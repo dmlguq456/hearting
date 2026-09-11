@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding
+from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -203,7 +203,7 @@ def _same_value(flag, given, sealed):
     return str(given) == str(sealed)
 
 
-def _sealed_owner_context(path):
+def _sealed_owner_context(path, *, worker_type="owner"):
     """Return route-sealed owner candidates, quality policy, and allocation.
 
     An owner is not a route node, so this selector stays route-blind for
@@ -231,7 +231,8 @@ def _sealed_owner_context(path):
         # this only moves the same verdict ahead of the launch.
         rows, field = route.get("registered_headless_candidates") or [], "harness"
     else:
-        rows, field = (route.get("dispatch_evidence") or {}).get("tuples") or [], "parent_harness"
+        rows = (route.get("dispatch_evidence") or {}).get("tuples") or []
+        field = "child_harness" if worker_type == "frame" else "parent_harness"
         if any(
             isinstance(row, dict)
             and row.get("status") == "unsupported"
@@ -248,7 +249,7 @@ def _sealed_owner_context(path):
     harnesses &= _defaults.DISPATCHABLE_HARNESSES
     if not harnesses:
         raise OwnerError("route-evidence-no-supported-owner-harness")
-    policy = route.get("owner_harness_policy")
+    policy = None if worker_type == "frame" else route.get("owner_harness_policy")
     if policy is not None:
         if not isinstance(policy, dict) or any(
             not isinstance(policy.get(band), list)
@@ -669,7 +670,7 @@ def main(argv):
         explicit, values, forwarded, route_evidence, derived = _parse(argv)
         jobs = _authoritative_jobs(values, os.environ)
         profile = values["--model-profile"]
-        sealed_context = _sealed_owner_context(route_evidence) if route_evidence else None
+        sealed_context = _sealed_owner_context(route_evidence, worker_type=values["--worker-type"]) if route_evidence else None
         if sealed_context and isinstance(sealed_context.get("policy"), dict):
             policy = dict(sealed_context["policy"])
             config = None
@@ -826,7 +827,7 @@ def main(argv):
         child_env = {
             key: value for key, value in os.environ.items() if not _MODEL_ENV.fullmatch(key)
         }
-        if values["--worker-type"] == "review":
+        if values["--worker-type"] in {"review", "frame"}:
             # A direct reviewer is deliberately route-free.  The selector may
             # itself run inside a route-owned owner, so inherited route
             # variables must not silently bind the child to that owner/node.
@@ -842,11 +843,13 @@ def main(argv):
         child_env["AGENT_DISPATCH_OWNER_HARNESS"] = selected
         if route_evidence:
             route_data = json.loads(Path(route_evidence).read_text(encoding="utf-8"))
-            if route_data.get("effective_intensity") == "quick":
+            if values["--worker-type"] == "frame" or route_data.get("effective_intensity") == "quick":
                 # W3: quick is a three-node route, so the caller's own
                 # `--route-node` selects which node this launch binds to. The
                 # default keeps every existing quick OWNER launch identical.
-                binding = derive_quick_owner_binding(
+                derive = (derive_frame_route_binding if values["--worker-type"] == "frame"
+                          else derive_quick_owner_binding)
+                binding = derive(
                     route_evidence, worktree=values["--worktree"],
                     capability=values["--capability"], capability_mode=values["--capability-mode"],
                     intensity=values["--intensity"], harness=selected,

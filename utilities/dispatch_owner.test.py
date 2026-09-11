@@ -746,6 +746,16 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
                                 {"harness": "claude", "status": "unsupported"}]})
         self.assertEqual(OWNER._sealed_owner_harnesses(path), {"codex"})
 
+    def test_standard_frame_selects_child_harness_without_owner_policy(self):
+        path = self._route({"effective_intensity": "standard",
+                            "dispatch_evidence": {"tuples": [
+                                {"parent_harness": "claude", "child_harness": "codex",
+                                 "status": "supported"}]},
+                            "owner_harness_policy": {"primary": ["claude"]}})
+        context = OWNER._sealed_owner_context(path, worker_type="frame")
+        self.assertEqual(context["harnesses"], {"codex"})
+        self.assertIsNone(context["policy"])
+
     def test_direct_route_has_no_owner_to_bind(self):
         path = self._route({"effective_intensity": "direct", "dispatch_evidence": None})
         with self.assertRaises(OWNER.OwnerError) as caught:
@@ -772,7 +782,7 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
         both and every quick owner died at launch.
         """
         source = Path(OWNER.__file__).read_text(encoding="utf-8")
-        body = source.split("if route_data.get(\"effective_intensity\") == \"quick\":", 1)[1]
+        body = source.split('if values["--worker-type"] == "frame" or route_data.get("effective_intensity") == "quick":', 1)[1]
         quick, standard = body.split("else:", 1)
         self.assertIn('"--route-file", binding.route_file', quick)
         code = "\n".join(

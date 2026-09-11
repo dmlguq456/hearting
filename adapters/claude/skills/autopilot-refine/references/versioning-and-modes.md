@@ -71,7 +71,7 @@ Surface external findings beside internal findings before any confirmation step.
 
 ### Mode-form notes
 
-> **Why automatic application is the default:** other family members (`autopilot-research`, `autopilot-code`, and `autopilot-draft`) finish their pipelines without routine confirmation. Refinement should behave consistently. Safety comes from `_internal/versions/v{prev}/`, integrated `pipeline_summary.md` history, immediate `git diff` review, Stage B.5 `⚠ Unverified` and `⚠ Style` markers, and the audit correction chain.
+> **Application approval:** quick+ requires the separate preview gate immediately before edits. Snapshot/version history preserves the preimage after approval; it does not substitute for approval. `--review-only` makes no target write.
 
 > **STRUCT halt:** never auto-apply a change that affects at least five files, rewrites a whole section, or requires rerunning an autopilot pipeline. Halt and recommend `/autopilot-research --from analyze` or `/autopilot-draft --from strategy`.
 

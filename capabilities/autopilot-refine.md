@@ -17,14 +17,14 @@ This is the portable capability contract for `autopilot-refine`. It defines runt
 
 ## Invocation Semantics
 
-Autopilot family — post-creation iteration pipeline for research and doc artifacts (NOT code). Prompt-driven: target artifact identified via prompt fuzzy match against `<artifact-root>/{research,documents}/*`, then auto-discovers the artifact's file structure, plans edits, shows a diff preview in chat, and on user confirm applies edits with versioning + integrated history logging in `pipeline_summary.md` (single source of truth — no separate CHANGELOG). Default intensity is `quick` (1-pass review, fastest path); escalate intensity to `standard|strong|thorough|adversarial` for multi-round review, fact-check, or external adversary work. Optional `--memo <file>` falls back to file-memo style for deferred reviews.
+Autopilot family — post-creation iteration pipeline for research and doc artifacts (NOT code). Prompt-driven: target artifact identified via prompt fuzzy match against `<artifact-root>/{research,documents}/*`, then auto-discovers the artifact's file structure, plans edits, shows a diff preview in chat, and on user confirm applies edits with versioning + integrated history logging in `pipeline_summary.md` (single source of truth — no separate CHANGELOG). Default intensity is `quick` (one registered conductor). Its sealed `inline_human_gates` declares `preview-disposition`, bound at the one-shot terminal boundary and enforced before any target-artifact write. The conductor writes `reviews/refine/preview.md`, raises and awaits the gate, then applies within the same attempt only after the person releases it; escalate intensity to `standard|strong|thorough|adversarial` for multi-round review, fact-check, or external adversary work. Optional `--memo <file>` falls back to file-memo style for deferred reviews.
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
 ## Post-Frame Direction Gate
 
 **One gate, raised from the frame legs (SD-123/SD-129).** A `standard+` route
-compiled after this cycle seals `human_gates: ["frame-review"]` and both
+compiled after this cycle seals `human_gates: ["frame-review", "preview-disposition"]` and both
 `frame` and `frame-alternative` continuations as that human gate, bound at
 `review`'s entry. `frame-review` is the recipe's one **direction** gate.
 
@@ -41,6 +41,8 @@ the diff preview to `reviews/refine/preview.md`, raises the gate with
 (exit 0 proceed, 3 revise, 4 stop) — never polling, never self-releasing.
 Depth-0 shows the preview and records `workflow-supervisor.py release --route
 <route> --gate preview-disposition --decision proceed|revise|stop --actor user`.
+A registered owner cannot release `preview-disposition` itself, including
+when an older raise recorded no release authority.
 Before this change the gate was declared but never fenced and no document told
 an owner to raise it, so no refine route ever actually waited on it. A route
 sealed before this cycle keeps its own generation's gate name, binding and
@@ -61,9 +63,9 @@ Depth-0 puts those questions to the user, records the answers with
 proceed|revise|stop --answers <file>`, and renders `shards/frame/intent.md`
 with `frame_interview.py render-intent`.
 
-The owner **receives** `intent.md`'s path as an input. It raises no gate,
-waits on no release, and renders no intent of its own — all of that is
-finished before it is launched. `intent.md` is the agreed intent `review`
+The owner **receives** `intent.md`'s path as an input. Depth-0 has already
+finished the frame interview and rendered intent. The owner later raises and
+waits for the separate preview approval before applying edits. `intent.md` is the agreed intent `review`
 reads first, so a verdict that proposes edits outside the recorded scope is a
 blocking finding rather than a silent change; pass its absolute path in the
 `review` prompt as `Intent:`. `revise` re-runs the frame pair before the route
@@ -71,7 +73,7 @@ starts and `stop` cancels before anything is compiled, so neither consumes the
 owner's retry boundary. A `review` start whose entry gate is not released is
 refused by every launch surface (`human-gate-unreleased`). The diff preview
 `review` produces stays a report the owner shows before `transaction` applies
-it; it is no longer a second human gate. `direct` has no gate: the depth-0
+it; this remains a separate human approval gate. `direct` has no gate: the depth-0
 session asks its one question of the same kind inline inside the §0.4 card
 step — a documented obligation on the acting session, not a machine-checked
 cap, since a `direct` route carries no gate binding. The declared

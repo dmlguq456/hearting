@@ -273,10 +273,7 @@ def _load_route(receipt: dict[str, Any]) -> dict[str, Any]:
         None,
     )
     continuation = (node or {}).get("continuation") or {}
-    if (
-        continuation.get("kind") != "human-gate"
-        or continuation.get("gate") != receipt["gate"]
-    ):
+    if not workflow_state.node_raises_human_gate(node or {}, receipt["gate"]):
         raise HumanGateReceiptError("route-gate-node-mismatch")
     binding = next(
         (

@@ -387,10 +387,9 @@ The validator refuses an interview that breaks the plain-language rules
 before it reaches anyone; the cap and the wording rules are machine-checked at
 the raise for every route carrying the gate, `quick` included, while steps 1–3
 above stay obligations on the acting session that nothing checks mechanically.
-`direct` has no frame node; `quick` and above run one in the bootstrap layer
-ahead of the route. The `direct` session asks its one question of the same
-kind inline, inside the blocking §0.4 card step, and records the answer in the
-plan or the work log.
+Only code/design/draft/refine/spec run the frame pair at `quick` and above,
+before the owner. Other recipes retain their topology. `direct` asks its
+question inline in the §0.4 card and records the answer in the plan or work log.
 The recorded answers become `shards/frame/intent.md`, rendered by depth-0,
 the brief `plan` reads first; `plan-author` is told to cite each decision by its
 question id and to report one it cannot honor as a blocker — a prompt

@@ -2428,11 +2428,15 @@
         "worker_kind": "capability-owner",
         "write_scope": [
           "target-artifact",
-          "_internal/versions/**"
+          "_internal/versions/**",
+          "reviews/refine/**"
         ],
         "owner_dispatch_depth": 1,
         "max_dispatch_depth": 1,
-        "model_profile": "balanced-deep"
+        "model_profile": "balanced-deep",
+        "inline_human_gates": [
+          "preview-disposition"
+        ]
       },
       "standard_plus": {
         "topology": "transactional-owner",

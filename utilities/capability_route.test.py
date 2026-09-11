@@ -242,7 +242,10 @@ class TestRoute(unittest.TestCase):
      # Still exactly ONE registered-headless quick owner per recipe mode --
      # that is what this test protects. The route now also carries the two
      # depth-1 frame legs ahead of it, which are not owners.
-     self.assertEqual([n["id"] for n in route["nodes"]],["frame","frame-alternative","one-shot"])
+     framed = recipe["capability"] in {
+      "autopilot-code","autopilot-design","autopilot-draft","autopilot-refine","autopilot-spec"}
+     self.assertEqual([n["id"] for n in route["nodes"]],
+                      ["frame","frame-alternative","one-shot"] if framed else ["one-shot"])
      owners=[n for n in route["nodes"] if n.get("unit")=="_kernel/owner"]
      self.assertEqual([n["id"] for n in owners],["one-shot"])
      owner=owners[0]
@@ -5540,6 +5543,34 @@ class FrameBootstrapLayerTest(unittest.TestCase):
    dispatch_evidence=self.dispatch(self.nested()))
 
  # -- quick's three-node shape ---------------------------------------------
+ def test_quick_frame_scope_is_exactly_the_five_portable_recipes(self):
+  registry=R.TOPO.load_registry()
+  framed=[]
+  for recipe in registry["recipes"]:
+   route=self.quick(capability=recipe["capability"],capability_mode=recipe["modes"][0])
+   R.verify_route(route,R.ROOT)
+   frames=[n["id"] for n in route["nodes"] if n.get("worker_type")=="frame"]
+   if frames:
+    framed.append(recipe["capability"])
+    self.assertEqual(frames,["frame","frame-alternative"])
+   else:
+    self.assertEqual([n["id"] for n in route["nodes"]],["one-shot"])
+    self.assertEqual(route["human_gate_bindings"],[])
+  self.assertEqual(set(framed),{c for c,m in self.FRAME_CAPABILITIES})
+
+ def test_orphaned_quick_preview_gate_is_rejected_even_when_rehashed(self):
+  route=self.quick(capability="autopilot-refine",capability_mode="default")
+  self.assertEqual(route["effective_intensity"],"quick")
+  node=next(n for n in route["nodes"] if n["id"]=="one-shot")
+  self.assertEqual(node["inline_human_gates"],["preview-disposition"])
+  self.assertIn({"gate":"preview-disposition","node":"one-shot","position":"terminal"},route["human_gate_bindings"])
+  R.verify_route(route,R.ROOT)
+  node.pop("inline_human_gates")
+  route["route_hash"]=R.route_hash(route)
+  route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]
+  with self.assertRaisesRegex(ValueError,"preview-approval-boundary-missing"):
+   R.verify_route(route,R.ROOT)
+
  def test_serial_attempt_survives_the_extra_two_nodes(self):
   """`serial-attempt` is a per-(route_id, route_node) attempt budget, so three
   nodes each get their own budget from the same policy word. If it had had to

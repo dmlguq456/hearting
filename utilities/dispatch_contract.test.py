@@ -31,6 +31,76 @@ def attempt_row(metadata,status="open"):
  pipe=CURRENT+","+",".join(f"{key}={value}" for key,value in metadata.items())
  return f"2026-08-25T00:00:00Z\t{status}\t/r\t/w\texecute\t{pipe}"
 
+class FrameLaunchGateTest(unittest.TestCase):
+ def fixture(self, base, harnesses=("codex", "claude"), candidates=("codex", "claude")):
+  route={"dispatch_contract_version":3,"route_id":"rt-frame-gate",
+         "route_hash":"sha256:frame-gate","effective_intensity":"standard",
+         "dispatch_evidence":{"tuples":[{"status":"supported","child_harness":h}
+                                         for h in candidates]},
+         "human_gate_bindings":[{"gate":"frame-review","node":"plan","position":"entry"}],
+         "nodes":[{"id":n,"dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
+                   "depends_on":[],"continuation":{"kind":"human-gate","gate":"frame-review"}}
+                  for n in ("frame","frame-alternative")]+
+                 [{"id":"plan","depends_on":["frame","frame-alternative"]}]}
+  rows=[]; markers={}
+  for node,harness in zip(route["nodes"],harnesses):
+   attempt="att-"+node["id"]
+   marker={"attempt_id":attempt,"registered_worker":True}
+   markers[node["id"]]=marker
+   metadata={"attempt_id":attempt,"route_id":route["route_id"],"route_hash":route["route_hash"],
+             "route_node":node["id"],"harness":harness,"worker_type":"frame",
+             "note":"completed-marker"}
+   rows.append(attempt_row(metadata,"done"))
+   directory=base/".dispatch"/"completion"/route["route_id"]
+   directory.mkdir(parents=True,exist_ok=True)
+   (directory/(node["id"]+".json")).write_text(json.dumps(marker))
+  path=base/"route.json";path.write_text(json.dumps(route))
+  jobs=base/"jobs.log";jobs.write_text("\n".join(rows))
+  return route,path,jobs,markers,rows
+
+ def test_actual_pair_rejects_same_harness_and_allows_recorded_single_harness(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   for harnesses,candidates,reason in (
+       (("codex","claude"),("codex","claude"),None),
+       (("codex","codex"),("codex","claude"),"frame-cross-harness-required"),
+       (("codex","codex"),("codex",),None),
+       (("codex","opencode"),("codex","claude"),"frame-harness-unsupported")):
+    with self.subTest(harnesses=harnesses,candidates=candidates):
+     route,path,jobs,markers,rows=self.fixture(base,harnesses,candidates)
+     if reason:
+      with self.assertRaises(D.DispatchContractError) as caught:
+       D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,rows)
+      self.assertEqual(caught.exception.reason,reason)
+     else:
+      D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,rows)
+
+ def test_standard_owner_is_fenced_by_real_gate_journal(self):
+  import workflow_state as WS
+  from types import SimpleNamespace
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);route,path,jobs,markers,rows=self.fixture(base)
+   binding=SimpleNamespace(route_file=str(path))
+   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
+        mock.patch.object(D,"completion_attempt_readiness",return_value=D.AttemptReadiness("ready","test")):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.owner_frame_launch_gate(binding,"start",base,jobs)
+    self.assertEqual(caught.exception.reason,"human-gate-not-raised")
+    ledger=WS.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
+    ledger.set_workflow_state("BLOCKED_HUMAN_GATE",evidence={"gate":"frame-review"},actor="gate")
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.owner_frame_launch_gate(binding,"start",base,jobs)
+    self.assertEqual(caught.exception.reason,"human-gate-unreleased")
+    ledger.set_workflow_state("RUNNING",evidence={"released_gate":"frame-review",
+      "decision":"proceed","actor_kind":"human","released_by":"test-person"},actor="gate")
+    D.owner_frame_launch_gate(binding,"start",base,jobs)
+    # A substituted pair cannot use an earlier approval to bypass diversity.
+    self.fixture(base,("codex","codex"))
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.owner_frame_launch_gate(binding,"start",base,jobs)
+    self.assertEqual(caught.exception.reason,"frame-cross-harness-required")
+
+
 class DispatchContractTest(unittest.TestCase):
  def test_cancel_closes_witness_only_on_cancelled_receipt(self):
   with tempfile.TemporaryDirectory() as td:
@@ -3059,6 +3129,7 @@ class DispatchContractTest(unittest.TestCase):
           mock.patch.object(D,"completion_marker_is_current",return_value=True), \
           mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
           mock.patch.object(D,"_sibling_attempt_gate"), \
+          mock.patch.object(D,"_frame_pair_attempt_gate"), \
           mock.patch.object(D,"_auxiliary_arbitration_gate"):
       try:
        D.completion_marker_gate(str(path),binding["node"],"start",base,base/"jobs.log",

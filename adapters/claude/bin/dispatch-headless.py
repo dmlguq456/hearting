@@ -45,6 +45,8 @@ from dispatch_contract import (  # noqa: E402
     claim_attempt_row,
     close_attempt_row,
     completion_marker_gate,
+    owner_frame_launch_gate,
+    recover_preview_gate_after_refusal,
     ensure_terminal_claim_absent,
     dispatch_state_root,
     PRELAUNCH_PROCESS_BLOCK_REASONS,
@@ -2015,6 +2017,8 @@ def validate_route_record(args: argparse.Namespace) -> int:
             early_jobs, attempt_id=args.attempt_id,
         )
     except DispatchContractError as e:
+        e.detail = recover_preview_gate_after_refusal(
+            args.route_file, args.route_node, args.action, args.agent_home, early_jobs, e)
         return fail(
             e.reason,
             78 if e.reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65,
@@ -2243,11 +2247,14 @@ def main(argv: list[str]) -> int:
     except DispatchContractError as e:
         return fail(e.reason, 65, detail=e.detail, child_spawned="0")
     try:
+        owner_frame_launch_gate(args.owner_route_binding, action, agent_home, jobs)
         completion_marker_gate(
             args.route_file, args.route_node, action, agent_home, jobs,
             attempt_id=args.attempt_id,
         )
     except DispatchContractError as e:
+        e.detail = recover_preview_gate_after_refusal(
+            args.route_file, args.route_node, action, agent_home, jobs, e)
         return fail(e.reason, 78 if e.reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65,
                     detail=e.detail, child_spawned="0")
     args.parent_binding = None

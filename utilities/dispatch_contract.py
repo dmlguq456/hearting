@@ -5588,6 +5588,127 @@ def _human_gate_entry_fence(
         )
 
 
+
+def recover_preview_gate_after_refusal(route_file, route_node, action, agent_home, jobs,
+                                      error: DispatchContractError) -> str:
+    """Outside the claim lock, turn a proved legacy preview into a real question.
+
+    The original start still fails. This never grants approval or changes a route.
+    Only a current completed review artifact can back the existing gate transaction.
+    """
+    if (action != "start" or error.reason != "human-gate-not-raised"
+            or not error.detail.startswith("preview-disposition:") or not route_file or not jobs):
+        return error.detail
+    try:
+        route = json.loads(Path(route_file).read_text())
+        bindings = [b for b in route.get("human_gate_bindings", [])
+                    if b.get("gate") == "preview-disposition" and b.get("node") == route_node
+                    and b.get("position", "entry") == "entry"]
+        raisers = [n for n in route.get("nodes", [])
+                   if n.get("continuation") == {"kind": "human-gate", "gate": "preview-disposition"}]
+        target = next(n for n in route.get("nodes", []) if n.get("id") == route_node)
+        if len(bindings) != 1 or len(raisers) != 1 or raisers[0]["id"] not in target.get("depends_on", []):
+            raise ValueError("preview-predecessor-unverified")
+        predecessor = raisers[0]
+        paths = [r / "completion" / route["route_id"] / (predecessor["id"] + ".json")
+                 for r in dispatch_state_roots(Path(agent_home), Path(jobs))]
+        marker_path = next(p for p in paths if p.is_file())
+        marker = json.loads(marker_path.read_text())
+        if not completion_marker_is_current(route, predecessor, marker_path, marker):
+            raise ValueError("preview-marker-unverified")
+        ready = completion_attempt_readiness(route, predecessor, marker, Path(jobs))
+        if ready.state != "ready":
+            raise ValueError("preview-attempt-" + ready.state)
+        artifact = Path(marker["evidence"]["path"])
+        if not artifact.is_absolute() or not artifact.is_file():
+            raise ValueError("preview-artifact-unreadable")
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("workflow-supervisor.py")),
+             "gate", "--route", str(route_file), "--gate", "preview-disposition",
+             "--block", "--jobs", str(jobs), "--artifact", str(artifact)],
+            text=True, capture_output=True, timeout=15, check=False)
+        if result.returncode:
+            raise ValueError("gate-carrier-refused: " + result.stderr.strip()[:240])
+        payload = json.loads(result.stdout)
+        if payload.get("action") != "blocked" or payload.get("workflow_state") != "BLOCKED_HUMAN_GATE":
+            raise ValueError("gate-block-unverified")
+        return error.detail + "; preview_gate_recovery=blocked delivery=" + str(payload.get("delivery", "-"))
+    except (OSError, ValueError, KeyError, StopIteration, DispatchContractError, subprocess.TimeoutExpired) as exc:
+        return error.detail + "; preview_gate_recovery=unavailable reason=" + str(exc)[:320]
+
+
+def owner_frame_launch_gate(binding, action: str, agent_home: Path,
+                            jobs: Path | None = None) -> None:
+    """The depth-0 frame must finish and be approved before an owner starts."""
+    if binding is None or action != "start":
+        return
+    route = json.loads(Path(binding.route_file).read_text(encoding="utf-8"))
+    frames = {n.get("id") for n in route.get("nodes", [])
+              if n.get("worker_type") == "frame" and n.get("dispatch_depth") == 1}
+    if not frames:
+        return  # Earlier route generations keep their original owner contract.
+    entries = [n for n in route.get("nodes", [])
+               if frames.issubset(set(n.get("depends_on", [])))]
+    if frames != {"frame", "frame-alternative"} or len(entries) != 1:
+        raise DispatchContractError("frame-owner-entry-invalid", str(route.get("route_id")))
+    completion_marker_gate(binding.route_file, entries[0]["id"], action, agent_home, jobs)
+
+
+def _frame_pair_attempt_gate(route: dict, node: dict, markers: dict,
+                             jobs: Path, registry_lines: list[str] | None) -> None:
+    """Compare the exact completed attempts, never a declared diversity label."""
+    frames = [n for n in route.get("nodes", [])
+              if n.get("id") in node.get("depends_on", [])
+              and n.get("worker_type") == "frame" and n.get("dispatch_depth") == 1]
+    if not frames:
+        return
+    if {n.get("id") for n in frames} != {"frame", "frame-alternative"}:
+        raise DispatchContractError("frame-pair-incomplete", str(node.get("id")))
+    try:
+        lines = registry_lines if registry_lines is not None else jobs.read_text().splitlines()
+    except OSError as exc:
+        raise DispatchContractError("frame-attempt-unverifiable", "registry-unreadable") from exc
+    attempts, harnesses = [], []
+    for frame in frames:
+        attempt = markers[frame["id"]].get("attempt_id")
+        rows = []
+        for line in lines:
+            fields = line.split("\t")
+            if len(fields) == 6:
+                metadata = parse_registry_metadata(fields[5])
+                if metadata.get("attempt_id") == attempt:
+                    rows.append((fields, metadata))
+        if len(rows) != 1:
+            raise DispatchContractError("frame-attempt-unverifiable", str(attempt))
+        fields, metadata = rows[0]
+        try:
+            identity = registered_node_identity(metadata, frame)
+        except ValueError as exc:
+            raise DispatchContractError("frame-attempt-unverifiable", str(attempt)) from exc
+        if (fields[1] != "done" or metadata.get("note") != "completed-marker"
+                or identity !=
+                   (route.get("route_id"), route.get("route_hash") or "", frame["id"])
+                or metadata.get("worker_type") != "frame"
+                or metadata.get("harness") not in {"codex", "claude", "opencode"}):
+            raise DispatchContractError("frame-attempt-unverifiable", str(attempt))
+        attempts.append(attempt)
+        harnesses.append(metadata["harness"])
+    if len(set(attempts)) != 2:
+        raise DispatchContractError("frame-attempt-duplicate", str(attempts))
+    if route.get("effective_intensity") == "quick":
+        candidates, field = route.get("registered_headless_candidates") or [], "harness"
+    else:
+        candidates = (route.get("dispatch_evidence") or {}).get("tuples") or []
+        field = "child_harness"
+    supported = {r.get(field) for r in candidates
+                 if isinstance(r, dict) and r.get("status") == "supported"}
+    supported &= {"codex", "claude", "opencode"}
+    if not supported or not set(harnesses).issubset(supported):
+        raise DispatchContractError("frame-harness-unsupported", str(harnesses))
+    if len(supported) > 1 and len(set(harnesses)) != 2:
+        raise DispatchContractError("frame-cross-harness-required", str(harnesses))
+
+
 def completion_marker_gate(
     route_file: str | None,
     route_node: str | None,
@@ -5597,6 +5718,7 @@ def completion_marker_gate(
     *,
     registry_lines: list[str] | None = None,
     attempt_id: str | None = None,
+    _raising_frame_gate: bool = False,
 ) -> None:
     """SD-56 decision gate: a record-bound ``--start`` must not spawn a node
     whose ``depends_on`` predecessors have no completion marker, nor one whose
@@ -5627,6 +5749,7 @@ def completion_marker_gate(
     if node is None:
         return
     missing = []
+    markers = {}
     blocked: list[tuple[str, AttemptReadiness]] = []
     for dep in node.get("depends_on", []):
         marker_path = next(
@@ -5652,6 +5775,7 @@ def completion_marker_gate(
         if dep_node is None or not completion_marker_is_current(route, dep_node, marker_path, marker):
             missing.append(dep)
             continue
+        markers[dep] = marker
         readiness = completion_attempt_readiness(
             route,
             dep_node,
@@ -5663,7 +5787,15 @@ def completion_marker_gate(
             blocked.append((dep, readiness))
     if missing:
         raise DispatchContractError("completion-marker-missing", ",".join(missing))
-    _human_gate_entry_fence(route, node, jobs)
+    if not blocked:
+        _frame_pair_attempt_gate(route, node, markers,
+                                 jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
+                                 registry_lines)
+    if _raising_frame_gate:
+        if set(node.get("depends_on", [])) != {"frame", "frame-alternative"}:
+            raise DispatchContractError("frame-owner-entry-invalid", str(node.get("id")))
+    else:
+        _human_gate_entry_fence(route, node, jobs)
     _auxiliary_arbitration_gate(route, node, agent_home, jobs)
     if blocked:
         reason = (

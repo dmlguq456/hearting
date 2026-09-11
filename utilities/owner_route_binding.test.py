@@ -836,6 +836,45 @@ class QuickNodeBindingTest(unittest.TestCase):
         path.write_text(json.dumps(route), encoding="utf-8")
         return path
 
+    def test_frame_binding_accepts_quick_and_standard_child_candidates(self):
+        # Compile real standard routes, with a different parent and child.
+        for intensity in ("quick", "standard"):
+            if intensity == "quick":
+                route = self.route
+            else:
+                route = M.ROUTE.compile_route(
+                    "autopilot-code", "dev", "standard", M.ROUTE.ROOT, M.ROUTE.ROOT,
+                    predicates=[], transport="headless", tracking="tracked",
+                    tracked_gate_evidence={
+                        "spec_read": {"satisfied": True, "source": "canonical-prd-sha256"},
+                        "drift_verdict": "within-spec", "workflow_mode": "tracked",
+                        "artifact_guard": {"satisfied": True, "source": "conductor-prechecked"}},
+                    dispatch_evidence={"tuples": [{
+                        "parent_harness": "claude", "parent_transport": "headless",
+                        "parent_sandbox": M.ROUTE.WRAPPER_PARENT_SANDBOXES["claude"][0],
+                        "child_harness": "codex", "launch_authority": "conductor",
+                        "status": "supported", "probe_source": "fixture-probe",
+                        "probe_time": "2026-07-16T00:00:00Z", "failure_class": "",
+                        "checked_worktree": str(M.ROUTE.ROOT.resolve()), "failure_scope": "none",
+                        "codex_command": "ok", "retry_on_isolated_worktree": 0}]})
+            path = Path(self.tmp.name) / (intensity + ".json")
+            path.write_text(json.dumps(route))
+            for node_id in ("frame", "frame-alternative"):
+                with self.subTest(intensity=intensity, node=node_id):
+                    binding = M.derive_frame_route_binding(
+                        path, worktree=M.ROUTE.ROOT, capability="autopilot-code",
+                        capability_mode="dev", intensity=intensity, harness="codex",
+                        route_node=node_id)
+                    self.assertEqual((binding.worker_type, binding.unit, binding.dispatch_depth),
+                                     ("frame", "plan/frame", 1))
+                    self.assertEqual(binding.write_scope, f"shards/{node_id}/**")
+                    if intensity == "standard":
+                        with self.assertRaisesRegex(M.OwnerRouteBindingError, "frame-route-harness-mismatch"):
+                            M.derive_frame_route_binding(
+                                path, worktree=M.ROUTE.ROOT, capability="autopilot-code",
+                                capability_mode="dev", intensity=intensity, harness="claude",
+                                route_node=node_id)
+
     def test_the_default_still_binds_the_one_shot_owner_exactly_as_before(self):
         owner = next(node for node in self.route["nodes"] if node["id"] == "one-shot")
         binding = self.derive()

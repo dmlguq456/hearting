@@ -1020,10 +1020,20 @@ _QUICK_NODE_AXES = {
 }
 
 
-def derive_quick_owner_binding(route_file: str | Path, *, worktree: str | Path,
+def derive_quick_owner_binding(route_file: str | Path, **kwargs) -> QuickOwnerRouteBinding:
+    """Compatibility entry for quick node bindings."""
+    return _derive_depth1_node_binding(route_file, **kwargs)
+
+
+def derive_frame_route_binding(route_file: str | Path, **kwargs) -> QuickOwnerRouteBinding:
+    """Bind a depth-0 frame launch to its own node and child harness."""
+    return _derive_depth1_node_binding(route_file, frame=True, **kwargs)
+
+
+def _derive_depth1_node_binding(route_file: str | Path, *, worktree: str | Path,
                                capability: str, capability_mode: str,
                                intensity: str, harness: str,
-                               route_node: str = "one-shot") -> QuickOwnerRouteBinding:
+                               route_node: str = "one-shot", frame: bool = False) -> QuickOwnerRouteBinding:
     """Derive the complete node tuple for one quick route node.
 
     `route_node` defaults to `one-shot`, so every existing quick owner caller
@@ -1038,11 +1048,25 @@ def derive_quick_owner_binding(route_file: str | Path, *, worktree: str | Path,
         route = ROUTE.verify_route(raw, expected_cwd=str(Path(worktree).resolve()))
     except (OSError, TypeError, ValueError) as exc:
         raise OwnerRouteBindingError("owner-route-verification-failed") from exc
-    if route.get("effective_intensity") != "quick":
-        raise OwnerRouteBindingError("quick-owner-route-required")
-    validate_owner_route_binding(path, worktree=worktree, capability=capability,
-                                 capability_mode=capability_mode, intensity=intensity,
-                                 harness=harness)
+    if frame:
+        if route_node not in {"frame", "frame-alternative"}:
+            raise OwnerRouteBindingError("frame-node-tuple-invalid")
+        if (route.get("capability"), route.get("capability_mode"),
+                route.get("effective_intensity")) != (capability, capability_mode, intensity):
+            raise OwnerRouteBindingError("frame-route-tuple-mismatch")
+        if route.get("effective_intensity") == "quick":
+            candidates, field = route.get("registered_headless_candidates") or [], "harness"
+        else:
+            candidates = (route.get("dispatch_evidence") or {}).get("tuples") or []
+            field = "child_harness"
+        if harness not in {r.get(field) for r in candidates if r.get("status") == "supported"}:
+            raise OwnerRouteBindingError("frame-route-harness-mismatch")
+    else:
+        if route.get("effective_intensity") != "quick":
+            raise OwnerRouteBindingError("quick-owner-route-required")
+        validate_owner_route_binding(path, worktree=worktree, capability=capability,
+                                     capability_mode=capability_mode, intensity=intensity,
+                                     harness=harness)
     expected = _QUICK_NODE_AXES.get(str(route_node))
     if expected is None:
         raise OwnerRouteBindingError("quick-node-tuple-invalid")

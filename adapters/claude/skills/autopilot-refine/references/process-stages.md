@@ -127,7 +127,15 @@ Intentionally untouched, when needed:
 - `{path}:{line}` — {historical citation, published title, or other reason}
 ```
 
-**Default: continue automatically.** Print the preview, then proceed to Stage D with `[auto-apply] applying {N_MECH} mech + {N_SEM} sem changes... (0 STRUCT)`. The user can inspect `git diff` and the snapshot afterward.
+**Quick and above: obtain approval before applying.** Write the current preview
+to `reviews/refine/preview.md` and raise `workflow-supervisor.py gate --route
+<route> --gate preview-disposition --block --artifact <preview>`. Use the
+existing bounded `await-release` command; depth-0 presents the preview and
+records the person's `proceed|revise|stop` decision. Quick's same conductor
+resumes after proceed; revise updates the preview and raises again. A changed
+preview invalidates its earlier approval. `--review-only` ends after the preview
+without applying or raising an apply request. Direct keeps its inline behavior,
+with an explicit pause when `--confirm` is supplied.
 
 **STRUCT exception:** if any change affects at least five files, rewrites a whole section, or requires a pipeline rerun, halt and recommend the heavier flow.
 
@@ -143,7 +151,7 @@ Apply?
 - "no" / "stop": abort
 ```
 
-Apply the adapter pause/autonomy rule. In Claude Code, schedule a 15-minute wakeup concurrently; if the user does not answer, continue with the recommended `yes / all` default.
+A timeout is not approval. Keep an unanswered approval pending.
 
 With **`--review-only`**, print Stage C and stop without Stage D.
 

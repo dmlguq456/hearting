@@ -41,7 +41,7 @@ Derive rigor from `--intensity` through CONVENTIONS §1.1 (`<agent-home>/core/CO
 | Rigor tier | Proposed-diff review |
 |---|---|
 | **light** (`direct`) | Run the factual/style detector and a sanity check; no independent review loop |
-| **quick** (`quick`) | Investigate, run Stage B.5, preview the diff, and apply; no independent review loop |
+| **quick** (`quick`) | Investigate, run Stage B.5, preview the diff, obtain approval, and apply; no independent review loop |
 | **standard** | Add one `deep reviewer`, two `fast reviewer` axes, and one `fast fact-checker` against in-artifact ground truth |
 | **thorough** | Add a second `deep reviewer`, retain two fast review axes and fact-checking, and allow a second round when the graph selects it |
 | **adversarial** | Thorough review plus an independent `external adversary` selected through the active adapter |
@@ -54,7 +54,7 @@ This capability performs pre-apply review only. Use `draft-refine` when a separa
 
 | Form | Behavior |
 |---|---|
-| `autopilot-refine "<prompt>"` | Investigate → preview diff → apply MECH/SEM changes → snapshot/version/log. Halt on STRUCT and recommend the heavier owning flow. |
+| `autopilot-refine "<prompt>"` | Investigate → preview diff → approval at quick+ → apply MECH/SEM changes → snapshot/version/log. Halt on STRUCT and recommend the heavier owning flow. |
 | `autopilot-refine "<prompt>" --confirm` | Pause after diff preview and apply only after explicit confirmation. |
 | `autopilot-refine "<prompt>" --review-only` | Investigate and preview; make no edit, snapshot, or log entry. |
 | `autopilot-refine --memo <file> "<prompt or artifact hint>"` | Use the memo as proposal input, then follow the default flow; `--confirm` remains available. |
@@ -75,7 +75,7 @@ After artifact resolution, run Stages A-E. Read `process-stages.md` for complete
 2. **Stage A — Discover structure**: inspect the artifact tree, identify `cards/*` for research or `strategy/` and `draft/` for documents, and narrow the affected files with search.
 3. **Stage B — Plan changes**: read only affected files, build a per-file change list, and classify each change as `MECH`, `SEM`, or `STRUCT`. Halt on STRUCT and recommend the owning heavier flow.
 4. **Stage B.5 — Factual and style detectors**: run for every change, including quick. Compare factual claims against artifact-local ground truth and run the style lint. Mark unresolved findings as `⚠ Unverified` or `⚠ Style`. Only the two explicit opt-out flags may skip these checks.
-5. **Stage C — Diff preview**: show the proposed change. Continue automatically by default, pause with `--confirm`, or stop with `--review-only`.
+5. **Stage C — Diff preview**: show the proposed change. At quick+, raise and await `preview-disposition` before applying. Direct pauses with `--confirm`; `--review-only` finishes after the preview without applying.
 6. **Stage D — Apply**: obtain the deterministic route-bound snapshot receipt before editing, apply the change, and update all five `pipeline_summary.md` sections: metadata, version history, changes, migrated minor log, and in-file changelog. Never choose the version or copy the snapshot manually.
 7. **Stage E — Memo form**: when `--memo <file>` is present, use the memo as proposal input before running Stages B-D.
 

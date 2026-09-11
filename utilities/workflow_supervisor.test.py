@@ -2292,6 +2292,14 @@ class TestGateSubjectNotCaller(WorkflowFixture):
                           "--jobs", str(jobs)])
         self.assertEqual(json.loads(buf.getvalue().strip().splitlines()[-1])["refusal"], "gate-not-blocked")
 
+    def test_preview_approval_cannot_be_self_released_even_by_a_legacy_owner(self):
+        binding = {"gate": "preview-disposition"}
+        self.assertEqual(SUP.gate_release_authority_at_raise(binding, None, "preview.md"), "depth-0")
+        for resolution in ({}, {"release_authority": "any"}, {"release_authority": "depth-0"}):
+            with self.assertRaisesRegex(SUP.SupervisorError, "gate-release-authority-refused"):
+                SUP.assert_release_authority("headless-owner", resolution, binding, "preview-disposition")
+            SUP.assert_release_authority("user", resolution, binding, "preview-disposition")
+
     def test_sd_open_48_legacy_interview_raise_without_authority_still_binds_the_owner(self):
         """review finding 4: a raise that predates `release_authority` but
         recorded an interview is depth-0 -- the flag was sealed at the raise."""
@@ -2473,6 +2481,189 @@ class TestGateSubjectNotCaller(WorkflowFixture):
         sidecar = SUP.gate_release_sidecar_path(path)
         self.assertTrue(str(sidecar).startswith(str(self.base)))
         self.assertFalse(str(sidecar).startswith(str(canonical)))
+
+
+class TestQuickPreviewApplyGate(WorkflowFixture):
+    def test_one_conductor_cannot_apply_until_person_releases_current_preview(self):
+        import artifact_producer as producer
+        route, path = self.write_route([{"id": "one-shot", "dispatch_depth": 1,
+            "terminal": True, "terminal_gate": "quick-complete", "completion_gate": "quick-complete",
+            "inline_human_gates": ["preview-disposition"],
+            "write_scope": ["target-artifact", "reviews/refine/**"]}])
+        route.update(capability="autopilot-refine", effective_intensity="quick",
+            human_gates=["preview-disposition"],
+            human_gate_bindings=[{"gate": "preview-disposition", "node": "one-shot", "position": "terminal"}])
+        route["route_hash"] = ROUTE.route_hash(route)
+        route["route_id"] = "rt-" + route["route_hash"].split(":")[1][:16]
+        path.write_text(json.dumps(route))
+        jobs, _session, _attempt = self.owner_registry(route_id=route["route_id"])
+        artifact_root = self.base / ".agent_reports"
+        target = artifact_root / "documents" / "topic" / "doc.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("original")
+        preview = artifact_root / "reviews" / "refine" / "preview.md"
+        preview.parent.mkdir(parents=True)
+        preview.write_text("Change original to revised.")
+        node = route["nodes"][0]
+        with mock.patch.dict(os.environ, {"AGENT_ROUTE_FILE": str(path), "AGENT_ROUTE_NODE": "one-shot",
+                "AGENT_DISPATCH_JOBS": str(jobs), "AGENT_DISPATCH_REGISTERED_WORKER": "1", "AGENT_HARNESS": "claude"}):
+            for harness in ("codex", "claude", "opencode"):
+                with mock.patch.dict(os.environ, {"AGENT_HARNESS": harness}):
+                    with self.assertRaises(producer.ProducerError):
+                        producer._quick_refine_write_gate(artifact_root, target)
+                    self.assertEqual(producer.check_write(artifact_root, target)["reason"], "quick-preview-approval-required")
+                    self.assertEqual(producer.check_write(artifact_root, artifact_root / "documents" / "flat.md")["reason"], "quick-preview-approval-required")
+            producer._quick_refine_write_gate(artifact_root, preview)
+            preview_check = subprocess.run([sys.executable, str(ROOT / "utilities" / "artifact-snapshot.py"),
+                "prepare", "--artifact-root", str(artifact_root), "--target", str(preview),
+                "--route", str(path), "--route-id", route["route_id"], "--node", "one-shot"],
+                text=True, capture_output=True)
+            self.assertEqual(preview_check.returncode, 0, preview_check.stderr)
+            with contextlib.redirect_stdout(io.StringIO()):
+                SUP.main(["gate", "--route", str(path), "--gate", "preview-disposition", "--block",
+                          "--jobs", str(jobs), "--artifact", str(preview)])
+            with self.assertRaises(SUP.SupervisorError):
+                SUP.main(["release", "--route", str(path), "--gate", "preview-disposition",
+                          "--decision", "proceed", "--jobs", str(jobs)])
+            with self.assertRaises(WS.WorkflowStateError):
+                WS.require_inline_gate_release(route, node, jobs=jobs)
+            with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": ""}):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    SUP.main(["release", "--route", str(path), "--gate", "preview-disposition",
+                              "--decision", "proceed", "--actor", "user", "--jobs", str(jobs)])
+                self.assertEqual(json.loads(output.getvalue())["successors"], [])
+            producer._quick_refine_write_gate(artifact_root, target)
+            result = subprocess.run([sys.executable, str(ROOT / "utilities" / "artifact-snapshot.py"),
+                "prepare", "--artifact-root", str(artifact_root), "--target", str(target),
+                "--route", str(path), "--route-id", route["route_id"], "--node", "one-shot"],
+                text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual((target.parent / "_internal" / "versions" / "v1" / "doc.md").read_text(), "original")
+            target.write_text("revised")
+            preview.write_text("Silently changed preview")
+            with self.assertRaises(producer.ProducerError):
+                producer._quick_refine_write_gate(artifact_root, target)
+            for decision in ("revise", "stop"):
+                with contextlib.redirect_stdout(io.StringIO()):
+                    SUP.main(["gate", "--route", str(path), "--gate", "preview-disposition", "--block",
+                              "--jobs", str(jobs), "--artifact", str(preview)])
+                with mock.patch.dict(os.environ, {"AGENT_DISPATCH_REGISTERED_WORKER": ""}):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        SUP.main(["release", "--route", str(path), "--gate", "preview-disposition",
+                                  "--decision", decision, "--actor", "user", "--jobs", str(jobs)])
+                with self.assertRaises(producer.ProducerError):
+                    producer._quick_refine_write_gate(artifact_root, target)
+            self.assertEqual(len(SUP._registry_rows(jobs)), 1)
+
+
+class TestLegacyPreviewGateRecovery(WorkflowFixture):
+    def test_launch_refusal_materializes_preview_question_without_releasing_or_spawning(self):
+        route, path = self.two_stage_route(human_gate="preview-disposition",
+            continuation={"kind": "human-gate", "gate": "preview-disposition"})
+        jobs, recipient, attempt = self.owner_registry()
+        artifact = self.base / "preview.md"
+        artifact.write_text("Proposed edit for the person's review.")
+        marker_dir = DC.dispatch_state_roots(ROOT, jobs)[0] / "completion" / route["route_id"]
+        marker_dir.mkdir(parents=True)
+        (marker_dir / "run.json").write_text(json.dumps({"evidence": {"path": str(artifact)}}))
+        error = DC.DispatchContractError("human-gate-not-raised", "preview-disposition: old route has no record")
+        original_jobs = jobs.read_bytes()
+        def gate_transaction(argv, **kwargs):
+            self.assertIn("--block", argv)
+            self.assertNotIn("--release", argv)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = SUP.main(argv[2:])
+            return subprocess.CompletedProcess(argv, code, output.getvalue(), "")
+        with mock.patch.object(DC, "completion_marker_is_current", return_value=True) as marker_check, \
+             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")), \
+             mock.patch.object(DC.subprocess, "run", side_effect=gate_transaction) as transaction:
+            detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
+            self.assertIn("preview_gate_recovery=blocked", detail)
+            ledger = SUP.ledger_for(route, jobs)
+            self.assertEqual(WS.human_gate_resolution(ledger.journal(), "preview-disposition")["status"], "blocked")
+            records = list((jobs.parent / "pending-delivery").rglob("*.json"))
+            self.assertEqual(len(records), 1)
+            before = records[0].read_bytes()
+            DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
+            self.assertEqual(records[0].read_bytes(), before)
+            self.assertEqual(jobs.read_bytes(), original_jobs)
+            transaction.reset_mock()
+            marker_check.return_value = False
+            detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "start", ROOT, jobs, error)
+            self.assertIn("preview-marker-unverified", detail)
+            transaction.assert_not_called()
+            detail = DC.recover_preview_gate_after_refusal(str(path), "verify", "dry-run", ROOT, jobs, error)
+            self.assertEqual(detail, error.detail)
+            transaction.assert_not_called()
+
+
+class TestInteractiveFrameGate(WorkflowFixture):
+    def test_bootstrap_frame_cannot_replace_confirmation_with_plain_file(self):
+        route, path = self.two_stage_route(human_gate="frame-review")
+        route["nodes"][0].update(worker_type="frame", dispatch_depth=1)
+        path.write_text(json.dumps(route))
+        artifact = self.base / "plain-summary.md"
+        artifact.write_text("This is not the user's confirmation.")
+        jobs, _session, _attempt = self.owner_registry()
+        with mock.patch.object(SUP, "create_gate_delivery") as delivery:
+            with self.assertRaisesRegex(SUP.SupervisorError, "frame-interview-required"):
+                SUP.main(["gate", "--route", str(path), "--gate", "frame-review", "--block",
+                          "--jobs", str(jobs), "--artifact", str(artifact)])
+            delivery.assert_not_called()
+
+    def test_both_real_frame_rows_can_hand_back_to_parent_before_owner_exists(self):
+        route, path = self.two_stage_route(human_gate="frame-review")
+        route["effective_intensity"] = "quick"
+        route["dispatch_contract_version"] = 3
+        route["registered_headless_candidates"] = [
+            {"harness": h, "status": "supported"} for h in ("codex", "claude")]
+        route["human_gate_bindings"] = [{"gate": "frame-review", "node": "one-shot", "position": "entry"}]
+        route["nodes"] = [{"id": n, "worker_type": "frame", "dispatch_depth": 1,
+                           "unit": "plan/frame", "depends_on": [],
+                           "continuation": {"kind": "human-gate", "gate": "frame-review"}}
+                          for n in ("frame", "frame-alternative")]
+        route["nodes"].append({"id": "one-shot", "depends_on": ["frame", "frame-alternative"]})
+        path.write_text(json.dumps(route))
+        artifact = self.base / "interview.json"
+        artifact.write_text("{}")
+        jobs = self.base / "dispatch" / "jobs.log"
+        jobs.parent.mkdir(parents=True, exist_ok=True)
+        markers = DC.dispatch_state_roots(ROOT, jobs)[0] / "completion" / route["route_id"]
+        markers.mkdir(parents=True)
+        lines = []
+        for node,harness in zip(route["nodes"], ("codex", "claude")):
+            attempt = "att-local-" + node["id"]
+            (markers / (node["id"] + ".json")).write_text(json.dumps({"attempt_id": attempt}))
+            meta = {"attempt_id": attempt, "parent_sid": "test-depth0", "route_id": route["route_id"],
+                    "route_hash": route["route_hash"], "route_node": node["id"], "worker_type": "frame",
+                    "dispatch_depth": "1", "harness": harness, "note": "completed-marker"}
+            lines.append("ts\tdone\t/r\t/w\tframe\t" + ",".join(k+"="+v for k,v in meta.items()))
+        jobs.write_text("\n".join(lines))
+        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "test-depth0", "AGENT_DISPATCH_ATTEMPT_ID": "",
+                "AGENT_DISPATCH_REGISTERED_WORKER": "", "AGENT_CODEX_MANAGED_CONTROL_SOCKET": "/tmp/test-control"}), \
+             mock.patch.object(SUP.HUMAN_GATE, "probe_consumer", return_value={"epoch": 1}), \
+             mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
+             mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
+            kwargs = dict(route_path=path, release_authority="depth-0", interview=True, questions=1)
+            record_path, created = SUP.create_gate_delivery(route, "frame-review", str(artifact), jobs, 0, **kwargs)
+            self.assertTrue(created)
+            record = json.loads(record_path.read_text())
+            self.assertEqual(record["kind"], "interactive-frame-handback")
+            self.assertEqual(record["recipient_session"], "test-depth0")
+            self.assertEqual(len(record["attempt_ids"]), 2)
+            self.assertEqual(SUP.create_gate_delivery(route, "frame-review", str(artifact), jobs, 0, **kwargs),
+                             (record_path, False))
+            self.assertIsNone(SUP._owner_row(SUP._registry_rows(jobs), route["route_id"]))
+            ledger = SUP.ledger_for(route, jobs)
+            ledger.set_workflow_state("BLOCKED_HUMAN_GATE", evidence={"gate": "frame-review", "delivery": str(record_path)}, actor="gate")
+            self.assertEqual(SUP.existing_gate_delivery(route, "frame-review", jobs)["delivery"], str(record_path))
+            self.assertEqual(SUP.retire_gate_delivery(route, "frame-review", jobs), "acked")
+            self.assertEqual(json.loads(record_path.read_text())["state"], "acked")
+            with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "other-parent"}):
+                with self.assertRaisesRegex(SUP.SupervisorError, "frame-gate-parent-binding-mismatch"):
+                    SUP.create_gate_delivery(route, "frame-review", str(artifact), jobs, 1, **kwargs)
 
 
 class TestGateRecipientIsNeverAFrameLeg(WorkflowFixture):

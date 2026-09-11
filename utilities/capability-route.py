@@ -2093,10 +2093,18 @@ def _stamp_frame_profiles(nodes, owner_profile, owner_demand):
     return nodes
 
 
-def _quick_gate_bindings():
+def _recipe_has_frame(recipe):
+    return any(_frame_node(node) for node in recipe["standard_plus"]["nodes"])
+
+
+def _quick_gate_bindings(recipe):
     """Quick's single human gate binding: the frame pair fences `one-shot`."""
 
-    return [{"gate": "frame-review", "node": "one-shot", "position": "entry"}]
+    bindings = ([{"gate": "frame-review", "node": "one-shot", "position": "entry"}]
+                if _recipe_has_frame(recipe) else [])
+    bindings.extend({"gate": gate, "node": "one-shot", "position": "terminal"}
+                    for gate in recipe["quick"].get("inline_human_gates", []))
+    return bindings
 
 
 def _seal_profile_demands(nodes, profile_demands=None, explicit_profiles=None, *, legacy=False):
@@ -2769,7 +2777,13 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                 "execution_surface":"registered-headless","registered_worker":True,
                 "completion_gate":"quick-complete",
                 "terminal":True,"terminal_gate":"quick-complete"}]
+        if recipe["quick"].get("inline_human_gates"):
+            nodes[-1]["inline_human_gates"] = list(recipe["quick"]["inline_human_gates"])
         gates=["quick-frame","quick-complete"]
+        if not _recipe_has_frame(recipe):
+            nodes = [nodes[-1]]
+            nodes[0]["depends_on"] = []
+            gates = ["quick-complete"]
         selection_basis=[{"axis":"direct-predicate-gap","signal":p,"source":"compiler"} for p in sorted(known_pred-set(predicates))]
     else:
         if transport not in (None, "headless"):
@@ -2897,21 +2911,19 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
       "nodes":nodes,"parallel_groups":_realized_parallel_groups(nodes),
       "conditional_extensions":_realize_conditional_extensions(recipe, effective),
       "completion_gates":gates,
-      # `frame-review` is intrinsic to the quick SHAPE, not drawn from the
-      # recipe: quick's nodes are compiler-owned, and every capability's quick
-      # route carries the same frame pair whether or not that recipe declares a
-      # standard+ frame node.
+      # The portable recipe owns whether this capability has a frame layer.
+      # Quick must not extend it to capabilities outside the five recipes.
       "human_gates":(sorted(set(recipe["human_gates"])|{"frame-review"})
-                     if effective=="quick" else recipe["human_gates"]),
+                     if effective=="quick" and _recipe_has_frame(recipe) else recipe["human_gates"]),
       # Quick binds the frame gate at `one-shot`'s entry: that is quick's only
       # fence point, and without it quick runs with no check at all. Only
       # `direct` (which has no owner and no worker) still binds nothing.
       "human_gate_bindings":json.loads(json.dumps(
-          _quick_gate_bindings() if effective=="quick"
+          _quick_gate_bindings(recipe) if effective=="quick"
           else recipe["human_gate_bindings"] if effective!="direct" else [])),
       "workflow_contract":_workflow_contract(
           registry, nodes,
-          _quick_gate_bindings() if effective=="quick"
+          _quick_gate_bindings(recipe) if effective=="quick"
           else recipe["human_gate_bindings"] if effective!="direct" else []),
       "resume_retry_boundaries":recipe["resume_retry_boundaries"],
       "dispatch_evidence":checked_dispatch,
@@ -3164,7 +3176,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     # binds nothing. Verifier and compiler must move together or a quick route
     # compiles and then refuses to verify.
     expected_bindings=json.loads(json.dumps(
-        _quick_gate_bindings() if route.get("effective_intensity")=="quick"
+        _quick_gate_bindings(route_recipe) if route.get("effective_intensity")=="quick"
         else route_recipe["human_gate_bindings"]
         if route.get("effective_intensity")!="direct" else []))
     if route.get("human_gate_bindings") != expected_bindings:
@@ -3174,6 +3186,13 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         raise ValueError("route workflow contract differs from the realized stage graph")
     if {row["gate"] for row in expected_bindings} - set(route.get("human_gates") or []):
         raise ValueError("route binds an undeclared human gate")
+    if route.get("effective_intensity") != "direct" and "preview-disposition" in (route.get("human_gates") or []):
+        preview_raisers = [n for n in route.get("nodes", [])
+                           if n.get("continuation") == {"kind": "human-gate", "gate": "preview-disposition"}
+                           or "preview-disposition" in n.get("inline_human_gates", [])]
+        preview_bindings = [b for b in expected_bindings if b.get("gate") == "preview-disposition"]
+        if not preview_raisers or not preview_bindings:
+            raise ValueError("preview-approval-boundary-missing")
     if route.get("owner_dispatch_depth") not in {0, 1} or route.get("max_dispatch_depth") not in {0, 1, 2}:
         raise ValueError("invalid qualified dispatch depth")
     if any(key in route for key in ("depth", "owner_depth", "max_depth")):
@@ -3383,7 +3402,7 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             # so it stays true unchanged with three nodes. `max_dispatch_depth`
             # stays 1 because the frame legs are depth 1 as well.
             or route.get("registered_headless_policy") != "serial-attempt"
-            or len(route.get("nodes",[])) != 3
+            or len(route.get("nodes",[])) != (3 if _recipe_has_frame(route_recipe) else 1)
         ):
             raise ValueError("quick route shape mismatch")
         candidates=_validate_registered_headless_evidence({
@@ -3398,6 +3417,10 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         node=next((n for n in route["nodes"] if n.get("id")=="one-shot"), None)
         if node is None:
             raise ValueError("quick route shape mismatch")
+        if node.get("inline_human_gates", []) != route_recipe["quick"].get("inline_human_gates", []):
+            raise ValueError("quick-inline-human-gates-mismatch")
+        if node.get("write_scope") != route_recipe["quick"]["write_scope"]:
+            raise ValueError("quick-write-scope-mismatch")
         if (
             node.get("dispatch_depth") != 1
             or node.get("unit") != "_kernel/owner"
@@ -3405,11 +3428,13 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             or node.get("execution_surface") != "registered-headless"
             or node.get("registered_worker") is not True
             or node.get("fallback_hops")
-            or sorted(node.get("depends_on") or []) != ["frame","frame-alternative"]
+            or sorted(node.get("depends_on") or []) !=
+               (["frame","frame-alternative"] if _recipe_has_frame(route_recipe) else [])
         ):
             raise ValueError("quick node axes mismatch")
         frame_legs=[n for n in route["nodes"] if _frame_node(n)]
-        if sorted(n.get("id") for n in frame_legs) != ["frame","frame-alternative"]:
+        if sorted(n.get("id") for n in frame_legs) != (
+                ["frame","frame-alternative"] if _recipe_has_frame(route_recipe) else []):
             raise ValueError("quick route frame pair mismatch")
         for leg in frame_legs:
             if (
