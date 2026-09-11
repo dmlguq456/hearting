@@ -26,6 +26,8 @@ from dispatch_contract import (
     REVIEW_GOVERNED_LEASE_NONCE_RE,
     _parse_review_metadata,
     process_group_observation,
+    process_start_ticks,
+    attempt_tagged_descendants,
     process_launch_identity,
     signal_exact_process_group,
     seal_detached_review_result,
@@ -126,7 +128,49 @@ def _group_empty(pgid: int) -> bool:
     return process_group_observation(pgid).state == "empty"
 
 
-def _reap_child(child: subprocess.Popen, child_meta: Mapping[str, str], *, grace: float = 0.75) -> bool:
+def _drain_owned_residue(child_meta: Mapping[str, str], attempt_id: str, grace: float) -> bool:
+    """Drain exact group members and attempt-tagged setsid descendants by pidfd."""
+    def observed():
+        group = process_group_observation(int(child_meta["pid"]))
+        tagged = attempt_tagged_descendants({**child_meta, "attempt_id": attempt_id})
+        if group.state not in {"empty", "populated"} or tagged.state not in {"empty", "populated"}:
+            return None
+        if group.reason or tagged.reason:
+            return None
+        return {(pid, start) for pid, start, state in (*group.members, *tagged.members)
+                if pid != os.getpid() and state != "Z"}
+
+    for signum in (signal.SIGTERM, signal.SIGKILL):
+        members = observed()
+        if members is None:
+            return False
+        if not members:
+            return True
+        for pid, start in sorted(members, reverse=True):
+            try:
+                fd = os.pidfd_open(pid)
+                try:
+                    if process_start_ticks(pid) != start:
+                        return False
+                    signal.pidfd_send_signal(fd, signum)
+                finally:
+                    os.close(fd)
+            except ProcessLookupError:
+                continue
+            except (OSError, AttributeError):
+                return False
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
+            members = observed()
+            if members is None:
+                return False
+            if not members:
+                return True
+            time.sleep(.02)
+    return observed() == set()
+
+
+def _reap_child(child: subprocess.Popen, child_meta: Mapping[str, str], *, grace: float = 0.75, attempt_id: str | None = None) -> bool:
     if child.poll() is None:
         if signal_exact_process_group(int(child_meta["pid"]), child_meta["pid_start"], signal.SIGTERM) != "signalled":
             return False
@@ -143,6 +187,8 @@ def _reap_child(child: subprocess.Popen, child_meta: Mapping[str, str], *, grace
         child.wait(timeout=0.25)
     except subprocess.TimeoutExpired:
         return False
+    if attempt_id is not None:
+        return _drain_owned_residue(child_meta, attempt_id, grace)
     return _group_empty(int(child_meta["pid"]))
 
 
@@ -311,9 +357,17 @@ def _run_watchdog(
     # Only its fenced child is coupled to watchdog death (below). Admission
     # before COMMIT is bounded by the control pipe and finite budget.
     watchdog = _identity(os.getpid())
+    interrupted = [0]
+    previous_signals = {}
+    def request_shutdown(signum, _frame):
+        interrupted[0] = signum
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous_signals[signum] = signal.signal(signum, request_shutdown)
     pass_fds = [gate_fd]
     if failure_fd is not None:
         pass_fds.append(failure_fd)
+    child = None
+    child_meta = None
     try:
         def require_parent_death_signal() -> None:
             if not _set_parent_death_signal():
@@ -325,7 +379,12 @@ def _run_watchdog(
             preexec_fn=require_parent_death_signal if os.name == "posix" else None,
             pass_fds=tuple(pass_fds),
             close_fds=True,
+            env={**os.environ, "AGENT_DISPATCH_ATTEMPT_ID": attempt_id},
         )
+        # Only the fence may retain this close-on-exec writer. Keeping a
+        # watchdog copy would hide a successful payload exec from the adapter.
+        _close(failure_fd)
+        failure_fd = None
         child_meta = _identity(child.pid)
         receipt = _receipt(attempt_id, watchdog, child_meta, budget, nonce)
         _write_once(readiness_fd, (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode())
@@ -333,8 +392,18 @@ def _run_watchdog(
         _close(readiness_fd)
         _close(control_fd)
         _close(gate_fd)
-        _release_review_lease(lease_release_spec)
-        return 70
+        _close(failure_fd)
+        reaped = child is None
+        if child is not None and child_meta is not None:
+            try:
+                reaped = _reap_child(child, child_meta, attempt_id=attempt_id)
+            except BaseException:
+                reaped = False
+        if reaped:
+            _release_review_lease(lease_release_spec)
+        for signum, previous in previous_signals.items():
+            signal.signal(signum, previous)
+        return 70 if reaped else 126
     finally:
         _close(readiness_fd)
 
@@ -343,7 +412,7 @@ def _run_watchdog(
     def reap_or_fail_closed() -> bool:
         nonlocal lease_release_allowed
         try:
-            reaped = _reap_child(child, child_meta)
+            reaped = _reap_child(child, child_meta, attempt_id=attempt_id)
         except BaseException:
             reaped = False
         if not reaped:
@@ -355,6 +424,10 @@ def _run_watchdog(
         selector.register(control_fd, selectors.EVENT_READ)
         token: bytes | None = None
         while token is None:
+            if interrupted[0]:
+                _close(control_fd)
+                _close(gate_fd)
+                return -interrupted[0] if reap_or_fail_closed() else 126
             if child.poll() is not None:
                 reaped = reap_or_fail_closed()
                 _close(control_fd)
@@ -394,6 +467,8 @@ def _run_watchdog(
         # COMMIT never restarts the budget.  Once admitted, the child remains
         # governed by the same absolute deadline.
         while child.poll() is None:
+            if interrupted[0]:
+                return -interrupted[0] if reap_or_fail_closed() else 126
             remaining = remaining_watchdog_seconds(budget)
             if remaining <= 0:
                 if not _timeout_authority(watchdog, child_meta, receipt, budget, jobs):
@@ -412,6 +487,8 @@ def _run_watchdog(
         return child_returncode
     finally:
         selector.close()
+        for signum, previous in previous_signals.items():
+            signal.signal(signum, previous)
         if lease_release_allowed and not _release_review_lease(lease_release_spec):
             return 126
 

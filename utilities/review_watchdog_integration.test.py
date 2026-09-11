@@ -236,6 +236,31 @@ class ReviewWatchdogIntegrationTest(unittest.TestCase):
                 except OSError:
                     pass
 
+    def test_readiness_failure_releases_lease_only_after_cleanup_proof(self):
+        for reaped in (False, True):
+            with self.subTest(reaped=reaped):
+                ready_read, ready_write = os.pipe()
+                control_read, control_write = os.pipe()
+                gate_read, gate_write = os.pipe()
+                identity = {"pid": "77", "pid_start": "123", "pgid": "77"}
+                calls = []
+                try:
+                    with mock.patch("review_watchdog._identity", return_value=identity), \
+                         mock.patch("review_watchdog.subprocess.Popen", return_value=mock.Mock(pid=77)), \
+                         mock.patch("review_watchdog._write_once", side_effect=BrokenPipeError), \
+                         mock.patch("review_watchdog._reap_child", side_effect=lambda *a, **k: calls.append("reap") or reaped), \
+                         mock.patch("review_watchdog._release_review_lease", side_effect=lambda *a: calls.append("release") or True):
+                        result = _run_watchdog(
+                            attempt_id="att-readiness-failure", budget=begin_finite_watchdog(2),
+                            readiness_fd=ready_write, control_fd=control_read, gate_fd=gate_read,
+                            child_argv=["unused"], nonce="a" * 64,
+                        )
+                    self.assertEqual(result, 70 if reaped else 126)
+                    self.assertEqual(calls, ["reap", "release"] if reaped else ["reap"])
+                finally:
+                    for fd in (ready_read, control_write, gate_write):
+                        os.close(fd)
+
     def test_failed_reap_never_returns_timeout_or_abort(self):
         self.assertEqual(self._run_with_failed_reap(), 126)
         self.assertEqual(self._run_with_failed_reap(b"ABORT\n"), 126)

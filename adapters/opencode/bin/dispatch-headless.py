@@ -1996,6 +1996,8 @@ def main(argv: list[str]) -> int:
             args.governor_reservation = wait_governor_reservation_claim(
                 governor, governor_root, reservation_token, proc,
                 expected_reservation=args.replica_batch_expectation,
+                watchdog_receipt=(args.review_watchdog_handle.receipt
+                                  if getattr(args, "review_watchdog_handle", None) else None),
             )
         except DispatchContractError as exc:
             fence_failure, fence_released = read_launch_fence_failure(
@@ -2003,11 +2005,11 @@ def main(argv: list[str]) -> int:
             )
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
-                proc.wait(timeout=0.5)
+                proc.wait(timeout=5.0 if getattr(args, "review_watchdog_handle", None) else 0.5)
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait(timeout=0.5)
+                    proc.wait(timeout=5.0 if getattr(args, "review_watchdog_handle", None) else 0.5)
                 except (ProcessLookupError, subprocess.TimeoutExpired):
                     pass
             cancel_governor_reservation(governor, governor_root, reservation_token)

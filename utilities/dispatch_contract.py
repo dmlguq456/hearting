@@ -3969,9 +3969,34 @@ def wait_governor_reservation_claim(
     *,
     timeout: float | None = None,
     expected_reservation: dict[str, object] | None = None,
+    watchdog_receipt: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Observe reserve→runner transfer before the reserving process may exit."""
 
+    claimant_pid = proc.pid
+    claimant_start = None
+    if watchdog_receipt is not None:
+        from review_watchdog import _is_receipt_digest_valid
+        watchdog = watchdog_receipt.get("watchdog") or {}
+        claimant = watchdog_receipt.get("child") or {}
+        observed_watchdog = process_launch_identity(proc.pid)
+        if (not isinstance(watchdog, Mapping) or not isinstance(claimant, Mapping)
+                or not _is_receipt_digest_valid(watchdog_receipt)
+                or watchdog.get("pid") != str(proc.pid)
+                or any(watchdog.get(k) != observed_watchdog.get(k) for k in
+                       ("pid", "pid_start", "pgid", "pid_ns", "pid_observer_ns"))):
+            raise DispatchContractError("model-worker-reservation-watchdog-mismatch")
+        try:
+            claimant_pid = int(claimant["pid"])
+            claimant_start = str(claimant["pid_start"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DispatchContractError("model-worker-reservation-claim-mismatch") from exc
+        observed = _runtime_ancestry_proc_stat(claimant_pid)
+        observed_claimant = process_launch_identity(claimant_pid)
+        if (not observed or observed["ppid"] != proc.pid
+                or any(claimant.get(k) != observed_claimant.get(k) for k in
+                       ("pid", "pid_start", "pgid", "pid_ns", "pid_observer_ns"))):
+            raise DispatchContractError("model-worker-reservation-claim-mismatch", "sealed watchdog child differs")
     if timeout is None:
         timeout = reservation_claim_timeout()
     deadline = time.monotonic() + max(0.1, timeout)
@@ -3993,13 +4018,13 @@ def wait_governor_reservation_claim(
         if payload.get("state") == "claimed":
             _validate_replica_reservation(payload, expected_reservation)
             if (
-                str(payload.get("claimant_pid", "")) != str(proc.pid)
+                str(payload.get("claimant_pid", "")) != str(claimant_pid)
                 or str(payload.get("claimant_starttime", ""))
-                != str(process_start_ticks(proc.pid) or payload.get("claimant_starttime", ""))
+                != str(claimant_start or process_start_ticks(claimant_pid) or payload.get("claimant_starttime", ""))
             ):
                 raise DispatchContractError(
                     "model-worker-reservation-claim-mismatch",
-                    f"expected_pid={proc.pid} claimant_pid={payload.get('claimant_pid', '-')}",
+                    f"expected_pid={claimant_pid} claimant_pid={payload.get('claimant_pid', '-')}",
                 )
             _return_governor_witness(root, token, payload)
             return payload

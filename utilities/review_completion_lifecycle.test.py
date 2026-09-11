@@ -275,9 +275,10 @@ class ForegroundClassificationLifecycleTest(unittest.TestCase):
 
 
 class DetachedReviewLifecycleTest(unittest.TestCase):
-    def _launch(self, root, ending="raise SystemExit(0)", timeout=4.0, fence_mutation=None):
+    def _launch(self, root, ending="raise SystemExit(0)", timeout=4.0, fence_mutation=None, governed=False):
         jobs = root / "jobs.log"
         gate_read, gate_write = os.pipe()
+        failure_read, failure_write = os.pipe()
         artifact_root = root / ".agent_reports"
         artifact_root.mkdir()
         report = artifact_root / "review.md"
@@ -291,15 +292,25 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
                 f"pathlib.Path({str(report)!r}).write_text('review evidence\\n'); "
                 f"pathlib.Path({str(log)!r}).write_text({(chr(10).join(json.dumps(row) for row in rows)+chr(10))!r}); "
                 + ending)
+        payload = [sys.executable, "-c", code]
+        env = dict(os.environ)
+        if governed:
+            governor = Path(__file__).with_name("model-worker-governor.py")
+            governor_root = root / "governor"
+            token, _ = contract.reserve_governor_token(governor, governor_root, "dispatch")
+            env[contract.GOVERNOR_RESERVATION_ENV] = token
+            payload = [sys.executable, str(governor), "--root", str(governor_root),
+                       "run", "--class", "dispatch", "--", *payload]
         handle = launch_review_watchdog(
             [sys.executable, str(Path(__file__).with_name("launch-fence.py")),
              "--parent-pid", str(os.getpid()), "--gate-fd", str(gate_read),
-             "--jobs", str(jobs), "--attempt-id", "att-lifecycle", "--",
-             sys.executable, "-c", code], gate_fd=gate_read,
+             "--failure-fd", str(failure_write), "--jobs", str(jobs), "--attempt-id", "att-lifecycle", "--",
+             *payload], gate_fd=gate_read, failure_fd=failure_write,
             budget=begin_finite_watchdog(timeout), attempt_id="att-lifecycle",
-            nonce="a" * 64, jobs=jobs,
+            nonce="a" * 64, jobs=jobs, env=env,
         )
         os.close(gate_read)
+        os.close(failure_write)
         try:
             receipt = handle.read_ready(2)
             values = dict(receipt["watchdog"])
@@ -337,8 +348,17 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
                 jobs.write_text(pipe)
             handle.commit()
             os.write(gate_write, b"1")
+            if governed:
+                self.governor_claim = contract.wait_governor_reservation_claim(
+                    governor, governor_root, token, handle.process,
+                    timeout=5, watchdog_receipt=receipt)
+                # A successful governor claim proves the fence exec happened.
+                # Its private error pipe must already be EOF while watchdog lives.
+                os.set_blocking(failure_read, False)
+                self.assertEqual(os.read(failure_read, 16384), b"")
         finally:
             os.close(gate_write)
+            os.close(failure_read)
         return handle, jobs
 
     @staticmethod
@@ -350,6 +370,66 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
             "interval": .005, "drain_interval_max": .01,
             "residue_grace": .1, "parent_recheck_interval": .01,
         })()
+
+    def test_real_fence_and_governor_transfer_use_child_identity_and_keep_watchdog_identity(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            handle, jobs = self._launch(root, ending="time.sleep(1)", timeout=10, governed=True)
+            self.assertEqual(str(self.governor_claim["claimant_pid"]), handle.receipt["child"]["pid"])
+            self.assertNotEqual(str(self.governor_claim["claimant_pid"]), str(handle.process.pid))
+            self.assertEqual(_row(jobs).metadata["pid"], str(handle.process.pid))
+            self.assertEqual(handle.process.wait(timeout=10), 0)
+            self.assertEqual(watcher.watch(self._args(jobs, _row(jobs))), 0)
+            self.assertEqual(_row(jobs).metadata["note"], "completed-review")
+
+    def test_watchdog_term_drains_governed_group_and_setsid_descendant(self):
+        self._check_watchdog_descendant_cleanup(signal.SIGTERM)
+
+    def test_watchdog_int_drains_governed_group_and_setsid_descendant(self):
+        self._check_watchdog_descendant_cleanup(signal.SIGINT)
+
+    def test_watchdog_timeout_drains_governed_group_and_setsid_descendant(self):
+        self._check_watchdog_descendant_cleanup(None)
+
+    def _check_watchdog_descendant_cleanup(self, stop_signal):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            marker = root / "grandchild.json"
+            ending = ("import subprocess,json; "
+                      "p=subprocess.Popen(['sleep','30'], start_new_session=True); "
+                      f"pathlib.Path({str(marker)!r}).write_text(json.dumps(p.pid)); "
+                      "time.sleep(30)")
+            handle, jobs = self._launch(root, ending=ending, timeout=3 if stop_signal is None else 10, governed=True)
+            try:
+                deadline = time.monotonic() + 3
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertTrue(marker.exists())
+                grandchild = json.loads(marker.read_text())
+                self.assertNotEqual(os.getpgid(grandchild), int(handle.receipt["child"]["pid"]))
+                if stop_signal is not None:
+                    handle.process.send_signal(stop_signal)
+                self.assertEqual(handle.process.wait(timeout=5), -stop_signal if stop_signal else 124)
+                observation = contract.attempt_tagged_descendants(_row(jobs).metadata)
+                self.assertEqual(observation.state, "empty", observation)
+                self.assertEqual(watcher.watch(self._args(jobs, _row(jobs))), 0)
+                self.assertEqual(_row(jobs).metadata["note"], f"dead-signal-{stop_signal}" if stop_signal else "dead-timeout")
+            finally:
+                if handle.process.poll() is None:
+                    handle.process.terminate()
+                    handle.process.wait(timeout=5)
+                # Exact identities, scoped to this fixture, also clean a failing test.
+                observation = contract.attempt_tagged_descendants(_row(jobs).metadata)
+                for pid, start, state in observation.members:
+                    try:
+                        fd = os.pidfd_open(pid)
+                        try:
+                            if contract.process_start_ticks(pid) == start and state != "Z":
+                                signal.pidfd_send_signal(fd, signal.SIGKILL)
+                        finally:
+                            os.close(fd)
+                    except ProcessLookupError:
+                        pass
 
     def test_real_launch_fence_refuses_a_stale_child_identity_before_payload(self):
         for mutation in (("review_fence_pid_start", "1"), ("pid_observer_ns", "pid:[foreign]")):
