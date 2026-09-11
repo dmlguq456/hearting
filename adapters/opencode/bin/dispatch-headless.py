@@ -294,7 +294,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--cooled-model")
     p.add_argument("--selection-source")
     p.add_argument("--launch-authority", choices=("conductor", "ancestor-broker"), default="conductor")
-    p.add_argument("--parent-harness", default=os.environ.get("AGENT_DISPATCH_CURRENT_HARNESS") or os.environ.get("AGENT_DISPATCH_OWNER_HARNESS") or "opencode")
+    p.add_argument("--parent-harness", default=parent_completion.default_parent_harness("opencode"))
     p.add_argument(
         "--allow-unmanaged-parent-poll", action="store_true",
         help="operator-only recovery: permit explicit bounded polling for an unmanaged Codex parent",
@@ -786,32 +786,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
 
 
 def _effective_parent_cwd(args):
-    """Where the DISPATCHING session lives — not merely where the wrapper ran.
-
-    Orchestrators routinely `cd` into the task worktree before dispatching, so a raw
-    getcwd() records the child's own worktree — a path that can never anchor the
-    parent session row in Fleet (observed: Codex dispatch-depth-1 jobs stayed orphan,
-    2026-07-16). When the launch cwd sits inside the task worktree and that worktree
-    is linked, back-map to the primary checkout instead; explicit --parent-cwd or
-    AGENT_DISPATCH_PARENT_CWD still wins via args.parent_cwd.
-    """
-    cwd = os.path.realpath(args.parent_cwd or os.getcwd())
-    try:
-        wt = os.path.realpath(args.worktree)
-    except (OSError, TypeError):
-        return cwd
-    if args.parent_cwd is None and (cwd == wt or cwd.startswith(wt + os.sep)):
-        try:
-            out = subprocess.check_output(
-                ["git", "-C", wt, "worktree", "list", "--porcelain"],
-                text=True, stderr=subprocess.DEVNULL)
-            first = next((ln.split(" ", 1)[1] for ln in out.splitlines()
-                          if ln.startswith("worktree ")), None)
-            if first and os.path.realpath(first) != wt:
-                return os.path.realpath(first)
-        except (OSError, subprocess.SubprocessError, IndexError):
-            pass
-    return cwd
+    return parent_completion.effective_parent_cwd(args)
 
 
 def resolve_parent_completion_delivery(args: argparse.Namespace) -> str:

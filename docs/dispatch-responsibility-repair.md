@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 새 Codex/OpenCode light 오너 검증은 준비 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
+상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 새 Codex/OpenCode light 오너 검증은 고정 4efdddf0에서 진행 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -184,3 +184,19 @@ producer 전체 155, capability route 387, adapter Codex 58/Claude 46/OpenCode 3
 검증: contract 226(skip 1), join 116, registry 95, progress 34, supervision 14, reaper 11, worker bootstrap 14, sub-session runtime 4, 실제 3adapter prompt 2, Fleet state 42/dispatch 134 및 adapter Codex 58/Claude 46/OpenCode 30 PASS. 변경 전 “살아 있는 residue도 정리 완료”, “정체면 kill”, “모델 heartbeat 명령 필수”를 고정하던 테스트는 새 책임 계약에 맞춰 행 보존·신호 부재·실제 정리·도구 관측을 검사한다. 로그 `/tmp/cleanup-*.log`, `/tmp/runtime-observation-*.log`, `/tmp/runtime-final-*.log`, `/tmp/responsibility-final-*.log`. 중간 실패와 최종 교정은 별도 로그로 남겼으며 새 실제 모델 owner 왕복은 아직 이 결과에 포함하지 않는다.
 
 전체 fallback 69 PASS(75.953초), review watchdog integration 17 / lifecycle 23 / Claude supervisor 69 PASS를 추가 확인했다. Codex supervisor 복구 픽스처는 원래 행 상태가 없는 Namespace만 넘겨 새 terminal cleanup 분기에서 실패했으므로 실제 open 행 상태를 명시했다. 전체 portable guards는 473 PASS/1 FAIL이었다. 유일 실패는 async session-end 시험과 foreground distill 시험이 동일한 fixture governor의 1개 슬롯을 경쟁한 것이며 stderr가 `distill class cap reached`를 기록했다. 운영 governor나 상한은 변경하지 않고 독립 시험의 상태 root를 분리했다. 이 중간 전체 실패와 후속 재검증을 구분한다.
+
+
+## 4ef 실측에서 남은 부모 판정과 완료 확정 공백
+
+전체 portable guards 최종 재실행은 474 PASS / 0 FAIL이다(`/tmp/runtime-responsibility-portable-guards-final.log`). 시험용 governor root 분리 전 473/1 결과도 위에 보존했다. main의 artifact_manifest 호환 수정 f6d05cbb를 병합한 고정 4efdddf0에서 두 실제 owner canary를 시작했으며, 진행 중인 이 소스는 변경하지 않는다.
+
+Codex 부모 r3 `01a08f84-b216-7d11-b91a-daba2fa7a057`, route `rt-41a62718e41a4619`에서 OpenCode frame `att-951d96ca230d42599108ac8c2e839706`은 동일 parent_sid에도 poll-fallback이었다. 선택기는 `AGENT_DISPATCH_CALLER_HARNESS=codex`를 넘겼지만 OpenCode parser가 이를 무시하고 선택된 child의 OWNER_HARNESS를 부모로 읽었다. 별도로 parent_cwd를 Git primary checkout으로 바꾸는 추론이 남아 있었다. 부모 harness/session/cwd 기본값을 공통 resolver로 합쳤고 세 adapter의 별도 harness 판정, Codex 전용 cwd reader, 세 Git back-map을 제거했다. 명시 경로→실제 native session 경로→호출 cwd 순서이며 Git 관계로 부모의 위치를 만들어 내지 않는다. 실제 parser 및 실제 main의 carrier-before-spawn 검사에서 호출자와 선택된 자식 하네스가 다른 조합을 검사한다.
+
+같은 실행의 Codex frame `att-ea0d96e78f3b4324bdb805ead2354c71`은 08:15:51.275Z PASS 종료 뒤 08:15:54.341Z 부모에게 readiness=ready/status=open/attention/complete-open으로 전달됐다. 부모의 호환 harvest 뒤 row/receipt가 success였다는 사실과 구분한다. 이는 프로세스 종료를 기다리는 join과 terminal writer의 실행 책임이 갈라진 경쟁이다. 공통 runtime join이 기존 exact writer로 종결을 확정하고 canonical row를 다시 읽은 뒤 ready를 반환하도록 연결했다. 쓰기 거부나 성공 반환 뒤 미확정은 terminal-commit-pending으로 유지하며 진단·기존 deadline notice와 런타임 재시도를 남긴다. 읽기 전용 진단 명령은 기존대로 원장을 쓰지 않는다. 확정된 결과는 재분류하지 않고 부정 handoff는 부정 결과로 종결한다.
+
+OpenCode fresh parent `ses_f70775274ffeX48D6xfVUd5b1s`, route `rt-f061d15f2bd3622f`는 pJ에서 같은 4ef 소스를 사용한다. Codex frame `att-8a8a0ceb63714914aaca68a14cbb5eb6`와 OpenCode frame `att-de6dfc61dd2048aa99dd5c22d7a3d1c1`의 실제 등록/시작을 확인했다. OpenCode 부모의 bounded-wait는 공개된 fallback이며 자동 wake PASS로 바꾸지 않는다. 두 owner의 최종 왕복 및 위 후속 교정의 실측은 아직 완료 근거가 아니다.
+
+
+후속 집중 검증은 부모 운송 12 / parent cwd 10 / join 120 / managed completion 14 / Claude supervisor 69 / Codex supervisor 34 / adapter Codex 58·Claude 46·OpenCode 30 PASS다. 생성 projection 20그룹, adaptation boundary, 기존 surface budget도 PASS다. 로그 `/tmp/parent-caller-*.log`, `/tmp/terminal-commit-*.log`, `/tmp/parent-terminal-*.log`. ready 직전 writer 실패·성공 반환 뒤 실제 미확정·이미 확정된 행·실제 부정 handoff를 각각 검사했고, 어댑터 main 시험은 parent-harness 수동 주입 없이 선택기가 내보내는 caller/owner 환경으로 carrier-before-spawn을 확인한다.
+
+pJ는 native `chatcmpl-tool-9c9df05f68854c3b`의 실제 “맞음 / sum() 집계 (추천)” 답변(1789115071747ms), 정식 frame-review release, OpenCode d=1 owner `att-acbd1881d14644bdaac832f8a0904b0b` light/GLM 기동, 첫 native read의 이번 cycle agreed intent(1789115114093ms)를 확인했다. 승인 전 owner 거부 `child_spawned=0`도 보존했다. `/tmp/f-r3/question-release-owner-read.json`과 native export가 원문 증거다. 아직 test/report 및 owner의 최종 수신·종결 합격은 아니다.

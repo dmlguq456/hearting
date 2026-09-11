@@ -290,20 +290,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--cooled-model")
     p.add_argument("--selection-source")
     p.add_argument("--launch-authority", choices=("conductor", "ancestor-broker"), default="conductor")
-    p.add_argument(
-        "--parent-harness",
-        default=(
-            os.environ.get("AGENT_DISPATCH_CURRENT_HARNESS")
-            or os.environ.get("AGENT_DISPATCH_CALLER_HARNESS")
-            or os.environ.get("AGENT_DISPATCH_OWNER_HARNESS")
-            or (
-                "claude"
-                if os.environ.get("CLAUDE_CODE_SESSION_ID")
-                and not os.environ.get("CODEX_THREAD_ID")
-                else "codex"
-            )
-        ),
-    )
+    p.add_argument("--parent-harness", default=parent_completion.default_parent_harness("codex"))
     p.add_argument("--parent-transport", default=os.environ.get("AGENT_DISPATCH_CURRENT_TRANSPORT") or "unknown")
     p.add_argument("--parent-sandbox", default=os.environ.get("AGENT_DISPATCH_CURRENT_SANDBOX") or "unknown")
     # default None (not "unknown"): an explicitly supplied `--nested-eligibility
@@ -1400,102 +1387,8 @@ def jobs_lock(jobs: Path):
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-_CODEX_THREAD_ID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
-_ROLLOUT_META_SCAN_LINES = 8
-
-
-def _codex_session_store_roots() -> list[Path]:
-    """Candidate rollout stores for the CALLING session, most specific first."""
-    roots: list[Path] = []
-    for raw in (os.environ.get("CODEX_SQLITE_HOME"), os.environ.get("CODEX_HOME"), "~/.codex"):
-        if not raw:
-            continue
-        try:
-            root = Path(raw).expanduser() / "sessions"
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if root not in roots:
-            roots.append(root)
-    return roots
-
-
-def _codex_thread_cwd(session_id):
-    """Read-only: the cwd the parent Codex thread itself was started in.
-
-    Resolved from that thread's rollout ``session_meta.cwd``. Every miss — bad id,
-    no store, missing or ambiguous rollout, unreadable file, absent meta, vanished
-    path — returns None so the caller falls through to the launch-cwd tier. Never
-    guesses.
-    """
-    if not session_id or not _CODEX_THREAD_ID_RE.fullmatch(session_id):
-        return None
-    suffix = "-" + session_id + ".jsonl"
-    for root in _codex_session_store_roots():
-        try:
-            candidates = [p for p in root.rglob("rollout-*.jsonl") if p.name.endswith(suffix)]
-        except (OSError, ValueError):
-            continue
-        if len(candidates) != 1:
-            continue
-        try:
-            with candidates[0].open("r", encoding="utf-8", errors="replace") as fh:
-                for _ in range(_ROLLOUT_META_SCAN_LINES):
-                    line = fh.readline()
-                    if not line:
-                        break
-                    try:
-                        record = json.loads(line)
-                    except (ValueError, TypeError):
-                        continue
-                    if not isinstance(record, dict) or record.get("type") != "session_meta":
-                        continue
-                    payload = record.get("payload")
-                    cwd = payload.get("cwd") if isinstance(payload, dict) else None
-                    if isinstance(cwd, str) and cwd and os.path.isdir(cwd):
-                        return os.path.realpath(cwd)
-                    return None
-        except OSError:
-            continue
-    return None
-
-
 def _effective_parent_cwd(args):
-    """Where the DISPATCHING session lives — not merely where the wrapper ran.
-
-    Evidence tiers, strongest first:
-
-    1. Explicit --parent-cwd / AGENT_DISPATCH_PARENT_CWD via args.parent_cwd.
-    2. The parent Codex thread's own rollout ``session_meta.cwd``. Codex sessions
-       routinely run harness utilities as `cd $AGENT_HOME && …`, so the wrapper's
-       getcwd() records AGENT_HOME rather than where the session lives (observed:
-       a managed-Codex thread living in a sibling app repo recorded
-       parent_cwd=<agent-home> and stayed orphan in Fleet whenever
-       the exact parent_sid match was unavailable, 2026-07-30). A non-Codex parent
-       has no thread rollout, so this tier is a silent no-op for it.
-    3. Launch getcwd(), back-mapped to the primary checkout when an orchestrator
-       `cd`-ed into the linked task worktree before dispatching (2026-07-16).
-    """
-    if not args.parent_cwd:
-        derived = _codex_thread_cwd(getattr(args, "parent_session_id", None))
-        if derived:
-            return derived
-    cwd = os.path.realpath(args.parent_cwd or os.getcwd())
-    try:
-        wt = os.path.realpath(args.worktree)
-    except (OSError, TypeError):
-        return cwd
-    if args.parent_cwd is None and (cwd == wt or cwd.startswith(wt + os.sep)):
-        try:
-            out = subprocess.check_output(
-                ["git", "-C", wt, "worktree", "list", "--porcelain"],
-                text=True, stderr=subprocess.DEVNULL)
-            first = next((ln.split(" ", 1)[1] for ln in out.splitlines()
-                          if ln.startswith("worktree ")), None)
-            if first and os.path.realpath(first) != wt:
-                return os.path.realpath(first)
-        except (OSError, subprocess.SubprocessError, IndexError):
-            pass
-    return cwd
+    return parent_completion.effective_parent_cwd(args)
 
 
 def _route_node_leg_fields(args):

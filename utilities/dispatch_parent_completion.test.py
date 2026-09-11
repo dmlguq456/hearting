@@ -48,6 +48,42 @@ class ParentDeliveryContract(unittest.TestCase):
                 for child, wrapper in ADAPTERS.items():
                     with self.subTest(parent=parent, child=child):
                         self.assertEqual(wrapper.parser().get_default("parent_session_id"), "native-parent")
+                        self.assertEqual(wrapper.parser().get_default("parent_harness"), parent)
+
+    def test_selector_caller_beats_selected_owner_and_stale_current_harness(self):
+        for parent, key in (("codex", "CODEX_THREAD_ID"),
+                            ("claude", "CLAUDE_CODE_SESSION_ID"),
+                            ("opencode", "OPENCODE_SESSION_ID")):
+            for child, wrapper in ADAPTERS.items():
+                env = {key: "native-parent", "AGENT_DISPATCH_CALLER_HARNESS": parent,
+                       "AGENT_DISPATCH_OWNER_HARNESS": child,
+                       "AGENT_DISPATCH_CURRENT_HARNESS": child}
+                with self.subTest(parent=parent, child=child), mock.patch.dict(os.environ, env, clear=True):
+                    parser = wrapper.parser()
+                    self.assertEqual(parser.get_default("parent_harness"), parent)
+                    self.assertEqual(parser.get_default("parent_session_id"), "native-parent")
+
+    def test_parent_worktree_is_shared_evidence_for_every_child(self):
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            session = home / "actual-parent-worktree"
+            session.mkdir()
+            stores = home / "sessions"
+            stores.mkdir()
+            thread = "0199ffff-1111-7abc-8def-000000000042"
+            (stores / ("rollout-test-" + thread + ".jsonl")).write_text(json.dumps({
+                "type": "session_meta", "payload": {"cwd": str(session)}}) + "\n")
+            env = {"HOME": td, "CODEX_HOME": td, "CODEX_THREAD_ID": thread}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(os, "getcwd", return_value=td):
+                for child, wrapper in ADAPTERS.items():
+                    with self.subTest(child=child):
+                        request = args(parent_session_id=thread, parent_cwd=None, worktree=td)
+                        self.assertEqual(wrapper._effective_parent_cwd(request), str(session))
+                        request.parent_harness = "opencode"
+                        self.assertEqual(wrapper._effective_parent_cwd(request), td)
+                        request.parent_cwd = str(session)
+                        self.assertEqual(wrapper._effective_parent_cwd(request), str(session))
 
     def test_explicit_caller_selects_its_own_session_among_inherited_ids(self):
         env = {"CODEX_THREAD_ID": "old-thread", "OPENCODE_SESSION_ID": "actual-parent",
@@ -158,7 +194,8 @@ class ParentDeliveryContract(unittest.TestCase):
                     "PATH": os.environ["PATH"], "HOME": str(root),
                     "AGENT_HOME": str(ROOT), "AGENT_DISPATCH_JOBS": str(jobs),
                     "AGENT_DISPATCH_PARENT_SESSION_ID": "thread-parent",
-                    "AGENT_DISPATCH_CURRENT_HARNESS": "codex",
+                    "AGENT_DISPATCH_CALLER_HARNESS": "codex",
+                    "AGENT_DISPATCH_OWNER_HARNESS": child,
                     "AGENT_DISPATCH_CURRENT_TRANSPORT": "interactive",
                     "AGENT_DISPATCH_CURRENT_SANDBOX": "default",
                     "CODEX_THREAD_ID": "thread-parent",
@@ -191,7 +228,6 @@ class ParentDeliveryContract(unittest.TestCase):
                     "--slug", "carrier-test", "--capability", "autopilot-code",
                     "--capability-mode", "debug", "--worker-mode", "dev/backend",
                     "--worker-type", "review", "--dispatch-depth", "1",
-                    "--parent-harness", "codex", "--parent-session-id", "thread-parent",
                     "--model", "test", "--attempt-id", attempt,
                 ]
                 if child == "codex":

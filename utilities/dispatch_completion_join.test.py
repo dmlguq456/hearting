@@ -181,6 +181,50 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                 self.assertEqual(receipt["state"], "ready")
                 self.assertEqual(receipt["children"][0]["status"], "done")
 
+    def test_runtime_session_join_commits_terminal_before_delivering_ready(self):
+        # Real process exit can precede the reaper's row commit. The join must
+        # own the same writer instead of asking the parent model to harvest.
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness):
+                self.jobs.write_text(session_row("open", "att-commit", "parent", "a", harness=harness).rstrip()
+                                     + ",launch_outcome=never-launched\n")
+                def commit(child, *, jobs):
+                    self.assertEqual(child.status, "open")
+                    jobs.write_text(session_row("done", child.attempt_id, "parent", "a", harness=harness))
+                    return ""
+                with mock.patch.object(JOIN, "close_finished_child", side_effect=commit) as close:
+                    receipt = JOIN.join_session_batch(jobs=self.jobs, parent_session_id="parent",
+                        timeout=0.2, interval=0.01, recover_receiptless=True)
+                close.assert_called_once()
+                self.assertEqual(receipt["state"], "ready")
+                self.assertEqual(receipt["children"][0]["status"], "done")
+
+    def test_failed_or_unconfirmed_terminal_commit_stays_a_runtime_obligation(self):
+        for reason in ("completion-rejected", ""):
+            with self.subTest(reason=reason):
+                self.jobs.write_text(row("open", "att-commit", "att-parent", "a", launch_outcome="never-launched"))
+                before = self.jobs.read_bytes()
+                with mock.patch.object(JOIN, "close_finished_child", return_value=reason) as close:
+                    receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent",
+                        timeout=0.1, interval=0.01, recover_receiptless=True)
+                close.assert_called_once()
+                self.assertEqual(receipt["state"], "timeout")
+                self.assertEqual(receipt["children"][0]["reason"], "terminal-commit-pending")
+                self.assertEqual(receipt["recovery_diagnostics"][0]["reason"], reason or "terminal-commit-unconfirmed")
+                self.assertEqual(self.jobs.read_bytes(), before)
+
+    def test_read_only_ready_join_does_not_commit_and_committed_rows_are_not_reclassified(self):
+        self.jobs.write_text(row("open", "att-commit", "att-parent", "a", launch_outcome="never-launched"))
+        with mock.patch.object(JOIN, "close_finished_child") as close:
+            receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent", timeout=0)
+            self.assertEqual(receipt["state"], "ready")
+            close.assert_not_called()
+            self.jobs.write_text(row("done", "att-commit", "att-parent", "a", "completed-marker"))
+            receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent", timeout=0,
+                                      recover_receiptless=True)
+            self.assertEqual(receipt["state"], "ready")
+            close.assert_not_called()
+
     def test_terminal_cleanup_uses_common_proof_and_never_recloses_success(self):
         child=subprocess.Popen([sys.executable,"-c","import sys;sys.stdin.read()"],
                                stdin=subprocess.PIPE,start_new_session=True)
@@ -1853,6 +1897,17 @@ class FinishedChildClosure(unittest.TestCase):
             order=0, status="open", slug=f"{attempt_id}-slug", attempt_id=attempt_id,
             raw=raw, metadata=meta,
         )
+
+    def test_runtime_settlement_preserves_a_real_negative_handoff(self):
+        child = self.child(verdict="FAIL", quiescent=True)
+        self.jobs.write_text(child.raw + "\n")
+        with mock.patch.object(JOIN, "run_route_completion") as success:
+            outcome = JOIN.settle_finished_attempt(self.jobs, child)
+        self.assertTrue(outcome["closed"], outcome)
+        current = JOIN.exact_attempt_row(self.jobs, child.attempt_id)
+        self.assertEqual(current.status, "done")
+        self.assertEqual(current.metadata["note"], "dead-worker-fail")
+        success.assert_not_called()
 
     def test_route_bound_child_is_closed_through_the_completion_path(self):
         calls: list[list[str]] = []

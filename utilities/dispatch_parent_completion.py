@@ -5,6 +5,8 @@ transport. All adapters use this boundary before publishing a started child.
 """
 from __future__ import annotations
 import os
+import json
+import re
 from pathlib import Path
 from codex_managed_dispatch import (
     MANAGED_PARENT_DELIVERY, ManagedDispatchError, probe_managed_codex_parent,
@@ -35,6 +37,85 @@ def interactive_parent_identity(environ=None) -> tuple[str, str]:
 def default_parent_session_id(environ=None) -> str | None:
     env = os.environ if environ is None else environ
     return env.get("AGENT_DISPATCH_PARENT_SESSION_ID") or interactive_parent_identity(env)[1] or None
+
+
+def default_parent_harness(fallback: str, environ=None) -> str:
+    """A selected child's runtime never replaces its caller's identity."""
+    env = os.environ if environ is None else environ
+    return interactive_parent_identity(env)[0] or env.get("AGENT_DISPATCH_OWNER_HARNESS") or fallback
+
+
+_CODEX_THREAD_ID_RE = re.compile(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+_ROLLOUT_META_SCAN_LINES = 8
+
+
+def _codex_session_store_roots() -> list[Path]:
+    """Candidate rollout stores for the CALLING session, most specific first."""
+    roots: list[Path] = []
+    for raw in (os.environ.get("CODEX_SQLITE_HOME"), os.environ.get("CODEX_HOME"), "~/.codex"):
+        if not raw:
+            continue
+        try:
+            root = Path(raw).expanduser() / "sessions"
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if root not in roots:
+            roots.append(root)
+    return roots
+
+
+def _codex_thread_cwd(session_id):
+    """Read-only: the cwd the parent Codex thread itself was started in.
+
+    Resolved from that thread's rollout ``session_meta.cwd``. Every miss — bad id,
+    no store, missing or ambiguous rollout, unreadable file, absent meta, vanished
+    path — returns None so the caller falls through to the launch-cwd tier. Never
+    guesses.
+    """
+    if not session_id or not _CODEX_THREAD_ID_RE.fullmatch(session_id):
+        return None
+    suffix = "-" + session_id + ".jsonl"
+    for root in _codex_session_store_roots():
+        try:
+            candidates = [p for p in root.rglob("rollout-*.jsonl") if p.name.endswith(suffix)]
+        except (OSError, ValueError):
+            continue
+        if len(candidates) != 1:
+            continue
+        try:
+            with candidates[0].open("r", encoding="utf-8", errors="replace") as fh:
+                for _ in range(_ROLLOUT_META_SCAN_LINES):
+                    line = fh.readline()
+                    if not line:
+                        break
+                    try:
+                        record = json.loads(line)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(record, dict) or record.get("type") != "session_meta":
+                        continue
+                    payload = record.get("payload")
+                    cwd = payload.get("cwd") if isinstance(payload, dict) else None
+                    if isinstance(cwd, str) and cwd and os.path.isdir(cwd):
+                        return os.path.realpath(cwd)
+                    return None
+        except OSError:
+            continue
+    return None
+
+
+def effective_parent_cwd(args) -> str:
+    """Use explicit/native parent evidence, then the actual launch directory.
+
+    A Git worktree relationship is not evidence of where the parent lives.
+    """
+    if getattr(args, "parent_cwd", None):
+        return os.path.realpath(args.parent_cwd)
+    if getattr(args, "parent_harness", "codex") == "codex":
+        derived = _codex_thread_cwd(getattr(args, "parent_session_id", None))
+        if derived:
+            return derived
+    return os.path.realpath(os.getcwd())
 
 
 def _direct_registered_parent(args) -> bool:

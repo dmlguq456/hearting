@@ -2893,6 +2893,37 @@ def recover_receiptless_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
                 "reason": "recovery-process-failed"}
 
 
+def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
+    """Commit exact terminal evidence before a runtime join can deliver it.
+
+    Reapers and joiners use the same terminal writers. The canonical row, not
+    a writer's exit code, proves that the transition actually committed.
+    """
+    reason = ""
+    try:
+        if _route_free_review_row(row):
+            expected = (row.attempt_id, int(row.metadata.get("pid", "0")),
+                        row.metadata.get("pid_start", ""), int(row.metadata.get("pgid", "0")))
+            fresh = exact_attempt_row(jobs, row.attempt_id)
+            if fresh.status not in OPEN_STATES:
+                return {"attempt_id": row.attempt_id, "closed": True, "reason": "terminal-committed"}
+            classification = classify_exact_route_free_review_outcome(
+                fresh, jobs=jobs, expected_attempt_id=expected[0], expected_pid=expected[1],
+                expected_pid_start=expected[2], expected_pgid=expected[3],
+                quiescence=attempt_process_quiescence(fresh.metadata))
+            reason = apply_exact_route_free_review_classification(
+                fresh, jobs=jobs, classification=classification)
+        else:
+            reason = close_finished_child(row, jobs=jobs)
+        current = exact_attempt_row(jobs, row.attempt_id)
+        return {"attempt_id": row.attempt_id, "closed": current.status not in OPEN_STATES,
+                "reason": reason or ("terminal-committed" if current.status not in OPEN_STATES
+                                     else "terminal-commit-unconfirmed")}
+    except (DispatchContractError, JoinContractError, OSError, ValueError) as exc:
+        return {"attempt_id": row.attempt_id, "closed": False,
+                "reason": str(getattr(exc, "reason", type(exc).__name__))[:160]}
+
+
 def _join_snapshot(
     *,
     initial: list[ChildRow],
@@ -2905,6 +2936,7 @@ def _join_snapshot(
     env: dict[str, str] | None,
     recovery: Callable[[ChildRow], dict[str, object]] | None = None,
     observation_jobs: Path | None = None,
+    settlement: Callable[[ChildRow], dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Join one immutable exact-attempt snapshot."""
 
@@ -2920,6 +2952,7 @@ def _join_snapshot(
     snapshot = {row.attempt_id for row in initial}
     started = time.monotonic()
     last_recovery: dict[str, float] = {}
+    last_settlement: dict[str, float] = {}
     recovery_results: dict[str, dict[str, object]] = {}
     last_observation = float("-inf")
     last_signature = ""
@@ -2960,6 +2993,16 @@ def _join_snapshot(
             else:
                 readiness = "ready"
                 reason = "registry-closed" if row.status == "done" else "terminal-observed"
+            if (settlement is not None and readiness == "ready"
+                    and row.status in OPEN_STATES and decision.action != "inspect-conflict"):
+                if time.monotonic() - last_settlement.get(row.attempt_id, float("-inf")) >= 2:
+                    last_settlement[row.attempt_id] = time.monotonic()
+                    outcome = settlement(row)
+                    recovery_results[row.attempt_id] = outcome
+                    recovered = recovered or outcome.get("closed") is True
+                # A quiescent process is not a committed outcome. Keep the
+                # recovery obligation and its bounded parent notice active.
+                readiness, reason, pending = "pending", "terminal-commit-pending", True
             if (recovery is not None and readiness == "pending"
                     and reason == "process-unverifiable"
                     and row.metadata.get("registered_worker") == "1"
@@ -3054,6 +3097,7 @@ def join_batch(
         env=env,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
         observation_jobs=jobs if recover_receiptless else None,
+        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover_receiptless else None,
     )
 
 
@@ -3093,6 +3137,7 @@ def join_session_batch(
         env=env,
         recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
         observation_jobs=jobs if recover_receiptless else None,
+        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover_receiptless else None,
     )
 
 

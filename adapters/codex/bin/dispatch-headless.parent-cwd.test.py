@@ -151,7 +151,7 @@ class EffectiveParentCwd(unittest.TestCase):
             self.assertEqual(WH._effective_parent_cwd(args), os.path.realpath(self.launch_cwd))
 
     # (d) worktree back-map regression.
-    def test_worktree_back_map_still_applies_without_rollout_evidence(self):
+    def test_worktree_ancestry_cannot_replace_missing_parent_evidence(self):
         primary = self.root / "repo"
         linked = self.root / "repo-wt" / "slug"
         linked.mkdir(parents=True)
@@ -160,7 +160,7 @@ class EffectiveParentCwd(unittest.TestCase):
         with mock.patch.dict(os.environ, self.env(CODEX_HOME=str(self.codex_home)), clear=True), \
                 mock.patch.object(WH.os, "getcwd", return_value=str(linked)), \
                 mock.patch.object(WH.subprocess, "check_output", return_value=porcelain):
-            self.assertEqual(WH._effective_parent_cwd(args), os.path.realpath(primary))
+            self.assertEqual(WH._effective_parent_cwd(args), os.path.realpath(linked))
 
     def test_worktree_back_map_is_skipped_when_rollout_resolves(self):
         linked = self.root / "repo-wt" / "slug"

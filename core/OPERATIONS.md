@@ -263,11 +263,14 @@ acknowledges the exact receipt after its turn completes; a different receipt
 cannot be consumed by a stale turn. Harvest inspects or reconciles the worker
 record and does not acknowledge notification delivery. Neither a missing harvest
 command nor an unchanged worker row authorizes repeated model turns or owner
-termination. The common controller retains unresolved child recovery and parent
+termination. The common controller commits exact terminal evidence before
+delivering completion and retains unresolved closure, child recovery, and parent
 notice. Launch dependencies, write authorization, and explicit terminal cleanup
 scopes own operation permissions. Existing human gates retain approval authority.
 
-The parent runtime supplies its native session identity independently of the
+The shared parent resolver owns harness, session, and cwd; adapters consume its
+result. A selected child and Git checkout ancestry cannot substitute for parent
+identity. The parent runtime supplies its native session identity independently of the
 child adapter. Dispatch carries the issued producer cycle and a concrete output
 directory in both environment and prompt. The producer record owns that path;
 write admission and completion publication use the same cycle binding. A missing
