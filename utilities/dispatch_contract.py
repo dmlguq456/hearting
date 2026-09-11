@@ -8080,6 +8080,8 @@ def marker_bound_delivery_transaction(
                 # another producer-specific boolean in every carrier.
                 bool(refreshed_marker is not None and refreshed_marker_digest)
                 or (refreshed_metadata.get("note") == "completed-supervisor"
+                    and refreshed_metadata.get("worker_type") == "owner"
+                    and refreshed_metadata.get("dispatch_depth") == "1"
                     and refreshed_metadata.get("failure_class") == "pass")
                 or (refreshed_fields[1] == "done"
                     and refreshed_metadata.get("note") == SUBSESSION_NOTE

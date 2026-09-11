@@ -11,12 +11,10 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
-    SUBSESSION_NOTE,
-    observed_attempt_liveness,
+    DispatchContractError,
     parse_registry_metadata,
-    row_is_subsession,
 )
-from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
+import dispatch_completion_join as JOIN  # noqa: E402
 
 
 def selected_rows(
@@ -51,83 +49,53 @@ def selected_rows(
     return list(latest.values())
 
 
-def classify(rows: list[tuple[list[str], dict[str, str]]]) -> dict[str, object]:
-    children: list[dict[str, str]] = []
-    terminal_failure = False
-    pending = False
-    for fields, metadata in rows:
-        status = fields[1]
-        note = metadata.get("note", "")
-        registered_process = (
-            metadata.get("attempt_schema_version") == "2"
-            and metadata.get("execution_surface") == "registered-headless"
-            and metadata.get("registered_worker", "").lower() in {"1", "true"}
-        )
-        observed = (
-            observed_attempt_liveness(
-                status,
-                metadata,
-                terminal_envelope=terminal_envelope_observed(
-                    metadata.get("log_file")
-                ),
-            )
-            if registered_process
-            else None
-        )
-        if registered_process and observed.state in {"alive", "unverifiable"}:
-            readiness = "pending"
-            pending = True
-        elif status in {"open", "running"}:
-            # Legacy and non-registered rows have no governed process identity.
-            # They remain pending while open; guessing terminal from transcript
-            # age would reintroduce the semantic/process conflation this helper
-            # exists to remove.
-            if registered_process and observed.state == "reconcile-needed":
-                readiness = "terminal-unclosed"
-                terminal_failure = True
-            else:
-                readiness = "process-unverifiable"
-                pending = True
-        elif status == "done" and (
-            note == "completed-marker"
-            or metadata.get("attempt_schema_version") != "2"
-            or (
-                metadata.get("failure_class") == "pass"
-                and (
-                    # A supervisor closed the depth-1 owner it supervises.
-                    (note == "completed-supervisor"
-                     and metadata.get("worker_type") == "owner")
-                    # A sub-session slice reached its own terminal. This arm used
-                    # to require `completed-supervisor`, a note no sub-session can
-                    # carry (it gets `completion_delivery=one-shot`, so it has no
-                    # supervisor) -- the reader was built for a writer that did not
-                    # exist. Defect F gave it one.
-                    or (note == SUBSESSION_NOTE and row_is_subsession(metadata))
-                )
-            )
-        ):
-            readiness = "ready"
-        elif status == "done":
-            readiness = "terminal-failure"
-            terminal_failure = True
-        else:
-            readiness = "contract-error"
-            terminal_failure = True
-        children.append(
-            {
-                "attempt_id": metadata.get("attempt_id", "legacy"),
-                "slug": fields[4],
-                "status": status,
-                "note": note or "-",
-                "process_state": observed.process_state if observed else "not-applicable",
-                "process_reason": observed.process_reason if observed else "unregistered-or-legacy",
-                "observed_liveness": observed.state if observed else "not-applicable",
-                "observed_reason": observed.reason if observed else "unregistered-or-legacy",
-                "readiness": readiness,
-            }
-        )
-    state = "terminal" if terminal_failure else "pending" if pending else "ready"
+def classify_legacy_rows(rows) -> dict[str, object]:
+    """Compatibility for pre-registration rows with no governed identity."""
+    children = [{"attempt_id": meta.get("attempt_id", "legacy"), "slug": fields[4],
+                 "status": fields[1], "note": meta.get("note", "-"),
+                 "readiness": "ready" if fields[1] == "done" else "process-unverifiable"
+                     if fields[1] in {"open", "running"} else "contract-error"}
+                for fields, meta in rows]
+    state = ("terminal" if any(c["readiness"] == "contract-error" for c in children)
+             else "pending" if any(c["readiness"] != "ready" for c in children) else "ready")
     return {"schema_version": 1, "state": state, "children": children}
+
+
+def classify_selection(jobs: Path, rows, *, settle: bool = False) -> dict[str, object]:
+    """Operational waits delegate registered decisions to the shared join."""
+    registered = {metadata["attempt_id"] for _, metadata in rows
+                  if metadata.get("attempt_schema_version") == "2"
+                  and metadata.get("registered_worker", "").lower() in {"1", "true"}
+                  and metadata.get("execution_surface") == "registered-headless"
+                  and metadata.get("attempt_id")}
+    legacy = classify_legacy_rows([(fields, metadata) for fields, metadata in rows
+                       if metadata.get("attempt_id") not in registered])
+    children = list(legacy["children"])
+    joined = JOIN.join_selected_attempts(jobs=jobs, expected_attempts=registered, recover=settle)
+    for child in joined["children"]:
+        current = dict(child)
+        if child["readiness"] == "ready":
+            row = JOIN.exact_attempt_row(jobs, child["attempt_id"])
+            state = JOIN.current_delivery_state(
+                jobs, row.attempt_id,
+                # This wait owns the selected attempt and its descendants,
+                # not all of that attempt's siblings under another parent.
+                parent_attempt_id=row.attempt_id, advance=False,
+            )
+            current["status"] = state.status
+            current["required_action"] = JOIN.delivery_required_action(state)
+            current["readiness"] = (
+                "ready" if JOIN.delivery_classification(state) == "success"
+                else "pending" if not state.quiescent or state.owned_children or state.status in {"open", "running"}
+                else "terminal-failure"
+            )
+        if current["readiness"] == "pending" and current["status"] in {"open", "running"} and child["readiness"] == "ready":
+            current["reason"] = "terminal-commit-pending"
+        children.append(current)
+    state = ("terminal" if any(c["readiness"] in {"terminal-failure", "contract-error"} for c in children)
+             else "pending" if any(c["readiness"] != "ready" for c in children) else "ready")
+    return {"schema_version": 1, "state": state, "children": children,
+            "recovery_diagnostics": joined.get("recovery_diagnostics", [])}
 
 
 def main() -> int:
@@ -136,17 +104,18 @@ def main() -> int:
     parser.add_argument("--parent", default="")
     parser.add_argument("--slug", default="")
     parser.add_argument("--attempt-id", default="")
+    parser.add_argument("--settle", action="store_true",
+                        help="operational wait: commit exact outcomes through the shared runtime join")
     args = parser.parse_args()
     try:
-        receipt = classify(
-            selected_rows(
+        rows = selected_rows(
                 Path(args.jobs),
                 parent=args.parent,
                 slug=args.slug,
                 attempt_id=args.attempt_id,
             )
-        )
-    except OSError as exc:
+        receipt = classify_selection(Path(args.jobs), rows, settle=args.settle)
+    except (OSError, JOIN.JoinContractError, DispatchContractError) as exc:
         receipt = {
             "schema_version": 1,
             "state": "contract-error",

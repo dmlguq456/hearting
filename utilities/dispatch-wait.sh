@@ -3,7 +3,7 @@
 #   A headless main/conductor is a one-shot process, so ending the turn also
 #   ends the process. After dispatching a stage, the conductor must poll for
 #   completion in the same turn instead of ending on a notification wait.
-#   This helper polls the shared exact-process readiness classifier.
+#   This helper uses the shared runtime join to commit exact outcomes and recover cleanup.
 #
 #   Usage: dispatch-wait.sh [--parent <self-slug>] [--slug <row-slug>] [--attempt-id <id>]
 #                           [--jobs <path>] [--interval <s>] [--max <s>]
@@ -17,7 +17,7 @@
 #
 #   exit 0: all target children are semantically successful and quiescent.
 #   exit 2: children remain alive at --max; call again.
-#   exit 3: a quiescent child has failure/unclosed terminal evidence; diagnose.
+#   exit 3: a quiescent child has a committed failure/conflict; diagnose.
 #   Each iteration emits one status line. No background/nohup waits are used.
 #   Legacy/non-registered rows remain compatible: closed rows do not require a
 #   governed PID, while open rows without exact identity stay unverifiable.
@@ -70,18 +70,18 @@ fi
 
 elapsed=0
 while :; do
-  set -- --jobs "$JOBS"
+  set -- --jobs "$JOBS" --settle
   [ -n "$PARENT" ] && set -- "$@" --parent "$PARENT"
   [ -n "$SLUG" ] && set -- "$@" --slug "$SLUG"
   [ -n "$ATTEMPT_ID" ] && set -- "$@" --attempt-id "$ATTEMPT_ID"
   ready_out=$(python3 "$READINESS" "$@" 2>&1)
   ready_rc=$?
   if [ "$ready_rc" -eq 0 ]; then
-    echo "✓ selected children are semantic-terminal and execution-quiescent — ready to harvest (exit 0)"
+    echo "✓ selected children are semantic-terminal and execution-quiescent — complete; no harvest required (exit 0)"
     exit 0
   fi
   if [ "$ready_rc" -eq 3 ]; then
-    echo "⚠️ quiescent terminal failure/unclosed child detected — harvest or diagnose (exit 3)"
+    echo "⚠️ quiescent terminal failure/conflict detected — inspect the exact result (exit 3)"
     printf '%s\n' "$ready_out"
     exit 3
   fi
@@ -92,6 +92,7 @@ while :; do
 
   if [ "$elapsed" -ge "$MAX" ]; then
     echo "… selected children still running or unverifiable after ${elapsed}s (max ${MAX}s) — call again (exit 2)"
+    printf '%s\n' "$ready_out"
     exit 2
   fi
 

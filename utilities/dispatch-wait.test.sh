@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # dispatch-wait.test.sh — SD-14 one-shot 대기 헬퍼 conformance (exit-code 매트릭스).
 #   증명 대상: (0) 대상 없음/종료 → 수확, (2) 실행 중·검증 불가 → 재호출,
-#   (3) 실행 종료가 증명된 미닫힘/실패 행 → 진단.
+#   (3) 확정된 실패/충돌 → 진단; 미확정 결과는 공통 writer의 복구 의무 유지.
 set -uo pipefail
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -79,6 +79,7 @@ else bad "legacy unverifiable child expected 2 got $rc [$out]"; fi
 # --- Case 3b: supplemental controlled current/open Codex terminal rows.
 # Real foreground FAIL/BLOCKED rows close before return. Explicit
 # reaped-before-publish evidence makes these synthetic open rows quiescent.
+# They lack a publish binding, so the shared writer cannot commit a verdict.
 term_wt="$tmp/wt/terminal"
 term_root="$tmp/canonical/.agent_reports"
 mkdir -p "$term_wt" "$term_root"
@@ -102,12 +103,11 @@ PY
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' "2026-07-22T00:00:00" "open" "repo" "$term_wt" "wait-$lower" \
     "attempt_schema_version=2,dispatch_depth=2,transport=headless,execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless,attempt_id=att-wait-$lower,parent=conf,harness=codex,artifact_root=$term_root,log_file=$log,launch_outcome=reaped-before-publish" >> "$jobs"
   out=$(AGENT_HOME="$agent_home" AGENT_ARTIFACT_ROOT="$term_root" sh "$WAIT" --jobs "$jobs" --parent conf --interval 1 --max 5 2>&1); rc=$?
-  if [ "$rc" -eq 3 ] && printf '%s' "$out" | grep -q 'terminal failure/unclosed child' \
-      && printf '%s' "$out" | grep -q 'terminal-unclosed' \
+  if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'terminal-commit-pending' \
       && ! printf '%s' "$out" | grep -q 'RAW_WAIT_SENTINEL\|private-fail\|private-blocked'; then
-    ok "supplemental open Codex $verdict row → typed wait exit 3 without raw leakage"
+    ok "uncommitted Codex $verdict retains writer recovery without raw leakage"
   else
-    bad "supplemental Codex $verdict expected typed wait exit3 got $rc [$out]"
+    bad "uncommitted Codex $verdict expected typed wait exit2 got $rc [$out]"
   fi
 done
 
@@ -175,7 +175,7 @@ PY
 )
 pid_ns=$(readlink /proc/self/ns/pid)
 printf '%s\t%s\t%s\t%s\t%s\t%s\n' "2026-07-24T00:00:00" "done" "repo" "$tmp/wt/quiescence" "q-child" \
-  "attempt_schema_version=2,dispatch_depth=2,transport=headless,execution_surface=registered-headless,registered_worker=1,attempt_id=att-quiescence,parent=conf,note=completed-marker,pid=$live_pid,pid_start=$live_start,pgid=$live_pid,pid_observer_ns=$pid_ns" >> "$jobs"
+  "attempt_schema_version=2,dispatch_depth=1,transport=headless,execution_surface=registered-headless,registered_worker=1,worker_type=owner,attempt_id=att-quiescence,parent=conf,note=completed-supervisor,failure_class=pass,pid=$live_pid,pid_start=$live_start,pgid=$live_pid,pid_observer_ns=$pid_ns" >> "$jobs"
 out=$(AGENT_HOME="$agent_home" sh "$WAIT" --jobs "$jobs" --attempt-id att-quiescence --max 0 2>&1); rc=$?
 if [ "$rc" -eq 2 ] && printf '%s' "$out" | grep -q 'still running or unverifiable'; then
   ok "semantic completion while process live → exit 2 (draining)"

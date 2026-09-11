@@ -107,7 +107,7 @@ from owner_route_binding import (  # noqa: E402
     validate_runtime_requirements,
 )
 from worker_bootstrap import (
-    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt,
+    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt,
     supervised_owner_prompt,  # noqa: E402
     assigned_contract,
     profile_worker_type,
@@ -717,6 +717,7 @@ def dispatch_prompt(
         "- Owner workers use the inherited registry, launch checked adapter wrappers directly, consume typed completion receipts, harvest artifacts, and close rows; stage/review/support workers do not dispatch.\n\n"
         f"{heartbeat}"
         f"{stage_session_prompt(args)}"
+        f"{released_task_prompt(args)}"
         "Assignment:\n"
         f"{task.rstrip()}\n\n"
         f"{ending}",

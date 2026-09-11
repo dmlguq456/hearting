@@ -3072,6 +3072,29 @@ def _join_snapshot(
         time.sleep(interval)
 
 
+def join_selected_attempts(*, jobs: Path, expected_attempts: set[str],
+                           timeout: float = 0.0, interval: float = 2.0,
+                           recover: bool = True) -> dict[str, object]:
+    """Use the runtime join for an operator's exact selected attempts too.
+
+    Selection is done by the caller; subsequent observations keep that fixed
+    identity set. The same terminal writers and cleanup recovery own progress.
+    No parent runtime or completion-note vocabulary is inferred here.
+    """
+    def refresh(attempts):
+        return [exact_attempt_row(jobs, attempt) for attempt in sorted(attempts)]
+
+    return _join_snapshot(
+        initial=refresh(expected_attempts), refresh=refresh,
+        identity={"selected_attempts": ",".join(sorted(expected_attempts))},
+        interval=interval, timeout=timeout, liveness_command=None,
+        liveness_probe_timeout=30.0, env=None,
+        recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover else None,
+        observation_jobs=jobs if recover else None,
+        settlement=(lambda row: settle_finished_attempt(jobs, row)) if recover else None,
+    )
+
+
 def join_batch(
     *,
     jobs: Path,

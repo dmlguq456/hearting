@@ -103,7 +103,7 @@ from owner_route_binding import (  # noqa: E402
     validate_runtime_requirements,
 )
 from worker_bootstrap import (
-    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt,
+    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt,
     assigned_contract,
     render_worker_bootstrap,
     runtime_progress_prompt,
@@ -761,6 +761,7 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         "- Preserve the reported QA/tool contracts in the artifact; owner workers launch checked adapter wrappers directly.\n\n"
         f"{heartbeat}"
         f"{stage_session_prompt(args)}"
+        f"{released_task_prompt(args)}"
         "Assignment:\n"
         f"{task.rstrip()}\n\n"
         "End with the kernel's exact three-line handoff as the entire final message — "

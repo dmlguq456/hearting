@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,6 +46,16 @@ def sealed_cancellation_metadata(attempt: str) -> dict[str, str]:
 
 
 class DispatchAttemptReadyTest(unittest.TestCase):
+    def classify(self, rows):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            jobs.write_text("".join("\t".join([*fields[:5], ",".join(k + "=" + v for k, v in meta.items())]) + "\n"
+                                    for fields, meta in rows))
+            before = jobs.read_bytes()
+            result = READY.classify_selection(jobs, rows)
+            self.assertEqual(jobs.read_bytes(), before)
+            return result
+
     def test_supervised_owner_pass_is_ready_without_a_stage_marker(self):
         fields = [
             "2026-08-11T00:00:00Z", "done", "/r", "/w", "owner", "",
@@ -71,7 +83,7 @@ class DispatchAttemptReadyTest(unittest.TestCase):
             "attempt_descendant_proof": "attempt-tagged-empty-v1",
             "attempt_descendant_observer_ns": "pid:[test]",
         }
-        receipt = READY.classify([(fields, metadata)])
+        receipt = self.classify([(fields, metadata)])
         self.assertEqual(receipt["state"], "ready")
         self.assertEqual(receipt["children"][0]["readiness"], "ready")
 
@@ -106,7 +118,7 @@ class DispatchAttemptReadyTest(unittest.TestCase):
             "attempt_descendant_proof": "attempt-tagged-empty-v1",
             "attempt_descendant_observer_ns": "pid:[test]",
         }
-        metadata.update(overrides)
+        metadata.update({"classifier_source": D.SUBSESSION_TERMINAL_CLASSIFIER, **overrides})
         return ["2026-09-06T00:00:00Z", "done", "/r", "/w", "slice", ""], metadata
 
     def test_subsession_terminal_is_ready(self):
@@ -115,7 +127,7 @@ class DispatchAttemptReadyTest(unittest.TestCase):
         # delivery, so no supervisor). It was a reader waiting for a writer that
         # did not exist, and this is the first test that reaches it.
         fields, metadata = self._slice_metadata("completed-subsession")
-        receipt = READY.classify([(fields, metadata)])
+        receipt = self.classify([(fields, metadata)])
         self.assertEqual(receipt["state"], "ready")
         self.assertEqual(receipt["children"][0]["readiness"], "ready")
 
@@ -123,7 +135,7 @@ class DispatchAttemptReadyTest(unittest.TestCase):
         fields, metadata = self._slice_metadata(
             "completed-subsession", failure_class="contract"
         )
-        receipt = READY.classify([(fields, metadata)])
+        receipt = self.classify([(fields, metadata)])
         self.assertNotEqual(receipt["children"][0]["readiness"], "ready")
 
     def test_subsession_note_on_a_stage_owner_row_is_not_ready(self):
@@ -134,14 +146,14 @@ class DispatchAttemptReadyTest(unittest.TestCase):
                     "subsession_index", "subsession_count", "subsession_mode",
                     "subsession_purpose"):
             metadata.pop(key, None)
-        receipt = READY.classify([(fields, metadata)])
+        receipt = self.classify([(fields, metadata)])
         self.assertNotEqual(receipt["children"][0]["readiness"], "ready")
 
     def test_slice_carrying_the_supervisor_note_is_not_ready(self):
         # The arm this replaced. A slice cannot be closed by a supervisor, so a
         # row claiming both is malformed and buys nothing.
         fields, metadata = self._slice_metadata("completed-supervisor")
-        receipt = READY.classify([(fields, metadata)])
+        receipt = self.classify([(fields, metadata)])
         self.assertNotEqual(receipt["children"][0]["readiness"], "ready")
 
     def test_supervised_stage_pass_still_requires_a_completion_marker(self):
@@ -171,13 +183,13 @@ class DispatchAttemptReadyTest(unittest.TestCase):
             "attempt_descendant_proof": "attempt-tagged-empty-v1",
             "attempt_descendant_observer_ns": "pid:[test]",
         }
-        receipt = READY.classify([(fields, metadata)])
+        receipt = self.classify([(fields, metadata)])
         self.assertEqual(receipt["state"], "terminal")
         self.assertEqual(
             receipt["children"][0]["readiness"], "terminal-failure"
         )
 
-    def test_open_quiescent_attempt_is_terminal_unclosed_not_pending(self):
+    def test_open_quiescent_attempt_waits_for_terminal_commit(self):
         fields = [
             "2026-07-24T00:00:00Z", "open", "/r", "/w", "owner", "",
         ]
@@ -191,12 +203,9 @@ class DispatchAttemptReadyTest(unittest.TestCase):
             "attempt_id": "att-ready-stale",
             "launch_outcome": "reaped-before-publish",
         }
-        receipt = READY.classify([(fields, metadata)])
-        self.assertEqual(receipt["state"], "terminal")
-        self.assertEqual(receipt["children"][0]["readiness"], "terminal-unclosed")
-        self.assertEqual(
-            receipt["children"][0]["observed_liveness"], "reconcile-needed"
-        )
+        receipt = self.classify([(fields, metadata)])
+        self.assertEqual(receipt["state"], "pending")
+        self.assertEqual(receipt["children"][0]["reason"], "terminal-commit-pending")
 
     def test_exact_terminal_envelope_is_reported_without_registry_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -219,17 +228,17 @@ class DispatchAttemptReadyTest(unittest.TestCase):
                 "launch_outcome": "reaped-before-publish",
                 "log_file": str(log),
             }
-            receipt = READY.classify([(fields, metadata)])
+            receipt = self.classify([(fields, metadata)])
         child = receipt["children"][0]
-        self.assertEqual(receipt["state"], "terminal")
-        self.assertEqual(child["observed_reason"], "terminal-observed")
+        self.assertEqual(receipt["state"], "pending")
+        self.assertEqual(child["reason"], "terminal-commit-pending")
 
     def test_automatically_cancelled_row_is_no_longer_pending(self):
         # J-4
         fields = ["2026-08-26T00:00:00Z", "done", "/r", "/w", "cancelled-auto", ""]
         metadata = sealed_cancellation_metadata("att-j4-automatic")
         metadata["classifier_source"] = "automatic-receipt-unavailable-v1"
-        receipt = READY.classify([(fields, metadata)])
+        receipt = self.classify([(fields, metadata)])
         child = receipt["children"][0]
         self.assertNotEqual(child["readiness"], "pending")
         self.assertNotEqual(child.get("process_reason"), "post-exit-receipt-incomplete")
@@ -239,10 +248,83 @@ class DispatchAttemptReadyTest(unittest.TestCase):
         fields = ["2026-08-26T00:00:00Z", "done", "/r", "/w", "cancelled-manual", ""]
         metadata = sealed_cancellation_metadata("att-j5-manual")
         metadata["classifier_source"] = "operator-receiptless-cancel-v1"
-        receipt = READY.classify([(fields, metadata)])
+        receipt = self.classify([(fields, metadata)])
         child = receipt["children"][0]
         self.assertNotEqual(child["readiness"], "pending")
         self.assertNotEqual(child.get("process_reason"), "post-exit-receipt-incomplete")
+
+
+class RuntimeWaitSharedJoinTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.jobs = self.root / "jobs.log"
+        self.attempt = "att-wait-shared"
+        self.meta = {"attempt_id": self.attempt, "attempt_schema_version": "2",
+                     "registered_worker": "1", "execution_surface": "registered-headless",
+                     "launch_outcome": "reaped-before-publish", "harness": "opencode",
+                     "worker_type": "review", "dispatch_depth": "1"}
+        self.write_row("open", self.meta)
+
+    def write_row(self, status, metadata):
+        self.jobs.write_text("\t".join(["2026-09-11T00:00:00Z", status, str(self.root),
+            str(self.root), "selected", ",".join(k + "=" + v for k, v in metadata.items())]) + "\n")
+
+    def selected(self):
+        return READY.selected_rows(self.jobs, attempt_id=self.attempt)
+
+    def test_terminal_commit_must_land_before_success_is_consumed(self):
+        def commit(jobs, row):
+            self.assertEqual(row.attempt_id, self.attempt)
+            self.write_row("done", {**self.meta, "note": "completed-review", "failure_class": "pass"})
+            return {"closed": True}
+        def proof(jobs, attempt, **kwargs):
+            self.assertEqual(READY.JOIN.exact_attempt_row(jobs, attempt).status, "done")
+            return READY.JOIN.CurrentDeliveryState(None, "", "", "", "done", "PASS", True, 0,
+                                                    False, completion_proven=True)
+        with mock.patch.object(READY.JOIN, "settle_finished_attempt", side_effect=commit) as settle, \
+                mock.patch.object(READY.JOIN, "current_delivery_state", side_effect=proof):
+            result = READY.classify_selection(self.jobs, self.selected(), settle=True)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(result["children"][0]["status"], "done")
+        self.assertEqual(result["children"][0]["required_action"], "advance-completed")
+        settle.assert_called_once()
+
+    def test_writer_failure_or_false_success_stays_pending_without_relabeling(self):
+        before = self.jobs.read_bytes()
+        for closed in (False, True):
+            with self.subTest(closed=closed), \
+                    mock.patch.object(READY.JOIN, "settle_finished_attempt", return_value={
+                        "closed": closed, "reason": "write-unconfirmed"}), \
+                    mock.patch.object(READY.JOIN, "current_delivery_state") as consume:
+                result = READY.classify_selection(self.jobs, self.selected(), settle=True)
+                self.assertEqual(result["state"], "pending")
+                self.assertEqual(result["children"][0]["reason"], "terminal-commit-pending")
+                consume.assert_not_called()
+                self.assertEqual(self.jobs.read_bytes(), before)
+
+    def test_conflict_uses_shared_current_consumption_proof(self):
+        self.write_row("done", {**self.meta, "note": "completed-review", "failure_class": "pass"})
+        proof = READY.JOIN.CurrentDeliveryState(None, "", "", "", "done", "PASS", True, 0,
+                                               False, completion_proven=True, terminal_conflict=True)
+        with mock.patch.object(READY.JOIN, "current_delivery_state", return_value=proof), \
+                mock.patch.object(READY.JOIN, "settle_finished_attempt") as settle:
+            result = READY.classify_selection(self.jobs, self.selected(), settle=True)
+        self.assertEqual(result["state"], "terminal")
+        self.assertEqual(result["children"][0]["required_action"], "inspect-done-failure")
+        settle.assert_not_called()
+
+    def test_unobservable_attempt_retains_recovery_obligation(self):
+        metadata = {**self.meta, "pid_scope": "namespace-local", "pid": "99999999", "pid_start": "1"}
+        metadata.pop("launch_outcome")
+        self.write_row("done", {**metadata, "note": "completed-review", "failure_class": "pass"})
+        before = self.jobs.read_bytes()
+        with mock.patch.object(READY.JOIN, "recover_receiptless_attempt", return_value={"closed": False}) as recover:
+            result = READY.classify_selection(self.jobs, self.selected(), settle=True)
+        self.assertEqual(result["state"], "pending")
+        recover.assert_called_once()
+        self.assertEqual(self.jobs.read_bytes(), before)
 
 
 if __name__ == "__main__":

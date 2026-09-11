@@ -25,10 +25,14 @@ not-observed-wrong.
 
 ## Target determination
 
+- The **assignment and released task** define the target and limits. Run only
+  applicable verification levels within that scope; an omitted plan does not
+  turn a bounded command check into a repository audit.
 - A **plan file path** is provided: read its Verification section and the corresponding
   log directory's `checklist.md` to identify changed files; build targets from both.
 - A **list of changed files** is provided: use them directly.
-- **No target given**: `git diff --name-only HEAD~1` for recently changed files.
+- **No target given**: use recent Git changes only when the task requests changed-code
+  verification; otherwise report the missing input instead of inventing a target.
 
 ## Levels (execute in order; stop at the first failure)
 

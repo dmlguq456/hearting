@@ -106,7 +106,7 @@ from owner_route_binding import (  # noqa: E402
     validate_runtime_requirements,
 )
 from worker_bootstrap import (
-    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt,
+    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt,
     supervised_owner_prompt,  # noqa: E402
     assigned_contract,
     profile_worker_type,
@@ -952,6 +952,7 @@ def dispatch_prompt(
         f"{heartbeat}"
         f"{no_commit_clause}"
         f"{stage_session_prompt(args)}"
+        f"{released_task_prompt(args)}"
         "Assignment:\n"
         f"{task.rstrip()}\n\n"
         f"{ending}",

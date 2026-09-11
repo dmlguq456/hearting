@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -143,6 +144,61 @@ def artifact_context_prompt(environ) -> str:
     return (f"- artifact_cycle_id: {values['AGENT_ARTIFACT_CYCLE_ID']}\n"
             f"- artifact_output_dir: {output}\n"
             "- Resolve relative artifact paths beneath artifact_output_dir.\n")
+
+
+def released_task_prompt(args) -> str:
+    """Carry the same released task across owner/stage and runtime boundaries.
+
+    This consumes the existing gate journal, not an owner's copied prompt or
+    a directory picked by recency. Launch authority remains with the gate.
+    Rendering the recorded answers also works when no plan/intent file was
+    passed by the conductor. Explicit per-stage assignments remain separate.
+    """
+    if getattr(args, "worker_type", None) == "frame":
+        return ""
+    binding = getattr(args, "owner_route_binding", None)
+    route_id = getattr(args, "route_id", None) or getattr(binding, "route_id", None)
+    if not route_id:
+        return ""
+    import frame_interview as interview
+    import workflow_state as workflow
+
+    jobs = getattr(args, "jobs", None)
+    if jobs is not None and not Path(jobs).expanduser().exists():
+        return ""  # A fresh registry preview has no recorded release to consume.
+    ledger = workflow.WorkflowLedger(route_id, jobs=jobs)
+    resolution = workflow.human_gate_resolution(ledger.journal(), "frame-review")
+    if resolution["status"] != "proceed" or not resolution.get("interview"):
+        return ""  # Frame preparation and legacy routes retain their own inputs.
+    artifact = str(resolution.get("artifact") or "")
+    try:
+        source = Path(artifact)
+        if not source.is_absolute():
+            raise ValueError("recorded interview path is not absolute")
+        value = json.loads(source.read_text(encoding="utf-8"))
+        if value.get("route_id") != route_id:
+            raise ValueError("recorded interview belongs to a different route")
+        answers = resolution.get("answers")
+        errors = interview.validate_answers(value, answers)
+        if errors:
+            raise ValueError("; ".join(errors[:3]))
+        value = {**value, "self_path": artifact}
+        intent = interview.render_intent(
+            value, answers, now=str(resolution.get("resolved_at") or "")[:10],
+        )
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise ValueError(
+            f"Released task input unavailable for {route_id}: {exc}. "
+            f"Restore the recorded interview at {artifact} and its recorded answers; "
+            "do not infer a replacement task from Git history."
+        ) from exc
+    return (
+        "Released task context (frame-review):\n"
+        "The recorded user scope and decisions below govern this work. Apply the "
+        "assigned stage within that scope; role defaults do not expand it. Cite "
+        "applicable decision ids in the output.\n\n"
+        f"{intent}\n"
+    )
 
 
 def runtime_progress_prompt() -> str:

@@ -1,6 +1,8 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 고정 4efdddf0의 Codex light owner는 실제 성공·workflow/route 완료·producer 봉인까지 확인했다. OpenCode owner가 존재하지 않는 감독자의 재개를 약속받고 종료한 결함은 공통 감독 연결로 수정했다. OpenAI Luna를 사용하는 OpenCode 리뷰의 실제 쓰기와 동일 Codex 부모의 정상 완료 전달을 확인했다. OpenCode d1 owner의 같은 세션 재개 검증은 원 native 질문의 실제 사용자 답변을 기다린다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
+현재 상태: 공통 실행·완료·재시도·정리·통보 책임을 연결했고, 실제 Codex light owner와 OpenAI Luna를 쓰는 OpenCode light owner 모두 자식 실행부터 workflow/route 종료와 cycle 봉인까지 확인했다. OpenCode 리뷰의 동일 Codex 부모 success 자동 전달도 확인했다. 마지막 OpenCode owner 실측에서 발견한 합의 내용 누락과 수동 대기의 조기 실패 판정은 공통 입력·완료 경로에서 수정하고 회귀검사를 통과했다. 이 두 후속 수정의 근거는 실제 기록 재생과 테스트이며 새 모델 왕복 PASS라고 부르지 않는다. main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
+
+아래는 HEAD별 진행·실패 기록이다. 각 절의 당시 대기/미검증 상태를 최종 상태로 읽지 않도록 최신 실측과 후속 수정은 마지막 두 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -8,10 +10,11 @@
 
 | 구간 | 최종 책임 | 변경 |
 |---|---|---|
+| 합의한 작업 전달 | 공통 worker bootstrap | 해제된 frame gate의 기록된 이해·답변을 owner와 후속 worker에 직접 전달한다. 계획 노드나 오너의 수동 prompt 복사에 의존하지 않으며 역할 preset이 작업 범위를 대신하지 않는다. |
 | 실행·수명·실패 정리 | 실행 경계와 finite watchdog | 실제 runner/fence와 등록 watchdog 신원을 구분한다. 자손 정리 증명 뒤 lease를 반환한다. 관측이 부족하면 정리 의무를 유지한다. |
 | 완료 확정 | jobs 잠금 안의 exact terminal writer | 프로세스 종료와 성공을 구분하고, 확정된 결과를 후속 관측이 뒤집지 못한다. `dispatch_attempt_policy`가 의미 결과와 남은 정리 의무를 분리한다. |
 | 재시도 | 동일 jobs 잠금의 retry claimant | 감시자는 exact predecessor를 제안한다. 실제 등록 시 확정 결과·정리 증거·동일 실패의 기존 후속 시도를 다시 확인한다. 명시적인 새 리뷰 round는 별개다. |
-| 대기·복구 | 공통 `dispatch_supervision.wait_for_batch` | Claude/Codex supervisor와 serial driver의 대기 횟수 초과 사망 루프 세 곳을 없앴다. 관측 도구 실패에도 작업을 유지하며 복구·부모 인계를 연결한다. |
+| 대기·복구 | 공통 join과 `dispatch_supervision.wait_for_batch` | Claude/Codex supervisor와 serial driver의 대기 횟수 초과 사망 루프 세 곳을 없앴다. 수동 bounded wait의 별도 성공 note 목록도 제거하고 같은 terminal writer·정리 복구·현재 소비 판정을 사용한다. 관측 도구 실패에도 작업을 유지하며 복구·부모 인계를 연결한다. |
 | 감독자 종료 | exact orphan watcher | helper 반환만으로 상태를 지우던 경로를 없앴다. 정리가 확인되지 않으면 상태와 부모 인계 기록을 남긴다. |
 | 사용자 통보 | 기존 pending-delivery 큐와 부모 runtime carrier | 새로운 별도 큐를 만들지 않았다. human-gate와 supervision은 같은 claim/send/acceptance 운송을 사용하며 판단 의미는 구분한다. 알림 수신은 작업 완료가 아니다. |
 
@@ -231,3 +234,28 @@ root33은 기존 Luna 부모 [61]을 재사용한다. 보고서용 compose에 di
 교정한 실제 리뷰 `att-cff2ba1e36684d309ddd1be5a0e7b213`는 보고서 쓰기(check-write allow, sum=3/exit0) 뒤 11:29:13.806Z에 동일 부모 `01a08fb3-ce47-7832-8635-d1b73ac21679`로 success/registry-closed/advance-completed를 자동 전달했다. 수동 harvest는 완료 조건이 아니다. exact attempt log와 결속한 native session `ses_f6fc7ffe2ffevcVuG3luTA65il`의 assistant 5개에서 provider=openai/model=gpt-5.6-luna를 확인했다. 근거는 `2026-09-11_opencode-review-receipt-r1/artifacts/dev_logs/root33-corrected-receipt-observation.json` 및 `root33-digest-model-clarification.json`이다.
 
 `review_output_digest`는 attempt/cycle/producer/output 위치의 identity tuple hash이다. 실제 tuple 재계산 `sha256:18bb0e6345e2a160053e59afcf096dbfc96477e8df2c84d6055cb227325b436f`는 원장과 일치한다. 보고서 내용은 별도 관측 snapshot(3038bytes, SHA256 `434edc76e1c9dd4c48f15595bede0dcd83c9f56363b885f6d75bdbe7d4eb2db0`)이며, identity digest를 불변 terminal content hash라고 해석하지 않는다. 이전 `att-1d29ae31c5054f17bf13bc00be900673`에 부모 운용 brief를 잘못 전달한 입력 오류, root33의 exact watchdog SIGTERM, 정리 증명과 11:24:01.785Z 실패 알림은 보존한다. 교정 리뷰의 운송 성공은 그 실패나 전체 owner parity를 덮지 않는다. pJ r5는 두 frame PASS 및 승인 전 owner 거부 뒤 원 native 질문(`call_fmnMlz8l0Kyu1OWwVKwFohyK`)의 실제 답변을 기다리며 source811을 고정한다.
+
+
+리뷰 검증 route `rt-5d4f828bf0e265db`는 inline complete→close를 정상 완료했고, 상대 primary를 사용한 단일 finalize가 11:41:24Z에 cycle `cyc_b97be936e128d2b518909ba6349d4e76`을 completed/sealed로 마쳤다. manifest `sha256:c7fd43dd25bce503081126f61d4f851586642f25c8d5c39ed602141310735698`와 4개 산출물의 bytes/digest가 일치한다. 시험 부모 [61]도 정상 /exit 뒤 socket 세 개 소멸과 shell 복귀를 확인했다. 최종 보고서는 쓰기·동일 부모 success·실제 native model만 검증 범위로 삼는다. 근거 `/tmp/opencode-review-receipt-r1-closure-observation.json`.
+
+## OpenCode d1 owner의 실제 재개와 마감
+
+고정 81112e11, route `rt-d3a5acca2fb8820e`, cycle `cyc_7428fb551d8861996ff714b2ef26f09d`에서 실제 부모 `ses_f6fd4341effexujfUk7zuotRfR`가 원 native 질문의 “둘 다 기록” 답변을 받았다. 11:36:14.309249Z release 뒤 OpenCode owner `att-946200843af74f628a186747bcd7e0a1`가 원 intent를 읽었다. owner의 첫 native 실행과 test 완료 뒤 재개는 모두 같은 `ses_f6fbed18bffeyREdrzA5YRlW7T`이며 실제 provider/model은 OpenAI/gpt-5.6-luna다. 공통 감독자가 test 결과를 확정하고 동일 세션을 한 번 재개해 report를 실행했다. report 종료 후에는 이미 선언된 terminal node가 충족되어 공통 terminal fast path로 owner를 닫았다. 세 번째 모델 턴의 결과라고 주장하지 않는다.
+
+두 frame·owner·test·report의 다섯 exact attempt는 모두 done/pass와 governed-process-group-drained를 확인했다. workflow COMPLETE→route close→단일 producer finalize가 끝나 cycle은 completed/sealed, 산출물 11개, manifest `sha256:21462a5185e476de44416311626ea563b7bc74ece1a1b8741af232984fa1f594`다. manifest의 11개 bytes/digest를 실제 파일과 대조했다. pJ 부모는 관측 종료 후 정상 /exit했고 12:08:05.744031Z shell 복귀·live agent 부재를 확인했다. pK 리뷰 부모와 pJ owner 부모의 소스 freeze를 모두 해제했다.
+
+OpenCode depth-0는 공개된 bounded-wait를 사용했고 owner 대기는 한 번 호출해 exit0으로 끝났다. 이것을 자동 wake라고 부르지 않는다. 앞선 Codex frame의 bounded-wait는 PASS와 프로세스 종료 후에도 terminal-unclosed/exit3을 반환했다. 또한 실제 owner는 합의한 intent를 읽었지만 생성된 test prompt에는 그 내용이 없었다. test는 `git diff HEAD~1`을 추정해 넓은 소스 검증을 했고 report는 사용자가 선택한 Python alias 실패 기록을 누락했다. 따라서 실행·동일 세션 재개·종결은 PASS지만 작업 범위 준수는 FAIL이다. 기존 marker와 test/report 산출물은 고치지 않았다. 봉인된 `artifacts/dev_logs/transport-verification.md`가 이 범위를 명시한다.
+
+근거는 `2026-09-11_frame-opencode-owner-light-r5` cycle의 봉인된 산출물과 `/tmp/f-r5/{parent-native-final-export,owner-native-final-export,bounded-wait-observation,root09-closure-observation,parent-shutdown-observation}.json`이다. 관측 종료 후 lease probe가 이미 풀린 결과는 살아 있던 동안의 lease 보유 증거라고 소급하지 않는다.
+
+## 마지막 실측에서 제거한 입력·완료 판정의 이중 책임
+
+합의 내용의 전달을 모델의 수동 prompt 복사에 맡기던 경로를 공통 `worker_bootstrap.released_task_prompt`로 바꿨다. 검증된 route identity로 기존 frame-review journal의 해제 기록과 실제 답변을 읽고, 기존 intent renderer로 owner·stage·review 입력에 넣는다. 계획 노드가 없어도 같은 범위와 선택이 전달되고 명시적인 stage assignment는 그대로 유지한다. 새 gate나 필수 CLI 입력은 없다. frame 두 다리는 독립 입력을 유지하며, 다른 cycle의 환경변수·최근 디렉터리·Git 이력으로 작업을 추정하지 않는다. 기록된 입력이 손상됐으면 정확한 복구 경로를 보고한다. QA preset의 무조건적인 `git diff HEAD~1` 기본 작업도 제거했다.
+
+실제 r5 test prompt는 `interpreter-alias` 결정이 없었다. 같은 원 journal과 답변을 세 실제 어댑터 renderer에 재생한 결과 모두 사용자 선택 “최종 test/report에 python alias 실패와 python3 성공을 함께 남긴다”와 확정된 작업을 포함했다. `/tmp/f-r5/corrected-task-context/observation.json`에 원 prompt SHA 및 교정 출력의 대조를 남겼다. 이는 모델 없는 실제 입력 재생이며 새 owner 실측은 아니다. 기존 journal의 답변·interview 참조 계약을 사용하며 새 불변 내용 snapshot을 도입했다고 주장하지 않는다.
+
+수동 대기의 등록 시도 성공 note 목록과 terminal-unclosed 실패 판정을 삭제했다. `dispatch-attempt-ready`와 `dispatch-wait`는 자동 감독자가 쓰는 공통 join의 terminal commit·정리 복구를 호출하고, 실제 행을 다시 읽은 뒤 공통 delivery classification으로 성공을 소비한다. watcher/settlement helper가 성공을 반환해도 행이 닫히지 않았으면 계속 pending이다. 관측 부족은 정리 의무와 진단을 남기고, 확정 PASS와 충돌한 관측은 기존 결과 bytes를 보존하면서 성공 소비를 보류한다. 호환 supervisor proof도 공통 reader에서 실제 d1 owner에만 적용하므로 stage가 supervisor note를 주장해 우회하지 못한다. 일반 읽기 CLI는 원장을 바꾸지 않으며 운영 bounded wait만 기존 writer를 사용한다. exit0이면 추가 harvest 의무가 없다.
+
+최종 회귀: 실제 3adapter prompt matrix 6, bootstrap 14, frame interview 31, adapter Codex 58/Claude 46/OpenCode 30, readiness 14, join 120, contract 226(skip1), shell bounded-wait conformance 모두 PASS. 실제 r5 완료 owner 행도 read-only readiness에서 ready/registry-closed/advance-completed였다. 생성 projection 20개·적응 경계·기존 surface budget 및 diff 공백 검사를 통과했다. OpenCode fresh-registry preview에 release 기록이 없는 경우를 뒤늦게 발견해 입력 주입 없이 기존 preview를 유지하도록 교정했으며 최초 실패 로그도 남겼다. 공통 판정으로 옮기면서 드러난 잘못된 legacy supervisor proof와 미봉인 slice fixture도 실제 writer 계약으로 정정했다. 로그 `/tmp/released-task-*-final.log`, `/tmp/released-task-*-tests.log`, `/tmp/shared-wait-*-final.log`, `/tmp/shared-wait-contract-tests.log`, `/tmp/context-wait-{generation,boundary}-final.log`.
+
+남은 지원 경계는 OpenCode depth-0의 명시적 bounded polling과 OpenCode serial-chain owner/deterministic advance 미지원이다. 두 모델 실행 하네스에 같은 OpenAI Luna를 쓴 결과를 모델 간 독립성으로 표현하지 않는다. 과거 4bc 시도의 관측 불가 자손이 자동 정리됐다는 운영 주장은 하지 않는다. 새로운 정상·지연·중복 재시도·관측 불가·감독자 종료 계약의 근거를 각각 구분했고, release/install은 별도 사용자 확인 전 보류한다.

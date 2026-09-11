@@ -392,10 +392,11 @@ above stay obligations on the acting session that nothing checks mechanically.
 Only code/design/draft/refine/spec run the frame pair at `quick` and above,
 before the owner. Other recipes retain their topology. `direct` asks its
 question inline in the §0.4 card and records the answer in the plan or work log.
-The recorded answers become `shards/frame/intent.md`, rendered by depth-0,
-the brief `plan` reads first; `plan-author` is told to cite each decision by its
-question id and to report one it cannot honor as a blocker — a prompt
-contract, not a gate check. An interview gate may be raised at most twice
+The recorded answers become `shards/frame/intent.md`, rendered by depth-0.
+The runtime supplies the released task and decisions to the owner and every
+subsequent worker, including graphs without `plan`. The assigned stage narrows
+that task; a role preset does not replace it. Workers cite applicable question
+ids and report decisions they cannot honor. An interview gate may be raised at most twice
 per route (`round` ≤ 2).
 
 Entry routers therefore have two deterministic load phases: manifest-owned
