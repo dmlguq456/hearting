@@ -2891,6 +2891,7 @@ def _join_snapshot(
     last_signature = ""
     observation_error = ""
     notice_published = False
+    last_notice_attempt = float("-inf")
 
     while True:
         rows = refresh(snapshot)
@@ -2969,7 +2970,9 @@ def _join_snapshot(
                 observation_error = "join-observation-write-failed"
             last_signature, last_observation = signature, time.monotonic()
         if (not notice_published and observation_jobs is not None and elapsed >= 30
+                and time.monotonic() - last_notice_attempt >= 30
                 and any(child["reason"] == "process-unverifiable" for child in children)):
+            last_notice_attempt = time.monotonic()
             try:
                 from dispatch_supervision import materialize
                 materialize(observation_jobs, snapshot, reason="process-unverifiable")
@@ -3081,7 +3084,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--attempt-id", action="append", default=[])
     value.add_argument("--interval", type=float, default=2.0)
     value.add_argument("--timeout", type=float, default=3600.0)
-    value.add_argument("--liveness-command")
+    value.add_argument("--liveness-command", help="Compatibility input; only shared exact process evidence decides readiness")
     value.add_argument("--recover-receiptless", action="store_true",
                        help="run bounded exact-proof recovery while joining owned children")
     return value

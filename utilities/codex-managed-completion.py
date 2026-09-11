@@ -651,17 +651,6 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         if watcher is not None:
             watcher.close()
     delivery_parent = delivery_parent_id(args)
-    if receipt.get("state") == "timeout":
-        return (
-            {
-                "schema_version": 1,
-                "status": "timeout",
-                "parent_attempt_id": delivery_parent,
-                "sealed_batch_id": args.sealed_batch_id,
-                "attempt_ids": sorted(attempts),
-            },
-            3,
-        )
     normalized = normalize_receipt(
         receipt,
         jobs=args.jobs,

@@ -266,15 +266,14 @@ consumption preserves the same receipt identity, and state/outbox removal before
 all applicable actions succeed is forbidden.
 
 **Dispatch responsibility:** execution, semantic outcome, and notification are
-separate facts. Runtime adapters supply evidence and transport; they do not
-define different retry or completion policies.
+separate facts.
 
 | Decision | Accountable component | Required follow-through |
 |---|---|---|
 | Start and execution lifetime | Claimed execution boundary | Publish the actual runner identity, enforce its finite budget, and account for governed descendants before releasing resources. |
 | Completion | Exact terminal writer under the jobs lock | Preserve the committed result. A later process observation cannot turn success into failure. |
 | Wait, recovery, and retry eligibility | Shared attempt policy and supervision controller | Reconcile exact evidence, retry only a settled retryable failure, and transfer an unresolved decision to the parent through durable delivery. |
-| Failure cleanup and supervisor exit | Execution boundary, with the exact post-exit watcher as recovery owner | Finish or retain an explicit cleanup obligation; never discard recovery state merely because a helper returned. |
+| Failure cleanup and supervisor exit | Execution boundary, with the exact post-exit watcher as recovery owner | Finish or retain an explicit cleanup obligation. |
 | User notification | Shared pending-delivery record and recipient runtime carrier | Keep the obligation until accepted or explicitly handed back. A display update or expired polling interval is not delivery. |
 
 A blocked transition owes either a bounded recovery action or an actionable
