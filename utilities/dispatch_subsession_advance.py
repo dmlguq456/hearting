@@ -571,6 +571,8 @@ def coordinate_chain_advance_from_joined_rows(
     if predecessor_row is None:
         return None
     metadata = predecessor_row.metadata
+    if DC.terminal_conflict_pending(metadata):
+        return None
     if predecessor_row.status not in TERMINAL_STATUSES:
         return None
 
@@ -661,6 +663,8 @@ def advance_chain_step(jobs: Path, parent_attempt_id: str, joined: dict) -> Chai
         return ChainAdvanceStep("not-chain")
     metadata = predecessor.metadata
     chain_id = metadata.get("session_chain_id", "")
+    if DC.terminal_conflict_pending(metadata):
+        return ChainAdvanceStep("unavailable", chain_id=chain_id, reason="terminal-evidence-conflict")
     try:
         predecessor_index = int(metadata.get("subsession_index", "0"))
     except ValueError:
@@ -699,6 +703,10 @@ def advance_chain_step(jobs: Path, parent_attempt_id: str, joined: dict) -> Chai
     except (OSError, ValueError):
         record = None
     reason = (record or {}).get("reason", "")
+    if reason == "terminal-evidence-conflict":
+        # An evidence review pauses this chain; it does not cancel unopened
+        # slices or discard the owner that will resume after the disposition.
+        return ChainAdvanceStep("unavailable", chain_id=chain_id, reason=reason)
     if reason:
         return ChainAdvanceStep("refused", chain_id=chain_id, predecessor_index=predecessor_index,
                                 successor_index=successor_index, reason=reason,

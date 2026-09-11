@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -110,11 +111,16 @@ class CompletionMarkerTest(unittest.TestCase):
             "workflow_mode": "tracked",
             "artifact_guard": {"satisfied": True, "source": "fixture"},
         }
-        route = ROUTE.compile_route(
-            "autopilot-code", "dev", "strong", self.repo, self.artifact,
-            signals=["shared-contract"], transport="headless", tracking="tracked",
-            tracked_gate_evidence=gate, dispatch_evidence=evidence,
-        )
+        # Compile and adapter validation must see the same deliberate runtime,
+        # state root and git environment. Otherwise the installed host release
+        # is sealed here and the wrapper never reaches the marker being tested.
+        with mock.patch.dict(os.environ, self.base_env(), clear=True):
+            ROUTE._forget_launch_path(ROOT)
+            route = ROUTE.compile_route(
+                "autopilot-code", "dev", "strong", self.repo, self.artifact,
+                signals=["shared-contract"], transport="headless", tracking="tracked",
+                tracked_gate_evidence=gate, dispatch_evidence=evidence,
+            )
         self.current_route = route
         return route
 

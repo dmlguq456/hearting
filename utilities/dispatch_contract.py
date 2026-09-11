@@ -28,7 +28,8 @@ from types import MappingProxyType
 
 from route_identity import registered_node_identity
 from governor_identity import close_witness, create_witness
-from dispatch_attempt_policy import decide_attempt, SUBSESSION_NOTE, SUCCESS_NOTES, committed_outcome
+from dispatch_attempt_policy import (decide_attempt, SUBSESSION_NOTE, SUCCESS_NOTES, committed_outcome,
+                                     terminal_conflict_identity, terminal_conflicts, terminal_conflict_pending)
 from dispatch_receipt_identity import receipt_digest as shared_receipt_digest
 
 _GOVERNOR_WITNESS_HANDLES: dict[tuple[str, str], object] = {}
@@ -365,6 +366,8 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "prior_failure_class",
     "conflicting_classifier_source",
     "conflicting_failure_class",
+    "conflicting_terminal_note",
+    "terminal_conflicts_b64",
     "receipt_state",
     "marker_state",
     # SD-111 P2 (D-4): the delivery-intent 8-field allowlist. Stamped once by
@@ -930,6 +933,7 @@ class MarkerBoundDeliveryResult:
     advanced: bool
     supervisor_terminal: bool = False
     subsession_terminal: bool = False
+    terminal_conflict: bool = False
 
 
 @dataclass(frozen=True)
@@ -6703,6 +6707,18 @@ def completion_attempt_readiness(
     """Combine a current semantic marker with its exact governed process state."""
 
     if marker.get("stage_authority") == "owner-chain":
+        try:
+            chain_rows = registry_lines if registry_lines is not None else jobs.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return AttemptReadiness("unverifiable", "registry-unreadable")
+        for line in chain_rows:
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            meta = parse_registry_metadata(fields[5])
+            if (meta.get("session_chain_id") == marker.get("session_chain_id")
+                    and terminal_conflict_pending(meta)):
+                return AttemptReadiness("unverifiable", "terminal-evidence-conflict", meta.get("attempt_id"))
         return AttemptReadiness("ready", "subsession-chain-quiescence-verified-at-stage-gate")
     if node.get("kind") == "resource-runner" or marker.get("registered_worker") is False:
         return AttemptReadiness("ready", "semantic-terminal-no-registered-process")
@@ -6748,6 +6764,8 @@ def completion_attempt_readiness(
             "unverifiable", f"marker-attempt-row-count-{len(exact)}", attempt_id
         )
     fields, metadata = exact[0]
+    if terminal_conflict_pending(metadata):
+        return AttemptReadiness("unverifiable", "terminal-evidence-conflict", attempt_id)
     try:
         validate_attempt_metadata(metadata)
     except DispatchContractError as exc:
@@ -8009,6 +8027,7 @@ def marker_bound_delivery_transaction(
                 and refreshed_metadata.get("classifier_source") == SUBSESSION_TERMINAL_CLASSIFIER
                 and row_is_subsession(refreshed_metadata)
             ),
+            terminal_conflict=terminal_conflict_pending(refreshed_metadata),
         )
 
 
@@ -8240,6 +8259,18 @@ def claim_attempt_row(
                 terminal_owner)
         if mutation_precheck is not None:
             mutation_precheck(lines)
+        # A serial successor consumes its predecessors just as a DAG edge
+        # consumes markers. Recheck the same conflict policy at actual claim,
+        # including an observation arriving after the coordinator's preview.
+        if launch and row_metadata.get("session_chain_id"):
+            for existing in lines:
+                fields = existing.split("\t")
+                if len(fields) != 6:
+                    continue
+                prior = parse_registry_metadata(fields[5])
+                if (prior.get("session_chain_id") == row_metadata["session_chain_id"]
+                        and terminal_conflict_pending(prior)):
+                    raise DispatchContractError("terminal-evidence-conflict", prior.get("attempt_id", ""))
         for index, existing in enumerate(lines):
             fields = existing.split("\t")
             if len(fields) == 6 and row_has_attempt(fields[5], attempt_id):
@@ -8577,7 +8608,77 @@ def attempt_launch_state(
     return "existing-unknown"
 
 
+def resolve_terminal_conflict(
+    jobs: Path, attempt_id: str, *, expected_row_sha256: str, review: Path,
+) -> dict[str, str]:
+    """Record an explicit review of an exact conflict, preserving its result.
+
+    This never selects a different verdict. A changed conflict or live process
+    invalidates the disposition; its caller must inspect the current evidence.
+    """
+    review_bytes = review.read_bytes()
+    if not review.is_absolute() or review.is_symlink() or not review_bytes.strip():
+        raise DispatchContractError("terminal-conflict-review-required")
+    lines = jobs.read_text(encoding="utf-8").splitlines()
+    matches = [(i, line.split("\t")) for i, line in enumerate(lines)
+               if len(line.split("\t")) == 6 and row_has_attempt(line.split("\t")[5], attempt_id)]
+    if len(matches) != 1:
+        raise DispatchContractError("attempt-terminal-row-not-unique")
+    _, fields = matches[0]
+    if fields[1] not in {"done", "killed", "cancelled"}:
+        raise DispatchContractError("terminal-conflict-not-terminal")
+    metadata = parse_registry_metadata(fields[5])
+    proof = attempt_process_quiescence(metadata, terminal_receipt=fields[1] in {"done", "killed", "cancelled"})
+    if proof.state != "quiescent":
+        raise DispatchContractError("terminal-conflict-process-unsettled", proof.reason)
+    if not terminal_conflict_pending(metadata):
+        raise DispatchContractError("terminal-conflict-not-pending")
+    conflicts = terminal_conflicts(metadata)
+    for entry in conflicts.values():
+        if not entry.get("review_sha256"):
+            entry.update(review_sha256=hashlib.sha256(review_bytes).hexdigest(),
+                         review_path_b64=base64.b64encode(str(review).encode()).decode())
+    values = {"terminal_conflicts_b64": base64.b64encode(json.dumps(conflicts, sort_keys=True).encode()).decode()}
+    expected = "\t".join(fields)
+    if hashlib.sha256(expected.encode()).hexdigest() != expected_row_sha256:
+        raise DispatchContractError("terminal-conflict-row-changed")
+    ensure_global_registry_writable(jobs)
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        fresh = jobs.read_text(encoding="utf-8").splitlines()
+        matches = [i for i, line in enumerate(fresh) if len(line.split("\t")) == 6
+                   and row_has_attempt(line.split("\t")[5], attempt_id)]
+        if len(matches) != 1 or fresh[matches[0]] != expected:
+            raise DispatchContractError("terminal-conflict-row-changed")
+        # A resolution is diagnostic metadata, never a second terminal commit.
+        fields[5] = _updated_attempt_metadata(fields[5], values, terminal=True)
+        fresh[matches[0]] = "\t".join(fields)
+        _atomic_registry_replace(jobs, fresh)
+    return values
+
+
 def reconcile_attempt_terminal(
+    jobs: Path,
+    attempt_id: str,
+    note: str,
+    *,
+    evidence: dict[str, str] | None = None,
+) -> str:
+    """One terminal commit, with conflicts handed back outside the jobs lock."""
+    outcome = _commit_attempt_terminal(jobs, attempt_id, note, evidence=evidence)
+    if outcome == "terminal-conflict":
+        from dispatch_supervision import materialize
+        try:
+            materialize(Path(jobs), {attempt_id}, reason="terminal-evidence-conflict")
+        except (OSError, ValueError, RuntimeError) as exc:
+            # The conflict is already durable. Keep the publication failure
+            # visible and retryable rather than reverting the committed result.
+            from dispatch_completion_join import log_delivery_refusal
+            log_delivery_refusal(Path(jobs), attempt_id, "terminal-conflict-delivery-pending")
+    return outcome
+
+
+def _commit_attempt_terminal(
     jobs: Path,
     attempt_id: str,
     note: str,
@@ -8619,59 +8720,32 @@ def reconcile_attempt_terminal(
             incoming = evidence or {}
             prior_class = metadata.get("failure_class", "")
             next_class = str(incoming.get("failure_class", ""))
-            if not prior_class or not next_class or prior_class == next_class:
+            prior_outcome = committed_outcome(fields[1], metadata)
+            next_outcome = committed_outcome("done", {"note": note, **incoming})
+            if (prior_outcome == next_outcome
+                    and (not prior_class or not next_class or prior_class == next_class)):
                 return "already-terminal"
-
-            def authority(source: str, detected: str) -> int:
-                if source == "supervisor-terminal-v1":
-                    return 30
-                if source == "completion-join-terminal-verdict-v1":
-                    return 20
-                if detected == "foreground-terminal-handoff":
-                    return 10
-                return 0
-
-            prior_rank = authority(
-                metadata.get("classifier_source", ""),
-                metadata.get("detected_by", ""),
-            )
-            next_rank = authority(
-                str(incoming.get("classifier_source", "")),
-                str(incoming.get("detected_by", "")),
-            )
-            semantic = {"pass", "fail", "blocked"}
+            # A classifier is an evidence producer, not an authority that can
+            # rewrite another committed result (and its immutable receipt).
             values = {
                 "terminal_conflict": "1",
                 "prior_terminal_note": metadata.get("note", ""),
                 "prior_classifier_source": metadata.get("classifier_source", ""),
                 "prior_failure_class": prior_class,
+                "conflicting_classifier_source": str(incoming.get("classifier_source", "")),
+                "conflicting_failure_class": next_class,
+                "conflicting_terminal_note": note,
             }
-            if next_rank > prior_rank and next_class in semantic:
-                values.update({"note": note, **incoming})
-                fields[5] = _updated_attempt_metadata(
-                    fields[5], values, terminal=True
-                )
-                lines[index] = "\t".join(fields)
-                _atomic_registry_replace(jobs, lines)
-                return "repaired-terminal"
-            if next_rank == prior_rank and {prior_class, next_class} <= semantic:
-                values.update(
-                    {
-                        "note": "dead-terminal-conflict",
-                        "failure_class": "contract",
-                        "conflicting_classifier_source": str(
-                            incoming.get("classifier_source", "")
-                        ),
-                        "conflicting_failure_class": next_class,
-                    }
-                )
-                fields[5] = _updated_attempt_metadata(
-                    fields[5], values, terminal=True
-                )
-                lines[index] = "\t".join(fields)
-                _atomic_registry_replace(jobs, lines)
-                return "terminal-conflict"
-            return "already-terminal"
+            conflicts = terminal_conflicts(metadata)
+            conflicts.setdefault(terminal_conflict_identity({**metadata, **values}), {
+                "note": note, "failure_class": next_class,
+                "classifier_source": str(incoming.get("classifier_source", "")),
+            })
+            values["terminal_conflicts_b64"] = base64.b64encode(json.dumps(conflicts, sort_keys=True).encode()).decode()
+            fields[5] = _updated_attempt_metadata(fields[5], values, terminal=True)
+            lines[index] = "\t".join(fields)
+            _atomic_registry_replace(jobs, lines)
+            return "terminal-conflict" if terminal_conflict_pending({**metadata, **values}) else "already-terminal"
         if fields[1] not in {"open", "running"}:
             raise DispatchContractError(
                 "attempt-terminal-status-invalid", fields[1]

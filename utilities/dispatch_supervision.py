@@ -14,12 +14,12 @@ import shlex
 import time
 from typing import Callable
 
-from dispatch_attempt_policy import decide_attempt
+from dispatch_attempt_policy import decide_attempt, terminal_conflict_digest
 from dispatch_receipt_identity import receipt_digest
 import dispatch_pending_delivery as pending_delivery
 
 KIND = "supervision"
-REASONS = frozenset({"process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed"})
+REASONS = frozenset({"process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict"})
 
 
 class SupervisionError(ValueError):
@@ -66,9 +66,16 @@ def _pending(rows: dict, attempts: list[str]) -> bool:
             terminal_receipt_gate=True)
         decision = decide_attempt(status, meta, process_state=proof.process_state,
                                   process_reason=proof.process_reason)
-        if decision.action in {"wait", "recover", "reconcile"}:
+        if decision.action in {"wait", "recover", "reconcile", "inspect-conflict"}:
             return True
     return False
+
+
+def _obligation_revision(rows: dict, attempts: list[str], reason: str) -> str:
+    if reason != "terminal-evidence-conflict":
+        return ""
+    value = [(aid, terminal_conflict_digest(rows[aid][1])) for aid in attempts]
+    return hashlib.sha256(json.dumps(value).encode()).hexdigest()
 
 
 def materialize(jobs: Path, attempts: set[str], *, reason: str) -> list[dict]:
@@ -93,6 +100,7 @@ def materialize(jobs: Path, attempts: set[str], *, reason: str) -> list[dict]:
             "recipient_thread_id": recipient,
             "sealed_batch_id": meta.get("managed_sealed_batch_id", ""),
             "job_registry": str(jobs), "reason": reason,
+            "obligation_revision": _obligation_revision(rows, monitored, reason),
             "responsible": "supervision-controller", "required_action": "inspect-recovery",
         }
         key = hashlib.sha256(json.dumps(receipt, sort_keys=True).encode()).hexdigest()
@@ -116,7 +124,7 @@ def validate(receipt: dict, *, expected_thread: str | None = None,
              expected_epoch: int | None = None) -> dict:
     keys = {"schema_version", "kind", "state", "owner_attempt_id", "monitored_attempt_ids",
             "recipient_thread_id", "sealed_batch_id", "job_registry",
-            "reason", "responsible", "required_action", "pending_delivery_id"}
+            "reason", "responsible", "required_action", "pending_delivery_id", "obligation_revision"}
     if (not isinstance(receipt, dict) or set(receipt) != keys
             or receipt.get("kind") != KIND or receipt.get("schema_version") != 1
             or receipt.get("state") != "attention" or receipt.get("reason") not in REASONS
@@ -164,6 +172,8 @@ def validate_receipt(receipt: dict, *, jobs: Path, expected_thread_id: str,
             or any(_root(rows, aid) != owner for aid in receipt["monitored_attempt_ids"])):
         raise SupervisionError("supervision-lineage-mismatch")
     # A recovered batch must not receive an obsolete intervention request.
+    if _obligation_revision(rows, receipt["monitored_attempt_ids"], receipt["reason"]) != receipt["obligation_revision"]:
+        raise SupervisionError("supervision-resolved")
     if validate_live and not _pending(rows, receipt["monitored_attempt_ids"]):
         raise SupervisionError("supervision-resolved")
     record = pending_delivery.read(jobs.parent, expected_thread_id, receipt["pending_delivery_id"])
@@ -197,20 +207,31 @@ def notice_is_current(record: dict) -> bool:
     if (owner not in rows or rows[owner][1].get("parent_sid") != receipt["recipient_thread_id"]
             or any(_root(rows, aid) != owner for aid in receipt["monitored_attempt_ids"])):
         raise SupervisionError("supervision-lineage-mismatch")
+    if _obligation_revision(rows, receipt["monitored_attempt_ids"], receipt["reason"]) != receipt["obligation_revision"]:
+        return False
     return _pending(rows, receipt["monitored_attempt_ids"])
 
 
 def render_text(receipt: dict) -> str:
     receipt = validate(receipt)
     utility = Path(__file__).resolve().with_name("dispatch-registry.py")
-    commands = [f"python3 {shlex.quote(str(utility))} reconcile --jobs "
+    operation = "resolve-terminal-conflict" if receipt["reason"] == "terminal-evidence-conflict" else "reconcile"
+    commands = [f"python3 {shlex.quote(str(utility))} {operation} --jobs "
                 f"{shlex.quote(receipt['job_registry'])} --attempt {shlex.quote(aid)}"
                 for aid in receipt["monitored_attempt_ids"]]
+    disposition = (
+        "Compare the committed result with the conflicting evidence and explain the discrepancy. "
+        "The read-only command previews the exact conflict. After reviewing and recording the evidence, "
+        "use the same command with --review-evidence <report> --expected-row-sha256 <preview-hash> --apply "
+        "to retain the committed result and release consumption. A new conflict requires a fresh review. "
+        if receipt["reason"] == "terminal-evidence-conflict" else
+        "If evidence cannot settle them, ask the user whether to keep waiting or cancel the exact work; "
+    )
     return ("Hearting supervision needs attention. This is not workflow completion. "
             f"reason={receipt['reason']} owner={receipt['owner_attempt_id']}. "
             "The controller retains waiting/recovery responsibility. Explain the blockage to the user "
             "and inspect these exact attempts. Do not infer death, erase rows, or retry from this notice. "
-            "If evidence cannot settle them, ask the user whether to keep waiting or cancel the exact work; "
+            + disposition +
             "an accepted notification does not close the work. Read-only diagnosis: " + " ; ".join(commands))
 
 

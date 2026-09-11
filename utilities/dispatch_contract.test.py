@@ -1244,7 +1244,7 @@ class DispatchContractTest(unittest.TestCase):
   finally:
    proc.kill();proc.wait()
 
- def test_supervisor_handoff_repairs_lower_authority_foreground_verdict(self):
+ def test_conflicting_supervisor_cannot_rewrite_the_committed_foreground_verdict(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"
    meta=("attempt_schema_version=2,dispatch_depth=2,transport=headless,"
@@ -1263,13 +1263,13 @@ class DispatchContractTest(unittest.TestCase):
      "terminal_event":"turn.completed",
      "reconcile_reason":"exact-final-handoff",
     })
-   self.assertEqual(result,"repaired-terminal")
+   self.assertEqual(result,"terminal-conflict")
    text=jobs.read_text()
-   self.assertIn("note=completed-supervisor",text)
+   self.assertEqual(D.parse_registry_metadata(text.split("\t")[5])["note"], "dead-worker-fail")
    self.assertIn("prior_failure_class=fail",text)
    self.assertIn("terminal_conflict=1",text)
 
- def test_equal_authority_verdict_conflict_fails_closed(self):
+ def test_conflict_preserves_pass_and_requests_inspection(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"
    meta=("attempt_schema_version=2,dispatch_depth=1,transport=headless,"
@@ -1282,7 +1282,9 @@ class DispatchContractTest(unittest.TestCase):
     jobs,"att-conflict","dead-worker-fail",
     evidence={"failure_class":"fail","classifier_source":"supervisor-terminal-v1"})
    self.assertEqual(result,"terminal-conflict")
-   self.assertIn("note=dead-terminal-conflict",jobs.read_text())
+   meta=D.parse_registry_metadata(jobs.read_text().strip().split("\t")[5])
+   self.assertEqual((meta["note"],meta["failure_class"]),("completed-supervisor","pass"))
+   self.assertEqual(D.decide_attempt("done",meta,process_state="quiescent").action,"inspect-conflict")
 
  def test_remounted_proc_nspid_is_bound_to_inner_namespace(self):
   inner_namespace="pid:[inner-remounted]"
@@ -4311,7 +4313,7 @@ class DeliveryIntentWiringTest(unittest.TestCase):
             )
             self.assertEqual(metadata.get("delivery_intent"), "1")
 
-    def test_w3_repaired_terminal_branch_never_stamps_or_overwrites_intent(self):
+    def test_w3_conflict_never_rewrites_committed_result_or_receipt(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"
             jobs.write_text(self._row() + "\n", encoding="utf-8")
@@ -4331,10 +4333,11 @@ class DeliveryIntentWiringTest(unittest.TestCase):
                     "classifier_source": "supervisor-terminal-v1",
                 },
             )
-            self.assertEqual(outcome, "repaired-terminal")
+            self.assertEqual(outcome, "terminal-conflict")
             after = D.parse_registry_metadata(
                 jobs.read_text(encoding="utf-8").splitlines()[0].split("\t")[5]
             )
+            self.assertEqual((after["note"], after["failure_class"]), ("completed-marker", "pass"))
             self.assertEqual(after.get("delivery_intent"), before.get("delivery_intent"))
             self.assertEqual(after.get("delivery_id"), before.get("delivery_id"))
             self.assertEqual(

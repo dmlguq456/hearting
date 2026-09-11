@@ -47,6 +47,7 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                reconcile_local_registry, resolve_agent_home,
                                resolve_dispatch_state_root,
                                resolve_parent_extinction,
+                               resolve_terminal_conflict,
                                seal_cancellation_quiescence_receipt,
                                signal_exact_process_group,
                                ROUTE_IDENTITY_METADATA_KEYS,
@@ -2196,11 +2197,13 @@ def emit_inventory(state_root, args):
 
 
 def main(argv):
-    p = argparse.ArgumentParser(description=__doc__); p.add_argument("operation", choices=("current", "liveness", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row", "archive-import", "inventory"))
+    p = argparse.ArgumentParser(description=__doc__); p.add_argument("operation", choices=("current", "liveness", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row", "resolve-terminal-conflict", "archive-import", "inventory"))
     p.add_argument("--jobs", type=Path); p.add_argument("--global-jobs", type=Path); p.add_argument("--local-jobs", type=Path)
     p.add_argument("--session"); p.add_argument("--route")
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
     p.add_argument("--apply", action="store_true"); p.add_argument("--audit", type=Path); p.add_argument("--integration-ref")
+    p.add_argument("--review-evidence", type=Path)
+    p.add_argument("--expected-row-sha256")
     p.add_argument("--cancel-receiptless-namespace", action="store_true")
     p.add_argument("--automatic-cancel-receiptless", action="store_true")
     p.add_argument("--recover-receiptless", action="store_true")
@@ -2252,6 +2255,35 @@ def main(argv):
     if not args.jobs:
         print("check=failed\nreason=jobs-required"); return 64
     args.jobs = args.jobs.resolve()
+    if args.operation == "resolve-terminal-conflict":
+        if not args.attempt or any((args.session, args.route, args.node, args.job, args.all)):
+            print("check=failed\nreason=exact-attempt-required"); return 64
+        matches = [r for r in read_rows(args.jobs) if r["meta"].get("attempt_id") == args.attempt]
+        if len(matches) != 1:
+            print("check=failed\nreason=attempt-terminal-row-not-unique"); return 65
+        from dispatch_attempt_policy import terminal_conflict_pending, terminal_conflicts, committed_outcome
+        row = matches[0]
+        raw = next(line for line in args.jobs.read_text().splitlines()
+                   if len(line.split("\t")) == 6
+                   and parse_registry_metadata(line.split("\t")[5]).get("attempt_id") == args.attempt)
+        result = {"attempt_id": args.attempt, "outcome": committed_outcome(row["status"], row["meta"]),
+                  "pending": terminal_conflict_pending(row["meta"]),
+                  "row_sha256": hashlib.sha256(raw.encode()).hexdigest(),
+                  "committed_note": row["meta"].get("note", ""),
+                  "conflicting_note": row["meta"].get("conflicting_terminal_note", ""),
+                  "conflicts": terminal_conflicts(row["meta"]),
+                  "disposition": "keep-committed-after-review", "applied": False}
+        if args.apply:
+            if not args.review_evidence or not args.expected_row_sha256:
+                print("check=failed\nreason=terminal-conflict-review-and-row-required"); return 64
+            try:
+                resolve_terminal_conflict(args.jobs, args.attempt,
+                    expected_row_sha256=args.expected_row_sha256, review=args.review_evidence.absolute())
+            except (OSError, DispatchContractError) as exc:
+                print(f"check=failed\nreason={exc}"); return 65
+            result.update(pending=False, applied=True)
+        print("check=ok\n" + json.dumps(result, sort_keys=True))
+        return 0
     if args.operation not in ("liveness", "orphan-scan") and not any((args.session, args.route, args.node, args.attempt, args.job)):
         print("check=failed\nreason=current-filter-required"); return 64
     recovery_modes = sum(bool(value) for value in (

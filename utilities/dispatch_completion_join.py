@@ -644,6 +644,7 @@ class CurrentDeliveryState:
     advanced: bool
     supervisor_terminal: bool = False
     subsession_terminal: bool = False
+    terminal_conflict: bool = False
 
 
 def delivery_classification(state: CurrentDeliveryState) -> str:
@@ -661,6 +662,7 @@ def delivery_classification(state: CurrentDeliveryState) -> str:
             and state.verdict == "PASS"
             and state.quiescent
             and state.owned_children == 0
+            and not state.terminal_conflict
         )
         else "attention"
     )
@@ -2658,6 +2660,7 @@ def current_delivery_state(
         advanced=result.advanced,
         supervisor_terminal=result.supervisor_terminal,
         subsession_terminal=result.subsession_terminal,
+        terminal_conflict=result.terminal_conflict,
     )
 
 

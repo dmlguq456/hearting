@@ -37,6 +37,7 @@ from dispatch_contract import (
     agent_home_equivalent,
     attempt_process_quiescence,
     completion_marker_is_current,
+    completion_attempt_readiness,
     dispatch_state_roots,
     ensure_global_registry_writable,
     parse_registry_metadata,
@@ -4664,6 +4665,11 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
         return {"passed": False, "reason": "completion-evidence-unreadable"}
     if digest != evidence.get("sha256"):
         return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
+    if marker.get("registered_worker") is True or marker.get("stage_authority") == "owner-chain":
+        readiness = completion_attempt_readiness(
+            route, node, marker, Path(jobs) if jobs is not None else _continuation_source_jobs(route))
+        if readiness.state != "ready":
+            return {"passed": False, "reason": readiness.reason}
     if exact_terminal:
         if jobs is None or not completion_marker_is_current(route, node, path, marker):
             return {"passed": False, "reason": "completion-marker-not-current"}
@@ -4678,7 +4684,7 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
         if (not matches or matches[-1][0][1] != "done"
                 or matches[-1][1].get("failure_class") != "pass"
                 or matches[-1][1].get("attempt_id") != marker.get("attempt_id")
-                or attempt_process_quiescence(matches[-1][1], terminal_receipt=True).state != "quiescent"):
+                or completion_attempt_readiness(route, node, marker, Path(jobs)).state != "ready"):
             return {"passed": False, "reason": "completion-attempt-not-current"}
         return {"passed": True, "reason": "completion-marker-verified", "current": True,
                 "node_id": node_id, "attempt_id": marker["attempt_id"], "completion_gate": gate,

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Responsibility contract falsifiers: no model/network credentials used."""
 import importlib.util
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -97,9 +98,121 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertEqual(caught.exception.reason, "retry-predecessor-not-retryable")
         self.assertEqual(len(self.jobs.read_text().splitlines()), 1)
 
+    def test_terminal_conflict_preserves_pass_blocks_consumption_and_has_exact_review_recovery(self):
+        import dispatch_completion_join as join
+        self._notice_rows()
+        lines = self.jobs.read_text().splitlines()
+        lines[1] = row("att-child", status="done", note="completed-marker", failure_class="pass",
+                       launch_outcome="never-launched").strip()
+        self.jobs.write_text("\n".join(lines)+"\n")
+        route, node, marker = {"route_id": "rt-policy"}, {"id": "test"}, {"attempt_id": "att-child", "registered_worker": True}
+        spec = importlib.util.spec_from_file_location("conflict_route", Path(contract.__file__).with_name("capability-route.py"))
+        route_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(route_module)
+        evidence = self.root / "passed.md"; evidence.write_text("PASS\n")
+        marker_path = route_module.completion_dir(route["route_id"], jobs=self.jobs) / "test.json"
+        marker_path.parent.mkdir(parents=True)
+        marker_path.write_text(json.dumps({**marker, "route_id": "rt-policy", "node_id": "test",
+            "evidence": {"path": str(evidence), "sha256": route_module.evidence_digest(evidence)}}))
+        marker_bytes = marker_path.read_bytes()
+        observe = lambda: route_module._marker_identity_row(route, node, "test", None, jobs=self.jobs)
+        self.assertTrue(observe()["passed"])
+        self.assertEqual(contract.completion_attempt_readiness(route, node, marker, self.jobs).state, "ready")
+        result = contract.reconcile_attempt_terminal(self.jobs, "att-child", "dead-worker-fail",
+            evidence={"failure_class": "fail", "classifier_source": "supervisor-terminal-v1"})
+        self.assertEqual(result, "terminal-conflict")
+        raw = self.jobs.read_text().splitlines()[1]
+        meta = contract.parse_registry_metadata(raw.split("\t")[5])
+        self.assertEqual(policy.committed_outcome("done", meta), "succeeded")
+        self.assertEqual(policy.required_action("done", meta), "inspect-done-failure")
+        self.assertEqual(contract.completion_attempt_readiness(route, node, marker, self.jobs).reason, "terminal-evidence-conflict")
+        self.assertFalse(observe()["passed"])
+        self.assertEqual(marker_path.read_bytes(), marker_bytes)
+        joined = join.join_batch(jobs=self.jobs, parent_attempt_id="att-owner", timeout=0, interval=0.05)
+        self.assertEqual(joined["children"][0]["required_action"], "inspect-done-failure")
+        notice = supervision.materialize(self.jobs, {"att-child"}, reason="terminal-evidence-conflict")[0]
+        self.assertTrue(supervision.notice_is_current(notice))
+        review = self.root / "disposition.md"
+        review.write_text("Compared the recorded PASS and late failure; retain the recorded result.\n")
+        with self.assertRaisesRegex(contract.DispatchContractError, "row-changed"):
+            contract.resolve_terminal_conflict(self.jobs, "att-child", expected_row_sha256="0"*64, review=review)
+        cli = [sys.executable, str(Path(contract.__file__).with_name("dispatch-registry.py")),
+               "resolve-terminal-conflict", "--jobs", str(self.jobs), "--attempt", "att-child"]
+        preview = subprocess.run(cli, capture_output=True, text=True, timeout=10)
+        self.assertEqual(preview.returncode, 0, preview.stdout+preview.stderr)
+        self.assertEqual(self.jobs.read_text().splitlines()[1], raw)
+        applied = subprocess.run(cli + ["--expected-row-sha256", hashlib.sha256(raw.encode()).hexdigest(),
+            "--review-evidence", str(review), "--apply"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(applied.returncode, 0, applied.stdout+applied.stderr)
+        self.assertEqual(contract.completion_attempt_readiness(route, node, marker, self.jobs).state, "ready")
+        self.assertTrue(observe()["passed"])
+        self.assertFalse(supervision.notice_is_current(notice))
+
+        # Replaying the same observation does not undo the recorded review.
+        contract.reconcile_attempt_terminal(self.jobs, "att-child", "dead-worker-fail",
+            evidence={"failure_class": "fail", "classifier_source": "supervisor-terminal-v1"})
+        self.assertEqual(contract.completion_attempt_readiness(route, node, marker, self.jobs).state, "ready")
+        # A different contradiction is a new obligation, never covered by the old review.
+        contract.reconcile_attempt_terminal(self.jobs, "att-child", "dead-worker-blocked",
+            evidence={"failure_class": "blocked", "classifier_source": "supervisor-terminal-v1"})
+        fresh = supervision.materialize(self.jobs, {"att-child"}, reason="terminal-evidence-conflict")[0]
+        self.assertNotEqual(fresh["delivery_id"], notice["delivery_id"])
+        self.assertEqual(contract.completion_attempt_readiness(route, node, marker, self.jobs).reason, "terminal-evidence-conflict")
+        self.assertFalse(supervision.notice_is_current(notice))
+
+        # Re-observing reviewed A must not hide unresolved B.
+        contract.reconcile_attempt_terminal(self.jobs, "att-child", "dead-worker-fail",
+            evidence={"failure_class": "fail", "classifier_source": "supervisor-terminal-v1"})
+        self.assertEqual(contract.completion_attempt_readiness(route, node, marker, self.jobs).reason, "terminal-evidence-conflict")
+        review_b = self.root / "second-disposition.md"
+        review_b.write_text("Inspected both contradictions, including the later BLOCKED evidence; retain PASS.\n")
+        raw = self.jobs.read_text().splitlines()[1]
+        contract.resolve_terminal_conflict(self.jobs, "att-child",
+            expected_row_sha256=hashlib.sha256(raw.encode()).hexdigest(), review=review_b)
+        for note, failure in (("dead-worker-fail", "fail"), ("dead-worker-blocked", "blocked")):
+            self.assertEqual(contract.reconcile_attempt_terminal(self.jobs, "att-child", note,
+                evidence={"failure_class": failure, "classifier_source": "supervisor-terminal-v1"}), "already-terminal")
+            self.assertEqual(contract.completion_attempt_readiness(route, node, marker, self.jobs).state, "ready")
+        history = policy.terminal_conflicts(contract.parse_registry_metadata(self.jobs.read_text().splitlines()[1].split("\t")[5]))
+        self.assertEqual(len(history), 2)
+        self.assertEqual({entry["review_sha256"] for entry in history.values()},
+                         {hashlib.sha256(review.read_bytes()).hexdigest(), hashlib.sha256(review_b.read_bytes()).hexdigest()})
+
+    def test_cancelled_work_never_becomes_an_automatic_retry_from_an_old_dead_note(self):
+        for harness in ("claude", "codex", "opencode"):
+            decision = policy.decide_attempt("cancelled", {"harness": harness, "note": "dead-runtime-exit"},
+                                             process_state="quiescent")
+            self.assertFalse(decision.retry_allowed)
+
+    def test_chain_conflict_pauses_without_cancelling_and_is_rechecked_at_claim(self):
+        from types import SimpleNamespace
+        import dispatch_subsession_advance as chain
+        common = dict(stage_authority="0", session_chain_id="ssc-conflict", subsession_count="2",
+            subsession_mode="serial", subsession_purpose="planned", phase_brief=str(self.root/"brief"),
+            state_ledger=str(self.root/"state"), phase_brief_sha256="1"*64,
+            fixed_files_sha256="2"*64, narrow_verify_sha256="3"*64, expected_round_trips="1")
+        predecessor = row("att-first", status="done", note="completed-subsession", failure_class="pass",
+            launch_outcome="never-launched", subsession_id="ss-first", subsession_index="1", **common)
+        successor = row("att-second", subsession_id="ss-second", subsession_index="2", **common)
+        self.jobs.write_text(predecessor+successor)
+        contract.reconcile_attempt_terminal(self.jobs, "att-first", "dead-worker-fail", evidence={"failure_class":"fail"})
+        before = self.jobs.read_bytes()
+        meta = contract.parse_registry_metadata(self.jobs.read_text().splitlines()[0].split("\t")[5])
+        result = chain.advance_chain_step(self.jobs, "att-owner",
+            {"att-first": SimpleNamespace(attempt_id="att-first", status="done", metadata=meta)})
+        self.assertEqual((result.outcome, result.reason), ("unavailable", "terminal-evidence-conflict"))
+        with self.assertRaises(contract.DispatchContractError) as caught:
+            contract.claim_attempt_row(self.jobs, "att-second", successor, launch=True)
+        self.assertEqual(caught.exception.reason, "terminal-evidence-conflict")
+        self.assertEqual(self.jobs.read_bytes(), before)
+        review = self.root/"chain-review.md"; review.write_text("Reviewed conflicting terminal evidence; keep the committed slice result.\n")
+        raw = self.jobs.read_text().splitlines()[0]
+        contract.resolve_terminal_conflict(self.jobs, "att-first",
+            expected_row_sha256=hashlib.sha256(raw.encode()).hexdigest(), review=review)
+        self.assertTrue(contract.claim_attempt_row(self.jobs, "att-second", successor, launch=True))
+
     def _notice_rows(self, kind="codex-managed-gateway"):
         self.jobs.write_text(row("att-owner", dispatch_depth="1", parent_attempt_id="", parent_sid="parent-test",
-            parent_completion_delivery=kind,
+            parent_completion_delivery=kind, route_node="__owner__",
             managed_sealed_batch_id="batch-test", pid="99999999", pid_start="1")
             + row("att-child", pid="99999998", pid_start="1"))
 
