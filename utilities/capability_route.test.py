@@ -1583,7 +1583,7 @@ class TestRoute(unittest.TestCase):
    meta=dict(attempt_schema_version=2,dispatch_depth=1,transport="headless",
        execution_surface="registered-headless",registered_worker="1",fallback_hop="same-harness-headless",
        route_id=route["route_id"],route_hash=route["route_hash"],route_node=node["id"],
-       attempt_id=attempt,failure_class="pass",launch_outcome="reaped-before-publish")
+       attempt_id=attempt,failure_class="pass",note="completed-marker",launch_outcome="reaped-before-publish")
    def row(values):
     return "2026-09-08T00:00:00Z\tdone\t/repo\t/wt\towner\t"+",".join(f"{k}={v}" for k,v in values.items())+"\n"
    jobs.write_text(row(meta)); evidence.write_text("first")
@@ -3002,7 +3002,14 @@ class TestContinuation(unittest.TestCase):
       sealed.write_text("",encoding="utf-8")
       wreck()
       declined=self._build(source,resume_from_node="execute",requested_boundary="execute")
-      self.assertEqual(declined["source_commit"],pinned)
+      if name == "registry is a directory":
+       self.assertEqual(declined["first_runnable_blocker"],
+        "continuation-source-node-unverified:frame:registry-unreadable")
+       self.assertEqual(declined["new_nodes"],[])
+       self.assertNotIn("source_commit",declined)
+      else:
+       self.assertEqual(declined["source_commit"],pinned)
+      self.assertEqual(source["source_commit"],pinned)
       self.assertNotIn("source_commit_rebind",declined)
     # An unresolved jobs binding is unreadable in the same sense.
     if sealed.is_dir(): sealed.rmdir()
@@ -3251,7 +3258,14 @@ class TestContinuation(unittest.TestCase):
    restore()
    for name,route in cases.items():
     with self.subTest(name):
-     self.assertEqual(route["source_commit"],pinned)
+     if name == "directory":
+      self.assertEqual(route["first_runnable_blocker"],
+       "continuation-source-node-unverified:frame:registry-unreadable")
+      self.assertEqual(route["new_nodes"],[])
+      self.assertNotIn("source_commit",route)
+     else:
+      self.assertEqual(route["source_commit"],pinned)
+     self.assertEqual(source["source_commit"],pinned)
      self.assertNotIn("source_commit_rebind",route)
 
  def test_c_pruned_release_registry_is_not_authoritative(self):
@@ -5206,6 +5220,30 @@ class ComposeRouteTest(TestRoute):
   self.assertEqual(route["conditional_extensions"][0]["after"],["report"])
   self.assertIn("small_work_confirmation",route)
   R.verify_route(route,R.ROOT)
+ def test_staged_without_graph_uses_recipe_without_another_cli(self):
+  route=self.compose(graph=None)
+  self.assertFalse(route.get("composed",False))
+  self.assertEqual(route["selection"]["shape"],"staged")
+  self.assertEqual([n["id"] for n in route["nodes"]],
+   ["frame","frame-alternative","plan","plan-check","execute","impl-review","test","report"])
+  R.verify_route(route,R.ROOT)
+ def test_chosen_graph_does_not_require_presets_review_stage(self):
+  for intensity in ("standard","strong"):
+   route=self.compose(graph="plan,test,report",intensity=intensity)
+   self.assertEqual([n["id"] for n in route["nodes"]],["plan","test","report"])
+   self.assertEqual(route["parallel_groups"],[])
+   self.assertEqual(route["composed_recipe"]["compose"]["omitted_parallel_presets"],
+    [{"id":"plan","reason":"review-consumer-not-selected"}])
+   R.verify_route(route,R.ROOT)
+ def test_frame_pair_stays_independent_and_gates_the_following_work(self):
+  route=self.compose(graph="frame,frame-alternative,plan,test,report")
+  nodes={n["id"]:n for n in route["nodes"]}
+  self.assertEqual(nodes["frame"]["depends_on"],[])
+  self.assertEqual(nodes["frame-alternative"]["depends_on"],[])
+  self.assertEqual(nodes["plan"]["depends_on"],["frame","frame-alternative"])
+  self.assertEqual(route["human_gate_bindings"],
+   [{"gate":"frame-review","node":"plan","position":"entry"}])
+  R.verify_route(route,R.ROOT)
  def test_subgraph_inputs_keep_the_base_contract(self):
   """Round-1 B1: a kept node keeps every declared input it can still get; a dropped producer's file is not promised."""
   route=self.compose(graph="execute,test,report")
@@ -5255,9 +5293,9 @@ class ComposeRouteTest(TestRoute):
   without=self.compose(capability="autopilot-spec",capability_mode="update",graph="research,review,prd-transaction",signals=["shared-contract"])
   self.assertEqual(without["human_gate_bindings"],[]); self.assertEqual(without["human_gates"],[])
   R.verify_route(without,R.ROOT)
-  # dropping the research anchor leaves spec-review's auxiliary_arbiter declaration orphaned: the registry validator refuses it as-is
-  with self.assertRaisesRegex(Exception,"auxiliary_arbiter"):
-   self.compose(capability="autopilot-spec",capability_mode="update",graph="review,prd-transaction",signals=["shared-contract"])
+  # A review unit can be reused without selecting its preset's producer group.
+  review_only=self.compose(capability="autopilot-spec",capability_mode="update",graph="review,prd-transaction",signals=["shared-contract"])
+  R.verify_route(review_only,R.ROOT)
  def test_terminal_frame_drops_its_group_and_gate(self):
   # `frame` is no longer a parallel-group anchor, and it is a dispatch-depth-1
   # node, so a `frame`-only subgraph has no depth-2 evidence consumer and can
@@ -5285,7 +5323,6 @@ class ComposeRouteTest(TestRoute):
   with self.assertRaisesRegex(ValueError,"compose-unit-not-in-choices"): self.compose(graph="execute:qa/test,test")
  def test_typed_refusals(self):
   with self.assertRaisesRegex(ValueError,"compose-graph-unknown-node"): self.compose(graph="execute,deploy")
-  with self.assertRaisesRegex(ValueError,"compose-graph-required"): self.compose(graph=None)
   with self.assertRaisesRegex(ValueError,"compose-graph-only-staged"): self.compose(shape="direct",graph="execute")
   with self.assertRaisesRegex(ValueError,"compose-shape-intensity-mismatch"): self.compose(intensity="quick")
   with self.assertRaisesRegex(ValueError,"compose-shape-intensity-mismatch"): self.compose(shape="direct",graph=None,intensity="standard")

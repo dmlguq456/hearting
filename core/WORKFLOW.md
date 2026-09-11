@@ -176,17 +176,21 @@ artifact and the entire evaluation ran inline in the main session.
 The precedence above decides which capability **owns the artifacts** of a
 request. It does not oblige the session to run that entry's whole recipe.
 Before proposing a route, choose the **shape** of the work from its size; the
-enumerated preset graph is one explicit choice among four, never the default
-a loosely matching request is bent into:
+shape and explicit choices determine the route; defaults only fill omissions:
 
 | Shape | When | Route |
 |---|---|---|
 | `direct` | one atomic, reversible change the session makes and checks inline | `capability-route.py compose --slug <slug>` — the inline node, dispatch depth 0 |
 | `solo` | one bounded piece of work that deserves its own registered session but no separate stages | `compose --shape solo` — one registered dispatch-depth-1 owner, no dispatch depth 2 |
-| `staged` | separable stages the session names itself | `compose --graph <stage,…>` — a dispatch-depth-1 owner plus the named stage subgraph of the owning capability, `standard+` |
-| preset | the request names the entry's full loop, or a promotion signal or spec-backed flow requires the enumerated recipe | `capability-route.py compile` with the registry recipe |
+| `staged` | work with separate stages | `compose --shape staged` uses the capability's standard recipe; optional `--graph <stage,…>` selects a subgraph |
 
-`compose` fills every other flag from the checkout: cwd, artifact root
+`compose` preserves the chosen stages and derives their dependencies. Inherited
+parallel presets that do not fit the selected graph are omitted; missing preset
+stages are not mandatory. The sealed result shows the realized stages and omitted
+defaults before execution. Input/output, explicit human gates, and terminal proof
+remain binding contracts for the selected work.
+`compile` remains the low-level explicit interface. Callers need not switch to it
+to obtain a complete recipe. `compose` fills omitted flags from the checkout: cwd, artifact root
 (`utilities/artifact-root.sh`), tracking and workflow mode by shape, a
 default drift verdict, the spec-read gate (it refuses with
 `compose-spec-read-required` when a `spec/prd.md` exists under the cwd or the
@@ -500,13 +504,10 @@ its terminal node. `BLOCKED_HUMAN_GATE` never advances automatically; only an
 explicit human release returns it to `RUNNING`. `FAILED_*` never advances a
 downstream stage.
 
-The completion writer owns the remaining successful state transitions as well
-as terminal-gate verification. It validates the whole closure before appending
-anything, then records the legal path through `STAGE_SUCCEEDED` and
-`TERMINAL_VERIFY` to `COMPLETE`. A repeated or interrupted close resumes from
-the journal without duplicating completed transitions. Human gates, failures,
-and cancellation remain unresolved obligations; a terminal marker cannot erase
-them.
+The completion writer validates and records the remaining legal path through
+`STAGE_SUCCEEDED` and `TERMINAL_VERIFY` to `COMPLETE`. Repeated or interrupted
+closure resumes from the journal. Markers cannot erase unresolved human gates,
+failures, or cancellation.
 
 **Every non-terminal stage declares exactly one continuation.** A stage graph
 that leaves a stage with no way to reach the next one is the defect this
@@ -716,14 +717,10 @@ references a unit in `roles/units/`, and routing happens at entry only — a
 dispatch-depth-2 worker never routes and never selects another worker. Enumerated
 recipes are curated fast paths, not the default. For a request no recipe fits, the
 entry composes its own route from the same catalog (**compose-on-demand**, §0.2.1):
-`capability-route.py compose` seals a `direct`, `solo`, or `staged` shape, and a staged
-`--graph` is the session's own subgraph of the owning capability's stage nodes; the
-composed graph passes the same validator, is hash-sealed exactly like a recipe route,
-is marked `composed: true` with its recipe embedded, and is confirmed under §0.4 (a
-`[경로]` notice for small work, the card or the SD-123 pair otherwise). Until SD-135
-the composed path was `standard+`-only, every composed node was dispatch depth 2 with
-no source write, and the assembly helper was not recognized by the route-binding
-guard — 18 of 635 routes were composed and every one sat under a preset entry.
+`capability-route.py compose` seals a `direct`, `solo`, or `staged` shape. Staged
+uses the capability recipe unless `--graph` selects a subgraph. Both use the same
+validator and seal; a subgraph embeds its recipe as `composed: true`. Confirmation
+follows §0.4 (`[경로]` for small work, the card or SD-123 pair otherwise).
 Composition changes route *shape only* — it never bypasses the §0.1
 spec/artifact-order gates, never grants dispatch depth 3, and never substitutes for a
 capability's own completion gates.

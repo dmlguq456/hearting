@@ -2408,6 +2408,13 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec):
             "compose-graph-unknown-node:" + ",".join(unknown)
             + " (available: " + ",".join(base_nodes) + ")"
         )
+    def gate_group(node_id):
+        base = base_nodes[node_id]
+        continuation = base.get("continuation") or {}
+        if continuation.get("kind") == "human-gate":
+            return continuation["gate"], tuple(base.get("depends_on", []))
+        return None
+
     nodes = []
     overrides = {}
     for index, (node_id, unit) in enumerate(graph_spec):
@@ -2425,6 +2432,19 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec):
             overrides[node_id] = unit
         previous = nodes[-1] if nodes else None
         node["depends_on"] = [previous["id"]] if previous else []
+        if previous and gate_group(previous["id"]):
+            group = gate_group(previous["id"])
+            if gate_group(node_id) == group:
+                # Independent raisers share their predecessor. Serializing
+                # them would make the first gate block its own second raiser.
+                node["depends_on"] = list(previous["depends_on"])
+            else:
+                raisers = []
+                for prior in reversed(nodes):
+                    if gate_group(prior["id"]) != group:
+                        break
+                    raisers.append(prior["id"])
+                node["depends_on"] = list(reversed(raisers))
         node["inputs"] = _compose_inputs(base_nodes, base_nodes[node_id], set(ids))
         node.pop("terminal", None)
         node.pop("terminal_gate", None)
@@ -2475,11 +2495,19 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec):
                 and row.get("gate") not in gates):
             bindings.append({"gate": row["gate"], "node": node_id, "position": "entry"})
             gates.append(row["gate"])
-    groups = [
-        json.loads(json.dumps(group))
-        for group in base_recipe["standard_plus"].get("parallel_groups") or []
-        if group["node"] in kept_ids and group["node"] != terminal["id"]
-    ]
+    groups, omitted_groups = [], []
+    for group in base_recipe["standard_plus"].get("parallel_groups") or []:
+        anchor = next((n for n in nodes if n["id"] == group["node"]), None)
+        if anchor is None or anchor is terminal:
+            continue
+        consumers = [n for n in nodes if anchor["id"] in n.get("depends_on", [])]
+        if anchor["kind"] == "pipeline-stage" and not any(
+                n["kind"] == "review-worker" for n in consumers):
+            # The preset's fan-out requires a review consumer. A caller who
+            # selected a smaller graph did not select that fan-out obligation.
+            omitted_groups.append({"id": group["id"], "reason": "review-consumer-not-selected"})
+        else:
+            groups.append(json.loads(json.dumps(group)))
     extensions = [
         json.loads(json.dumps(row))
         for row in base_recipe.get("conditional_extensions") or []
@@ -2513,6 +2541,8 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec):
     }
     if groups:
         recipe["standard_plus"]["parallel_groups"] = groups
+    if omitted_groups:
+        recipe["compose"]["omitted_parallel_presets"] = omitted_groups
     return recipe
 
 
@@ -2580,8 +2610,6 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         raise ValueError(f"compose-shape-invalid:{shape}")
     if shape != "staged" and graph:
         raise ValueError(f"compose-graph-only-staged:{shape}")
-    if shape == "staged" and not graph:
-        raise ValueError("compose-graph-required")
     registry = TOPO.load_registry()
     base = next((r for r in registry["recipes"] if r["capability"] == capability), None)
     if base is None:
@@ -2631,7 +2659,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         route_origin="compose", shape=shape,
         profile_demands=profile_demands, explicit_profiles=explicit_profiles,
     )
-    if shape == "staged":
+    if shape == "staged" and graph:
         recipe = compose_subgraph_recipe(registry, base, parse_graph_spec(graph))
         route = compile_composed_route(
             recipe, capability_mode, requested, cwd, artifact_root,
@@ -5915,8 +5943,8 @@ def main():
     cp.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
     cp.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
-    cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered depth-1 owner) | staged (owner + your stage subgraph); default staged when --graph is given, else direct")
-    cp.add_argument("--graph",default=None,help="comma list of the capability's stage ids in your order, optional :unit override, e.g. execute,test,report or execute:dev/refactor,test")
+    cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph); default staged with --graph, else direct")
+    cp.add_argument("--graph",default=None,help="optional staged subgraph in your order; incompatible inherited parallel presets are omitted; optional :unit override, e.g. execute,test,report")
     cp.add_argument("--capability",default=COMPOSE_DEFAULT_CAPABILITY); cp.add_argument("--capability-mode",default=None)
     cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; staged accepts strong+")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")

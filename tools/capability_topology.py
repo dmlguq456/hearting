@@ -506,7 +506,6 @@ def _validate_gate_contracts(recipe, registry):
     # same three facts off the recipe, and
     # `capability_topology.test.py` pins the two to agree on every realized group.
     nodes_by_id = {node.get("id"): node for node in recipe["standard_plus"].get("nodes", [])}
-    expected_arbiter_gates = set()
     for group in recipe["standard_plus"].get("parallel_groups", []):
         if not any(leg.get("leg_class") == "auxiliary" for leg in group.get("legs", [])):
             continue
@@ -531,32 +530,15 @@ def _validate_gate_contracts(recipe, registry):
                 f"consumer, found {len(consumers)}"
             )
         gate = consumers[0].get("completion_gate")
-        expected_arbiter_gates.add(gate)
         entry = contracts.get(gate)
         if not isinstance(entry, dict) or entry.get("auxiliary_arbiter") is not True:
             raise TopologyError(
                 f"{recipe['capability']}: auxiliary group {group.get('id')} arbiter gate "
                 f"{gate} must declare auxiliary_arbiter"
             )
-    for gate in sorted(
-        gate for gate, entry in contracts.items()
-        if isinstance(entry, dict) and entry.get("auxiliary_arbiter") is True
-    ):
-        owner = nodes_by_id.get(
-            next(
-                (
-                    node.get("id") for node in recipe["standard_plus"].get("nodes", [])
-                    if node.get("completion_gate") == gate
-                ),
-                None,
-            )
-        )
-        if owner is None or gate in expected_arbiter_gates:
-            continue
-        raise TopologyError(
-            f"{recipe['capability']}: gate {gate} declares auxiliary_arbiter but "
-            "arbitrates no auxiliary-bearing group in this recipe"
-        )
+    # `auxiliary_arbiter` is a gate's ability to consume auxiliary findings.
+    # Only a selected auxiliary group creates that obligation. Reusing the
+    # review unit on a smaller graph does not require its preset's producers.
 
 
 def _validate_activation_conditions(registry):

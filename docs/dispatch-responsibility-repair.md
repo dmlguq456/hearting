@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 6b7d19a5 실측은 지연 통보·실제 보고서 쓰기 PASS, 정상 완료 알림 FAIL로 종료했다. 47d5e42e·21425b55를 통합했고 전달 계약 교정 09b687ac의 실제 정상 완료를 확인했으며, 후속 운송 지시 범위를 정리했다. 원래 frame 부모의 정식 질문에서 사용자의 이해 확인·기록 방식 답변을 받았으며, 같은 gate의 release와 owner 입력 읽기를 진행 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치를 주장하지 않는다.
+상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 새 Codex/OpenCode light 오너 검증은 준비 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -25,7 +25,7 @@
 
 - 공통 수정: `704ae7cf` → `cc1791ba` → `de632e5c` → `705f042e`.
 - 리뷰 수명·완료 전달: `be684cf8`까지 포함. 21분 실측의 원본 source는 `56746fb4`이며, 이후 수정의 실측이라고 바꾸어 쓰지 않는다.
-- frame: `daa82355` + `7db4ce09`(실제 모델 role/profile 전달) + `5929e741`(route/cycle→frame→질문→owner 순서 및 상대 산출물 기준) 포함. 실제 두 하네스 완료·자동 wake와 승인 전 owner 거부를 확인했으며, release 후 owner 입력 읽기와 standard 왕복은 아직 합격을 주장하지 않는다.
+- frame: `daa82355` + `7db4ce09`(실제 모델 role/profile 전달) + `5929e741`(route/cycle→frame→질문→owner 순서 및 상대 산출물 기준) 포함. 실제 두 하네스 완료·자동 wake, 승인 전 owner 거부, 실제 답변 후 release·owner 입력 읽기를 확인했다. workflow closure도 아래 후속 교정으로 완료했다. 새 standard 오너 검증은 남아 있다.
 - 통합 경로: `/home/nas/user/Uihyeop/personal/hearting-wt/dispatch-responsibility-integration`, 실측과 최종 회귀의 고정 HEAD `6b7d19a5`. 후속 소스 교정 `47d5e42e`는 별도 작업 트리에서 검증했고, 실측 종료·증거 고정 뒤 통합했다. 이전 `a337969b` 16개 검사 묶음과 `e2667929` 6개 검사 묶음은 해당 HEAD의 증거로 따로 보존한다.
 - 705f042e 고정 검증: fallback 69, contract 198(skip 1), 공통 책임 10, managed completion 14, gateway 42, orphan 7 PASS. 생성 projection 20개 PASS. 최초 adaptation 검사에서 OPERATIONS 지시 수 1개 초과를 확인했고, 통합 문서의 중복 설명을 삭제해 기존 상한 안으로 복구했다.
 - 공통 책임 시험은 확정 성공+지연/관측 불가, 정리 미확정 terminal 행, 두 프로세스의 동일 실패 retry 경쟁, 등록 후 첫 기동 경쟁, retry 제안 뒤 성공 확정, controller 재시작, 오래된 알림 억제, 관측 도구 실패 후 회복을 확인한다.
@@ -54,9 +54,9 @@
 |---|---|---|
 | 21분 이상 d=1 리뷰 쓰기와 부모 통보 | HEAD 56746fb4, att-29dfc6a3a3dc4b88b65fff8e4452e289, 쓰기 1268.92560412초, 부모 01a08e11-2b08-7393-a36d-702aeca9d6bb | 실제 정상 경로 PASS. 리뷰 지적 3건은 be684cf8에서 수정. |
 | frame 두 하네스와 두 자동 wake | HEAD 7db4ce09, route rt-f94885fba268775b, Codex att-a4e566dfb0ab444f9341bc9f14eb69d1 + Claude att-223896abecdf4178a5d10a9e0713b121, 동일 부모 01a08e56-2fec-7ae3-8898-765dae020431 | actual marker 2개·wake 2회 확인. |
-| 승인 전 owner 기동 금지와 실제 질문 | 같은 frame r2, human-gate-not-raised / child_spawned=0, 정식 frame-review raise | 확인. 원 부모의 실제 답변을 수신했으며 release 이후 부분은 진행 중이다. |
+| 승인 전 owner 기동 금지와 실제 질문 | 같은 frame r2, human-gate-not-raised / child_spawned=0, 정식 frame-review raise | 확인. 원 부모의 실제 답변, release와 owner intent 읽기까지 확인했다. |
 | 지연 관측→통보→같은 attempt 정상 완료 | HEAD 6b7d19a5, 새 private parent 01a08e7f-750c-7291-8e5b-f08ec638e2de (wB:pG), dispatch 호출에만 completion timeout 60초, 실제 자식 150초/finite watchdog 600초 이상 | supervision·실제 쓰기 PASS, 정상 completion FAIL. canonical success가 부모 attention으로 바뀌었다. 가짜 age 또는 운영 row 편집 없음. |
-| frame standard 왕복 및 최종 owner의 intent 읽기 | 별도 실측 필요 | 미합격/미완료. |
+| quick owner intent 읽기·workflow closure | 아래 원답변/closure 증거 | PASS. standard의 새 Codex/OpenCode 오너 검증은 미완료. |
 
 frame 증거: `.agent_reports/campaigns/2026-09-10_frame-bootstrap-layer/2026-09-11_frame-live-parent-canary-r2/artifacts/dev_logs/r2-parent-wakes-observed.{json,txt}`.
 
@@ -109,3 +109,22 @@ frame 증거: `.agent_reports/campaigns/2026-09-10_frame-bootstrap-layer/2026-09
 Codex의 기존 App Server turn/start·turn/steer 운송과 Claude의 기존 asyncRewake/다음 prompt sweep을 재사용했다. 공식 문서상 start와 steer의 역할, asyncRewake의 exit 2 및 비동기 hook 수명은 서로 다르다. 실행 방식을 통일했다고 주장하지 않는다. 공통인 것은 실행 결과·정리·재시도·전달 책임이다. OpenCode의 prompt carrier도 같은 큐와 의미 검사를 소비하며 실제 런타임 수신 여부는 실측된 범위만 별도로 기록한다.
 
 참고: [Codex App Server](https://learn.chatgpt.com/docs/app-server), [Claude hooks](https://code.claude.com/docs/en/hooks). 2026-09-11 공식 문서를 확인했다.
+
+
+## 라우팅 선택과 마무리 책임 정리
+
+사용자의 완료 기준은 “기본값은 선택을 돕고, 하네스는 내부 절차를 대신 책임진다”이다. 모델·단계 preset을 맞추기 위한 거부와 재조립을 사용자에게 떠넘기는 것도 이번 수리의 결함 범위에 포함했다. 문서 바이트 감소를 인지 부담 감소의 증명으로 삼지 않는다.
+
+- `16047ba9`: intensity별 owner 모델 **강제 비교**를 제거했다. compile과 verify가 `_resolve_owner_profile` 하나로 요구를 해석하고, 요구가 없을 때만 기존 기본값을 쓴다. quick의 한 프로세스와 owner가 서로 다른 모델 선택을 갖던 경계도 합쳤다. QA·실행 단계와 모델 선택을 분리하며 새 전역 설정은 만들지 않았다.
+- 같은 커밋의 공통 workflow writer가 terminal gate 확인 후 필요한 합법적 전이를 끝까지 수행한다. 전체 전이를 먼저 검증하고, 실패·사람 판단·취소는 보존한다. 중간 append 뒤 중단되거나 명령을 다시 호출해도 journal의 남은 부분만 수행한다. 호출자에게 수동 상태 변경 순서를 요구하던 부담을 제거했다.
+- `compose --shape staged`는 기본 recipe를 바로 발급한다. 전체 그래프를 쓰기 위해 `compile`로 바꾸거나 node 이름을 나열할 필요가 없다. 명시적인 `--graph plan,test,report`는 그대로 유지한다. 선택하지 않은 plan-check를 강제로 추가하지 않고, 그 검토 소비자를 요구하던 inherited parallel preset을 제외·기록한다.
+- `auxiliary_arbiter`를 선언한 검토 gate는 보조 의견을 처리할 수 있는 기능이다. 실제 선택된 보조 그룹이 있을 때만 그 의무가 생긴다. 검토 단위를 단독 재사용할 때 원래 preset의 producer까지 강제하던 역방향 검사를 제거했다. 선택된 그룹의 실제 검토·증거 의무는 검증한다.
+- 같은 사용자 gate를 올리는 독립 frame 두 다리를 조립기가 직렬로 연결해 자신의 gate에 막히게 하던 간선을 수정했다. 두 다리는 이전 의존성을 공유하고, 다음 작업은 두 결과를 모두 기다린다.
+
+실제 quick 원답변 증거: `/tmp/frame-quick-original-answer-owner-observation.json`. 원답변 05:16:40.585Z → release 05:20:20.698Z → owner `att-5061090efcf74f1ab538f99ac7c075de`의 실제 intent 읽기 05:21:17.707Z → 부모 success 05:23:40.620Z. 합계 Markdown 독립 실행 exit 0. 기존 Claude owner/profile을 유지한 과거 시도이며 새로운 light 테스트로 계산하지 않는다.
+
+실제 closure 증거: `/tmp/frame-quick-terminal-closure-observation.json`. 수정 source `16047ba93e067fb029f951367ea22d584b0bdad0`의 정상 `workflow-supervisor complete`가 원 route `rt-f94885fba268775b`를 COMPLETE로 기록했다. journal 3→6, 성공 상태 전이 3개 추가. 반복 호출 exit 0이며 journal 불변. 원 route·답변·intent·검증 산출물 바이트 불변, 모델 재기동 0. workflow 완료와 producer cycle finalize는 별도 관측한다.
+
+최종 소스 검사: route 387 / compose CLI 17 / profile demand 24 / workflow 127 / topology 45 PASS. 생성 20그룹·adaptation boundary PASS. quick/standard owner light를 실제 selector→세 adapter parser/resolver로 연결한 6경로도 통과했다(`/tmp/surface-owner-adapter-parity.json`); 모델을 호출한 실측으로 계산하지 않는다. 로그 `/tmp/surface-final-*.log`.
+
+수정 전 ce519에서도 재현되는 기존 fixture 실패 3종을 별도 확인했다(`/tmp/closure-baseline-failures.log`). terminal fixture는 현재 완료 writer의 `note=completed-marker`를 빠뜨렸고, 두 continuation fixture는 읽을 수 없는 원장에서 받은 차단 결과를 새 route로 가정했다. 실제 완료 형식을 넣고 차단·source 보존·새 node 0을 검증하도록 기대값을 수정했다. 운영 판단을 느슨하게 바꿔 테스트를 통과시킨 것이 아니다.
