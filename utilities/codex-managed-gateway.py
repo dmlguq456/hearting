@@ -951,6 +951,18 @@ class ManagedGateway:
                 identity = (thread_id, key)
                 self._appserver_requests.setdefault(identity, time.time())
                 self._publish_wait_locked(thread_id)
+                # Human availability is not a deadline. Codex 0.153.4's TUI
+                # ignores autoResolutionMs and expires non-blocking questions
+                # after 60s grace + 60s countdown. Project only the native UI
+                # wait policy; the TUI still owns answers and explicit cancel.
+                params = message["params"]
+                projected = dict(params)
+                if isinstance(params.get("isBlocking"), bool):
+                    projected["isBlocking"] = True
+                if "autoResolutionMs" in params:
+                    projected["autoResolutionMs"] = None
+                if projected != params:
+                    message = {**message, "params": projected}
         elif method == "serverRequest/resolved":
             params = message.get("params")
             if isinstance(params, dict):

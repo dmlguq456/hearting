@@ -88,6 +88,14 @@ frame 증거: `.agent_reports/campaigns/2026-09-10_frame-bootstrap-layer/2026-09
 
 6b 실측 행의 격리 복사본으로도 09b snapshot→delivery success를 확인했다. 그 복사본에 실제 terminal CAS로 충돌을 기록하면 committed proof와 봉인 receipt bytes를 유지하면서 attention으로 소비를 보류했다(`/tmp/completion-conflict-consumption.json`). 운영 원장은 수정하지 않았다.
 
+## 사용자 답변 대기와 질문 창의 수명
+
+사용자가 frame 질문의 자동 만료를 지적했다. 설치된 `codex-cli 0.153.4`의 실제 생성 schema와 같은 release tag의 구현을 확인했다. 기본 모드는 `isBlocking=false`를 발급하고 TUI는 60초 비표시 유예 + 60초 countdown 뒤 `answers={}`를 반환한다. `autoResolutionMs`는 이 버전에서 deprecated이며 null로만 바꿔서는 타이머가 꺼지지 않는다. 근거: [0.153.4 질문 handler](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/tools/handlers/request_user_input.rs), [동일 버전 TUI 타이머](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/tui/src/bottom_pane/request_user_input/mod.rs). 생성 schema는 `/tmp/codex-question-schema-01534/ToolRequestUserInputParams.json`에 보존했다.
+
+공통 workflow 계약에 사용자 결정은 시간 경과나 빈 답변으로 확정하지 않는다고 명시했다. 결정 대기와 질문 복구는 gate owner가 유지하며 독립적으로 승인된 작업은 계속한다. Codex gateway는 유효한 질문 요청의 native 대기 정책만 `isBlocking=true`, 구버전 `autoResolutionMs=null`로 투영한다. 질문 ID·내용·선택지·실제 답변과 직접 취소는 그대로 통과시키고 자체 답변이나 별도 승인 주체를 만들지 않는다. gateway의 Fleet 표시가 종료되어도 workflow gate는 별도로 유지된다. 해당 기능을 제어할 수 없는 클라이언트에는 나중에 답할 수 있는 일반 대화 질문을 남긴다.
+
+검증: 실제 socket을 통과하는 최신·구버전·이미 무기한인 요청, ID/내용 보존, 응답 합성 없음, 실제 답변/빈 취소 응답 전달을 포함한 gateway 46건 PASS. managed entry, human gate receipt, generated projection 20개와 adaptation boundary를 함께 검사했다(`/tmp/question-wait-checks/`, `/tmp/question-wait-gateway.log`). 모델 기동이나 실제 TUI 2분 대기는 수행하지 않았다. 이 수정은 소스 동작과 protocol 검증이며, 실행 중인 pF 또는 이 대화 창의 제한을 해제했다고 주장하지 않는다. main/release/install은 계속 보류한다.
+
 ## 검증의 오류도 보존
 
 `dispatch_completion_marker` 4건은 설치된 release에서 compile한 뒤 fixture runtime으로 start하여 표식 검사 전 root mismatch로 실패했다. 실제 guard stderr에서 runtime/launch/jobs 차이를 확인하고 compile과 adapter 검증이 같은 fixture 환경을 사용하도록 고쳤다. 거부 기대값을 삭제하거나 운영 기동 검사를 우회하지 않았다. 수정 후 30건 PASS (`/tmp/terminal-commit-responsibility-check/dispatch_completion_marker-fixed.log`).

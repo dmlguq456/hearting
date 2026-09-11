@@ -319,6 +319,7 @@ class FakeAppServer:
         *,
         thread_id: str = "thread-1",
         question: str = "PRIVATE QUESTION",
+        wait_policy: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + 5
         while self.current is None and time.monotonic() < deadline:
@@ -348,6 +349,7 @@ class FakeAppServer:
                 ],
             },
         }
+        message["params"].update(wait_policy or {})
         self.current.write_json(message)
         return message
 
@@ -1235,6 +1237,49 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         self.assertNotIn("PRIVATE QUESTION", persisted)
         self.assertNotIn("PRIVATE OPTION", persisted)
+
+    def test_question_deadline_projection_preserves_identity_and_real_answers(self) -> None:
+        # Current schema generated from the installed codex-cli 0.153.4:
+        # autoResolutionMs is deprecated; isBlocking is the timer authority.
+        # Also cover older peers without isBlocking and already unbounded UI.
+        policies = [
+            ({"isBlocking": False, "autoResolutionMs": None},
+             {"isBlocking": True, "autoResolutionMs": None}),
+            ({"isBlocking": False}, {"isBlocking": True}),
+            ({"autoResolutionMs": 120000}, {"autoResolutionMs": None}),
+            ({"isBlocking": True, "autoResolutionMs": None},
+             {"isBlocking": True, "autoResolutionMs": None}),
+        ]
+        for ordinal, (before, after) in enumerate(policies):
+            with self.subTest(policy=before):
+                request_id = 950 + ordinal
+                request = self.server.emit_user_input(request_id, wait_policy=before)
+                received = self.client.wait_for(
+                    lambda value: value.get("method") == "item/tool/requestUserInput"
+                    and value.get("id") == request_id
+                )
+                self.assertEqual(received, {
+                    **request, "params": {**request["params"], **after}
+                })
+                for key, value in before.items():
+                    self.assertEqual(request["params"][key], value)
+                self.wait_interaction("thread-1", True)
+                self.assertFalse(any(
+                    value.get("id") == request_id
+                    for value in self.server.approval_responses
+                ))
+                # An explicit empty/cancel response remains a TUI decision;
+                # the gateway must neither invent an answer nor suppress it.
+                answer = ({"answers": {"choice": {"answers": ["Proceed"]}}}
+                          if ordinal % 2 == 0 else {"answers": {}})
+                self.client.respond(request_id, answer)
+                self.wait_interaction("thread-1", False)
+                expected = {"jsonrpc": "2.0", "id": request_id, "result": answer}
+                deadline = time.monotonic() + 5
+                while (expected not in self.server.approval_responses
+                       and time.monotonic() < deadline):
+                    time.sleep(0.01)
+                self.assertIn(expected, self.server.approval_responses)
 
     def test_typed_ids_remain_distinct_until_each_response(self) -> None:
         self.server.emit_user_input(17)

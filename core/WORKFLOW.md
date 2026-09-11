@@ -521,6 +521,13 @@ any of these is rejected at route compile, and a launch bound to such a graph is
 rejected before the process starts** — the refusal is the point, because the
 alternative is silent abandonment.
 
+Human decisions have no elapsed-time default. A question window closing or an
+empty response does not release, reject, or cancel the durable gate. Its owner
+keeps the exact question and gate available for a later real answer; independent
+authorized work can continue. Managed question surfaces disable automatic empty
+answers where the runtime supports this. Otherwise the owner leaves a plain-text
+question for a later reply instead of repeatedly opening expiring prompts.
+
 A continuation route projects this contract onto its suffix. It drops a gate
 whose gated entry node was cut, never rebinds a retained raising continuation to
 an arbitrary successor, and never treats a reused predecessor's completion as a
