@@ -1290,15 +1290,6 @@ def retire_gate_delivery(route, gate, jobs):
                 continue
             if record.get("state") not in {"claimed", "sent-ambiguous"}:
                 # `pending`: nobody holds it, so take the ordinary claim path.
-                if (record.get("attempts") or 0) >= PENDING.RECLAIM_LIMIT:
-                    # `claim` refuses a record whose reclaim budget is spent, so
-                    # ack can never reach it; the release still supersedes it
-                    # (review round 2, N3) -- expire it under the declared actor
-                    # rather than leave it `pending` forever.
-                    PENDING.expire_if_due(root, recipient_key, delivery_id,
-                                          actor=PENDING.EXPIRY_ACTOR,
-                                          reason="receipt-row-superseded")
-                    return "expired"
                 PENDING.claim(root, recipient_key, delivery_id,
                               claim_owner=f"gate-release:{os.getpid()}",
                               lease_seconds=60.0, require_generation_proof=False)

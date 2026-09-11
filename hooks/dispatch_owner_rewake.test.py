@@ -2061,10 +2061,9 @@ class GateCarrierTest(unittest.TestCase):
             rewake._open_gate_pending(launch)
             row.assert_not_called()
 
-    def test_the_real_unclaimable_record_never_spins_the_loop(self):
-        """review round 2, N4: B3 with the real probe and real notices."""
+    def test_repeated_claim_failure_still_wakes_once_when_delivery_recovers(self):
         delivery_id = self._gate_record()
-        for _ in range(rewake.pending_delivery.RECLAIM_LIMIT):
+        for _ in range(10):
             rewake.pending_delivery.claim(self.state, "session-gate", delivery_id,
                                           claim_owner="x", lease_seconds=0.001)
             rewake.pending_delivery.reclaim(self.state, "session-gate", delivery_id,
@@ -2099,24 +2098,21 @@ class GateCarrierTest(unittest.TestCase):
                 mock.patch.object(sys, "stdout", io.StringIO()), \
                 mock.patch.object(sys, "stderr", io.StringIO()) as stderr:
             code = rewake.main()
-        self.assertEqual(code, 0)
-        self.assertNotIn("owner=alive-waiting", stderr.getvalue())
-        self.assertEqual(sleep.call_count, run.call_count - 1)
-        self.assertLessEqual(run.call_count, 8)
+        self.assertEqual(code, 2)
+        self.assertIn("owner=alive-waiting", stderr.getvalue())
+        self.assertLessEqual(run.call_count, 1)
 
-    def test_the_probe_ignores_a_record_whose_reclaim_budget_is_spent(self):
-        """review round 1, B3: an unclaimable record must not keep the probe
-        returning True forever."""
+    def test_probe_recovers_expired_claims_without_an_eight_attempt_dead_end(self):
         delivery_id = self._gate_record()
-        for _ in range(rewake.pending_delivery.RECLAIM_LIMIT):
+        for _ in range(10):
             rewake.pending_delivery.claim(self.state, "session-gate", delivery_id,
                                           claim_owner="x", lease_seconds=0.001)
             rewake.pending_delivery.reclaim(self.state, "session-gate", delivery_id,
                                             now_ns=time.monotonic_ns() + 10**12)
         record = rewake.pending_delivery.read(self.state, "session-gate", delivery_id)
-        self.assertGreaterEqual(record["attempts"], rewake.pending_delivery.RECLAIM_LIMIT)
+        self.assertEqual(record["attempts"], 10)
         rewake._PROBE_DIRECTORY_MTIME.clear()
-        self.assertFalse(rewake._open_gate_pending(self._launch()))
+        self.assertTrue(rewake._open_gate_pending(self._launch()))
 
     def test_an_unannounced_probe_sleeps_and_the_wait_stays_bounded(self):
         """review round 1, B3: when the probe fires but nothing can be announced the

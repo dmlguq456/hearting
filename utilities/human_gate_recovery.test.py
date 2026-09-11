@@ -431,6 +431,22 @@ class M4LeaseRecovery(GatewayFixture):
     def record(self):
         return json.loads(self.path.read_text())
 
+    def test_nine_pre_send_storage_failures_recover_without_reissuing_the_question(self):
+        with mock.patch.object(self.g.ledger, "_write", side_effect=OSError("temporary-storage-failure")):
+            for _ in range(9):
+                self.one()
+                self.clock += 31_000_000_000
+        self.assertEqual(self.record()["attempts"], 9)
+        self.assertEqual(len(self.sink.sent), 0)
+        self.state.steer_ready = True
+        self.one()
+        self.assertEqual(len(self.sink.sent), 1)
+        self.response({"result": {"turnId": "busy"}})
+        self.clock += 31_000_000_000
+        self.one()
+        self.assertEqual(self.record()["state"], "acked")
+        self.assertEqual(len(self.sink.sent), 1)
+
     def transport(self, _socket, request):
         if request["op"] == "status":
             return {"status": "ready", "capabilities": {"human_gate_delivery": {
@@ -484,12 +500,12 @@ class M4LeaseRecovery(GatewayFixture):
         self.clock += 31_000_000_000
         self.one()
         self.assertEqual((self.record()["state"], self.record()["attempts"]), ("sent-ambiguous", 3))
-        for _ in range(PD.RECLAIM_LIMIT + 1):
+        for _ in range(10):
             self.clock += 31_000_000_000
             self.one()
-        self.assertEqual(self.record()["attempts"], PD.RECLAIM_LIMIT)
+        self.assertEqual(self.record()["attempts"], 13)
         self.assertEqual(len(self.sink.sent), 1)
-        self.assertIn("pending-delivery-reclaim-exhausted", self.watcher.errors[-1])
+        self.assertEqual(self.record()["state"], "sent-ambiguous")
 
     def test_expired_claim_has_one_cas_winner(self):
         with mock.patch.object(PD.time, "monotonic_ns", return_value=self.clock):

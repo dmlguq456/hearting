@@ -926,9 +926,14 @@ class TestResourceLifecycle(WorkflowFixture):
         with open(log, "ab") as stream:
             proc = subprocess.Popen(
                 ["/bin/sh", "-c", runner.SENTINEL_SCRIPT, "resource-runner",
-                 "sh", "-c", "exit 7"],
+                 "sh", "-c", "read token; exit 7"],
                 cwd=self.base, env={**os.environ, "AGENT_RESOURCE_SENTINEL": str(sentinel)},
-                stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+                stdin=subprocess.PIPE, stdout=stream, stderr=subprocess.STDOUT, start_new_session=True)
+        def cleanup():
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate(timeout=5)
+        self.addCleanup(cleanup)
         identity = None
         for _ in range(50):
             identity = SUP.RR.proc_identity(proc.pid)
@@ -936,7 +941,9 @@ class TestResourceLifecycle(WorkflowFixture):
                 break
             time.sleep(0.01)
         self.assertIsNotNone(identity)
-        proc.wait(timeout=30)
+        # Observe the real live wrapper before permitting the payload to
+        # exit; an immediate `exit 7` raced /proc observation under load.
+        proc.communicate(b"release\n", timeout=30)
         for _ in range(100):
             if sentinel.is_file():
                 break
@@ -946,7 +953,7 @@ class TestResourceLifecycle(WorkflowFixture):
         registry.write_text(json.dumps({"schema_version": 1, "runs": {"job": {
             **identity, "run_id": "job", "process_group": proc.pid,
             "cwd": str(self.base), "log": str(log), "sentinel": str(sentinel),
-            "command": ["sh", "-c", "exit 7"], "status": "running",
+            "command": ["sh", "-c", "read token; exit 7"], "status": "running",
             "parent_attempt_id": "att-fixture", "workflow_state": "RUNNING",
         }}}), encoding="utf-8")
         result = subprocess.run(
@@ -2406,8 +2413,7 @@ class TestGateSubjectNotCaller(WorkflowFixture):
         self.assertEqual(payload["questions"], 1)
         self.assertIn("await-release", payload["await_command"])
 
-    def test_a_burned_record_is_expired_by_the_release_not_orphaned(self):
-        """review round 2, N3."""
+    def test_release_retires_a_record_after_repeated_carrier_recovery(self):
         route, path = self.two_stage_route(
             human_gate="frame-review",
             continuation={"kind": "human-gate", "gate": "frame-review"})
@@ -2416,17 +2422,18 @@ class TestGateSubjectNotCaller(WorkflowFixture):
         interview, value = self._interview()
         _code, payload = self._block_with(path, jobs, interview)
         delivery_id = json.loads(Path(payload["delivery"]).read_text("utf-8"))["delivery_id"]
-        for _ in range(PENDING.RECLAIM_LIMIT):
+        for _ in range(10):
             PENDING.claim(root, session, delivery_id, claim_owner="x", lease_seconds=0.001)
             PENDING.reclaim(root, session, delivery_id, now_ns=time.monotonic_ns() + 10**12)
-        self.assertGreaterEqual(PENDING.read(root, session, delivery_id)["attempts"], PENDING.RECLAIM_LIMIT)
+        self.assertEqual(PENDING.read(root, session, delivery_id)["attempts"], 10)
         answers_path, _answers = self._answers(value)
         with contextlib.redirect_stdout(io.StringIO()):
             code = SUP.main(["release", "--route", str(path), "--gate", "frame-review",
                              "--decision", "proceed", "--jobs", str(jobs), "--answers", str(answers_path)])
         self.assertEqual(code, 0)
         record = PENDING.read(root, session, delivery_id)
-        self.assertEqual((record["state"], record["expiry_reason"]), ("expired", "receipt-row-superseded"))
+        self.assertEqual(record["state"], "acked")
+        self.assertEqual(record["acked_by"], "gate-released:frame-review")
 
     def test_await_release_refusals_carry_a_typed_reason(self):
         """review round 1, minor 6."""

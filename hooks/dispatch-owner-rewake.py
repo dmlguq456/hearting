@@ -145,7 +145,7 @@ def _validated_jobs(raw: str | None) -> Path | None:
 # ---------------------------------------------------------------------------
 
 ARM_DIRECTORY = "rewake-arms"
-ARM_LIMIT = 8  # same finite discipline as dispatch_pending_delivery.RECLAIM_LIMIT
+ARM_LIMIT = 8  # Bounds this async hook; the next real prompt retains sweep recovery.
 ARM_SCHEMA = 1
 ARM_STATES = frozenset({"waiting", "gate-wake-sent", "lapsed", "ended"})
 
@@ -1093,10 +1093,9 @@ _PROBE_NEXT_DEADLINE_NS: dict[str, int] = {}
 
 def _open_gate_pending(launch: Launch) -> bool:
     """SD-129 probe for `wait_for_attempt`: is a gate record for THIS attempt
-    waiting for a carrier? `pending`, or a lease another carrier let expire,
-    and still claimable (`attempts` below `RECLAIM_LIMIT`; a record whose
-    reclaim budget is spent is left to the release-time retirement, so the
-    hook never spins on something it can never claim -- review round 1, B3).
+    waiting for a carrier? `pending`, or a lease another carrier let expire.
+    The hook's interval and one-wake boundary govern its work; earlier failed
+    claims do not cancel delivery responsibility.
     A live claim by the sweep is left alone -- it acks within its own turn.
 
     The recipient directory is only scanned when its mtime moved since the
@@ -1123,8 +1122,6 @@ def _open_gate_pending(launch: Launch) -> bool:
     _PROBE_NEXT_DEADLINE_NS.pop(key, None)
     for _root, _key, _delivery_id, record in _recipient_gate_records(launch):
         if launch.attempt_id not in (record.get("attempt_ids") or []):
-            continue
-        if (record.get("attempts") or 0) >= pending_delivery.RECLAIM_LIMIT:
             continue
         state = record.get("state")
         if state == "pending":

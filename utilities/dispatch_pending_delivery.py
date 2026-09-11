@@ -53,7 +53,6 @@ SCHEMA_VERSION = 1
 MAX_RECEIPT_BYTES = 2048
 DIR_MODE = 0o700
 FILE_MODE = 0o600
-RECLAIM_LIMIT = 8  # SD-106 규율과 같은 유한 상한.
 
 RECIPIENT_KINDS = frozenset({
     "claude-parent-runtime",
@@ -379,8 +378,6 @@ def claim(
             raise PendingDeliveryError(
                 "pending-delivery-claim-refused", f"state={value['state']}"
             )
-        if value["attempts"] >= RECLAIM_LIMIT:
-            raise PendingDeliveryError("pending-delivery-reclaim-exhausted")
         now = time.monotonic_ns()
         updated = dict(value)
         if live_recipient_generation is not None:
@@ -452,10 +449,12 @@ def ack(
 
 
 def reclaim(root: Path, recipient_key: str, delivery_id: str, *, now_ns: int) -> dict:
-    """Bounded lease reclaim: ``{claimed,sent-ambiguous} -> pending`` once the
-    claim deadline has passed. Exhausting ``RECLAIM_LIMIT`` attempts is a
-    typed terminal refusal, not a further state transition -- the record
-    stays exactly where it was so a human/operator sees the stuck claim."""
+    """Reclaim an expired lease without deciding whether to send again.
+
+    Claims count ownership transfers, not emissions. A courier owns backoff,
+    acceptance checks and no-resend rules; this queue cannot abandon an owed
+    delivery because earlier couriers crashed or observed transient failures.
+    """
 
     path = record_path(root, recipient_key, delivery_id)
     with _record_lock(path):
@@ -469,9 +468,6 @@ def reclaim(root: Path, recipient_key: str, delivery_id: str, *, now_ns: int) ->
         deadline = value.get("claim_deadline_ns")
         if deadline is not None and now_ns < deadline:
             raise PendingDeliveryError("pending-delivery-claim-refused", "lease-not-expired")
-        # The exhaustion check belongs to the next `claim()`, not here: a
-        # reclaim only restores eligibility to retry, it is not itself a
-        # retry attempt.
         updated = dict(value)
         updated["state"] = "pending"
         updated["claim_owner"] = None

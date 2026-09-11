@@ -297,6 +297,9 @@ unresolved attempts and read-only diagnosis command. The recipient explains the
 blockage and asks for a disposition if evidence cannot resolve it; notification
 acceptance never cancels an attempt or authorizes retry. Gate and supervision
 notices share claim/send/acceptance mechanics, with separate semantic validators.
+A recovery receipt binds the work and parent; its courier proves the current
+connection generation at claim time. Claim counts are audit data, not a delivery
+cutoff. Couriers own backoff, one-wake bounds, and transport no-resend evidence.
 A settled attempt suppresses a late recovery notice. On controller exit, the
 exact orphan watcher retains state unless cleanup is proven or the unresolved
 decision has been durably handed to its parent.

@@ -326,9 +326,9 @@ class ClaimCasTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(reclaimed["state"], "pending")
         self.assertIsNone(reclaimed["claim_owner"])
 
-    def test_reclaim_exhaustion_is_a_typed_terminal_refusal(self):
+    def test_expired_claims_do_not_cancel_delivery_after_old_eight_attempt_limit(self):
         deadline = None
-        for owner in range(PD.RECLAIM_LIMIT):
+        for owner in range(10):
             claimed = PD.claim(
                 self.root, "sess-claim", self.kwargs["delivery_id"],
                 claim_owner=f"carrier-{owner}", lease_seconds=1,
@@ -338,21 +338,15 @@ class ClaimCasTest(IsolatedRootMixin, unittest.TestCase):
                 self.root, "sess-claim", self.kwargs["delivery_id"],
                 now_ns=deadline + 1,
             )
-        with self.assertRaises(PD.PendingDeliveryError) as ctx:
-            PD.claim(
-                self.root, "sess-claim", self.kwargs["delivery_id"],
-                claim_owner="carrier-final", lease_seconds=1,
-            )
-        self.assertEqual(ctx.exception.reason, "pending-delivery-reclaim-exhausted")
+        final = PD.claim(self.root, "sess-claim", self.kwargs["delivery_id"],
+                         claim_owner="carrier-final", lease_seconds=1)
+        self.assertEqual(final["attempts"], 11)
+        PD.ack(self.root, "sess-claim", self.kwargs["delivery_id"], acked_by="carrier-final")
+        self.assertEqual(PD.read(self.root, "sess-claim", self.kwargs["delivery_id"])["state"], "acked")
 
-    def test_a47_7_deliverer_unproven_reclaim_bounded_and_single_authoritative(self):
-        # A47-7: RECLAIM_LIMIT=8 and pending-delivery-reclaim-exhausted stay
-        # current-behavior unchanged when re-run through the
-        # claim_authority=deliverer-unproven path (require_generation_proof
-        # =False) -- and every claim in the bounded chain records exactly
-        # one grade, never a mix.
+    def test_recovery_preserves_one_claim_authority_and_live_lease_exclusion(self):
         deadline = None
-        for owner in range(PD.RECLAIM_LIMIT):
+        for owner in range(10):
             claimed = PD.claim(
                 self.root, "sess-claim", self.kwargs["delivery_id"],
                 claim_owner=f"carrier-{owner}", lease_seconds=1,
@@ -364,13 +358,12 @@ class ClaimCasTest(IsolatedRootMixin, unittest.TestCase):
                 self.root, "sess-claim", self.kwargs["delivery_id"],
                 now_ns=deadline + 1,
             )
-        with self.assertRaises(PD.PendingDeliveryError) as ctx:
-            PD.claim(
-                self.root, "sess-claim", self.kwargs["delivery_id"],
-                claim_owner="carrier-final", lease_seconds=1,
-                require_generation_proof=False,
-            )
-        self.assertEqual(ctx.exception.reason, "pending-delivery-reclaim-exhausted")
+        final = PD.claim(self.root, "sess-claim", self.kwargs["delivery_id"],
+                         claim_owner="carrier-final", lease_seconds=1,
+                         require_generation_proof=False)
+        self.assertEqual(final["claim_authority"], "deliverer-unproven")
+        with self.assertRaisesRegex(PD.PendingDeliveryError, "lease-not-expired"):
+            PD.reclaim(self.root, "sess-claim", self.kwargs["delivery_id"], now_ns=final["claimed_at_ns"])
 
 
 class PruneTest(IsolatedRootMixin, unittest.TestCase):
