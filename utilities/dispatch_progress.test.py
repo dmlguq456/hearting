@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -345,6 +346,83 @@ class ProgressTest(unittest.TestCase):
         state=P.watchdog(self.args(),10)
         self.assertEqual(state["terminal_action"],"process-exited")
         self.assertNotIn("fail-closed",state["action"])
+
+    def test_late_terminal_row_supersedes_cached_exit_after_watchdog_restart(self):
+        P.heartbeat(self.args(), 0)
+        self.proc.terminate(); self.proc.wait(timeout=3)
+        self.assertEqual(P.watchdog(self.args(), 1)["terminal_action"], "process-exited")
+        D.close_attempt_row_if(self.jobs, self.attempt, "completed-marker", lambda fields: True)
+        restarted = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(restarted)
+        state = restarted.watchdog(self.args(), 2)
+        self.assertEqual(state["terminal_action"], "registry-terminal")
+
+    def test_completed_row_precedes_stale_capacity_log_without_signalling(self):
+        log = self.base / "stage.codex.jsonl"
+        log.write_text("Selected model is at capacity\n")
+        self.jobs.write_text(self.jobs.read_text().rstrip("\n") + f",log_file={log}\n")
+        D.close_attempt_row_if(self.jobs, self.attempt, "completed-marker", lambda fields: True)
+        with mock.patch.object(P, "signal_authoritative_process_group") as signal_group:
+            state = P.watchdog(self.args(apply=True), 1)
+        signal_group.assert_not_called()
+        self.assertEqual(state["semantic_terminal_action"], "registry-terminal")
+        self.assertEqual(state["action"], "draining")
+        self.assertIn("note=completed-marker", self.jobs.read_text())
+
+    def test_real_watchdog_exit_then_delayed_completion_never_retries(self):
+        fallback_spec = importlib.util.spec_from_file_location(
+            "fallback_exit_race", ROOT / "utilities/stage-dispatch-fallback.py"
+        )
+        fallback = importlib.util.module_from_spec(fallback_spec)
+        fallback_spec.loader.exec_module(fallback)
+        self.proc.terminate(); self.proc.wait(timeout=3)
+        original_row = self.jobs.read_text()
+        watchdog_path = P.state_paths(D.dispatch_state_root(self.jobs), self.attempt)[1]
+        args = SimpleNamespace(jobs=self.jobs, progress_window_seconds=30,
+                               watchdog_max_windows=2, direct_timeout=5)
+        # Exercise the shared decision boundary with all three harness tags.
+        # The worker and watchdog are real processes; only publication timing
+        # is controlled here. This does not launch a model or mutate live jobs.
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                self.jobs.write_text(original_row.rstrip("\n") + f",harness={harness}\n")
+                watchdog_path.unlink(missing_ok=True)
+                stop = threading.Event()
+                publication = {}
+
+                def publish_after_exit():
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline and not stop.wait(0.01):
+                        state = P.read_json(watchdog_path)
+                        if state.get("terminal_action") == "process-exited":
+                            publication["exit_observed_at"] = time.monotonic()
+                            # Cairn's completion publication lag was ~0.95 s.
+                            if stop.wait(0.95):
+                                return
+                            publication["closed"] = D.close_attempt_row_if(
+                                self.jobs, self.attempt, "completed-marker",
+                                lambda fields: fields[1] == "open",
+                            )
+                            publication["published_at"] = time.monotonic()
+                            return
+
+                publisher = threading.Thread(target=publish_after_exit)
+                publisher.start()
+                try:
+                    state, fields = fallback.watch_launched_attempt(
+                        args, {"route_id": "rt-1"}, {"id": "test"}, self.attempt, {}
+                    )
+                finally:
+                    stop.set()
+                    publisher.join(timeout=6)
+                self.assertFalse(publisher.is_alive())
+                self.assertTrue(publication.get("closed"), publication)
+                self.assertGreaterEqual(
+                    publication["published_at"] - publication["exit_observed_at"], 0.95
+                )
+                self.assertEqual(state, "terminal", fields)
+                self.assertEqual(fields["note"], "completed-marker")
+                self.assertEqual(len(self.jobs.read_text().splitlines()), 1)
 
     def test_registry_terminal_is_cached_but_withheld_while_process_drains(self):
         text = self.jobs.read_text().replace("\topen\t", "\tdone\t")

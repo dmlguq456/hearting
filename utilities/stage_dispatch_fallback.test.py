@@ -431,17 +431,61 @@ class FallbackTest(unittest.TestCase):
    state,fields=F.watch_launched_attempt(args,route,node,"att-tool",{"child_pid":str(proc.pid),"child_pid_start":"2"})
   self.assertEqual(state,"fail-closed")
   self.assertEqual(fields.get("reason"),"progress-error")
- def test_process_exit_without_marker_advances_fallback(self):
-  args=SimpleNamespace(jobs=self.jobs,progress_window_seconds=1,watchdog_max_windows=2)
-  route={"route_id":"rt-fixture"}
-  node={"id":"plan"}
+ def test_process_exit_without_terminal_record_does_not_authorize_retry(self):
+  args=SimpleNamespace(jobs=self.jobs,progress_window_seconds=1,watchdog_max_windows=2,direct_timeout=0.1)
   seed=mock.Mock(returncode=0,stdout="",stderr="")
   exited=mock.Mock(returncode=0,stdout="action=process-exited\nterminal_action=process-exited\n",stderr="")
-  with mock.patch.object(F.subprocess,"run",side_effect=[seed,exited]):
-   state,fields=F.watch_launched_attempt(
-    args,route,node,"att-process-exit",{"child_pid":"1","child_pid_start":"2"})
-  self.assertEqual(state,"fallback")
+  with mock.patch.object(F.subprocess,"run",side_effect=[seed]+[exited]*20):
+   state,fields=F.watch_launched_attempt(args,{"route_id":"rt-fixture"},{"id":"plan"},"att-process-exit",{})
+  self.assertEqual(state,"observed")
   self.assertEqual(fields["terminal_action"],"process-exited")
+
+ def test_watchdog_cache_cannot_override_current_terminal_row(self):
+  args=SimpleNamespace(jobs=self.jobs,progress_window_seconds=1,watchdog_max_windows=2,direct_timeout=0.1)
+  for cached in ("process-exited", "dead-no-progress", "dead-capacity"):
+   for note, expected in (("completed-marker", "terminal"),
+                          ("completed-review-blocking", "terminal"),
+                          ("dead-worker-fail", "fallback"),
+                          ("dead-capacity", "capacity")):
+    with self.subTest(cached=cached,note=note):
+     self.jobs.write_text(
+      "2026-07-24T00:00:00Z\tdone\t/repo\t/wt\tplan-check\t"
+      "route_id=rt-fixture,route_node=plan-check,attempt_id=att-terminal,"
+      f"launch_outcome=reaped-before-publish,note={note}\n")
+     seed=mock.Mock(returncode=0,stdout="",stderr="")
+     stale=mock.Mock(returncode=0,stdout=f"action={cached}\nterminal_action={cached}\n",stderr="")
+     with mock.patch.object(F.subprocess,"run",side_effect=[seed,stale]):
+      state,fields=F.watch_launched_attempt(args,{"route_id":"rt-fixture"},{"id":"plan-check"},"att-terminal",{})
+     self.assertEqual(state,expected)
+     self.assertEqual(fields["note"],note)
+
+ def test_cached_failure_without_terminal_record_cannot_authorize_retry(self):
+  args=SimpleNamespace(jobs=self.jobs,progress_window_seconds=1,watchdog_max_windows=2,direct_timeout=0.1)
+  for cached in ("dead-no-progress", "dead-capacity", "registry-terminal"):
+   with self.subTest(cached=cached):
+    seed=mock.Mock(returncode=0,stdout="",stderr="")
+    stale=mock.Mock(returncode=0,stdout=f"action={cached}\nterminal_action={cached}\n",stderr="")
+    with mock.patch.object(F.subprocess,"run",side_effect=[seed,stale]):
+     state,_=F.watch_launched_attempt(args,{"route_id":"rt-fixture"},{"id":"plan"},"att-missing",{})
+    self.assertEqual(state,"fail-closed")
+
+ def test_completed_but_live_or_unverifiable_attempt_cannot_authorize_retry(self):
+  proc=self._live_row(attempt="att-settling")
+  self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").rstrip("\n") + ",note=completed-marker\n")
+  args=SimpleNamespace(jobs=self.jobs,progress_window_seconds=1,watchdog_max_windows=2,direct_timeout=0.1)
+  seed=mock.Mock(returncode=0,stdout="",stderr="")
+  stale=mock.Mock(returncode=0,stdout="action=dead-capacity\nterminal_action=dead-capacity\n",stderr="")
+  with mock.patch.object(F.subprocess,"run",side_effect=[seed]+[stale]*20):
+   state,fields=F.watch_launched_attempt(args,{"route_id":"rt-fixture"},{"id":"plan"},"att-settling",{})
+  self.assertEqual(state,"observed")
+  self.assertEqual(fields["process_state"],"live")
+  self.assertIsNone(proc.poll())
+  with mock.patch.object(F.subprocess,"run",side_effect=[seed,stale]), mock.patch.object(
+       F,"attempt_process_quiescence",return_value=SimpleNamespace(state="unverifiable",reason="observer-unavailable")):
+   state,fields=F.watch_launched_attempt(args,{"route_id":"rt-fixture"},{"id":"plan"},"att-settling",{})
+  self.assertEqual(state,"fail-closed")
+  self.assertEqual(fields["process_reason"],"observer-unavailable")
+
  def test_completed_row_is_draining_until_exact_process_exits(self):
   proc=subprocess.Popen(["sleep","30"],start_new_session=True)
   try:

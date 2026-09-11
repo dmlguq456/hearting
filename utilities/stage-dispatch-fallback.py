@@ -1282,23 +1282,26 @@ def watch_launched_attempt(args, route, node, attempt_id, launch_fields):
             if verdict[0] == "observed":
                 advisory.update(verdict[1])
             return verdict
-        if last.get("action", "").startswith("fail-closed"):
-            return "fail-closed", last
-        if last.get("terminal_action") == "dead-capacity":
-            return "capacity", last
-        if last.get("terminal_action") == "dead-no-progress":
-            return "fallback", last
-        if last.get("terminal_action") == "process-exited":
-            return "fallback", last
-        if last.get("terminal_action") == "registry-terminal":
-            terminal = terminal_attempt_state(
-                args.jobs, route["route_id"], node["id"], attempt_id
-            )
-            if terminal is None:
-                return "fail-closed", last
+        # Observe progress here; derive retry permission only from the exact
+        # settled attempt row. Process exit can precede marker publication.
+        terminal = terminal_attempt_state(
+            args.jobs, route["route_id"], node["id"], attempt_id
+        )
+        if terminal is not None:
             if terminal[0] == "draining":
                 return "observed", terminal[1]
             return terminal
+        if last.get("action", "").startswith("fail-closed"):
+            return "fail-closed", last
+        action = last.get("terminal_action")
+        if action == "process-exited":
+            # Keep the existing bounded observation window. If publication
+            # is still pending at its end, return the original launch receipt
+            # to the owner without launching another attempt.
+            return "observed", last
+        if action in {"dead-capacity", "dead-no-progress", "registry-terminal"}:
+            # The cached claim has no matching durable terminal record.
+            return "fail-closed", last
         return "observed", last
 
     # Establish a file/heartbeat fingerprint before the first deadline. This

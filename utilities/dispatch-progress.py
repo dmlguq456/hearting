@@ -465,6 +465,13 @@ def watchdog(args, now):
     })
     with locked(lock_path):
         state = read_json(wd_path)
+        # The settled attempt row owns the verdict. A cached observation or
+        # an older capacity log must not override a later completion record.
+        if fields[1] not in {"open", "running"}:
+            state.update({"action": "registry-terminal", "terminal_action": "registry-terminal",
+                          "observed_at": now, "verdict": verdict["state"]})
+            write_json(wd_path, state)
+            return defer_terminal_until_quiescent(state, metadata)
         capacity_path = capacity_log_evidence(dispatch_state_root(args.jobs), fields[4], metadata)
         if metadata.get("note") == "dead-capacity" or capacity_path is not None:
             closed = metadata.get("note") == "dead-capacity"
@@ -535,11 +542,6 @@ def watchdog(args, now):
         if previous and fingerprint and fingerprint != previous:
             quiet, last_progress = 0, now
             state["last_window_at"] = now
-        if fields[1] not in {"open", "running"}:
-            state.update({"action": "registry-terminal", "terminal_action": "registry-terminal",
-                          "observed_at": now, "verdict": verdict["state"]})
-            write_json(wd_path, state)
-            return defer_terminal_until_quiescent(state, metadata)
         if background is not None:
             state.update(
                 {
