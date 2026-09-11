@@ -55,9 +55,10 @@ W7C write-cutover contract (`utilities/artifact_producer.py`, registry table
 `producer_lifecycle` in `capabilities/topologies.json`). The same lifecycle
 binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 
-1. **begin before the first write.** After the route is compiled and bound,
-   the owner (the inline session for `direct`, the dispatch-depth-1 owner for
-   `quick` and `standard+`) runs `artifact_producer.py begin --artifact-root
+1. **begin before the first write.** After route compile/bind, depth-0 runs
+   `begin` before either frame leg starts; the later owner inherits that cycle.
+   Without frame, the acting owner (inline for `direct`, depth-1 otherwise)
+   begins the cycle. The command is `artifact_producer.py begin --artifact-root
    <root> --route <route file> --capability autopilot-code --intensity <intensity>`.
    While the cutover is inactive this returns `legacy-compat` and the legacy
    `<artifact-root>/plans/` layout stays writable; once active it
@@ -111,10 +112,10 @@ Stage-local gates must not become full independent QA loops after every sub-stag
 
 **Corrections are batched, never atomic.** A failed review gate (`plan-check`, `impl-review`, `test`) is followed by exactly one correction pass that closes every 🔴 finding of that round together, plus the follow-on gaps the review named; the owner never redispatches the full `plan` or `execute` node to fix a single finding. The plan correction runs through the `code-refine` boundary and the code correction re-enters the `execute` boundary as a bounded fix under the same node. The re-review that follows is a **closure check** under the review unit's Round Protocol — the owner's assignment names the round number and the prior review artifact and asks whether the prior 🔴 items are closed and the delta is clean; it never asks for a fresh independent re-audit of the whole artifact. Each correction consumes one unit of the `core/CONVENTIONS.md §1.1` retry budget; when the budget is spent, remaining concerns go to the plan's risk/unresolved section and the owner reports them instead of opening another round. A review round that records blocking findings ends `completed-review-blocking`, not as a dead worker; when the budget is spent on such rounds, the owner writes `round_{N}.owner-closure.md` beside the review artifacts (frontmatter `verdict: closed-by-owner`, `node`, `gate`; body naming every blocking attempt and its disposition) and completes the review node with that record as evidence — `core/OPERATIONS.md §5.10` owns the gate's evidence checks.
 
-**Pre-route direction gate (SD-123).** The direction gate runs in the depth-0
-bootstrap layer *ahead of* the route, not inside it. A route sealed before this
-cycle keeps `frame.continuation=inline-next` and is never retro-fitted. Depth-0
-launches the frame pair, joins both direction briefs, and builds
+**Pre-owner direction gate (SD-123).** Depth-0 compiles/binds the route and
+begins its producer cycle before launching the frame pair. The direction gate
+binds at `one-shot` entry for `quick`, `plan` entry for `standard+`. Legacy
+sealed routes remain unchanged. Depth-0 joins both direction briefs and builds
 `shards/frame/frame-summary.json` (five fields — 방향/대안/위험/범위 변경/비용,
 ≤1KB) plus the **frame interview** `shards/frame/interview.json` (SD-129: a
 one-sentence restatement the user confirms, a plain-language brief, and at most
@@ -132,7 +133,7 @@ it is launched. `intent.md` is the agreed intent `plan` reads first (Problem /
 Proposed Outcome / Affected / Constraints / Decisions / Open Questions), so a
 plan that contradicts a recorded decision is a plan-check blocker; pass its
 absolute path in the plan prompt as `Intent:`. `revise` re-runs the frame pair
-before the route starts and `stop` cancels before anything is compiled, so
+before owner launch and `stop` cancels the prepared workflow, so
 neither consumes the owner's `code-refine` retry budget. A first-work-node
 start whose entry gate is not released is refused by every launch surface
 (`human-gate-unreleased`). `direct` has no gate: the depth-0 session asks its
