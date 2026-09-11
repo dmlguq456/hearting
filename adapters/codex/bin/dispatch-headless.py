@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
+    foreground_review_launch_identity,
     GROUP_REAP_PROOF,
     GOVERNOR_RESERVATION_ENV,
     REPLICA_RESERVATION_ROW_KEYS,
@@ -54,6 +55,7 @@ from dispatch_contract import (  # noqa: E402
     headless_attempt_policy,
     launch_orphan_watch,
     launch_reap_watch,
+    seal_foreground_result,
     new_attempt_id,
     parse_registry_metadata,
     parent_attempt_binding_is_live,
@@ -3160,6 +3162,14 @@ def main(argv: list[str]) -> int:
                 attempt_id=args.attempt_id, child_spawned="1",
             )
         read_launch_fence_failure(fence_failure_read_fd)
+        foreground_review_handoff = (
+            getattr(args, "launch_lifecycle", DETACHED) == FOREGROUND_SCOPED
+            and getattr(args, "dispatch_depth", None) == 1
+            and getattr(args, "worker_type", None) == "review"
+            and getattr(args, "execution_surface", None) == "registered-headless"
+            and bool(getattr(args, "registered_worker", False))
+            and not any(foreground_review_launch_identity(args).values())
+        )
         start_ticks = launch_metadata.get("pid_start", "")
         if (args.dispatch_depth == 1 and args.worker_type == "owner"
                 and args.launch_lifecycle == DETACHED):
@@ -3209,7 +3219,45 @@ def main(argv: list[str]) -> int:
         args.child_pid = proc.pid
         args.child_pid_start = start_ticks
         args.launch_heartbeat = seed_launch_heartbeat(args, jobs, proc.pid, start_ticks)
-        if args.launch_lifecycle == FOREGROUND_SCOPED:
+        if args.launch_lifecycle == FOREGROUND_SCOPED and foreground_review_handoff:
+            binding = args.parent_binding
+            try:
+                outcome = wait_foreground(
+                    proc, args.foreground_timeout,
+                    parent_pid=binding.observed_pid if binding else None,
+                    parent_pid_start=binding.observed_pid_start if binding else None,
+                    parent_is_live=(
+                        (lambda: parent_attempt_binding_is_live(jobs, binding))
+                        if binding else None
+                    ),
+                )
+                foreground_seal = seal_foreground_result(
+                    jobs, args.attempt_id, proc.pid, start_ticks or "",
+                    int(launch_metadata.get("pgid", "0")),
+                    exit_code=outcome.exit_code, failure=outcome.failure,
+                    group_empty=outcome.group_empty,
+                )
+                reap_watch_pid = launch_reap_watch(
+                    jobs, args.attempt_id, proc.pid, start_ticks or "",
+                    int(launch_metadata.get("pgid", "0")),
+                    foreground_seal=foreground_seal,
+                )
+            except (DispatchContractError, ValueError) as exc:
+                reason = getattr(exc, "reason", "foreground-outcome-seal-error")
+                detail = getattr(exc, "detail", str(exc))
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                close_job_row(jobs, args.slug, args.worktree, reason, "", args.attempt_id)
+                return fail(reason, 70, detail=detail, child_spawned="0")
+            annotate_attempt_row(
+                jobs, args.attempt_id,
+                {"reap_watch": "post-exit", "reap_watch_pid": str(reap_watch_pid)},
+            )
+            args.worker_exit = outcome.exit_code
+            args.worker_failure = outcome.failure
+        elif args.launch_lifecycle == FOREGROUND_SCOPED:
             binding = args.parent_binding
             outcome = wait_foreground(
                 proc,

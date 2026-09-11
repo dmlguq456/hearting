@@ -49,6 +49,7 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                resolve_parent_extinction,
                                seal_cancellation_quiescence_receipt,
                                signal_exact_process_group,
+                               ROUTE_IDENTITY_METADATA_KEYS,
                                validate_attempt_metadata)  # noqa: E402
 from dispatch_continuation_budget import resolve_continuation_budget  # noqa: E402
 from owner_route_binding import (  # noqa: E402
@@ -66,6 +67,9 @@ from codex_dispatch_terminal import (  # noqa: E402
     inspect_terminal_attempt,
 )
 from dispatch_completion_join import (  # noqa: E402
+    ChildRow,
+    classify_exact_route_free_review_outcome,
+    current_attempt_row,
     materialize_after_terminal_close,
     reconcile_pending_delivery,
 )
@@ -579,13 +583,54 @@ def carrier_terminal(row):
     )
 
 
-def classify(row, args, newest_orders, rows=None):
+def _foreground_review_candidate(meta):
+    return (
+        meta.get("transport") == "headless"
+        and meta.get("execution_surface") == "registered-headless"
+        and meta.get("registered_worker") == "1"
+        and meta.get("dispatch_depth") == "1"
+        and meta.get("worker_type") == "review"
+        and meta.get("launch_lifecycle") == "foreground-scoped"
+        and not any(meta.get(key) for key in ROUTE_IDENTITY_METADATA_KEYS)
+    )
+
+
+def _foreground_binding(meta):
+    try:
+        return (
+            str(meta["attempt_id"]), int(meta["pid"]),
+            str(meta["pid_start"]), int(meta["pgid"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def classify(row, args, newest_orders, rows=None, *, expected_binding=None):
     if row["status"] not in OPEN: return "terminal", "already-terminal", None
     meta = row["meta"]
     if row.get("legacy_read_only"):
         return "legacy-read-only", "legacy-attempt-row", None
     if row.get("attempt_contract_status") != "current":
         return "contract-invalid", row.get("attempt_contract_status", "invalid"), None
+    if _foreground_review_candidate(row["meta"]):
+        # The selected row is the admission boundary.  Its binding is never
+        # reconstructed from the row being classified: refresh first, then
+        # observe quiescence on that exact fresh snapshot.
+        if expected_binding is None:
+            return "active", "foreground-outcome-binding-required", None
+        fresh = current_attempt_row(args.jobs, row["meta"].get("attempt_id", ""))
+        if fresh is not None:
+            process = attempt_process_quiescence(fresh.metadata)
+            classification = classify_exact_route_free_review_outcome(
+                fresh,
+                jobs=args.jobs,
+                expected_attempt_id=expected_binding[0],
+                expected_pid=expected_binding[1],
+                expected_pid_start=expected_binding[2],
+                expected_pgid=expected_binding[3],
+                quiescence=process,
+            )
+            return classification.as_registry_tuple()
     # OPERATIONS §5.10: every post-hoc carrier classifies the exact log through
     # the shared helper, so a reviewer whose FAIL names a readable in-root
     # artifact is booked `completed-review-blocking` here exactly as the
@@ -842,7 +887,14 @@ def reconcile(rows, args):
         if all(key[:2]): newest[key] = row["order"]
     decisions = []
     for row in selected:
-        category, reason, note = classify(row, args, newest, rows)
+        selected_binding = (
+            _foreground_binding(row["meta"])
+            if _foreground_review_candidate(row["meta"])
+            else None
+        )
+        category, reason, note = classify(
+            row, args, newest, rows, expected_binding=selected_binding
+        )
         closed = False
         cascade = []
         summary_owner = {"state": "not-applied", "reason": "dry-run"}
@@ -861,7 +913,10 @@ def reconcile(rows, args):
                 for item in fresh_rows:
                     key = fold_key(item["meta"])
                     if all(key[:2]): latest[key] = item["order"]
-                fresh_category, fresh_reason, fresh_note = classify(fresh, args, latest, fresh_rows)
+                fresh_category, fresh_reason, fresh_note = classify(
+                    fresh, args, latest, fresh_rows,
+                    expected_binding=selected_binding,
+                )
                 fresh_decision.update(category=fresh_category, reason=fresh_reason, note=fresh_note)
                 return fresh_note == note and fresh_category == category
 

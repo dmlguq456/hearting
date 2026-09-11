@@ -35,7 +35,13 @@ from dispatch_contract import (  # noqa: E402
     SUCCESS_NOTES,
     DispatchContractError,
     ProcessQuiescence,
+    FOREGROUND_OUTCOME_KEYS,
+    ROUTE_IDENTITY_METADATA_KEYS,
+    _foreground_outcome_values_from_pipe,
+    attempt_raw_row_sha256,
     attempt_process_quiescence,
+    foreground_review_eligible,
+    validate_review_output_binding,
     close_attempt_row,
     marker_bound_delivery_transaction,
     marker_bound_process_identity,
@@ -1238,7 +1244,7 @@ def read_supervisor_state(
 def child_row_revision(row: ChildRow) -> str:
     """Return the bounded exact-row revision sealed into an outbox receipt."""
 
-    return hashlib.sha256(row.raw.encode("utf-8")).hexdigest()
+    return attempt_raw_row_sha256(row.raw)
 
 
 def receipt_with_current_actions(
@@ -3218,7 +3224,162 @@ def route_completion_evidence(
     return artifact, ""
 
 
-def close_finished_child(row: ChildRow, *, jobs: str | Path) -> str:
+@dataclass(frozen=True)
+class ExactReviewClassification:
+    """A neutral decision shared by reaper and registry reconciliation."""
+
+    state: str
+    reason: str
+    note: str | None
+    close_action: str
+
+    def as_registry_tuple(self) -> tuple[str, str, str | None]:
+        return self.state, self.reason, self.note
+
+
+def _route_free_review_row(row: ChildRow) -> bool:
+    metadata = row.metadata
+    return (
+        metadata.get("transport") == "headless"
+        and metadata.get("execution_surface") == "registered-headless"
+        and metadata.get("registered_worker") == "1"
+        and metadata.get("dispatch_depth") == "1"
+        and metadata.get("worker_type") == "review"
+        and metadata.get("launch_lifecycle") == "foreground-scoped"
+        and not any(metadata.get(key) for key in ROUTE_IDENTITY_METADATA_KEYS)
+    )
+
+
+def classify_exact_route_free_review_outcome(
+    row: ChildRow,
+    *,
+    jobs: str | Path,
+    expected_attempt_id: str,
+    expected_pid: int,
+    expected_pid_start: str,
+    expected_pgid: int,
+    quiescence: ProcessQuiescence,
+) -> ExactReviewClassification:
+    """Classify one sealed, route-free review without mutating its row."""
+
+    if not _route_free_review_row(row):
+        return ExactReviewClassification(
+            "contract-invalid", "foreground-outcome-ineligible",
+            "dead-foreground-outcome-ineligible", "typed-close"
+        )
+    if not foreground_review_eligible(
+        row.metadata,
+        expected_attempt_id=expected_attempt_id,
+        expected_pid=expected_pid,
+        expected_pid_start=expected_pid_start,
+        expected_pgid=expected_pgid,
+    ):
+        return ExactReviewClassification(
+            "contract-invalid", "foreground-outcome-binding-mismatch",
+            "dead-foreground-outcome-binding-mismatch", "typed-close"
+        )
+    seal_error = None
+    try:
+        raw_fields = row.raw.split("\t")
+        if len(raw_fields) != 6:
+            raise DispatchContractError("foreground-outcome-malformed")
+        sealed = _foreground_outcome_values_from_pipe(raw_fields[5])
+    except (DispatchContractError, IndexError) as exc:
+        sealed = None
+        seal_error = exc
+    if sealed is None:
+        if seal_error is not None:
+            if quiescence.state != "quiescent":
+                return ExactReviewClassification(
+                    "active", f"foreground-process-{quiescence.reason}", None, "pending"
+                )
+            return ExactReviewClassification(
+                "terminal-handoff", seal_error.reason,
+                "dead-foreground-outcome-malformed", "typed-close"
+            )
+        return ExactReviewClassification(
+            "active", "foreground-outcome-pending", None, "pending"
+        )
+    if quiescence.state != "quiescent":
+        return ExactReviewClassification(
+            "active", f"foreground-process-{quiescence.reason}", None, "pending"
+        )
+    if sealed["foreground_process_failure"] != "none":
+        failure = sealed["foreground_process_failure"]
+        return ExactReviewClassification(
+            "terminal-handoff", f"foreground-process-{failure}", f"dead-{failure}", "typed-close"
+        )
+    metadata = row.metadata
+    terminal = inspect_terminal_attempt(
+        metadata.get("log_file"),
+        worktree=_row_worktree(row),
+        artifact_root_metadata=metadata.get("artifact_root"),
+        worker_type=metadata.get("worker_type"),
+    )
+    if terminal.get("state") != "valid":
+        state = str(terminal.get("state") or "absent")
+        reason = str(terminal.get("reason") or f"terminal-{state}")
+        note = "dead-missing-result" if state == "absent" else "dead-invalid-envelope"
+        return ExactReviewClassification("terminal-handoff", reason, note, "typed-close")
+    verdict = str(terminal.get("verdict") or "")
+    if verdict in {"FAIL", "BLOCKED"}:
+        if review_blocking_handoff(terminal, metadata.get("worker_type")):
+            return ExactReviewClassification(
+                "terminal-handoff", "typed-review-blocking", REVIEW_BLOCKING_NOTE, "typed-close"
+            )
+        note = "dead-worker-fail" if verdict == "FAIL" else "dead-worker-blocked"
+        return ExactReviewClassification("terminal-handoff", f"typed-{verdict.lower()}", note, "typed-close")
+    if verdict != "PASS":
+        return ExactReviewClassification("terminal-handoff", "terminal-verdict-invalid", "dead-invalid-envelope", "typed-close")
+    if terminal.get("artifact_state") != "readable":
+        return ExactReviewClassification(
+            "terminal-handoff", f"evidence-{terminal.get('artifact_state') or 'absent'}",
+            "dead-invalid-envelope", "typed-close"
+        )
+    artifact, evidence_reason = route_completion_evidence(
+        metadata, worktree=_row_worktree(row)
+    )
+    if artifact is None:
+        return ExactReviewClassification(
+            "terminal-handoff", evidence_reason, "dead-invalid-envelope", "typed-close"
+        )
+    try:
+        validate_review_output_binding(
+            jobs,
+            attempt_id=row.attempt_id,
+            output_path=artifact,
+            cycle_id=metadata.get("review_cycle_id", ""),
+            producer_id=metadata.get("review_producer_id", ""),
+            capability=metadata.get("capability", ""),
+            unit=metadata.get("unit", ""),
+            worktree=_row_worktree(row),
+            artifact_root=metadata.get("artifact_root", ""),
+        )
+    except (DispatchContractError, OSError) as exc:
+        return ExactReviewClassification(
+            "terminal-handoff", getattr(exc, "reason", "review-output-binding-invalid"),
+            "dead-invalid-envelope", "typed-close"
+        )
+    return ExactReviewClassification("done", "foreground-review-pass", "completed-review", "wrapper-pass")
+
+
+def apply_exact_route_free_review_classification(
+    row: ChildRow, *, jobs: str | Path, classification: ExactReviewClassification
+) -> str:
+    """Apply one already-computed review decision through one terminal CAS."""
+
+    if classification.close_action == "pending":
+        return "pending"
+    if classification.close_action == "typed-close":
+        return close_finished_child(row, jobs=jobs, classification=classification)
+    if classification.close_action == "wrapper-pass":
+        return close_wrapper_pass(row, jobs=jobs, classification=classification)
+    return "foreground-outcome-close-action-invalid"
+
+
+def close_finished_child(
+    row: ChildRow, *, jobs: str | Path, classification: ExactReviewClassification | None = None
+) -> str:
     """Close one finished-but-open child from its own terminal evidence.
 
     A route-bound node may only be closed through the completion-marker path
@@ -3236,6 +3397,26 @@ def close_finished_child(row: ChildRow, *, jobs: str | Path) -> str:
     """
 
     metadata = getattr(row, "metadata", {}) or {}
+    if classification is not None:
+        if classification.close_action == "pending":
+            return "pending"
+        if classification.close_action == "wrapper-pass":
+            return "classification-action-mismatch"
+        try:
+            closed = close_attempt_row(
+                Path(jobs), row.attempt_id, classification.note or "dead-foreground-review",
+                evidence={
+                    "classifier_source": "foreground-review-classifier-v1",
+                    "reconcile_reason": classification.reason,
+                    "failure_class": "contract" if classification.note != "completed-review" else "pass",
+                },
+            )
+        except (DispatchContractError, OSError) as exc:
+            return getattr(exc, "reason", type(exc).__name__)
+        if closed:
+            materialize_after_terminal_close(Path(jobs), row.attempt_id)
+            return ""
+        return classification.reason
     route_file = metadata.get("route_file")
     route_node = metadata.get("route_node")
     if not route_file or not route_node:
@@ -3378,8 +3559,29 @@ def close_finished_child(row: ChildRow, *, jobs: str | Path) -> str:
     return completion
 
 
-def close_wrapper_pass(row: ChildRow, *, jobs: str | Path) -> str:
+def close_wrapper_pass(
+    row: ChildRow, *, jobs: str | Path, classification: ExactReviewClassification | None = None
+) -> str:
     """Complete one wrapper-reaped PASS or close a typed contract failure."""
+
+    if classification is not None:
+        if classification.close_action != "wrapper-pass":
+            return close_finished_child(row, jobs=jobs, classification=classification)
+        try:
+            closed = close_attempt_row(
+                Path(jobs), row.attempt_id, classification.note or "completed-review",
+                evidence={
+                    "classifier_source": "foreground-review-classifier-v1",
+                    "reconcile_reason": classification.reason,
+                    "failure_class": "pass",
+                },
+            )
+        except (DispatchContractError, OSError) as exc:
+            return getattr(exc, "reason", type(exc).__name__)
+        if closed:
+            materialize_after_terminal_close(Path(jobs), row.attempt_id)
+            return ""
+        return classification.reason
 
     reason = close_finished_child(row, jobs=jobs)
     if not reason:

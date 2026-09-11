@@ -4542,4 +4542,59 @@ class LaunchMismatchAnnotationTest(unittest.TestCase):
             self.assertEqual(D.launch_mismatch_annotation(detail), {}, detail)
 
 
+class ForegroundOutcomeSealTest(unittest.TestCase):
+ def _jobs(self, directory, extra=""):
+  jobs=Path(directory)/"jobs.log"
+  jobs.write_text(
+   "2026-09-11T00:00:00Z\topen\t/r\t/w\treview\t"
+   "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+   "execution_surface=registered-headless,registered_worker=1,"
+   "fallback_hop=same-harness-headless,worker_type=review,"
+   "launch_lifecycle=foreground-scoped,attempt_id=att-contract,"
+   "pid=123,pid_start=456,pgid=123,pid_ns=pid:[1],pid_observer_ns=pid:[1]"
+   + extra + "\n", encoding="utf-8")
+  return jobs
+
+ def test_partial_and_seventh_outcome_keys_are_rejected_without_mutation(self):
+  for extra, reason in (
+   (",foreground_outcome_schema=1", "foreground-outcome-partial"),
+   (",foreground_outcome_schema=1,foreground_outcome_ready=1,foreground_extra=x", "foreground-outcome-malformed"),
+  ):
+   with self.subTest(reason=reason), tempfile.TemporaryDirectory() as td:
+    jobs=self._jobs(td, extra)
+    before=jobs.read_bytes()
+    with self.assertRaises(D.DispatchContractError) as ctx:
+     D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=0,failure="",group_empty=True)
+    self.assertEqual(ctx.exception.reason, reason)
+    self.assertEqual(jobs.read_bytes(), before)
+
+ def test_each_route_identity_key_refuses_authority(self):
+  for key in D.ROUTE_IDENTITY_METADATA_KEYS:
+   with self.subTest(key=key), tempfile.TemporaryDirectory() as td:
+    jobs=self._jobs(td, f",{key}=route-value")
+    with self.assertRaises(D.DispatchContractError) as ctx:
+     D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=0,failure="",group_empty=True)
+    self.assertEqual(ctx.exception.reason, "foreground-outcome-ineligible")
+
+ def test_concurrent_identical_seals_converge_and_conflict_preserves_bytes(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=self._jobs(td)
+   barrier=threading.Barrier(2)
+   results=[]
+   def identical():
+    barrier.wait()
+    try: results.append(D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=0,failure="",group_empty=True))
+    except Exception as exc: results.append(exc)
+   threads=[threading.Thread(target=identical) for _ in range(2)]
+   for thread in threads: thread.start()
+   for thread in threads: thread.join()
+   self.assertEqual(len(results), 2)
+   self.assertTrue(all(isinstance(item, D.SealedForegroundOutcome) for item in results))
+   committed=jobs.read_bytes()
+   with self.assertRaises(D.DispatchContractError) as ctx:
+    D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=7,failure="exit-7",group_empty=True)
+   self.assertEqual(ctx.exception.reason, "foreground-outcome-conflict")
+   self.assertEqual(jobs.read_bytes(), committed)
+
+
 if __name__=="__main__": unittest.main()
