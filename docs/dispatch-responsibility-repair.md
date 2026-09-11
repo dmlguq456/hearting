@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-현재 상태: 공통 실행·완료·재시도·정리·통보 책임을 연결했고, 실제 Codex light owner와 OpenAI Luna를 쓰는 OpenCode light owner 모두 자식 실행부터 workflow/route 종료와 cycle 봉인까지 확인했다. OpenCode 리뷰의 동일 Codex 부모 success 자동 전달도 확인했다. 마지막 OpenCode owner 실측에서 발견한 합의 내용 누락과 수동 대기의 조기 실패 판정은 공통 입력·완료 경로에서 수정하고 회귀검사를 통과했다. 이 두 후속 수정의 근거는 실제 기록 재생과 테스트이며 새 모델 왕복 PASS라고 부르지 않는다. main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
+현재 상태: 공통 실행·완료·재시도·정리·통보 책임을 연결했고, 실제 Codex light owner와 OpenAI Luna를 쓰는 OpenCode light owner 모두 자식 실행부터 workflow/route 종료와 cycle 봉인까지 확인했다. OpenCode 리뷰의 동일 Codex 부모 success 자동 전달도 확인했다. 마지막 OpenCode owner 실측에서 발견한 합의 내용 누락과 수동 대기의 조기 실패 판정은 공통 입력·완료 경로에서 수정하고 회귀검사를 통과했다. 이 두 후속 수정의 근거는 실제 기록 재생과 테스트이며 새 모델 왕복 PASS라고 부르지 않는다. 소스 3b9ea255를 통합 트리와 로컬 main에 병합했다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전 보류한다.
 
 아래는 HEAD별 진행·실패 기록이다. 각 절의 당시 대기/미검증 상태를 최종 상태로 읽지 않도록 최신 실측과 후속 수정은 마지막 두 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
 
@@ -259,3 +259,5 @@ OpenCode depth-0는 공개된 bounded-wait를 사용했고 owner 대기는 한 �
 최종 회귀: 실제 3adapter prompt matrix 6, bootstrap 14, frame interview 31, adapter Codex 58/Claude 46/OpenCode 30, readiness 14, join 120, contract 226(skip1), shell bounded-wait conformance 모두 PASS. 실제 r5 완료 owner 행도 read-only readiness에서 ready/registry-closed/advance-completed였다. 생성 projection 20개·적응 경계·기존 surface budget 및 diff 공백 검사를 통과했다. OpenCode fresh-registry preview에 release 기록이 없는 경우를 뒤늦게 발견해 입력 주입 없이 기존 preview를 유지하도록 교정했으며 최초 실패 로그도 남겼다. 공통 판정으로 옮기면서 드러난 잘못된 legacy supervisor proof와 미봉인 slice fixture도 실제 writer 계약으로 정정했다. 로그 `/tmp/released-task-*-final.log`, `/tmp/released-task-*-tests.log`, `/tmp/shared-wait-*-final.log`, `/tmp/shared-wait-contract-tests.log`, `/tmp/context-wait-{generation,boundary}-final.log`.
 
 남은 지원 경계는 OpenCode depth-0의 명시적 bounded polling과 OpenCode serial-chain owner/deterministic advance 미지원이다. 두 모델 실행 하네스에 같은 OpenAI Luna를 쓴 결과를 모델 간 독립성으로 표현하지 않는다. 과거 4bc 시도의 관측 불가 자손이 자동 정리됐다는 운영 주장은 하지 않는다. 새로운 정상·지연·중복 재시도·관측 불가·감독자 종료 계약의 근거를 각각 구분했고, release/install은 별도 사용자 확인 전 보류한다.
+
+최종 통합 확인: 3b9ea255의 깨끗한 통합 트리에서 prompt 6 / readiness 14 / join 120을 다시 통과했다(`/tmp/integration-3b9-{prompt,ready,join}.log`). PR #17의 수정 브랜치를 푸시했고 로컬 main도 같은 소스로 fast-forward했다. 원격 main은 f6d05cbb에 유지했으며, primary checkout의 기존 미추적 `dist/`는 보존했다. 이 기록 이후 문서만 고친 커밋은 위 소스 검증의 의미를 바꾸지 않는다.
