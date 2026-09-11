@@ -165,6 +165,31 @@ class ReviewWatchdogIntegrationTest(unittest.TestCase):
                 os.close(gate_write)
                 self.assertEqual(handle.process.wait(timeout=2), -int(signum))
 
+    def test_admission_keeps_lease_on_unknown_watchdog_child_or_tagged_proof(self):
+        import dispatch_lifecycle as lifecycle
+        from dispatch_contract import ProcessGroupObservation
+        from types import SimpleNamespace
+        for fault in ("watchdog", "child", "tagged"):
+            with self.subTest(fault=fault):
+                process = mock.Mock(pid=77)
+                process.poll.return_value = 0
+                identity = {"pid": "77", "pid_start": "1", "pgid": "77",
+                            "pid_ns": "ns", "pid_observer_ns": "ns"}
+                handle = SimpleNamespace(process=process, receipt={"watchdog": identity},
+                    _committing=True, close_control=lambda: None, readiness_fd=-1, attempt_id="att-held")
+                release = mock.Mock(return_value=True)
+                with mock.patch.object(lifecycle, "attempt_scan_namespace_authority", return_value=True), \
+                     mock.patch.object(lifecycle, "process_group_observation", side_effect=[
+                         ProcessGroupObservation("unverifiable" if fault == "watchdog" else "empty"),
+                         ProcessGroupObservation("unverifiable" if fault == "child" else "empty")]), \
+                     mock.patch.object(lifecycle, "attempt_tagged_descendants", return_value=ProcessGroupObservation(
+                         "unverifiable" if fault == "tagged" else "empty")):
+                    result = lifecycle._review_cleanup(handle, child=identity, lease_acquired=True,
+                        lease_release=release, witness_probe=lambda: True)
+                release.assert_not_called()
+                self.assertEqual(result.review_lease, "unverified")
+                self.assertEqual(result.status, "unverified")
+
     def test_reap_proof_is_required_for_every_cleanup_failure(self):
         class FakeChild:
             pid = 77

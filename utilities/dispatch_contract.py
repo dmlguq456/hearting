@@ -4228,6 +4228,27 @@ def _record_review_admission_failure(
         return False
 
 
+
+def adapter_launch_failure_outcome(jobs: Path, attempt_id: str, reason: str) -> str:
+    """Preserve the launch transaction's outcome when an adapter reports it."""
+    rows = []
+    for line in Path(jobs).read_text(encoding="utf-8").splitlines():
+        fields = line.split("\t")
+        if len(fields) == 6 and row_has_attempt(fields[5], attempt_id):
+            rows.append(parse_registry_metadata(fields[5]))
+    if len(rows) != 1:
+        raise DispatchContractError("attempt-row-not-unique", attempt_id)
+    metadata = rows[0]
+    if metadata.get("review_admission") in {"aborted", "commit-failed"}:
+        outcome = metadata.get("launch_outcome", "")
+        if outcome in {"never-launched", "post-release-failed"}:
+            return outcome
+        raise DispatchContractError("review-admission-outcome-missing", attempt_id)
+    return {
+        "attempt-launch-identity-record-failed": "reaped-before-publish",
+        "attempt-launch-cleanup-unverified": "launch-cleanup-unverified",
+    }.get(reason, "never-launched")
+
 def _parent_liveness_evidence(
     jobs: Path, metadata: dict[str, str]
 ) -> tuple[bool, str, AuthoritativeProcessIdentity | None]:
@@ -4631,12 +4652,34 @@ def spawn_claimed_attempt(
             """Run every external cleanup effect before deriving the verdict."""
 
             nonlocal admission_cleanup
-            registered_group_empty = _abort_fenced_launch(
-                proc,
-                -1 if post_release else gate_write,
-                identity["pid_start"],
+            watchdog_owned = admission is not None and bool(
+                admission.metadata.get("review_fence_pid")
             )
-            returned_cleanup = abort_admission(reason)
+            # A watchdog owns the fenced child and setsid descendants. Give
+            # that authority the teardown request before observing its death;
+            # killing it first destroys the only complete cleanup owner.
+            # Its outcome seal needs this same registry lock.
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            try:
+                if watchdog_owned:
+                    if not post_release:
+                        try:
+                            os.close(gate_write)
+                        except OSError:
+                            pass
+                    returned_cleanup = abort_admission(reason)
+                    registered_group_empty = (
+                        attempt_scan_namespace_authority(identity)
+                        and proc.poll() is not None
+                        and process_group_observation(int(identity["pgid"])).state == "empty"
+                    )
+                else:
+                    registered_group_empty = _abort_fenced_launch(
+                        proc, -1 if post_release else gate_write, identity["pid_start"],
+                    )
+                    returned_cleanup = abort_admission(reason)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             if returned_cleanup is not None:
                 admission_cleanup = returned_cleanup
             admission_cleanup = _merge_review_cleanup_group_proof(
@@ -6541,6 +6584,21 @@ def _immutable_attempt_identity(fields: list[str]) -> tuple[object, ...]:
     )
     return fields[2], fields[3], fields[4], immutable_metadata
 
+
+
+def launched_attempt_identity(fields: list[str]) -> tuple[object, ...]:
+    """Compare an admitted attempt across its one terminal/delivery commit.
+
+    Reuse registry mutation vocabularies; terminal evidence is added at close,
+    whereas the admitted process identity and lifecycle must stay unchanged.
+    """
+    base = _immutable_attempt_identity(fields)
+    metadata = parse_registry_metadata(fields[5])
+    return (*base[:3],
+            tuple((key, value) for key, value in base[3]
+                  if key not in ATTEMPT_TERMINAL_EVIDENCE_KEYS),
+            tuple((key, metadata.get(key, "")) for key in sorted(_PROCESS_IDENTITY_METADATA_KEYS)),
+            metadata.get("launch_lifecycle", ""))
 
 def _atomic_registry_replace(jobs: Path, lines: list[str]) -> None:
     """Replace the registry after fsync without exposing a truncated file."""

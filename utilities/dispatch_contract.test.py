@@ -3367,6 +3367,57 @@ class DispatchContractTest(unittest.TestCase):
     if proc.poll() is None:proc.kill()
     proc.wait()
 
+ def test_real_watchdog_commit_close_fault_drains_before_lease_and_outside_jobs_lock(self):
+  import dispatch_lifecycle as lifecycle
+  import review_watchdog
+  import time
+  import signal
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td); attempt="att-real-commit-fault"
+   jobs=self._cleanup_fault_row(td,attempt); marker=base/"grandchild"
+   budget=lifecycle.begin_finite_watchdog(30); holder={}; order=[]
+   code=("import pathlib,subprocess,time; p=subprocess.Popen(['sleep','30'],start_new_session=True); "
+         f"pathlib.Path({str(marker)!r}).write_text(str(p.pid)); time.sleep(30)")
+   def spawn(gate_fd):
+    handle=review_watchdog.launch_review_watchdog(
+     [sys.executable,str(Path(__file__).with_name("launch-fence.py")),
+      "--parent-pid",str(os.getpid()),"--gate-fd",str(gate_fd),"--",sys.executable,"-c",code],
+     gate_fd=gate_fd,budget=budget,attempt_id=attempt,nonce="a"*64)
+    holder["handle"]=handle
+    return handle.process
+   def admission(identity):
+    handle=holder["handle"]; receipt=handle.read_ready(2); child=receipt["child"]
+    def release():
+     self.assertIsNotNone(handle.process.poll())
+     self.assertEqual(D.attempt_tagged_descendants(dict(identity,attempt_id=attempt)).state,"empty")
+     # The production watchdog also seals an outcome through this lock.
+     with Path(str(jobs)+".lock").open("a") as probe:
+      D.fcntl.flock(probe.fileno(),D.fcntl.LOCK_EX|D.fcntl.LOCK_NB)
+     order.append("release"); return True
+    def commit():
+     handle.commit()
+     deadline=time.monotonic()+3
+     while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+     self.assertTrue(marker.exists())
+     raise OSError("COMMIT delivered but close failed")
+    return D.PostClaimAdmission(
+     {"review_admission":"prepared","review_fence_pid":str(child["pid"])},
+     abort=lambda _reason:lifecycle._review_cleanup(handle,child=child,lease_acquired=True,
+       lease_release=release,witness_probe=lambda:handle.process.poll() is not None),commit=commit)
+   try:
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(jobs,attempt,parent_binding=None,spawn=spawn,post_claim=admission)
+    self.assertEqual(caught.exception.reason,"attempt-post-claim-commit-failed")
+    self.assertEqual(order,["release"])
+    self.assertEqual(holder["handle"].process.returncode,-signal.SIGTERM)
+    metadata=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+    self.assertEqual(metadata["launch_outcome"],"post-release-failed")
+    self.assertEqual(metadata["review_admission_cleanup"],"verified-post-release-reaped-v1")
+   finally:
+    handle=holder.get("handle")
+    if handle is not None and handle.process.poll() is None:
+     handle.process.terminate();handle.process.wait(timeout=5)
+
  def test_review_holder_uses_live_process_past_deadline_and_rejects_future_timestamp(self):
   identity=D.process_launch_identity(os.getpid())
   nonce="f"*64

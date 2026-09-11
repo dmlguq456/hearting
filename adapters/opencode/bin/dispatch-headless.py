@@ -37,6 +37,7 @@ from dispatch_contract import (  # noqa: E402
     REPLICA_RESERVATION_ROW_KEYS,
     anchored_capacity_failure,
     annotate_attempt_row,
+    adapter_launch_failure_outcome,
     launch_mismatch_annotation,
     attempt_launch_is_available,
     attempt_launch_state,
@@ -1961,15 +1962,7 @@ def main(argv: list[str]) -> int:
                 print("child_spawned=0")
                 print("reason=attempt-launch-already-claimed")
                 return 0
-            outcome = (
-                "reaped-before-publish"
-                if exc.reason == "attempt-launch-identity-record-failed"
-                else (
-                    "launch-cleanup-unverified"
-                    if exc.reason == "attempt-launch-cleanup-unverified"
-                    else "never-launched"
-                )
-            )
+            outcome = adapter_launch_failure_outcome(jobs, args.attempt_id, exc.reason)
             annotate_attempt_row(jobs, args.attempt_id, {"launch_outcome": outcome})
             cancel_governor_reservation(governor, governor_root, reservation_token)
             reason = (

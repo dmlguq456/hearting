@@ -38,6 +38,7 @@ from dispatch_contract import (  # noqa: E402
     SUPERVISOR_LEASE_KIND,
     anchored_capacity_failure,
     annotate_attempt_row,
+    adapter_launch_failure_outcome,
     bytecode_cache_env,
     launch_mismatch_annotation,
     attempt_launch_is_available,
@@ -3109,21 +3110,14 @@ def main(argv: list[str]) -> int:
                     else "launch-error"
                 )
             )
-            outcome = (
-                "reaped-before-publish"
-                if exc.reason == "attempt-launch-identity-record-failed"
-                else (
-                    "launch-cleanup-unverified"
-                    if exc.reason == "attempt-launch-cleanup-unverified"
-                    else "never-launched"
-                )
-            )
+            outcome = adapter_launch_failure_outcome(jobs, args.attempt_id, exc.reason)
             annotate_attempt_row(jobs, args.attempt_id, {"launch_outcome": outcome})
             cancel_governor_reservation(governor, governor_root, reservation_token)
             close_job_row(jobs, args.slug, args.worktree, reason, "", args.attempt_id)
             return fail(
                 exc.reason, 73, detail=exc.detail,
-                attempt_id=args.attempt_id, child_spawned="0",
+                attempt_id=args.attempt_id,
+                child_spawned="1" if outcome == "post-release-failed" else "0",
             )
         except OSError as exc:
             for fd in (fence_failure_read_fd, fence_failure_write_fd):

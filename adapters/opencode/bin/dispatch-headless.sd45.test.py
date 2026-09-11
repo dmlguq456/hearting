@@ -393,6 +393,85 @@ class ForegroundReviewStartPathTest(unittest.TestCase):
             self.assertFalse(any("HEAD" in " ".join(map(str, call.args[0])) for call in git_read.call_args_list))
             self.assertIn("reap_watch=post-exit,reap_watch_pid=4242", jobs.read_text(encoding="utf-8"))
 
+    def test_commit_failure_preserves_common_outcome_and_closes_exact_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); worktree = root / "worktree"; worktree.mkdir()
+            subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+            subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+            (worktree / "README").write_text("isolated\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(worktree), "add", "README"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "fixture"], check=True)
+            jobs = root / "jobs.log"; artifacts = root / "artifacts"; artifacts.mkdir()
+            environment = isolated_dispatch_env(
+                AGENT_DISPATCH_JOBS=str(jobs), AGENT_DISPATCH_PARENT_SESSION_ID="session-test",
+                AGENT_DISPATCH_CURRENT_HARNESS="claude", AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                AGENT_DISPATCH_CURRENT_SANDBOX="default", AGENT_DISPATCH_CALLER_HARNESS="claude",
+                AGENT_DISPATCH_OWNER_HARNESS="claude", CODEX_THREAD_ID="", CODEX_SESSION_ID="",
+            )
+            order = []; seal_token = object()
+            def seal(*args, **kwargs):
+                order.append("seal"); self.assertEqual(kwargs, {"exit_code": 0, "failure": "", "group_empty": True})
+                metadata = next(
+                    WH.parse_registry_metadata(line.split("\t", 5)[5])
+                    for line in jobs.read_text(encoding="utf-8").splitlines()
+                    if "attempt_id=att-opencode-foreground" in line
+                )
+                self.assertEqual(args[1], metadata["attempt_id"])
+                self.assertEqual(str(args[2]), metadata["pid"])
+                self.assertEqual(str(args[3]), metadata["pid_start"])
+                self.assertEqual(str(args[4]), metadata["pgid"])
+                return seal_token
+            def wait(*_args, **_kwargs):
+                order.append("wait"); return types.SimpleNamespace(exit_code=0, failure="", group_empty=True)
+            def reap(*args, **kwargs):
+                order.append("reap"); self.assertIs(kwargs["foreground_seal"], seal_token)
+                self.assertEqual(args[1], "att-opencode-foreground")
+                return 4242
+            real_annotate = WH.annotate_attempt_row
+            def annotate(jobs_path, attempt_id, values):
+                if "reap_watch" in values: order.append("annotate")
+                return real_annotate(jobs_path, attempt_id, values)
+            from dispatch_contract import PostClaimAdmission, ReviewAdmissionCleanup
+            cleanup = ReviewAdmissionCleanup(
+                watchdog_group="empty", fenced_child_group="empty", readiness="closed-removed",
+                review_lease="released", governed_witness="unlocked",
+                payload_marker="may-have-started", status="verified-post-release-reaped")
+            admission = PostClaimAdmission({"review_admission": "prepared"},
+                abort=lambda _reason: cleanup,
+                commit=lambda: (_ for _ in ()).throw(OSError("commit-close-fault")))
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(WH, "acquire_review_lease_after_claim", return_value=admission), \
+                    mock.patch.object(WH, "cancel_governor_reservation", wraps=WH.cancel_governor_reservation) as cancel, \
+                    mock.patch.object(WH, "resolve_artifact_root", return_value=str(artifacts)), \
+                    mock.patch.object(WH.shutil, "which", return_value="/bin/runtime"), \
+                    mock.patch.object(WH, "attach_summary_owner", return_value={}), \
+                    mock.patch.object(WH, "shell_command", return_value="true"), \
+                    mock.patch.object(WH, "wait_governor_reservation_claim", return_value={}), \
+                    mock.patch.object(WH, "wait_foreground", side_effect=wait), \
+                    mock.patch.object(WH, "seal_foreground_result", side_effect=seal) as seal_call, \
+                    mock.patch.object(WH, "launch_reap_watch", side_effect=reap) as reap_call, \
+                    mock.patch.object(WH, "annotate_attempt_row", side_effect=annotate), \
+                    mock.patch.object(WH.subprocess, "check_output", wraps=WH.subprocess.check_output) as git_read:
+                result = WH.main([
+                    "dispatch-headless.py", "--start", "--worktree", str(worktree), "--jobs", str(jobs),
+                    "--slug", "review", "--capability", "autopilot-code", "--capability-mode", "debug",
+                    "--worker-mode", "dev/backend", "--worker-type", "review", "--launch-lifecycle", "foreground-scoped",
+                    "--model", "test", "--variant", "low",
+                    "--attempt-id", "att-opencode-foreground",
+                ])
+            self.assertEqual(result, 73)
+            seal_call.assert_not_called(); reap_call.assert_not_called()
+            cancel.assert_called_once()
+            lines = jobs.read_text().splitlines()
+            self.assertEqual(len(lines), 1)
+            fields = lines[0].split("\t")
+            self.assertEqual(fields[1], "done")
+            metadata = WH.parse_registry_metadata(fields[5])
+            self.assertEqual(metadata["launch_outcome"], "post-release-failed")
+            self.assertEqual(metadata["review_admission"], "commit-failed")
+            self.assertEqual(metadata["review_admission_cleanup"], "verified-post-release-reaped-v1")
+
     def test_owner_route_keys_are_real_entry_negatives_before_wait_or_seal(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); worktree = root / "worktree"; worktree.mkdir()

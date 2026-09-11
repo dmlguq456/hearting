@@ -15,6 +15,7 @@ from dispatch_contract import (
     GROUP_REAP_PROOF,
     DispatchContractError,
     annotate_attempt_row,
+    launched_attempt_identity,
     annotate_attempt_row_if,
     attempt_scan_namespace_authority,
     attempt_process_quiescence,
@@ -249,10 +250,21 @@ def watch(args: argparse.Namespace) -> int:
                 expected_pgid=args.pgid,
                 quiescence=quiescence,
             )
-            apply_exact_route_free_review_classification(
+            failure = apply_exact_route_free_review_classification(
                 row, jobs=args.jobs, classification=classification
             )
-        except (DispatchContractError, JoinContractError):
+            # A successful process drain is not a committed terminal row.
+            # Re-read even after success, allowing an exact concurrent close
+            # but never treating a CAS or I/O refusal as watcher completion.
+            current = exact_attempt_row(args.jobs, args.attempt_id)
+            if (current.status not in {"done", "killed", "cancelled"}
+                    or launched_attempt_identity(current.raw.split("\t"))
+                    != launched_attempt_identity(row.raw.split("\t"))):
+                print("review-completion-apply-failed: " + (failure or "terminal-row-unverified"), file=sys.stderr)
+                return 65
+            if failure:
+                materialize_after_terminal_close(args.jobs, args.attempt_id)
+        except (DispatchContractError, JoinContractError, OSError):
             return 65
         return 0
     # The drain proof is the last moment at which the detached watcher has

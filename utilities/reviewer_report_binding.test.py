@@ -743,6 +743,25 @@ class ReviewAdapterWiringParityTest(unittest.TestCase):
             self.assertEqual(cleanup.review_lease, "released")
             self.assertEqual(released, [True])
 
+    def test_foreground_admission_keeps_lease_for_live_or_unobservable_process_set(self):
+        with tempfile.TemporaryDirectory() as td:
+            child = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            identity = D.process_launch_identity(child.pid)
+            try:
+                for namespace in (identity["pid_observer_ns"], "pid:[foreign]"):
+                    release = mock.Mock(return_value={"status": "released"})
+                    admission = DL.acquire_foreground_review_admission(
+                        budget=DL.begin_finite_watchdog(30),
+                        identity={**identity, "pid_observer_ns": namespace}, root=Path(td),
+                        cycle_id="cyc-live", attempt_id="att-live-review",
+                        review_output=Path(td)/"report.md", binding={}, jobs=Path(td)/"jobs.log",
+                        lease_acquire=lambda *_a, **_k: {"status": "acquired", "registry_metadata": {}},
+                        lease_release=release, witness_probe=lambda: True)
+                    self.assertEqual(admission.abort("fault").status, "unverified")
+                    release.assert_not_called()
+            finally:
+                child.terminate(); child.wait(timeout=5)
+
 
 class PreflightHelpBoundaryTest(unittest.TestCase):
     def test_codex_and_opencode_write_help_and_argv_boundary(self):

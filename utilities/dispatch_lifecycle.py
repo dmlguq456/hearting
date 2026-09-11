@@ -20,6 +20,8 @@ from dispatch_contract import (
     PostClaimAdmission,
     ReviewAdmissionCleanup,
     process_group_observation,
+    attempt_scan_namespace_authority,
+    attempt_tagged_descendants,
     process_identity_is_live,
     process_start_ticks,
     signal_exact_process_group,
@@ -189,16 +191,21 @@ def _review_cleanup(
             # sealed readiness identity is absent, no signal is safe.
             if expected_identity is not None:
                 try:
-                    signal_exact_process_group(
-                        int(expected_identity["pid"]),
-                        str(expected_identity["pid_start"]), signal.SIGKILL,
-                    )
-                    process.wait(timeout=1.0)
+                    if attempt_scan_namespace_authority(dict(expected_identity)):
+                        signal_exact_process_group(
+                            int(expected_identity["pid"]),
+                            str(expected_identity["pid_start"]), signal.SIGTERM,
+                        )
+                    # TERM asks the finite watchdog to drain its own fenced
+                    # group and tagged descendants. Never kill that authority
+                    # merely because this adapter's bounded join expires.
+                    process.wait(timeout=5.0)
                 except (BaseException, subprocess.TimeoutExpired):
                     pass
         try:
             watchdog_ok = (
                 expected_identity is not None
+                and attempt_scan_namespace_authority(dict(expected_identity))
                 and process.poll() is not None
                 and process_group_observation(int(expected_identity["pgid"])).state == "empty"
             )
@@ -212,20 +219,25 @@ def _review_cleanup(
                 all(str(child.get(key, "")) for key in (
                     "pid_start", "pid_ns", "pid_observer_ns"
                 ))
+                and attempt_scan_namespace_authority(dict(child))
                 and process_group_observation(child_pgid).state == "empty"
+                and attempt_tagged_descendants({
+                    **dict(child), "attempt_id": str(getattr(handle, "attempt_id", "")),
+                }).state == "empty"
             )
         except (OSError, TypeError, ValueError):
             child_ok = False
     lease_state = "never-acquired"
     if lease_acquired:
-        lease_state = "released"
-        if lease_release is None:
-            lease_state = "unverified"
-        else:
+        lease_state = "unverified"
+        if watchdog_ok and child_ok and lease_release is not None:
             try:
                 release_result = lease_release()
-                if release_result is False:
-                    lease_state = "unverified"
+                if release_result is not False and (
+                    not isinstance(release_result, Mapping)
+                    or release_result.get("status") in {"released", "already-released"}
+                ):
+                    lease_state = "released"
             except BaseException:
                 lease_state = "unverified"
     witness_state = "unlocked"
@@ -453,17 +465,26 @@ def acquire_foreground_review_admission(
         nonlocal cleanup_result
         if cleanup_result is not None:
             return cleanup_result
-        lease_state = "released"
         try:
-            release_result = lease_release()
-            if release_result is False:
-                lease_state = "unverified"
-            elif isinstance(release_result, Mapping) and release_result.get("status") not in {
-                "released", "already-released"
-            }:
-                lease_state = "unverified"
-        except BaseException:
-            lease_state = "unverified"
+            pgid = int(str(identity.get("pgid", "")))
+            group_empty = (
+                attempt_scan_namespace_authority(dict(identity))
+                and process_group_observation(pgid).state == "empty"
+                and attempt_tagged_descendants({**dict(identity), "attempt_id": attempt_id}).state == "empty"
+            )
+        except (OSError, TypeError, ValueError):
+            group_empty = False
+        lease_state = "unverified"
+        if group_empty:
+            try:
+                release_result = lease_release()
+                if release_result is not False and (
+                    not isinstance(release_result, Mapping)
+                    or release_result.get("status") in {"released", "already-released"}
+                ):
+                    lease_state = "released"
+            except BaseException:
+                pass
         witness_state = "unlocked"
         if witness_probe is not None:
             witness_deadline = time.monotonic() + _REVIEW_WITNESS_UNLOCK_TIMEOUT
@@ -479,11 +500,6 @@ def acquire_foreground_review_admission(
                 if remaining <= 0:
                     break
                 time.sleep(min(_REVIEW_WITNESS_POLL_INTERVAL, remaining))
-        try:
-            pgid = int(str(identity.get("pgid", "")))
-            group_empty = process_group_observation(pgid).state == "empty"
-        except (OSError, TypeError, ValueError):
-            group_empty = False
         verified = (
             group_empty
             and lease_state == "released"

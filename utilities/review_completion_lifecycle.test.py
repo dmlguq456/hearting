@@ -431,6 +431,61 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
                     except ProcessLookupError:
                         pass
 
+    def test_commit_ambiguity_cleanup_requests_watchdog_and_releases_only_after_descendants(self):
+        import dispatch_lifecycle as lifecycle
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            marker = root / "grandchild.json"
+            ending = ("import subprocess,json; "
+                      "p=subprocess.Popen(['sleep','30'], start_new_session=True); "
+                      f"pathlib.Path({str(marker)!r}).write_text(json.dumps(p.pid)); "
+                      "time.sleep(30)")
+            handle, jobs = self._launch(root, ending=ending, timeout=30, governed=True)
+            try:
+                deadline = time.monotonic() + 3
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertTrue(marker.exists())
+                released = []
+                def release():
+                    self.assertIsNotNone(handle.process.poll())
+                    self.assertEqual(contract.process_group_observation(int(handle.receipt["child"]["pgid"])).state, "empty")
+                    self.assertEqual(contract.attempt_tagged_descendants(_row(jobs).metadata).state, "empty")
+                    released.append(True)
+                    return {"status": "released"}
+                result = lifecycle._review_cleanup(
+                    handle, child=handle.receipt["child"], lease_acquired=True,
+                    lease_release=release, witness_probe=lambda: handle.process.poll() is not None,
+                )
+                self.assertEqual(result.status, "verified-post-release-reaped")
+                self.assertEqual(released, [True])
+                self.assertEqual(handle.process.returncode, -signal.SIGTERM)
+            finally:
+                if handle.process.poll() is None:
+                    handle.process.terminate()
+                    handle.process.wait(timeout=5)
+
+    def test_route_free_apply_refusal_requires_exact_durable_terminal_row(self):
+        for fault in ("cas", "io", "concurrent", "different-identity"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                handle, jobs = self._launch(Path(td))
+                handle.process.wait(timeout=5)
+                before = _row(jobs)
+                real_apply = watcher.apply_exact_route_free_review_classification
+                def apply(row, **kwargs):
+                    if fault == "io":
+                        raise OSError("registry-write-refused")
+                    if fault in {"concurrent", "different-identity"}:
+                        self.assertEqual(real_apply(row, **kwargs), "")
+                        if fault == "different-identity":
+                            jobs.write_text(jobs.read_text().replace(
+                                "pid_start=" + row.metadata["pid_start"], "pid_start=1", 1))
+                    return "registry-cas-refused"
+                with mock.patch.object(watcher, "apply_exact_route_free_review_classification", side_effect=apply):
+                    result = watcher.watch(self._args(jobs, before))
+                self.assertEqual(result, 0 if fault == "concurrent" else 65)
+                self.assertEqual(_row(jobs).status, "open" if fault in {"cas", "io"} else "done")
+
     def test_real_launch_fence_refuses_a_stale_child_identity_before_payload(self):
         for mutation in (("review_fence_pid_start", "1"), ("pid_observer_ns", "pid:[foreign]")):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as td:
