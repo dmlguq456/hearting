@@ -707,7 +707,9 @@ def terminal_attempt_state(
         "terminal_action": "registry-terminal",
         "note": note or "unknown",
     }
-    process = attempt_process_quiescence(row)
+    # The exact terminal row is the gate that may consume a portable drain
+    # receipt after its observer namespace has gone away.
+    process = attempt_process_quiescence(row, terminal_receipt=True)
     fields.update(process_state=process.state, process_reason=process.reason)
     if process.state == "live":
         return "draining", fields

@@ -44,12 +44,12 @@ from dispatch_completion_join import (  # noqa: E402
 KINDS = {"registry", "tool", "file", "artifact", "test", "terminal"}
 
 
-def defer_terminal_until_quiescent(state, metadata):
+def defer_terminal_until_quiescent(state, metadata, *, terminal_receipt=False):
     """Keep semantic terminal evidence cached while withholding fallback readiness."""
 
     if not state.get("terminal_action"):
         return state
-    process = attempt_process_quiescence(metadata)
+    process = attempt_process_quiescence(metadata, terminal_receipt=terminal_receipt)
     if process.state == "quiescent":
         return state
     visible = dict(state)
@@ -471,7 +471,7 @@ def watchdog(args, now):
             state.update({"action": "registry-terminal", "terminal_action": "registry-terminal",
                           "observed_at": now, "verdict": verdict["state"]})
             write_json(wd_path, state)
-            return defer_terminal_until_quiescent(state, metadata)
+            return defer_terminal_until_quiescent(state, metadata, terminal_receipt=True)
         capacity_path = capacity_log_evidence(dispatch_state_root(args.jobs), fields[4], metadata)
         if metadata.get("note") == "dead-capacity" or capacity_path is not None:
             closed = metadata.get("note") == "dead-capacity"

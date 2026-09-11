@@ -523,6 +523,39 @@ class FallbackTest(unittest.TestCase):
   state,fields=F.terminal_attempt_state(self.jobs,"rt-q","plan-check","att-rb")
   self.assertEqual(state,"fallback")
   self.assertNotIn("review_verdict",fields)
+ def test_terminal_fallback_consumes_portable_receipt_after_observer_exit(self):
+  import dispatch_contract as D
+  for harness in ("claude","codex","opencode"):
+   for lifecycle,outcome in (("foreground-scoped","governed-process-reaped"),
+                             ("detached","governed-process-group-drained")):
+    for note,expected in (("completed-marker","terminal"),
+                          ("completed-review-blocking","terminal"),
+                          ("dead-capacity","capacity"),
+                          ("dead-worker-fail","fallback")):
+     with self.subTest(harness=harness,lifecycle=lifecycle,note=note):
+      metadata={"route_id":"rt-q","route_node":"plan-check","attempt_id":"att-receipted",
+       "attempt_schema_version":"2","dispatch_depth":"2","transport":"headless",
+       "execution_surface":"registered-headless","registered_worker":"1",
+       "fallback_hop":"same-harness-headless","harness":harness,"note":note,
+       "pid":"437","pgid":"437","pid_start":"20","pid_scope":"namespace-local",
+       "pid_ns":"pid:[foreign-fixture]","pid_observer_ns":"pid:[foreign-fixture]",
+       "launch_lifecycle":lifecycle,"launch_outcome":outcome,
+       "group_reap_proof":D.GROUP_REAP_PROOF,"group_reap_pgid":"437",
+       "attempt_descendant_proof":D.ATTEMPT_DESCENDANT_PROOF,
+       "attempt_descendant_observer_ns":"pid:[foreign-fixture]"}
+      def write(status="done"):
+       self.jobs.write_text("2026-09-11T00:00:00Z\t"+status+"\t/repo\t/wt\treview\t"+
+        ",".join(f"{k}={v}" for k,v in metadata.items())+"\n")
+      write()
+      state,fields=F.terminal_attempt_state(self.jobs,"rt-q","plan-check","att-receipted")
+      self.assertEqual(state,expected,fields)
+      self.assertEqual(fields["process_state"],"quiescent")
+      write("open")
+      self.assertIsNone(F.terminal_attempt_state(self.jobs,"rt-q","plan-check","att-receipted"))
+      metadata.pop("group_reap_proof")
+      write()
+      state,fields=F.terminal_attempt_state(self.jobs,"rt-q","plan-check","att-receipted")
+      self.assertEqual(state,"fail-closed",fields)
  def test_attempt_identity_is_stable_across_actions(self):
   path=self.route(); first=self.run_chain(path); second=self.run_chain(path)
   def attempt(result):

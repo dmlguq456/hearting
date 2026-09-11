@@ -83,6 +83,34 @@ class ProgressTest(unittest.TestCase):
         self.proc.wait(timeout=3)
         self.assertIn("note=dead-no-progress", self.jobs.read_text())
 
+    def test_closed_row_consumes_portable_receipt_but_cached_observation_cannot(self):
+        self.proc.terminate(); self.proc.wait(timeout=5)
+        fields = self.jobs.read_text().strip().split("\t")
+        metadata = D.parse_registry_metadata(fields[5])
+        metadata.update(pid_scope="namespace-local", pid_ns="pid:[foreign-fixture]",
+            pid_observer_ns="pid:[foreign-fixture]", launch_lifecycle="detached",
+            launch_outcome="governed-process-group-drained", group_reap_proof=D.GROUP_REAP_PROOF,
+            group_reap_pgid=metadata["pgid"], attempt_descendant_proof=D.ATTEMPT_DESCENDANT_PROOF,
+            attempt_descendant_observer_ns="pid:[foreign-fixture]", note="completed-marker")
+        fields[1] = "done"
+        fields[5] = ",".join(f"{k}={v}" for k,v in metadata.items())
+        self.jobs.write_text("\t".join(fields)+"\n")
+        result = P.watchdog(self.args(), 10)
+        self.assertEqual(result["terminal_action"], "registry-terminal", result)
+        # The same cached action and portable receipt on an open row do not
+        # grant terminal authority. Nor does an incomplete receipt on a closed row.
+        fields[1] = "open"
+        self.jobs.write_text("\t".join(fields)+"\n")
+        result = P.watchdog(self.args(), 11)
+        self.assertEqual(result["terminal_action"], "", result)
+        self.assertEqual(result["action"], "fail-closed-process-unverifiable")
+        fields[1] = "done"
+        metadata.pop("group_reap_proof")
+        fields[5] = ",".join(f"{k}={v}" for k,v in metadata.items())
+        self.jobs.write_text("\t".join(fields)+"\n")
+        result = P.watchdog(self.args(), 12)
+        self.assertEqual(result["terminal_action"], "", result)
+
     def _verification_lease(self, process, *, deadline=100):
         lease = self.base / "verification-leases" / f"{self.attempt}.json"
         lease.parent.mkdir(parents=True, exist_ok=True)
