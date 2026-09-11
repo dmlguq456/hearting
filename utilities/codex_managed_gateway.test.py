@@ -960,6 +960,17 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         self.assertIsInstance(timing["same_thread_resume_ns"], int)
 
+    def test_opencode_child_uses_the_same_exact_parent_gateway(self) -> None:
+        request = receipt_request("batch-opencode")
+        request["receipt"]["children"][0]["harness"] = "opencode"
+        result = control(self.control, request)
+        self.assertEqual(result["status"], "accepted", result)
+        self.assertEqual(self.server.counts(), (1, 0))
+        starts = [value for value in self.server.messages if value.get("method") == "turn/start"]
+        context = starts[0]["params"]["additionalContext"]["hearting-completion"]["value"]
+        self.assertIn('"harness":"opencode"', context)
+        self.assertIn('"delivery_classification":"success"', context)
+
     def test_invalid_delivery_timing_is_rejected_before_upstream(self) -> None:
         before = self.server.counts()
         request = receipt_request("batch-bad-timing")

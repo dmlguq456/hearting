@@ -144,6 +144,7 @@ from codex_managed_dispatch import (  # noqa: E402
     probe_managed_codex_parent,
     registered_parent_delivery,
 )
+import dispatch_parent_completion as parent_completion
 from execution_access import (  # noqa: E402
     AccessContext,
     ExecutionAccessError,
@@ -403,66 +404,8 @@ def _bind_runtime_parent(args: argparse.Namespace) -> None:
 
 
 def resolve_parent_completion_delivery(args: argparse.Namespace) -> str:
-    """Select the checked parent-runtime adapter for a direct Codex child.
-
-    Not keyed on `worker_type` (2026-09-10, W2 of frame-bootstrap-layer): only
-    action/dispatch_depth/execution_surface/registered_worker/parent identity
-    decide the branch below, so a depth-1 `frame` worker takes exactly the
-    same delivery path a depth-1 `owner`/`review`/`stage`/`support` worker
-    does. Do not re-derive this by re-reading the branches; see
-    `CodexSD78CompletionDelivery.test_frame_worker_type_takes_the_same_delivery_path_as_owner`
-    in dispatch-headless.sd45.test.py, which proves it by calling this exact
-    function with `worker_type="frame"`.
-    """
-    args.managed_gateway_binding = None
-    current_thread = os.environ.get("CODEX_THREAD_ID") or os.environ.get(
-        "CODEX_SESSION_ID"
-    )
-    direct_registered = (
-        getattr(args, "action", "") in {"register", "start"}
-        and args.dispatch_depth == 1
-        and args.execution_surface == "registered-headless"
-        and bool(args.registered_worker)
-        and bool(args.parent_session_id)
-        and os.environ.get("AGENT_DISPATCH_CHILD") != "1"
-    )
-    if (
-        direct_registered
-        and args.parent_harness == "codex"
-        and bool(current_thread)
-        and args.parent_session_id == current_thread
-    ):
-        try:
-            args.managed_gateway_binding = probe_managed_codex_parent(
-                parent_harness=args.parent_harness,
-                parent_session_id=args.parent_session_id,
-            )
-        except ManagedDispatchError as exc:
-            if os.environ.get("AGENT_CODEX_MANAGED_GATEWAY") == "1":
-                args.parent_completion_reason = str(exc)
-                args.parent_completion_reason_class = (
-                    getattr(exc, "reason_class", "") or "-"
-                )
-            else:
-                args.parent_completion_reason = (
-                    "interactive-auto-wake-unsupported"
-                )
-                args.parent_completion_reason_class = "-"
-            return "poll-fallback"
-        if args.managed_gateway_binding.thread_advanced:
-            args.parent_session_id = args.managed_gateway_binding.thread_id
-            args.parent_completion_reason = "managed-thread-advanced"
-        else:
-            args.parent_completion_reason = "managed-single-ingress-live"
-        return MANAGED_PARENT_DELIVERY
-    if direct_registered and args.parent_harness == "claude":
-        args.parent_completion_reason = "claude-async-rewake-resume"
-        return "claude-parent-runtime"
-    if direct_registered:
-        args.parent_completion_reason = "parent-identity-unmatched"
-        return "poll-fallback"
-    args.parent_completion_reason = "parent-attempt-owned"
-    return "parent-runtime-supervised"
+    return parent_completion.resolve_parent_completion_delivery(
+        args, probe=probe_managed_codex_parent)
 
 
 def bind_parent_completion_delivery(args: argparse.Namespace) -> None:
@@ -470,88 +413,12 @@ def bind_parent_completion_delivery(args: argparse.Namespace) -> None:
 
 
 def validate_interactive_parent_launch(args: argparse.Namespace) -> None:
-    """Never let an ordinary Codex parent enter a model-owned wait loop."""
-
-    direct_registered = (
-        getattr(args, "action", "") in {"register", "start"}
-        and args.dispatch_depth == 1
-        and args.execution_surface == "registered-headless"
-        and bool(args.registered_worker)
-        and bool(args.parent_session_id)
-    )
-    if not (
-        direct_registered
-        and args.parent_harness == "codex"
-        and args.parent_completion_delivery == "poll-fallback"
-    ):
-        return
-    if getattr(args, "allow_unmanaged_parent_poll", False):
-        args.parent_completion_reason = "operator-authorized-unmanaged-poll"
-        return
-    raise DispatchContractError(
-        "managed-entry-required",
-        "unmanaged interactive Codex parents cannot register or start a detached owner; restart through preflight.sh managed-entry",
-    )
+    parent_completion.validate_interactive_parent_launch(args)
 
 
-def launch_parent_completion_sidecar(
-    args: argparse.Namespace,
-    jobs: Path,
-) -> None:
-    """Prelaunch one exact joiner before the managed direct child spawn claim."""
-
-    args.managed_sidecar_state = "not-selected"
-    args.managed_sidecar_reason = "-"
-    if args.parent_completion_delivery != MANAGED_PARENT_DELIVERY:
-        return
-    binding = getattr(args, "managed_gateway_binding", None)
-    if binding is None:
-        args.managed_sidecar_state = "launch-failed"
-        args.managed_sidecar_reason = "managed-binding-missing"
-        return
-    try:
-        sidecar = launch_managed_completion_sidecar(
-            binding=binding,
-            jobs=jobs,
-            parent_session_id=args.parent_session_id or "",
-            attempt_ids={args.attempt_id},
-        )
-    except ManagedDispatchError as exc:
-        args.managed_sidecar_state = "launch-failed"
-        args.managed_sidecar_reason = str(exc)
-        try:
-            annotate_attempt_row(
-                jobs,
-                args.attempt_id,
-                {
-                    "managed_delivery_state": "sidecar-launch-failed",
-                },
-            )
-        except DispatchContractError:
-            pass
-        return
-    args.managed_sidecar_state = "running"
-    args.managed_sidecar_pid = sidecar.pid
-    args.managed_sealed_batch_id = sidecar.sealed_batch_id
-    args.managed_sidecar_log = sidecar.log_file
-    try:
-        recorded = annotate_attempt_row(
-            jobs,
-            args.attempt_id,
-            {
-                "managed_delivery_state": "sidecar-running",
-                "managed_sealed_batch_id": sidecar.sealed_batch_id,
-                "managed_sidecar_pid": str(sidecar.pid),
-                "managed_sidecar_log": str(sidecar.log_file),
-            },
-        )
-    except DispatchContractError:
-        recorded = False
-    if not recorded:
-        # The immutable delivery stamp still lets this exact sidecar join. Keep
-        # the launch successful while making the observability loss explicit.
-        args.managed_sidecar_state = "running-unrecorded"
-        args.managed_sidecar_reason = "sidecar-metadata-unrecorded"
+def launch_parent_completion_sidecar(args: argparse.Namespace, jobs: Path) -> None:
+    parent_completion.launch_parent_completion_sidecar(
+        args, jobs, launch=launch_managed_completion_sidecar, annotate=annotate_attempt_row)
 
 
 def fail(reason: str, code: int, **fields: str) -> int:
@@ -2864,18 +2731,7 @@ def main(argv: list[str]) -> int:
                 args.attempt_claimed = attempt_launch_is_available(
                     jobs, args.attempt_id
                 )
-            if args.attempt_claimed:
-                recorded_delivery = registered_parent_delivery(
-                    jobs, args.attempt_id
-                )
-                if recorded_delivery != args.parent_completion_delivery:
-                    raise DispatchContractError(
-                        "attempt-parent-delivery-changed",
-                        (
-                            f"registered={recorded_delivery} "
-                            f"current={args.parent_completion_delivery}"
-                        ),
-                    )
+            parent_completion.validate_registered_delivery(args, jobs, read=registered_parent_delivery)
         except DispatchContractError as e:
             cancel_governor_reservation(governor, governor_root, reservation_token)
             return fail(e.reason, 73, detail=e.detail, child_spawned="0")

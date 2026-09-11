@@ -430,11 +430,12 @@ raise SystemExit(3 if state == 'timeout' else 0)
         self.assertEqual(result.returncode, 65)
         self.assertIn("attempt-set-invalid", result.stdout)
 
-    def test_direct_managed_codex_and_claude_children_use_hashed_parent(self) -> None:
-        attempts = ["att-direct-codex", "att-direct-claude"]
+    def test_direct_managed_sibling_children_use_hashed_parent(self) -> None:
+        attempts = ["att-direct-codex", "att-direct-claude", "att-direct-opencode"]
         self.jobs.write_text(
             session_row(attempts[0], harness="codex")
-            + session_row(attempts[1], harness="claude"),
+            + session_row(attempts[1], harness="claude")
+            + session_row(attempts[2], harness="opencode"),
             encoding="utf-8",
         )
         server = ControlServer(self.control_path)
@@ -456,7 +457,7 @@ raise SystemExit(3 if state == 'timeout' else 0)
         self.assertNotIn("RAW_SESSION_CHILD_SENTINEL", encoded)
         self.assertEqual(
             {child["harness"] for child in server.request["receipt"]["children"]},
-            {"codex", "claude"},
+            {"codex", "claude", "opencode"},
         )
 
     def test_retryable_disconnect_reconnect_sends_once_after_server_appears(self) -> None:

@@ -123,8 +123,16 @@ Codex의 기존 App Server turn/start·turn/steer 운송과 Claude의 기존 asy
 
 실제 quick 원답변 증거: `/tmp/frame-quick-original-answer-owner-observation.json`. 원답변 05:16:40.585Z → release 05:20:20.698Z → owner `att-5061090efcf74f1ab538f99ac7c075de`의 실제 intent 읽기 05:21:17.707Z → 부모 success 05:23:40.620Z. 합계 Markdown 독립 실행 exit 0. 기존 Claude owner/profile을 유지한 과거 시도이며 새로운 light 테스트로 계산하지 않는다.
 
-실제 closure 증거: `/tmp/frame-quick-terminal-closure-observation.json`. 수정 source `16047ba93e067fb029f951367ea22d584b0bdad0`의 정상 `workflow-supervisor complete`가 원 route `rt-f94885fba268775b`를 COMPLETE로 기록했다. journal 3→6, 성공 상태 전이 3개 추가. 반복 호출 exit 0이며 journal 불변. 원 route·답변·intent·검증 산출물 바이트 불변, 모델 재기동 0. workflow 완료와 producer cycle finalize는 별도 관측한다.
+실제 closure 증거: `/tmp/frame-quick-terminal-closure-observation.json`. 수정 source `16047ba93e067fb029f951367ea22d584b0bdad0`의 정상 `workflow-supervisor complete`가 원 route `rt-f94885fba268775b`를 COMPLETE로 기록했다. journal 3→6, 성공 상태 전이 3개 추가. 반복 호출 exit 0이며 journal 불변. 원 route·답변·intent·검증 산출물 바이트 불변, 모델 재기동 0. 이후 정상 producer finalize도 같은 PID의 단일 실행으로 exit 0: cycle completed/storage sealed/lineage committed, artifact 15개. manifest SHA256 `dbff683c78241a28e1edd71eb98c1981430f0b7a7174cffb71b1e98af77ed40d`가 producer 및 admission 색인과 일치했다. `/tmp/frame-quick-cycle-finalized-observation.json`과 원 cycle의 `artifacts/dev_logs/quick-closure-evidence.json`에 보존했다.
 
 최종 소스 검사: route 387 / compose CLI 17 / profile demand 24 / workflow 127 / topology 45 PASS. 생성 20그룹·adaptation boundary PASS. quick/standard owner light를 실제 selector→세 adapter parser/resolver로 연결한 6경로도 통과했다(`/tmp/surface-owner-adapter-parity.json`); 모델을 호출한 실측으로 계산하지 않는다. 로그 `/tmp/surface-final-*.log`.
 
 수정 전 ce519에서도 재현되는 기존 fixture 실패 3종을 별도 확인했다(`/tmp/closure-baseline-failures.log`). terminal fixture는 현재 완료 writer의 `note=completed-marker`를 빠뜨렸고, 두 continuation fixture는 읽을 수 없는 원장에서 받은 차단 결과를 새 route로 가정했다. 실제 완료 형식을 넣고 차단·source 보존·새 node 0을 검증하도록 기대값을 수정했다. 운영 판단을 느슨하게 바꿔 테스트를 통과시킨 것이 아니다.
+
+## 부모가 소유하는 완료 전달 경로
+
+4bc standard 실측의 OpenCode frame은 실제 Codex 부모 아래에서도 `parent-identity-unmatched/poll-fallback`을 출력했다. 자식 어댑터 이름을 부모 실행 환경으로 간주한 구현이었다. `dispatch_parent_completion.py`가 세 어댑터의 부모 확인·전달 경로 선택·등록된 경로 유지·기동 전 전달자 준비를 함께 소유한다. 자식별 세 분기와 두 sidecar 구현을 공통 함수로 교체했다. OpenCode 자식에도 실제 Codex 부모 gateway를 연결하며, witnessed thread successor도 같은 함수가 반영한다. sidecar와 gateway에 남아 있던 두 하네스 목록은 공통 하네스 목록을 사용한다. OpenCode 부모의 native 자동 wake를 구현했다고 주장하지 않으며 그 부모에는 기존의 명시적 유한 대기 경로가 남는다.
+
+검증: 세 실제 어댑터 main에서 정확한 행 등록→전달자 준비 실패→자식 기동 0·예약 반환·실패 종결을 확인했다. 부모×자식×worker type, fork 후 부모 변경, 등록 뒤 운송 변경 거부, OpenCode 자식의 실제 sidecar 프로세스→제어 socket 및 gateway→mock App Server 전달도 검사했다. 공통 8 / Codex adapter 58 / Claude adapter 46 / OpenCode adapter 28 / managed completion 14 / gateway 47 PASS, generated 20·adaptation boundary PASS (`/tmp/parent-delivery-check-*.log`). 모델 부모의 새 자동 수신 실측은 별도 잔여다.
+
+세 adapter suite의 과거 owner identity fixture 오류는 수정 전 4bc에서도 각각 동일한 3개 오류로 재현했다(`/tmp/parent-delivery-baseline-*.log`). 존재하지 않는 route 경로를 의도적으로 넣는 identity 분류 검사에 frame gate를 외부 경계로 명시했다. 실제 main의 등록/기동/종료 관측은 유지했고 새 운송 검사는 실제 main에서 수행한다. main/release/install은 계속 보류한다.

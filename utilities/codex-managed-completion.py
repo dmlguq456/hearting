@@ -20,6 +20,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+from dispatch_contract import WRAPPER_PARENT_HARNESSES
 from dispatch_completion_join import (  # noqa: E402
     JoinContractError,
     MANAGED_SESSION_PARENT_DELIVERY,
@@ -314,7 +315,7 @@ def wait_for_session_launch_claims(
                 or metadata.get("dispatch_depth") != "1"
                 or metadata.get("execution_surface") != "registered-headless"
                 or metadata.get("registered_worker") != "1"
-                or metadata.get("harness") not in {"codex", "claude"}
+                or metadata.get("harness") not in WRAPPER_PARENT_HARNESSES
             ):
                 raise CompletionError("registry-launch-contract-invalid")
             claimed = metadata.get("launch_claimed")
@@ -454,7 +455,7 @@ def normalize_receipt(
     harnesses: dict[str, str] = {}
     for row in rows:
         harness = row.metadata.get("harness")
-        if harness not in {"codex", "claude"}:
+        if harness not in WRAPPER_PARENT_HARNESSES:
             raise CompletionError("registry-child-harness-invalid")
         harnesses[row.attempt_id] = harness
     try:

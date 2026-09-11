@@ -37,6 +37,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.fleet import interaction as fleet_interaction
 from tools.fleet import session_registry
+from dispatch_contract import WRAPPER_PARENT_HARNESSES
 from dispatch_completion_join import (  # noqa: E402
     DELIVERY_TIMING_POINTS,
     JoinContractError,
@@ -1600,7 +1601,7 @@ class ManagedGateway:
                     }
                     and status != "done"
                 )
-                or harness not in {"codex", "claude", "unknown"}
+                or harness not in (*WRAPPER_PARENT_HARNESSES, "unknown")
                 or delivery_state not in {"success", "attention"}
                 or (
                     delivery_state == "success"

@@ -160,9 +160,7 @@ def delivery_args(**overrides):
 
 
 class OpenCodeParentCompletionDelivery(unittest.TestCase):
-    # Item 2: opencode's own parent-runtime completion delivery contract,
-    # ported from adapters/codex/bin/dispatch-headless.py minus the
-    # Codex-only managed single-ingress gateway branch.
+    # Parent runtime selects the carrier independently of this child adapter.
     def test_direct_registered_claude_parent_gets_claude_parent_runtime(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             args = delivery_args()
@@ -578,6 +576,8 @@ class ForegroundReviewStartPathTest(unittest.TestCase):
                         mock.patch.object(WH, "wait_foreground"),
                         mock.patch.object(WH, "seal_foreground_result"),
                         mock.patch("model_profile.selection_receipt", return_value={}),
+                        # The fixture injects route identity axes independently, not a real frame route.
+                        mock.patch.object(WH, "owner_frame_launch_gate"),
                     ]
                     if key == "route_file":
                         patches.append(mock.patch.object(WH, "headless_attempt_policy", return_value={

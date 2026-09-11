@@ -139,6 +139,7 @@ from codex_managed_dispatch import (  # noqa: E402
     probe_managed_codex_parent,
     registered_parent_delivery,
 )
+import dispatch_parent_completion as parent_completion
 from execution_access import (  # noqa: E402
     AccessContext,
     ExecutionAccessError,
@@ -801,58 +802,8 @@ def _bind_runtime_parent(args: argparse.Namespace) -> None:
 
 
 def resolve_parent_completion_delivery(args: argparse.Namespace) -> str:
-    """Select wake mechanics from the parent runtime, never the child runtime.
-
-    Not keyed on `worker_type` (2026-09-10, W2 of frame-bootstrap-layer): only
-    action/dispatch_depth/execution_surface/registered_worker/parent identity
-    decide the branch below, so a depth-1 `frame` worker takes exactly the
-    same delivery path a depth-1 `owner`/`review`/`stage`/`support` worker
-    does. Do not re-derive this by re-reading the branches; see
-    `ClaudeChildParentRuntimeDelivery.test_frame_worker_type_takes_the_same_delivery_path_as_owner`
-    in dispatch-headless.sd45.test.py, which proves it by calling this exact
-    function with `worker_type="frame"`.
-    """
-
-    args.managed_gateway_binding = None
-    current_thread = os.environ.get("CODEX_THREAD_ID") or os.environ.get(
-        "CODEX_SESSION_ID"
-    )
-    direct_registered = (
-        getattr(args, "action", "") in {"register", "start"}
-        and args.dispatch_depth == 1
-        and args.execution_surface == "registered-headless"
-        and bool(args.registered_worker)
-        and bool(args.parent_session_id)
-    )
-    if (
-        direct_registered
-        and args.parent_harness == "codex"
-        and args.parent_session_id == current_thread
-    ):
-        try:
-            args.managed_gateway_binding = probe_managed_codex_parent(
-                parent_harness=args.parent_harness,
-                parent_session_id=args.parent_session_id,
-            )
-        except ManagedDispatchError as exc:
-            args.parent_completion_reason = (
-                str(exc)
-                if os.environ.get("AGENT_CODEX_MANAGED_GATEWAY") == "1"
-                else "interactive-auto-wake-unsupported"
-            )
-            args.parent_completion_reason_class = (
-                (getattr(exc, "reason_class", "") or "-")
-                if os.environ.get("AGENT_CODEX_MANAGED_GATEWAY") == "1"
-                else "-"
-            )
-            return "poll-fallback"
-        args.parent_completion_reason = "managed-single-ingress-live"
-        return MANAGED_PARENT_DELIVERY
-    if direct_registered and args.parent_harness == "claude":
-        args.parent_completion_reason = "claude-async-rewake-resume"
-        return "claude-parent-runtime"
-    args.parent_completion_reason = "parent-attempt-owned"
-    return "parent-runtime-supervised"
+    return parent_completion.resolve_parent_completion_delivery(
+        args, probe=probe_managed_codex_parent)
 
 
 def bind_parent_completion_delivery(args: argparse.Namespace) -> None:
@@ -860,82 +811,12 @@ def bind_parent_completion_delivery(args: argparse.Namespace) -> None:
 
 
 def validate_interactive_parent_launch(args: argparse.Namespace) -> None:
-    """Never let a Codex caller wait in-model for a cross-harness owner."""
-
-    direct_registered = (
-        getattr(args, "action", "") in {"register", "start"}
-        and args.dispatch_depth == 1
-        and args.execution_surface == "registered-headless"
-        and bool(args.registered_worker)
-        and bool(args.parent_session_id)
-    )
-    if not (
-        direct_registered
-        and args.parent_harness == "codex"
-        and args.parent_completion_delivery == "poll-fallback"
-    ):
-        return
-    if getattr(args, "allow_unmanaged_parent_poll", False):
-        args.parent_completion_reason = "operator-authorized-unmanaged-poll"
-        return
-    raise DispatchContractError(
-        "managed-entry-required",
-        "unmanaged interactive Codex parents cannot register or start a detached owner; restart through preflight.sh managed-entry",
-    )
+    parent_completion.validate_interactive_parent_launch(args)
 
 
-def launch_parent_completion_sidecar(
-    args: argparse.Namespace,
-    jobs: Path,
-) -> None:
-    args.managed_sidecar_state = "not-selected"
-    args.managed_sidecar_reason = "-"
-    if args.parent_completion_delivery != MANAGED_PARENT_DELIVERY:
-        return
-    binding = getattr(args, "managed_gateway_binding", None)
-    if binding is None:
-        args.managed_sidecar_state = "launch-failed"
-        args.managed_sidecar_reason = "managed-binding-missing"
-        return
-    try:
-        sidecar = launch_managed_completion_sidecar(
-            binding=binding,
-            jobs=jobs,
-            parent_session_id=args.parent_session_id or "",
-            attempt_ids={args.attempt_id},
-        )
-    except ManagedDispatchError as exc:
-        args.managed_sidecar_state = "launch-failed"
-        args.managed_sidecar_reason = str(exc)
-        try:
-            annotate_attempt_row(
-                jobs,
-                args.attempt_id,
-                {"managed_delivery_state": "sidecar-launch-failed"},
-            )
-        except DispatchContractError:
-            pass
-        return
-    args.managed_sidecar_state = "running"
-    args.managed_sidecar_pid = sidecar.pid
-    args.managed_sealed_batch_id = sidecar.sealed_batch_id
-    args.managed_sidecar_log = sidecar.log_file
-    try:
-        recorded = annotate_attempt_row(
-            jobs,
-            args.attempt_id,
-            {
-                "managed_delivery_state": "sidecar-running",
-                "managed_sealed_batch_id": sidecar.sealed_batch_id,
-                "managed_sidecar_pid": str(sidecar.pid),
-                "managed_sidecar_log": str(sidecar.log_file),
-            },
-        )
-    except DispatchContractError:
-        recorded = False
-    if not recorded:
-        args.managed_sidecar_state = "running-unrecorded"
-        args.managed_sidecar_reason = "sidecar-metadata-unrecorded"
+def launch_parent_completion_sidecar(args: argparse.Namespace, jobs: Path) -> None:
+    parent_completion.launch_parent_completion_sidecar(
+        args, jobs, launch=launch_managed_completion_sidecar, annotate=annotate_attempt_row)
 
 
 # core/OPERATIONS.md §5.10 "Registered headless permission posture". A
@@ -2454,18 +2335,7 @@ def main(argv: list[str]) -> int:
                 args.attempt_claimed = attempt_launch_is_available(
                     jobs, args.attempt_id
                 )
-            if args.attempt_claimed:
-                recorded_delivery = registered_parent_delivery(
-                    jobs, args.attempt_id
-                )
-                if recorded_delivery != args.parent_completion_delivery:
-                    raise DispatchContractError(
-                        "attempt-parent-delivery-changed",
-                        (
-                            f"registered={recorded_delivery} "
-                            f"current={args.parent_completion_delivery}"
-                        ),
-                    )
+            parent_completion.validate_registered_delivery(args, jobs, read=registered_parent_delivery)
         except DispatchContractError as e:
             cancel_governor_reservation(governor, governor_root, reservation_token)
             return fail(e.reason, 73, detail=e.detail, child_spawned="0")
