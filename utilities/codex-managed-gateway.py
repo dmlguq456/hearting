@@ -1700,7 +1700,7 @@ class ManagedGateway:
             elif child["required_action"] == "inspect-done-failure":
                 commands.append(
                     f"{harvest} harvest --jobs {jobs} --attempt-id {attempt} "
-                    "--status done --failure-detail"
+                    "--status done"
                 )
         command_text = "\n".join(commands) or "(no harvest command; advance the route)"
         context = (

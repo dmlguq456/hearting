@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 소스 통합 HEAD 6b7d19a535dcd3dea130f72a71f2eacfcbc0789c에서 회귀검사와 실제 지연 통보 검증 중. frame 사용자의 이해 확인·기록 방식 답변은 대기 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치를 주장하지 않는다.
+상태: 6b7d19a5 실측은 지연 통보·실제 보고서 쓰기 PASS, 정상 완료 알림 FAIL로 종료했다. 47d5e42e·21425b55를 통합했고 전달 계약 교정을 검증 중이다. frame 사용자의 이해 확인·기록 방식 답변은 대기 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치를 주장하지 않는다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -26,7 +26,7 @@
 - 공통 수정: `704ae7cf` → `cc1791ba` → `de632e5c` → `705f042e`.
 - 리뷰 수명·완료 전달: `be684cf8`까지 포함. 21분 실측의 원본 source는 `56746fb4`이며, 이후 수정의 실측이라고 바꾸어 쓰지 않는다.
 - frame: `daa82355` + `7db4ce09`(실제 모델 role/profile 전달) + `5929e741`(route/cycle→frame→질문→owner 순서 및 상대 산출물 기준) 포함. 실제 두 하네스 완료·자동 wake와 승인 전 owner 거부를 확인했으며, release 후 owner 입력 읽기와 standard 왕복은 아직 합격을 주장하지 않는다.
-- 통합 경로: `/home/nas/user/Uihyeop/personal/hearting-wt/dispatch-responsibility-integration`, 실측과 최종 회귀의 고정 HEAD `6b7d19a5`. 후속 소스 교정 `47d5e42e`는 별도 작업 트리에서 검증했고, 실측이 끝난 뒤 통합한다. 이전 `a337969b` 16개 검사 묶음과 `e2667929` 6개 검사 묶음은 해당 HEAD의 증거로 따로 보존한다.
+- 통합 경로: `/home/nas/user/Uihyeop/personal/hearting-wt/dispatch-responsibility-integration`, 실측과 최종 회귀의 고정 HEAD `6b7d19a5`. 후속 소스 교정 `47d5e42e`는 별도 작업 트리에서 검증했고, 실측 종료·증거 고정 뒤 통합했다. 이전 `a337969b` 16개 검사 묶음과 `e2667929` 6개 검사 묶음은 해당 HEAD의 증거로 따로 보존한다.
 - 705f042e 고정 검증: fallback 69, contract 198(skip 1), 공통 책임 10, managed completion 14, gateway 42, orphan 7 PASS. 생성 projection 20개 PASS. 최초 adaptation 검사에서 OPERATIONS 지시 수 1개 초과를 확인했고, 통합 문서의 중복 설명을 삭제해 기존 상한 안으로 복구했다.
 - 공통 책임 시험은 확정 성공+지연/관측 불가, 정리 미확정 terminal 행, 두 프로세스의 동일 실패 retry 경쟁, 등록 후 첫 기동 경쟁, retry 제안 뒤 성공 확정, controller 재시작, 오래된 알림 억제, 관측 도구 실패 후 회복을 확인한다.
 - 실제 socket gateway 시험은 살아 있는 fixture process를 두고 supervision context 전달·중복 억제·행 불변을 확인한다. 이는 실제 모델/TUI 수신 시험과 구분한다.
@@ -55,12 +55,24 @@
 | 21분 이상 d=1 리뷰 쓰기와 부모 통보 | HEAD 56746fb4, att-29dfc6a3a3dc4b88b65fff8e4452e289, 쓰기 1268.92560412초, 부모 01a08e11-2b08-7393-a36d-702aeca9d6bb | 실제 정상 경로 PASS. 리뷰 지적 3건은 be684cf8에서 수정. |
 | frame 두 하네스와 두 자동 wake | HEAD 7db4ce09, route rt-f94885fba268775b, Codex att-a4e566dfb0ab444f9341bc9f14eb69d1 + Claude att-223896abecdf4178a5d10a9e0713b121, 동일 부모 01a08e56-2fec-7ae3-8898-765dae020431 | actual marker 2개·wake 2회 확인. |
 | 승인 전 owner 기동 금지와 실제 질문 | 같은 frame r2, human-gate-not-raised / child_spawned=0, 정식 frame-review raise | 확인. 실제 사용자 답변을 대리하지 않으며 release 이후 부분은 대기. |
-| 지연 관측→통보→같은 attempt 정상 완료 | HEAD 6b7d19a5, 새 private parent 01a08e7f-750c-7291-8e5b-f08ec638e2de (wB:pG), dispatch 호출에만 completion timeout 60초, 실제 자식 150초/finite watchdog 600초 이상 | 진행 중. 가짜 age 또는 운영 row 편집 없음. |
+| 지연 관측→통보→같은 attempt 정상 완료 | HEAD 6b7d19a5, 새 private parent 01a08e7f-750c-7291-8e5b-f08ec638e2de (wB:pG), dispatch 호출에만 completion timeout 60초, 실제 자식 150초/finite watchdog 600초 이상 | supervision·실제 쓰기 PASS, 정상 completion FAIL. canonical success가 부모 attention으로 바뀌었다. 가짜 age 또는 운영 row 편집 없음. |
 | frame standard 왕복 및 최종 owner의 intent 읽기 | 별도 실측 필요 | 미합격/미완료. |
 
 frame 증거: `.agent_reports/campaigns/2026-09-10_frame-bootstrap-layer/2026-09-11_frame-live-parent-canary-r2/artifacts/dev_logs/r2-parent-wakes-observed.{json,txt}`.
 
 실제 지연 canary는 살아 있는 프로세스의 정상적인 지연이다. 이것을 PID namespace의 관측 불가 실측이라고 부르지 않는다. 관측 불가·감독자 종료·중복 재시도·실패 정리는 각 격리 정책 및 실프로세스 검사 근거로 구분한다. 실제 OpenCode 사용자 수신은 이번에 새로 검증했다고 주장하지 않는다.
+
+## 실제 완료 오배송에서 제거한 중복 판단
+
+6b 실측 attempt `att-a1b4ca9c1b174701be782c02f38709f9`는 150.000102947초 hold 뒤 보고서를 썼다(778 bytes, SHA256 `78006e7276e7f20eb7fe12423cd1b2596f7767deaa9e6b59224215bb6778a60a`). 실제 부모는 03:32:57.204Z에 `join-deadline`을 받았고, 03:36:37.312Z에는 성공 영수증을 attention으로 바꾼 완료 알림을 받았다. 인쇄된 `--failure-detail` 수확 명령도 PASS 행이라 거부됐다. 원장·과거 영수증·보고서는 수정하지 않았다.
+
+원인은 전달 snapshot이 marker/supervisor/subsession만 별도로 성공 판정하여 terminal writer의 `completed-review` 성공 영수증을 버린 것이다. 생산자별 boolean 두 개를 전달자마다 운반하던 구조를 없애고, 정확한 attempt·부모·하네스·digest에 결속된 기존 봉인 영수증을 공통 완료 근거로 소비한다. 전달자는 현재 행/process CAS, 자손 정리, 미해결 충돌을 계속 확인한다. 쓰기 권한 검사를 종료 후 다시 실행하지 않는다. 닫힌 리뷰의 쓰기 lease가 끝났다는 이유로 이미 확정한 성공을 뒤집지 않는다. 영수증 도입 전 행의 기존 proof는 호환 읽기 경계에만 남긴다.
+
+실프로세스 검사를 terminal close에서 끝내지 않고 current snapshot→전달 영수증까지 연장하자, registry reconcile이 먼저 닫는 경우 `failure_class=pass`를 누락하는 두 번째 경로도 드러났다. reaper/join/registry가 같은 review terminal evidence를 기록하도록 합쳤다. Claude/Codex supervisor, gateway, rewake의 자동 attention 안내는 일반 exact `--status done` 수확을 사용한다. `--failure-detail`은 명시적 실패 진단에만 남겨 PASS의 정리·충돌 의무도 조회할 수 있게 한다.
+
+후속 교정 검사: responsibility 14 / contract 223(skip 1) / join 113 / registry 95 / review lifecycle 19 / serial supervisor 30 / managed completion 14 / gateway 45 / sweep 17 / rewake 160 / route consumption 12 / Claude supervisor 71 / Codex supervisor 33 PASS. 생성 projection 20개와 adaptation boundary PASS. 로그: `/tmp/completion-consumer-final/`.
+
+정확한 6b 실측 기록: `.agent_reports/campaigns/2026-09-10_review-lease-watchdog/2026-09-11_supervision-live/artifacts/dev_logs/supervision-live-observation.json`. 새 source·부모·cycle로 동일 60초 join/150초 hold 경로를 재검증하며, 통합 교정의 실제 정상 완료 합격은 아직 주장하지 않는다.
 
 ## 검증의 오류도 보존
 

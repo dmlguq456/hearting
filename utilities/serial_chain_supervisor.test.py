@@ -714,7 +714,7 @@ class SubsessionDeliveryClassificationTest(unittest.TestCase):
         state = JOIN.CurrentDeliveryState(
             marker=None, marker_digest="", row_revision="r", row_digest="d",
             status="done", verdict="PASS", quiescent=True, owned_children=0,
-            advanced=False, subsession_terminal=True,
+            advanced=False, completion_proven=True,
         )
         self.assertEqual(JOIN.delivery_classification(state), "success")
 

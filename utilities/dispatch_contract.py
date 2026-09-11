@@ -30,7 +30,7 @@ from route_identity import registered_node_identity
 from governor_identity import close_witness, create_witness
 from dispatch_attempt_policy import (decide_attempt, SUBSESSION_NOTE, SUCCESS_NOTES, committed_outcome,
                                      terminal_conflict_identity, terminal_conflicts, terminal_conflict_pending)
-from dispatch_receipt_identity import receipt_digest as shared_receipt_digest
+from dispatch_receipt_identity import receipt_digest as shared_receipt_digest, unseal_receipt
 
 _GOVERNOR_WITNESS_HANDLES: dict[tuple[str, str], object] = {}
 
@@ -931,8 +931,7 @@ class MarkerBoundDeliveryResult:
     quiescent: bool
     owned_children: int
     advanced: bool
-    supervisor_terminal: bool = False
-    subsession_terminal: bool = False
+    completion_proven: bool = False
     terminal_conflict: bool = False
 
 
@@ -7739,7 +7738,7 @@ SUBSESSION_CHAIN_REFUSAL_CLASSIFIER = "subsession-chain-refusal-v1"
 # module because `dispatch_completion_join` imports this one, never the reverse.
 # Consumers that ask "did this attempt succeed?" use this set; the two that ask
 # "*which producer* closed this row" (SD-94 marker eligibility and
-# `supervisor_terminal` below) keep their narrow literal on purpose.
+# legacy terminal proof below) keep their narrow literal on purpose.
 
 
 def row_is_subsession(metadata: dict[str, str]) -> bool:
@@ -8031,16 +8030,20 @@ def marker_bound_delivery_transaction(
             quiescent=quiescent,
             owned_children=owned_open_count(refreshed),
             advanced=advanced,
-            supervisor_terminal=(
-                refreshed_metadata.get("note") == "completed-supervisor"
-                and refreshed_metadata.get("failure_class") == "pass"
-            ),
-            subsession_terminal=(
-                refreshed_fields[1] == "done"
-                and refreshed_metadata.get("note") == SUBSESSION_NOTE
-                and refreshed_metadata.get("failure_class") == "pass"
-                and refreshed_metadata.get("classifier_source") == SUBSESSION_TERMINAL_CLASSIFIER
-                and row_is_subsession(refreshed_metadata)
+            completion_proven=(
+                _delivery_commit_proven(refreshed_metadata)
+                if refreshed_metadata.get("delivery_intent") else
+                # Read compatibility for rows predating the one-time receipt.
+                # New terminal kinds use the common committed receipt, not
+                # another producer-specific boolean in every carrier.
+                bool(refreshed_marker is not None and refreshed_marker_digest)
+                or (refreshed_metadata.get("note") == "completed-supervisor"
+                    and refreshed_metadata.get("failure_class") == "pass")
+                or (refreshed_fields[1] == "done"
+                    and refreshed_metadata.get("note") == SUBSESSION_NOTE
+                    and refreshed_metadata.get("failure_class") == "pass"
+                    and refreshed_metadata.get("classifier_source") == SUBSESSION_TERMINAL_CLASSIFIER
+                    and row_is_subsession(refreshed_metadata))
             ),
             terminal_conflict=terminal_conflict_pending(refreshed_metadata),
         )
@@ -8401,6 +8404,52 @@ _DELIVERY_INTENT_IMMUTABLE_KEYS = frozenset({
 _SD105_CANCELLED_NOTE = "cancelled-receipt-unavailable"
 
 
+def _terminal_delivery_receipt(metadata: dict[str, str]) -> dict:
+    """The terminal writer and every carrier use this same semantic result."""
+    is_success = committed_outcome("done", metadata) == "succeeded"
+    child = {
+        "attempt_id": metadata.get("attempt_id", ""),
+        "status": "done",
+        "readiness": "ready",
+        "harness": metadata.get("harness", ""),
+        "required_action": "advance-completed" if is_success else "inspect-done-failure",
+        "delivery_classification": "success" if is_success else "attention",
+    }
+    if not is_success:
+        child["reason"] = "terminal-failure-or-unclosed"
+    receipt = {
+        "schema_version": 2,
+        "state": "delivered",
+        "parent_attempt_id": metadata.get("parent_attempt_id", ""),
+        "job_registry": "",
+        "children": [child],
+        "delivery_classification": child["delivery_classification"],
+    }
+    return receipt
+
+
+def _delivery_commit_proven(metadata: dict[str, str]) -> bool:
+    """Validate the existing committed receipt without repeating worker checks.
+
+    Write authorization and runtime classification were proved before close.
+    Re-running those checks after a lease/cycle closes would reject a valid
+    completion. Current cleanup, conflicts and row CAS remain separate duties.
+    """
+    if metadata.get("delivery_intent") != "1" or not metadata.get("parent_sid"):
+        return False
+    try:
+        receipt = unseal_receipt(metadata.get("delivery_receipt_b64", ""))
+    except ValueError:
+        return False
+    return (
+        receipt == _terminal_delivery_receipt(metadata)
+        and metadata.get("delivery_recipient_kind") == metadata.get("parent_completion_delivery")
+        and metadata.get("delivery_recipient_digest") == hashlib.sha256(metadata["parent_sid"].encode()).hexdigest()
+        and shared_receipt_digest(receipt) == metadata.get("delivery_receipt_digest")
+        and receipt.get("delivery_classification") == "success"
+    )
+
+
 def _delivery_intent_values(fields: list[str], metadata: dict[str, str]) -> dict[str, str]:
     """Compute the one-time delivery-intent stamp for a row that just took its
     `open|running -> done` edge (W1-W4), or {} if none is owed.
@@ -8430,28 +8479,7 @@ def _delivery_intent_values(fields: list[str], metadata: dict[str, str]) -> dict
         return {}
     recipient_kind = metadata["parent_completion_delivery"]
     recipient_key = metadata["parent_sid"]
-    parent_attempt_id = metadata.get("parent_attempt_id", "")
-    route_id = metadata.get("route_id", "")
-    route_node = metadata.get("route_node", "")
-    is_success = committed_outcome("done", metadata) == "succeeded"
-    child = {
-        "attempt_id": attempt_id,
-        "status": "done",
-        "readiness": "ready",
-        "harness": metadata.get("harness", ""),
-        "required_action": "advance-completed" if is_success else "inspect-done-failure",
-        "delivery_classification": "success" if is_success else "attention",
-    }
-    if not is_success:
-        child["reason"] = "terminal-failure-or-unclosed"
-    receipt = {
-        "schema_version": 2,
-        "state": "delivered",
-        "parent_attempt_id": parent_attempt_id,
-        "job_registry": "",
-        "children": [child],
-        "delivery_classification": child["delivery_classification"],
-    }
+    receipt = _terminal_delivery_receipt(metadata)
     receipt_digest = shared_receipt_digest(receipt)
 
     receipt_bytes = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("utf-8")

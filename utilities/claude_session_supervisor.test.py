@@ -91,7 +91,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 session = args[args.index(key) + 1]
                 prompt = sys.stdin.read()
                 state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
-                if '--failure-detail' in prompt:
+                if 'inspect-done-failure' in prompt:
                     with open(state_path, encoding='utf-8') as state_handle:
                         state_value = json.load(state_handle)
                     state_value.pop('outbox', None)
@@ -144,7 +144,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 for line in sys.stdin:
                     payload = json.loads(line)
                     prompt = payload['message']['content'][0]['text']
-                    if '--failure-detail' in prompt:
+                    if 'inspect-done-failure' in prompt:
                         with open(state_path, encoding='utf-8') as state_handle:
                             state_value = json.load(state_handle)
                         state_value.pop('outbox', None)
@@ -763,7 +763,7 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 import json, os, sys
                 state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
                 prompt = sys.stdin.read()
-                if '--failure-detail' in prompt:
+                if 'inspect-done-failure' in prompt:
                     with open(state_path, encoding='utf-8') as h:
                         state_value = json.load(h)
                     state_value.pop('outbox', None)

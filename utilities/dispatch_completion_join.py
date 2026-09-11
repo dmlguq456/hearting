@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_attempt_policy import decide_attempt, required_action
 from dispatch_receipt_identity import (
-    CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, canonical_receipt, receipt_digest,
+    CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, canonical_receipt, receipt_digest, unseal_receipt,
 )
 from dispatch_contract import (  # noqa: E402
     AUTOMATIC_RECEIPTLESS_CLASSIFIER,
@@ -167,21 +167,10 @@ def seal_delivery_receipt(receipt: dict[str, object]) -> str:
 
 def unseal_delivery_receipt(encoded: str) -> dict[str, object]:
     """Decode a sealed receipt body back into the exact original dict."""
-
-    if not isinstance(encoded, str) or not encoded:
-        raise JoinContractError("delivery-receipt-invalid")
-    padded = encoded + "=" * (-len(encoded) % 4)
     try:
-        decoded = base64.standard_b64decode(padded.encode("ascii"))
+        return unseal_receipt(encoded)
     except ValueError as exc:
         raise JoinContractError("delivery-receipt-invalid") from exc
-    try:
-        value = json.loads(decoded.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise JoinContractError("delivery-receipt-invalid") from exc
-    if not isinstance(value, dict):
-        raise JoinContractError("delivery-receipt-invalid")
-    return value
 
 
 OWNER_ROUTE_NODE = "_owner"
@@ -642,8 +631,7 @@ class CurrentDeliveryState:
     quiescent: bool
     owned_children: int
     advanced: bool
-    supervisor_terminal: bool = False
-    subsession_terminal: bool = False
+    completion_proven: bool = False
     terminal_conflict: bool = False
 
 
@@ -653,11 +641,7 @@ def delivery_classification(state: CurrentDeliveryState) -> str:
     return (
         "success"
         if (
-            (
-                (state.marker is not None and bool(state.marker_digest))
-                or state.supervisor_terminal
-                or state.subsession_terminal
-            )
+            state.completion_proven
             and state.status == "done"
             and state.verdict == "PASS"
             and state.quiescent
@@ -2658,8 +2642,7 @@ def current_delivery_state(
         quiescent=result.quiescent,
         owned_children=result.owned_children,
         advanced=result.advanced,
-        supervisor_terminal=result.supervisor_terminal,
-        subsession_terminal=result.subsession_terminal,
+        completion_proven=result.completion_proven,
         terminal_conflict=result.terminal_conflict,
     )
 
@@ -3433,6 +3416,15 @@ def classify_exact_route_free_review_outcome(
     return ExactReviewClassification("done", "detached-review-pass" if detached else "foreground-review-pass", "completed-review", "wrapper-pass")
 
 
+def review_terminal_evidence(note: str, reason: str) -> dict[str, str]:
+    """Preserve the classifier's result at every review terminal writer."""
+    return {
+        "classifier_source": "foreground-review-classifier-v1",
+        "reconcile_reason": reason,
+        "failure_class": "pass" if note == "completed-review" else "contract",
+    }
+
+
 def apply_exact_route_free_review_classification(
     row: ChildRow, *, jobs: str | Path, classification: ExactReviewClassification
 ) -> str:
@@ -3475,11 +3467,7 @@ def close_finished_child(
         try:
             closed = close_attempt_row(
                 Path(jobs), row.attempt_id, classification.note or "dead-foreground-review",
-                evidence={
-                    "classifier_source": "foreground-review-classifier-v1",
-                    "reconcile_reason": classification.reason,
-                    "failure_class": "contract" if classification.note != "completed-review" else "pass",
-                },
+                evidence=review_terminal_evidence(classification.note, classification.reason),
             )
         except (DispatchContractError, OSError) as exc:
             return getattr(exc, "reason", type(exc).__name__)
@@ -3640,11 +3628,7 @@ def close_wrapper_pass(
         try:
             closed = close_attempt_row(
                 Path(jobs), row.attempt_id, classification.note or "completed-review",
-                evidence={
-                    "classifier_source": "foreground-review-classifier-v1",
-                    "reconcile_reason": classification.reason,
-                    "failure_class": "pass",
-                },
+                evidence=review_terminal_evidence(classification.note, classification.reason),
             )
         except (DispatchContractError, OSError) as exc:
             return getattr(exc, "reason", type(exc).__name__)

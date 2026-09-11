@@ -106,7 +106,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                         finally:
                             os.close(lease_fd)
                         state_path = os.environ.get('AGENT_DISPATCH_COMPLETION_STATE_FILE')
-                        if '--failure-detail' in prompt:
+                        if 'inspect-done-failure' in prompt:
                             with open(state_path, encoding='utf-8') as h:
                                 state_value = json.load(h)
                             state_value.pop('outbox', None)
@@ -484,7 +484,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                     elif method == 'turn/start':
                         turns += 1
                         prompt = value['params']['input'][0]['text']
-                        if '--failure-detail' in prompt:
+                        if 'inspect-done-failure' in prompt:
                             state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
                             with open(state_path, encoding='utf-8') as h:
                                 state_value = json.load(h)

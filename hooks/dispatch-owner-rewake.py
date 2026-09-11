@@ -860,7 +860,7 @@ def classified_receipt(
             instruction = (
                 "Use only the exact checked harvest command: "
                 f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
-                f"--attempt-id {shlex.quote(launch.attempt_id)} --status done --failure-detail."
+                f"--attempt-id {shlex.quote(launch.attempt_id)} --status done."
             )
         elif required_action == "advance-completed":
             instruction = "No harvest command is required; advance or finish the route."
@@ -876,8 +876,7 @@ def classified_receipt(
             instruction = (
                 "Inspect the exact current row and completion marker with: "
                 f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
-                f"--attempt-id {shlex.quote(launch.attempt_id)} --status done "
-                "--failure-detail."
+                f"--attempt-id {shlex.quote(launch.attempt_id)} --status done."
             )
     elif transaction_error:
         state = "attention"

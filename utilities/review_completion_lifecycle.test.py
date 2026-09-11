@@ -68,6 +68,22 @@ def _row(jobs: Path):
     return join.exact_attempt_row(jobs, "att-lifecycle")
 
 
+def _assert_success_delivery(test, jobs):
+    """Cross the actual terminal-writer -> current snapshot -> carrier seam."""
+    before = jobs.read_bytes()
+    receipt = join.unseal_delivery_receipt(_row(jobs).metadata["delivery_receipt_b64"])
+    test.assertEqual(receipt["delivery_classification"], "success")
+    # Write permission belongs to the live review, not the closed delivery.
+    with mock.patch.object(join, "validate_review_output_binding", side_effect=AssertionError("closed review must not reacquire write authority")):
+        state = join.current_delivery_state(jobs, "att-lifecycle", parent_attempt_id="att-lifecycle", advance=False)
+        test.assertTrue(state.completion_proven)
+        test.assertEqual(join.delivery_classification(state), "success", state)
+        delivered = join.receipt_with_delivery_observability(receipt, jobs=jobs)
+    test.assertEqual(delivered["delivery_classification"], "success")
+    test.assertEqual(delivered["children"][0]["required_action"], "advance-completed")
+    test.assertEqual(before, jobs.read_bytes())
+
+
 def _reconcile_args(jobs: Path, agent_home: Path):
     return type("ReconcileArgs", (), {
         "session": "", "route": "", "node": "", "attempt": "att-lifecycle", "job": "",
@@ -225,6 +241,7 @@ class ForegroundClassificationLifecycleTest(unittest.TestCase):
                 self.assertEqual(counts["materialized_record"], 1)
                 self.assertEqual(counts["delivery_identity"], 1)
                 self.assertEqual(counts["delivery_ids"], {identity[1]})
+                _assert_success_delivery(self, jobs)
                 terminal_bytes = jobs.read_bytes()
                 delivery_path = next(root.rglob(f"{identity[1]}.json"))
                 delivery_bytes = delivery_path.read_bytes()
@@ -381,6 +398,7 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
             self.assertEqual(handle.process.wait(timeout=10), 0)
             self.assertEqual(watcher.watch(self._args(jobs, _row(jobs))), 0)
             self.assertEqual(_row(jobs).metadata["note"], "completed-review")
+            _assert_success_delivery(self, jobs)
 
     def test_watchdog_term_drains_governed_group_and_setsid_descendant(self):
         self._check_watchdog_descendant_cleanup(signal.SIGTERM)

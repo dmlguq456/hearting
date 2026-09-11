@@ -1059,6 +1059,7 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         context = params["additionalContext"]["hearting-completion"]["value"]
         command = next(line for line in context.splitlines() if " harvest --jobs " in line)
+        self.assertNotIn("--failure-detail", command)
         environment = dict(os.environ)
         for name in (
             "AGENT_DISPATCH_JOBS",
@@ -1076,6 +1077,15 @@ class ManagedGatewayTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(f"job_registry={jobs}", result.stdout)
+        self.assertIn("matched=1", result.stdout)
+
+        # Attention can mean a delivery/cleanup obligation on a PASS row.
+        # The generated inspection must remain usable for that exact row.
+        jobs.write_text(jobs.read_text().replace("failure_class=child-failed", "failure_class=pass")
+                        .replace("note=dead-worker-fail", "note=completed-review"))
+        result = subprocess.run(shlex.split(command), text=True, capture_output=True,
+                                env=environment, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("matched=1", result.stdout)
 
     def test_active_manual_turn_receipt_steers_without_second_turn(self) -> None:

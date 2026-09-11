@@ -73,6 +73,7 @@ from dispatch_completion_join import (  # noqa: E402
     current_attempt_row,
     materialize_after_terminal_close,
     reconcile_pending_delivery,
+    review_terminal_evidence,
 )
 from dispatch_summary import ensure_attempt_owner  # noqa: E402
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
@@ -923,6 +924,8 @@ def reconcile(rows, args):
 
             reconcile_evidence = {"classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
                                   "reconcile_reason": reason}
+            if selected_binding is not None:
+                reconcile_evidence.update(review_terminal_evidence(note, reason))
             if note == REVIEW_BLOCKING_NOTE:
                 # Seal the artifact the reviewer named, as the join does, so the
                 # owner-closure gate can re-verify it from the row.

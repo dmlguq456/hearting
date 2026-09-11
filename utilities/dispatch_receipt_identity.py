@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import base64
 
 CANONICAL_RECEIPT_KEYS = frozenset({
     "schema_version", "state", "parent_attempt_id", "job_registry", "children",
@@ -14,6 +15,19 @@ CANONICAL_CHILD_KEYS = frozenset({
     "delivery_classification",
 })
 NOTICE_KINDS = frozenset({"human-gate", "supervision"})
+
+
+def unseal_receipt(encoded: str) -> dict:
+    """Restore the writer's exact receipt; decoding grants no authority."""
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("delivery-receipt-invalid")
+    try:
+        value = json.loads(base64.b64decode(encoded + "=" * (-len(encoded) % 4), validate=True))
+    except (ValueError, UnicodeError) as exc:
+        raise ValueError("delivery-receipt-invalid") from exc
+    if not isinstance(value, dict):
+        raise ValueError("delivery-receipt-invalid")
+    return value
 
 
 def canonical_receipt(receipt: dict) -> dict:

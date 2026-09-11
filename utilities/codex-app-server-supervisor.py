@@ -495,7 +495,7 @@ def completion_prompt(
         elif action == "inspect-done-failure":
             commands.append(
                 f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
-                f"{attempt} --status done --failure-detail"
+                f"{attempt} --status done"
             )
     command_text = "\n".join(commands) or "(no harvest command; advance the route)"
     return (

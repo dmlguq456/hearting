@@ -282,7 +282,8 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertIn("required_action=inspect-done-failure", message)
         self.assertIn("state=attention", message)
         self.assertIn("Hearting dispatch requires attention", message)
-        self.assertIn("--status done --failure-detail", message)
+        self.assertIn("--status done", message)
+        self.assertNotIn("--failure-detail", message)
 
     def write_marker_bound_owner(self, *, status: str = "open", child: bool = False):
         evidence = self.root / "report.md"
@@ -657,7 +658,8 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertIn("required_action=inspect-done-failure", message)
         self.assertIn(f"--jobs {self.jobs}", message)
         self.assertIn("--attempt-id att-owner-1", message)
-        self.assertIn("--status done --failure-detail", message)
+        self.assertIn("--status done", message)
+        self.assertNotIn("--failure-detail", message)
 
     def test_complete_open_receipt_names_the_exact_registry(self) -> None:
         launch = rewake.parse_launch(self.payload())

@@ -1577,6 +1577,7 @@ class HarvestVocabularyTest(unittest.TestCase):
                 self.codex.completion_prompt(receipt, jobs=self.jobs),
             ):
                 lines = JOIN.harvest_command_lines(prompt)
+                self.assertNotIn("--failure-detail", prompt)
                 satisfiable, reason = JOIN.supervisor_receipt_satisfiable(
                     lines,
                     base=JOIN.ROOT,

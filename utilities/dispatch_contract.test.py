@@ -4185,6 +4185,31 @@ class DeliveryIntentValuesTest(unittest.TestCase):
         self.assertEqual(restored["children"][0]["required_action"], "inspect-done-failure")
         self.assertEqual(restored["children"][0]["reason"], "terminal-failure-or-unclosed")
 
+    def test_committed_delivery_proof_is_independent_of_harness_and_terminal_producer(self):
+        for harness in ("claude", "codex", "opencode"):
+            for note in ("completed-review", "completed-marker", "completed-supervisor", "completed-subsession"):
+                with self.subTest(harness=harness, note=note):
+                    metadata = self._metadata(harness=harness, note=note, failure_class="pass")
+                    metadata.update(D._delivery_intent_values(self._fields(metadata), metadata))
+                    self.assertTrue(D._delivery_commit_proven(metadata))
+
+    def test_committed_receipt_cannot_be_rebound_or_replace_failure_with_success(self):
+        metadata = self._metadata(note="completed-review", failure_class="pass")
+        metadata.update(D._delivery_intent_values(self._fields(metadata), metadata))
+        for changes in (
+            {"attempt_id": "att-other"}, {"parent_attempt_id": "att-other"},
+            {"parent_sid": "other-session"}, {"parent_completion_delivery": "codex-managed-gateway"},
+            {"harness": "opencode"}, {"delivery_receipt_digest": "0" * 64},
+            {"delivery_receipt_b64": "!invalid"}, {"delivery_receipt_b64": "W10"},
+            {"delivery_receipt_b64": D.base64.b64encode(b'{"kind":{}}').decode()},
+            {"delivery_intent": "0"}, {"note": "dead-failed", "failure_class": "fail"},
+        ):
+            with self.subTest(changes=changes):
+                self.assertFalse(D._delivery_commit_proven({**metadata, **changes}))
+        failed = self._metadata(note="dead-failed", failure_class="fail")
+        failed.update(D._delivery_intent_values(self._fields(failed), failed))
+        self.assertFalse(D._delivery_commit_proven(failed))
+
     def test_already_stamped_row_never_restamps(self):
         metadata = self._metadata(
             note="completed-marker", failure_class="pass",
