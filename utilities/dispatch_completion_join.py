@@ -27,6 +27,10 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
+from dispatch_attempt_policy import decide_attempt, required_action
+from dispatch_receipt_identity import (
+    CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, canonical_receipt, receipt_digest,
+)
 from dispatch_contract import (  # noqa: E402
     AUTOMATIC_RECEIPTLESS_CLASSIFIER,
     SUBSESSION_NOTE,
@@ -102,19 +106,6 @@ DELIVERY_TIMING_POINTS = (
     "final_report_marker_ns",
     "owner_terminal_envelope_ns",
 )
-# SD-111 D-2/C-2: mirrors codex-managed-gateway.py's ALLOWED_RECEIPT_KEYS /
-# ALLOWED_CHILD_KEYS minus "delivery_timing". Duplicated (not imported) because
-# codex-managed-gateway.py imports this module already -- importing back would
-# be circular. Keep both lists synchronized by hand; §11 forbids widening
-# either vocabulary.
-CANONICAL_RECEIPT_KEYS = frozenset({
-    "schema_version", "state", "parent_attempt_id", "job_registry", "children",
-    "delivery_classification",
-})
-CANONICAL_CHILD_KEYS = frozenset({
-    "attempt_id", "status", "readiness", "reason", "required_action", "harness",
-    "delivery_classification",
-})
 MAX_DELIVERY_RECEIPT_BYTES = 2048
 # SUCCESS_NOTES / SUBSESSION_NOTE / row_is_subsession are re-exported from
 # `dispatch_contract`, which owns the definition (this module imports that one,
@@ -136,27 +127,19 @@ def canonical_delivery_receipt(receipt: dict[str, object]) -> dict[str, object]:
     digest/``delivery_id`` across carriers.
     """
 
-    if not isinstance(receipt, dict):
-        raise JoinContractError("delivery-receipt-invalid")
-    canonical: dict[str, object] = {
-        key: value for key, value in receipt.items() if key in CANONICAL_RECEIPT_KEYS
-    }
-    raw_children = receipt.get("children")
-    if isinstance(raw_children, list):
-        canonical["children"] = [
-            {key: value for key, value in child.items() if key in CANONICAL_CHILD_KEYS}
-            for child in raw_children
-            if isinstance(child, dict)
-        ]
-    return canonical
+    try:
+        return canonical_receipt(receipt)
+    except ValueError as exc:
+        raise JoinContractError(str(exc)) from exc
 
 
 def canonical_receipt_digest(receipt: dict[str, object]) -> str:
     """Return the sha256 hex digest of the timing-excluded canonical receipt."""
 
-    canonical = canonical_delivery_receipt(receipt)
-    encoded = json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    try:
+        return receipt_digest(receipt)
+    except ValueError as exc:
+        raise JoinContractError(str(exc)) from exc
 
 
 def seal_delivery_receipt(receipt: dict[str, object]) -> str:
@@ -591,13 +574,9 @@ def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
 def required_action_for_attempt(status: str, metadata: dict[str, str]) -> str:
     """Return the one typed follow-up that the exact registry row permits."""
 
-    if status in OPEN_STATES:
-        return "complete-open"
-    if status != "done":
+    if status not in OPEN_STATES | {"done"}:
         raise JoinContractError("owned-row-status-invalid")
-    if metadata.get("failure_class") == "pass" or metadata.get("note") in SUCCESS_NOTES:
-        return "advance-completed"
-    return "inspect-done-failure"
+    return required_action(status, metadata)
 
 
 def harvest_command_lines(prompt: str) -> list[str]:
@@ -2782,44 +2761,6 @@ def supervisor_guarded_attempt_ids(
     return guarded
 
 
-def _liveness_state(
-    row: ChildRow,
-    command: list[str],
-    env: dict[str, str],
-    timeout: float = 30.0,
-) -> str:
-    """Return ``alive`` or ``terminal`` without exposing liveness output."""
-
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-        fields = row.raw.split("\t")
-        if len(fields) == 6 and fields[1] == "running":
-            fields[1] = "open"
-        handle.write("\t".join(fields) + "\n")
-        registry = Path(handle.name)
-    try:
-        result = subprocess.run(
-            [*command, str(registry)],
-            env={**env, "AGENT_DISPATCH_JOBS": str(registry)},
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=max(0.1, timeout),
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise JoinContractError("liveness-contract-unavailable") from exc
-    finally:
-        try:
-            registry.unlink()
-        except OSError:
-            pass
-    if result.returncode == 0:
-        return "alive"
-    if result.returncode == 3:
-        return "terminal"
-    raise JoinContractError("liveness-contract-failed")
-
-
 def join_observation_path(jobs: Path, identity: dict[str, str]) -> Path:
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     return jobs.resolve().parent / "join-observations" / f"{key}.json"
@@ -2918,8 +2859,6 @@ def _join_snapshot(
 ) -> dict[str, object]:
     """Join one immutable exact-attempt snapshot."""
 
-    command = liveness_command or [str(ROOT / "utilities" / "dispatch-liveness.sh")]
-    runtime_env = dict(os.environ if env is None else env)
     interval = max(0.05, interval)
     timeout = max(0.0, timeout)
     if not initial:
@@ -2936,6 +2875,7 @@ def _join_snapshot(
     last_observation = float("-inf")
     last_signature = ""
     observation_error = ""
+    notice_published = False
 
     while True:
         rows = refresh(snapshot)
@@ -2955,56 +2895,26 @@ def _join_snapshot(
                 # even when their final runtime envelope is not visible yet.
                 terminal_receipt_gate=True,
             )
-            if row.status == "done":
-                if observed.state == "terminal":
-                    readiness, reason = "ready", "registry-closed"
-                elif (
-                    observed.process_reason == "attempt-descendant-live"
-                    and _marker_bound_prepare_marker_proof(
-                        row.metadata, row.attempt_id
-                    ) is not None
-                ):
-                    # SD-OPEN-47 (H7-c): the exact leader is gone and the row
-                    # is live only through tagged residue (a background shell,
-                    # a detached wait), while the completion marker chain
-                    # already proves this attempt finished. That residue must
-                    # not hold the owner in `runtime_wait: registered-children`
-                    # until the join times out and reparks forever. A live
-                    # exact leader (`*-pid-live`) or a missing post-exit
-                    # receipt keeps the SD-79/80/89 gate as before (review
-                    # finding 3).
-                    readiness, reason = "ready", "registry-closed-marker"
-                else:
-                    readiness = "pending"
-                    reason = (
-                        "process-alive"
-                        if observed.state == "alive"
-                        else "process-unverifiable"
-                    )
-                    pending = True
-            elif row.status in OPEN_STATES:
-                if observed.state == "alive":
-                    readiness, reason = "pending", "process-alive"
-                    pending = True
-                elif observed.state == "reconcile-needed":
-                    readiness, reason = "ready", "terminal-observed"
-                elif observed.process_reason == "post-exit-receipt-incomplete":
-                    # A namespace-local fallback probe cannot replace the
-                    # wrapper-issued portable receipt.
-                    readiness, reason = "pending", "process-unverifiable"
-                    pending = True
-                else:
-                    probe = _liveness_state(
-                        row, command, runtime_env, liveness_probe_timeout
-                    )
-                    if probe == "terminal":
-                        readiness, reason = "ready", "terminal-observed"
-                    else:
-                        readiness = "pending"
-                        reason = "process-unverifiable"
-                        pending = True
-            else:
+            if row.status not in OPEN_STATES | {"done"}:
                 raise JoinContractError("owned-row-status-invalid")
+            marker_residue = (
+                row.status == "done" and observed.process_reason == "attempt-descendant-live"
+                and _marker_bound_prepare_marker_proof(row.metadata, row.attempt_id) is not None
+            )
+            decision = decide_attempt(
+                row.status, row.metadata,
+                process_state="quiescent" if marker_residue else observed.process_state,
+                process_reason=observed.process_reason,
+                terminal_observed=observed.reason == "terminal-observed",
+            )
+            if decision.action in {"wait", "recover"}:
+                readiness = "pending"
+                reason = "process-alive" if decision.action == "wait" else "process-unverifiable"
+                pending = True
+            else:
+                readiness = "ready"
+                reason = ("registry-closed-marker" if marker_residue else
+                          "registry-closed" if row.status == "done" else "terminal-observed")
             if (recovery is not None and readiness == "pending"
                     and reason == "process-unverifiable"
                     and row.status in OPEN_STATES
@@ -3043,6 +2953,14 @@ def _join_snapshot(
                 # A display record never owns the child's lifetime or verdict.
                 observation_error = "join-observation-write-failed"
             last_signature, last_observation = signature, time.monotonic()
+        if (not notice_published and observation_jobs is not None and elapsed >= 30
+                and any(child["reason"] == "process-unverifiable" for child in children)):
+            try:
+                from dispatch_supervision import materialize
+                materialize(observation_jobs, snapshot, reason="process-unverifiable")
+                notice_published = True
+            except (OSError, ValueError, pending_delivery.PendingDeliveryError) as exc:
+                observation_error = "supervision-notice-unpersisted:" + str(exc)
         if not pending:
             return {
                 "schema_version": SCHEMA_VERSION,

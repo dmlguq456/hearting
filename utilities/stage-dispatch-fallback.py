@@ -71,6 +71,7 @@ from dispatch_mode_contract import (  # noqa: E402
     validate_route_mode_axes,
 )
 from worker_bootstrap import assigned_contract, worker_type_for_kind  # noqa: E402
+from dispatch_attempt_policy import decide_attempt, committed_outcome
 from codex_dispatch_terminal import REVIEW_BLOCKING_NOTE  # noqa: E402
 from dispatch_degradation import record_degradation  # noqa: E402
 from dispatch_allocation_receipt import record_allocation_receipt  # noqa: E402
@@ -711,21 +712,19 @@ def terminal_attempt_state(
     # receipt after its observer namespace has gone away.
     process = attempt_process_quiescence(row, terminal_receipt=True)
     fields.update(process_state=process.state, process_reason=process.reason)
-    if process.state == "live":
+    decision = decide_attempt("done", row, process_state=process.state,
+                              process_reason=process.reason)
+    if decision.action == "wait":
         return "draining", fields
-    if process.state != "quiescent":
+    if decision.action == "recover":
         return "fail-closed", fields
-    if note == "completed-marker":
+    if decision.action == "advance":
         return "terminal", fields
-    if note == REVIEW_BLOCKING_NOTE:
-        # OPERATIONS §5.10: a reviewer that recorded blocking findings finished.
-        # That is a stage result for the owner to read, never a launch failure
-        # to fall back from -- descending to the next hop here would spend the
-        # round budget on a second review the owner did not ask for.
+    if decision.action == "review":
         return "terminal", {**fields, "review_verdict": "FAIL"}
-    if note == "dead-capacity":
+    if decision.retry_kind == "capacity":
         return "capacity", {**fields, "failure_class": "capacity"}
-    if note.startswith("dead-"):
+    if decision.retry_allowed:
         return "fallback", fields
     return "fail-closed", fields
 
@@ -1109,6 +1108,9 @@ def wrapper_command(
         "--execution-surface", "registered-headless",
         "--registered-worker", "1",
     ]
+    retry_of = (capacity_prior or {}).get("attempt_id") or getattr(args, "automatic_retry_of", "")
+    if retry_of:
+        command += ["--automatic-retry-of", retry_of]
     unit = node.get("unit") or ""
     if unit and not unit.startswith("_kernel/"):
         command += ["--worker-mode", unit]
@@ -1593,6 +1595,11 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
             )
 
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])
+    prior_rows = registry_rows(args.jobs, route["route_id"], node["id"])
+    args.automatic_retry_of = (
+        prior_rows[-1].get("attempt_id", "") if prior_rows
+        and committed_outcome(prior_rows[-1]["_status"], prior_rows[-1]) == "failed" else ""
+    )
     failed_tuples = set(args.failed_tuple) | set(prior_failures)
     attempts: list[str] = []
     direct_failures: list[dict[str, str]] = []
@@ -1771,7 +1778,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                             fields.get("reason")
                             or (worker_failure if worker_failure != "-" else "wrapper-exit")
                         )
-                        if failure_reason in PRELAUNCH_PROCESS_BLOCK_REASONS:
+                        if failure_reason in PRELAUNCH_PROCESS_BLOCK_REASONS or failure_reason.startswith("retry-"):
                             return fail(
                                 failure_reason,
                                 78,
@@ -1846,6 +1853,8 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                         if output:
                             print(output)
                         return 0
+                if registry_has_attempt(args.jobs, attempt_id):
+                    args.automatic_retry_of = attempt_id
                 if early == "capacity":
                     failed = {
                         **fields, "attempt_id": attempt_id,

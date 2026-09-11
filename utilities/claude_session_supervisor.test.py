@@ -1147,11 +1147,10 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             result.stdout,
         )
 
-    def test_join_timeout_repark_bound_trips_without_spurious_model_turn(self):
+    def test_join_deadlines_preserve_owner_past_old_repark_bound(self):
         self.jobs.write_text(owner_row(self.lease) + child_row(), encoding="utf-8")
-        # More timeouts than --max-join-reparks allows: the supervisor must
-        # fail closed via the repark bound, never by silently delivering a
-        # timeout receipt to the model as if it were actionable.
+        # Deadlines cannot end a live dependency. The compatibility flag no
+        # longer grants termination; eventual ready produces exactly one turn.
         join_script = self._timeout_then_ready_join(timeouts=10)
         cmd = self.command_with_join(join_script)
         idx = cmd.index("--join-timeout")
@@ -1164,11 +1163,11 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             env=self.child_env(FAKE_TRACE=str(self.trace)),
             timeout=10,
         )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("join-timeout-repark-exceeded", result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("join-timeout-repark-exceeded", result.stdout + result.stderr)
         trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
         turn_starts = [row for row in trace if row["event"] == "turn-start"]
-        self.assertEqual(len(turn_starts), 1, trace)
+        self.assertEqual(len(turn_starts), 2, trace)
 
     def _blocked_child_row(self) -> str:
         log = self.base / "att-child.claude.jsonl"

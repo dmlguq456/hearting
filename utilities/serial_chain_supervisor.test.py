@@ -23,6 +23,7 @@ from contextlib import redirect_stdout
 
 ROOT = Path(__file__).resolve().parents[1]
 import sys
+import time
 sys.path.insert(0, str(ROOT / "utilities"))
 
 import dispatch_completion_join as JOIN  # noqa: E402
@@ -515,7 +516,7 @@ class SupervisorEdgeAcceptanceTest(unittest.TestCase):
                     finally:
                         harness.doCleanups()
 
-    def test_repark_exhaustion_has_the_same_external_verdict_on_both_supervisors(self):
+    def test_repeated_deadlines_preserve_both_supervisors(self):
         verdicts = {}
         for runtime in ("claude", "codex"):
             harness = self._harness(runtime)
@@ -544,17 +545,25 @@ class SupervisorEdgeAcceptanceTest(unittest.TestCase):
                         "AGENT_ARTIFACT_ROOT": str(harness.artifact_root),
                     }
                 )
-                result = subprocess.run(
-                    command, input="initial assignment", text=True,
-                    capture_output=True, env=env, timeout=10,
-                )
-                verdicts[runtime] = result.stdout + result.stderr
-                self.assertIn("join-timeout-repark-exceeded", verdicts[runtime])
+                process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True, env=env)
+                try:
+                    process.stdin.write("initial assignment")
+                    process.stdin.close()
+                    process.stdin = None
+                    time.sleep(1.5)
+                    self.assertIsNone(process.poll(), runtime)
+                finally:
+                    process.terminate()
+                    out, err = process.communicate(timeout=5)
+                verdicts[runtime] = out + err
+                self.assertIn("dispatch.supervisor.reparked", out)
+                self.assertNotIn("join-timeout-repark-exceeded", verdicts[runtime])
             finally:
                 harness.doCleanups()
         self.assertEqual(
             ["join-timeout-repark-exceeded" in verdicts[name] for name in ("claude", "codex")],
-            [True, True],
+            [False, False],
         )
 
 

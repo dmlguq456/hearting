@@ -40,7 +40,7 @@ class OrphanWatchTest(unittest.TestCase):
         )
         self.supervisor_lease.parent.mkdir(parents=True, exist_ok=True)
         self.supervisor_lease.write_text("stale", encoding="utf-8")
-        self.owner = subprocess.Popen(["sleep", "60"])
+        self.owner = subprocess.Popen(["sleep", "60"], start_new_session=True)
         self.owner_start = self.proc_start(self.owner.pid)
         self.observer_namespace = (Path("/proc/self/ns/pid").readlink())
         self.children = []
@@ -64,7 +64,7 @@ class OrphanWatchTest(unittest.TestCase):
         status = "done" if completed_owner else "open"
         child_pid = child.pid if child is not None else 99999999
         child_start = self.proc_start(child.pid) if child is not None else "1"
-        child_group = f",pgid={child.pid}" if child is not None else ""
+        child_group = f",pgid={child_pid},pid_observer_ns={self.observer_namespace},pid_ns={self.observer_namespace}"
         current = (
             "attempt_schema_version=2,transport=headless,"
             "execution_surface=registered-headless,registered_worker=1,"
@@ -80,7 +80,8 @@ class OrphanWatchTest(unittest.TestCase):
         self.jobs.write_text(
             f"2026-07-19T00:00:00Z\t{status}\t/r\t/w\towner\t"
             f"{current},dispatch_depth=1,worker_type=owner,attempt_id=att-watch,"
-            f"pid={self.owner.pid},pid_start={self.owner_start},"
+            "parent_sid=parent-test,parent_completion_delivery=claude-parent-runtime,"
+            f"pid={self.owner.pid},pid_start={self.owner_start},pgid={self.owner.pid},"
             f"pid_observer_ns={self.observer_namespace},"
             f"pid_ns={self.observer_namespace}"
             f"{supervised_metadata}\n"
@@ -92,7 +93,7 @@ class OrphanWatchTest(unittest.TestCase):
         )
 
     def watcher(self):
-        return subprocess.Popen([
+        process = subprocess.Popen([
             sys.executable, str(WATCH),
             "--jobs", str(self.jobs),
             "--agent-home", str(self.home),
@@ -101,6 +102,12 @@ class OrphanWatchTest(unittest.TestCase):
             "--pid-start", self.owner_start,
             "--interval", "0.02",
         ])
+        def reap():
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+        self.addCleanup(reap)
+        return process
 
     def test_owner_exit_reaps_exact_child_group_and_closes_both_rows(self):
         child = subprocess.Popen(["sleep", "60"], start_new_session=True)
@@ -133,7 +140,7 @@ class OrphanWatchTest(unittest.TestCase):
         self.assertFalse(self.supervisor_state.exists())
         self.assertTrue(self.supervisor_lease.exists())
 
-    def test_terminal_owner_waits_for_extinction_before_exit_without_mutation(self):
+    def test_terminal_owner_waits_then_finishes_child_cleanup(self):
         self.write_rows(completed_owner=True)
         before = self.jobs.read_text()
         watcher = self.watcher()
@@ -142,7 +149,9 @@ class OrphanWatchTest(unittest.TestCase):
         self.assertTrue(self.supervisor_state.exists())
         self.owner.kill(); self.owner.wait()
         self.assertEqual(watcher.wait(timeout=5), 0)
-        self.assertEqual(self.jobs.read_text(), before)
+        after = self.jobs.read_text()
+        self.assertEqual(after.splitlines()[0], before.splitlines()[0])
+        self.assertIn("\tdone\t/r\t/w\tchild\t", after)
         self.assertFalse(self.supervisor_state.exists())
         self.assertFalse(self.supervisor_lease.exists())
 
@@ -181,8 +190,8 @@ class OrphanWatchTest(unittest.TestCase):
         text = self.jobs.read_text()
         text = text.replace("\tdone\t/r\t/w\towner\t", "\tkilled\t/r\t/w\towner\t")
         text = text.replace(
-            f"pid_start={self.owner_start},",
-            f"pid_start={self.owner_start},pid_scope=namespace-local,",
+            f"pid_start={self.owner_start},pgid={self.owner.pid},",
+            f"pid_start={self.owner_start},pgid={self.owner.pid},pid_scope=namespace-local,",
             1,
         )
         text = text.replace(
@@ -198,10 +207,14 @@ class OrphanWatchTest(unittest.TestCase):
                           if "att-child" in line)
         self.assertIn("\topen\t", child_line)
         self.owner.kill(); self.owner.wait()
-        self.assertEqual(watcher.wait(timeout=5), 0)
+        self.assertEqual(watcher.wait(timeout=5), 70)
+        self.assertTrue(self.supervisor_state.exists())
+        notices = list((self.jobs.parent / "pending-delivery").glob("**/delivery-*.json"))
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(json.loads(notices[0].read_text())["receipt"]["reason"], "supervisor-exited")
         child_line = next(line for line in self.jobs.read_text().splitlines()
                           if "att-child" in line)
-        self.assertIn("note=dead-parent-terminated", child_line)
+        self.assertIn("note=dead-parent-exited", child_line)
 
     def test_non_orphan_429_exit_is_reconciled_as_capacity(self):
         log = self.base / "owner.claude.jsonl"
@@ -221,7 +234,7 @@ class OrphanWatchTest(unittest.TestCase):
         self.jobs.write_text(
             "2026-07-19T00:00:00Z\topen\t/r\t/w\towner\t"
             f"{current},attempt_id=att-watch,pid={self.owner.pid},"
-            f"pid_start={self.owner_start},log_file={log}\n"
+            f"pid_start={self.owner_start},pgid={self.owner.pid},log_file={log}\n"
         )
         watcher = self.watcher()
         time.sleep(0.05)
@@ -242,7 +255,7 @@ class OrphanWatchTest(unittest.TestCase):
         self.jobs.write_text(
             "2026-07-19T00:00:00Z\topen\t/r\t/w\towner\t"
             f"{current},attempt_id=att-watch,pid={self.owner.pid},"
-            f"pid_start={self.owner_start}\n"
+            f"pid_start={self.owner_start},pgid={self.owner.pid}\n"
         )
         watcher = self.watcher()
         time.sleep(0.05)

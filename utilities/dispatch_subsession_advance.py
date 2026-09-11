@@ -794,15 +794,10 @@ def drive_serial_chain(
         attempts = {step.attempt_id}  # type: ignore[arg-type]
         traversed.add(step.attempt_id or "")
         last = step.attempt_id
-        reparks = 0
-        receipt = join(set(attempts))
-        while receipt.get("state") == "timeout":
-            reparks += 1
-            if reparks > max_reparks:
-                raise ChainDriveError("join-timeout-repark-exceeded")
-            if on_timeout:
-                on_timeout(set(attempts))
-            receipt = join(set(attempts))
+        from dispatch_supervision import wait_for_batch
+        receipt = wait_for_batch(join=join, attempts=set(attempts), jobs=jobs,
+                                 parent_attempt_id=parent_attempt_id, emit=emit,
+                                 on_timeout=on_timeout)
         joined_rows = refresh(set(attempts))
         joined = {row.attempt_id: row for row in joined_rows}
     if sibling_attempts:

@@ -37,6 +37,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
+from dispatch_receipt_identity import CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, receipt_digest
 
 
 class PendingDeliveryError(RuntimeError):
@@ -107,39 +108,12 @@ REQUIRED_FIELDS = (
 RECOVERY_AUDIT_FIELDS = frozenset({"expiry_actor", "expiry_detail", "expired_at_ns"})
 IMMUTABLE_FIELDS = ("delivery_id", "recipient_digest", "attempt_ids", "receipt_digest")
 
-# Mirrors dispatch_completion_join.{CANONICAL_RECEIPT_KEYS,CANONICAL_CHILD_KEYS,
-# canonical_receipt_digest}. Duplicated (not imported): dispatch_completion_join
-# imports *this* module for materialize_pending_delivery, so the reverse import
-# would be circular. Keep both copies synchronized by hand; §11 forbids
-# widening either vocabulary.
-CANONICAL_RECEIPT_KEYS = frozenset({
-    "schema_version", "state", "parent_attempt_id", "job_registry", "children",
-    "delivery_classification",
-})
-CANONICAL_CHILD_KEYS = frozenset({
-    "attempt_id", "status", "readiness", "reason", "required_action", "harness",
-    "delivery_classification",
-})
 
 
 def _canonical_receipt_digest(receipt: dict) -> str:
     if not isinstance(receipt, dict):
         raise PendingDeliveryError("pending-delivery-identity-conflict", "receipt-not-dict")
-    if receipt.get("kind") == "human-gate":
-        encoded = json.dumps(
-            receipt, ensure_ascii=False, separators=(",", ":"), sort_keys=True
-        ).encode("utf-8")
-        return "sha256:" + hashlib.sha256(encoded).hexdigest()
-    canonical = {k: v for k, v in receipt.items() if k in CANONICAL_RECEIPT_KEYS}
-    children = receipt.get("children")
-    if isinstance(children, list):
-        canonical["children"] = [
-            {k: v for k, v in child.items() if k in CANONICAL_CHILD_KEYS}
-            for child in children
-            if isinstance(child, dict)
-        ]
-    encoded = json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return receipt_digest(receipt)
 
 
 def recipient_digest(recipient_key: str) -> str:

@@ -100,6 +100,9 @@ def _bounded_receipt_text(record: dict) -> str:
     """
 
     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    if receipt.get("kind") == "supervision":
+        from dispatch_supervision import render_text
+        return render_text(receipt)
     children = receipt.get("children") if isinstance(receipt.get("children"), list) else []
     parts = []
     for child in children:
@@ -183,6 +186,15 @@ def sweep_deliver(
                 )
             except pending_delivery.PendingDeliveryError:
                 continue
+            if record.get("receipt", {}).get("kind") == "supervision":
+                try:
+                    from dispatch_supervision import notice_is_current
+                    if not notice_is_current(record):
+                        pending_delivery.reject_claimed(root, session_id, delivery_id,
+                            claim_owner=claim_owner, reason="supervision-resolved")
+                        continue
+                except (OSError, ValueError, pending_delivery.PendingDeliveryError):
+                    continue  # Preserve the lease and retry through the existing queue.
             claimed.append(record)
     except OSError:
         pass

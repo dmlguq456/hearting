@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import threading
 import unittest
 from unittest import mock
@@ -356,23 +357,22 @@ raise SystemExit(3 if state == 'timeout' else 0)
         self.assertIn("jobs-path-invalid", result.stdout)
         self.assertFalse(self.control_path.exists())
 
-    def test_timeout_never_connects_to_gateway(self) -> None:
+    def test_timeout_retains_completion_carrier_without_terminal_delivery(self) -> None:
         attempts = ["att-a", "att-b"]
-        self.jobs.write_text(
-            row(attempts[0], harness="codex", status="open")
-            + row(attempts[1], harness="claude", status="open"),
-            encoding="utf-8",
-        )
-        result = subprocess.run(
-            self.command(attempts, mode="timeout"),
-            text=True,
-            capture_output=True,
-            timeout=5,
-        )
-        self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
-        payload = json.loads(result.stdout)
-        self.assertEqual(payload["status"], "timeout")
-        self.assertFalse(self.control_path.exists())
+        self.jobs.write_text(row(attempts[0], harness="codex", status="open")
+                             + row(attempts[1], harness="claude", status="open"), encoding="utf-8")
+        before = self.jobs.read_bytes()
+        process = subprocess.Popen(self.command(attempts, mode="timeout"),
+                                   text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            time.sleep(0.7)
+            self.assertIsNone(process.poll())
+            self.assertEqual(self.jobs.read_bytes(), before)
+            self.assertFalse(self.control_path.exists())
+        finally:
+            process.terminate()
+            out, err = process.communicate(timeout=5)
+        self.assertNotIn('"status": "delivered"', out)
 
     def test_terminal_observed_open_child_keeps_actionable_status(self) -> None:
         self.jobs.write_text(

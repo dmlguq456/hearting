@@ -1056,7 +1056,7 @@ def _recipient_gate_records(launch: Launch) -> list[tuple[Path, str, str, dict]]
             continue
         if record is None or record.get("state") not in pending_delivery.OPEN_STATES:
             continue
-        if not is_human_gate_record(record):
+        if not is_human_gate_record(record) and record.get("receipt", {}).get("kind") != "supervision":
             continue
         found.append((root, recipient_key, delivery_id, record))
     return found
@@ -1167,6 +1167,15 @@ def _gate_notices(
             )
         except pending_delivery.PendingDeliveryError:
             continue
+        if record.get("receipt", {}).get("kind") == "supervision":
+            try:
+                from dispatch_supervision import notice_is_current
+                if not notice_is_current(record):
+                    pending_delivery.reject_claimed(root, recipient_key, delivery_id,
+                        claim_owner=claim_owner, reason="supervision-resolved")
+                    continue
+            except (OSError, ValueError, pending_delivery.PendingDeliveryError):
+                continue
         notices.append(_bounded_receipt_text(record))
         if announced is not None:
             announced.append(delivery_id)
@@ -1189,6 +1198,8 @@ def gate_wake_message(launch: Launch, notices: list[str]) -> str:
     still alive and waiting -- so the session answers the gate instead of
     harvesting the attempt."""
 
+    if any("Hearting supervision needs attention." in notice for notice in notices):
+        return " ".join(notices)
     return (
         "Hearting human gate awaiting your decision (SD-123/129). Runtime gate receipt "
         f"schema=2 state=attention attempt_id={launch.attempt_id} armed={launch.armed} "

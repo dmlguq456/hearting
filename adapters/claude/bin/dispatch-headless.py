@@ -266,6 +266,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--registered-worker", type=int, choices=(0, 1), default=1)
     p.add_argument("--capacity-retry", type=int, choices=(0, 1), default=0)
     p.add_argument("--prior-attempt-id")
+    p.add_argument("--automatic-retry-of", help="Exact failed predecessor; revalidated atomically at claim")
     p.add_argument("--cooled-model")
     p.add_argument("--selection-source")
     p.add_argument("--launch-authority", choices=("conductor", "ancestor-broker"), default="conductor")
@@ -1634,6 +1635,8 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
                 pipe += f",{key}={replica_reservation[key]}"
     leg_class, auxiliary_check = _route_node_leg_fields(args)
     pipe += f",leg_class={leg_class},auxiliary_check={auxiliary_check}"
+    if getattr(args, "automatic_retry_of", None):
+        pipe += f",automatic_retry_of={args.automatic_retry_of}"
     if args.capacity_retry:
         pipe += (
             f",capacity_retry=1,prior_attempt_id={args.prior_attempt_id}"

@@ -3762,9 +3762,9 @@ class DeliveryIntentValuesTest(unittest.TestCase):
         self.assertEqual(restored["children"][0]["delivery_classification"], "success")
         self.assertEqual(restored["children"][0]["required_action"], "advance-completed")
         self.assertNotIn("reason", restored["children"][0])
-        canonical = {k: v for k, v in restored.items() if k in D._CANONICAL_RECEIPT_KEYS}
+        canonical = {k: v for k, v in restored.items() if k in __import__("dispatch_receipt_identity").CANONICAL_RECEIPT_KEYS}
         canonical["children"] = [
-            {k: v for k, v in c.items() if k in D._CANONICAL_CHILD_KEYS}
+            {k: v for k, v in c.items() if k in __import__("dispatch_receipt_identity").CANONICAL_CHILD_KEYS}
             for c in restored["children"]
         ]
         digest = hashlib.sha256(

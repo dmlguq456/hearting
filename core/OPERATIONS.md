@@ -265,16 +265,42 @@ copied status/action as hints and select the current exact row action. Successfu
 consumption preserves the same receipt identity, and state/outbox removal before
 all applicable actions succeed is forbidden.
 
-Owner supervisors and managed completion carriers enable exact receiptless
-recovery inside the shared join, before its long timeout. Each unresolved
-namespace-local attempt is checked at most once per 30 seconds; only the
-registry's existing quiescence proof can cancel it, and the join re-reads the
-row before proceeding. Ordinary join queries remain read-only. An unavailable
-namespace observation is distinct from a namespace proved present. After
-30 seconds of unverifiable child state, the join publishes a fresh diagnostic
-beside the registry under `join-observations/`; Fleet shows the parked owner as
-requiring attention. This display record grants no completion, retry, or signal
-authority and expires after 120 seconds without a refresh.
+**Dispatch responsibility:** execution, semantic outcome, and notification are
+separate facts. Runtime adapters supply evidence and transport; they do not
+define different retry or completion policies.
+
+| Decision | Accountable component | Required follow-through |
+|---|---|---|
+| Start and execution lifetime | Claimed execution boundary | Publish the actual runner identity, enforce its finite budget, and account for governed descendants before releasing resources. |
+| Completion | Exact terminal writer under the jobs lock | Preserve the committed result. A later process observation cannot turn success into failure. |
+| Wait, recovery, and retry eligibility | Shared attempt policy and supervision controller | Reconcile exact evidence, retry only a settled retryable failure, and transfer an unresolved decision to the parent through durable delivery. |
+| Failure cleanup and supervisor exit | Execution boundary, with the exact post-exit watcher as recovery owner | Finish or retain an explicit cleanup obligation; never discard recovery state merely because a helper returned. |
+| User notification | Shared pending-delivery record and recipient runtime carrier | Keep the obligation until accepted or explicitly handed back. A display update or expired polling interval is not delivery. |
+
+A blocked transition owes either a bounded recovery action or an actionable
+parent notice naming the unresolved attempts and the responsible component.
+An elapsed join interval is a checkpoint, not child death or owner failure.
+Duplicate observations converge on the existing obligation; successful results
+and already accepted notifications are not replayed as retries. Read-only
+queries neither cancel work nor acquire these responsibilities.
+
+`dispatch_attempt_policy.py` is the shared decision table. Terminal writers,
+join/harvest, and the retry claimant consume it; the jobs lock admits at most
+one automatic successor for an exact `automatic_retry_of` predecessor. An
+explicit new review round remains a workflow decision. Stage boundaries specify
+inputs and outcomes; they do not themselves imply another process launch.
+
+`dispatch_supervision.wait_for_batch` owns repeated join checkpoints across
+session supervisors, serial chains, and the managed completion carrier. It
+keeps execution alive, schedules exact recovery, and uses the existing
+pending-delivery queue for `kind=supervision` notices. A notice names the exact
+unresolved attempts and read-only diagnosis command. The recipient explains the
+blockage and asks for a disposition if evidence cannot resolve it; notification
+acceptance never cancels an attempt or authorizes retry. Gate and supervision
+notices share claim/send/acceptance mechanics, with separate semantic validators.
+A settled attempt suppresses a late recovery notice. On controller exit, the
+exact orphan watcher retains state unless cleanup is proven or the unresolved
+decision has been durably handed to its parent.
 
 A checked verification runner records its exact attempt/route/node, live
 PID/start/leader-PGID, actual argv digest, start, and bounded deadline beside the

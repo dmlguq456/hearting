@@ -628,6 +628,62 @@ class ManagedGatewayTest(unittest.TestCase):
         self.assertIn("hearting-human-gate", context)
         self.assertNotIn("hearting-completion", context)
 
+    def _supervision_request(self):
+        import dispatch_supervision as supervision
+        import dispatch_contract as contract
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+        self.addCleanup(cleanup)
+        jobs = self.root / "notice-jobs.log"
+        epoch = control(self.control, {"schema_version": 1, "op": "status"})["epoch"]
+        common = ("attempt_schema_version=2,transport=headless,execution_surface=registered-headless,"
+                  "registered_worker=1,fallback_hop=same-harness-headless,")
+        jobs.write_text("2026-09-11T00:00:00Z\topen\t/r\t/w\towner\t" + common
+            + f"dispatch_depth=1,attempt_id=att-notice-owner,parent_sid=thread-1,session_generation={epoch},"
+            "session_generation_supported=1,parent_completion_delivery=codex-managed-gateway,"
+            "managed_sealed_batch_id=batch-notice,route_id=rt-notice,route_node=owner\n"
+            + "2026-09-11T00:00:00Z\topen\t/r\t/w\tchild\t" + common
+            + f"dispatch_depth=2,attempt_id=att-notice-child,parent_attempt_id=att-notice-owner,pid={process.pid},"
+            + f"pid_start={contract.process_start_ticks(process.pid)},pgid={process.pid},"
+            + f"pid_observer_ns={contract.process_namespace_identity()}\n")
+        record = supervision.materialize(jobs, {"att-notice-child"}, reason="join-deadline")[0]
+        receipt = record["receipt"]
+        request = {"schema_version": 1, "op": "deliver-notice", "thread_id": "thread-1",
+                   "parent_attempt_id": "att-notice-owner", "sealed_batch_id": "batch-notice",
+                   "delivery_id": supervision.gateway_delivery_id(receipt),
+                   "receipt_digest": record["receipt_digest"], "receipt": receipt}
+        return request, jobs, process
+
+    def test_supervision_uses_notice_transport_once_without_completing_live_work(self):
+        request, jobs, process = self._supervision_request()
+        before = jobs.read_bytes()
+        first = control(self.control, request)
+        self.assertEqual(first["status"], "accepted", first)
+        second = control(self.control, request)
+        self.assertEqual((second["status"], second["replay"]), ("accepted", True))
+        self.assertIsNone(process.poll())
+        self.assertEqual(jobs.read_bytes(), before)
+        starts = [message for message in self.server.messages if message.get("method") == "turn/start"]
+        contexts = [m["params"].get("additionalContext", {}) for m in starts]
+        notices = [c for c in contexts if "hearting-supervision" in c]
+        self.assertEqual(len(notices), 1)
+        self.assertNotIn("hearting-completion", notices[0])
+        self.assertIn("not workflow completion", notices[0]["hearting-supervision"]["value"])
+
+    def test_recovered_work_suppresses_late_supervision_notice(self):
+        request, jobs, process = self._supervision_request()
+        process.terminate(); process.wait(timeout=5)
+        lines = jobs.read_text().splitlines()
+        lines[1] = lines[1].replace("\topen\t", "\tdone\t") + ",note=completed-marker"
+        jobs.write_text("\n".join(lines) + "\n")
+        result = control(self.control, request)
+        self.assertEqual(result["reason"], "supervision-resolved", result)
+        self.assertFalse(any("hearting-supervision" in m.get("params", {}).get("additionalContext", {})
+                             for m in self.server.messages))
+
     def test_sibling_thread_start_does_not_move_binding(self) -> None:
         self.server.next_start_id = "thread-sibling"
         self.client.request("thread/start", {})

@@ -33,7 +33,8 @@ from dispatch_completion_join import (  # noqa: E402
     validate_delivery_timing,
 )
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
-import human_gate_receipt  # noqa: E402
+import human_gate_receipt
+import dispatch_notice_receipt as notice_receipt  # noqa: E402
 
 
 MAX_RESPONSE_BYTES = 16 * 1024
@@ -54,8 +55,8 @@ class CompletionError(RuntimeError):
     """The exact batch or gateway control contract is invalid."""
 
 
-class HumanGateWatcher:
-    """Bounded observer/claimer for this session's live gate records."""
+class NoticeWatcher:
+    """One courier for typed gate and recovery notices in this session."""
 
     def __init__(
         self, args: argparse.Namespace, attempts: set[str], capability: dict[str, Any]
@@ -63,7 +64,7 @@ class HumanGateWatcher:
         self.args = args
         self.root = args.jobs.resolve(strict=False).parent
         self.recipient = args.parent_session_id or ""
-        self.owner = f"codex-human-gate:{os.getpid()}"
+        self.owner = f"codex-notice:{os.getpid()}"
         self.attempts = set(attempts)
         self.epoch = int(capability["epoch"])
         self._scan_cursor = 0
@@ -112,7 +113,7 @@ class HumanGateWatcher:
             except (OSError, ValueError, UnicodeDecodeError):
                 continue
             receipt = value.get("receipt") if isinstance(value, dict) else None
-            if (isinstance(receipt, dict) and receipt.get("kind") == "human-gate"
+            if (isinstance(receipt, dict) and notice_receipt.is_notice(receipt)
                     and value.get("state") in {"pending", "claimed", "sent-ambiguous"}):
                 eligible.append(path)
         if not eligible:
@@ -130,9 +131,9 @@ class HumanGateWatcher:
                 self.epoch = int(capability["epoch"])
             record = json.loads(path.read_text(encoding="utf-8"))
             receipt = record.get("receipt") if isinstance(record, dict) else None
-            if not isinstance(receipt, dict) or receipt.get("kind") != "human-gate":
+            if not notice_receipt.is_notice(receipt):
                 return
-            human_gate_receipt.validate_pending_record(
+            notice_receipt.validate_pending_record(
                 record, jobs=self.args.jobs,
                 expected_thread_id=self.recipient,
                 expected_epoch=self.epoch,
@@ -159,18 +160,18 @@ class HumanGateWatcher:
                 claim_owner=self.owner, lease_seconds=30.0,
                 require_generation_proof=True,
             )
-            human_gate_receipt.validate_pending_record(
+            notice_receipt.validate_pending_record(
                 claimed, jobs=self.args.jobs,
                 expected_thread_id=self.recipient,
                 expected_epoch=self.epoch,
                 expected_attempts=self.attempts,
                 expected_sealed_batch_id=self.args.sealed_batch_id,
             )
-            request = {"schema_version": 1, "op": "deliver-human-gate",
+            request = {"schema_version": 1, "op": "deliver-notice",
                        "thread_id": self.recipient,
                        "parent_attempt_id": receipt["owner_attempt_id"],
                        "sealed_batch_id": receipt["sealed_batch_id"],
-                       "delivery_id": human_gate_receipt.gateway_delivery_id(receipt),
+                       "delivery_id": notice_receipt.gateway_delivery_id(receipt),
                        "receipt_digest": claimed["receipt_digest"],
                        "receipt": receipt}
             result = gateway_request(self.args.control_socket, request)
@@ -200,10 +201,30 @@ class HumanGateWatcher:
                         or not re.fullmatch(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)+(?:[:].*)?", reason)):
                     self._record_error("gateway-rejection-untyped")
                     return
+                if receipt.get("kind") == "supervision" and reason != "supervision-resolved":
+                    self._record_error(reason)
+                    return
                 pending_delivery.reject_claimed(
                     self.root, self.recipient, claimed["delivery_id"],
                     claim_owner=self.owner, reason=reason)
         except Exception as exc:
+            if str(exc) == "supervision-resolved" and "record" in locals():
+                try:
+                    if record.get("state") == "pending":
+                        resolved = pending_delivery.claim(
+                            self.root, self.recipient, record["delivery_id"],
+                            claim_owner=self.owner, lease_seconds=30.0,
+                            require_generation_proof=True)
+                    elif "claimed" in locals():
+                        resolved = claimed
+                    else:
+                        raise ValueError("supervision-resolution-owned-by-other-carrier")
+                    pending_delivery.reject_claimed(
+                        self.root, self.recipient, resolved["delivery_id"],
+                        claim_owner=self.owner, reason="supervision-resolved")
+                except (ValueError, pending_delivery.PendingDeliveryError):
+                    pass
+                return
             if sent:
                 try:
                     pending_delivery.mark_sent_ambiguous(
@@ -217,6 +238,10 @@ class HumanGateWatcher:
                 except Exception:
                     pass
             self._record_error(str(exc))
+
+
+# Compatibility name for callers; there is only one notice courier.
+HumanGateWatcher = NoticeWatcher
 
 
 def negotiate_human_gate(args: argparse.Namespace) -> dict[str, Any] | None:
@@ -618,7 +643,10 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
             watcher = HumanGateWatcher(args, attempts, capability)
             watcher.start()
     try:
-        receipt = run_join(args, attempts)
+        from dispatch_supervision import wait_for_batch
+        receipt = wait_for_batch(join=lambda selected: run_join(args, selected),
+                                 attempts=attempts, jobs=args.jobs,
+                                 parent_attempt_id=delivery_parent_id(args))
     finally:
         if watcher is not None:
             watcher.close()

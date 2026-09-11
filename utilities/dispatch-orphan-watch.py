@@ -79,6 +79,7 @@ def _run_registry(operation: str, args) -> subprocess.CompletedProcess:
         check=False,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        timeout=30,
     )
 
 
@@ -121,10 +122,28 @@ def observed_owner_lifecycle(args):
     return observed, phase, metadata
 
 
+def _finish_recovery(args) -> bool:
+    """Retire state only after every owned execution is settled.
+
+    A failed cleanup hands the exact obligation to the existing parent queue;
+    preserving supervisor state makes a failed handback recoverable on restart.
+    """
+    from dispatch_supervision import _rows, _root, _pending, materialize
+    rows = _rows(Path(args.jobs))
+    owned = {args.attempt_id} if args.attempt_id in rows else set()
+    for aid in rows:
+        if rows[aid][1].get("parent_attempt_id") == args.attempt_id:
+            owned.add(aid)
+    if owned and _pending(rows, sorted(owned)):
+        materialize(Path(args.jobs), owned, reason="supervisor-exited")
+        return False
+    _remove_supervisor_state(args)
+    return True
+
+
 def reconcile_orphan_cascade(args) -> int:
     result = _run_registry("orphan-status", args)
-    _remove_supervisor_state(args)
-    return result.returncode
+    return 0 if _finish_recovery(args) else (result.returncode or 70)
 
 
 def reconcile_exact_exit(args) -> int:
@@ -150,7 +169,7 @@ def reconcile_exact_exit(args) -> int:
         try:
             outcome = reconcile_supervisor_terminal(args.jobs, args.attempt_id, terminal)
         except Exception:
-            _remove_supervisor_state(args)
+            _finish_recovery(args)
             return 70
         # SD-111 P2 trigger 1: dispatch_supervisor_terminal cannot import
         # dispatch_completion_join (circular), so its own docstring asks the
@@ -164,8 +183,7 @@ def reconcile_exact_exit(args) -> int:
         exact_result = _run_registry("reconcile", args)
         status = attempt_status(args.jobs, args.attempt_id)
 
-    _remove_supervisor_state(args)
-    if status not in OPEN:
+    if _finish_recovery(args):
         return 0
     if exact_result is not None and exact_result.returncode:
         return exact_result.returncode
@@ -218,7 +236,12 @@ def main(argv=None) -> int:
     # independently compares this value with both its current namespace and
     # the parent's recorded launch observer before consuming the proof.
     args.pid_observer_ns = process_namespace_identity() or ""
-    return watch(args)
+    while True:
+        try:
+            return watch(args)
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            print(f"orphan-recovery-retained attempt_id={args.attempt_id} reason={exc}", file=sys.stderr, flush=True)
+            time.sleep(max(args.interval, 30.0))
 
 
 if __name__ == "__main__":

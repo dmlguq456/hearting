@@ -25,6 +25,8 @@ from typing import Callable, Iterator, Mapping, NamedTuple
 
 from route_identity import registered_node_identity
 from governor_identity import close_witness, create_witness
+from dispatch_attempt_policy import decide_attempt, SUBSESSION_NOTE, SUCCESS_NOTES, committed_outcome
+from dispatch_receipt_identity import receipt_digest as shared_receipt_digest
 
 _GOVERNOR_WITNESS_HANDLES: dict[tuple[str, str], object] = {}
 
@@ -4415,6 +4417,9 @@ def validate_attempt_metadata(
         dispatch_depth = int(metadata.get("dispatch_depth", -1))
     except (TypeError, ValueError) as exc:
         raise DispatchContractError("invalid-attempt-metadata", str(exc)) from exc
+    retry_of = metadata.get("automatic_retry_of")
+    if retry_of is not None and not re.fullmatch(r"att-[A-Za-z0-9._-]{1,240}", str(retry_of)):
+        raise DispatchContractError("retry-predecessor-invalid", str(retry_of))
     if schema_version != ATTEMPT_SCHEMA_VERSION:
         raise DispatchContractError(
             "legacy-attempt-row-read-only",
@@ -5722,18 +5727,11 @@ def _sibling_attempt_gate(
     registry_lines: list[str] | None = None,
     attempt_id: str | None = None,
 ) -> None:
-    """SD-79: refuse to launch over a previous attempt of *this* node that still runs.
+    """Check the latest node execution using the shared lifecycle decision.
 
-    The ``depends_on`` loop above cannot cover this. A retry, a fallback hop, and
-    a capacity re-selection are all further attempts at the *same* node, so they
-    never appear in any node's ``depends_on`` list and that loop structurally
-    never fires for them. This is also not
-    ``completion_attempt_readiness``'s ``conflicting_active`` scan: that one asks
-    whether a *registry status word* says another attempt is still open, while
-    this one asks the operating system whether the previous attempt's processes
-    are still alive. A row closed by a false death verdict looks quiet to the
-    first check and loud to this one -- which is the whole failure this repairs.
-    Do not merge them.
+    This preflight is advisory to the atomic claim boundary. It cannot grant
+    retry permission or override a committed result; it explains outstanding
+    cleanup before the claimant reaches the jobs lock.
     """
 
     if registry_lines is None:
@@ -5771,7 +5769,9 @@ def _sibling_attempt_gate(
         sibling_metadata,
         terminal_receipt=sibling_status in {"done", "killed", "cancelled"},
     )
-    if process.state == "quiescent":
+    decision = decide_attempt(sibling_status, sibling_metadata,
+                              process_state=process.state, process_reason=process.reason)
+    if decision.action not in {"wait", "recover"}:
         return
     reason = (
         "prior-attempt-still-live"
@@ -6606,7 +6606,6 @@ def marker_bound_process_identity(
 # checked supervisor closed a depth-1 owner", and one of them (SD-94 marker
 # eligibility, `capability-route.py`) grants a privilege a sub-session must never
 # have.
-SUBSESSION_NOTE = "completed-subsession"
 SUBSESSION_TERMINAL_CLASSIFIER = "completion-join-subsession-terminal-v1"
 SUBSESSION_CHAIN_REFUSAL_CLASSIFIER = "subsession-chain-refusal-v1"
 
@@ -6615,7 +6614,6 @@ SUBSESSION_CHAIN_REFUSAL_CLASSIFIER = "subsession-chain-refusal-v1"
 # Consumers that ask "did this attempt succeed?" use this set; the two that ask
 # "*which producer* closed this row" (SD-94 marker eligibility and
 # `supervisor_terminal` below) keep their narrow literal on purpose.
-SUCCESS_NOTES = frozenset({"completed-marker", "completed-supervisor", SUBSESSION_NOTE})
 
 
 def row_is_subsession(metadata: dict[str, str]) -> bool:
@@ -7038,6 +7036,43 @@ def recover_unstarted_attempt(jobs: Path, attempt_id: str) -> bool:
         return True
 
 
+def _automatic_retry_admission(lines: list[str], metadata: dict[str, str]) -> None:
+    """The jobs lock arbitrates retries against the committed predecessor.
+
+    Observers propose a predecessor, never permission. Distinct consumers of
+    one failure converge on one successor; explicit review rounds have no
+    automatic_retry_of binding and keep their separate workflow semantics.
+    """
+    prior = metadata.get("automatic_retry_of")
+    if not prior:
+        return
+    predecessor = None
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        candidate = parse_registry_metadata(fields[5])
+        if (candidate.get("automatic_retry_of") == prior
+                and candidate.get("attempt_id") != metadata.get("attempt_id")
+                and (candidate.get("launch_claimed") == "1" or fields[1] not in {"open", "running"})):
+            raise DispatchContractError("retry-already-claimed",
+                                        f"responsible_attempt={candidate.get('attempt_id')}")
+        if candidate.get("attempt_id") == prior:
+            if predecessor is not None:
+                raise DispatchContractError("retry-predecessor-ambiguous", prior)
+            predecessor = (fields[1], candidate)
+    if predecessor is None:
+        raise DispatchContractError("retry-predecessor-missing", prior)
+    status, source = predecessor
+    if any(source.get(k) != metadata.get(k) for k in ("route_id", "route_node", "parent_attempt_id")):
+        raise DispatchContractError("retry-predecessor-binding-mismatch", prior)
+    proof = attempt_process_quiescence(source, terminal_receipt=status in {"done", "killed", "cancelled"})
+    decision = decide_attempt(status, source, process_state=proof.state, process_reason=proof.reason)
+    if not decision.retry_allowed:
+        raise DispatchContractError("retry-predecessor-not-retryable",
+            f"attempt={prior} outcome={decision.outcome} responsible={decision.responsible} action={decision.action}")
+
+
 def claim_attempt_row(
     jobs: Path,
     attempt_id: str,
@@ -7099,6 +7134,7 @@ def claim_attempt_row(
                     )
                 if not launch or metadata.get("launch_claimed") == "1" or fields[1] != "open":
                     return False
+                _automatic_retry_admission(lines, row_metadata)
                 if preclaim is not None:
                     preclaim(lines)
                 pipe = ",".join(part for part in fields[5].split(",") if not part.startswith("launch_claimed="))
@@ -7154,6 +7190,8 @@ def claim_attempt_row(
                     "quick-replacement-attempts-exhausted",
                     f"replacement_attempts={len(replacement_attempts)} limit={replacement_attempt_limit}",
                 )
+        if launch:
+            _automatic_retry_admission(lines, row_metadata)
         if launch and preclaim is not None:
             preclaim(lines)
         row_fields[5] += f",launch_claimed={1 if launch else 0}"
@@ -7178,20 +7216,6 @@ def _row_identity(fields: list[str]) -> tuple[str, ...] | None:
     return None
 
 
-# SD-111 D-2/C-2: duplicated (not imported) from dispatch_completion_join's
-# CANONICAL_RECEIPT_KEYS/CANONICAL_CHILD_KEYS/canonical_receipt_digest/
-# seal_delivery_receipt -- dispatch_completion_join imports THIS module, so
-# the reverse import would be circular. Keep every copy of this vocabulary
-# (here, dispatch_completion_join.py, dispatch_pending_delivery.py)
-# synchronized by hand; §11 forbids widening it.
-_CANONICAL_RECEIPT_KEYS = frozenset({
-    "schema_version", "state", "parent_attempt_id", "job_registry", "children",
-    "delivery_classification",
-})
-_CANONICAL_CHILD_KEYS = frozenset({
-    "attempt_id", "status", "readiness", "reason", "required_action", "harness",
-    "delivery_classification",
-})
 _MAX_DELIVERY_RECEIPT_BYTES = 2048
 _DELIVERY_INTENT_IMMUTABLE_KEYS = frozenset({
     "delivery_intent", "delivery_id", "delivery_recipient_digest", "delivery_receipt_digest",
@@ -7245,10 +7269,7 @@ def _delivery_intent_values(fields: list[str], metadata: dict[str, str]) -> dict
     parent_attempt_id = metadata.get("parent_attempt_id", "")
     route_id = metadata.get("route_id", "")
     route_node = metadata.get("route_node", "")
-    is_success = (
-        metadata.get("failure_class") == "pass"
-        or metadata.get("note") in SUCCESS_NOTES
-    )
+    is_success = committed_outcome("done", metadata) == "succeeded"
     child = {
         "attempt_id": attempt_id,
         "status": "done",
@@ -7267,12 +7288,7 @@ def _delivery_intent_values(fields: list[str], metadata: dict[str, str]) -> dict
         "children": [child],
         "delivery_classification": child["delivery_classification"],
     }
-    canonical = {key: value for key, value in receipt.items() if key in _CANONICAL_RECEIPT_KEYS}
-    canonical["children"] = [
-        {key: value for key, value in child.items() if key in _CANONICAL_CHILD_KEYS}
-    ]
-    canonical_bytes = json.dumps(canonical, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    receipt_digest = hashlib.sha256(canonical_bytes).hexdigest()
+    receipt_digest = shared_receipt_digest(receipt)
 
     receipt_bytes = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode("utf-8")
     if len(receipt_bytes) > _MAX_DELIVERY_RECEIPT_BYTES:

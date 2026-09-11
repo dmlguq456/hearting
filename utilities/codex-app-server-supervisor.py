@@ -946,7 +946,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--reasoning")
     value.add_argument("--join-interval", type=float, default=2.0)
     value.add_argument("--join-timeout", type=float, default=3600.0)
-    value.add_argument("--max-join-reparks", type=int, default=6)
+    value.add_argument("--max-join-reparks", type=int, default=6, help="Compatibility input; join deadlines no longer terminate owned work")
     value.add_argument("--max-identical-redeliveries", type=int, default=2)
     value.add_argument("--max-continuations", type=positive_continuation_limit)
     value.add_argument(
@@ -1349,25 +1349,12 @@ def main(argv: list[str] | None = None) -> int:
                     delivered,
                     phase="parked",
                 )
-                # D-1 (owner-supervisor-liveness S-1): a `timeout` join receipt is
-                # an internal repark checkpoint, not an actionable attention
-                # receipt. See the matching comment in claude-session-supervisor.py.
-                reparks = 0
-                while True:
-                    receipt = run_join(args, park_attempts)
-                    if receipt["state"] != "timeout":
-                        break
-                    reparks += 1
-                    if reparks > args.max_join_reparks:
-                        raise SupervisorError("join-timeout-repark-exceeded")
-                    emit(
-                        {
-                            "type": "dispatch.supervisor.reparked",
-                            "parent_attempt_id": args.parent_attempt_id,
-                            "attempt_count": len(park_attempts),
-                            "repark_ordinal": reparks,
-                        }
-                    )
+                from dispatch_supervision import wait_for_batch
+                receipt = wait_for_batch(
+                    join=lambda attempts: run_join(args, attempts),
+                    attempts=set(park_attempts), jobs=Path(args.jobs),
+                    parent_attempt_id=args.parent_attempt_id, emit=emit,
+                )
                 joined_rows = current_children(
                     Path(args.jobs), args.parent_attempt_id, park_attempts
                 )

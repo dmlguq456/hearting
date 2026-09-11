@@ -25,7 +25,7 @@ from dispatch_supervisor_terminal import classify_claude_result, opencode_termin
 # completion note instead of `dead-worker-fail`; the verdict axis
 # (`failure_class=fail`) is unchanged. Only a `worker_type=review` row with a
 # readable artifact earns it; every other FAIL keeps the dead-worker note.
-REVIEW_BLOCKING_NOTE = "completed-review-blocking"
+from dispatch_attempt_policy import REVIEW_BLOCKING_NOTE
 REVIEW_WORKER_TYPE = "review"
 
 
