@@ -61,15 +61,16 @@ Before merge/commit: (1) run `python3 tools/generate.py`, (2) record new `utilit
 
 > Treat the [Reference Index](#reference-index) as the single source for reference files, load points, and contents.
 
-## Pre-Route Direction Gate (SD-123)
+## Pre-Owner Direction Gate (SD-123)
 
 The direction gate is finished before you are launched. The frame legs run in
-the depth-0 bootstrap layer ahead of the route; depth-0 joins them, builds
+the depth-0 bootstrap layer after route binding and producer begin, before
+owner launch. Depth-0 joins them, builds
 `shards/frame/frame-summary.json` and the interview `shards/frame/interview.json`
 (schema `frame_interview_v1`, SD-129), asks the user, releases `frame-review`,
-and renders `shards/frame/intent.md`. A route sealed before this cycle keeps
-`frame.continuation=inline-next` and is never retro-fitted; do not attempt to
-apply this gate to an already-open route.
+and renders `shards/frame/intent.md` under the inherited cycle's
+`AGENT_ARTIFACT_OUTPUT_DIR`. Legacy sealed route bytes remain unchanged;
+consume the gate declarations of your assigned route.
 
 1. **You receive `intent.md`'s path as an input.** Read it first. Do not raise
    `frame-review`, do not call `await-release` for it, and do not render the

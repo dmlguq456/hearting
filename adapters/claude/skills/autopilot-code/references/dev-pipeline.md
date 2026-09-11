@@ -250,14 +250,14 @@ perspectives are deliberately asymmetric. Any additional security/material/speci
 node still needs a validated compose-on-demand extension with disjoint output and a
 completion gate; never create an undeclared child or alter a sealed group width.
 
-### Step 0: frame (already done, by depth-0, before this route started)
+### Step 0: frame (already done, by depth-0, before owner launch)
 
 Skip only for `direct` (orient-lite carries the framing posture inline). For `quick`
 and every `standard+` intensity, the direction gate already ran (owner-execution.md
-"Pre-Route Direction Gate"): depth-0 itself launched exactly two frame legs — `frame`
+"Pre-Owner Direction Gate"): depth-0 itself launched exactly two frame legs — `frame`
 and `frame-alternative`, on two different harnesses, the anchor one tier above the
 owner's own model profile via `model_profile.frame_profile_for_owner` — as its own
-bootstrap layer, before this route or its owner existed. There is no third frame leg
+bootstrap layer, after route binding and producer begin but before owner launch. There is no third frame leg
 at any intensity; `strong+` widening applies only to plan and implementation review
 (above), never to frame. See `core/WORKFLOW.md` for the full depth-0 procedure.
 
