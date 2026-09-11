@@ -318,13 +318,11 @@ sessions read the detail they need after approval. If a runtime automatically
 injects a selected Skill body into main, do not duplicate that read; record the
 runtime limitation rather than claiming total-token savings.
 
-**Two-stage confirmation (SD-123).** At `quick+` the direction gate comes
-first and the §0.4 card second, because the frame legs run in the depth-0
-bootstrap layer ahead of the route. Depth-0 launches the pair, joins both
-direction briefs, and puts this blocking `[방향 확인]` card and the interview
-to the user before route compile/bind/producer-begin — frame touches no
-source, so the route-participation invariant above still holds while nothing
-is compiled yet:
+**Two-stage confirmation (SD-123).** For the five frame recipes at `quick+`,
+depth-0 first compiles/binds the route and issues its producer cycle, then
+launches the two frame nodes. These steps authorize frame artifacts, not owner
+execution. After both briefs arrive, depth-0 presents this blocking direction
+card and the interview. User approval precedes the owner and the §0.4 notice:
 
 ```text
 [방향 확인]
@@ -340,7 +338,7 @@ is compiled yet:
 
 Deliver this card through a native structured-question surface when one is
 available, the plain-text form otherwise — the same fallback rule as the §0.4
-card. Only once the direction is confirmed does the route start, and the §0.4
+card. Only once the direction is confirmed does the owner start, and the §0.4
 gate then arrives as a non-blocking `[실행 통지]` — the same five fields, in
 order. It announces the route the confirmed direction produced; it does not
 re-ask a direction the user has already settled.

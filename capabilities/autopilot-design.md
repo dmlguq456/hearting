@@ -23,10 +23,9 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 ## Post-Frame Direction Gate
 
-**One gate, raised from the frame legs (SD-123/SD-129).** A `standard+` route
-compiled after this cycle seals `human_gates: ["frame-review"]` and both
+**One gate, raised from the frame legs (SD-123/SD-129).** A `quick+` route seals `human_gates: ["frame-review"]` and both
 `frame` and `frame-alternative` continuations as that human gate, bound at
-`refs`'s entry. `frame-review` is the recipe's only human gate: the old
+`one-shot`'s entry for `quick` and `refs`'s entry for `standard+`. `frame-review` is the recipe's only human gate: the old
 `direction-confirmation` continuation on `refs` is retired, because a route
 must have exactly one place a person is asked for direction. A route sealed
 before this cycle keeps its own generation's gate name, binding and node
@@ -54,7 +53,7 @@ first (genre/audience/claim scope collapse to design's own fields — 방향/대
 위험/범위 변경/비용 — plus recorded Decisions), so a reference brief that
 contradicts a recorded decision is a `design-review` blocker; pass its
 absolute path in the `refs` prompt as `Intent:`. `revise` re-runs the frame
-pair before the route starts and `stop` cancels before anything is compiled,
+pair before owner launch and `stop` cancels the prepared workflow,
 so neither consumes the owner's retry boundary. A `refs` start whose entry
 gate is not released is refused by every launch surface
 (`human-gate-unreleased`). `direct` has no gate: the depth-0 session asks its
@@ -76,9 +75,10 @@ W7C write-cutover contract (`utilities/artifact_producer.py`, registry table
 `producer_lifecycle` in `capabilities/topologies.json`). The same lifecycle
 binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 
-1. **begin before the first write.** After the route is compiled and bound,
-   the owner (the inline session for `direct`, the dispatch-depth-1 owner for
-   `quick` and `standard+`) runs `artifact_producer.py begin --artifact-root
+1. **begin before the first write.** After route compile/bind, depth-0 runs
+   `begin` before either frame leg starts; the later owner inherits that cycle.
+   Without frame, the acting owner (inline for `direct`, depth-1 otherwise)
+   begins the cycle. The command is `artifact_producer.py begin --artifact-root
    <root> --route <route file> --capability autopilot-design --intensity <intensity>`.
    While the cutover is inactive this returns `legacy-compat` and the legacy
    `<artifact-root>/designs/` layout stays writable; once active it

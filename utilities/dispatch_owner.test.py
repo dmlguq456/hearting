@@ -1066,6 +1066,65 @@ class RouteDerivedOwnerTupleTest(unittest.TestCase):
         self.assertIn("--qa", str(caught.exception))
 
 
+class FrameModelRoleHandoffTest(unittest.TestCase):
+    _route = RouteDerivedOwnerTupleTest._route
+
+    def setUp(self):
+        self.env = mock.patch.dict(os.environ, {
+            name: "/fixture/" + name.lower() for name in OWNER._FRAME_ARTIFACT_ENV
+        })
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def _args(self, node="frame", **overrides):
+        path = self._route(nodes=[{"id": node, "role": "deep maker", "model_profile": "deep"}], **overrides)
+        return ["--dry-run", "--route-evidence", path, "--route-node", node,
+                "--worker-type", "frame", "--unit", "plan/frame", "--prompt-text", "probe"]
+
+    def test_actual_adapter_parsers_and_resolvers_consume_the_selected_node_role(self):
+        for node in ("frame", "frame-alternative"):
+            _, values, forwarded, _, _ = OWNER._parse(self._args(node))
+            self.assertEqual(values["--model-profile"], "deep")
+            for harness in ("codex", "claude", "opencode"):
+                with self.subTest(node=node, harness=harness):
+                    path = ROOT / "adapters" / harness / "bin" / "dispatch-headless.py"
+                    spec = importlib.util.spec_from_file_location("frame_role_" + harness, path)
+                    adapter = importlib.util.module_from_spec(spec)
+                    sys.modules[spec.name] = adapter
+                    spec.loader.exec_module(adapter)
+                    args = adapter.parser().parse_args(forwarded)
+                    # No fake role/profile resolver: use the adapter's actual profile selection.
+                    settings = adapter.resolve_model_settings(args)
+                    self.assertEqual(settings["role"], "deep maker")
+                    self.assertEqual(settings["profile"], "deep")
+                    args.model_role = None
+                    with self.assertRaises(adapter.ModelSelectionError) as caught:
+                        adapter.resolve_model_settings(args)
+                    self.assertEqual(caught.exception.reason, "model-profile-role-required")
+
+    def test_explicit_complete_tuple_still_gets_the_sealed_role(self):
+        args = self._args() + ["--worktree", "/w/tree", "--slug", "s", "--capability", "autopilot-code",
+            "--capability-mode", "audit", "--qa", "standard", "--intensity", "quick",
+            "--dispatch-depth", "1", "--assigned-contract", "autopilot-code",
+            "--owner", "autopilot-code", "--model-profile", "deep"]
+        _, values, forwarded, _, _ = OWNER._parse(args)
+        self.assertEqual(values["--model-role"], "deep maker")
+        self.assertEqual(forwarded.count("--model-role"), 1)
+
+    def test_caller_cannot_replace_either_sealed_model_axis(self):
+        for flag, value in (("--model-role", "fast reviewer"), ("--model-profile", "light")):
+            with self.subTest(flag=flag), self.assertRaises(OWNER.OwnerError) as caught:
+                OWNER._parse(self._args() + [flag, value])
+            self.assertEqual(str(caught.exception), "route-evidence-arg-mismatch:" + flag)
+
+    def test_a_missing_sealed_role_cannot_be_supplied_by_the_caller(self):
+        path = self._route(nodes=[{"id": "frame", "model_profile": "deep"}])
+        with self.assertRaises(OWNER.OwnerError) as caught:
+            OWNER._parse(["--dry-run", "--route-evidence", path, "--route-node", "frame",
+                          "--worker-type", "frame", "--unit", "plan/frame", "--model-role", "deep maker"])
+        self.assertEqual(str(caught.exception), "route-node-model-setting-missing:--model-role")
+
+
 class RefusalHintTest(unittest.TestCase):
     """Every typed refusal that has a known next step prints it as `hint=`."""
 

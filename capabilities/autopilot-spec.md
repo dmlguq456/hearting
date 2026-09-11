@@ -34,10 +34,9 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 ## Post-Frame Direction Gate
 
-**One gate, raised from the frame legs (SD-123/SD-129).** A `standard+` route
-compiled after this cycle seals `human_gates: ["frame-review"]` and both
+**One gate, raised from the frame legs (SD-123/SD-129).** A `quick+` route seals `human_gates: ["frame-review"]` and both
 `frame` and `frame-alternative` continuations as that human gate, bound at
-`research`'s entry. `frame-review` is the recipe's only human gate: the old
+`one-shot`'s entry for `quick` and `research`'s entry for `standard+`. `frame-review` is the recipe's only human gate: the old
 `intent-confirmation` declaration is retired, because no node ever raised it
 and no command in the harness could release it — the intent question it named
 is exactly what the frame interview now asks. A route sealed before this cycle
@@ -66,8 +65,8 @@ waits on no release, and renders no intent of its own — all of that is
 finished before it is launched. `intent.md` is the agreed intent `research`
 reads first, so a PRD requirement that contradicts a recorded decision is a
 `spec-review` blocker; pass its absolute path in the `research` prompt as
-`Intent:`. `revise` re-runs the frame pair before the route starts and `stop`
-cancels before anything is compiled, so neither consumes the owner's retry
+`Intent:`. `revise` re-runs the frame pair before owner launch and `stop`
+cancels the prepared workflow, so neither consumes the owner's retry
 boundary. A `research` start whose entry gate is not released is refused by
 every launch surface (`human-gate-unreleased`). `direct` has no gate: the
 depth-0 session asks its one question of the same kind inline inside the §0.4
@@ -102,9 +101,10 @@ W7C write-cutover contract (`utilities/artifact_producer.py`, registry table
 `producer_lifecycle` in `capabilities/topologies.json`). The same lifecycle
 binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 
-1. **begin before the first write.** After the route is compiled and bound,
-   the owner (the inline session for `direct`, the dispatch-depth-1 owner for
-   `quick` and `standard+`) runs `artifact_producer.py begin --artifact-root
+1. **begin before the first write.** After route compile/bind, depth-0 runs
+   `begin` before either frame leg starts; the later owner inherits that cycle.
+   Without frame, the acting owner (inline for `direct`, depth-1 otherwise)
+   begins the cycle. The command is `artifact_producer.py begin --artifact-root
    <root> --route <route file> --capability autopilot-spec --intensity <intensity>`.
    While the cutover is inactive this returns `legacy-compat` and the legacy
    `<artifact-root>/spec/` layout stays writable; once active it

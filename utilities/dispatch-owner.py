@@ -53,7 +53,7 @@ _REQUIRED = {
 # Captured for validation but not required: `--unit` is meaningless for an owner
 # (the tuple contract pins it to `_kernel/owner`) and mandatory for the SD-OPEN-40
 # review launch below.
-_CAPTURED = _REQUIRED | {"--unit", "--review-output"}
+_CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role"}
 # SD-OPEN-40: the depth-1 tuples this selector may launch. `review` exists so an
 # independent reviewer can be a *registered review worker* instead of an owner
 # wearing a reviewer's prompt. Before it, every ad-hoc independent review landed
@@ -129,7 +129,7 @@ _HINTS = {
     "frame-artifact-scope-missing": "export all four of AGENT_ARTIFACT_ROOT, AGENT_ARTIFACT_CAMPAIGN_ID, AGENT_ARTIFACT_CYCLE_ID "
                                     "and AGENT_ARTIFACT_CYCLE_DIR in the same Bash call as the launch (OPERATIONS §5.10b)",
     "route-node-unknown": "--route-node must name an id present in the sealed route's nodes list",
-    "route-node-worker-type-forbidden": "--route-node selects a frame node's own model_profile; only --worker-type frame may use it",
+    "route-node-worker-type-forbidden": "--route-node selects a frame node's own profile and role; only --worker-type frame may use it",
     "forbidden-flag": "model, reasoning, effort, variant and completion-delivery are sealed by the profile and route; remove the flag",
     "explicit-jobs-outside-parent-registry": "drop --jobs: an interactive Claude parent's completion hook trusts only the inherited "
                                              "AGENT_DISPATCH_JOBS (or the installed canonical registry), so an owner started into another "
@@ -155,16 +155,8 @@ class OwnerError(ValueError):
     pass
 
 
-def _node_model_profile(route, route_node):
-    """The one route-node-derived field a `--route-node` launch needs.
-
-    `_ROUTE_FIELDS` stays the one owner-only table (`--model-profile` there
-    maps to the OWNER's sealed `owner_model_profile`); a frame node selected
-    by `--route-node` instead reads its OWN `model_profile` from the route's
-    node list. The owner and the route node it dispatches are not the same
-    profile decision, and the owner-only table must not grow a second,
-    node-keyed column to answer both -- this helper is that one exception.
-    """
+def _node_model_settings(route, route_node):
+    """A frame uses its sealed node profile and role, independently of the owner."""
     nodes = route.get("nodes")
     node = next(
         (row for row in nodes if isinstance(row, dict) and row.get("id") == route_node),
@@ -172,8 +164,11 @@ def _node_model_profile(route, route_node):
     ) if isinstance(nodes, list) else None
     if node is None:
         raise OwnerError("route-node-unknown")
-    value = node.get("model_profile")
-    return str(value) if value not in (None, "") else None
+    settings = {"--model-profile": node.get("model_profile"), "--model-role": node.get("role")}
+    for flag, value in settings.items():
+        if not isinstance(value, str) or not value.strip():
+            raise OwnerError(f"route-node-model-setting-missing:{flag}")
+    return settings
 
 
 def _route_defaults(path, route_node=None):
@@ -193,7 +188,7 @@ def _route_defaults(path, route_node=None):
         "--owner": capability, "--assigned-contract": capability,
     })
     if route_node is not None:
-        values["--model-profile"] = _node_model_profile(route, route_node)
+        values.update(_node_model_settings(route, route_node))
     return {flag: (str(value) if value not in (None, "") else None) for flag, value in values.items()}
 
 
@@ -356,9 +351,8 @@ def _parse(argv):
             i += 1
             continue
         # Selector-only, like --adapter/--route-evidence: a frame launch bound
-        # to a route node names which node's own model_profile to derive (see
-        # _node_model_profile below). The wrapper never sees this flag; it does
-        # not need plumbing past this selector's own gap-fill concern.
+        # to a route node derives that node's sealed model profile and role.
+        # The selected binding later forwards the wrapper's route-node flag.
         if arg == "--route-node":
             if i + 1 >= len(argv):
                 raise OwnerError("route-node-missing")
@@ -410,13 +404,14 @@ def _parse(argv):
         i += 1
     derived = []
     required = set(_REQUIRED)
-    # Only a gap opens the route: a caller that spells out the whole tuple is
-    # parsed exactly as before and validated by the binding checks downstream.
+    # Owner tuples retain gap-fill compatibility. Frame launches always read
+    # their node: a complete caller tuple cannot replace its sealed model axes.
     gaps = [flag for flag in _REQUIRED if not values.get(flag)]
-    if route_evidence and gaps and values.get("--worker-type", "owner") in {"owner", "frame"}:
+    if route_evidence and (gaps or route_node) and values.get("--worker-type", "owner") in {"owner", "frame"}:
+        sealed_flags = _ROUTE_SEALED | ({"--model-profile", "--model-role"} if route_node else set())
         for flag, sealed in _route_defaults(route_evidence, route_node).items():
             if values.get(flag):
-                if flag in _ROUTE_SEALED and sealed is not None and not _same_value(flag, values[flag], sealed):
+                if flag in sealed_flags and sealed is not None and not _same_value(flag, values[flag], sealed):
                     raise OwnerError(f"route-evidence-arg-mismatch:{flag}")
                 continue
             if sealed is None:
