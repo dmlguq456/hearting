@@ -343,11 +343,15 @@ def claim(
     claim_owner: str,
     lease_seconds: float,
     require_generation_proof: bool = False,
+    live_recipient_generation: tuple[str, str] | None = None,
     expected_state: str = "pending",
 ) -> dict:
     """CAS ``expected_state -> claimed`` under one flock (SD-111 §10.2:
     read-check-write inside one lock; ``os.replace`` atomicity alone is not
-    CAS)."""
+    CAS). A courier may supply the recipient/generation it just proved through
+    the live runtime. That proof belongs to this claim, not to the immutable
+    receipt. The courier must first validate the receipt's own binding rules.
+    """
 
     if lease_seconds <= 0:
         raise PendingDeliveryError("pending-delivery-identity-conflict", "lease_seconds")
@@ -360,7 +364,16 @@ def claim(
             raise PendingDeliveryError("pending-delivery-identity-conflict", "recipient")
         if value["delivery_id"] != delivery_id:
             raise PendingDeliveryError("pending-delivery-identity-conflict", "delivery_id")
-        if require_generation_proof and value.get("session_generation_supported") != "1":
+        if live_recipient_generation is not None and (
+            not require_generation_proof
+            or len(live_recipient_generation) != 2
+            or live_recipient_generation[0] != recipient_key
+            or not isinstance(live_recipient_generation[1], str)
+            or not live_recipient_generation[1]
+        ):
+            raise PendingDeliveryError("pending-delivery-generation-unproven")
+        if (require_generation_proof and live_recipient_generation is None
+                and value.get("session_generation_supported") != "1"):
             raise PendingDeliveryError("pending-delivery-generation-unproven")
         if value["state"] != expected_state:
             raise PendingDeliveryError(
@@ -370,6 +383,9 @@ def claim(
             raise PendingDeliveryError("pending-delivery-reclaim-exhausted")
         now = time.monotonic_ns()
         updated = dict(value)
+        if live_recipient_generation is not None:
+            updated["session_generation"] = live_recipient_generation[1]
+            updated["session_generation_supported"] = "1"
         updated["state"] = "claimed"
         updated["claimed_at_ns"] = now
         updated["claim_owner"] = claim_owner

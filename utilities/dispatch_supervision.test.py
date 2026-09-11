@@ -99,7 +99,7 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
 
     def _notice_rows(self, kind="codex-managed-gateway"):
         self.jobs.write_text(row("att-owner", dispatch_depth="1", parent_attempt_id="", parent_sid="parent-test",
-            parent_completion_delivery=kind, session_generation="1", session_generation_supported="1",
+            parent_completion_delivery=kind,
             managed_sealed_batch_id="batch-test", pid="99999999", pid_start="1")
             + row("att-child", pid="99999998", pid_start="1"))
 
@@ -109,10 +109,29 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         first = supervision.materialize(self.jobs, {"att-child"}, reason="process-unverifiable")[0]
         second = supervision.materialize(self.jobs, {"att-child"}, reason="process-unverifiable")[0]
         self.assertEqual(first, second)
+        self.assertEqual(first["session_generation_supported"], "0")
+        self.assertNotIn("recipient_epoch", first["receipt"])
         self.assertEqual(self.jobs.read_bytes(), before)
         supervision.validate_pending_record(first, jobs=self.jobs, expected_thread_id="parent-test",
             expected_epoch=1, expected_attempts={"att-owner"}, expected_sealed_batch_id="batch-test")
         self.assertIn("not workflow completion", supervision.render_text(first["receipt"]))
+
+    def test_claim_binds_live_generation_without_changing_the_obligation(self):
+        self._notice_rows()
+        record = supervision.materialize(self.jobs, {"att-child"}, reason="join-deadline")[0]
+        with self.assertRaisesRegex(pending.PendingDeliveryError, "generation-unproven"):
+            pending.claim(self.root, "parent-test", record["delivery_id"], claim_owner="courier",
+                          lease_seconds=1, require_generation_proof=True)
+        with self.assertRaisesRegex(pending.PendingDeliveryError, "generation-unproven"):
+            pending.claim(self.root, "parent-test", record["delivery_id"], claim_owner="courier",
+                          lease_seconds=1, require_generation_proof=True,
+                          live_recipient_generation=("another-parent", "2"))
+        claimed = pending.claim(self.root, "parent-test", record["delivery_id"], claim_owner="courier",
+                                lease_seconds=1, require_generation_proof=True,
+                                live_recipient_generation=("parent-test", "2"))
+        self.assertEqual((claimed["session_generation"], claimed["claim_authority"]), ("2", "generation-proven"))
+        self.assertEqual(claimed["receipt"], record["receipt"])
+        self.assertEqual(supervision.materialize(self.jobs, {"att-child"}, reason="join-deadline")[0], claimed)
 
     def test_recovered_work_retires_stale_notice_in_native_carriers(self):
         for kind in ("claude-parent-runtime", "opencode-turn"):

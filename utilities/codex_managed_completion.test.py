@@ -251,6 +251,7 @@ raise SystemExit(3 if state == 'timeout' else 0)
         )
         claimed = dict(record)
         with mock.patch.object(module.human_gate_receipt, "validate_pending_record") as validate, \
+             mock.patch.object(module, "negotiate_human_gate", return_value={"epoch": 9}), \
              mock.patch.object(module.human_gate_receipt, "gateway_delivery_id",
                                return_value="hg-dlv-exact"), \
              mock.patch.object(module.pending_delivery, "claim", return_value=claimed), \

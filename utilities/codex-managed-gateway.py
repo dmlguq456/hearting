@@ -528,6 +528,7 @@ class PendingInternal:
         deferred_after_steer: bool = False,
         event: threading.Event | None = None,
         outcome: dict[str, Any] | None = None,
+        recipient_epoch: int | None = None,
     ):
         self.kind = kind
         self.thread_id = thread_id
@@ -535,6 +536,7 @@ class PendingInternal:
         self.delivery_id = delivery_id
         self.identity = identity if identity is not None else {}
         self.receipt = receipt
+        self.recipient_epoch = recipient_epoch if recipient_epoch is not None else (receipt or {}).get("recipient_epoch")
         self.tui_request_id = tui_request_id
         self.deferred_after_steer = deferred_after_steer
         self.event = event if event is not None else threading.Event()
@@ -1730,6 +1732,9 @@ class ManagedGateway:
         with self._lock:
             expected_thread = self._binding_thread_id
             expected_epoch = self._epoch
+        transport_epoch = request.get("recipient_epoch", (receipt or {}).get("recipient_epoch")) if isinstance(receipt, dict) else None
+        if type(transport_epoch) is not int or transport_epoch != expected_epoch:
+            raise GatewayError("recipient-epoch-mismatch")
         try:
             normalized = codec.validate(
                 receipt, expected_thread=expected_thread,
@@ -1777,7 +1782,7 @@ class ManagedGateway:
             # Re-check both binding dimensions before consulting or creating
             # durable state so reconnect/fork races cannot prepare old work.
             if (self._binding_thread_id != thread_id
-                    or receipt.get("recipient_epoch") != self._epoch):
+                    or request.get("recipient_epoch", receipt.get("recipient_epoch")) != self._epoch):
                 return {"schema_version": 1, "status": "rejected", "delivery_id": delivery_id,
                         "reason": "recipient-epoch-mismatch"}
             existing = self.ledger.get(delivery_id)
@@ -1811,7 +1816,8 @@ class ManagedGateway:
                     return {"schema_version": 1, "status": "rejected", "delivery_id": delivery_id,
                             "reason": "thread-not-owned-by-current-tui"}
                 pending = PendingInternal(kind="human-gate-wait", thread_id=thread_id,
-                                          delivery_id=delivery_id, identity=identity, receipt=receipt)
+                                          delivery_id=delivery_id, identity=identity, receipt=receipt,
+                                          recipient_epoch=self._epoch)
                 state = self._threads.setdefault(thread_id, ThreadState())
                 try:
                     self.ledger._transition(delivery_id, "prepared", **identity)
@@ -1892,8 +1898,22 @@ class ManagedGateway:
     def _send_human_gate_locked(self, pending: PendingInternal, state: ThreadState) -> None:
         current_thread = self._binding_thread_id
         current_epoch = self._epoch
+        # Rebind only unsent work whose semantic identity is still valid.
+        # Recovery obligations survive a connection generation; approval
+        # gates carry their own epoch and their codec refuses stale release.
+        if pending.recipient_epoch != current_epoch:
+            existing = self.ledger.get(pending.delivery_id)
+            if existing and existing.get("state") == "prepared":
+                try:
+                    notice_receipt.codec(pending.receipt).validate(
+                        pending.receipt, expected_thread=current_thread,
+                        expected_epoch=current_epoch)
+                except (human_gate_receipt.HumanGateReceiptError, dispatch_supervision.SupervisionError):
+                    pass
+                else:
+                    pending.recipient_epoch = current_epoch
         if (current_thread != pending.thread_id
-                or pending.receipt.get("recipient_epoch") != current_epoch):
+                or pending.recipient_epoch != current_epoch):
             # Close every local projection of a prepared request.  The
             # validation snapshot is deliberately outside the mutation lock;
             # once the binding changes, the requester must receive one typed

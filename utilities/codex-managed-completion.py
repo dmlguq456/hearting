@@ -59,14 +59,14 @@ class NoticeWatcher:
     """One courier for typed gate and recovery notices in this session."""
 
     def __init__(
-        self, args: argparse.Namespace, attempts: set[str], capability: dict[str, Any]
+        self, args: argparse.Namespace, attempts: set[str], capability: dict[str, Any] | None
     ):
         self.args = args
         self.root = args.jobs.resolve(strict=False).parent
         self.recipient = args.parent_session_id or ""
         self.owner = f"codex-notice:{os.getpid()}"
         self.attempts = set(attempts)
-        self.epoch = int(capability["epoch"])
+        self.epoch = int(capability["epoch"]) if capability else 0
         self._scan_cursor = 0
         self.stop = __import__("threading").Event()
         self.thread = __import__("threading").Thread(target=self._run, daemon=True)
@@ -127,8 +127,9 @@ class NoticeWatcher:
         sent = False
         try:
             capability = negotiate_human_gate(self.args)
-            if capability is not None:
-                self.epoch = int(capability["epoch"])
+            if capability is None:
+                raise CompletionError("notice-recipient-unavailable")
+            self.epoch = int(capability["epoch"])
             record = json.loads(path.read_text(encoding="utf-8"))
             receipt = record.get("receipt") if isinstance(record, dict) else None
             if not notice_receipt.is_notice(receipt):
@@ -159,6 +160,7 @@ class NoticeWatcher:
                 self.root, self.recipient, record["delivery_id"],
                 claim_owner=self.owner, lease_seconds=30.0,
                 require_generation_proof=True,
+                live_recipient_generation=(self.recipient, str(self.epoch)),
             )
             notice_receipt.validate_pending_record(
                 claimed, jobs=self.args.jobs,
@@ -169,6 +171,7 @@ class NoticeWatcher:
             )
             request = {"schema_version": 1, "op": "deliver-notice",
                        "thread_id": self.recipient,
+                       "recipient_epoch": self.epoch,
                        "parent_attempt_id": receipt["owner_attempt_id"],
                        "sealed_batch_id": receipt["sealed_batch_id"],
                        "delivery_id": notice_receipt.gateway_delivery_id(receipt),
@@ -214,7 +217,8 @@ class NoticeWatcher:
                         resolved = pending_delivery.claim(
                             self.root, self.recipient, record["delivery_id"],
                             claim_owner=self.owner, lease_seconds=30.0,
-                            require_generation_proof=True)
+                            require_generation_proof=True,
+                            live_recipient_generation=(self.recipient, str(self.epoch)))
                     elif "claimed" in locals():
                         resolved = claimed
                     else:
@@ -637,11 +641,11 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     wait_for_session_launch_claims(args, attempts)
     watcher: HumanGateWatcher | None = None
     if args.parent_session_id:
-        # An old or disconnected gateway must never receive a gate claim.
+        # Keep the courier alive through a disconnected gateway. It must
+        # prove a live binding before each claim, including after reconnect.
         capability = negotiate_human_gate(args)
-        if capability is not None:
-            watcher = HumanGateWatcher(args, attempts, capability)
-            watcher.start()
+        watcher = HumanGateWatcher(args, attempts, capability)
+        watcher.start()
     try:
         from dispatch_supervision import wait_for_batch
         receipt = wait_for_batch(join=lambda selected: run_join(args, selected),

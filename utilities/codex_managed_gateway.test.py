@@ -642,8 +642,8 @@ class ManagedGatewayTest(unittest.TestCase):
         common = ("attempt_schema_version=2,transport=headless,execution_surface=registered-headless,"
                   "registered_worker=1,fallback_hop=same-harness-headless,")
         jobs.write_text("2026-09-11T00:00:00Z\topen\t/r\t/w\towner\t" + common
-            + f"dispatch_depth=1,attempt_id=att-notice-owner,parent_sid=thread-1,session_generation={epoch},"
-            "session_generation_supported=1,parent_completion_delivery=codex-managed-gateway,"
+            + "dispatch_depth=1,attempt_id=att-notice-owner,parent_sid=thread-1,"
+            "parent_completion_delivery=codex-managed-gateway,"
             "managed_sealed_batch_id=batch-notice,route_id=rt-notice,route_node=owner\n"
             + "2026-09-11T00:00:00Z\topen\t/r\t/w\tchild\t" + common
             + f"dispatch_depth=2,attempt_id=att-notice-child,parent_attempt_id=att-notice-owner,pid={process.pid},"
@@ -652,10 +652,68 @@ class ManagedGatewayTest(unittest.TestCase):
         record = supervision.materialize(jobs, {"att-notice-child"}, reason="join-deadline")[0]
         receipt = record["receipt"]
         request = {"schema_version": 1, "op": "deliver-notice", "thread_id": "thread-1",
+                   "recipient_epoch": epoch,
                    "parent_attempt_id": "att-notice-owner", "sealed_batch_id": "batch-notice",
                    "delivery_id": supervision.gateway_delivery_id(receipt),
                    "receipt_digest": record["receipt_digest"], "receipt": receipt}
         return request, jobs, process
+
+    def test_real_row_without_generation_traverses_courier_queue_and_gateway(self):
+        from types import SimpleNamespace
+        import dispatch_pending_delivery as pending
+        request, jobs, process = self._supervision_request()
+        before = jobs.read_bytes()
+        self.assertNotIn(b"session_generation", before)
+        spec = importlib.util.spec_from_file_location("completion_notice_integration",
+                                                     ROOT / "utilities" / "codex-managed-completion.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        args = SimpleNamespace(jobs=jobs, parent_session_id="thread-1", sealed_batch_id="batch-notice",
+                               control_socket=self.control, interval=0.01)
+        watcher = module.NoticeWatcher(args, {"att-notice-owner"}, None)
+        delivery_id = request["receipt"]["pending_delivery_id"]
+        path = pending.record_path(jobs.parent, "thread-1", delivery_id)
+        # A disconnected parent never consumes the record. The same courier
+        # retries after connection returns, using a real control handshake.
+        with mock.patch.object(module, "negotiate_human_gate", return_value=None):
+            watcher._one(path)
+        self.assertEqual(pending.read(jobs.parent, "thread-1", delivery_id)["state"], "pending")
+        watcher._one(path)
+        record = pending.read(jobs.parent, "thread-1", delivery_id)
+        self.assertEqual(record["state"], "acked", list(watcher.errors))
+        self.assertEqual(record["session_generation"], str(request["recipient_epoch"]))
+        self.assertEqual(record["claim_authority"], "generation-proven")
+        self.assertEqual(jobs.read_bytes(), before)
+        self.assertIsNone(process.poll())
+
+    def test_recovery_obligation_survives_epoch_change_before_send(self):
+        request, jobs, process = self._supervision_request()
+        # Prepare a real durable notice, then change only the transport
+        # generation before its first send. Its work binding stays unchanged.
+        receipt = request["receipt"]
+        identity = dict(thread_id="thread-1", parent_attempt_id="att-notice-owner",
+                        sealed_batch_id="batch-notice", receipt_digest=request["receipt_digest"])
+        item = GATEWAY.PendingInternal(kind="human-gate-wait", thread_id="thread-1",
+            delivery_id=request["delivery_id"], receipt=receipt, identity=identity,
+            recipient_epoch=request["recipient_epoch"] - 1)
+        with self.gateway._lock:
+            self.gateway.ledger._transition(item.delivery_id, "prepared", **identity)
+            self.gateway._delivery_pending[item.delivery_id] = item
+            state = self.gateway._threads["thread-1"]
+            self.gateway._send_human_gate_locked(item, state)
+        self.assertTrue(item.event.wait(5))
+        self.assertEqual(item.outcome["status"], "accepted", item.outcome)
+        self.assertEqual(item.recipient_epoch, request["recipient_epoch"])
+        replay = control(self.control, request)
+        self.assertTrue(replay["replay"])
+        self.assertIsNone(process.poll())
+
+    def test_notice_transport_refuses_stale_generation_before_creating_a_send(self):
+        request, jobs, process = self._supervision_request()
+        stale = dict(request, recipient_epoch=request["recipient_epoch"] - 1)
+        self.assertEqual(control(self.control, stale)["reason"], "recipient-epoch-mismatch")
+        self.assertIsNone(self.gateway.ledger.get(request["delivery_id"]))
+        self.assertEqual(control(self.control, request)["status"], "accepted")
 
     def test_supervision_uses_notice_transport_once_without_completing_live_work(self):
         request, jobs, process = self._supervision_request()

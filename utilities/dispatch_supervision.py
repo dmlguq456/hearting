@@ -87,13 +87,10 @@ def materialize(jobs: Path, attempts: set[str], *, reason: str) -> list[dict]:
         kind = meta.get("parent_completion_delivery", "")
         if not recipient or kind not in pending_delivery.RECIPIENT_KINDS:
             raise SupervisionError("supervision-parent-carrier-unbound")
-        generation = meta.get("session_generation", "")
-        supported = meta.get("session_generation_supported", "0")
-        epoch = int(generation) if generation.isdecimal() else 0
         receipt = {
             "schema_version": 1, "kind": KIND, "state": "attention",
             "owner_attempt_id": owner, "monitored_attempt_ids": monitored,
-            "recipient_thread_id": recipient, "recipient_epoch": epoch,
+            "recipient_thread_id": recipient,
             "sealed_batch_id": meta.get("managed_sealed_batch_id", ""),
             "job_registry": str(jobs), "reason": reason,
             "responsible": "supervision-controller", "required_action": "inspect-recovery",
@@ -103,7 +100,9 @@ def materialize(jobs: Path, attempts: set[str], *, reason: str) -> list[dict]:
         receipt["pending_delivery_id"] = delivery
         record = pending_delivery.create(jobs.parent, delivery_id=delivery,
             recipient_kind=kind, recipient_key=recipient,
-            session_generation=generation, session_generation_supported=supported,
+            # The work obligation outlives gateway connections. The courier
+            # proves the current recipient generation when claiming it.
+            session_generation="", session_generation_supported="0",
             attempt_ids=[owner], parent_attempt_id=owner,
             route_id=meta.get("owner_route_id") or meta.get("route_id") or "route-free",
             route_node=meta.get("route_node") or "supervision",
@@ -116,7 +115,7 @@ def materialize(jobs: Path, attempts: set[str], *, reason: str) -> list[dict]:
 def validate(receipt: dict, *, expected_thread: str | None = None,
              expected_epoch: int | None = None) -> dict:
     keys = {"schema_version", "kind", "state", "owner_attempt_id", "monitored_attempt_ids",
-            "recipient_thread_id", "recipient_epoch", "sealed_batch_id", "job_registry",
+            "recipient_thread_id", "sealed_batch_id", "job_registry",
             "reason", "responsible", "required_action", "pending_delivery_id"}
     if (not isinstance(receipt, dict) or set(receipt) != keys
             or receipt.get("kind") != KIND or receipt.get("schema_version") != 1
@@ -124,9 +123,8 @@ def validate(receipt: dict, *, expected_thread: str | None = None,
             or receipt.get("required_action") != "inspect-recovery"
             or receipt.get("responsible") != "supervision-controller"):
         raise SupervisionError("supervision-shape-invalid")
-    text_keys = keys - {"schema_version", "recipient_epoch", "monitored_attempt_ids"}
+    text_keys = keys - {"schema_version", "monitored_attempt_ids"}
     if (any(not isinstance(receipt[key], str) for key in text_keys)
-            or type(receipt["recipient_epoch"]) is not int or receipt["recipient_epoch"] < 0
             or not Path(receipt["job_registry"]).is_absolute()
             or any(ord(char) < 32 for key in text_keys for char in receipt[key])):
         raise SupervisionError("supervision-field-invalid")
@@ -138,8 +136,8 @@ def validate(receipt: dict, *, expected_thread: str | None = None,
         raise SupervisionError("supervision-attempts-invalid")
     if expected_thread is not None and receipt["recipient_thread_id"] != expected_thread:
         raise SupervisionError("supervision-thread-mismatch")
-    if expected_epoch is not None and receipt["recipient_epoch"] != expected_epoch:
-        raise SupervisionError("supervision-epoch-mismatch")
+    # Unlike an approval gate, recovery is attempt-scoped, not tied to a
+    # particular connection. The common transport fences its live epoch.
     return dict(receipt)
 
 
@@ -163,7 +161,6 @@ def validate_receipt(receipt: dict, *, jobs: Path, expected_thread_id: str,
     meta = rows[owner][1]
     if (meta.get("parent_sid") != expected_thread_id
             or meta.get("managed_sealed_batch_id", "") != expected_sealed_batch_id
-            or meta.get("session_generation", "") != str(expected_epoch)
             or any(_root(rows, aid) != owner for aid in receipt["monitored_attempt_ids"])):
         raise SupervisionError("supervision-lineage-mismatch")
     # A recovered batch must not receive an obsolete intervention request.
@@ -181,7 +178,6 @@ def validate_pending_record(record: dict, **kwargs) -> dict:
             or record.get("attempt_ids") != [receipt["owner_attempt_id"]]
             or record.get("parent_attempt_id") != receipt["owner_attempt_id"]
             or record.get("recipient_digest") != pending_delivery.recipient_digest(receipt["recipient_thread_id"])
-            or record.get("session_generation") != str(receipt["recipient_epoch"])
             or record.get("receipt_digest") != receipt_digest(receipt)):
         raise SupervisionError("supervision-pending-mismatch")
     return dict(record)
