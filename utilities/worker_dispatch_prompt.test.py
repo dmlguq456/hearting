@@ -133,6 +133,9 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                     **os.environ,
                     "AGENT_HOME": str(ROOT),
                     "AGENT_ARTIFACT_ROOT": str(artifact_root),
+                    "AGENT_ARTIFACT_CYCLE_ID": "cyc-concrete-prompt",
+                    "AGENT_ARTIFACT_CYCLE_DIR": str(artifact_root / "campaigns" / "stream" / "current"),
+                    "AGENT_ARTIFACT_OUTPUT_DIR": "",
                     "OPENCODE_CONFIG_CONTENT": "{}",
                 }
                 env.pop("AGENT_DISPATCH_JOBS", None)
@@ -149,6 +152,8 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                 self.assertIn(f"- assigned_contract: {expected_contract}", prompt)
                 self.assertNotIn("- worker_role:", prompt)
                 self.assertIn("CUSTOM ASSIGNMENT", prompt)
+                self.assertIn("- artifact_cycle_id: cyc-concrete-prompt", prompt)
+                self.assertIn(f"- artifact_output_dir: {artifact_root}/campaigns/stream/current/artifacts", prompt)
                 self.assertIn("artifact: <canonical path | ->", prompt)
                 self.assertIn("verdict: PASS | FAIL | BLOCKED", prompt)
                 self.assertIn("blocker: none | <one line>", prompt)

@@ -4881,6 +4881,13 @@ def _publish_completion_locked(
 ):
     """Publish marker history, exact-attempt link, and canonical marker under one node lock."""
 
+    # The same producer binding owns write admission and completion evidence.
+    # An open neighbouring cycle cannot certify this route's completed work.
+    from artifact_producer import ProducerError, require_cycle_output
+    try:
+        require_cycle_output(Path(route["artifact_root"]), Path(evidence), route_id=route["route_id"])
+    except ProducerError as exc:
+        raise ValueError(f"{exc.code}: {exc.detail}") from exc
     _validate_auxiliary_arbiter(route, node, evidence)
     axes=_marker_attempt_axes(node,attempt_id,attempt_metadata)
     evidence_sha=evidence_digest(evidence)

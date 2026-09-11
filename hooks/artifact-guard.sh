@@ -255,9 +255,9 @@ esac
 # write scope. Declaring a scope and then writing outside it was unchecked at
 # every layer: only `spec/` was bound, so a worker could emit any other
 # artifact its node never claimed. Node scopes are cycle-relative vocabulary
-# (`plan/**`, `dev_logs/**`, `plans/<cycle>/**`) and the route record carries no
-# resolved cycle, so a scope matches at any depth beneath the artifact root and
-# `<cycle>`/`<topic>` are single-segment wildcards. Only worker-authored regions
+# (`plan/**`, `dev_logs/**`, `plans/<cycle>/**`). The producer oracle above
+# supplies their concrete cycle output root; `<cycle>`/`<topic>` are
+# single-segment wildcards. Only worker-authored regions
 # are bound: artifact-root files and dot-prefixed machine state belong to the
 # runtime, and `_internal/` already exited above.
 case "$fp" in
@@ -272,7 +272,7 @@ case "$fp" in
       # not an "owner writes anywhere" carve-out.
       if [ -z "$route_node" ] || [ "$route_node" = "-" ]; then
         :
-      elif ! python3 - "$route_file" "$route_id" "$route_node" "$cr" "$fp" <<'PY'
+      elif ! python3 - "$route_file" "$route_id" "$route_node" "$cr" "$fp" "$cutover_verdict" <<'PY'
 import fnmatch,json,re,sys
 from pathlib import Path
 WORKTREE_ONLY={"source-scoped"}
@@ -296,15 +296,13 @@ def component_match(value, pattern):
     return all(fnmatch.fnmatchcase(value_part, pattern_part)
                for value_part,pattern_part in zip(values,parts))
 def bound(rel,pat):
-    if pat.startswith("^"):
-        return component_match(rel,pat[1:])
-    segments=rel.split("/")
-    return any(component_match("/".join(segments[i:]),pat) for i in range(len(segments)))
+    return component_match(rel,pat.removeprefix("^"))
 try:
     route=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     if route.get("route_id")!=sys.argv[2]: raise ValueError("route id mismatch")
     node=next(row for row in route["nodes"] if row["id"]==sys.argv[3])
-    rel=Path(sys.argv[5]).relative_to(Path(sys.argv[4])).as_posix()
+    scope_root=json.loads(sys.argv[6]).get("output_dir") or sys.argv[4]
+    rel=Path(sys.argv[5]).resolve().relative_to(Path(scope_root).resolve()).as_posix()
     pats=[pat for scope in node["write_scope"] for pat in patterns(scope)]
     ok=any(part.startswith(".") for part in rel.split("/")) or any(bound(rel,pat) for pat in pats)
 except Exception:

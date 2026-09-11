@@ -13,6 +13,30 @@ from codex_managed_dispatch import (
 from dispatch_contract import DispatchContractError, annotate_attempt_row
 
 
+def interactive_parent_identity(environ=None) -> tuple[str, str]:
+    """Resolve the caller's native identity, independently of the child adapter."""
+    env = os.environ if environ is None else environ
+    sessions = {
+        "codex": env.get("CODEX_THREAD_ID") or env.get("CODEX_SESSION_ID") or "",
+        "claude": env.get("CLAUDE_CODE_SESSION_ID") or env.get("CLAUDE_SESSION_ID") or "",
+        "opencode": env.get("OPENCODE_SESSION_ID") or "",
+    }
+    explicit = env.get("AGENT_DISPATCH_CALLER_HARNESS") or env.get("AGENT_DISPATCH_CURRENT_HARNESS")
+    if explicit:
+        if explicit not in sessions:
+            raise DispatchContractError("caller-harness-invalid")
+        return explicit, sessions[explicit]
+    detected = [(harness, session) for harness, session in sessions.items() if session]
+    if len(detected) > 1:
+        raise DispatchContractError("caller-harness-ambiguous")
+    return detected[0] if detected else ("", "")
+
+
+def default_parent_session_id(environ=None) -> str | None:
+    env = os.environ if environ is None else environ
+    return env.get("AGENT_DISPATCH_PARENT_SESSION_ID") or interactive_parent_identity(env)[1] or None
+
+
 def _direct_registered_parent(args) -> bool:
     return (
         getattr(args, "action", "") in {"register", "start"}

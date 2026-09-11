@@ -245,10 +245,10 @@ class ClaudeSD78CompletionDelivery(unittest.TestCase):
             "claude_dispatch_headless_task", Path(WH.__file__).with_name("dispatch-headless.py"))
         with mock.patch.object(WH, "task_prompt", return_value=("do the thing", "cli")):
             prompt, _source = WH.dispatch_prompt(args)
-        self.assertTrue(prompt.startswith("Runtime-owned completion join (SD-78):"))
-        self.assertIn("same Claude session once", prompt)
-        self.assertIn("Do not call dispatch-wait", prompt)
-        self.assertIn("a supervised owner yields the current turn", prompt)
+        self.assertTrue(prompt.startswith("Runtime-owned completion join:"))
+        self.assertIn("runtime waits and resumes this owner", prompt)
+        self.assertIn("acknowledges delivery and retains unresolved cleanup", prompt)
+        self.assertIn("Inspection commands are available when needed", prompt)
         self.assertNotIn("poll in the current turn", prompt)
 
     def test_supervised_shell_uses_session_bridge_without_no_persistence(self):

@@ -516,11 +516,11 @@ class CodexSD78CompletionDelivery(unittest.TestCase):
         args = _prompt_args()
         with mock.patch.object(WH, "task_prompt", return_value=("do the thing", "cli")):
             prompt, _source = WH.dispatch_prompt(args)
-        self.assertTrue(prompt.startswith("Runtime-owned completion join (SD-78):"))
+        self.assertTrue(prompt.startswith("Runtime-owned completion join:"))
         self.assertIn("runtime_wait: registered-children", prompt)
-        self.assertIn("joins all exact parent_attempt_id children outside the model", prompt)
-        self.assertIn("Do not call dispatch-wait", prompt)
-        self.assertIn("a supervised owner yields the current turn", prompt)
+        self.assertIn("runtime waits and resumes this owner", prompt)
+        self.assertIn("acknowledges delivery and retains unresolved cleanup", prompt)
+        self.assertIn("Inspection commands are available when needed", prompt)
         self.assertNotIn("poll in the current turn", prompt)
 
     def test_explicit_poll_mode_is_disclosed_as_fallback(self):

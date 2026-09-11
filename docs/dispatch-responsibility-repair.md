@@ -158,3 +158,13 @@ join에 남아 있던 예외는 유효한 완료 marker가 있으면 살아 있�
 ## 잘못된 cycle 쓰기 증거 복구
 
 OpenCode 부모 canary의 Codex frame `att-ea04186aba80442fadd029cc04556d67`는 다른 cycle의 `direction-brief.md`를 덮어썼다. 원래 Codex rollout의 118/139행 native patches를 순서 적용한 5227bytes가 원 marker SHA256 `4d78735e0ec62ff00e71e601b31d22194cf203409e7aa28752993b598095ca47`와 정확히 일치하여 원문을 복구했다. 덮인 4201bytes와 패치·복구 영수증은 원 cycle `artifacts/dev_logs/direction-brief-restoration/`에 보존했다. 원장·marker 수정과 재기동은 없고, 이후 잘못된 쓰기는 정상 검증으로 인정하지 않는다. 환경 변수 미전달이라는 보고의 probe 정규식은 `AGENT_ARTIFACT_*`를 매칭하지 않으므로 그 원인 주장은 추가 확인이 필요하다. 다른 cycle 쓰기 자체는 실제 파일과 marker hash로 확인됐다.
+
+## 부모 신원·출력 위치·실행 저장소의 책임
+
+세 어댑터의 부모 session 기본값과 depth-0 frame 질문 생성이 공통 native identity resolver를 사용한다. OpenCode 부모 아래 Codex 다리에서 부모 ID가 사라지던 누락을 제거했다. local frame handback은 실제 OpenCode 부모가 정식 질문을 표시하는 경로이며, 비동기 자동 wake 지원 주장과 구분한다. workflow 129, selector 77, 부모 운송 10 및 실제 세 adapter parser의 부모 조합 검사가 통과했다.
+
+세 어댑터가 같은 producer 환경 전달 함수를 사용하고 실제 출력 경로를 prompt에도 넣는다. producer `require_cycle_output`을 쓰기와 completion publish가 함께 사용하며, 환경이 빠져도 route의 기존 producer record에서 binding을 찾는다. 열린 다른 cycle의 같은 `shards/frame/**` 경로는 거부하고 정확한 output directory를 안내한다. artifact guard의 루트 아래 임의 suffix 일치도 cycle-relative 일치로 교체했다. 새 검사는 서로 열린 두 cycle의 같은 파일명, 잘못된 output 힌트, cycle env 누락, marker 생성 전 거부를 포함한다.
+
+OpenCode 실행 저장소는 [공식 XDG 구현](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/core/src/global.ts), [설정 로더](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/config/config.ts), [인증 경로](https://github.com/anomalyco/opencode/blob/v1.18.30/packages/opencode/src/auth/index.ts)를 확인했다. Codex owner 아래 OpenCode adapter가 attempt별 data/cache/state/config를 worktree에 준비하고 기존 auth와 설정을 복사하지 않고 연결한다. 설정 옆에 자동 생성하는 `.gitignore`·npm 의존성 파일도 private directory에 남긴다. 실제 `codex sandbox -P :workspace`에서 외부 fixture 경로는 EROFS/exit 1이었다. 최초 data/cache/state 준비만으로 paths/startup은 통과했으나 config load는 `.gitignore` 쓰기로 실패해 그 증거도 보존했다. 최종 설정 투영 후 `debug config` exit 0, 원래 `fixture/light` 모델 선택 유지, 원래 설정/auth bytes 불변을 확인했다. 근거 `/tmp/opencode-nested-runtime-observation.json`. 모델 기반 owner 왕복 검증을 대체하는 증거는 아니다.
+
+producer 전체 155, capability route 387, adapter Codex 58/Claude 46/OpenCode 30, worker bootstrap/prompt 검사가 통과했다. 원본 HEAD 32d4e143을 메모리에 로드한 기준 실행에서도 producer 실패 11건을 재현했다. terminal fixture가 공식 completion writer를 거치지 않아 marker와 원장이 달랐고, lease fixture는 PID가 없는 witness-only record와 역전된 시간값으로 실제 holder 종료를 대신했다. 정식 complete와 실제 PID/start/PGID 및 witness를 가진 자식의 종료를 사용하는 fixture로 수정했다. A의 lease 운영 함수는 변경하지 않았다. 로그 `/tmp/producer-32d-baseline.log`, `/tmp/producer-context-final.log`, `/tmp/parent-scope-*.log`.

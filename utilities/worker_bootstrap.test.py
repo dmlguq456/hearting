@@ -10,6 +10,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WorkerBootstrapTest(unittest.TestCase):
+    def test_issued_cycle_context_supplies_missing_output_directory(self):
+        env = {"AGENT_ARTIFACT_CYCLE_ID": "cyc-test", "AGENT_ARTIFACT_CYCLE_DIR": "/issued/cycle"}
+        values = W.artifact_cycle_environment(env)
+        self.assertEqual(values["AGENT_ARTIFACT_OUTPUT_DIR"], "/issued/cycle/artifacts")
+        self.assertIn("/issued/cycle/artifacts", W.artifact_context_prompt(env))
+        self.assertNotIn("AGENT_ARTIFACT_OUTPUT_DIR", env)
+        self.assertEqual(W.artifact_context_prompt({}), "")
+
     def test_deterministic_fallback_types(self):
         self.assertEqual(W.resolve_worker_type(explicit=None, dispatch_depth=1), "owner")
         self.assertEqual(

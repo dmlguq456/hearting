@@ -111,6 +111,7 @@ OPENCODE_DIRECT_DISPATCH_HOME=$(AGENT_HOME="$TMP/not-agent-home" HOME="$DISPATCH
   "$ROOT/adapters/opencode/utilities/agent-home.sh")
 
 echo "== artifact guard CLI =="
+export AGENT_HOME="$ROOT" # Compile and verify against the same source contract.
 ROUTE_FIXTURE_JOBS="$TMP/proj/.dispatch/jobs.log"
 mkdir -p "$TMP/proj/.agent_reports/spec" "$(dirname "$ROUTE_FIXTURE_JOBS")"
 if "$ART" --file "$TMP/proj/.agent_reports/spec/prd.md" --session test >/tmp/art.out 2>/tmp/art.err; then
@@ -482,6 +483,7 @@ else
 fi
 
 echo "== git state guard CLI =="
+export AGENT_HOME="$TMP/agent_home"
 mkdir -p "$TMP/repo"
 (
   cd "$TMP/repo" || exit 1
@@ -3412,11 +3414,12 @@ if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --sk
   && grep -q '^unit-family=qa ' "$TMP/context_footprint.out" \
   && ! grep -q '^surface=native-bootstrap-agent-modes' "$TMP/context_footprint.out" \
   && { grep -q '^status=ok' "$TMP/context_footprint.out" \
-    || { grep -q '^status=warn warnings=19$' "$TMP/context_footprint.out" \
+    || { grep -q '^status=warn warnings=21$' "$TMP/context_footprint.out" \
       && grep -Eq 'owner worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
       && grep -Eq 'stage worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
       && grep -Eq 'review worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
       && grep -Eq 'support worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
+      && grep -Eq 'frame worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:claude footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:codex footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'bootstrap:opencode footprint regression' "$TMP/context_footprint.out" \
@@ -3426,6 +3429,7 @@ if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --sk
       && grep -q 'entry-router:codex:max footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'entry-router:opencode:max footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'missing from context footprint baseline: unit-catalog:total' "$TMP/context_footprint.out" \
+      && grep -q 'missing from context footprint baseline: worker-bootstrap:frame' "$TMP/context_footprint.out" \
       && grep -q 'worker-bootstrap:kernel footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'worker-bootstrap:owner footprint regression' "$TMP/context_footprint.out" \
       && grep -q 'worker-bootstrap:review footprint regression' "$TMP/context_footprint.out" \

@@ -20,11 +20,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# W7C producer-cycle environment passed from an owner to its stage workers.
-ARTIFACT_PRODUCER_CYCLE_ENV = (
-    "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
-    "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR",
-)
+
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
@@ -109,7 +105,9 @@ from owner_route_binding import (  # noqa: E402
     owner_binding_tuple_failure_fields,
     validate_runtime_requirements,
 )
-from worker_bootstrap import (  # noqa: E402
+from worker_bootstrap import (
+    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt,
+    supervised_owner_prompt,  # noqa: E402
     assigned_contract,
     profile_worker_type,
     render_worker_bootstrap,
@@ -251,9 +249,7 @@ def parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--parent-session-id",
-        default=os.environ.get("AGENT_DISPATCH_PARENT_SESSION_ID")
-        or os.environ.get("CODEX_THREAD_ID")
-        or os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        default=parent_completion.default_parent_session_id(),
     )
     p.add_argument(
         "--parent-cwd",
@@ -925,18 +921,7 @@ def dispatch_prompt(
     )
     sync_wait_clause = ""
     if owner_standard_plus and supervised:
-        sync_wait_clause = (
-            "Runtime-owned completion join (SD-78): register every separable child in the "
-            "current batch with --start. Confirm that the start receipt itself says "
-            "registered=1, started=1, and child_spawned=1; check=ok, a dry-run attempt id, "
-            "or a register-only receipt is not launch evidence. Only then end this turn with "
-            "exactly `runtime_wait: registered-children`. "
-            "Do not call dispatch-wait, liveness, Monitor, or any scheduling/wakeup tool. The "
-            "App Server supervisor joins all exact parent_attempt_id children outside the model "
-            "and resumes this same thread once with a typed bounded receipt. On resume, harvest "
-            "only the listed exact attempts. Do not emit the final three-line handoff while an "
-            "owned child remains open.\n\n"
-        )
+        sync_wait_clause = supervised_owner_prompt()
     elif owner_standard_plus:
         sync_wait_clause = (
             "Checked polling fallback (App Server completion bridge unavailable): immediately "
@@ -981,6 +966,7 @@ def dispatch_prompt(
         f"- owner_harness: {args.owner_harness or '-'}\n"
         f"- worktree: {args.worktree}\n"
         f"- artifact_root: {args.artifact_root}\n"
+        f"{artifact_context_prompt(os.environ)}"
         f"- route_state: {route_state}\n\n"
         "Codex realization:\n"
         f"- Read only $AGENT_HOME/adapters/codex/skills/{args.assigned_contract}/SKILL.md; the typed bootstrap above already contains the exact portable unit persona.\n"
@@ -2803,7 +2789,7 @@ def main(argv: list[str]) -> int:
             # through unchanged so stage workers write into the same
             # `campaigns/<camp>/cycles/<cyc>/artifacts/` and never issue a
             # second lineage.
-            **{key: os.environ.get(key, "") for key in ARTIFACT_PRODUCER_CYCLE_ENV},
+            **artifact_cycle_environment(os.environ),
             "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
             "AGENT_ROUTE_FILE": (
                 args.route_file

@@ -960,6 +960,38 @@ class CheckWriteTest(ProducerTestBase):
         verdict = P.check_write(self.root, target)
         self.assertEqual((verdict["verdict"], verdict["reason"]), ("deny", "cycle-not-open"))
 
+    def test_worker_write_is_bound_to_issued_cycle_and_returns_its_output_path(self):
+        self.activate()
+        route, _, first = self.begin(title="current")
+        _, _, other = self.begin(capability="autopilot-draft", mode="doc", title="neighbour")
+        current = self.write_output(first, "shards/frame/direction-brief.md", b"current\n")
+        neighbour = self.write_output(other, "shards/frame/direction-brief.md", b"neighbour\n")
+        # Both cycles are open, with exactly the same node-relative filename.
+        # Neither a false output hint nor an omitted cycle env overrides the route.
+        for use_cycle_env in (True, False):
+            env = {"AGENT_ROUTE_ID": route["route_id"], "AGENT_ARTIFACT_OUTPUT_DIR": str(neighbour.parent)}
+            if use_cycle_env:
+                env["AGENT_ARTIFACT_CYCLE_ID"] = first["cycle_id"]
+            with self.subTest(cycle_env=use_cycle_env), mock.patch.dict(os.environ, env):
+                self.assertEqual(P.check_write(self.root, current)["verdict"], "allow")
+                verdict = P.check_write(self.root, neighbour)
+                self.assertEqual(verdict["reason"], "artifact-outside-bound-cycle")
+                self.assertIn(first["env"]["AGENT_ARTIFACT_OUTPUT_DIR"], verdict["detail"])
+        self.assertEqual(neighbour.read_bytes(), b"neighbour\n")
+
+    def test_registered_completion_reuses_cycle_scope_before_marker_publication(self):
+        self.activate()
+        route, _, result = self.begin()
+        foreign = Path(self._tmp.name) / "foreign.md"
+        foreign.write_text("other cycle result\n")
+        with mock.patch.object(R, "_marker_attempt_axes") as axes:
+            with self.assertRaisesRegex(ValueError, "artifact-outside-bound-cycle"):
+                R._publish_completion_locked(route, {}, "frame", foreign,
+                                             attempt_id="att-wrong-cycle", attempt_metadata={})
+            axes.assert_not_called()
+        self.assertEqual(P.require_cycle_output(self.root, self.write_output(result), route_id=route["route_id"]),
+                         Path(result["cycle_dir"]) / "artifacts")
+
     def test_resolve_output_dir(self):
         self.assertEqual(P.resolve_output_dir(self.root, "spec"), (self.root / "spec", "legacy"))
         self.activate()
@@ -1345,6 +1377,26 @@ class CliTest(ProducerTestBase):
 class ReviewPublicationLeaseTest(ProducerTestBase):
     """SD-117 §13.34.5-(2): L1 review-publication-lease enforcement."""
 
+    def live_v2_holder(self, cycle_id, attempt, nonce):
+        witness = D.review_governed_lease_path(self.root, cycle_id, attempt)
+        witness.parent.mkdir(parents=True, exist_ok=True)
+        witness.write_bytes(D.review_governed_lease_payload(attempt, cycle_id, nonce))
+        process = subprocess.Popen(
+            [sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1],'r+b'); "
+             "fcntl.flock(f,fcntl.LOCK_EX); print('ready',flush=True); sys.stdin.read()", str(witness)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        def cleanup():
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=5)
+            process.stdin.close(); process.stdout.close()
+        self.addCleanup(cleanup)
+        self.assertEqual(process.stdout.readline().strip(), "ready")
+        namespace = os.readlink(f"/proc/{process.pid}/ns/pid")
+        return process, {"pid": process.pid, "pid_start": D.process_start_ticks(process.pid),
+                         "pgid": process.pid, "pid_ns": namespace, "pid_observer_ns": namespace}
+
     def test_review_round_one_fail_keeps_cycle_open_and_registered_publication_verdict_is_allow(self):
         self.activate()
         route, route_file, result = self.begin()
@@ -1438,23 +1490,23 @@ class ReviewPublicationLeaseTest(ProducerTestBase):
             "review_governed_lease": D.REVIEW_GOVERNED_LEASE_KIND,
             "review_governed_lease_nonce": nonce,
         }
+        process, identity = self.live_v2_holder(cycle_id, attempt, nonce)
+        record.update(identity)
         v2 = lease_dir / f"{attempt}.json"
         v2.write_text(json.dumps(record), encoding="utf-8")
-        governed = D.review_governed_lease_path(self.root, cycle_id, attempt)
-        governed.parent.mkdir(parents=True)
-        governed.write_bytes(D.review_governed_lease_payload(attempt, cycle_id, nonce))
-        with governed.open("r+b") as held:
-            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            self.assertEqual(P._live_review_lease(self.root, cycle_id), v2)
-            record["released_at"] = P._rfc3339(now)
-            v2.write_text(json.dumps(record), encoding="utf-8")
-            self.assertEqual(P._live_review_lease(self.root, cycle_id), corrupt)
-            record["released_at"] = None
-            record["deadline"] = P._rfc3339(now - 2)
-            v2.write_text(json.dumps(record), encoding="utf-8")
-            self.assertEqual(P._live_review_lease(self.root, cycle_id), corrupt)
-            record["deadline"] = P._rfc3339(now + 300)
-            v2.write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(P._live_review_lease(self.root, cycle_id), v2)
+        record["released_at"] = P._rfc3339(now)
+        v2.write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(P._live_review_lease(self.root, cycle_id), corrupt)
+        record["released_at"] = None
+        record["acquired_at"] = P._rfc3339(now - 10)
+        record["deadline"] = P._rfc3339(now - 2)
+        v2.write_text(json.dumps(record), encoding="utf-8")
+        # A valid time limit never overrides an exactly live holder.
+        self.assertEqual(P._live_review_lease(self.root, cycle_id), v2)
+        record["deadline"] = P._rfc3339(now + 300)
+        v2.write_text(json.dumps(record), encoding="utf-8")
+        process.stdin.close(); process.wait(timeout=5)
         corrupt.unlink()
         self.assertIsNone(P._live_review_lease(self.root, cycle_id))
 
@@ -1466,6 +1518,7 @@ class ReviewPublicationLeaseTest(ProducerTestBase):
         cycle_id = result["cycle_id"]
         attempt = "att-finalize-race-v2"
         nonce = "d" * 64
+        process, identity = self.live_v2_holder(cycle_id, attempt, nonce)
         now = time.time()
         lease_dir = P._review_lease_dir(self.root, cycle_id)
         lease_dir.mkdir(parents=True, exist_ok=True)
@@ -1476,15 +1529,12 @@ class ReviewPublicationLeaseTest(ProducerTestBase):
             "expired": False,
             "review_governed_lease": D.REVIEW_GOVERNED_LEASE_KIND,
             "review_governed_lease_nonce": nonce,
+            **identity,
         }), encoding="utf-8")
-        governed = D.review_governed_lease_path(self.root, cycle_id, attempt)
-        governed.parent.mkdir(parents=True)
-        governed.write_bytes(D.review_governed_lease_payload(attempt, cycle_id, nonce))
-        with governed.open("r+b") as held:
-            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            with self.assertRaises(P.ProducerError) as caught:
-                P.finalize(self.root, cycle_id=cycle_id)
-            self.assertEqual(caught.exception.code, "cycle-finalize-blocked-live-review")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=cycle_id)
+        self.assertEqual(caught.exception.code, "cycle-finalize-blocked-live-review")
+        process.stdin.close(); process.wait(timeout=5)
         self.assertEqual(P.finalize(self.root, cycle_id=cycle_id)["status"], "sealed")
 
     def test_recovery_journal_roll_forward_is_fenced_by_live_v2_lease(self):
@@ -2642,8 +2692,8 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                 fallback_hop="same-harness-headless",harness="codex",route_id=route["route_id"],
                 route_hash=route["route_hash"],route_node=node["id"],failure_class="pass",launch_outcome="reaped-before-publish")
             subprocess.run([sys.executable,"-c","pass"],check=True)
-            jobs.write_text(row("open","owner",owner_meta)+row("done","report",child_meta))
-            R._publish_completion_locked(route,node,node["id"],artifact,attempt_id=child,attempt_metadata=child_meta,jobs=jobs)
+            jobs.write_text(row("open","owner",owner_meta)+row("open","report",child_meta))
+            R.complete_node(route,node,node["id"],artifact,attempt_id=child,jobs=jobs)
             request=terminal.TerminalCommitRequest(route_file,owner,jobs,self.root)
             return route,route_file,jobs,owner,result,artifact,request
 

@@ -3201,6 +3201,37 @@ def _quick_refine_write_gate(root: Path, target: Path, route=None) -> None:
         raise ProducerError("quick-preview-approval-required", str(exc)) from exc
 
 
+def require_cycle_output(
+    root: Path, target: Path, *, cycle_id: Optional[str] = None, route_id: Optional[str] = None,
+) -> Optional[Path]:
+    """Bind writes and completion evidence to the producer's issued cycle.
+
+    Route lookup recovers omitted environment context from producer records;
+    directory names, recency and a caller-supplied output path are not authority.
+    Legacy routes without a producer cycle retain their existing contract.
+    """
+    record = read_cycle_record(root, cycle_id) if cycle_id else None
+    if cycle_id and record is None:
+        raise ProducerError("cycle-unknown", cycle_id)
+    if record is None and route_id:
+        candidates = [item for item in list_cycle_records(root) if item.get("route_id") == route_id]
+        opened = [item for item in candidates if item.get("state") == "open"]
+        candidates = opened or candidates
+        if len(candidates) > 1:
+            raise ProducerError("route-cycle-binding-ambiguous", route_id)
+        record = candidates[0] if candidates else None
+    if record is None:
+        return None
+    if route_id and record.get("route_id") != route_id:
+        raise ProducerError("cycle-route-binding-mismatch", f"cycle={record['cycle_id']} route={route_id}")
+    output = cycle_dir(root, record["campaign_id"], record["cycle_id"], record) / "artifacts"
+    try:
+        Path(target).resolve().relative_to(output.resolve())
+    except ValueError as exc:
+        raise ProducerError("artifact-outside-bound-cycle", f"cycle={record['cycle_id']} output_dir={output}") from exc
+    return output
+
+
 def check_write(root: Path, target: Path) -> Dict[str, Any]:
     """Classify one prospective write under the artifact root.
 
@@ -3227,6 +3258,13 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
     if top == "shared":
         return {**base, "verdict": "deny", "reason": "shared-revision-immutable", "layout": "shared"}
     if top == "campaigns":
+        try:
+            require_cycle_output(
+                root, target, cycle_id=os.environ.get("AGENT_ARTIFACT_CYCLE_ID"),
+                route_id=os.environ.get("AGENT_ROUTE_ID") or os.environ.get("AGENT_OWNER_ROUTE_ID"),
+            )
+        except ProducerError as exc:
+            return {**base, "verdict": "deny", "reason": exc.code, "detail": exc.detail, "layout": "cycle"}
         legacy = len(parts) >= 5 and parts[2] == "cycles"
         readable = len(parts) >= 4 and parts[2] != "cycles"
         if not legacy and not readable:
@@ -3264,7 +3302,8 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
             return {**base, "verdict": "deny", "reason": "cycle-not-open", "layout": "cycle", "cycle_id": cycle_id}
         bucket = parts[artifacts_index + 1] if len(parts) > artifacts_index + 2 else None
         return {**base, "verdict": "allow", "reason": "open-cycle-artifacts", "layout": "cycle",
-                "cycle_id": cycle_id, "campaign_id": campaign_id, "bucket": bucket}
+                "cycle_id": cycle_id, "campaign_id": campaign_id, "bucket": bucket,
+                "output_dir": str(cycle_path / "artifacts")}
     if active:
         return {**base, "verdict": "deny", "reason": "legacy-top-level-write-denied", "layout": "legacy",
                 "bucket": top, "hint": LEGACY_WRITE_HINT}

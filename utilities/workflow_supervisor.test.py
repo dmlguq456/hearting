@@ -2699,6 +2699,15 @@ class TestInteractiveFrameGate(WorkflowFixture):
             delivery.assert_not_called()
 
     def test_both_real_frame_rows_can_hand_back_to_parent_before_owner_exists(self):
+        self._assert_local_frame_handback("codex", "CODEX_THREAD_ID")
+
+    def test_opencode_parent_receives_local_frame_handback_before_owner_exists(self):
+        self._assert_local_frame_handback("opencode", "OPENCODE_SESSION_ID")
+
+    def test_claude_parent_receives_local_frame_handback_before_owner_exists(self):
+        self._assert_local_frame_handback("claude", "CLAUDE_CODE_SESSION_ID")
+
+    def _assert_local_frame_handback(self, harness, session_key):
         route, path = self.two_stage_route(human_gate="frame-review")
         route["effective_intensity"] = "quick"
         route["dispatch_contract_version"] = 3
@@ -2718,16 +2727,17 @@ class TestInteractiveFrameGate(WorkflowFixture):
         markers = DC.dispatch_state_roots(ROOT, jobs)[0] / "completion" / route["route_id"]
         markers.mkdir(parents=True)
         lines = []
-        for node,harness in zip(route["nodes"], ("codex", "claude")):
+        for node,child_harness in zip(route["nodes"], ("codex", "claude")):
             attempt = "att-local-" + node["id"]
             (markers / (node["id"] + ".json")).write_text(json.dumps({"attempt_id": attempt}))
             meta = {"attempt_id": attempt, "parent_sid": "test-depth0", "route_id": route["route_id"],
                     "route_hash": route["route_hash"], "route_node": node["id"], "worker_type": "frame",
-                    "dispatch_depth": "1", "harness": harness, "note": "completed-marker"}
+                    "dispatch_depth": "1", "harness": child_harness, "note": "completed-marker"}
             lines.append("ts\tdone\t/r\t/w\tframe\t" + ",".join(k+"="+v for k,v in meta.items()))
         jobs.write_text("\n".join(lines))
-        with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "test-depth0", "AGENT_DISPATCH_ATTEMPT_ID": "",
-                "AGENT_DISPATCH_REGISTERED_WORKER": "", "AGENT_CODEX_MANAGED_CONTROL_SOCKET": "/tmp/test-control"}), \
+        with mock.patch.dict(os.environ, {session_key: "test-depth0", "AGENT_DISPATCH_CALLER_HARNESS": harness,
+                "AGENT_DISPATCH_ATTEMPT_ID": "", "AGENT_DISPATCH_REGISTERED_WORKER": "",
+                "AGENT_CODEX_MANAGED_CONTROL_SOCKET": "/tmp/test-control"}, clear=True), \
              mock.patch.object(SUP.HUMAN_GATE, "probe_consumer", return_value={"epoch": 1}), \
              mock.patch.object(DC, "completion_marker_is_current", return_value=True), \
              mock.patch.object(DC, "completion_attempt_readiness", return_value=DC.AttemptReadiness("ready", "fixture")):
@@ -2746,7 +2756,7 @@ class TestInteractiveFrameGate(WorkflowFixture):
             self.assertEqual(SUP.existing_gate_delivery(route, "frame-review", jobs)["delivery"], str(record_path))
             self.assertEqual(SUP.retire_gate_delivery(route, "frame-review", jobs), "acked")
             self.assertEqual(json.loads(record_path.read_text())["state"], "acked")
-            with mock.patch.dict(os.environ, {"CODEX_THREAD_ID": "other-parent"}):
+            with mock.patch.dict(os.environ, {session_key: "other-parent"}):
                 with self.assertRaisesRegex(SUP.SupervisorError, "frame-gate-parent-binding-mismatch"):
                     SUP.create_gate_delivery(route, "frame-review", str(artifact), jobs, 1, **kwargs)
 

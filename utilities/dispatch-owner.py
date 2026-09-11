@@ -285,25 +285,11 @@ def export_owner_route_env(child_env, binding):
 
 
 def _caller_harness(env):
-    """Keep the interactive caller distinct from the selected child adapter."""
-
-    explicit = env.get("AGENT_DISPATCH_CALLER_HARNESS") or env.get(
-        "AGENT_DISPATCH_CURRENT_HARNESS"
-    )
-    if explicit:
-        if explicit not in _defaults.DISPATCHABLE_HARNESSES:
-            raise OwnerError("caller-harness-invalid")
-        return explicit
-    detected = set()
-    if env.get("CODEX_THREAD_ID") or env.get("CODEX_SESSION_ID"):
-        detected.add("codex")
-    if env.get("CLAUDE_CODE_SESSION_ID"):
-        detected.add("claude")
-    if env.get("OPENCODE_SESSION_ID"):
-        detected.add("opencode")
-    if len(detected) > 1:
-        raise OwnerError("caller-harness-ambiguous")
-    return next(iter(detected), None)
+    from dispatch_parent_completion import interactive_parent_identity, DispatchContractError
+    try:
+        return interactive_parent_identity(env)[0] or None
+    except DispatchContractError as exc:
+        raise OwnerError(exc.reason) from exc
 
 
 def _load_defaults():

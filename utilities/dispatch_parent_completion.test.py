@@ -40,6 +40,27 @@ def args(parent="codex", **values):
 
 
 class ParentDeliveryContract(unittest.TestCase):
+    def test_every_adapter_parser_binds_the_actual_parent_session(self):
+        for parent, key in (("codex", "CODEX_THREAD_ID"),
+                            ("claude", "CLAUDE_CODE_SESSION_ID"),
+                            ("opencode", "OPENCODE_SESSION_ID")):
+            with mock.patch.dict(os.environ, {key: "native-parent"}, clear=True):
+                for child, wrapper in ADAPTERS.items():
+                    with self.subTest(parent=parent, child=child):
+                        self.assertEqual(wrapper.parser().get_default("parent_session_id"), "native-parent")
+
+    def test_explicit_caller_selects_its_own_session_among_inherited_ids(self):
+        env = {"CODEX_THREAD_ID": "old-thread", "OPENCODE_SESSION_ID": "actual-parent",
+               "AGENT_DISPATCH_CALLER_HARNESS": "opencode"}
+        self.assertEqual(P.interactive_parent_identity(env), ("opencode", "actual-parent"))
+        self.assertEqual(P.default_parent_session_id(env), "actual-parent")
+        env["AGENT_DISPATCH_PARENT_SESSION_ID"] = "explicit-dispatch-binding"
+        self.assertEqual(P.default_parent_session_id(env), "explicit-dispatch-binding")
+        self.assertEqual(P.interactive_parent_identity(env), ("opencode", "actual-parent"))
+        del env["AGENT_DISPATCH_CALLER_HARNESS"]
+        with self.assertRaisesRegex(P.DispatchContractError, "caller-harness-ambiguous"):
+            P.interactive_parent_identity(env)
+
     def test_parent_runtime_selects_delivery_for_every_child_and_worker_type(self):
         for child, wrapper in ADAPTERS.items():
             for parent, delivery in (("codex", P.MANAGED_PARENT_DELIVERY),

@@ -950,7 +950,11 @@ def create_local_frame_gate_delivery(route, gate, artifact, jobs_path, epoch, *,
         return None
     if release_actor_kind() == "headless-owner" or os.environ.get("AGENT_DISPATCH_ATTEMPT_ID"):
         raise SupervisorError("frame-gate-depth0-required")
-    session = os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_SESSION_ID")
+    from dispatch_parent_completion import interactive_parent_identity
+    try:
+        parent_harness, session = interactive_parent_identity()
+    except ValueError as exc:
+        raise SupervisorError(str(exc)) from exc
     if not session:
         raise SupervisorError("frame-gate-parent-identity-missing")
     bindings = [b for b in route.get("human_gate_bindings", []) if b.get("gate") == gate]
@@ -976,7 +980,7 @@ def create_local_frame_gate_delivery(route, gate, artifact, jobs_path, epoch, *,
         if len(metadata) != 1 or metadata[0].get("parent_sid") != session:
             raise SupervisorError("frame-gate-parent-binding-mismatch")
         attempts.append(attempt)
-    if os.environ.get("CODEX_THREAD_ID"):
+    if parent_harness == "codex":
         control = os.environ.get("AGENT_CODEX_MANAGED_CONTROL_SOCKET")
         if not control:
             raise SupervisorError("frame-gate-managed-parent-required")

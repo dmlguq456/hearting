@@ -9,6 +9,10 @@ from pathlib import Path
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
 RESERVED_UNITS = ("_kernel/owner", "_kernel/resource")
+ARTIFACT_PRODUCER_CYCLE_ENV = (
+    "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
+    "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR",
+)
 _FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 WORKER_KIND_TYPES = {
     "capability-owner": "owner",
@@ -121,6 +125,35 @@ def unit_persona_body(root: Path, unit: str | None) -> str | None:
         return None
     text = path.read_text(encoding="utf-8")
     return _FRONTMATTER_RE.sub("", text, count=1).strip()
+
+
+def artifact_cycle_environment(environ) -> dict[str, str]:
+    """Carry the issued producer context; fill its deterministic output path."""
+    values = {key: environ.get(key, "") for key in ARTIFACT_PRODUCER_CYCLE_ENV}
+    if values["AGENT_ARTIFACT_CYCLE_DIR"] and not values["AGENT_ARTIFACT_OUTPUT_DIR"]:
+        values["AGENT_ARTIFACT_OUTPUT_DIR"] = str(Path(values["AGENT_ARTIFACT_CYCLE_DIR"]) / "artifacts")
+    return values
+
+
+def artifact_context_prompt(environ) -> str:
+    values = artifact_cycle_environment(environ)
+    output = values["AGENT_ARTIFACT_OUTPUT_DIR"]
+    if not output:
+        return ""
+    return (f"- artifact_cycle_id: {values['AGENT_ARTIFACT_CYCLE_ID']}\n"
+            f"- artifact_output_dir: {output}\n"
+            "- Resolve relative artifact paths beneath artifact_output_dir.\n")
+
+
+def supervised_owner_prompt() -> str:
+    return (
+        "Runtime-owned completion join: launch the current batch through its checked dispatch surface. "
+        "A start receipt proves launch with registered=1, started=1, child_spawned=1. "
+        "Yield with `runtime_wait: registered-children`; the runtime waits and resumes this owner "
+        "with an exact receipt. It also acknowledges delivery and retains unresolved cleanup. "
+        "Use the result to continue authorized work within the existing gates. "
+        "Inspection commands are available when needed; they are not a delivery acknowledgement.\n\n"
+    )
 
 
 def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = None) -> str:

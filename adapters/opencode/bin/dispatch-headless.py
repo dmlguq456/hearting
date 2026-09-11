@@ -20,11 +20,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-# W7C producer-cycle environment passed from an owner to its stage workers.
-ARTIFACT_PRODUCER_CYCLE_ENV = (
-    "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
-    "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR",
-)
+
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
@@ -104,7 +100,8 @@ from owner_route_binding import (  # noqa: E402
     owner_binding_tuple_failure_fields,
     validate_runtime_requirements,
 )
-from worker_bootstrap import (  # noqa: E402
+from worker_bootstrap import (
+    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt,
     assigned_contract,
     render_worker_bootstrap,
     resolve_worker_type,
@@ -246,10 +243,7 @@ def parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--parent-session-id",
-        default=os.environ.get("AGENT_DISPATCH_PARENT_SESSION_ID")
-        or os.environ.get("OPENCODE_SESSION_ID")
-        or os.environ.get("CODEX_THREAD_ID")
-        or os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        default=parent_completion.default_parent_session_id(),
     )
     p.add_argument(
         "--parent-cwd",
@@ -585,6 +579,61 @@ def resolve_report_bundle_root(route_file: str | None, route_node: str | None) -
     return path
 
 
+def prepare_nested_runtime(worktree: Path, attempt_id: str, environ=None) -> dict[str, str]:
+    """Keep OpenCode's mutable state inside the invoking owner's workspace.
+
+    OpenCode writes dependency state beside its config as well as under XDG
+    data/cache/state. User config and the existing auth are linked for reading;
+    no credentials or user configuration are copied or rewritten.
+    """
+    env = os.environ if environ is None else environ
+    if not re.fullmatch(r"att-[A-Za-z0-9_-]+", attempt_id):
+        raise DispatchContractError("nested-opencode-attempt-invalid")
+    worktree = Path(worktree).resolve()
+    runtime = worktree / ".dispatch" / "opencode-runtime" / attempt_id
+    if not runtime.resolve().is_relative_to(worktree):
+        raise DispatchContractError("nested-opencode-runtime-outside-worktree")
+    values = {}
+    for kind in ("data", "cache", "state", "config"):
+        directory = runtime / kind
+        if not directory.resolve().is_relative_to(worktree):
+            raise DispatchContractError("nested-opencode-runtime-outside-worktree")
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
+        values[f"XDG_{kind.upper()}_HOME"] = str(directory)
+    source_data = Path(env.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+    auth = source_data / "opencode" / "auth.json"
+    if auth.is_file():
+        destination = Path(values["XDG_DATA_HOME"]) / "opencode" / "auth.json"
+        destination.parent.mkdir(exist_ok=True, mode=0o700)
+        if destination.is_symlink() and destination.resolve() == auth.resolve():
+            pass
+        elif destination.exists() or destination.is_symlink():
+            raise DispatchContractError("nested-opencode-auth-link-conflict", str(destination))
+        else:
+            destination.symlink_to(auth.resolve())
+    source_config = Path(env.get("OPENCODE_CONFIG_DIR") or
+                         Path(env.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode")
+    config = Path(values["XDG_CONFIG_HOME"]) / "opencode"
+    config.mkdir(exist_ok=True, mode=0o700)
+    # These files are dependency-manager outputs. Configuration and relative
+    # plugin/command/agent inputs remain links to the caller's original bytes.
+    generated = {".git", ".gitignore", "node_modules", "package.json", "package-lock.json", "bun.lock", "bun.lockb"}
+    if source_config.is_dir():
+        for source in source_config.iterdir():
+            if source.name in generated:
+                continue
+            link = config / source.name
+            if link.is_symlink() and link.resolve() == source.resolve():
+                continue
+            if link.exists() or link.is_symlink():
+                raise DispatchContractError("nested-opencode-config-link-conflict", str(link))
+            link.symlink_to(source.resolve(), target_is_directory=source.is_dir())
+    if env.get("OPENCODE_CONFIG_DIR"):
+        values["OPENCODE_CONFIG_DIR"] = str(config)
+    return values
+
+
 def qa_track(capability: str) -> str:
     if capability.startswith("code-") or capability == "autopilot-code":
         return "code"
@@ -713,6 +762,7 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         f"- owner_harness: {args.owner_harness or '-'}\n"
         f"- worktree: {args.worktree}\n"
         f"- artifact_root: {args.artifact_root}\n"
+        f"{artifact_context_prompt(os.environ)}"
         f"- route_state: {'consume the immutable record already validated by the wrapper' if args.route_file else 'validated dispatch metadata'}\n\n"
         "OpenCode realization:\n"
         "- The wrapper already validated capability mode, optional worker mode, QA, artifact-root access, and any route record. Use worker-route only for a safety recheck.\n"
@@ -1712,6 +1762,13 @@ def main(argv: list[str]) -> int:
             detail=str(exc),
             child_spawned="0",
         )
+    args.nested_runtime_env = {}
+    if action == "start" and args.dispatch_depth == 2 and args.parent_harness == "codex":
+        try:
+            args.nested_runtime_env = prepare_nested_runtime(Path(args.worktree), args.attempt_id)
+        except (DispatchContractError, OSError) as exc:
+            return fail(getattr(exc, "reason", "nested-opencode-runtime-unavailable"), 73,
+                        detail=str(exc), child_spawned="0")
     log_dir = (
         Path(args.log_dir)
         if args.log_dir
@@ -1845,7 +1902,7 @@ def main(argv: list[str]) -> int:
             # through unchanged so stage workers write into the same
             # `campaigns/<camp>/cycles/<cyc>/artifacts/` and never issue a
             # second lineage.
-            **{key: os.environ.get(key, "") for key in ARTIFACT_PRODUCER_CYCLE_ENV},
+            **artifact_cycle_environment(os.environ),
             "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
             "AGENT_ROUTE_FILE": (
                 args.route_file
@@ -1868,6 +1925,7 @@ def main(argv: list[str]) -> int:
             "AGENT_DISPATCH_CURRENT_SANDBOX": "adapter-default",
             **stage_session_environment(args),
             "OPENCODE_CONFIG_CONTENT": args.opencode_config_content,
+            **args.nested_runtime_env,
             # Headless liveness contract: the OpenCode runtime child exposes
             # the dispatch slug to the plugin, which records a plugin-load
             # marker at init and touches <log_dir>/<slug>.heartbeat on every

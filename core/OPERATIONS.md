@@ -267,6 +267,21 @@ termination. The common controller retains unresolved child recovery and parent
 notice. Launch dependencies, write authorization, and explicit terminal cleanup
 scopes own operation permissions. Existing human gates retain approval authority.
 
+The parent runtime supplies its native session identity independently of the
+child adapter. Dispatch carries the issued producer cycle and a concrete output
+directory in both environment and prompt. The producer record owns that path;
+write admission and completion publication use the same cycle binding. A missing
+cycle environment can be recovered from the route's producer record. Refusals
+name the correct output directory, and node scopes are relative to that directory.
+Another open cycle or a matching filename suffix does not grant write authority.
+
+An OpenCode child inside a Codex owner's workspace sandbox receives per-attempt
+XDG data/cache/state/config directories beneath the worktree. User configuration
+and existing authentication are linked for reading; generated dependency state
+stays in the attempt directory. The
+adapter prepares these paths before admission and reports preparation failures
+before spawning; the model does not diagnose or retry missing runtime storage.
+
 **Dispatch responsibility:** execution, semantic outcome, and notification are
 separate facts.
 

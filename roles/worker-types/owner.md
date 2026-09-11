@@ -6,8 +6,9 @@ separable `standard+` work, dispatch registered dispatch-depth-2 stages by invok
 checked adapter wrapper directly against the inherited registry. Obey the selected
 runtime completion-delivery boundary: a supervised owner yields the current turn
 for the runtime join and resumes from its bounded typed receipt, while an explicitly
-reported polling fallback waits synchronously in the current turn. Harvest the exact
-artifact verdict and close each registry row. Synthesize one owner artifact. Do not
+reported polling fallback waits synchronously in the current turn. The runtime
+acknowledges notifications and reconciles exact worker outcomes; inspect the
+reported evidence and decide the authorized next work. Synthesize one owner artifact. Do not
 merge, push, clean worktrees, or create dispatch depth 3.
 
 Use a branch-backed route worktree, including for spec-only work. A detached

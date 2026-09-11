@@ -16,6 +16,8 @@ You are a bounded worker, not the user-facing main session.
   session identity is used automatically and no explicit guard session id is passed.
 - Write durable artifacts only under the canonical artifact root; the task
   worktree's tracked `.agent_reports`/`.claude_reports` snapshot is read-only shadow state.
+  Use the concrete cycle output directory supplied in dispatch metadata for
+  relative artifact paths. Directory recency does not identify your cycle.
   Resolve that root as an absolute path and report the artifact as an absolute
   path. A relative `artifact:` value resolves against the worker cwd, so the
   terminal envelope check classifies it `outside-root` and the completed
