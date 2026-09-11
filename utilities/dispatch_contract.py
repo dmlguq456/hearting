@@ -24,6 +24,7 @@ import tempfile
 import time
 import uuid
 from typing import Callable, Iterator, Mapping, NamedTuple
+from types import MappingProxyType
 
 from route_identity import registered_node_identity
 from governor_identity import close_witness, create_witness
@@ -403,6 +404,37 @@ ATTEMPT_TERMINAL_EVIDENCE_KEYS = {
     "review_gate_closure",
     "owner_closure",
 }
+
+# Foreground review completion is authoritative only for a deliberately
+# route-free registered depth-1 review.  Keep this list exhaustive: adding a
+# provenance field here would silently turn a route-bound row into a new
+# authority surface.
+ROUTE_IDENTITY_METADATA_KEYS = (
+    "route_file",
+    "route_id",
+    "route_hash",
+    "route_node",
+    "registry_digest",
+    "write_scope",
+    "completion_gate",
+    "owner_route_file",
+    "owner_route_id",
+    "owner_route_hash",
+    "batch_route_id",
+    "batch_route_node",
+)
+FOREGROUND_OUTCOME_KEYS = (
+    "foreground_outcome_schema",
+    "foreground_outcome_ready",
+    "foreground_process_exit",
+    "foreground_process_failure",
+    "foreground_group_empty",
+    "foreground_outcome_source",
+)
+FOREGROUND_OUTCOME_SOURCE = "wait-foreground-v1"
+FOREGROUND_FAILURES = frozenset({
+    "none", "timeout", "parent-terminated", "process-identity-unavailable",
+})
 _MODULE_ROOT = Path(__file__).resolve().parents[1]
 _CAPACITY_TERMINAL_RE = re.compile(
     r"(?:error\s*[:\-]\s*)?(?:selected\s+)?model(?:\s+[A-Za-z0-9._:/-]+)?\s+"
@@ -694,6 +726,94 @@ class PostClaimAdmission:
         self._commit_started = True
         self._commit_callback()
         self._committed = True
+
+
+@dataclass(frozen=True)
+class SealedForegroundOutcome:
+    """The lock-scoped foreground result and its seal-moment row evidence."""
+
+    values: Mapping[str, str]
+    attempt_raw_row_sha256: str
+
+
+def foreground_review_eligible(
+    metadata: Mapping[str, object],
+    *,
+    expected_attempt_id: str,
+    expected_pid: int,
+    expected_pid_start: str,
+    expected_pgid: int,
+) -> bool:
+    """Return the one exact route-free foreground-review predicate."""
+
+    return _foreground_review_eligibility_reason(
+        metadata,
+        expected_attempt_id=expected_attempt_id,
+        expected_pid=expected_pid,
+        expected_pid_start=expected_pid_start,
+        expected_pgid=expected_pgid,
+    ) == ""
+
+
+def _foreground_review_eligibility_reason(
+    metadata: Mapping[str, object],
+    *,
+    expected_attempt_id: str,
+    expected_pid: int,
+    expected_pid_start: str,
+    expected_pgid: int,
+) -> str:
+    """Give the seal/classifier callers a stable refusal family."""
+
+    if not (
+        metadata.get("transport") == "headless"
+        and metadata.get("execution_surface") == "registered-headless"
+        and metadata.get("registered_worker") == "1"
+        and metadata.get("dispatch_depth") == "1"
+        and metadata.get("worker_type") == "review"
+        and metadata.get("launch_lifecycle") == "foreground-scoped"
+        and not any(metadata.get(key) for key in ROUTE_IDENTITY_METADATA_KEYS)
+        and metadata.get("pgid", "").isdigit()
+        and metadata.get("pid", "").isdigit()
+        and metadata.get("pid_start")
+        and metadata.get("pgid") == metadata.get("pid")
+        and metadata.get("pid_ns")
+        and metadata.get("pid_ns") == metadata.get("pid_observer_ns")
+    ):
+        return "eligibility"
+    if not (
+        metadata.get("attempt_id") == expected_attempt_id
+        and metadata.get("pid") == str(expected_pid)
+        and metadata.get("pid_start") == expected_pid_start
+        and metadata.get("pgid") == str(expected_pgid)
+    ):
+        return "binding"
+    return ""
+
+
+def foreground_review_launch_identity(args: object) -> dict[str, object]:
+    """Project the route identity that the adapter will actually record.
+
+    Flat CLI values cover the ordinary route fields; owner and replica binding
+    objects carry the remaining fields.  Keeping this projection next to the
+    shared twelve-key predicate prevents an adapter from treating a missing
+    flat attribute as proof that the eventual registry row is route-free.
+    """
+
+    identity: dict[str, object] = {
+        key: getattr(args, key, None) or ""
+        for key in ROUTE_IDENTITY_METADATA_KEYS
+    }
+    owner = getattr(args, "owner_route_binding", None)
+    if owner is not None:
+        identity["owner_route_file"] = getattr(owner, "route_file", None) or ""
+        identity["owner_route_id"] = getattr(owner, "route_id", None) or ""
+        identity["owner_route_hash"] = getattr(owner, "route_hash", None) or ""
+    reservation = getattr(args, "replica_batch_reservation", None) or {}
+    for key in ("batch_route_id", "batch_route_node"):
+        if key in reservation:
+            identity[key] = reservation.get(key) or ""
+    return identity
 
 
 # SD-113 A47-2: the vocabulary `_delivery_intent_values()` recognizes as a
@@ -6390,6 +6510,8 @@ def _immutable_attempt_identity(fields: list[str]) -> tuple[object, ...]:
             (key, value)
             for key, value in metadata.items()
             if key not in ATTEMPT_MUTABLE_METADATA
+            and key not in FOREGROUND_OUTCOME_KEYS
+            and key != "review_process_outcome_b64"
         )
     )
     return fields[2], fields[3], fields[4], immutable_metadata
@@ -6414,6 +6536,298 @@ def _atomic_registry_replace(jobs: Path, lines: list[str]) -> None:
             os.unlink(tmp_name)
         except FileNotFoundError:
             pass
+
+
+_FOREGROUND_SIGNED_INTEGER = re.compile(r"(?:0|-?[1-9][0-9]*)\Z")
+_FOREGROUND_FAILURE_SUFFIX = re.compile(r"(?:exit|signal)-([1-9][0-9]*)\Z")
+
+
+def attempt_raw_row_sha256(raw_row: str) -> str:
+    """Hash one exact raw registry row, without normalizing its bytes."""
+
+    if not isinstance(raw_row, str):
+        raise TypeError("raw registry row must be text")
+    return hashlib.sha256(raw_row.encode("utf-8")).hexdigest()
+
+
+def _foreground_outcome_values_from_pipe(pipe: str) -> dict[str, str] | None:
+    """Validate the foreground namespace and return canonical values."""
+
+    found: dict[str, str] = {}
+    for part in pipe.split(","):
+        key = part.split("=", 1)[0]
+        if not key.startswith("foreground_"):
+            continue
+        if "=" not in part or key not in FOREGROUND_OUTCOME_KEYS:
+            raise DispatchContractError("foreground-outcome-malformed", key)
+        if key in found:
+            raise DispatchContractError("foreground-outcome-malformed", key)
+        found[key] = part.split("=", 1)[1]
+    if not found:
+        return None
+    if set(found) != set(FOREGROUND_OUTCOME_KEYS):
+        raise DispatchContractError(
+            "foreground-outcome-partial", ",".join(sorted(found))
+        )
+    if found["foreground_outcome_schema"] != "1":
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_outcome_schema")
+    if found["foreground_outcome_ready"] != "1":
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_outcome_ready")
+    if found["foreground_outcome_source"] != FOREGROUND_OUTCOME_SOURCE:
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_outcome_source")
+    exit_text = found["foreground_process_exit"]
+    if not _FOREGROUND_SIGNED_INTEGER.fullmatch(exit_text):
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_process_exit")
+    failure = found["foreground_process_failure"]
+    if failure == "none":
+        pass
+    elif failure in {"timeout", "parent-terminated", "process-identity-unavailable"}:
+        pass
+    else:
+        match = _FOREGROUND_FAILURE_SUFFIX.fullmatch(failure)
+        if match is None:
+            raise DispatchContractError("foreground-outcome-malformed", "foreground_process_failure")
+    try:
+        exit_code = int(exit_text)
+    except ValueError as exc:  # pragma: no cover - guarded by the regex
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_process_exit") from exc
+    if (failure == "none") != (exit_code == 0):
+        raise DispatchContractError("foreground-outcome-malformed", "none-exit-relation")
+    if failure.startswith(("exit-", "signal-")):
+        suffix = int(failure.split("-", 1)[1])
+        if failure.startswith("exit-") and exit_code != suffix:
+            raise DispatchContractError("foreground-outcome-malformed", "exit-relation")
+    if found["foreground_group_empty"] not in {"0", "1"}:
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_group_empty")
+    return {key: found[key] for key in FOREGROUND_OUTCOME_KEYS}
+
+
+def _foreground_outcome_values(
+    *, exit_code: object, failure: object, group_empty: object
+) -> dict[str, str]:
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_process_exit")
+    if not isinstance(failure, str):
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_process_failure")
+    storage_failure = "none" if failure == "" else failure
+    if storage_failure == "none":
+        pass
+    elif storage_failure in {"timeout", "parent-terminated", "process-identity-unavailable"}:
+        pass
+    elif _FOREGROUND_FAILURE_SUFFIX.fullmatch(storage_failure) is None:
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_process_failure")
+    if (storage_failure == "none") != (exit_code == 0):
+        raise DispatchContractError("foreground-outcome-malformed", "none-exit-relation")
+    if storage_failure.startswith("exit-"):
+        if exit_code != int(storage_failure.split("-", 1)[1]):
+            raise DispatchContractError("foreground-outcome-malformed", "exit-relation")
+    if not isinstance(group_empty, bool):
+        raise DispatchContractError("foreground-outcome-malformed", "foreground_group_empty")
+    return {
+        "foreground_outcome_schema": "1",
+        "foreground_outcome_ready": "1",
+        "foreground_process_exit": str(exit_code),
+        "foreground_process_failure": storage_failure,
+        "foreground_group_empty": "1" if group_empty else "0",
+        "foreground_outcome_source": FOREGROUND_OUTCOME_SOURCE,
+    }
+
+
+def _review_watchdog_outcome_identity(metadata: Mapping[str, str]) -> dict[str, str]:
+    return {key: metadata.get(key, "") for key in (
+        "attempt_id", "pid", "pid_start", "pgid", "pid_ns", "pid_observer_ns",
+        "review_watchdog_budget_digest", "review_readiness_digest",
+        "review_governed_lease_nonce",
+    )}
+
+
+def detached_review_outcome_from_pipe(pipe: str) -> dict[str, str] | None:
+    """Read the watchdog's outcome; never derive process success from prose."""
+    metadata = _parse_review_metadata(pipe)
+    encoded = metadata.get("review_process_outcome_b64")
+    if encoded is None:
+        return None
+    try:
+        raw = base64.b64decode(encoded, altchars=b"-_", validate=True)
+        body = json.loads(raw)
+        if not isinstance(body, dict) or set(body) != {"source", "identity", "outcome"}:
+            raise ValueError("shape")
+        if body["source"] != "review-watchdog-v1":
+            raise ValueError("source")
+        expected = _review_watchdog_outcome_identity(metadata)
+        if body["identity"] != expected or not all(expected.values()):
+            raise ValueError("identity")
+        outcome = body["outcome"]
+        if not isinstance(outcome, dict) or set(outcome) != set(FOREGROUND_OUTCOME_KEYS):
+            raise ValueError("outcome")
+        return _foreground_outcome_values_from_pipe(",".join(f"{k}={v}" for k, v in outcome.items()))
+    except (ValueError, TypeError, UnicodeError) as exc:
+        raise DispatchContractError("review-process-outcome-invalid") from exc
+
+
+def seal_detached_review_result(
+    jobs: str | Path, attempt_id: str, *, budget_digest: str, nonce: str,
+    exit_code: int,
+) -> None:
+    """Only the exact watchdog seals its result; the reaper closes the row.
+
+    The reader independently proves quiescence. A killed watchdog leaves no
+    result, which cannot authorize PASS even when the log claims success.
+    """
+    current = process_launch_identity(os.getpid())
+    failure = ("" if exit_code == 0 else "timeout" if exit_code == 124
+               else f"signal-{-exit_code}" if exit_code < 0 else f"exit-{exit_code}")
+    outcome = _foreground_outcome_values(exit_code=exit_code, failure=failure, group_empty=False)
+    jobs = Path(jobs)
+    ensure_global_registry_writable(jobs)
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        lines = jobs.read_text(encoding="utf-8").splitlines()
+        matches = _foreground_row(lines, attempt_id)
+        if len(matches) != 1:
+            raise DispatchContractError("review-process-outcome-row-not-unique")
+        index, fields, metadata = matches[0]
+        metadata = _parse_review_metadata(fields[5])
+        if (metadata.get("worker_type") != "review"
+                or metadata.get("dispatch_depth") != "1"
+                or any(metadata.get(key) for key in ROUTE_IDENTITY_METADATA_KEYS)):
+            return  # Route-bound reviews retain their marker completion path.
+        if (fields[1] not in {"open", "running"}
+                or metadata.get("launch_lifecycle") != "detached"
+                or metadata.get("review_watchdog_budget_digest") != budget_digest
+                or metadata.get("review_governed_lease_nonce") != nonce
+                or metadata.get("review_admission") != "prepared"
+                or metadata.get("launch_claimed") != "1"
+                or any(metadata.get(key) != current.get(key) for key in
+                       ("pid", "pid_start", "pgid", "pid_ns", "pid_observer_ns"))
+                or not foreground_review_eligible(
+                    {**metadata, "launch_lifecycle": "foreground-scoped"},
+                    expected_attempt_id=attempt_id, expected_pid=os.getpid(),
+                    expected_pid_start=current.get("pid_start", ""), expected_pgid=os.getpid())):
+            raise DispatchContractError("review-process-outcome-binding-mismatch")
+        identity = _review_watchdog_outcome_identity(metadata)
+        if not all(identity.values()):
+            raise DispatchContractError("review-process-outcome-binding-mismatch")
+        existing = detached_review_outcome_from_pipe(fields[5])
+        if existing is not None:
+            if existing != outcome:
+                raise DispatchContractError("review-process-outcome-conflict")
+            return
+        body = {"source": "review-watchdog-v1", "identity": identity, "outcome": outcome}
+        encoded = base64.urlsafe_b64encode(json.dumps(body, sort_keys=True, separators=(",", ":")).encode()).decode()
+        fields[5] += ",review_process_outcome_b64=" + encoded
+        lines[index] = "\t".join(fields)
+        _atomic_registry_replace(jobs, lines)
+
+
+def _foreground_row(
+    lines: list[str], attempt_id: str
+) -> list[tuple[int, list[str], dict[str, str]]]:
+    matches: list[tuple[int, list[str], dict[str, str]]] = []
+    for index, line in enumerate(lines):
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = parse_registry_metadata(fields[5])
+        if metadata.get("attempt_id") == attempt_id:
+            matches.append((index, fields, metadata))
+    return matches
+
+
+def seal_foreground_result(
+    jobs: str | Path,
+    attempt_id: str,
+    pid: int,
+    pid_start: str,
+    pgid: int,
+    *,
+    exit_code: object,
+    failure: object,
+    group_empty: object,
+) -> SealedForegroundOutcome:
+    """Atomically persist and revalidate one foreground review outcome."""
+
+    if not attempt_id:
+        raise DispatchContractError("foreground-outcome-attempt-required", "attempt_id")
+    desired = _foreground_outcome_values(
+        exit_code=exit_code, failure=failure, group_empty=group_empty
+    )
+    jobs = Path(jobs)
+    ensure_global_registry_writable(jobs)
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        matches = _foreground_row(lines, attempt_id)
+        if not matches:
+            raise DispatchContractError("foreground-outcome-row-not-found", "count=0")
+        if len(matches) != 1:
+            raise DispatchContractError(
+                "foreground-outcome-row-ambiguous", f"count={len(matches)}"
+            )
+        index, fields, metadata = matches[0]
+        validate_attempt_metadata(metadata)
+        if fields[1] not in {"open", "running"}:
+            raise DispatchContractError("foreground-outcome-row-not-open", fields[1])
+        if not foreground_review_eligible(
+            metadata,
+            expected_attempt_id=attempt_id,
+            expected_pid=pid,
+            expected_pid_start=pid_start,
+            expected_pgid=pgid,
+        ):
+            eligibility_reason = _foreground_review_eligibility_reason(
+                metadata,
+                expected_attempt_id=attempt_id,
+                expected_pid=pid,
+                expected_pid_start=pid_start,
+                expected_pgid=pgid,
+            )
+            if eligibility_reason == "binding":
+                raise DispatchContractError("foreground-outcome-binding-mismatch", "binding")
+            raise DispatchContractError("foreground-outcome-ineligible", eligibility_reason)
+        existing = _foreground_outcome_values_from_pipe(fields[5])
+        if existing is not None and existing != desired:
+            raise DispatchContractError("foreground-outcome-conflict", "values")
+        identity = _immutable_attempt_identity(fields)
+        if existing is None:
+            fields[5] = fields[5] + "," + ",".join(
+                f"{key}={value}" for key, value in desired.items()
+            )
+            lines[index] = "\t".join(fields)
+            _atomic_registry_replace(jobs, lines)
+
+        readback_lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        readback = _foreground_row(readback_lines, attempt_id)
+        if len(readback) == 0:
+            raise DispatchContractError("foreground-outcome-readback-mismatch", "count=0")
+        if len(readback) != 1:
+            raise DispatchContractError(
+                "foreground-outcome-readback-mismatch", f"count={len(readback)}"
+            )
+        _, readback_fields, readback_metadata = readback[0]
+        try:
+            if (
+                _immutable_attempt_identity(readback_fields) != identity
+                or readback_fields[1] not in {"open", "running"}
+                or not foreground_review_eligible(
+                    readback_metadata,
+                    expected_attempt_id=attempt_id,
+                    expected_pid=pid,
+                    expected_pid_start=pid_start,
+                    expected_pgid=pgid,
+                )
+                or _foreground_outcome_values_from_pipe(readback_fields[5]) != desired
+            ):
+                raise DispatchContractError("foreground-outcome-readback-mismatch", "row")
+        except DispatchContractError as exc:
+            if exc.reason == "foreground-outcome-readback-mismatch":
+                raise
+            raise DispatchContractError("foreground-outcome-readback-mismatch", exc.detail) from exc
+        raw = readback_fields
+        return SealedForegroundOutcome(
+            values=MappingProxyType(dict(desired)),
+            attempt_raw_row_sha256=attempt_raw_row_sha256("\t".join(raw)),
+        )
 
 
 def _cancellation_quiescence_receipt_record(
@@ -7995,6 +8409,8 @@ def launch_reap_watch(
     pid: int,
     pid_start: str,
     pgid: int,
+    *,
+    foreground_seal: SealedForegroundOutcome | None = None,
 ) -> int:
     """Start the exact detached-process drain observer in the launch namespace."""
 
@@ -8003,6 +8419,62 @@ def launch_reap_watch(
             "reap-watch-identity-invalid",
             "attempt_id, leader pid/start, and leader pgid are required",
         )
+    jobs = Path(jobs)
+    if foreground_seal is not None:
+        if not isinstance(foreground_seal, SealedForegroundOutcome):
+            raise DispatchContractError(
+                "reap-watch-foreground-seal-invalid", "type"
+            )
+        try:
+            lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            raise DispatchContractError(
+                "reap-watch-foreground-seal-invalid", "registry"
+            ) from exc
+        matches = _foreground_row(lines, attempt_id)
+        if len(matches) != 1:
+            raise DispatchContractError(
+                "reap-watch-foreground-seal-invalid", f"rows={len(matches)}"
+            )
+        _index, fields, metadata = matches[0]
+        if fields[1] not in {"open", "running"} or not foreground_review_eligible(
+            metadata,
+            expected_attempt_id=attempt_id,
+            expected_pid=pid,
+            expected_pid_start=pid_start,
+            expected_pgid=pgid,
+        ):
+            raise DispatchContractError(
+                "reap-watch-foreground-seal-invalid", "binding-or-eligibility"
+            )
+        try:
+            values = _foreground_outcome_values_from_pipe(fields[5])
+        except DispatchContractError as exc:
+            raise DispatchContractError(
+                "reap-watch-foreground-seal-invalid", exc.detail
+            ) from exc
+        if (
+            values is None
+            or dict(foreground_seal.values) != values
+            or foreground_seal.attempt_raw_row_sha256
+            != attempt_raw_row_sha256("\t".join(fields))
+        ):
+            raise DispatchContractError(
+                "reap-watch-foreground-seal-invalid", "stale-or-mismatched"
+            )
+    else:
+        # A foreground review must consume the exact object returned by the
+        # locked seal API.  Detached launches retain their historical None
+        # fence and therefore need no registry read here.
+        try:
+            lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        matches = _foreground_row(lines, attempt_id)
+        if len(matches) == 1 and matches[0][2].get("launch_lifecycle") == "foreground-scoped":
+            raise DispatchContractError(
+                "reap-watch-foreground-seal-required", attempt_id
+            )
     script = _MODULE_ROOT / "utilities" / "dispatch-reap-watch.py"
     # The observer is governance machinery, not part of the governed attempt.
     # A direct wrapper can inherit the same attempt tag that supplied its

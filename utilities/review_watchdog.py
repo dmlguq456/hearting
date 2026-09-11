@@ -3,7 +3,7 @@
 
 The watchdog is the registered identity.  The fenced child is a separate
 session/group used only for readiness and exact timeout teardown.  This module
-has no summary-owner or registry mutation authority.
+cannot close registry rows. It seals only its exact process result for the reaper.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from dispatch_contract import (
     process_group_observation,
     process_launch_identity,
     signal_exact_process_group,
+    seal_detached_review_result,
 )
 from dispatch_lifecycle import (
     FiniteWatchdogBudget,
@@ -306,12 +307,9 @@ def _run_watchdog(
     jobs: str | Path | None = None,
 ) -> int:
     nonce = _validated_nonce(nonce)
-    if not _set_parent_death_signal():
-        _close(readiness_fd)
-        _close(control_fd)
-        _close(gate_fd)
-        _release_review_lease(lease_release_spec)
-        return 71
+    # The detached watchdog outlives the short-lived adapter launcher.
+    # Only its fenced child is coupled to watchdog death (below). Admission
+    # before COMMIT is bounded by the control pipe and finite budget.
     watchdog = _identity(os.getpid())
     pass_fds = [gate_fd]
     if failure_fd is not None:
@@ -568,6 +566,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             jobs=value("--jobs") if "--jobs" in args[:marker] else None,
         )
+        if "--jobs" in args[:marker]:
+            try:
+                seal_detached_review_result(
+                    value("--jobs"), value("--attempt-id"),
+                    budget_digest=_budget_from_json(value("--budget")).digest,
+                    nonce=value("--nonce"), exit_code=result,
+                )
+            except (DispatchContractError, OSError, ValueError):
+                return 126
         return _preserve_signal_exit(result)
     except (KeyError, ValueError, IndexError, OSError, RuntimeError, json.JSONDecodeError):
         return 64
