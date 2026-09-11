@@ -21,12 +21,9 @@ from dispatch_completion_join import (
     completion_followup_text,
     SupervisorOutbox,
     advance_delivery_timing,
-    classify_supervised_shell_command,
-    classify_supervised_shell_command_reason,
-    consume_advance_completed_outbox,
+    acknowledge_supervisor_delivery,
     current_children,
     delivery_timing_fields,
-    harvest_command_lines,
     log_delivery_refusal,
     materialize_after_terminal_close,
     prepare_supervisor_outbox,
@@ -40,9 +37,6 @@ from dispatch_completion_join import (
     remove_supervisor_state,
     runtime_wait_requested,
     start_retry_prompt,
-    supervisor_guarded_attempt_ids,
-    supervisor_outbox_delivery_identity,
-    supervisor_receipt_satisfiable,
     validate_delivery_timing,
     write_supervisor_state,
 )
@@ -65,7 +59,6 @@ from dispatch_supervisor_terminal import (
     SupervisorTerminal,
     classify_claude_result,
     classify_supervisor_abandonment_terminal,
-    classify_supervisor_attention_terminal,
     classify_supervisor_error,
     reconcile_supervisor_terminal,
 )
@@ -787,128 +780,10 @@ def runtime_reconcile(args: argparse.Namespace, rows: dict[str, Any],
     return closed
 
 
-def receipt_satisfiability(
-    args: argparse.Namespace, prompt: str, outbox: SupervisorOutbox | None
-) -> tuple[bool, str]:
-    """D2a: prove every command a prompt prescribes is admitted, before delivery.
-
-    The verdict is ``supervisor_receipt_satisfiable``'s alone -- one traversal
-    of the real ``classify_supervised_shell_command``, with the guarded set
-    derived by the same helper the park hook uses. The second traversal only
-    names the category for the emitted event; it can never flip the verdict.
-    A prompt that prescribes no command (the initial brief, a start retry) is
-    vacuously satisfiable.
-    """
-
-    lines = harvest_command_lines(prompt)
-    if not lines:
-        return True, ""
-    classifier_args: dict[str, Any] = {
-        "base": Path(args.worktree),
-        "open_attempt_ids": supervisor_guarded_attempt_ids(
-            current_children(Path(args.jobs), args.parent_attempt_id), outbox
-        ),
-        "parent_slug": os.environ.get("AGENT_DISPATCH_SELF_SLUG", ""),
-        "jobs": Path(args.jobs),
-        "parent_attempt_id": args.parent_attempt_id,
-        "route_file": Path(args.route_file) if args.route_file else None,
-        "route_id": args.route_id,
-    }
-    satisfiable, reason = supervisor_receipt_satisfiable(lines, **classifier_args)
-    if satisfiable:
-        return True, ""
-    failing = next(
-        (
-            line
-            for line in lines
-            if classify_supervised_shell_command(command=line, **classifier_args)
-            is None
-        ),
-        "",
-    )
-    if not failing:
-        return False, reason
-    return False, classify_supervised_shell_command_reason(
-        command=failing, **classifier_args
-    )
-
-
-def seal_receipt_unsatisfiable(args: argparse.Namespace, reason: str) -> int:
-    """D2a terminal: no admitted command can satisfy the prompt about to ship.
-
-    A *proof*, not an inference from a non-advancing row: the supervisor and
-    the park guard disagree about the command vocabulary, so no model turn and
-    no number of re-deliveries can change the outcome. ``protocol``, because
-    this is a contract failure between two runtime components -- never an
-    owner failure (plan SS3.4 D2a/D2c).
-    """
-
-    emit(
-        {
-            "type": "dispatch.supervisor.receipt-unsatisfiable",
-            "parent_attempt_id": args.parent_attempt_id,
-            "reason": reason,
-        }
-    )
-    detail = f"receipt-unsatisfiable:{reason}"
-    if not reconcile(args, classify_supervisor_attention_terminal("claude", detail)):
-        return 70
-    emit(
-        {
-            "type": "dispatch.supervisor.redelivery-suppressed",
-            "parent_attempt_id": args.parent_attempt_id,
-            "resolution": "receipt-unsatisfiable",
-            "reason": reason,
-        }
-    )
-    return 70
-
-
-def seal_redelivery_abandoned(args: argparse.Namespace, identical: int) -> int:
-    """D2b terminal: the receipt was proven satisfiable and the owner did not act.
-
-    A *policy stop*, claiming nothing about why. It closes the owner attempt
-    row and publishes no completion marker, so the route node stays incomplete
-    and remains available to ordinary SD-106 same-node redispatch.
-    """
-
-    detail = f"identical-redelivery-bound:{identical}"
-    emit(
-        {
-            "type": "dispatch.supervisor.redelivery-suppressed",
-            "parent_attempt_id": args.parent_attempt_id,
-            "resolution": "identical-redelivery-bound",
-            "identical_redeliveries": identical,
-        }
-    )
-    if not reconcile(args, classify_supervisor_abandonment_terminal("claude", detail)):
-        return 70
-    emit({"type": "dispatch.supervisor.error", "reason": detail})
-    return 70
-
-
-def remediation_prompt(attempts: set[str], *, jobs: str = "") -> str:
-    # Same route-bound-success dependency as completion_prompt() above.
-    jobs_argument = f"--jobs {shlex.quote(jobs)} " if jobs else ""
-    commands = "\n".join(
-        f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
-        f"{shlex.quote(attempt)} --mark-done"
-        for attempt in sorted(attempts)
-    )
-    return (
-        "Runtime completion contract violation: previously delivered exact attempt(s) "
-        f"remain open: {','.join(sorted(attempts))}. The absolute preflight path is "
-        "the shared, runtime-neutral registry harvest compatibility surface and does "
-        "not change either harness. Run only these exact commands, "
-        f"one at a time:\n{commands}\n"
-        "Do not wait, poll, inspect raw logs, or do unrelated work."
-    )
-
 
 def _apply_notice(prompt: str, notice: str) -> str:
     """Attach an SD-116 (b)/(c) budget notice outside any prompt's receipt
-    JSON. Used at the two continuation sites whose prompt builders
-    (`start_retry_prompt`, `remediation_prompt`) carry no receipt at all, so
+    JSON. Used for start-retry prompts that carry no receipt, so
     a `notice=` keyword on `completion_prompt()` alone would not reach them
     (amendment A3)."""
 
@@ -1315,7 +1190,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--join-interval", type=float, default=2.0)
     value.add_argument("--join-timeout", type=float, default=3600.0)
     value.add_argument("--max-join-reparks", type=int, default=6, help="Compatibility input; join deadlines no longer terminate owned work")
-    value.add_argument("--max-identical-redeliveries", type=int, default=2)
+    value.add_argument("--max-identical-redeliveries", type=int, default=2, help="Compatibility input; delivery no longer requires model bookkeeping commands")
     value.add_argument("--turn-timeout", type=float, default=7200.0)
     value.add_argument("--max-continuations", type=positive_continuation_limit)
     value.add_argument(
@@ -1404,10 +1279,7 @@ def main(argv: list[str] | None = None) -> int:
     active_outbox: SupervisorOutbox | None = None
     delivery_timing = delivery_timing_fields()
     same_thread_resume_count = 0
-    remediated: set[tuple[str, ...]] = set()
     launch_remediated: set[tuple[str, ...]] = set()
-    last_delivery_identity: tuple[str, tuple[tuple[str, str], ...]] = ("", ())
-    identical_redeliveries = 0
     # SD-116 (c): a one-element list, not a bool, so `_seal_terminal_handoff_or_raise`
     # can flip it for the whole loop -- the reserve is spendable exactly once
     # per owner lifetime (D47-4's "gross_remaining == reserved boundary" case).
@@ -1495,17 +1367,6 @@ def main(argv: list[str] | None = None) -> int:
                 write_supervisor_state(
                     state_path, args.parent_attempt_id, delivered, phase="running-turn"
                 )
-            # D2a, one choke point for every producer: no prompt leaves this
-            # supervisor until the park guard is proven to admit each command it
-            # prescribes. With D1's harvest vocabulary applied this must never
-            # fire -- it is a permanent tripwire against exactly the drift that
-            # deadlocked att-30344fd4, not an expected path.
-            satisfiable, unsatisfiable_reason = receipt_satisfiability(
-                args, next_prompt, active_outbox
-            )
-            if not satisfiable:
-                return seal_receipt_unsatisfiable(args, unsatisfiable_reason)
-            last_delivery_identity = supervisor_outbox_delivery_identity(active_outbox)
             turn_ordinal += 1
             turn_started_ns = time.monotonic_ns()
             emit(
@@ -1593,115 +1454,32 @@ def main(argv: list[str] | None = None) -> int:
             current = {row.attempt_id: row for row in rows}
             completed_delivery = False
             if active_outbox is not None:
-                delivery_timing = advance_delivery_timing(
-                    delivery_timing, "exact_harvest_ns"
+                acknowledge_supervisor_delivery(
+                    state_path, args.parent_attempt_id, active_outbox.receipt_id
                 )
-                consume_advance_completed_outbox(
-                    state_path, args.parent_attempt_id, rows
-                )
-                observed_state = read_supervisor_phase_state(
-                    state_path, args.parent_attempt_id
-                )
-                active_outbox = (
-                    observed_state.outbox
-                    if observed_state is not None
-                    else None
-                )
+                observed_state = read_supervisor_phase_state(state_path, args.parent_attempt_id)
+                active_outbox = observed_state.outbox if observed_state is not None else None
                 if active_outbox is not None:
-                    if active_outbox.receipt is None:
-                        raise SupervisorError("supervisor-outbox-receipt-missing")
-                    outbox_attempts = set(active_outbox.attempt_ids)
-                    active_outbox = refresh_supervisor_outbox_actions(
-                        state_path,
-                        args.parent_attempt_id,
-                        current_children(
-                            Path(args.jobs),
-                            args.parent_attempt_id,
-                            outbox_attempts,
-                        ),
-                        jobs=Path(args.jobs),
-                    ).outbox
-                    # D2b. An owner that has simply not run the command yet is a
-                    # legitimate state, so a non-advancing row alone never seals
-                    # anything. An unchanged outbox first buys in-place work --
-                    # no model turn, no continuation spend -- and only a bound
-                    # exhausted after that stops the loop.
-                    if (
-                        supervisor_outbox_delivery_identity(active_outbox)
-                        == last_delivery_identity
-                    ):
-                        runtime_reconcile(
-                            args,
-                            {
-                                row.attempt_id: row
-                                for row in current_children(
-                                    Path(args.jobs),
-                                    args.parent_attempt_id,
-                                    outbox_attempts,
-                                )
-                            },
-                            outbox_attempts,
-                        )
-                        run_join(args, outbox_attempts)
-                        active_outbox = refresh_supervisor_outbox_actions(
-                            state_path,
-                            args.parent_attempt_id,
-                            current_children(
-                                Path(args.jobs),
-                                args.parent_attempt_id,
-                                outbox_attempts,
-                            ),
-                            jobs=Path(args.jobs),
-                        ).outbox
-                        if (
-                            supervisor_outbox_delivery_identity(active_outbox)
-                            != last_delivery_identity
-                        ):
-                            emit(
-                                {
-                                    "type": "dispatch.supervisor.redelivery-suppressed",
-                                    "parent_attempt_id": args.parent_attempt_id,
-                                    "resolution": "row-advanced",
-                                    "identical_redeliveries": identical_redeliveries,
-                                }
-                            )
-                            identical_redeliveries = 0
-                            redelivery_stalled = False
-                        else:
-                            # SD-116 R3: the identical-redelivery increment
-                            # branch is the only place a continuation is
-                            # classified as a stall spend.
-                            identical_redeliveries += 1
-                            redelivery_stalled = True
-                            if identical_redeliveries > args.max_identical_redeliveries:
-                                return seal_redelivery_abandoned(
-                                    args, identical_redeliveries
-                                )
-                    else:
-                        identical_redeliveries = 0
-                        redelivery_stalled = False
+                    # A separately replaced outbox retains its own delivery; a
+                    # stale acknowledgement cannot consume it or kill its owner.
                     verdict, notice = _admit_continuation(
                         ledger, budget_state_root,
                         parent_attempt_id=args.parent_attempt_id,
                         route_id=args.route_id, route_hash=args.route_hash,
-                        ordinal=continuations, purpose="ordinary", stalled=redelivery_stalled,
+                        ordinal=continuations, purpose="ordinary", stalled=False,
                         warning_threshold=args.continuation_warning_threshold,
                     )
                     if not verdict.admitted:
                         next_prompt = _seal_terminal_handoff_or_raise(
-                            ledger, budget_state_root, args=args,
-                            ordinal=continuations,
+                            ledger, budget_state_root, args=args, ordinal=continuations,
                             failure_reason="continuation-limit-exceeded",
                             terminal_handoff_issued=terminal_handoff_issued,
                         )
-                        continuations += 1
-                        resume = True
-                        continue
-                    pending_notice = notice
-                    next_prompt = completion_prompt(
-                        active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
-                        notice=notice,
-                    )
+                    else:
+                        pending_notice = notice
+                        next_prompt = completion_prompt(
+                            active_outbox.receipt or {}, active_outbox, jobs=args.jobs, notice=notice,
+                        )
                     continuations += 1
                     resume = True
                     continue
@@ -2024,40 +1802,20 @@ def main(argv: list[str] | None = None) -> int:
                 resume = True
                 continue
 
-            unresolved = {
-                attempt
-                for attempt, row in current.items()
-                if row.status in {"open", "running"}
-            }
-            if unresolved:
-                # Evidence-backed closure first: a route-bound child that finished
-                # without writing its own marker leaves the model with no legal
-                # remediation (see runtime_close_child), so asking it again only
-                # burns a continuation before the same deadlock.
-                closed = runtime_reconcile(args, current, unresolved)
-                if closed:
-                    unresolved -= closed
-                    if not unresolved:
-                        rows = current_children(Path(args.jobs), args.parent_attempt_id)
-                        current = {row.attempt_id: row for row in rows}
-                        continue
-                signature = tuple(sorted(unresolved))
-                if signature in remediated:
-                    raise SupervisorError("owned-children-remain-open-after-resume")
-                verdict, notice = _admit_continuation(
-                    ledger, budget_state_root,
+            # A terminal status word does not discharge remaining cleanup.
+            # The common policy checks every owned attempt before finalization.
+            owned_attempts = set(current)
+            if owned_attempts:
+                from dispatch_supervision import wait_for_child_settlement
+                wait_for_child_settlement(
+                    jobs=Path(args.jobs), attempts=owned_attempts,
                     parent_attempt_id=args.parent_attempt_id,
-                    route_id=args.route_id, route_hash=args.route_hash,
-                    ordinal=continuations, purpose="ordinary", stalled=False,
-                    warning_threshold=args.continuation_warning_threshold,
+                    join=lambda attempts: run_join(args, attempts),
+                    reconcile=lambda attempts: runtime_reconcile(
+                        args, {row.attempt_id: row for row in current_children(
+                            Path(args.jobs), args.parent_attempt_id, attempts)}, attempts),
+                    emit=emit,
                 )
-                if not verdict.admitted:
-                    raise SupervisorError("owned-children-remain-open-after-resume")
-                remediated.add(signature)
-                next_prompt = _apply_notice(remediation_prompt(unresolved, jobs=args.jobs), notice)
-                continuations += 1
-                resume = True
-                continue
 
             if stream_session is not None:
                 teardown_started_ns = time.monotonic_ns()

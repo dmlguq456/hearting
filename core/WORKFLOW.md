@@ -481,8 +481,12 @@ declare completion from an intermediate success.
 Committed success and remaining cleanup are separate facts. A marker does not
 make a live descendant quiescent: the execution boundary retains cleanup,
 and the common supervisor retains the wait or recovery notice until it ends.
-Successful exact inspection consumes its notification action; requesting more
-failure detail is optional and cannot become a second completion gate.
+Exact inspection reads the worker's result; requesting more failure detail is
+optional and cannot become a second completion gate.
+The runtime acknowledges a delivered notification after its receiving turn
+finishes. Delivery does not restrict the owner's tools or prove stage success;
+launch dependencies, write authorization and terminal cleanup scopes own those
+decisions. Repeating a notification cannot declare the owner abandoned.
 
 A steward's idle-notify subscription is observation, not a continuation; it never
 satisfies the registered-continuation obligation below (`core/OPERATIONS.md §5.14`).

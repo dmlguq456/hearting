@@ -258,14 +258,14 @@ requested release is already current still performs this checked prune pass.
 
 Before delivery, the supervisor atomically commits the bounded receipt payload,
 deterministic receipt id and digest, exact attempt set, and row revisions. A
-restart reuses that committed payload and identity. The guard and prompt treat
-copied status/action as hints and select the current exact row action. Successful
-`complete-open` or `inspect-done-failure` harvest consumes only that attempt once;
-`advance-completed` is consumed after current-row revalidation. Partial batch
-consumption preserves the same receipt identity, and state/outbox removal before
-all applicable actions succeed is forbidden. Receipt commands settle these
-records; they neither require fresh approval nor prohibit separately authorized
-work. Existing human gates retain their own approval authority.
+restart reuses that committed payload and identity. The receiving runtime
+acknowledges the exact receipt after its turn completes; a different receipt
+cannot be consumed by a stale turn. Harvest inspects or reconciles the worker
+record and does not acknowledge notification delivery. Neither a missing harvest
+command nor an unchanged worker row authorizes repeated model turns or owner
+termination. The common controller retains unresolved child recovery and parent
+notice. Launch dependencies, write authorization, and explicit terminal cleanup
+scopes own operation permissions. Existing human gates retain approval authority.
 
 **Dispatch responsibility:** execution, semantic outcome, and notification are
 separate facts.

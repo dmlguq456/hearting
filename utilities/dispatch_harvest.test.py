@@ -164,13 +164,13 @@ class HarvestTest(unittest.TestCase):
         )
         self.assertNotEqual(expected, self.home / ".dispatch" / "jobs.log")
 
-    def test_successful_failure_detail_consumes_supervisor_outbox_once(self):
-        self._supervised_inspection_consumes_once(["--failure-detail"])
+    def test_failure_inspection_does_not_own_notification_ack(self):
+        self._supervised_inspection_preserves_delivery(["--failure-detail"])
 
-    def test_successful_terminal_read_consumes_supervisor_outbox_once(self):
-        self._supervised_inspection_consumes_once([])
+    def test_terminal_inspection_does_not_own_notification_ack(self):
+        self._supervised_inspection_preserves_delivery([])
 
-    def _supervised_inspection_consumes_once(self, extra):
+    def _supervised_inspection_preserves_delivery(self, extra):
         attempt = "att-supervisor-failure-detail"
         parent = "att-supervisor-parent"
         jobs = self.base / "supervisor.jobs.log"
@@ -242,22 +242,21 @@ class HarvestTest(unittest.TestCase):
         wrong_filter = list(command)
         wrong_filter[wrong_filter.index("--status") + 1] = "open"
         missing = subprocess.run(wrong_filter, text=True, capture_output=True, env=env)
-        self.assertNotEqual(missing.returncode, 0)
+        if not extra:
+            self.assertIn("matched=0", missing.stdout)
         self.assertEqual(state.read_bytes(), before)
         result = subprocess.run(
             command, text=True, capture_output=True, env=env
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        consumed = json.loads(state.read_text(encoding="utf-8"))
-        self.assertEqual(consumed["phase"], "running-turn")
-        self.assertNotIn("outbox", consumed)
+        self.assertEqual(state.read_bytes(), before)
         repeated = subprocess.run(
             command, text=True, capture_output=True, env=env
         )
         self.assertEqual(
             repeated.returncode, 0, repeated.stdout + repeated.stderr
         )
-        self.assertEqual(json.loads(state.read_text(encoding="utf-8")), consumed)
+        self.assertEqual(state.read_bytes(), before)
 
     def test_routed_harvest_replays_shared_completion_for_one_exact_attempt(self):
         attempt = "att-harvest-exact"

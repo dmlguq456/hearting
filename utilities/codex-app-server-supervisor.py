@@ -18,14 +18,11 @@ from dispatch_completion_join import (
     completion_followup_text,
     SupervisorOutbox,
     advance_delivery_timing,
-    classify_supervised_shell_command,
-    classify_supervised_shell_command_reason,
-    consume_advance_completed_outbox,
+    acknowledge_supervisor_delivery,
     close_wrapper_pass,
     current_children,
     delivery_timing_fields,
     exact_attempt_row,
-    harvest_command_lines,
     log_delivery_refusal,
     materialize_after_terminal_close,
     prepare_supervisor_outbox,
@@ -39,9 +36,6 @@ from dispatch_completion_join import (
     remove_supervisor_state,
     runtime_wait_requested,
     start_retry_prompt,
-    supervisor_guarded_attempt_ids,
-    supervisor_outbox_delivery_identity,
-    supervisor_receipt_satisfiable,
     unstarted_child_attempts,
     validate_delivery_timing,
     write_supervisor_state,
@@ -62,8 +56,6 @@ import dispatch_subsession_advance as subsession_advance
 from dispatch_supervisor_terminal import (
     SupervisorTerminal,
     classify_codex_result,
-    classify_supervisor_abandonment_terminal,
-    classify_supervisor_attention_terminal,
     classify_supervisor_error,
     reconcile_supervisor_terminal,
 )
@@ -532,105 +524,6 @@ def runtime_reconcile(args: argparse.Namespace, rows: dict[str, Any],
     return closed
 
 
-def receipt_satisfiability(
-    args: argparse.Namespace, prompt: str, outbox: SupervisorOutbox | None
-) -> tuple[bool, str]:
-    """D2a, mirrored from claude-session-supervisor.py: prove every command a
-    prompt prescribes is admitted by the park guard before it is delivered.
-
-    The verdict is ``supervisor_receipt_satisfiable``'s alone; the second
-    traversal only names the category for the emitted event. A prompt that
-    prescribes no command is vacuously satisfiable.
-    """
-
-    lines = harvest_command_lines(prompt)
-    if not lines:
-        return True, ""
-    classifier_args: dict[str, Any] = {
-        "base": Path(args.worktree),
-        "open_attempt_ids": supervisor_guarded_attempt_ids(
-            current_children(Path(args.jobs), args.parent_attempt_id), outbox
-        ),
-        "parent_slug": os.environ.get("AGENT_DISPATCH_SELF_SLUG", ""),
-        "jobs": Path(args.jobs),
-        "parent_attempt_id": args.parent_attempt_id,
-        "route_file": Path(args.route_file) if args.route_file else None,
-        "route_id": args.route_id,
-    }
-    satisfiable, reason = supervisor_receipt_satisfiable(lines, **classifier_args)
-    if satisfiable:
-        return True, ""
-    failing = next(
-        (
-            line
-            for line in lines
-            if classify_supervised_shell_command(command=line, **classifier_args)
-            is None
-        ),
-        "",
-    )
-    if not failing:
-        return False, reason
-    return False, classify_supervised_shell_command_reason(
-        command=failing, **classifier_args
-    )
-
-
-def seal_receipt_unsatisfiable(args: argparse.Namespace, reason: str) -> int:
-    """D2a terminal: supervisor and park guard disagree on the vocabulary."""
-
-    emit(
-        {
-            "type": "dispatch.supervisor.receipt-unsatisfiable",
-            "parent_attempt_id": args.parent_attempt_id,
-            "reason": reason,
-        }
-    )
-    detail = f"receipt-unsatisfiable:{reason}"
-    if not reconcile(args, classify_supervisor_attention_terminal("codex", detail)):
-        return 70
-    emit(
-        {
-            "type": "dispatch.supervisor.redelivery-suppressed",
-            "parent_attempt_id": args.parent_attempt_id,
-            "resolution": "receipt-unsatisfiable",
-            "reason": reason,
-        }
-    )
-    return 70
-
-
-def seal_redelivery_abandoned(args: argparse.Namespace, identical: int) -> int:
-    """D2b terminal: proven satisfiable, and the owner did not act.
-
-    Closes the owner attempt row only; it publishes no completion marker, so
-    the route node stays incomplete and SD-106 same-node redispatch remains
-    available.
-    """
-
-    detail = f"identical-redelivery-bound:{identical}"
-    emit(
-        {
-            "type": "dispatch.supervisor.redelivery-suppressed",
-            "parent_attempt_id": args.parent_attempt_id,
-            "resolution": "identical-redelivery-bound",
-            "identical_redeliveries": identical,
-        }
-    )
-    if not reconcile(args, classify_supervisor_abandonment_terminal("codex", detail)):
-        return 70
-    emit({"type": "dispatch.supervisor.error", "reason": detail})
-    return 70
-
-
-def remediation_prompt(attempts: set[str]) -> str:
-    joined = ",".join(sorted(attempts))
-    return (
-        "Runtime completion contract violation: previously delivered exact attempt(s) "
-        f"remain open: {joined}. Perform typed exact-attempt harvest/closure now. "
-        "Do not wait, poll, inspect raw logs, or perform unrelated work."
-    )
-
 
 class AppServer:
     def __init__(self, command: list[str], cwd: str, env: dict[str, str]):
@@ -791,7 +684,7 @@ def _apply_notice(prompt: str, notice: str) -> str:
     """Mirrors claude-session-supervisor.py's identically-named helper --
     attaches an SD-116 (b)/(c) budget notice outside any prompt's receipt
     JSON, for the two continuation sites whose prompt builders
-    (`start_retry_prompt`, `remediation_prompt`) carry no receipt at all."""
+    (`start_retry_prompt`) carry no receipt at all."""
 
     return f"{prompt}\n{notice}" if notice else prompt
 
@@ -928,7 +821,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--join-interval", type=float, default=2.0)
     value.add_argument("--join-timeout", type=float, default=3600.0)
     value.add_argument("--max-join-reparks", type=int, default=6, help="Compatibility input; join deadlines no longer terminate owned work")
-    value.add_argument("--max-identical-redeliveries", type=int, default=2)
+    value.add_argument("--max-identical-redeliveries", type=int, default=2, help="Compatibility input; delivery no longer requires model bookkeeping commands")
     value.add_argument("--max-continuations", type=positive_continuation_limit)
     value.add_argument(
         "--continuation-warning-threshold", type=int, default=3,
@@ -1067,13 +960,10 @@ def main(argv: list[str] | None = None) -> int:
             raise SupervisorError("thread-start-response-invalid")
         thread_id = thread["id"]
 
-        remediated: set[tuple[str, ...]] = set()
         launch_remediated: set[tuple[str, ...]] = set()
         next_prompt = prompt
         pending_notice = ""
         continuations = 0
-        last_delivery_identity: tuple[str, tuple[tuple[str, str], ...]] = ("", ())
-        identical_redeliveries = 0
         # SD-116 (c): mirrors claude-session-supervisor.py -- spendable
         # exactly once per owner lifetime.
         terminal_handoff_issued = [False]
@@ -1094,14 +984,6 @@ def main(argv: list[str] | None = None) -> int:
                 write_supervisor_state(
                     state_path, args.parent_attempt_id, delivered, phase="running-turn"
                 )
-            # D2a, one choke point for every producer -- see the matching
-            # comment in claude-session-supervisor.py.
-            satisfiable, unsatisfiable_reason = receipt_satisfiability(
-                args, next_prompt, active_outbox
-            )
-            if not satisfiable:
-                return seal_receipt_unsatisfiable(args, unsatisfiable_reason)
-            last_delivery_identity = supervisor_outbox_delivery_identity(active_outbox)
             final_text, _final_item = run_turn(
                 server, thread_id=thread_id, prompt=next_prompt, args=args
             )
@@ -1110,110 +992,32 @@ def main(argv: list[str] | None = None) -> int:
             current = {row.attempt_id: row for row in rows}
             completed_delivery = False
             if active_outbox is not None:
-                delivery_timing = advance_delivery_timing(
-                    delivery_timing, "exact_harvest_ns"
+                acknowledge_supervisor_delivery(
+                    state_path, args.parent_attempt_id, active_outbox.receipt_id
                 )
-                consume_advance_completed_outbox(
-                    state_path, args.parent_attempt_id, rows
-                )
-                observed_state = read_supervisor_phase_state(
-                    state_path, args.parent_attempt_id
-                )
-                active_outbox = (
-                    observed_state.outbox
-                    if observed_state is not None
-                    else None
-                )
+                observed_state = read_supervisor_phase_state(state_path, args.parent_attempt_id)
+                active_outbox = observed_state.outbox if observed_state is not None else None
                 if active_outbox is not None:
-                    if active_outbox.receipt is None:
-                        raise SupervisorError("supervisor-outbox-receipt-missing")
-                    outbox_attempts = set(active_outbox.attempt_ids)
-                    active_outbox = refresh_supervisor_outbox_actions(
-                        state_path,
-                        args.parent_attempt_id,
-                        current_children(
-                            Path(args.jobs),
-                            args.parent_attempt_id,
-                            outbox_attempts,
-                        ),
-                        jobs=Path(args.jobs),
-                    ).outbox
-                    # D2b, mirrored from claude-session-supervisor.py.
-                    if (
-                        supervisor_outbox_delivery_identity(active_outbox)
-                        == last_delivery_identity
-                    ):
-                        runtime_reconcile(
-                            args,
-                            {
-                                row.attempt_id: row
-                                for row in current_children(
-                                    Path(args.jobs),
-                                    args.parent_attempt_id,
-                                    outbox_attempts,
-                                )
-                            },
-                            outbox_attempts,
-                        )
-                        run_join(args, outbox_attempts)
-                        active_outbox = refresh_supervisor_outbox_actions(
-                            state_path,
-                            args.parent_attempt_id,
-                            current_children(
-                                Path(args.jobs),
-                                args.parent_attempt_id,
-                                outbox_attempts,
-                            ),
-                            jobs=Path(args.jobs),
-                        ).outbox
-                        if (
-                            supervisor_outbox_delivery_identity(active_outbox)
-                            != last_delivery_identity
-                        ):
-                            emit(
-                                {
-                                    "type": "dispatch.supervisor.redelivery-suppressed",
-                                    "parent_attempt_id": args.parent_attempt_id,
-                                    "resolution": "row-advanced",
-                                    "identical_redeliveries": identical_redeliveries,
-                                }
-                            )
-                            identical_redeliveries = 0
-                            redelivery_stalled = False
-                        else:
-                            # SD-116 R3: the identical-redelivery increment
-                            # branch is the only place a continuation is
-                            # classified as a stall spend.
-                            identical_redeliveries += 1
-                            redelivery_stalled = True
-                            if identical_redeliveries > args.max_identical_redeliveries:
-                                return seal_redelivery_abandoned(
-                                    args, identical_redeliveries
-                                )
-                    else:
-                        identical_redeliveries = 0
-                        redelivery_stalled = False
+                    # A separately replaced outbox retains its own delivery; a
+                    # stale acknowledgement cannot consume it or kill its owner.
                     verdict, notice = _admit_continuation(
                         ledger, budget_state_root,
                         parent_attempt_id=args.parent_attempt_id,
                         route_id=args.route_id, route_hash=args.route_hash,
-                        ordinal=continuations, purpose="ordinary", stalled=redelivery_stalled,
+                        ordinal=continuations, purpose="ordinary", stalled=False,
                         warning_threshold=args.continuation_warning_threshold,
                     )
                     if not verdict.admitted:
                         next_prompt = _seal_terminal_handoff_or_raise(
-                            ledger, budget_state_root, args=args,
-                            ordinal=continuations,
+                            ledger, budget_state_root, args=args, ordinal=continuations,
                             failure_reason="continuation-limit-exceeded",
                             terminal_handoff_issued=terminal_handoff_issued,
                         )
-                        continuations += 1
-                        continue
-                    pending_notice = notice
-                    next_prompt = completion_prompt(
-                        active_outbox.receipt or {}, active_outbox, jobs=args.jobs,
-                        notice=notice,
-                    )
+                    else:
+                        pending_notice = notice
+                        next_prompt = completion_prompt(
+                            active_outbox.receipt or {}, active_outbox, jobs=args.jobs, notice=notice,
+                        )
                     continuations += 1
                     continue
                 completed_delivery = True
@@ -1446,39 +1250,20 @@ def main(argv: list[str] | None = None) -> int:
                 continuations += 1
                 continue
 
-            unresolved = {
-                attempt
-                for attempt, row in current.items()
-                if row.status in {"open", "running"}
-            }
-            if unresolved:
-                # Evidence-backed closure first: a route-bound child that finished
-                # without writing its own marker leaves the model with no legal
-                # remediation (see close_finished_child), so asking it again only
-                # burns a continuation before the same deadlock.
-                closed = runtime_reconcile(args, current, unresolved)
-                if closed:
-                    unresolved -= closed
-                    if not unresolved:
-                        rows = current_children(Path(args.jobs), args.parent_attempt_id)
-                        current = {row.attempt_id: row for row in rows}
-                        continue
-                signature = tuple(sorted(unresolved))
-                if signature in remediated:
-                    raise SupervisorError("owned-children-remain-open-after-resume")
-                verdict, notice = _admit_continuation(
-                    ledger, budget_state_root,
+            # A terminal status word does not discharge remaining cleanup.
+            # The common policy checks every owned attempt before finalization.
+            owned_attempts = set(current)
+            if owned_attempts:
+                from dispatch_supervision import wait_for_child_settlement
+                wait_for_child_settlement(
+                    jobs=Path(args.jobs), attempts=owned_attempts,
                     parent_attempt_id=args.parent_attempt_id,
-                    route_id=args.route_id, route_hash=args.route_hash,
-                    ordinal=continuations, purpose="ordinary", stalled=False,
-                    warning_threshold=args.continuation_warning_threshold,
+                    join=lambda attempts: run_join(args, attempts),
+                    reconcile=lambda attempts: runtime_reconcile(
+                        args, {row.attempt_id: row for row in current_children(
+                            Path(args.jobs), args.parent_attempt_id, attempts)}, attempts),
+                    emit=emit,
                 )
-                if not verdict.admitted:
-                    raise SupervisorError("owned-children-remain-open-after-resume")
-                remediated.add(signature)
-                next_prompt = _apply_notice(remediation_prompt(unresolved), notice)
-                continuations += 1
-                continue
 
             if delivery_timing["join_completed_ns"] is not None:
                 delivery_timing = advance_delivery_timing(

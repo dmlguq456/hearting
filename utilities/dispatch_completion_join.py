@@ -1453,6 +1453,31 @@ def consume_supervisor_outbox_attempts(
         return True
 
 
+def acknowledge_supervisor_delivery(
+    path: Path | None, parent_attempt_id: str, receipt_id: str,
+) -> bool:
+    """Acknowledge the exact notification after the runtime's receiving turn.
+
+    This commits delivery only. It never closes a worker, publishes a marker,
+    authorizes retry, or requires the model to execute a bookkeeping command.
+    """
+    if path is None or not receipt_id:
+        return False
+    with _supervisor_state_lock(path):
+        state = read_supervisor_phase_state(path, parent_attempt_id)
+        if state is None:
+            return False
+        if state.outbox is None:
+            return True
+        if state.outbox.receipt_id != receipt_id:
+            return False
+        _write_supervisor_state_unlocked(
+            path, parent_attempt_id, set(state.delivered_attempt_ids),
+            phase="running-turn", outbox=None,
+        )
+        return True
+
+
 def consume_advance_completed_outbox(
     path: Path | None,
     parent_attempt_id: str,

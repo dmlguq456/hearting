@@ -281,3 +281,34 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
         # A failed observer receives bounded backoff; execution budgets remain
         # the execution boundary's responsibility, never this observer's vote.
         time.sleep(30.0 if observer_error else 0.05)
+
+
+def wait_for_child_settlement(*, jobs: Path, attempts: set[str],
+                              parent_attempt_id: str,
+                              join: Callable[[set[str]], dict],
+                              reconcile: Callable[[set[str]], object],
+                              emit: Callable[[dict], None]) -> None:
+    """Retain an unresolved child after notification without another model turn.
+
+    Exact recovery and the shared attempt policy decide when work is settled.
+    A ready join receipt alone does not prove cleanup or registry closure.
+    The ordinary wait controller retains the obligation and parent handback.
+    """
+    def observe(monitored: set[str]) -> dict:
+        if not _pending(_rows(jobs), sorted(monitored)):
+            return {"state": "settled"}
+        reconcile(monitored)
+        if not _pending(_rows(jobs), sorted(monitored)):
+            return {"state": "settled"}
+        receipt = join(monitored)
+        reconcile(monitored)
+        if not _pending(_rows(jobs), sorted(monitored)):
+            return {"state": "settled"}
+        if receipt.get("state") != "timeout":
+            # A terminal-but-unclosed observation may return immediately.
+            # Retry evidence collection at a bounded cadence, without tokens.
+            time.sleep(1.0)
+        return {"state": "timeout"}
+
+    wait_for_batch(join=observe, attempts=attempts, jobs=jobs,
+                   parent_attempt_id=parent_attempt_id, emit=emit)

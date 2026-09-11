@@ -141,6 +141,20 @@ Codex의 기존 App Server turn/start·turn/steer 운송과 Claude의 기존 asy
 
 join에 남아 있던 예외는 유효한 완료 marker가 있으면 살아 있는 tagged 자손을 `quiescent`로 바꾸어 ready를 만들었다. 뒤쪽 전달 판정은 실제 자손을 다시 관측해 attention을 만들었다. 이 치환을 제거하여 동일한 공통 결정이 실제 자손 정리까지 기다리게 했다. 성공 기록은 보존하고, 실행 경계가 정리를 소유하며, 오래 걸리면 기존 감독자의 유한 관측과 durable notice가 사용자에게 이어진다. 실제 자손 프로세스를 유지한 동안 pending, 종료한 뒤 같은 행/marker bytes에서 success/advance-completed가 나오는 회귀를 추가했다.
 
-4bc Codex owner는 일반 exact `--status done` 수확 후에도 `supervisor-outbox-consume-failed`를 받았다. harvest가 옛 `--failure-detail` 플래그를 별도 성공 조건으로 쓰고 있었기 때문이다. 실제로 읽은 정확한 terminal 행이나 이번에 끝낸 행으로 소비를 판단한다. 상세 출력 옵션은 완료 권한이 아니다. 일반·상세 CLI 읽기의 각 최초 소비/반복 멱등성과 미일치 조회의 미소비를 검사했다. join 114 / harvest 20 / contract 223(skip 1) PASS (`/tmp/cleanup-consumption-*.log`).
+4bc Codex owner는 일반 exact `--status done` 수확 후에도 `supervisor-outbox-consume-failed`를 받았다. harvest가 옛 `--failure-detail` 플래그를 별도 성공 조건으로 쓰고 있었기 때문이다. 최초 교정 39e65d0e에서는 상세 출력과 읽기 성공을 분리했다(join 114 / harvest 20 / contract 223(skip 1) PASS). 뒤의 오너 종료 증거를 확인한 최종 수정에서는 harvest의 알림 소비 자체를 제거했다. 읽기·종결과 알림 전달 확인을 같은 명령의 성공 여부로 묶을 이유가 없다.
 
-4bc의 최초 Codex frame attention은 marker 게시 직후 전달됐으며, 사후 같은 행의 현재 판정은 success였다. 당시 process snapshot은 확보하지 못했으므로 이 실측의 정확한 원인이 위 자손 치환이었다고 확정하지 않는다. 또한 4bc owner의 `identical-redelivery-bound:3` 사망은 별도 남은 책임 충돌이다. 운송 확인을 특정 모델 명령의 실행 여부와 결합해 반복 전달 뒤 오너를 버리는 경로도 이번 범위에서 제거해야 하며, 이 두 수정만으로 전체 종료를 선언하지 않는다.
+4bc의 최초 Codex frame attention은 marker 게시 직후 전달됐으며, 사후 같은 행의 현재 판정은 success였다. 당시 process snapshot은 확보하지 못했으므로 이 실측의 정확한 원인이 위 자손 치환이었다고 확정하지 않는다.
+
+## 알림 수신 확인을 런타임 책임으로 정리
+
+4bc 오너는 06:12:24.972Z에 `identical-redelivery-bound:3`으로 종료됐다. 모델이 수확을 실행했어도 알림 소비가 실패하자 감독자가 같은 알림을 세 번 보내고 오너를 버렸다. 최종 구현은 두 감독자의 명령 허용 사전 검사·동일 알림 삼진 종료·미종결 자식에 대한 모델 재촉 후 종료를 제거한다. `registered-parent-park`는 명시적인 terminal cleanup scope만 집행한다. 일반 작업에 별도의 알림 기반 도구 허용 목록을 적용하지 않는다.
+
+공통 `acknowledge_supervisor_delivery`가 수신 턴 완료 뒤 정확한 알림만 멱등 확인한다. worker 결과·marker·재시도 권한을 변경하지 않으며, 다른 알림으로 교체되었으면 이전 턴의 확인은 거부한다. 모델은 수확 명령으로 runtime outbox를 조작하지 않는다. 미종결 자식은 `wait_for_child_settlement`가 기존 공통 attempt policy와 정확한 reconcile을 사용해 이어받는다. 불명확한 관측이 반복되면 기존 durable notice를 전달하고 감독자가 계속 기다린다. 모델 재호출·토큰 소비·오너 사망으로 관측 실패를 대신하지 않는다. 실제 harvest를 관측하지 않은 `exact_harvest_ns`는 null로 둔다.
+
+실제 fake-runtime 프로세스를 사용한 Codex/Claude 회귀에서 알림 수신 1회 뒤 모델 수확 0회로 정상 종료한다. 관측 불가 자식은 두 모델 턴(최초+알림) 뒤 감독자가 생존하며 notice를 생성하고, fixture가 정확한 종결·정리 증거를 제공하면 모델 추가 턴 없이 끝난다. 명시적인 정리 권한 제한은 별도 회귀로 유지한다. 이 검사는 모델 기반 owner canary 완료 주장과 구분한다.
+
+최종 회귀: Codex supervisor 34 / Claude supervisor 69 / join 115 / harvest 20 / supervision 14 / cleanup hook 7 PASS. `open`과 `done`인 관측 불가 자식을 각각 검사했고, 일반·상세 harvest가 알림 상태를 바꾸지 않는 것을 실제 CLI로 확인했다. 과거 fake join이 기록하던 근거 없는 done 행에는 실제 자식 프로세스를 띄우지 않은 fixture의 quiescence를 명시했다. generated projections와 adaptation boundary도 PASS. 로그는 `/tmp/runtime-ack-complete-*.log`, `/tmp/runtime-ack-final-*.log`, `/tmp/runtime-ack-generated.log`, `/tmp/runtime-ack-boundary-final.log`에 있다. 실측 4bc의 마지막 test 정리 미입증은 이 fixture 통과로 해소됐다고 주장하지 않는다.
+
+## 잘못된 cycle 쓰기 증거 복구
+
+OpenCode 부모 canary의 Codex frame `att-ea04186aba80442fadd029cc04556d67`는 다른 cycle의 `direction-brief.md`를 덮어썼다. 원래 Codex rollout의 118/139행 native patches를 순서 적용한 5227bytes가 원 marker SHA256 `4d78735e0ec62ff00e71e601b31d22194cf203409e7aa28752993b598095ca47`와 정확히 일치하여 원문을 복구했다. 덮인 4201bytes와 패치·복구 영수증은 원 cycle `artifacts/dev_logs/direction-brief-restoration/`에 보존했다. 원장·marker 수정과 재기동은 없고, 이후 잘못된 쓰기는 정상 검증으로 인정하지 않는다. 환경 변수 미전달이라는 보고의 probe 정규식은 `AGENT_ARTIFACT_*`를 매칭하지 않으므로 그 원인 주장은 추가 확인이 필요하다. 다른 cycle 쓰기 자체는 실제 파일과 marker hash로 확인됐다.

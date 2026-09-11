@@ -906,6 +906,39 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertTrue(all(event["outer_pid"] == os.getpid() for event in transitions))
         self.assertTrue(all(event["outer_pid_start"] for event in transitions))
 
+    def test_runtime_acknowledges_exact_receipt_without_deciding_worker_outcome(self):
+        path = self.root / "runtime" / "delivery.json"
+        raw = row("open", "att-a", "att-parent", "child").rstrip("\n")
+        child = JOIN.ChildRow(0, "open", "child", "att-a", raw,
+                              {"attempt_id": "att-a", "parent_attempt_id": "att-parent"})
+        receipt = {"schema_version": 2, "state": "ready", "parent_attempt_id": "att-parent",
+                   "children": [{"attempt_id": "att-a", "status": "open",
+                                 "required_action": "complete-open"}]}
+        prepared = JOIN.prepare_supervisor_outbox(path, "att-parent", set(), receipt, [child])
+        before = path.read_bytes()
+        self.assertFalse(JOIN.acknowledge_supervisor_delivery(path, "att-parent", "foreign"))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertTrue(JOIN.acknowledge_supervisor_delivery(
+            path, "att-parent", prepared.outbox.receipt_id))
+        committed = path.read_bytes()
+        self.assertTrue(JOIN.acknowledge_supervisor_delivery(
+            path, "att-parent", prepared.outbox.receipt_id))
+        self.assertEqual(path.read_bytes(), committed)
+        state = JOIN.read_supervisor_phase_state(path, "att-parent")
+        self.assertIsNone(state.outbox)
+        self.assertEqual(state.delivered_attempt_ids, frozenset({"att-a"}))
+        self.assertEqual(child.raw, raw)
+        self.assertEqual(child.status, "open")
+        # An old receiving turn cannot consume a new notification.
+        replacement = JOIN.prepare_supervisor_outbox(path, "att-parent", {"att-a"},
+            {**receipt, "children": [{"attempt_id": "att-b", "status": "open",
+                                      "required_action": "complete-open"}]},
+            [JOIN.ChildRow(1, "open", "b", "att-b", raw.replace("att-a", "att-b"),
+                           {"attempt_id": "att-b", "parent_attempt_id": "att-parent"})])
+        self.assertFalse(JOIN.acknowledge_supervisor_delivery(
+            path, "att-parent", prepared.outbox.receipt_id))
+        self.assertEqual(JOIN.read_supervisor_phase_state(path, "att-parent"), replacement)
+
     def test_supervisor_outbox_partial_consume_preserves_same_receipt(self):
         state_path = self.root / "runtime" / "parent-batch.json"
         children = [
@@ -1598,8 +1631,6 @@ class HarvestVocabularyTest(unittest.TestCase):
         for receipt in receipts:
             prompts.append(self.claude.completion_prompt(receipt, jobs=self.jobs))
             prompts.append(self.codex.completion_prompt(receipt, jobs=self.jobs))
-        prompts.append(self.claude.remediation_prompt({"att-a"}, jobs=self.jobs))
-        prompts.append(self.codex.remediation_prompt({"att-a"}))
         checked_any = False
         for prompt in prompts:
             for line in JOIN.harvest_command_lines(prompt):
