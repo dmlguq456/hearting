@@ -7767,13 +7767,38 @@ def mark_attempt_launch_started(jobs: Path, attempt_id: str, pid: int) -> None:
             )
         index, fields, metadata = matches[0]
         validate_attempt_metadata(metadata)
-        expected_start = metadata.get("pid_start", "")
+        # A detached governed review stores the watchdog as the attempt PID.
+        # Its payload fence is the separately sealed child, whose exact parent
+        # must still be that live watchdog. Other launches retain the old tuple.
+        fence = metadata
+        if metadata.get("review_admission") == "prepared" and metadata.get("launch_lifecycle") == "detached":
+            metadata = _parse_review_metadata(fields[5])
+            if (metadata.get("worker_type") != "review"
+                    or metadata.get("review_governed_lease") != REVIEW_GOVERNED_LEASE_KIND
+                    or not REVIEW_GOVERNED_LEASE_NONCE_RE.fullmatch(metadata.get("review_governed_lease_nonce", ""))
+                    or not metadata.get("review_readiness_digest")
+                    or not metadata.get("review_watchdog_budget_digest")
+                    or pid != os.getpid()
+                    or metadata.get("pid") != str(os.getppid())
+                    or not process_identity_is_live(os.getppid(), metadata.get("pid_start", ""))
+                    or exact_process_group_signal_authority(os.getppid(), metadata.get("pid_start", "")) != "authoritative"):
+                raise DispatchContractError("attempt-launch-fence-identity-mismatch", attempt_id)
+            parent = process_launch_identity(os.getppid())
+            if any(metadata.get(key) != parent.get(key) for key in
+                   ("pid", "pid_start", "pgid", "pid_ns", "pid_observer_ns")):
+                raise DispatchContractError("attempt-launch-fence-identity-mismatch", attempt_id)
+            current = process_launch_identity(pid)
+            fence = {key: metadata.get("review_fence_" + key, "") for key in
+                     ("pid", "pid_start", "pgid", "pid_ns", "pid_observer_ns")}
+            if any(not value or current.get(key) != value for key, value in fence.items()):
+                raise DispatchContractError("attempt-launch-fence-identity-mismatch", attempt_id)
+        expected_start = fence.get("pid_start", "")
         if (
             fields[1] not in {"open", "running"}
             or metadata.get("launch_claimed") != "1"
             or metadata.get("launch_fence") != "registry-v1"
-            or metadata.get("pid") != str(pid)
-            or metadata.get("pgid") != str(pid)
+            or fence.get("pid") != str(pid)
+            or fence.get("pgid") != str(pid)
             or not expected_start
             or not process_identity_is_live(pid, expected_start)
             or exact_process_group_signal_authority(pid, expected_start)

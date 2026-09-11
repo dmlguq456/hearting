@@ -275,7 +275,7 @@ class ForegroundClassificationLifecycleTest(unittest.TestCase):
 
 
 class DetachedReviewLifecycleTest(unittest.TestCase):
-    def _launch(self, root, ending="raise SystemExit(0)", timeout=4.0):
+    def _launch(self, root, ending="raise SystemExit(0)", timeout=4.0, fence_mutation=None):
         jobs = root / "jobs.log"
         gate_read, gate_write = os.pipe()
         artifact_root = root / ".agent_reports"
@@ -288,12 +288,14 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
             {"type": "turn.completed"},
         ]
         code = ("import os,pathlib,signal,time; "
-                f"os.read({gate_read}, 1); "
                 f"pathlib.Path({str(report)!r}).write_text('review evidence\\n'); "
                 f"pathlib.Path({str(log)!r}).write_text({(chr(10).join(json.dumps(row) for row in rows)+chr(10))!r}); "
                 + ending)
         handle = launch_review_watchdog(
-            [sys.executable, "-c", code], gate_fd=gate_read,
+            [sys.executable, str(Path(__file__).with_name("launch-fence.py")),
+             "--parent-pid", str(os.getpid()), "--gate-fd", str(gate_read),
+             "--jobs", str(jobs), "--attempt-id", "att-lifecycle", "--",
+             sys.executable, "-c", code], gate_fd=gate_read,
             budget=begin_finite_watchdog(timeout), attempt_id="att-lifecycle",
             nonce="a" * 64, jobs=jobs,
         )
@@ -306,7 +308,7 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
                 "artifact_root": str(artifact_root),
                 "unit": "qa/code-review",
                 "review_output_locator_b64": contract.encode_review_output_locator("review.md"),
-                "launch_lifecycle": "detached", "launch_claimed": "1",
+                "launch_lifecycle": "detached", "launch_claimed": "1", "launch_fence": "registry-v1",
                 "review_admission": "prepared", "parent_attempt_id": "",
                 "review_watchdog_budget_digest": receipt["budget_digest"],
                 "review_readiness_digest": receipt["receipt_digest"],
@@ -327,7 +329,14 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
             _jobs(root, **values)
             jobs.write_text(jobs.read_text().replace(",parent_attempt_id=", "", 1)
                             .replace("\t/repo\t/wt\t", f"\t{root}\t{root}\t"))
+            if fence_mutation:
+                pipe = jobs.read_text()
+                key, value = fence_mutation
+                import re
+                pipe = re.sub(r"(?<=,)" + key + r"=[^,\n]+", key + "=" + value, pipe)
+                jobs.write_text(pipe)
             handle.commit()
+            os.write(gate_write, b"1")
         finally:
             os.close(gate_write)
         return handle, jobs
@@ -342,12 +351,22 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
             "residue_grace": .1, "parent_recheck_interval": .01,
         })()
 
+    def test_real_launch_fence_refuses_a_stale_child_identity_before_payload(self):
+        for mutation in (("review_fence_pid_start", "1"), ("pid_observer_ns", "pid:[foreign]")):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                handle, jobs = self._launch(root, fence_mutation=mutation)
+                self.assertNotEqual(handle.process.wait(timeout=5), 0)
+                self.assertFalse((root / ".agent_reports" / "review.md").exists())
+                self.assertNotIn("launch_started", _row(jobs).metadata)
+
     def test_actual_watchdog_exit_closes_and_materializes_without_owner_identity(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             handle, jobs = self._launch(root)
             self.assertEqual(handle.process.wait(timeout=5), 0)
             before = _row(jobs)
+            self.assertEqual(before.metadata.get("launch_started"), "1")
             self.assertIn("review_process_outcome_b64", before.metadata)
             self.assertEqual(watcher.watch(self._args(jobs, before)), 0)
             final = _row(jobs)
