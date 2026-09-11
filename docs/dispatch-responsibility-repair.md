@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 6b7d19a5 실측은 지연 통보·실제 보고서 쓰기 PASS, 정상 완료 알림 FAIL로 종료했다. 47d5e42e·21425b55를 통합했고 전달 계약 교정을 검증 중이다. frame 사용자의 이해 확인·기록 방식 답변은 대기 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치를 주장하지 않는다.
+상태: 6b7d19a5 실측은 지연 통보·실제 보고서 쓰기 PASS, 정상 완료 알림 FAIL로 종료했다. 47d5e42e·21425b55를 통합했고 전달 계약 교정 09b687ac의 실제 정상 완료를 확인했으며, 후속 운송 지시 범위를 정리했다. frame 사용자의 이해 확인·기록 방식 답변은 대기 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치를 주장하지 않는다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -73,6 +73,20 @@ frame 증거: `.agent_reports/campaigns/2026-09-10_frame-bootstrap-layer/2026-09
 후속 교정 검사: responsibility 14 / contract 223(skip 1) / join 113 / registry 95 / review lifecycle 19 / serial supervisor 30 / managed completion 14 / gateway 45 / sweep 17 / rewake 160 / route consumption 12 / Claude supervisor 71 / Codex supervisor 33 PASS. 생성 projection 20개와 adaptation boundary PASS. 로그: `/tmp/completion-consumer-final/`.
 
 정확한 6b 실측 기록: `.agent_reports/campaigns/2026-09-10_review-lease-watchdog/2026-09-11_supervision-live/artifacts/dev_logs/supervision-live-observation.json`. 새 source·부모·cycle로 동일 60초 join/150초 hold 경로를 재검증하며, 통합 교정의 실제 정상 완료 합격은 아직 주장하지 않는다.
+
+## 09b 실제 재검증과 후속 책임 경계
+
+새 부모 `01a08e9b-2977-7ac0-b3ba-01e534889fcc`, Luna attempt `att-5d1fa4e292ea4da78fb27d461696d61f`는 같은 source `09b687ac`에서 04:05:49.467Z supervision과 04:08:24.746Z 정상 completion을 각각 자동 수신했다. 원장의 `completed-review/pass`, 봉인 success, 부모의 `success/advance-completed/done`이 일치했다. hold는 150.000073초, 보고서는 218 bytes / SHA256 `80fb9b2abcc960c18fa6f00efac2ff933e6c7d8cc611b9fe002e8b1722b1fbdf`다. 기동 후 수동 부모 입력은 없었다.
+
+부모는 이미 승인된 별도 읽기 검증을 다시 질문했다. 04:10:46.143Z 빈 답변 반환 뒤 자율 재개했으나 잘못된 attempt 문자열과 끝의 점 인자로 두 번 실패한 뒤 04:11:38.448Z 정상 수확했다. [33]의 별도 정상 수확도 1회 있어 전체 성공 읽기는 2회다. 자동 두 전달·실제 쓰기·회수 가능성은 PASS이며, 무오류 자율 후속이나 전체 관측자의 단 한 번 읽기는 PASS가 아니다. 정상 completion은 원래 추가 수확을 요구하지 않는다. 별도 검증을 제품의 새 마무리 의무로 바꾸지 않았다.
+
+원본: `.agent_reports/campaigns/2026-09-10_review-lease-watchdog/2026-09-11_supervision-live-r2/artifacts/dev_logs/supervision-live-r2-observation.json`. 최종 관측 04:14:05.387Z source clean, 시험 자식·watchdog·sidecar·reaper 종료를 기록했다. 시험 부모 두 개는 증거 cutoff 뒤 `/exit`로 정리했으며 실제 frame 승인 대기 부모는 보존했다.
+
+이 후속 재질문의 원인이 운송 문구였다고 확정하지 않는다. 다만 `Run only these commands`를 운송자가 새 권한 제한처럼 전달하는 것은 책임 범위를 넘는다. 공통 command projection과 후속 안내로 세 batch renderer 및 rewake의 수동 명령 조립을 합쳤다. 정확한 실행 인자에는 문장 끝 마침표가 섞이지 않는다. 완료 기록의 미처리 동작만 안내하고 기존 승인과 human gate가 계속 권한을 소유한다. 문구 변경만으로 모델의 무오류 행동을 증명했다고 주장하지 않는다.
+
+후속 지시 공통화 검증: join 114 / Claude supervisor 71 / Codex supervisor 33 / gateway 45 / rewake 160 / generated 20 / adaptation boundary PASS (`/tmp/completion-context-fixed/`). 첫 검사는 rewake 명령 뒤 설명 결합과 Claude의 공통 실행 표면 설명 누락을 잡았고, 실제 명령 줄 분리 및 하네스 선택 불변 설명을 공통 함수에 유지한 뒤 재검증했다. 이 검증은 09b 실제 수신과 별도 소스 근거다.
+
+6b 실측 행의 격리 복사본으로도 09b snapshot→delivery success를 확인했다. 그 복사본에 실제 terminal CAS로 충돌을 기록하면 committed proof와 봉인 receipt bytes를 유지하면서 attention으로 소비를 보류했다(`/tmp/completion-conflict-consumption.json`). 운영 원장은 수정하지 않았다.
 
 ## 검증의 오류도 보존
 

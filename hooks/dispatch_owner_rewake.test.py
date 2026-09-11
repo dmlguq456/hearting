@@ -737,9 +737,9 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         (new_release / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
 
         message = rewake.receipt(launch, "attention", "terminal-quiescent", new_release)
-        match = re.search(r"checked harvest command: (.+?)\. Do not", message)
-        assert match is not None, message
-        harvest_line = match.group(1)
+        commands = JOIN.harvest_command_lines(message)
+        self.assertEqual(len(commands), 1, message)
+        harvest_line = commands[0]
         # The command this hook renders does name the sealed OLD release --
         # that half of the pipeline already works (see the sibling
         # `test_receipt_prefers_the_sealed_launch_home_over_a_mutable_root`).

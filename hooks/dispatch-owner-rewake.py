@@ -31,6 +31,7 @@ from dispatch_completion_join import (  # noqa: E402
     current_attempt_row,
     current_children,
     current_delivery_state,
+    completion_harvest_command,
     delivery_classification,
     delivery_required_action,
 )
@@ -811,7 +812,6 @@ def classified_receipt(
     if not (home / "adapters" / "codex" / "bin" / "preflight.sh").is_file():
         home = root
     harvest = home / "adapters" / "codex" / "bin" / "preflight.sh"
-    jobs_argument = shlex.quote(str(launch.jobs))
     status = delivery.status if delivery is not None else ""
     row_revision = delivery.row_revision if delivery is not None else "unavailable"
     marker_current = bool(delivery and _completion_evidence_current(delivery))
@@ -850,17 +850,11 @@ def classified_receipt(
             reason = "terminal-failure-or-unclosed"
         if state == "success":
             instruction = "No harvest command is required; the registered owner completed."
-        elif required_action == "complete-open":
+        elif required_action in {"complete-open", "inspect-done-failure"}:
             instruction = (
-                "Use only the exact checked harvest command: "
-                f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
-                f"--attempt-id {shlex.quote(launch.attempt_id)} --status open --mark-done."
-            )
-        elif required_action == "inspect-done-failure":
-            instruction = (
-                "Use only the exact checked harvest command: "
-                f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
-                f"--attempt-id {shlex.quote(launch.attempt_id)} --status done."
+                "Exact completion bookkeeping command:\n"
+                + completion_harvest_command(launch.attempt_id, required_action,
+                    jobs=str(launch.jobs), surface=str(harvest))
             )
         elif required_action == "advance-completed":
             instruction = "No harvest command is required; advance or finish the route."
@@ -874,9 +868,9 @@ def classified_receipt(
             )
         else:
             instruction = (
-                "Inspect the exact current row and completion marker with: "
-                f"{shlex.quote(str(harvest))} harvest --jobs {jobs_argument} "
-                f"--attempt-id {shlex.quote(launch.attempt_id)} --status done."
+                "Inspect the exact current row and completion marker with:\n"
+                + completion_harvest_command(launch.attempt_id, "inspect-done-failure",
+                    jobs=str(launch.jobs), surface=str(harvest))
             )
     elif transaction_error:
         state = "attention"
@@ -904,7 +898,7 @@ def classified_receipt(
         f"advanced={int(advanced)} "
         f"reason={reason} required_action={required_action}. "
         "Do not start or re-arm Background Bash, Monitor, liveness, or dispatch-wait. "
-        f"{instruction} Do not emit a periodic progress recap."
+        f"{instruction}\nDo not emit a periodic progress recap."
     )
     return state, message
 

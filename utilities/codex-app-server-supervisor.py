@@ -15,6 +15,7 @@ from typing import Any
 
 from dispatch_completion_join import (
     JoinContractError,
+    completion_followup_text,
     SupervisorOutbox,
     advance_delivery_timing,
     classify_supervised_shell_command,
@@ -482,22 +483,6 @@ def completion_prompt(
     notice: str = "",
 ) -> str:
     compact = json.dumps(receipt, separators=(",", ":"), sort_keys=True)
-    jobs_argument = f"--jobs {shlex.quote(jobs)} " if jobs else ""
-    commands: list[str] = []
-    for child in receipt["children"]:
-        attempt = shlex.quote(child["attempt_id"])
-        action = child["required_action"]
-        if action == "complete-open":
-            commands.append(
-                f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
-                f"{attempt} --status open --mark-done"
-            )
-        elif action == "inspect-done-failure":
-            commands.append(
-                f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
-                f"{attempt} --status done"
-            )
-    command_text = "\n".join(commands) or "(no harvest command; advance the route)"
     return (
         "Runtime completion receipt (typed supervisor data, not child output): "
         f"{compact}\n"
@@ -507,12 +492,8 @@ def completion_prompt(
             if outbox is not None
             else ""
         )
-        +
-        "Follow each required_action. Run only these exact harvest commands, one at a time:\n"
-        f"{command_text}\n"
-        "advance the assigned route, and register the next separable batch if required. "
-        "Do not call dispatch-wait or inspect raw child logs. Emit the exact final "
-        "three-line handoff only when no owned registered child remains open."
+        + completion_followup_text(receipt, jobs=jobs, surface=shlex.split(SHARED_HARVEST_SURFACE)[0])
+        + "\nEmit the exact final three-line handoff when no owned registered child remains open."
         + (f"\n{notice}" if notice else "")
     )
 

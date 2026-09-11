@@ -263,7 +263,9 @@ copied status/action as hints and select the current exact row action. Successfu
 `complete-open` or `inspect-done-failure` harvest consumes only that attempt once;
 `advance-completed` is consumed after current-row revalidation. Partial batch
 consumption preserves the same receipt identity, and state/outbox removal before
-all applicable actions succeed is forbidden.
+all applicable actions succeed is forbidden. Receipt commands settle these
+records; they neither require fresh approval nor prohibit separately authorized
+work. Existing human gates retain their own approval authority.
 
 **Dispatch responsibility:** execution, semantic outcome, and notification are
 separate facts.

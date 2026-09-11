@@ -663,6 +663,26 @@ def delivery_required_action(state: CurrentDeliveryState) -> str:
     return "inspect-done-failure"
 
 
+def completion_harvest_command(attempt_id: str, action: str, *, jobs: str, surface: str) -> str:
+    """Project an already-decided record action; grant no workflow authority."""
+    if action not in {"complete-open", "inspect-done-failure"}:
+        return ""
+    registry = f"--jobs {shlex.quote(jobs)} " if jobs else ""
+    status = "--status open --mark-done" if action == "complete-open" else "--status done"
+    return f"{shlex.quote(surface)} harvest {registry}--attempt-id {shlex.quote(attempt_id)} {status}"
+
+
+def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
+    commands = [completion_harvest_command(child["attempt_id"], child["required_action"],
+                jobs=jobs, surface=surface) for child in receipt["children"]]
+    command_text = "\n".join(command for command in commands if command) or "(no harvest command; advance the route)"
+    return ("Completion bookkeeping for the listed attempts:\n" + command_text
+            + "\nThe commands use the shared, runtime-neutral registry harvest compatibility surface; "
+              "it does not select or change the owner or child harness. "
+              "Continue the authorized work within its existing human gates. "
+              "This receipt creates no new approval step.")
+
+
 def delivery_timing_fields(**values: int | None) -> dict[str, int | None]:
     """Project the same versioned timing vocabulary on every runtime surface."""
 

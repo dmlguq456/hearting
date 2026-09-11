@@ -10,6 +10,7 @@ import io
 import inspect
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -1524,6 +1525,16 @@ class HarvestVocabularyTest(unittest.TestCase):
             jobs=Path(self.jobs),
         )
 
+    def test_command_projection_preserves_exact_arguments_without_prose_punctuation(self):
+        surface = "/fixture root/owner's preflight.sh"
+        jobs = "/fixture root/exact jobs.log"
+        for action, suffix in (("complete-open", ["--status", "open", "--mark-done"]),
+                               ("inspect-done-failure", ["--status", "done"])):
+            command = JOIN.completion_harvest_command("att-exact", action, jobs=jobs, surface=surface)
+            self.assertEqual(shlex.split(command), [surface, "harvest", "--jobs", jobs,
+                             "--attempt-id", "att-exact", *suffix])
+        self.assertEqual(JOIN.completion_harvest_command("att-exact", "advance-completed", jobs=jobs, surface=surface), "")
+
     def test_incident_command_with_jobs_now_classifies(self):
         # D-1: the exact command string the incident denied.
         line = (
@@ -1578,6 +1589,8 @@ class HarvestVocabularyTest(unittest.TestCase):
             ):
                 lines = JOIN.harvest_command_lines(prompt)
                 self.assertNotIn("--failure-detail", prompt)
+                self.assertNotIn("Run only", prompt)
+                self.assertIn("This receipt creates no new approval step", prompt)
                 satisfiable, reason = JOIN.supervisor_receipt_satisfiable(
                     lines,
                     base=JOIN.ROOT,

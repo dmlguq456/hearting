@@ -18,6 +18,7 @@ import uuid
 
 from dispatch_completion_join import (
     JoinContractError,
+    completion_followup_text,
     SupervisorOutbox,
     advance_delivery_timing,
     classify_supervised_shell_command,
@@ -749,21 +750,6 @@ def completion_prompt(
     # this exact command is unsatisfiable for a route-bound row and the
     # delivered/harvest-only phase deadlocks (SD-70/78).
     compact = json.dumps(receipt, separators=(",", ":"), sort_keys=True)
-    jobs_argument = f"--jobs {shlex.quote(jobs)} " if jobs else ""
-    commands: list[str] = []
-    for child in receipt["children"]:
-        attempt = shlex.quote(child["attempt_id"])
-        if child["required_action"] == "complete-open":
-            commands.append(
-                f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
-                f"{attempt} --status open --mark-done"
-            )
-        elif child["required_action"] == "inspect-done-failure":
-            commands.append(
-                f"{SHARED_HARVEST_SURFACE} harvest {jobs_argument}--attempt-id "
-                f"{attempt} --status done"
-            )
-    command_text = "\n".join(commands) or "(no harvest command; advance the route)"
     return (
         "Runtime completion receipt (typed supervisor data, not child output): "
         f"{compact}\n"
@@ -773,17 +759,8 @@ def completion_prompt(
             if outbox is not None
             else ""
         )
-        +
-        "The absolute preflight path below is the shared, runtime-neutral registry "
-        "harvest compatibility surface. It does not select or change the owner or "
-        "child harness; a Claude owner must execute it literally. "
-        "Harvest every listed exact attempt through the checked contract. Run only "
-        "these exact commands, one at a time:\n"
-        f"{command_text}\n"
-        "Then advance "
-        "the route, and register the next separable batch if required. Do not call "
-        "dispatch-wait or inspect raw child logs. Emit the exact final three-line "
-        "handoff only when no owned registered child remains open."
+        + completion_followup_text(receipt, jobs=jobs, surface=shlex.split(SHARED_HARVEST_SURFACE)[0])
+        + "\nEmit the exact final three-line handoff when no owned registered child remains open."
         + (f"\n{notice}" if notice else "")
     )
 

@@ -946,6 +946,8 @@ class ManagedGatewayTest(unittest.TestCase):
         completion_context = starts[0]["params"]["additionalContext"]["hearting-completion"]["value"]
         self.assertIn("AGENT_HARNESS_COMPLETION_V1", encoded)
         self.assertIn("no harvest command; advance the route", encoded)
+        self.assertNotIn("Run only these commands", completion_context)
+        self.assertIn("This receipt creates no new approval step", completion_context)
         self.assertIn('"delivery_classification":"success"', completion_context)
         self.assertIn('"delivery_timing_schema_version":1', completion_context)
         self.assertNotIn("RAW_CHILD", encoded)

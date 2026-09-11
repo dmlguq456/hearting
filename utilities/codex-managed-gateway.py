@@ -40,6 +40,7 @@ from tools.fleet import session_registry
 from dispatch_completion_join import (  # noqa: E402
     DELIVERY_TIMING_POINTS,
     JoinContractError,
+    completion_followup_text,
     STAGE_ADVANCE_RECEIPT_KEY,
     STAGE_ADVANCE_SCHEMA_VERSION,
     advance_delivery_timing,
@@ -1685,30 +1686,11 @@ class ManagedGateway:
         receipt: dict[str, Any],
         delivery_id: str,
     ) -> dict[str, Any]:
-        commands: list[str] = []
-        harvest = shlex.quote(
-            str(AGENT_HOME / "adapters" / "codex" / "bin" / "preflight.sh")
-        )
-        jobs = shlex.quote(str(receipt["job_registry"]))
-        for child in receipt["children"]:
-            attempt = shlex.quote(str(child["attempt_id"]))
-            if child["required_action"] == "complete-open":
-                commands.append(
-                    f"{harvest} harvest --jobs {jobs} --attempt-id {attempt} "
-                    "--status open --mark-done"
-                )
-            elif child["required_action"] == "inspect-done-failure":
-                commands.append(
-                    f"{harvest} harvest --jobs {jobs} --attempt-id {attempt} "
-                    "--status done"
-                )
-        command_text = "\n".join(commands) or "(no harvest command; advance the route)"
         context = (
             "AGENT_HARNESS_COMPLETION_V1\n"
-            + canonical(receipt)
-            + "\nExact typed receipt. Run only these commands:\n"
-            + command_text
-            + "\nThen continue the route; no raw logs or waits."
+            + canonical(receipt) + "\n"
+            + completion_followup_text(receipt, jobs=str(receipt["job_registry"]),
+                surface=str(AGENT_HOME / "adapters" / "codex" / "bin" / "preflight.sh"))
         )
         if len(context.encode("utf-8")) > MAX_CONTEXT_BYTES:
             raise GatewayError("completion-context-oversized")
