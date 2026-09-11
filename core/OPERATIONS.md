@@ -265,6 +265,17 @@ copied status/action as hints and select the current exact row action. Successfu
 consumption preserves the same receipt identity, and state/outbox removal before
 all applicable actions succeed is forbidden.
 
+Owner supervisors and managed completion carriers enable exact receiptless
+recovery inside the shared join, before its long timeout. Each unresolved
+namespace-local attempt is checked at most once per 30 seconds; only the
+registry's existing quiescence proof can cancel it, and the join re-reads the
+row before proceeding. Ordinary join queries remain read-only. An unavailable
+namespace observation is distinct from a namespace proved present. After
+30 seconds of unverifiable child state, the join publishes a fresh diagnostic
+beside the registry under `join-observations/`; Fleet shows the parked owner as
+requiring attention. This display record grants no completion, retry, or signal
+authority and expires after 120 seconds without a refresh.
+
 A checked verification runner records its exact attempt/route/node, live
 PID/start/leader-PGID, actual argv digest, start, and bounded deadline beside the
 canonical registry. Only a live, unexpired, exact binding whose current

@@ -2194,6 +2194,15 @@ class CodexAttemptIdentityTest(unittest.TestCase):
             self.assertEqual(state, "idle")
             self.assertEqual(rows[0].stage, "parked-supervised")
             self.assertEqual(classifier.call_args.kwargs["supervisor_phase"], "parked")
+            with mock.patch.object(dispatch, "observed_supervised_owner_liveness", return_value=observed), \
+                 mock.patch.object(dispatch, "_job_transcript_signal", return_value="dead"), \
+                 mock.patch.object(dispatch, "read_join_observation", return_value={
+                     "state": "attention", "children": [{"attempt_id": "att-child",
+                     "reason": "process-unverifiable", "recovery_reason": "namespace-not-extinct"}]}):
+                state = dispatch._dispatch_liveness(rows[0], now=1000.0, track=False)
+            self.assertEqual(state, "blocked")
+            self.assertEqual(rows[0].stage, "supervision-attention")
+            self.assertEqual(rows[0].state_evidence["join_observation"]["children"][0]["attempt_id"], "att-child")
 
     def test_legacy_row_without_process_identity_keeps_rollout_fallback(self):
         job = DispatchJob(key="code-test", slug="legacy", cwd="/work/wt",

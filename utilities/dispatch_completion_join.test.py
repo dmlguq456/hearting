@@ -156,6 +156,95 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             "inspect-done-failure",
         )
 
+    def receiptless_row(self, harness="codex"):
+        return row("open", "att-recovery", "att-parent", "a", process_metadata={
+            "harness": harness, "pid": "999999", "pid_start": "42", "pgid": "999999",
+            "pid_scope": "namespace-local", "pid_observer_ns": "pid:[999999999]",
+        })
+
+    def test_receiptless_recovery_runs_before_timeout_and_rechecks_closure(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                self.jobs.write_text(self.receiptless_row(harness))
+                def settle(jobs, child):
+                    self.assertEqual(child.attempt_id, "att-recovery")
+                    jobs.write_text(row("done", child.attempt_id, "att-parent", "a",
+                                        "cancelled-receipt-unavailable"))
+                    return {"attempt_id": child.attempt_id, "closed": True, "reason": "proved"}
+                with mock.patch.object(JOIN, "recover_receiptless_attempt", side_effect=settle) as recover:
+                    receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent",
+                                              timeout=0.2, interval=0.01, recover_receiptless=True)
+                recover.assert_called_once()
+                self.assertEqual(receipt["state"], "ready")
+                self.assertEqual(receipt["children"][0]["status"], "done")
+
+    def test_unknown_recovery_is_throttled_and_never_grants_completion(self):
+        self.jobs.write_text(self.receiptless_row())
+        before = self.jobs.read_bytes()
+        with mock.patch.object(JOIN, "recover_receiptless_attempt", return_value={
+                "attempt_id": "att-recovery", "closed": False, "reason": "namespace-not-extinct"}) as recover:
+            receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent",
+                                      timeout=0.15, interval=0.01, recover_receiptless=True)
+        recover.assert_called_once()
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(receipt["recovery_diagnostics"][0]["reason"], "namespace-not-extinct")
+        self.assertEqual(self.jobs.read_bytes(), before)
+
+    def test_recovery_claim_without_row_change_does_not_release_join(self):
+        self.jobs.write_text(self.receiptless_row())
+        with mock.patch.object(JOIN, "recover_receiptless_attempt", return_value={
+                "attempt_id": "att-recovery", "closed": True, "reason": "claimed"}):
+            receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent",
+                                      timeout=0.1, interval=0.01, recover_receiptless=True)
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(receipt["children"][0]["status"], "open")
+
+    def test_read_only_join_does_not_run_recovery(self):
+        self.jobs.write_text(self.receiptless_row())
+        with mock.patch.object(JOIN, "recover_receiptless_attempt") as recover:
+            JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent", timeout=0)
+        recover.assert_not_called()
+        self.assertFalse((self.root / "join-observations").exists())
+
+    def test_recovery_tool_cannot_claim_a_different_attempt_or_missing_proof(self):
+        self.jobs.write_text(self.receiptless_row())
+        child = JOIN.current_children(self.jobs, "att-parent")[0]
+        for attempt, digest in (("att-foreign", "sha256:abc"), (child.attempt_id, None)):
+            with self.subTest(attempt=attempt, digest=digest):
+                payload = {"classifier_source": D.AUTOMATIC_RECEIPTLESS_CLASSIFIER,
+                           "decisions": [{"attempt_id": attempt, "closed": 1, "receipt_digest": digest}]}
+                with mock.patch.object(JOIN.subprocess, "run", return_value=mock.Mock(
+                        returncode=0, stdout=json.dumps(payload))) as run:
+                    result = JOIN.recover_receiptless_attempt(self.jobs, child)
+                self.assertFalse(result["closed"])
+                argv = run.call_args.args[0]
+                self.assertEqual(argv[argv.index("--attempt") + 1], child.attempt_id)
+                self.assertNotIn("--all", argv)
+
+    def test_attention_is_fresh_scoped_diagnostic_not_a_completion_record(self):
+        identity = {"parent_attempt_id": "att-parent"}
+        child = {"attempt_id": "att-child", "readiness": "pending", "reason": "process-unverifiable"}
+        with mock.patch.object(JOIN.time, "time", return_value=1000):
+            JOIN.write_join_observation(self.jobs, identity, [child], elapsed=31, recovery_results={})
+        record = JOIN.read_join_observation(self.jobs, identity, now=1001)
+        self.assertEqual(record["state"], "attention")
+        self.assertFalse(self.jobs.exists())
+        self.assertEqual(JOIN.read_join_observation(self.jobs, identity, now=1121), {})
+        self.assertEqual(JOIN.read_join_observation(self.jobs, {"parent_attempt_id": "att-other"}, now=1001), {})
+        child["readiness"] = "ready"
+        with mock.patch.object(JOIN.time, "time", return_value=1002):
+            JOIN.write_join_observation(self.jobs, identity, [child], elapsed=33, recovery_results={})
+        self.assertEqual(JOIN.read_join_observation(self.jobs, identity, now=1003)["state"], "ready")
+
+    def test_display_write_failure_does_not_terminate_supervision(self):
+        self.jobs.write_text(self.receiptless_row())
+        with mock.patch.object(JOIN, "recover_receiptless_attempt", return_value={"closed": False}), \
+             mock.patch.object(JOIN, "write_join_observation", side_effect=OSError("read-only")):
+            receipt = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent", timeout=0,
+                                      recover_receiptless=True)
+        self.assertEqual(receipt["state"], "timeout")
+        self.assertEqual(receipt["observation_error"], "join-observation-write-failed")
+
     def marker_delivery_fixture(self, attempt: str = "att-delivery") -> str:
         evidence = self.root / "execute.md"
         evidence.write_text("fixture evidence\n", encoding="utf-8")

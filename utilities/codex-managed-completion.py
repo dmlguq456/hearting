@@ -326,6 +326,7 @@ def run_join(args: argparse.Namespace, attempts: set[str]) -> dict[str, Any]:
     command += [
         "--interval", str(args.interval),
         "--timeout", str(args.timeout),
+        "--recover-receiptless",
     ]
     for attempt_id in sorted(attempts):
         command += ["--attempt-id", attempt_id]

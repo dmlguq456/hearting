@@ -779,129 +779,56 @@ def fake_run_result(returncode, stdout):
     )
 
 
-class RuntimeReceiptlessCancelTest(unittest.TestCase):
-    """Unit-level coverage for the B7 sibling helper (plan SS3.2 B7 / SS9.9)."""
+class SharedReceiptlessRecoveryTest(unittest.TestCase):
+    """The former Codex-only recovery now belongs to the shared join."""
 
     def setUp(self):
-        self.module = load_supervisor_module()
-        self.args = argparse.Namespace(
-            jobs="/fixture/jobs.log", parent_attempt_id=PARENT
-        )
+        load_supervisor_module()
+        import dispatch_completion_join
+        self.module = dispatch_completion_join
+        self.child = argparse.Namespace(attempt_id="att-child")
 
-    def test_closes_and_emits_once_per_proven_attempt(self):
-        # S-1
-        record = json.dumps({
+    def response(self, *, closed=0, reason="namespace-not-extinct", digest=None):
+        return fake_run_result(0, json.dumps({
             "classifier_source": "automatic-receipt-unavailable-v1",
-            "decisions": [{
-                "closed": 1,
-                "receipt_digest": "sha256:" + "a" * 64,
-                "reason": "automatic-cancelled-receipt-unavailable",
-            }],
-        })
-        emitted = []
-        with mock.patch.object(
-            self.module, "subprocess"
-        ) as fake_subprocess, mock.patch.object(
-            self.module, "emit", side_effect=lambda payload: emitted.append(payload)
-        ):
-            fake_subprocess.run.return_value = fake_run_result(0, record)
-            fake_subprocess.TimeoutExpired = subprocess.TimeoutExpired
-            closed = self.module.runtime_receiptless_cancel(self.args, {"att-child"})
-        self.assertEqual(closed, {"att-child"})
-        self.assertEqual(fake_subprocess.run.call_count, 1)
-        cancelled = [e for e in emitted if e["type"] == "dispatch.supervisor.receiptless-cancelled"]
-        self.assertEqual(len(cancelled), 1)
-        self.assertEqual(cancelled[0]["attempt_id"], "att-child")
-        self.assertEqual(cancelled[0]["receipt_digest"], "sha256:" + "a" * 64)
+            "decisions": [{"attempt_id": "att-child", "closed": closed,
+                           "reason": reason, "receipt_digest": digest}],
+        }))
 
-    def test_only_new_attempts_ever_reach_the_exact_attempt_argv(self):
-        # S-2
-        record = json.dumps({
-            "classifier_source": "automatic-receipt-unavailable-v1",
-            "decisions": [{"closed": 0, "reason": "namespace-not-extinct"}],
-        })
-        calls = []
-        def fake_run(command, **kwargs):
-            calls.append(command)
-            return fake_run_result(0, record)
-        with mock.patch.object(self.module, "subprocess") as fake_subprocess, \
-             mock.patch.object(self.module, "emit"):
-            fake_subprocess.run.side_effect = fake_run
-            fake_subprocess.TimeoutExpired = subprocess.TimeoutExpired
-            self.module.runtime_receiptless_cancel(self.args, {"att-only-this-one"})
-        self.assertEqual(len(calls), 1)
-        self.assertIn("--attempt", calls[0])
-        argv_after_attempt = calls[0][calls[0].index("--attempt") + 1]
-        self.assertEqual(argv_after_attempt, "att-only-this-one")
-        self.assertNotIn("--all", calls[0])
+    def test_exact_proven_closure_and_scope(self):
+        with mock.patch.object(self.module.subprocess, "run", return_value=self.response(
+                closed=1, digest="sha256:" + "a" * 64)) as run:
+            result = self.module.recover_receiptless_attempt(Path("/fixture/jobs.log"), self.child)
+        self.assertTrue(result["closed"])
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--attempt") + 1], "att-child")
+        self.assertNotIn("--all", command)
+        self.assertEqual(run.call_args.kwargs["timeout"], 10)
 
-    def test_no_event_for_an_ordinary_not_eligible_result(self):
-        # S-3
-        record = json.dumps({
-            "classifier_source": "automatic-receipt-unavailable-v1",
-            "decisions": [{"closed": 0, "reason": "terminal-envelope-valid"}],
-        })
-        emitted = []
-        with mock.patch.object(self.module, "subprocess") as fake_subprocess, \
-             mock.patch.object(
-                 self.module, "emit", side_effect=lambda payload: emitted.append(payload)
-             ):
-            fake_subprocess.run.return_value = fake_run_result(0, record)
-            fake_subprocess.TimeoutExpired = subprocess.TimeoutExpired
-            closed = self.module.runtime_receiptless_cancel(self.args, {"att-child"})
-        self.assertEqual(closed, set())
-        self.assertEqual(emitted, [])
+    def test_unproven_and_live_rows_are_not_closed(self):
+        for reason in ("process-alive", "namespace-not-extinct", "namespace-observation-unavailable"):
+            with self.subTest(reason=reason), mock.patch.object(self.module.subprocess, "run",
+                    return_value=self.response(reason=reason)):
+                result = self.module.recover_receiptless_attempt(Path("/fixture/jobs.log"), self.child)
+            self.assertFalse(result["closed"])
+            self.assertEqual(result["reason"], reason)
 
-    def test_repeated_call_over_an_already_cancelled_child_is_idempotent(self):
-        # S-4
-        record = json.dumps({
-            "classifier_source": "automatic-receipt-unavailable-v1",
-            "decisions": [{
-                "closed": 1,
-                "receipt_digest": "sha256:" + "b" * 64,
-                "reason": "automatic-cancelled-receipt-unavailable",
-            }],
-        })
-        with mock.patch.object(self.module, "subprocess") as fake_subprocess, \
-             mock.patch.object(self.module, "emit"):
-            fake_subprocess.run.return_value = fake_run_result(0, record)
-            fake_subprocess.TimeoutExpired = subprocess.TimeoutExpired
-            first = self.module.runtime_receiptless_cancel(self.args, {"att-child"})
-            second = self.module.runtime_receiptless_cancel(self.args, {"att-child"})
-        self.assertEqual(first, {"att-child"})
-        self.assertEqual(second, {"att-child"})
+    def test_missing_proof_and_malformed_output_are_not_closure(self):
+        for response in (self.response(closed=1), fake_run_result(1, "broken"),
+                         fake_run_result(0, "[]")):
+            with self.subTest(response=response), mock.patch.object(self.module.subprocess, "run", return_value=response):
+                result = self.module.recover_receiptless_attempt(Path("/fixture/jobs.log"), self.child)
+            self.assertFalse(result["closed"])
+            self.assertEqual(result["reason"], "recovery-process-failed")
 
-    def test_non_zero_exit_or_unparseable_stdout_is_skipped_not_closed(self):
-        # part of S-4/S-5 coverage: a process failure is never a close
-        emitted = []
-        with mock.patch.object(self.module, "subprocess") as fake_subprocess, \
-             mock.patch.object(
-                 self.module, "emit", side_effect=lambda payload: emitted.append(payload)
-             ):
-            fake_subprocess.run.return_value = fake_run_result(1, "not-json")
-            fake_subprocess.TimeoutExpired = subprocess.TimeoutExpired
-            closed = self.module.runtime_receiptless_cancel(self.args, {"att-child"})
-        self.assertEqual(closed, set())
-        skipped = [e for e in emitted if e["type"] == "dispatch.supervisor.receiptless-cancel-skipped"]
-        self.assertEqual(len(skipped), 1)
-        self.assertEqual(skipped[0]["attempt_id"], "att-child")
-
-    def test_repark_exhaustion_still_raises_join_timeout_repark_exceeded(self):
-        # S-5 (regression): existing exhaustion test is preserved in the
-        # end-to-end class below (test_live_unresolved_child_still_raises);
-        # this asserts the new helper does not swallow that raise when it is
-        # itself part of the repark loop -- a runtime_receiptless_cancel call
-        # that finds nothing eligible must never suppress the bound.
-        record = json.dumps({
-            "classifier_source": "automatic-receipt-unavailable-v1",
-            "decisions": [{"closed": 0, "reason": "process-alive"}],
-        })
-        with mock.patch.object(self.module, "subprocess") as fake_subprocess, \
-             mock.patch.object(self.module, "emit"):
-            fake_subprocess.run.return_value = fake_run_result(0, record)
-            fake_subprocess.TimeoutExpired = subprocess.TimeoutExpired
-            closed = self.module.runtime_receiptless_cancel(self.args, {"att-child"})
-        self.assertEqual(closed, set())
+    def test_second_ineligible_call_does_not_invent_another_closure(self):
+        with mock.patch.object(self.module.subprocess, "run", side_effect=[
+                self.response(closed=1, digest="sha256:" + "b" * 64),
+                self.response(reason="attempt-already-terminal")]):
+            first = self.module.recover_receiptless_attempt(Path("/fixture/jobs.log"), self.child)
+            second = self.module.recover_receiptless_attempt(Path("/fixture/jobs.log"), self.child)
+        self.assertTrue(first["closed"])
+        self.assertFalse(second["closed"])
 
 
 class TypedReceiptStageAdvanceNegotiationTest(unittest.TestCase):

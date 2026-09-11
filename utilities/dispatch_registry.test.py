@@ -1260,6 +1260,21 @@ class RegistryTest(unittest.TestCase):
   self.assertEqual(applied["decisions"][0]["reason"],"namespace-not-extinct")
   self.assertIn("\topen\t",self.jobs.read_text())
 
+ def test_unreadable_namespace_reports_missing_observation_without_closing(self):
+  module=self.load_registry_module("namespace_observation_unavailable")
+  attempt="att-observer-unavailable"
+  self.jobs.write_text(self.cancellation_row(attempt))
+  before=self.jobs.read_bytes()
+  with mock.patch.object(module,"observer_namespace_extinct",return_value="unverifiable"), \
+       mock.patch.object(module,"prove_attempt_quiescence") as prove, \
+       contextlib.redirect_stdout(io.StringIO()) as stream:
+   module.automatic_cancel_receiptless(module.read_rows(self.jobs),self.cancellation_args(attempt))
+  applied=json.loads(stream.getvalue())
+  self.assertEqual(applied["closed"],0)
+  self.assertEqual(applied["decisions"][0]["reason"],"namespace-observation-unavailable")
+  prove.assert_not_called()
+  self.assertEqual(self.jobs.read_bytes(),before)
+
  def test_automatic_extinct_and_envelope_absent_closes_with_receipt(self):
   # R-2
   module=self.load_registry_module("r2_automatic_extinct")

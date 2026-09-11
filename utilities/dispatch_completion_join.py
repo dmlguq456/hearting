@@ -28,6 +28,7 @@ from typing import Callable
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
+    AUTOMATIC_RECEIPTLESS_CLASSIFIER,
     SUBSESSION_NOTE,
     SUBSESSION_TERMINAL_CLASSIFIER,
     SUBSESSION_CHAIN_REFUSAL_CLASSIFIER,
@@ -2819,6 +2820,89 @@ def _liveness_state(
     raise JoinContractError("liveness-contract-failed")
 
 
+def join_observation_path(jobs: Path, identity: dict[str, str]) -> Path:
+    key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return jobs.resolve().parent / "join-observations" / f"{key}.json"
+
+
+def read_join_observation(jobs: Path, identity: dict[str, str], *, now: float | None = None) -> dict:
+    """Read a fresh exact-parent diagnostic; it never grants completion."""
+    path = join_observation_path(jobs, identity)
+    try:
+        if path.is_symlink() or path.stat().st_size > MAX_STATE_BYTES:
+            return {}
+        value = json.loads(path.read_text(encoding="utf-8"))
+        age = (time.time() if now is None else now) - value["observed_at"]
+        if (value.get("schema_version") != 1 or value.get("identity") != identity
+                or not 0 <= age <= 120 or value.get("state") not in {"waiting", "attention", "ready"}
+                or not isinstance(value.get("children"), list)):
+            return {}
+        return value
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+
+
+def write_join_observation(jobs: Path, identity: dict[str, str], children: list[dict],
+                           *, elapsed: float, recovery_results: dict) -> None:
+    """Publish bounded diagnostics separately from the completion receipt."""
+    pending = [child for child in children if child["readiness"] == "pending"]
+    attention = elapsed >= 30 and any(child["reason"] == "process-unverifiable" for child in pending)
+    value = {"schema_version": 1, "identity": identity, "observed_at": time.time(),
+             "state": "attention" if attention else ("waiting" if pending else "ready"),
+             "elapsed_seconds": round(elapsed, 1),
+             "pending_count": len(pending),
+             "children": [{"attempt_id": child["attempt_id"], "reason": child["reason"],
+                           "recovery_reason": recovery_results.get(child["attempt_id"], {}).get("reason", "")}
+                          for child in pending[:16]]}
+    path = join_observation_path(jobs, identity)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def recover_receiptless_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
+    """Ask the existing proof authority to settle one exact receiptless row.
+
+    A failed observation never grants cancellation. The registry helper owns
+    proof, revalidation, and closure; the join only schedules the bounded check.
+    """
+    command = [
+        sys.executable, str(ROOT / "utilities" / "dispatch-registry.py"),
+        "reconcile", "--attempt", row.attempt_id,
+        "--automatic-cancel-receiptless", "--apply",
+        "--cancellation-wait", "0", "--jobs", str(jobs),
+    ]
+    try:
+        result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=10, check=False)
+        record = json.loads(result.stdout)
+        decisions = record.get("decisions")
+        if (result.returncode != 0
+                or record.get("classifier_source") != AUTOMATIC_RECEIPTLESS_CLASSIFIER
+                or not isinstance(decisions, list) or len(decisions) != 1
+                or decisions[0].get("attempt_id") != row.attempt_id):
+            raise ValueError("recovery-contract-invalid")
+        decision = decisions[0]
+        closed = decision.get("closed") == 1
+        if closed and not str(decision.get("receipt_digest") or "").startswith("sha256:"):
+            raise ValueError("recovery-proof-missing")
+        return {"attempt_id": row.attempt_id, "closed": closed,
+                "reason": str(decision.get("reason") or "recovery-unavailable")[:160]}
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.TimeoutExpired):
+        return {"attempt_id": row.attempt_id, "closed": False,
+                "reason": "recovery-process-failed"}
+
+
 def _join_snapshot(
     *,
     initial: list[ChildRow],
@@ -2829,6 +2913,8 @@ def _join_snapshot(
     liveness_command: list[str] | None,
     liveness_probe_timeout: float,
     env: dict[str, str] | None,
+    recovery: Callable[[ChildRow], dict[str, object]] | None = None,
+    observation_jobs: Path | None = None,
 ) -> dict[str, object]:
     """Join one immutable exact-attempt snapshot."""
 
@@ -2845,11 +2931,17 @@ def _join_snapshot(
         }
     snapshot = {row.attempt_id for row in initial}
     started = time.monotonic()
+    last_recovery: dict[str, float] = {}
+    recovery_results: dict[str, dict[str, object]] = {}
+    last_observation = float("-inf")
+    last_signature = ""
+    observation_error = ""
 
     while True:
         rows = refresh(snapshot)
         children: list[dict[str, str]] = []
         pending = False
+        recovered = False
         for row in rows:
             observed = observed_attempt_liveness(
                 row.status,
@@ -2913,6 +3005,16 @@ def _join_snapshot(
                         pending = True
             else:
                 raise JoinContractError("owned-row-status-invalid")
+            if (recovery is not None and readiness == "pending"
+                    and reason == "process-unverifiable"
+                    and row.status in OPEN_STATES
+                    and row.metadata.get("registered_worker") == "1"
+                    and row.metadata.get("pid_scope") == "namespace-local"
+                    and time.monotonic() - last_recovery.get(row.attempt_id, float("-inf")) >= 30):
+                last_recovery[row.attempt_id] = time.monotonic()
+                outcome = recovery(row)
+                recovery_results[row.attempt_id] = outcome
+                recovered = recovered or outcome.get("closed") is True
             children.append(
                 {
                     "attempt_id": row.attempt_id,
@@ -2925,6 +3027,22 @@ def _join_snapshot(
                     ),
                 }
             )
+        if recovered:
+            # Re-read the canonical rows and all process evidence. The helper's
+            # exit code or JSON alone never makes a child ready.
+            continue
+        signature = json.dumps(children, sort_keys=True)
+        elapsed = time.monotonic() - started
+        if observation_jobs is not None and (signature != last_signature
+                or time.monotonic() - last_observation >= 30):
+            try:
+                write_join_observation(observation_jobs, identity, children,
+                                       elapsed=elapsed, recovery_results=recovery_results)
+                observation_error = ""
+            except OSError:
+                # A display record never owns the child's lifetime or verdict.
+                observation_error = "join-observation-write-failed"
+            last_signature, last_observation = signature, time.monotonic()
         if not pending:
             return {
                 "schema_version": SCHEMA_VERSION,
@@ -2941,6 +3059,8 @@ def _join_snapshot(
                 "state": "timeout",
                 **identity,
                 "children": children,
+                "recovery_diagnostics": list(recovery_results.values()),
+                "observation_error": observation_error,
             }
         time.sleep(interval)
 
@@ -2954,6 +3074,7 @@ def join_batch(
     timeout: float = 3600.0,
     liveness_command: list[str] | None = None,
     env: dict[str, str] | None = None,
+    recover_receiptless: bool = False,
 ) -> dict[str, object]:
     """Join one immutable child batch sealed to an exact parent attempt."""
 
@@ -2967,6 +3088,8 @@ def join_batch(
         liveness_command=liveness_command,
         liveness_probe_timeout=30.0,
         env=env,
+        recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
+        observation_jobs=jobs if recover_receiptless else None,
     )
 
 
@@ -2980,6 +3103,7 @@ def join_session_batch(
     timeout: float = 540.0,
     liveness_command: list[str] | None = None,
     env: dict[str, str] | None = None,
+    recover_receiptless: bool = False,
 ) -> dict[str, object]:
     """Join one exact batch sealed to an interactive parent session."""
 
@@ -3003,6 +3127,8 @@ def join_session_batch(
         liveness_command=liveness_command,
         liveness_probe_timeout=5.0,
         env=env,
+        recovery=(lambda row: recover_receiptless_attempt(jobs, row)) if recover_receiptless else None,
+        observation_jobs=jobs if recover_receiptless else None,
     )
 
 
@@ -3023,6 +3149,8 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--interval", type=float, default=2.0)
     value.add_argument("--timeout", type=float, default=3600.0)
     value.add_argument("--liveness-command")
+    value.add_argument("--recover-receiptless", action="store_true",
+                       help="run bounded exact-proof recovery while joining owned children")
     return value
 
 
@@ -3056,6 +3184,7 @@ def main(argv: list[str] | None = None) -> int:
                     set(args.attempt_id) if args.attempt_id else None
                 ),
                 parent_completion_delivery=args.parent_completion_delivery,
+                recover_receiptless=args.recover_receiptless,
                 interval=args.interval,
                 timeout=args.timeout,
                 liveness_command=liveness,
@@ -3064,6 +3193,7 @@ def main(argv: list[str] | None = None) -> int:
             receipt = join_batch(
                 jobs=Path(args.jobs),
                 parent_attempt_id=args.parent_attempt_id or "",
+                recover_receiptless=args.recover_receiptless,
                 expected_attempts=(
                     set(args.attempt_id) if args.attempt_id else None
                 ),

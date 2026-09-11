@@ -43,7 +43,7 @@ from dispatch_contract import (  # noqa: E402
     resolve_agent_home,
     process_table_scan_scope,
 )
-from dispatch_completion_join import read_supervisor_phase_state  # noqa: E402
+from dispatch_completion_join import read_supervisor_phase_state, read_join_observation  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 
 try:  # W7D read-side layout resolver; absent on a pre-cutover checkout.
@@ -922,6 +922,15 @@ def _dispatch_liveness(job, now, track=True, codex_index=None):
     elif common_observation and common_observation.state == "parked-supervised":
         job.stage = "parked-supervised"
         job.note = "parked-supervised"
+        if registry_path and job.attempt_id:
+            observation = read_join_observation(
+                Path(registry_path), {"parent_attempt_id": job.attempt_id}, now=now
+            )
+            if observation.get("state") == "attention":
+                job.stage = "supervision-attention"
+                job.note = "process-unverifiable"
+                job.state_evidence = {**evidence, "join_observation": observation}
+                return "blocked"
     return state
 
 

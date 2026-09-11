@@ -943,8 +943,11 @@ def _receiptless_namespace_cancel_reason(row, args):
         return "observer-namespace-unavailable"
     if meta.get("pid_observer_ns") in {None, "", observer_namespace}:
         return "namespace-not-foreign"
-    if observer_namespace_extinct(meta) != "extinct":
+    namespace_state = observer_namespace_extinct(meta)
+    if namespace_state == "present":
         return "namespace-not-extinct"
+    if namespace_state != "extinct":
+        return "namespace-observation-unavailable"
     if _marker_backed_repair(row, args.agent_home, args.jobs):
         return "completion-marker-present"
     terminal = inspect_terminal_attempt(
