@@ -22,6 +22,7 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).with_name("dispatch-owner-rewake.py")
+ROOT = MODULE_PATH.parents[1]
 # A holder that is provably dead *from this process's own PID namespace*:
 # pid 4194304 is above Linux's pid_max, so `/proc/<pid>` never exists, and
 # the namespace is ours so the hook may judge it (a holder recorded from
@@ -125,6 +126,22 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         self.assertEqual(launch.attempt_id, "att-owner-1")
         self.assertEqual(launch.jobs, self.jobs)
         self.assertEqual(launch.session_id, "session-1")
+
+    def test_session_owner_rows_accepts_depth1_review_and_rejects_registry_negatives(self) -> None:
+        self.jobs.write_text(self.row(worker_type="review"), encoding="utf-8")
+        self.assertEqual(
+            [attempt_id for attempt_id, _age in rewake._session_owner_rows(self.jobs, "session-1")],
+            ["att-owner-1"],
+        )
+        for key, value in (
+            ("dispatch_depth", "2"),
+            ("parent_completion_delivery", "codex-stop-hook"),
+            ("launch_claimed", "0"),
+            ("launch_started", "0"),
+        ):
+            with self.subTest(key=key):
+                self.jobs.write_text(self.row(worker_type="review", **{key: value}), encoding="utf-8")
+                self.assertEqual(rewake._session_owner_rows(self.jobs, "session-1"), [])
 
     def test_exact_successful_quick_dispatch_node_start_is_armed(self) -> None:
         payload = self.payload()
@@ -2372,6 +2389,40 @@ class GateCloseRearmTest(GateCarrierTest):
         self.assertIn("armed=registry-rearm", stderr.getvalue())
         ledger = json.loads(rewake.arm_path(self.jobs, "att-gate-owner").read_text(encoding="utf-8"))
         self.assertEqual(ledger["state"], "ended")
+
+
+class Depth1WorkerTypeProjectionTest(unittest.TestCase):
+    def test_only_owner_frame_review_are_depth1(self):
+        for worker_type in ("owner", "frame", "review"):
+            self.assertTrue(rewake._worker_type_is_depth1(worker_type))
+        for worker_type in ("stage", "dev/backend", ""):
+            self.assertFalse(rewake._worker_type_is_depth1(worker_type))
+        self.assertTrue(rewake._worker_type_is_depth1({"review", "other"}))
+        self.assertFalse(rewake._worker_type_is_depth1({"stage", "other"}))
+
+    def test_depth1_projection_is_not_duplicated_in_adapters(self):
+        for adapter in ("claude", "codex", "opencode"):
+            source = (ROOT / "adapters" / adapter / "bin" / "dispatch-headless.py").read_text(encoding="utf-8")
+            self.assertNotIn("def _worker_type_is_depth1", source)
+            self.assertNotIn("DEPTH1_WORKER_TYPES", source)
+
+    def test_stdout_review_worker_uses_the_same_depth_one_gate(self):
+        payload = {
+            "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "session_id": "session-1",
+            "tool_input": {"command": "python3 utilities/dispatch-headless.py --start"},
+            "tool_response": {"stdout": "\n".join((
+                "check=ok", "status=start", "dispatch_depth=1",
+                "worker_type=review", "parent_completion_delivery=claude-parent-runtime",
+                "registered=1", "started=1", "attempt_id=att-review",
+                "parent_session_id=session-1", "job_registry=/tmp/jobs.log",
+            ))},
+        }
+        with mock.patch.object(rewake, "_trusted_jobs", return_value=Path("/tmp/jobs.log")), \
+                mock.patch.object(rewake, "_validated_jobs", return_value=Path("/tmp/jobs.log")):
+            launch = rewake.parse_launch(payload)
+        self.assertIsNotNone(launch)
+        self.assertEqual(launch.attempt_id, "att-review")
 
 
 if __name__ == "__main__":

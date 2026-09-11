@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-import argparse,importlib.util,json,os,subprocess,sys,tempfile,unittest
+import argparse,importlib.util,io,json,os,subprocess,sys,tempfile,types,unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 ROOT=Path(__file__).resolve().parents[3]
 S=importlib.util.spec_from_file_location("route",ROOT/"utilities/capability-route.py"); R=importlib.util.module_from_spec(S); S.loader.exec_module(R)
 WH_S=importlib.util.spec_from_file_location("opencode_dispatch_headless",Path(__file__).with_name("dispatch-headless.py")); WH=importlib.util.module_from_spec(WH_S); WH_S.loader.exec_module(WH)
+from dispatch_contract import ROUTE_IDENTITY_METADATA_KEYS
 
 
 def isolated_dispatch_env(**updates):
@@ -292,6 +294,309 @@ class OpenCodePermissionDefault(unittest.TestCase):
             for node in ("setup", "media", "report", "independent-verify", "sync"):
                 with self.subTest(node=node): self.assertIsNone(WH.resolve_report_bundle_root(str(route), node))
             self.assertIsNone(WH.resolve_report_bundle_root(None, "publish"))
+
+
+class ForegroundReviewStartPathTest(unittest.TestCase):
+    def setUp(self):
+        # This suite exercises admission and watcher ordering, not a user's
+        # installed runtime. Keep that external readiness boundary isolated.
+        projection = mock.patch.object(WH, "check_runtime_projection", return_value=0)
+        projection.start()
+        self.addCleanup(projection.stop)
+
+    def _owner_route_fixture(self, worktree, artifacts):
+        gate = {
+            "spec_read": {"satisfied": True, "source": "opencode-fixture"},
+            "drift_verdict": "within-spec",
+            "workflow_mode": "tracked",
+            "artifact_guard": {"satisfied": True, "source": "opencode-fixture"},
+        }
+        dispatch = {"tuples": [{
+            "parent_harness": "opencode", "parent_transport": "headless",
+            "parent_sandbox": "adapter-default", "child_harness": "opencode",
+            "launch_authority": "conductor", "status": "supported",
+            "probe_source": "opencode-fixture", "probe_time": "2026-07-16T00:00:00Z",
+            "failure_class": "", "checked_worktree": str(worktree.resolve()),
+            "failure_scope": "none", "codex_command": "not-applicable",
+            "retry_on_isolated_worktree": 0,
+        }], "native_subagent": []}
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(artifacts.parent / "jobs.log")}, clear=False):
+            route = R.compile_route(
+                "autopilot-code", "debug", "standard", worktree, artifacts,
+                signals=["shared-contract"], transport="headless", tracking="tracked",
+                tracked_gate_evidence=gate, dispatch_evidence=dispatch,
+            )
+        path = artifacts / "owner-route.json"
+        path.write_text(json.dumps(route), encoding="utf-8")
+        return path, route
+
+    def test_real_start_waits_seals_then_launches_reaper(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); worktree = root / "worktree"; worktree.mkdir()
+            subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+            subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+            (worktree / "README").write_text("isolated\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(worktree), "add", "README"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "fixture"], check=True)
+            jobs = root / "jobs.log"; artifacts = root / "artifacts"; artifacts.mkdir()
+            environment = isolated_dispatch_env(
+                AGENT_DISPATCH_JOBS=str(jobs), AGENT_DISPATCH_PARENT_SESSION_ID="session-test",
+                AGENT_DISPATCH_CURRENT_HARNESS="claude", AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                AGENT_DISPATCH_CURRENT_SANDBOX="default", AGENT_DISPATCH_CALLER_HARNESS="claude",
+                AGENT_DISPATCH_OWNER_HARNESS="claude", CODEX_THREAD_ID="", CODEX_SESSION_ID="",
+            )
+            order = []; seal_token = object()
+            def seal(*args, **kwargs):
+                order.append("seal"); self.assertEqual(kwargs, {"exit_code": 0, "failure": "", "group_empty": True})
+                metadata = next(
+                    WH.parse_registry_metadata(line.split("\t", 5)[5])
+                    for line in jobs.read_text(encoding="utf-8").splitlines()
+                    if "attempt_id=att-opencode-foreground" in line
+                )
+                self.assertEqual(args[1], metadata["attempt_id"])
+                self.assertEqual(str(args[2]), metadata["pid"])
+                self.assertEqual(str(args[3]), metadata["pid_start"])
+                self.assertEqual(str(args[4]), metadata["pgid"])
+                return seal_token
+            def wait(*_args, **_kwargs):
+                order.append("wait"); return types.SimpleNamespace(exit_code=0, failure="", group_empty=True)
+            def reap(*args, **kwargs):
+                order.append("reap"); self.assertIs(kwargs["foreground_seal"], seal_token)
+                self.assertEqual(args[1], "att-opencode-foreground")
+                return 4242
+            real_annotate = WH.annotate_attempt_row
+            def annotate(jobs_path, attempt_id, values):
+                if "reap_watch" in values: order.append("annotate")
+                return real_annotate(jobs_path, attempt_id, values)
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(WH, "resolve_artifact_root", return_value=str(artifacts)), \
+                    mock.patch.object(WH.shutil, "which", return_value="/bin/runtime"), \
+                    mock.patch.object(WH, "attach_summary_owner", return_value={}), \
+                    mock.patch.object(WH, "shell_command", return_value="true"), \
+                    mock.patch.object(WH, "wait_governor_reservation_claim", return_value={}), \
+                    mock.patch.object(WH, "wait_foreground", side_effect=wait), \
+                    mock.patch.object(WH, "seal_foreground_result", side_effect=seal) as seal_call, \
+                    mock.patch.object(WH, "launch_reap_watch", side_effect=reap) as reap_call, \
+                    mock.patch.object(WH, "annotate_attempt_row", side_effect=annotate), \
+                    mock.patch.object(WH.subprocess, "check_output", wraps=WH.subprocess.check_output) as git_read:
+                result = WH.main([
+                    "dispatch-headless.py", "--start", "--worktree", str(worktree), "--jobs", str(jobs),
+                    "--slug", "review", "--capability", "autopilot-code", "--capability-mode", "debug",
+                    "--worker-mode", "dev/backend", "--worker-type", "review", "--launch-lifecycle", "foreground-scoped",
+                    "--model", "test", "--variant", "low",
+                    "--attempt-id", "att-opencode-foreground",
+                ])
+            self.assertEqual(result, 0); self.assertEqual(order, ["wait", "seal", "reap", "annotate"])
+            seal_call.assert_called_once(); reap_call.assert_called_once()
+            self.assertIs(reap_call.call_args.kwargs["foreground_seal"], seal_token)
+            self.assertFalse(any("HEAD" in " ".join(map(str, call.args[0])) for call in git_read.call_args_list))
+            self.assertIn("reap_watch=post-exit,reap_watch_pid=4242", jobs.read_text(encoding="utf-8"))
+
+    def test_commit_failure_preserves_common_outcome_and_closes_exact_row(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); worktree = root / "worktree"; worktree.mkdir()
+            subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+            subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+            (worktree / "README").write_text("isolated\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(worktree), "add", "README"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "fixture"], check=True)
+            jobs = root / "jobs.log"; artifacts = root / "artifacts"; artifacts.mkdir()
+            environment = isolated_dispatch_env(
+                AGENT_DISPATCH_JOBS=str(jobs), AGENT_DISPATCH_PARENT_SESSION_ID="session-test",
+                AGENT_DISPATCH_CURRENT_HARNESS="claude", AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                AGENT_DISPATCH_CURRENT_SANDBOX="default", AGENT_DISPATCH_CALLER_HARNESS="claude",
+                AGENT_DISPATCH_OWNER_HARNESS="claude", CODEX_THREAD_ID="", CODEX_SESSION_ID="",
+            )
+            order = []; seal_token = object()
+            def seal(*args, **kwargs):
+                order.append("seal"); self.assertEqual(kwargs, {"exit_code": 0, "failure": "", "group_empty": True})
+                metadata = next(
+                    WH.parse_registry_metadata(line.split("\t", 5)[5])
+                    for line in jobs.read_text(encoding="utf-8").splitlines()
+                    if "attempt_id=att-opencode-foreground" in line
+                )
+                self.assertEqual(args[1], metadata["attempt_id"])
+                self.assertEqual(str(args[2]), metadata["pid"])
+                self.assertEqual(str(args[3]), metadata["pid_start"])
+                self.assertEqual(str(args[4]), metadata["pgid"])
+                return seal_token
+            def wait(*_args, **_kwargs):
+                order.append("wait"); return types.SimpleNamespace(exit_code=0, failure="", group_empty=True)
+            def reap(*args, **kwargs):
+                order.append("reap"); self.assertIs(kwargs["foreground_seal"], seal_token)
+                self.assertEqual(args[1], "att-opencode-foreground")
+                return 4242
+            real_annotate = WH.annotate_attempt_row
+            def annotate(jobs_path, attempt_id, values):
+                if "reap_watch" in values: order.append("annotate")
+                return real_annotate(jobs_path, attempt_id, values)
+            from dispatch_contract import PostClaimAdmission, ReviewAdmissionCleanup
+            cleanup = ReviewAdmissionCleanup(
+                watchdog_group="empty", fenced_child_group="empty", readiness="closed-removed",
+                review_lease="released", governed_witness="unlocked",
+                payload_marker="may-have-started", status="verified-post-release-reaped")
+            admission = PostClaimAdmission({"review_admission": "prepared"},
+                abort=lambda _reason: cleanup,
+                commit=lambda: (_ for _ in ()).throw(OSError("commit-close-fault")))
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(WH, "acquire_review_lease_after_claim", return_value=admission), \
+                    mock.patch.object(WH, "cancel_governor_reservation", wraps=WH.cancel_governor_reservation) as cancel, \
+                    mock.patch.object(WH, "resolve_artifact_root", return_value=str(artifacts)), \
+                    mock.patch.object(WH.shutil, "which", return_value="/bin/runtime"), \
+                    mock.patch.object(WH, "attach_summary_owner", return_value={}), \
+                    mock.patch.object(WH, "shell_command", return_value="true"), \
+                    mock.patch.object(WH, "wait_governor_reservation_claim", return_value={}), \
+                    mock.patch.object(WH, "wait_foreground", side_effect=wait), \
+                    mock.patch.object(WH, "seal_foreground_result", side_effect=seal) as seal_call, \
+                    mock.patch.object(WH, "launch_reap_watch", side_effect=reap) as reap_call, \
+                    mock.patch.object(WH, "annotate_attempt_row", side_effect=annotate), \
+                    mock.patch.object(WH.subprocess, "check_output", wraps=WH.subprocess.check_output) as git_read:
+                result = WH.main([
+                    "dispatch-headless.py", "--start", "--worktree", str(worktree), "--jobs", str(jobs),
+                    "--slug", "review", "--capability", "autopilot-code", "--capability-mode", "debug",
+                    "--worker-mode", "dev/backend", "--worker-type", "review", "--launch-lifecycle", "foreground-scoped",
+                    "--model", "test", "--variant", "low",
+                    "--attempt-id", "att-opencode-foreground",
+                ])
+            self.assertEqual(result, 73)
+            seal_call.assert_not_called(); reap_call.assert_not_called()
+            cancel.assert_called_once()
+            lines = jobs.read_text().splitlines()
+            self.assertEqual(len(lines), 1)
+            fields = lines[0].split("\t")
+            self.assertEqual(fields[1], "done")
+            metadata = WH.parse_registry_metadata(fields[5])
+            self.assertEqual(metadata["launch_outcome"], "post-release-failed")
+            self.assertEqual(metadata["review_admission"], "commit-failed")
+            self.assertEqual(metadata["review_admission_cleanup"], "verified-post-release-reaped-v1")
+
+    def test_owner_route_keys_are_real_entry_negatives_before_wait_or_seal(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); worktree = root / "worktree"; worktree.mkdir()
+            subprocess.run(["git", "init", "-q", str(worktree)], check=True)
+            subprocess.run(["git", "-C", str(worktree), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "config", "user.name", "Test"], check=True)
+            (worktree / "README").write_text("isolated\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(worktree), "add", "README"], check=True)
+            subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "fixture"], check=True)
+            jobs = root / "jobs.log"; artifacts = root / "artifacts"; artifacts.mkdir()
+            route_file, route = self._owner_route_fixture(worktree, artifacts)
+            environment = isolated_dispatch_env(
+                AGENT_DISPATCH_JOBS=str(jobs), AGENT_DISPATCH_PARENT_SESSION_ID="session-test",
+                AGENT_DISPATCH_CURRENT_HARNESS="opencode", AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                AGENT_DISPATCH_CURRENT_SANDBOX="default", AGENT_DISPATCH_CALLER_HARNESS="opencode",
+                AGENT_DISPATCH_OWNER_HARNESS="opencode", CODEX_THREAD_ID="", CODEX_SESSION_ID="",
+            )
+            for ordinal, key in enumerate(ROUTE_IDENTITY_METADATA_KEYS):
+                with self.subTest(key=key):
+                    env = dict(environment)
+                    extra = []
+                    expected_value = str(route_file) if key == "route_file" else "bound"
+                    if key == "route_file":
+                        extra.extend(["--route-file", str(route_file)])
+                    elif key.startswith("owner_route_"):
+                        pass
+                    elif key.startswith("batch_"):
+                        pass
+                    else:
+                        extra.extend(["--" + key.replace("_", "-"), "bound"])
+                    owner_binding = types.SimpleNamespace(route_file="", route_id="", route_hash="")
+                    if key.startswith("owner_route_"):
+                        setattr(owner_binding, key.removeprefix("owner_"), "bound")
+                    reservation = ({"batch_group": "fixture-group", key: "bound"}
+                                   if key.startswith("batch_") else {})
+
+                    real_claim = WH.claim_attempt_row
+                    real_append = WH.append_job
+                    def append_with_binding(jobs_path, args):
+                        if key.startswith("owner_route_"):
+                            args.owner_route_binding = owner_binding
+                        return real_append(jobs_path, args)
+                    def claim_and_check(jobs_path, attempt_id, row, **kwargs):
+                        metadata = WH.parse_registry_metadata(row.split("\t", 5)[5])
+                        active = [candidate for candidate in ROUTE_IDENTITY_METADATA_KEYS if metadata.get(candidate)]
+                        self.assertEqual(active, [key])
+                        self.assertEqual(metadata[key], expected_value)
+                        claimed_metadata.clear()
+                        claimed_metadata.update(metadata)
+                        return real_claim(jobs_path, attempt_id, row, **kwargs)
+
+                    claimed_metadata = {}
+
+                    patches = [
+                        mock.patch.object(WH, "validate_route_record", return_value=0),
+                        mock.patch.object(WH, "completion_marker_gate"),
+                        mock.patch.object(WH, "reconcile_launch_lifecycle", return_value=types.SimpleNamespace(
+                            requested="detached", effective="detached", reselection="retained-test-scope",
+                            override="absent", metadata=lambda: {},
+                        )),
+                        mock.patch.object(WH, "claim_attempt_row", side_effect=claim_and_check),
+                        mock.patch.object(WH, "append_job", side_effect=append_with_binding),
+                        mock.patch.object(WH, "replica_batch_expectation", return_value=None),
+                        mock.patch.object(WH, "reserve_governor_token", return_value=("token", reservation)),
+                        mock.patch.object(WH, "cancel_governor_reservation"),
+                        mock.patch.object(WH, "wait_governor_reservation_claim", return_value={}),
+                        mock.patch.object(WH, "wait_foreground"),
+                        mock.patch.object(WH, "seal_foreground_result"),
+                        mock.patch("model_profile.selection_receipt", return_value={}),
+                    ]
+                    if key == "route_file":
+                        patches.append(mock.patch.object(WH, "headless_attempt_policy", return_value={
+                            "fallback_hop": "same-harness-headless",
+                            "fallback_ordinal": 0,
+                            "quick": False,
+                            "terminal_attempt_limit": None,
+                            "replacement_attempt_limit": 0,
+                            "replacement_notes": frozenset(),
+                        }))
+                    if key.startswith("owner_route_"):
+                        patches.extend([
+                            mock.patch.object(WH, "binding_from_environment", return_value=owner_binding),
+                            mock.patch.object(WH, "owner_binding_tuple_failure_fields", return_value={}),
+                        ])
+                    with ExitStack() as stack:
+                        stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+                        stack.enter_context(mock.patch.object(WH, "resolve_artifact_root", return_value=str(artifacts)))
+                        stack.enter_context(mock.patch.object(WH.shutil, "which", return_value="/bin/runtime"))
+                        stack.enter_context(mock.patch.object(WH, "attach_summary_owner", return_value={}))
+                        stack.enter_context(mock.patch.object(WH, "shell_command", return_value="true"))
+                        entered = [stack.enter_context(patcher) for patcher in patches]
+                        watcher_call = stack.enter_context(mock.patch.object(WH, "launch_reap_watch"))
+                        result = WH.main([
+                            "dispatch-headless.py", "--start", "--worktree", str(worktree), "--jobs", str(jobs),
+                            "--slug", f"review-{ordinal}", "--capability", "autopilot-code", "--capability-mode", "debug",
+                            "--worker-mode", "dev/backend", "--worker-type", "review", "--launch-lifecycle", "foreground-scoped",
+                            "--model", "test", "--variant", "low", "--attempt-id", f"att-opencode-identity-{ordinal}",
+                            *extra,
+                        ])
+                    self.assertEqual(result, 0)
+                    self.assertEqual(entered[3].call_count, 1)
+                    self.assertEqual(entered[4].call_count, 1)
+                    final_metadata = WH.parse_registry_metadata(
+                        next(
+                            line.split("\t", 5)[5]
+                            for line in jobs.read_text(encoding="utf-8").splitlines()
+                            if f"attempt_id=att-opencode-identity-{ordinal}" in line
+                        )
+                    )
+                    self.assertEqual(
+                        [candidate for candidate in ROUTE_IDENTITY_METADATA_KEYS if final_metadata.get(candidate)],
+                        [key],
+                    )
+                    self.assertEqual(final_metadata[key], expected_value)
+                    self.assertEqual(entered[9].call_count, 0)
+                    self.assertEqual(entered[10].call_count, 0)
+                    watcher_call.assert_called_once()
+                    watcher_args = watcher_call.call_args.args
+                    self.assertEqual(watcher_args[0], jobs)
+                    self.assertEqual(watcher_args[1], f"att-opencode-identity-{ordinal}")
+                    self.assertEqual(str(watcher_args[2]), final_metadata["pid"])
+                    self.assertEqual(str(watcher_args[3]), final_metadata["pid_start"])
+                    self.assertEqual(str(watcher_args[4]), final_metadata["pgid"])
+                    self.assertIsNone(watcher_call.call_args.kwargs.get("foreground_seal"))
+                    self.assertIn("reap_watch=post-exit", jobs.read_text(encoding="utf-8"))
 
 
 class OpenCodeLaunchFenceFailure(unittest.TestCase):

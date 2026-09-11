@@ -13,9 +13,12 @@ from dispatch_contract import (
     ATTEMPT_DESCENDANT_PROOF,
     ATTEMPT_DESCENDANT_RESIDUE_PROOF,
     GROUP_REAP_PROOF,
+    DispatchContractError,
     annotate_attempt_row,
+    launched_attempt_identity,
     annotate_attempt_row_if,
     attempt_scan_namespace_authority,
+    attempt_process_quiescence,
     attempt_tagged_descendants,
     close_attempt_row_if,
     parent_completion_window,
@@ -23,10 +26,15 @@ from dispatch_contract import (
     process_group_observation,
     process_namespace_identity,
     process_start_ticks,
+    foreground_review_eligible,
+    _foreground_outcome_values_from_pipe,
 )
 from codex_dispatch_terminal import terminal_envelope_observed
 from dispatch_completion_join import (
     JoinContractError,
+    _route_free_review_row,
+    apply_exact_route_free_review_classification,
+    classify_exact_route_free_review_outcome,
     close_finished_child,
     close_wrapper_pass,
     exact_attempt_row,
@@ -58,8 +66,10 @@ def attempt_metadata(jobs: Path, attempt_id: str) -> dict[str, str]:
     return record[1] if record is not None else {}
 
 
-def exact_binding(metadata: dict[str, str], args: argparse.Namespace) -> bool:
-    return bool(
+def exact_binding(
+    metadata: dict[str, str], args: argparse.Namespace, raw_pipe: str | None = None
+) -> bool:
+    detached = bool(
         metadata
         and metadata.get("attempt_id") == args.attempt_id
         and metadata.get("pid") == str(args.pid)
@@ -70,6 +80,24 @@ def exact_binding(metadata: dict[str, str], args: argparse.Namespace) -> bool:
         and metadata.get("pid_observer_ns")
         and metadata.get("pid_ns") == metadata.get("pid_observer_ns")
     )
+    if detached:
+        return True
+    if not foreground_review_eligible(
+        metadata,
+        expected_attempt_id=args.attempt_id,
+        expected_pid=args.pid,
+        expected_pid_start=args.pid_start,
+        expected_pgid=args.pgid,
+    ):
+        return False
+    try:
+        return _foreground_outcome_values_from_pipe(
+            raw_pipe if raw_pipe is not None else ",".join(
+                f"{key}={value}" for key, value in metadata.items()
+            )
+        ) is not None
+    except DispatchContractError:
+        return False
 
 
 def record_missing_result_degradation(
@@ -129,8 +157,9 @@ def residue_terminal_basis(fields: list[str], metadata: dict[str, str]) -> str:
 
 
 def watch(args: argparse.Namespace) -> int:
-    metadata = attempt_metadata(args.jobs, args.attempt_id)
-    if not exact_binding(metadata, args):
+    initial = attempt_record(args.jobs, args.attempt_id)
+    metadata = initial[1] if initial is not None else {}
+    if not exact_binding(metadata, args, initial[0][5] if initial else None):
         return 65
     if (
         process_namespace_identity() != metadata.get("pid_observer_ns")
@@ -158,7 +187,7 @@ def watch(args: argparse.Namespace) -> int:
         if record is None:
             return 65
         fields, metadata = record
-        if not exact_binding(metadata, args):
+        if not exact_binding(metadata, args, fields[5]):
             return 65
         group = process_group_observation(args.pgid)
         descendants = attempt_tagged_descendants(metadata)
@@ -208,6 +237,36 @@ def watch(args: argparse.Namespace) -> int:
     )
     if not annotated:
         return 65
+    row = exact_attempt_row(args.jobs, args.attempt_id)
+    if _route_free_review_row(row):
+        try:
+            quiescence = attempt_process_quiescence(row.metadata)
+            classification = classify_exact_route_free_review_outcome(
+                row,
+                jobs=args.jobs,
+                expected_attempt_id=args.attempt_id,
+                expected_pid=args.pid,
+                expected_pid_start=args.pid_start,
+                expected_pgid=args.pgid,
+                quiescence=quiescence,
+            )
+            failure = apply_exact_route_free_review_classification(
+                row, jobs=args.jobs, classification=classification
+            )
+            # A successful process drain is not a committed terminal row.
+            # Re-read even after success, allowing an exact concurrent close
+            # but never treating a CAS or I/O refusal as watcher completion.
+            current = exact_attempt_row(args.jobs, args.attempt_id)
+            if (current.status not in {"done", "killed", "cancelled"}
+                    or launched_attempt_identity(current.raw.split("\t"))
+                    != launched_attempt_identity(row.raw.split("\t"))):
+                print("review-completion-apply-failed: " + (failure or "terminal-row-unverified"), file=sys.stderr)
+                return 65
+            if failure:
+                materialize_after_terminal_close(args.jobs, args.attempt_id)
+        except (DispatchContractError, JoinContractError, OSError):
+            return 65
+        return 0
     # The drain proof is the last moment at which the detached watcher has
     # exact process authority.  If no semantic terminal envelope exists and
     # the row is still open, close the residue as typed missing-result.
@@ -255,7 +314,7 @@ def watch(args: argparse.Namespace) -> int:
             if record is None:
                 return 65
             fields, metadata = record
-            if not exact_binding(metadata, args):
+            if not exact_binding(metadata, args, fields[5]):
                 return 65
             if fields[1] not in {"open", "running"}:
                 return 0  # the conductor's complete won the race

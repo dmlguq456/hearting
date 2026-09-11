@@ -3247,6 +3247,209 @@ class DispatchContractTest(unittest.TestCase):
   self.assertEqual(D.attempt_process_quiescence(identity),
                    D._attempt_process_quiescence_impl(identity))
 
+ def test_post_claim_admission_is_idempotent_and_rejects_commit_after_abort(self):
+  calls=[]
+  cleanup=D.ReviewAdmissionCleanup(
+   watchdog_group="empty", fenced_child_group="empty", readiness="closed-removed",
+   review_lease="never-acquired", governed_witness="unlocked",
+   payload_marker="absent", status="verified-never-launched")
+  admission=D.PostClaimAdmission(
+   {"review_admission":"prepared"},
+   abort=lambda reason: (calls.append(("abort",reason)) or cleanup),
+   commit=lambda: calls.append(("commit", "ok")),
+  )
+  first=admission.abort("fault")
+  self.assertIs(first, cleanup)
+  self.assertIs(admission.abort("duplicate"), cleanup)
+  with self.assertRaises(D.DispatchContractError) as caught:
+   admission.commit()
+  self.assertEqual(caught.exception.reason,"review-admission-commit-after-abort")
+  self.assertEqual(calls,[("abort","fault")])
+
+ def _cleanup_fault_row(self, base, attempt):
+  jobs=Path(base)/"jobs.log"
+  row=(f"2026-07-23T00:00:01Z\topen\t/repo\t/wt\tchild\t{CURRENT},"
+       f"attempt_id={attempt}")
+  self.assertTrue(D.claim_attempt_row(jobs,attempt,row,launch=False))
+  return jobs
+
+ @staticmethod
+ def _cleanup_fault_spawn(gate_fd):
+  return subprocess.Popen(
+   [sys.executable,str(Path(__file__).with_name("launch-fence.py")),
+    "--parent-pid",str(os.getpid()),"--gate-fd",str(gate_fd),"--",
+    "sleep","60"], pass_fds=(gate_fd,), start_new_session=True)
+
+ @staticmethod
+ def _cleanup_record(status="verified-never-launched", lease="released"):
+  return D.ReviewAdmissionCleanup(
+   watchdog_group="empty", fenced_child_group="empty",
+   readiness="closed-removed", review_lease=lease,
+   governed_witness="unlocked",
+   payload_marker=("may-have-started" if status == "verified-post-release-reaped" else "absent"),
+   status=status)
+
+ def test_post_claim_abort_runs_when_registered_group_proof_fails_and_annotates_unverified(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=self._cleanup_fault_row(td,"att-cleanup-group-fault")
+   child=[];abort_calls=[]
+   cleanup=self._cleanup_record()
+   def spawn(gate_fd):
+    proc=self._cleanup_fault_spawn(gate_fd);child.append(proc);return proc
+   admission=D.PostClaimAdmission(
+    {"review_admission":"prepared","invalid":"metadata"},
+    abort=lambda reason: (abort_calls.append(reason) or cleanup),
+    commit=lambda: None)
+   with mock.patch.object(D,"_abort_fenced_launch",return_value=False):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(jobs,"att-cleanup-group-fault",parent_binding=None,spawn=spawn,
+                             post_claim=lambda _identity: admission)
+   self.assertEqual(caught.exception.reason,"attempt-launch-cleanup-unverified")
+   self.assertEqual(abort_calls,["post-claim-metadata-invalid"])
+   meta=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(meta["review_admission"],"aborted")
+   self.assertEqual(meta["review_admission_cleanup"],"unverified")
+   self.assertEqual(meta["launch_claimed"],"1")
+   for proc in child:
+    if proc.poll() is None:proc.kill()
+    proc.wait()
+
+ def test_post_claim_abort_merges_returned_cleanup_after_registered_group_proof(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=self._cleanup_fault_row(td,"att-cleanup-merge")
+   child=[];abort_calls=[]
+   cleanup=self._cleanup_record()
+   def spawn(gate_fd):
+    proc=self._cleanup_fault_spawn(gate_fd);child.append(proc);return proc
+   def mutate(_identity):
+    fields=jobs.read_text().strip().split("\t")
+    fields[1]="done"
+    jobs.write_text("\t".join(fields)+"\n")
+    return D.PostClaimAdmission(
+     {"review_admission":"prepared"},
+     abort=lambda reason: (abort_calls.append(reason) or cleanup),
+     commit=lambda: None)
+   with mock.patch.object(D,"_abort_fenced_launch",return_value=True):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(jobs,"att-cleanup-merge",parent_binding=None,spawn=spawn,
+                             post_claim=mutate)
+   self.assertEqual(caught.exception.reason,"attempt-post-claim-identity-changed")
+   self.assertEqual(abort_calls,["post-claim-record-failed"])
+   meta=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(meta["review_admission"],"aborted")
+   self.assertEqual(meta["review_admission_cleanup"],"verified-lease-released-v1")
+   for proc in child:
+    if proc.poll() is None:proc.kill()
+    proc.wait()
+
+ def test_post_release_commit_failure_merges_cleanup_and_records_terminal_failure(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=self._cleanup_fault_row(td,"att-cleanup-commit")
+   child=[];abort_calls=[]
+   cleanup=self._cleanup_record("verified-post-release-reaped")
+   def spawn(gate_fd):
+    proc=self._cleanup_fault_spawn(gate_fd);child.append(proc);return proc
+   admission=D.PostClaimAdmission(
+    {"review_admission":"prepared"},
+    abort=lambda reason: (abort_calls.append(reason) or cleanup),
+    commit=lambda: (_ for _ in ()).throw(RuntimeError("commit-close-fault")))
+   with mock.patch.object(D,"_abort_fenced_launch",return_value=True):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(jobs,"att-cleanup-commit",parent_binding=None,spawn=spawn,
+                             post_claim=lambda _identity: admission)
+   self.assertEqual(caught.exception.reason,"attempt-post-claim-commit-failed")
+   self.assertEqual(abort_calls,["post-release-commit-failed"])
+   meta=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+   self.assertEqual(meta["review_admission"],"commit-failed")
+   self.assertEqual(meta["review_admission_cleanup"],"verified-post-release-reaped-v1")
+   self.assertEqual(meta["launch_outcome"],"post-release-failed")
+   for proc in child:
+    if proc.poll() is None:proc.kill()
+    proc.wait()
+
+ def test_real_watchdog_commit_close_fault_drains_before_lease_and_outside_jobs_lock(self):
+  import dispatch_lifecycle as lifecycle
+  import review_watchdog
+  import time
+  import signal
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td); attempt="att-real-commit-fault"
+   jobs=self._cleanup_fault_row(td,attempt); marker=base/"grandchild"
+   budget=lifecycle.begin_finite_watchdog(30); holder={}; order=[]
+   code=("import pathlib,subprocess,time; p=subprocess.Popen(['sleep','30'],start_new_session=True); "
+         f"pathlib.Path({str(marker)!r}).write_text(str(p.pid)); time.sleep(30)")
+   def spawn(gate_fd):
+    handle=review_watchdog.launch_review_watchdog(
+     [sys.executable,str(Path(__file__).with_name("launch-fence.py")),
+      "--parent-pid",str(os.getpid()),"--gate-fd",str(gate_fd),"--",sys.executable,"-c",code],
+     gate_fd=gate_fd,budget=budget,attempt_id=attempt,nonce="a"*64)
+    holder["handle"]=handle
+    return handle.process
+   def admission(identity):
+    handle=holder["handle"]; receipt=handle.read_ready(2); child=receipt["child"]
+    def release():
+     self.assertIsNotNone(handle.process.poll())
+     self.assertEqual(D.attempt_tagged_descendants(dict(identity,attempt_id=attempt)).state,"empty")
+     # The production watchdog also seals an outcome through this lock.
+     with Path(str(jobs)+".lock").open("a") as probe:
+      D.fcntl.flock(probe.fileno(),D.fcntl.LOCK_EX|D.fcntl.LOCK_NB)
+     order.append("release"); return True
+    def commit():
+     handle.commit()
+     deadline=time.monotonic()+3
+     while not marker.exists() and time.monotonic()<deadline:time.sleep(.02)
+     self.assertTrue(marker.exists())
+     raise OSError("COMMIT delivered but close failed")
+    return D.PostClaimAdmission(
+     {"review_admission":"prepared","review_fence_pid":str(child["pid"])},
+     abort=lambda _reason:lifecycle._review_cleanup(handle,child=child,lease_acquired=True,
+       lease_release=release,witness_probe=lambda:handle.process.poll() is not None),commit=commit)
+   try:
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(jobs,attempt,parent_binding=None,spawn=spawn,post_claim=admission)
+    self.assertEqual(caught.exception.reason,"attempt-post-claim-commit-failed")
+    self.assertEqual(order,["release"])
+    self.assertEqual(holder["handle"].process.returncode,-signal.SIGTERM)
+    metadata=D.parse_registry_metadata(jobs.read_text().strip().split("\t",5)[5])
+    self.assertEqual(metadata["launch_outcome"],"post-release-failed")
+    self.assertEqual(metadata["review_admission_cleanup"],"verified-post-release-reaped-v1")
+   finally:
+    handle=holder.get("handle")
+    if handle is not None and handle.process.poll() is None:
+     handle.process.terminate();handle.process.wait(timeout=5)
+
+ def test_review_holder_uses_live_process_past_deadline_and_rejects_future_timestamp(self):
+  identity=D.process_launch_identity(os.getpid())
+  nonce="f"*64
+  metadata=dict(identity,attempt_id="att-holder",review_governed_lease=D.REVIEW_GOVERNED_LEASE_KIND,
+               review_governed_lease_nonce=nonce)
+  record={"schema_version":2,"attempt_id":"att-holder","cycle_id":"cyc-holder",
+          "acquired_at":"2020-01-01T00:00:00Z","deadline":"2020-01-01T00:01:00Z",
+          "released_at":None,"expired":False}
+  metadata["review_lease_record_digest"]=D.review_lease_record_digest(record)
+  self.assertEqual(D.review_holder_disposition(record,metadata,Path("/tmp"),now=2_000_000_000).state,"live")
+  future=dict(record,acquired_at="2099-01-01T00:00:00Z",deadline="2099-01-01T00:01:00Z")
+  self.assertEqual(D.review_holder_disposition(future,metadata,Path("/tmp"),now=2_000_000_000).reason,
+                   "lease-acquired-in-future")
+
+ def test_review_holder_uses_flock_only_for_namespace_unverifiable(self):
+  nonce="0"*64
+  metadata={"attempt_id":"att-witness","pid":"1","pid_start":"1","pgid":"1",
+            "pid_ns":"n","pid_observer_ns":"o","review_governed_lease":D.REVIEW_GOVERNED_LEASE_KIND,
+            "review_governed_lease_nonce":nonce}
+  record={"schema_version":2,"attempt_id":"att-witness","cycle_id":"cyc-witness",
+          "acquired_at":"2020-01-01T00:00:00Z","deadline":"2099-01-01T00:01:00Z",
+          "released_at":None,"expired":False}
+  metadata["review_lease_record_digest"]=D.review_lease_record_digest(record)
+  with mock.patch.object(D,"attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("unverifiable","process-namespace-unverifiable")), \
+       mock.patch.object(D,"review_governed_lease_is_held",return_value=True):
+   self.assertEqual(D.review_holder_disposition(record,metadata,Path("/tmp")).state,"live")
+  with mock.patch.object(D,"attempt_governed_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent","process-pid-gone")), \
+       mock.patch.object(D,"review_governed_lease_is_held",return_value=True):
+   self.assertEqual(D.review_holder_disposition(record,metadata,Path("/tmp")).state,"dead")
+
 def extinct_metadata(attempt="att-extinct-fixture"):
  # CURRENT (used by attempt_row()) already carries registered_worker=1.
  return cancellation_metadata(attempt)
@@ -4540,6 +4743,61 @@ class LaunchMismatchAnnotationTest(unittest.TestCase):
                        'reason {"mismatches":{}}', 'reason {"mismatches":[]}',
                        "reason null"):
             self.assertEqual(D.launch_mismatch_annotation(detail), {}, detail)
+
+
+class ForegroundOutcomeSealTest(unittest.TestCase):
+ def _jobs(self, directory, extra=""):
+  jobs=Path(directory)/"jobs.log"
+  jobs.write_text(
+   "2026-09-11T00:00:00Z\topen\t/r\t/w\treview\t"
+   "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+   "execution_surface=registered-headless,registered_worker=1,"
+   "fallback_hop=same-harness-headless,worker_type=review,"
+   "launch_lifecycle=foreground-scoped,attempt_id=att-contract,"
+   "pid=123,pid_start=456,pgid=123,pid_ns=pid:[1],pid_observer_ns=pid:[1]"
+   + extra + "\n", encoding="utf-8")
+  return jobs
+
+ def test_partial_and_seventh_outcome_keys_are_rejected_without_mutation(self):
+  for extra, reason in (
+   (",foreground_outcome_schema=1", "foreground-outcome-partial"),
+   (",foreground_outcome_schema=1,foreground_outcome_ready=1,foreground_extra=x", "foreground-outcome-malformed"),
+  ):
+   with self.subTest(reason=reason), tempfile.TemporaryDirectory() as td:
+    jobs=self._jobs(td, extra)
+    before=jobs.read_bytes()
+    with self.assertRaises(D.DispatchContractError) as ctx:
+     D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=0,failure="",group_empty=True)
+    self.assertEqual(ctx.exception.reason, reason)
+    self.assertEqual(jobs.read_bytes(), before)
+
+ def test_each_route_identity_key_refuses_authority(self):
+  for key in D.ROUTE_IDENTITY_METADATA_KEYS:
+   with self.subTest(key=key), tempfile.TemporaryDirectory() as td:
+    jobs=self._jobs(td, f",{key}=route-value")
+    with self.assertRaises(D.DispatchContractError) as ctx:
+     D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=0,failure="",group_empty=True)
+    self.assertEqual(ctx.exception.reason, "foreground-outcome-ineligible")
+
+ def test_concurrent_identical_seals_converge_and_conflict_preserves_bytes(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs=self._jobs(td)
+   barrier=threading.Barrier(2)
+   results=[]
+   def identical():
+    barrier.wait()
+    try: results.append(D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=0,failure="",group_empty=True))
+    except Exception as exc: results.append(exc)
+   threads=[threading.Thread(target=identical) for _ in range(2)]
+   for thread in threads: thread.start()
+   for thread in threads: thread.join()
+   self.assertEqual(len(results), 2)
+   self.assertTrue(all(isinstance(item, D.SealedForegroundOutcome) for item in results))
+   committed=jobs.read_bytes()
+   with self.assertRaises(D.DispatchContractError) as ctx:
+    D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=7,failure="exit-7",group_empty=True)
+   self.assertEqual(ctx.exception.reason, "foreground-outcome-conflict")
+   self.assertEqual(jobs.read_bytes(), committed)
 
 
 if __name__=="__main__": unittest.main()

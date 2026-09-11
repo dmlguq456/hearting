@@ -1,4 +1,5 @@
 from contextlib import contextmanager, redirect_stdout
+import ast
 from datetime import datetime, timedelta, timezone
 import fcntl
 import importlib.util
@@ -12,12 +13,14 @@ import unittest
 from unittest import mock
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "utilities"))
 import dispatch_contract as D
 import artifact_lifecycle as L
 import artifact_producer as P
+import dispatch_lifecycle as DL
 
 _ROUTE_SPEC = importlib.util.spec_from_file_location(
     "review_binding_route_fixture", PROJECT_ROOT / "utilities/capability-route.py"
@@ -306,7 +309,7 @@ class ReviewOutputBindingTest(unittest.TestCase):
                             worktree=root, artifact_root=root,
                             lease_record=changed,
                         ))
-            self.assertFalse(D.review_output_write_authorized(
+            self.assertTrue(D.review_output_write_authorized(
                 jobs, output_path=output, attempt_id="att-review", cycle_id="cyc-1",
                 producer_id="prod-1", capability="autopilot-code", unit="qa/code-review",
                 worktree=root, artifact_root=root, lease_record=lease,
@@ -614,6 +617,150 @@ class ReviewOutputWrapperBoundaryTest(unittest.TestCase):
             )
             self.assertEqual(created.returncode, 0, created.stdout + created.stderr)
             self.assertEqual(output.read_text(), "namespace-verified\n")
+
+
+class ReviewAdapterWiringParityTest(unittest.TestCase):
+    """The three wrappers consume the same budget/admission contract."""
+
+    HARNESSES = ("claude", "codex", "opencode")
+
+    def _wrapper(self, harness):
+        spec = importlib.util.spec_from_file_location(
+            f"review_wiring_{harness}_{id(self)}",
+            PROJECT_ROOT / f"adapters/{harness}/bin/dispatch-headless.py",
+        )
+        wrapper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(wrapper)
+        return wrapper
+
+    def _args(self, lifecycle):
+        return SimpleNamespace(
+            review_output="/tmp/review-output.md",
+            review_output_binding={
+                "cycle_id": "cyc-review", "output_path": "/tmp/review-output.md",
+            },
+            watchdog_budget=DL.begin_finite_watchdog(
+                12.0, origin_monotonic_ns=10_000, origin_epoch=100.0
+            ),
+            artifact_root=Path("/tmp/review-artifact-root"),
+            attempt_id="att-review-wiring", review_governed_lease_nonce="a" * 64,
+            launch_lifecycle=lifecycle, review_watchdog_handle=object(),
+        )
+
+    def test_each_adapter_routes_detached_and_foreground_to_shared_admission(self):
+        identity = {
+            "pid": "11", "pid_start": "22", "pgid": "11",
+            "pid_ns": "pid:[1]", "pid_observer_ns": "pid:[1]",
+        }
+        for harness in self.HARNESSES:
+            wrapper = self._wrapper(harness)
+            with self.subTest(harness=harness, lifecycle="detached"):
+                args = self._args(DL.DETACHED)
+                with mock.patch.object(wrapper, "acquire_review_admission", return_value="detached") as acquire:
+                    self.assertEqual(
+                        wrapper.acquire_review_lease_after_claim(args, Path("/tmp/jobs"), identity),
+                        "detached",
+                    )
+                kwargs = acquire.call_args.kwargs
+                self.assertIs(kwargs["budget"], args.watchdog_budget)
+                self.assertIs(kwargs["handle"], args.review_watchdog_handle)
+                self.assertEqual(kwargs["nonce"], args.review_governed_lease_nonce)
+                self.assertIs(kwargs["lease_acquire"], wrapper.review_lease_acquire)
+                with self.subTest(probe="witness-unlocked"):
+                    with mock.patch.object(wrapper, "review_governed_lease_is_held", return_value=True):
+                        self.assertFalse(kwargs["witness_probe"]())
+
+            with self.subTest(harness=harness, lifecycle="foreground"):
+                args = self._args(DL.FOREGROUND_SCOPED)
+                with mock.patch.object(wrapper, "acquire_foreground_review_admission", return_value="foreground") as acquire:
+                    self.assertEqual(
+                        wrapper.acquire_review_lease_after_claim(args, Path("/tmp/jobs"), identity),
+                        "foreground",
+                    )
+                kwargs = acquire.call_args.kwargs
+                self.assertIs(kwargs["budget"], args.watchdog_budget)
+                self.assertEqual(kwargs["identity"], identity)
+                self.assertIs(kwargs["lease_acquire"], wrapper.review_lease_acquire)
+
+    def test_each_adapter_has_watchdog_spawn_and_absolute_foreground_budget(self):
+        for harness in self.HARNESSES:
+            path = PROJECT_ROOT / f"adapters/{harness}/bin/dispatch-headless.py"
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            spawn_nodes = [
+                node for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == "spawn_worker"
+            ]
+            self.assertEqual(len(spawn_nodes), 1, harness)
+            spawn_names = {
+                node.func.id for node in ast.walk(spawn_nodes[0])
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            self.assertIn("launch_review_watchdog", spawn_names, harness)
+            all_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+            names = {
+                node.func.id for node in all_calls if isinstance(node.func, ast.Name)
+            }
+            self.assertIn("begin_finite_watchdog", names, harness)
+            wait_calls = [
+                node for node in all_calls
+                if isinstance(node.func, ast.Name) and node.func.id == "wait_foreground"
+            ]
+            self.assertTrue(
+                any(any(keyword.arg == "watchdog_budget" for keyword in call.keywords)
+                    for call in wait_calls),
+                harness,
+            )
+
+    def test_foreground_admission_proves_direct_group_and_external_cleanup(self):
+        with tempfile.TemporaryDirectory() as td:
+            child = subprocess.Popen(["sleep", "0.05"], start_new_session=True)
+            identity = D.process_launch_identity(child.pid)
+            child.wait(timeout=2)
+            released = []
+            budget = DL.begin_finite_watchdog(
+                12.0, origin_monotonic_ns=10_000, origin_epoch=100.0
+            )
+            admission = DL.acquire_foreground_review_admission(
+                budget=budget, identity=identity, root=Path(td),
+                cycle_id="cyc-review", attempt_id="att-review-direct",
+                review_output=Path(td) / "report.md", binding={"binding": "fixture"},
+                jobs=Path(td) / "jobs.log",
+                lease_acquire=lambda *_args, **kwargs: {
+                    "status": "acquired",
+                    "registry_metadata": {
+                        "review_lease_acquired_at": "2026-01-01T00:00:00Z",
+                        "review_lease_deadline": "2026-01-01T00:01:00Z",
+                        "review_lease_record_digest": "sha256:" + "a" * 64,
+                    },
+                },
+                lease_release=lambda: (released.append(True) or {"status": "released"}),
+                witness_probe=lambda: True,
+            )
+            cleanup = admission.abort("direct-group-fault")
+            self.assertEqual(cleanup.status, "verified-never-launched")
+            self.assertEqual(cleanup.fenced_child_group, "empty")
+            self.assertEqual(cleanup.review_lease, "released")
+            self.assertEqual(released, [True])
+
+    def test_foreground_admission_keeps_lease_for_live_or_unobservable_process_set(self):
+        with tempfile.TemporaryDirectory() as td:
+            child = subprocess.Popen(["sleep", "30"], start_new_session=True)
+            identity = D.process_launch_identity(child.pid)
+            try:
+                for namespace in (identity["pid_observer_ns"], "pid:[foreign]"):
+                    release = mock.Mock(return_value={"status": "released"})
+                    admission = DL.acquire_foreground_review_admission(
+                        budget=DL.begin_finite_watchdog(30),
+                        identity={**identity, "pid_observer_ns": namespace}, root=Path(td),
+                        cycle_id="cyc-live", attempt_id="att-live-review",
+                        review_output=Path(td)/"report.md", binding={}, jobs=Path(td)/"jobs.log",
+                        lease_acquire=lambda *_a, **_k: {"status": "acquired", "registry_metadata": {}},
+                        lease_release=release, witness_probe=lambda: True)
+                    self.assertEqual(admission.abort("fault").status, "unverified")
+                    release.assert_not_called()
+            finally:
+                child.terminate(); child.wait(timeout=5)
 
 
 class PreflightHelpBoundaryTest(unittest.TestCase):

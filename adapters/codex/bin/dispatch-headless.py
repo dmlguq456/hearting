@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
+    foreground_review_launch_identity,
     GROUP_REAP_PROOF,
     GOVERNOR_RESERVATION_ENV,
     REPLICA_RESERVATION_ROW_KEYS,
@@ -37,6 +38,7 @@ from dispatch_contract import (  # noqa: E402
     SUPERVISOR_LEASE_KIND,
     anchored_capacity_failure,
     annotate_attempt_row,
+    adapter_launch_failure_outcome,
     bytecode_cache_env,
     launch_mismatch_annotation,
     attempt_launch_is_available,
@@ -54,6 +56,7 @@ from dispatch_contract import (  # noqa: E402
     headless_attempt_policy,
     launch_orphan_watch,
     launch_reap_watch,
+    seal_foreground_result,
     new_attempt_id,
     parse_registry_metadata,
     parent_attempt_binding_is_live,
@@ -62,6 +65,7 @@ from dispatch_contract import (  # noqa: E402
     sealed_launch_home,
     resolve_live_parent_attempt,
     resolve_model_governor_root,
+    review_governed_lease_is_held,
     replica_batch_expectation,
     reserve_governor_token,
     runtime_ancestry_binding,
@@ -78,11 +82,15 @@ from artifact_producer import (  # noqa: E402
     review_lease_acquire,
 )
 from dispatch_lifecycle import (  # noqa: E402
+    acquire_foreground_review_admission,
+    acquire_review_admission,
+    begin_finite_watchdog,
     DETACHED,
     FOREGROUND_SCOPED,
     LIFECYCLES,
     deterministic_post_exit_outcome,
     reconcile_launch_lifecycle,
+    launch_review_watchdog,
     wait_foreground,
 )
 from dispatch_continuation_budget import positive_continuation_limit  # noqa: E402
@@ -1692,12 +1700,35 @@ def acquire_review_lease_after_claim(
     if not args.review_output:
         return {}
     binding = args.review_output_binding
-    result = review_lease_acquire(
-        Path(args.artifact_root), cycle_id=binding["cycle_id"],
-        attempt_id=args.attempt_id, review_output=binding["output_path"],
-        binding=binding, governed_identity=identity, jobs=jobs,
+    budget = getattr(args, "watchdog_budget", None)
+    if budget is None:
+        raise ProducerError("review-watchdog-budget-missing")
+    witness_metadata = {
+        "attempt_id": args.attempt_id,
+        "review_cycle_id": binding["cycle_id"],
+        "review_governed_lease": "summary-flock-v1",
+        "review_governed_lease_nonce": args.review_governed_lease_nonce,
+    }
+    witness_unlocked = lambda: not review_governed_lease_is_held(
+        Path(args.artifact_root), witness_metadata
     )
-    return dict(result.get("registry_metadata") or {})
+    if args.launch_lifecycle == DETACHED:
+        handle = getattr(args, "review_watchdog_handle", None)
+        if handle is None:
+            raise ProducerError("review-watchdog-handle-missing")
+        return acquire_review_admission(
+            handle=handle, budget=budget, identity=identity,
+            root=Path(args.artifact_root), cycle_id=binding["cycle_id"],
+            attempt_id=args.attempt_id, review_output=binding["output_path"],
+            binding=binding, jobs=jobs, nonce=args.review_governed_lease_nonce,
+            lease_acquire=review_lease_acquire, witness_probe=witness_unlocked,
+        )
+    return acquire_foreground_review_admission(
+        budget=budget, identity=identity, root=Path(args.artifact_root),
+        cycle_id=binding["cycle_id"], attempt_id=args.attempt_id,
+        review_output=binding["output_path"], binding=binding, jobs=jobs,
+        lease_acquire=review_lease_acquire, witness_probe=witness_unlocked,
+    )
 
 
 def attach_summary_owner(args, log_path: Path, prompt_path: Path, identity):
@@ -2975,6 +3006,7 @@ def main(argv: list[str]) -> int:
                 child_spawned="0",
             )
         fence_failure_read_fd, fence_failure_write_fd = os.pipe()
+        args.watchdog_budget = begin_finite_watchdog(args.foreground_timeout)
         def spawn_worker(gate_fd: int) -> subprocess.Popen:
             fence_command = [
                 sys.executable, str(ROOT / "utilities" / "launch-fence.py"),
@@ -2999,6 +3031,25 @@ def main(argv: list[str]) -> int:
                     "run", "--class", "dispatch", "--", "sh", "-c", command,
                 ]
             )
+            if args.review_output and args.launch_lifecycle == DETACHED:
+                try:
+                    args.review_watchdog_handle = launch_review_watchdog(
+                        fence_command, gate_fd=gate_fd, budget=args.watchdog_budget,
+                        attempt_id=args.attempt_id,
+                        nonce=args.review_governed_lease_nonce,
+                        failure_fd=fence_failure_write_fd, env=dispatch_env,
+                        lease_release_spec={
+                            "root": args.artifact_root,
+                            "cycle_id": args.review_output_binding["cycle_id"],
+                            "attempt_id": args.attempt_id,
+                        }, jobs=jobs,
+                    )
+                finally:
+                    try:
+                        os.close(fence_failure_write_fd)
+                    except OSError:
+                        pass
+                return args.review_watchdog_handle.process
             try:
                 return subprocess.Popen(
                     fence_command,
@@ -3062,21 +3113,14 @@ def main(argv: list[str]) -> int:
                     else "launch-error"
                 )
             )
-            outcome = (
-                "reaped-before-publish"
-                if exc.reason == "attempt-launch-identity-record-failed"
-                else (
-                    "launch-cleanup-unverified"
-                    if exc.reason == "attempt-launch-cleanup-unverified"
-                    else "never-launched"
-                )
-            )
+            outcome = adapter_launch_failure_outcome(jobs, args.attempt_id, exc.reason)
             annotate_attempt_row(jobs, args.attempt_id, {"launch_outcome": outcome})
             cancel_governor_reservation(governor, governor_root, reservation_token)
             close_job_row(jobs, args.slug, args.worktree, reason, "", args.attempt_id)
             return fail(
                 exc.reason, 73, detail=exc.detail,
-                attempt_id=args.attempt_id, child_spawned="0",
+                attempt_id=args.attempt_id,
+                child_spawned="1" if outcome == "post-release-failed" else "0",
             )
         except OSError as exc:
             for fd in (fence_failure_read_fd, fence_failure_write_fd):
@@ -3097,6 +3141,8 @@ def main(argv: list[str]) -> int:
                 reservation_token,
                 proc,
                 expected_reservation=args.replica_batch_expectation,
+                watchdog_receipt=(args.review_watchdog_handle.receipt
+                                  if getattr(args, "review_watchdog_handle", None) else None),
             )
         except DispatchContractError as exc:
             fence_failure, fence_released = read_launch_fence_failure(
@@ -3104,11 +3150,11 @@ def main(argv: list[str]) -> int:
             )
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
-                proc.wait(timeout=0.5)
+                proc.wait(timeout=5.0 if getattr(args, "review_watchdog_handle", None) else 0.5)
             except (ProcessLookupError, subprocess.TimeoutExpired):
                 try:
                     os.killpg(proc.pid, signal.SIGKILL)
-                    proc.wait(timeout=0.5)
+                    proc.wait(timeout=5.0 if getattr(args, "review_watchdog_handle", None) else 0.5)
                 except (ProcessLookupError, subprocess.TimeoutExpired):
                     pass
             cancel_governor_reservation(governor, governor_root, reservation_token)
@@ -3163,6 +3209,14 @@ def main(argv: list[str]) -> int:
                 attempt_id=args.attempt_id, child_spawned="1",
             )
         read_launch_fence_failure(fence_failure_read_fd)
+        foreground_review_handoff = (
+            getattr(args, "launch_lifecycle", DETACHED) == FOREGROUND_SCOPED
+            and getattr(args, "dispatch_depth", None) == 1
+            and getattr(args, "worker_type", None) == "review"
+            and getattr(args, "execution_surface", None) == "registered-headless"
+            and bool(getattr(args, "registered_worker", False))
+            and not any(foreground_review_launch_identity(args).values())
+        )
         start_ticks = launch_metadata.get("pid_start", "")
         if (args.dispatch_depth == 1 and args.worker_type == "owner"
                 and args.launch_lifecycle == DETACHED):
@@ -3212,7 +3266,46 @@ def main(argv: list[str]) -> int:
         args.child_pid = proc.pid
         args.child_pid_start = start_ticks
         args.launch_heartbeat = seed_launch_heartbeat(args, jobs, proc.pid, start_ticks)
-        if args.launch_lifecycle == FOREGROUND_SCOPED:
+        if args.launch_lifecycle == FOREGROUND_SCOPED and foreground_review_handoff:
+            binding = args.parent_binding
+            try:
+                outcome = wait_foreground(
+                    proc, args.foreground_timeout,
+                    watchdog_budget=args.watchdog_budget,
+                    parent_pid=binding.observed_pid if binding else None,
+                    parent_pid_start=binding.observed_pid_start if binding else None,
+                    parent_is_live=(
+                        (lambda: parent_attempt_binding_is_live(jobs, binding))
+                        if binding else None
+                    ),
+                )
+                foreground_seal = seal_foreground_result(
+                    jobs, args.attempt_id, proc.pid, start_ticks or "",
+                    int(launch_metadata.get("pgid", "0")),
+                    exit_code=outcome.exit_code, failure=outcome.failure,
+                    group_empty=outcome.group_empty,
+                )
+                reap_watch_pid = launch_reap_watch(
+                    jobs, args.attempt_id, proc.pid, start_ticks or "",
+                    int(launch_metadata.get("pgid", "0")),
+                    foreground_seal=foreground_seal,
+                )
+            except (DispatchContractError, ValueError) as exc:
+                reason = getattr(exc, "reason", "foreground-outcome-seal-error")
+                detail = getattr(exc, "detail", str(exc))
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                close_job_row(jobs, args.slug, args.worktree, reason, "", args.attempt_id)
+                return fail(reason, 70, detail=detail, child_spawned="0")
+            annotate_attempt_row(
+                jobs, args.attempt_id,
+                {"reap_watch": "post-exit", "reap_watch_pid": str(reap_watch_pid)},
+            )
+            args.worker_exit = outcome.exit_code
+            args.worker_failure = outcome.failure
+        elif args.launch_lifecycle == FOREGROUND_SCOPED:
             binding = args.parent_binding
             outcome = wait_foreground(
                 proc,
@@ -3224,6 +3317,7 @@ def main(argv: list[str]) -> int:
                     if binding
                     else None
                 ),
+                watchdog_budget=args.watchdog_budget,
             )
             annotate_attempt_row(
                 jobs,

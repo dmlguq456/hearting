@@ -98,6 +98,44 @@ class DispatchReapWatchTest(unittest.TestCase):
             )
         self.assertNotIn(D.ATTEMPT_DESCENDANT_ENV, spawn.call_args.kwargs["env"])
 
+    def test_foreground_launch_requires_the_locked_seal_and_rejects_stale_digest(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text(
+                _row(
+                    "open", "/repo", "/wt", "review",
+                    "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+                    "execution_surface=registered-headless,registered_worker=1,"
+                    "fallback_hop=same-harness-headless,worker_type=review,"
+                    "launch_lifecycle=foreground-scoped,attempt_id=att-fence,"
+                    "pid=123,pid_start=456,pgid=123,pid_ns=pid:[1],"
+                    "pid_observer_ns=pid:[1]",
+                ) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(D.DispatchContractError) as missing:
+                D.launch_reap_watch(jobs, "att-fence", 123, "456", 123)
+            self.assertEqual(missing.exception.reason, "reap-watch-foreground-seal-required")
+            seal = D.seal_foreground_result(
+                jobs, "att-fence", 123, "456", 123,
+                exit_code=7, failure="exit-7", group_empty=True,
+            )
+            stale = D.SealedForegroundOutcome(seal.values, "0" * 64)
+            with self.assertRaises(D.DispatchContractError) as invalid:
+                D.launch_reap_watch(
+                    jobs, "att-fence", 123, "456", 123,
+                    foreground_seal=stale,
+                )
+            self.assertEqual(invalid.exception.reason, "reap-watch-foreground-seal-invalid")
+            with mock.patch.object(D.subprocess, "Popen", return_value=mock.Mock(pid=41)):
+                self.assertEqual(
+                    D.launch_reap_watch(
+                        jobs, "att-fence", 123, "456", 123,
+                        foreground_seal=seal,
+                    ),
+                    41,
+                )
+
     def test_detached_watcher_waits_for_escaped_tagged_child_and_seals_receipt(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

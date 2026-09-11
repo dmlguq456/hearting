@@ -2135,4 +2135,23 @@ class ResolveOwnerRouteAdvanceTest(unittest.TestCase):
   self.assertEqual((route_id,route_file,status),("rt-legacy","/legacy.json","ok"))
 
 
+class ForegroundRegistryContractTest(unittest.TestCase):
+ def test_classifier_has_no_row_derived_binding_fallback_and_refreshes_before_probe(self):
+  source=SCRIPT.read_text(encoding="utf-8")
+  self.assertNotIn("expected_binding or _foreground_binding", source)
+  refresh=source.index("fresh = current_attempt_row")
+  quiescence=source.index("attempt_process_quiescence(fresh.metadata)")
+  classify=source.index("classify_exact_route_free_review_outcome(")
+  self.assertLess(refresh, quiescence)
+  self.assertLess(quiescence, classify)
+
+ def test_all_route_identity_keys_are_shared_with_the_contract(self):
+  module=importlib.util.module_from_spec(
+      importlib.util.spec_from_file_location("dispatch_registry_contract", SCRIPT))
+  spec=module.__spec__
+  assert spec is not None and spec.loader is not None
+  spec.loader.exec_module(module)
+  self.assertEqual(tuple(module.ROUTE_IDENTITY_METADATA_KEYS), tuple(D.ROUTE_IDENTITY_METADATA_KEYS))
+
+
 if __name__=="__main__":unittest.main()

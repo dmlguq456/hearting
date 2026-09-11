@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import importlib.util
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import typing
 import unittest
 from unittest import mock
 import sys
@@ -3345,6 +3347,22 @@ class RouteCompletionEvidenceReviewConflictTest(unittest.TestCase):
         stage, stage_reason = JOIN.route_completion_evidence(
             self.metadata(worker_type="stage"), worktree=str(self.worktree))
         self.assertEqual((stage, stage_reason), (str(self.artifact), ""))
+
+
+class ExactReviewClassifierSignatureTest(unittest.TestCase):
+    def test_process_quiescence_annotation_resolves(self):
+        hints = typing.get_type_hints(JOIN.classify_exact_route_free_review_outcome)
+        self.assertIs(hints["quiescence"], D.ProcessQuiescence)
+        parameters = inspect.signature(
+            JOIN.classify_exact_route_free_review_outcome
+        ).parameters
+        self.assertEqual(
+            tuple(parameters[name].kind for name in (
+                "jobs", "expected_attempt_id", "expected_pid",
+                "expected_pid_start", "expected_pgid", "quiescence",
+            )),
+            (inspect.Parameter.KEYWORD_ONLY,) * 6,
+        )
 
 
 if __name__ == "__main__":
