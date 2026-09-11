@@ -642,32 +642,38 @@ read. An ordinary detached process is never run invisibly on the user's behalf.
 
 All repo-launched model-backed workers pass through `utilities/model-worker-governor.py`, which applies a global cap, per-class caps, rolling start budget, kill switch, and witness-proven abandoned-lease recovery. Its shared state lives under the canonical artifact root so the main checkout and linked workers use one writable governor. A registered dispatch launch reserves its slots atomically before any registry row or model process is created; a parallel batch reserves its exact declared N legs in one locked operation on first start, so insufficient total/class/start-budget capacity creates zero partial rows and zero model processes. An idempotent recovery may reserve one missing leg only after all other N-1 manifest-bound rows are proven active or completed. Each reserved dispatch runner claims one opaque reservation and releases it after its command exits; parallel-group provenance survives reservation-to-claim transfer and is copied into the immutable attempt row. Unused reservations are cancelled or pruned with their exact owner PID/start identity. Governor PID and group scans preserve `inaccessible`/`incomplete` as an occupied, unreleasable state instead of pruning a lease or reservation as dead; only a complete empty group releases descendant-held capacity. Other worker classes atomically acquire their lease in the governed runner. The legacy non-consuming `check` remains diagnostic only and is never a launch authorization. A launched worker inherits the same governor root before it can dispatch a child. This does not modify runtime-owned native subagent limits. A standard+ cycle's concurrent slot occupancy is dispatch-depth-1 owner 1 plus a parallel group's 2–4 legs, so its peak is 3 at `standard` and 4–5 at `strong+`; the `dispatch` class cap of 8 is the minimum that lets two standard+ cycles run at once (3×2=6, 4×2=8), and the global cap of 12 leaves 4 slots for the non-dispatch background classes (`title`, `distill`, `loop`). The per-class cap sum (8+1+4+2=15) deliberately exceeds the global cap (12): each class keeps its own ceiling, but the global cap is meant to be the real bottleneck under load, and `AGENT_MODEL_WORKER_CLASS_LIMIT_<CLASS>` overrides one class's cap when that priority balance needs to shift.
 
-Registered model-backed jobs remain owned by the dispatching session even when the runtime launcher uses a background OS process. The main or dispatch-depth-1 conductor launches, polls, harvests, and integrates the job in the same task flow; an absent OS parent does not grant an independent lifecycle or permit the orchestrator to end early. Only long-running non-model resource jobs use the independent `utilities/resource-runner.py` lifecycle. Reattachment and signals for those resource jobs require PID, process start time, process group, command identity, absolute cwd, log, and run-registry identity rather than PID alone.
+Registered model-backed jobs stay within the dispatching workflow. Its runtime
+owns admission, waiting, delivery acknowledgement, and exact process cleanup;
+the model interprets results and continues the authorized work. OS detachment
+changes transport rather than transferring these responsibilities. Non-model
+resource jobs use the separate `resource-runner.py` lifecycle and its exact
+PID/start/group, command, cwd, log, and registry identity for reattachment.
+
 
 Admission recovery is bounded: only a global/class-cap refusal from `acquire` or `reserve` triggers one `reclaim(root)` transaction after the failed admission has released its state lock. Only `reclaimed_count > 0` permits one complete admission retry. Kill switches, identity/validation errors, and rolling start budgets are never bypassed; start history is not refunded. `check` and refusal messages never scan witnesses. Reclaim returns only leases whose exact witness permits an exclusive nonblocking lock; live claimants, inherited descendant handles, foreign namespaces, and unprovable legacy records stay protected. No PID-only removal, state reset, or cap increase substitutes for this proof.
 
 Each registered dispatch attempt also owns its summary lifecycle. While the governed worker remains behind its launch fence, the selected adapter starts one non-model summary supervisor bound to the exact attempt id, log path, and worker PID/start identity; the same registry transaction publishes that owner identity before releasing the worker. The supervisor requests one early summary, ordinary debounced updates while the exact worker lives, and one final update after log quiescence, then exits without completion, signal, retry, or launch authority. Initial and final requests may each use one durable `(harness, session, phase)` admission ticket when the ordinary rolling refresh budget is exhausted, but never bypass the provider kill switch, per-session lock, governor, or global concurrency cap. `dispatch-reconcile --apply` may idempotently restore a missing supervisor only for one open, exact, live attempt. An extinct registered namespace-local row from a pre-receipt runtime may be removed from the active Fleet set only through `dispatch-reconcile --attempt <id> --cancel-receiptless-namespace --apply`: this exact operator action records `failure_class=cancelled`, writes no PASS, marker, or reap receipt, and deliberately leaves successor readiness fail-closed. Fleet's explicit kill path likewise closes only the selected exact attempt as a typed cancellation; its wrapper remains responsible for the genuine post-exit receipt. Fleet is otherwise a pure observer of registry and stored summary sidecars: starting, refreshing, or closing Fleet never creates provider work. Interactive sessions use their runtime lifecycle bridge as the summary producer and follow the same bounded admission rules.
 
-A post-exit receipt can become permanently unissuable. The detached drain
-receipt requires `attempt-tagged-empty-v1`, so one process that escapes the
-governed process group while still carrying the attempt tag blocks that proof
-forever: `reconcile` answers `terminal-draining` with
-`marker-missing-post-exit-receipt-incomplete`, the completion join answers
-`process-unverifiable`, and a worker that reported PASS and wrote its artifact
-has no checked way back. `dispatch-reconcile --attempt <id>
---seal-artifact-proof-receipt --apply` is the recovery, and it is completion
-evidence rather than a cancellation: it seals a typed
-`receipt-superseded-by-artifact-proof` substitute only when the artifact named by
-the exact terminal PASS envelope still hashes to the digest the worker itself
-recorded at its own last `stage-heartbeat --phase artifact`, the governed process
-is dead, and the observing session is in the namespace that recorded that PID.
-The seal writes no marker and no verdict of its own; the row still closes through
-the ordinary `reconcile` or `capability-route.py complete` path afterwards. Any
-unprovable link in that chain is a typed refusal, never a fail-open close, and a
-row that already carries a genuine receipt is refused as
-`post-exit-receipt-present`. Only this seal lets a sealed proof outrank a live
-attempt-tagged process, and only at a terminal gate — an unsealed row keeps the
-ordinary veto.
+Progress is observed by the runtime from exact native tool identifiers and
+completion states, scoped file changes, and bounded verification leases.
+A quiet window creates a durable `no-progress` supervision notice, not a signal,
+failed row, or retry. The launcher's finite execution budget retains timeout and
+cleanup authority; progress recovery leaves a delayed success intact.
+Per-tool bookkeeping is runtime-owned. Optional heartbeats
+are work hints: test→tool is legal, and a terminal heartbeat cannot commit a
+successful result. Prose, log mtime, and repeated tool events grant no progress.
+Only declared sub-sessions receive the chain ledger/helper instructions.
+
+A committed result and process cleanup are separate obligations. The runtime
+join retains every owned attempt, including `done` rows, until the exact process
+group and tagged descendants are settled. `dispatch-reconcile --attempt <id>
+--apply` uses the same bounded cleanup proof authority on terminal rows; it
+preserves the result, marker, and delivery receipt and grants no retry credit.
+Missing observation keeps the cleanup obligation and its durable supervision
+notice open. A later proof settles it without a new model turn or cancellation.
+Historical artifact and residue seals remain audit evidence: a valid artifact
+never proves that a live descendant stopped. The launcher/watchdog owns signals;
+join/reconcile own proof recovery and notification, not guessed process death.
 
 Detached resource runs are first-class lab/resource jobs, not registered agent
 dispatches and not members of `jobs.log`. Every `resource-runner start`

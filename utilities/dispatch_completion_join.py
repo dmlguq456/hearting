@@ -55,6 +55,7 @@ from dispatch_contract import (  # noqa: E402
     parse_registry_metadata,
     process_identity_disposition,
     reconcile_attempt_terminal,
+    resolve_attempt_cleanup,
     row_is_subsession,
 )
 import dispatch_pending_delivery as pending_delivery  # noqa: E402
@@ -2863,6 +2864,8 @@ def recover_receiptless_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
     A failed observation never grants cancellation. The registry helper owns
     proof, revalidation, and closure; the join only schedules the bounded check.
     """
+    if row.status not in OPEN_STATES:
+        return resolve_attempt_cleanup(jobs, row.attempt_id, apply=True)
     command = [
         sys.executable, str(ROOT / "utilities" / "dispatch-registry.py"),
         "reconcile", "--attempt", row.attempt_id,
@@ -2959,14 +2962,13 @@ def _join_snapshot(
                 reason = "registry-closed" if row.status == "done" else "terminal-observed"
             if (recovery is not None and readiness == "pending"
                     and reason == "process-unverifiable"
-                    and row.status in OPEN_STATES
                     and row.metadata.get("registered_worker") == "1"
                     and row.metadata.get("pid_scope") == "namespace-local"
                     and time.monotonic() - last_recovery.get(row.attempt_id, float("-inf")) >= 30):
                 last_recovery[row.attempt_id] = time.monotonic()
                 outcome = recovery(row)
                 recovery_results[row.attempt_id] = outcome
-                recovered = recovered or outcome.get("closed") is True
+                recovered = recovered or outcome.get("closed") is True or outcome.get("changed") is True
             children.append(
                 {
                     "attempt_id": row.attempt_id,
@@ -3482,22 +3484,15 @@ def apply_exact_route_free_review_classification(
 def close_finished_child(
     row: ChildRow, *, jobs: str | Path, classification: ExactReviewClassification | None = None
 ) -> str:
-    """Close one finished-but-open child from its own terminal evidence.
+    """Reconcile cleanup or commit a still-open child's exact terminal evidence.
 
-    A route-bound node may only be closed through the completion-marker path
-    (OPERATIONS §5.10, SD-70); `dispatch-harvest --mark-done` refuses it with
-    `route-completion-required`. The supervised-parent park hook in turn admits
-    only that harvest command (`classify_supervised_shell_command`), so a
-    supervised owner cannot execute the one command that would work: the model
-    has no legal exit and the batch deadlocks until the owner is killed. A
-    supervisor is not park-guarded and already owns the join outside the model
-    loop, so it performs this closure itself.
-
-    Completion is never invented — without a valid terminal envelope naming an
-    in-root artifact the child stays open and the caller keeps its existing
-    failure. Returns ``""`` on success, else a short skip reason.
+    The runtime owns this transition; a model need not harvest to acknowledge
+    delivery or close rows. Committed results are never reclassified here.
     """
 
+    if row.status not in OPEN_STATES:
+        result = resolve_attempt_cleanup(Path(jobs), row.attempt_id, apply=True)
+        return "" if result["settled"] else str(result["reason"])
     metadata = getattr(row, "metadata", {}) or {}
     if classification is not None:
         if classification.close_action == "pending":

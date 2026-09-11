@@ -29,7 +29,7 @@ def default_state_dir(artifact_root: Path, route_id: str) -> Path:
 # handoff that classified `ok` at start time. The worker contract obligation
 # layered on top of that server-side gate is procedural, not a second runtime
 # check: the successor MUST read that handoff before its first edit
-# (`roles/worker-bootstrap.md`), since it is this session's only carrier of
+# (`roles/worker-contexts/subsession.md`), since it is this session's only carrier of
 # the predecessor's completed items, exact next command, invariants, and
 # forbidden files -- nothing else transfers context across the attempt
 # boundary. `metadata()` below is unchanged by R3.
@@ -209,7 +209,9 @@ def prompt_fragment(args: argparse.Namespace) -> str:
     if not getattr(args, "subsession_id", None):
         return ""
     files = "\n".join(f"  - {file}" for file in args.fixed_file)
+    context = (Path(__file__).resolve().parents[1] / "roles/worker-contexts/subsession.md").read_text(encoding="utf-8")
     return (
+        context + "\n"
         "Stage sub-session contract:\n"
         f"- sub-session: {args.subsession_id} ({args.subsession_index}/{args.subsession_count}, {args.subsession_mode}, {args.subsession_purpose})\n"
         "- stage_authority: 0; never publish the route-node completion marker\n"

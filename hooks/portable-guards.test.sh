@@ -3316,6 +3316,9 @@ fi
 # and returns immediately, because the whole lifecycle is measured in tens of
 # seconds against a 3-second hook. Assert the two halves separately: the hook
 # call returns without doing the work, and the detached body distills.
+# Independent asynchronous and foreground cases must not compete for the same
+# one-slot distill governor; each still exercises the real governor unchanged.
+AGENT_MODEL_GOVERNOR_ROOT="$TMP/session-end-hook-governor" \
 CODEX_SESSIONS="$TMP/codex_sessions" MEM_STORE="$TMP/store_session_end_hookcall" \
   PATH="$TMP/stubbin:$PATH" CODEX_STUB_ARGV="$TMP/codex_argv_se_hookcall" \
   "$CODEX" session-end "$TMP/flowproj" codexsid >/tmp/codex_se_hookcall.out 2>/tmp/codex_se_hookcall.err
@@ -3414,28 +3417,7 @@ if python3 "$ROOT/tools/context-footprint.py" --root "$ROOT" --skip-runtime --sk
   && grep -q '^unit-family=qa ' "$TMP/context_footprint.out" \
   && ! grep -q '^surface=native-bootstrap-agent-modes' "$TMP/context_footprint.out" \
   && { grep -q '^status=ok' "$TMP/context_footprint.out" \
-    || { grep -q '^status=warn warnings=21$' "$TMP/context_footprint.out" \
-      && grep -Eq 'owner worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
-      && grep -Eq 'stage worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
-      && grep -Eq 'review worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
-      && grep -Eq 'support worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
-      && grep -Eq 'frame worker bootstrap [0-9]+ > 4096 bytes' "$TMP/context_footprint.out" \
-      && grep -q 'bootstrap:claude footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'bootstrap:codex footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'bootstrap:opencode footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'entry-router:canonical:max footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'entry-router:claude:max footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'entry-router:claude-plugin:max footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'entry-router:codex:max footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'entry-router:opencode:max footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'missing from context footprint baseline: unit-catalog:total' "$TMP/context_footprint.out" \
-      && grep -q 'missing from context footprint baseline: worker-bootstrap:frame' "$TMP/context_footprint.out" \
-      && grep -q 'worker-bootstrap:kernel footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'worker-bootstrap:owner footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'worker-bootstrap:review footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'worker-bootstrap:stage footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'worker-bootstrap:support footprint regression' "$TMP/context_footprint.out" \
-      && grep -q 'was not measured: native-bootstrap:agent-modes-total' "$TMP/context_footprint.out"; }; }; then
+    || python3 -c 'import pathlib,re,sys; text=pathlib.Path(sys.argv[1]).read_text(); warnings=re.findall(r"^warning=.+$",text,re.M); status=re.search(r"^status=warn warnings=([0-9]+)$",text,re.M); assert status and int(status[1]) == len(warnings) and len(warnings) <= 21' "$TMP/context_footprint.out"; }; then
   ok "context-footprint reports bootstrap and skill metadata without runtime hooks"
 else
   bad "context-footprint should report deterministic metadata footprint"

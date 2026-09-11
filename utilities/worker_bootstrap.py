@@ -145,6 +145,12 @@ def artifact_context_prompt(environ) -> str:
             "- Resolve relative artifact paths beneath artifact_output_dir.\n")
 
 
+def runtime_progress_prompt() -> str:
+    return ("The runtime observes tool progress and publishes completion. "
+            "No per-tool heartbeat command is required. Complete the assigned work "
+            "and return its final artifact and verdict.\n\n")
+
+
 def supervised_owner_prompt() -> str:
     return (
         "Runtime-owned completion join: launch the current batch through its checked dispatch surface. "

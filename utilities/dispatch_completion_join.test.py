@@ -181,6 +181,29 @@ class DispatchCompletionJoinTest(unittest.TestCase):
                 self.assertEqual(receipt["state"], "ready")
                 self.assertEqual(receipt["children"][0]["status"], "done")
 
+    def test_terminal_cleanup_uses_common_proof_and_never_recloses_success(self):
+        child=subprocess.Popen([sys.executable,"-c","import sys;sys.stdin.read()"],
+                               stdin=subprocess.PIPE,start_new_session=True)
+        identity=D.process_launch_identity(child.pid)
+        child.stdin.close();child.wait(timeout=5)
+        self.jobs.write_text(row("done","att-cleanup","att-parent","a","completed-marker",
+            process_metadata={**identity,"pid_scope":"namespace-local",
+                "launch_lifecycle":"foreground-scoped","fallback_hop":"same-harness-headless"}))
+        original=D.parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+        receipt=JOIN.join_batch(jobs=self.jobs,parent_attempt_id="att-parent",timeout=0.2,
+                               interval=0.01,recover_receiptless=True)
+        self.assertEqual(receipt["state"],"ready",receipt)
+        fields=self.jobs.read_text().strip().split("\t",5)
+        settled=D.parse_registry_metadata(fields[5])
+        self.assertEqual(fields[1],"done")
+        self.assertEqual({key:settled[key] for key in original},original)
+        self.assertIn("cleanup_receipt_digest",settled)
+        self.assertNotIn("cancellation_quiescence_receipt",settled)
+        exact=JOIN.current_attempt_row(self.jobs,"att-cleanup")
+        with mock.patch.object(JOIN,"inspect_terminal_attempt") as classify:
+            self.assertEqual(JOIN.close_finished_child(exact,jobs=self.jobs),"")
+        classify.assert_not_called()
+
     def test_unknown_recovery_is_throttled_and_never_grants_completion(self):
         self.jobs.write_text(self.receiptless_row())
         before = self.jobs.read_bytes()

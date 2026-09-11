@@ -354,12 +354,12 @@ class RegistryTest(unittest.TestCase):
         "--attempt",attempt,"--route",route,"--node",node)
   live=self.invoke(*args);self.assertEqual(live.returncode,0,live.stdout+live.stderr);self.assertIn("state=working",live.stdout)
   heartbeat["phase"]="terminal";(heartbeat_dir/f"{attempt}.json").write_text(json.dumps(heartbeat))
-  done=self.invoke(*args);self.assertEqual(done.returncode,0,done.stdout+done.stderr);self.assertIn("state=done",done.stdout)
+  done=self.invoke(*args);self.assertEqual(done.returncode,0,done.stdout+done.stderr);self.assertIn("state=working",done.stdout)
   with self.jobs.open("a") as out:
    out.write(f"2026-07-16T00:00:05Z\topen\t/r\t/w\tnamespace\troute_id={route},route_node={node},attempt_id={attempt},pid=437,pid_start=1,pid_scope=namespace-local\n")
   applied=self.invoke("reconcile","--attempt",attempt,"--apply")
-  record=json.loads(applied.stdout);self.assertEqual(record["closed"],1);self.assertEqual(record["decisions"][0]["category"],"terminal-heartbeat")
-  self.assertIn("note=completed-terminal-heartbeat",self.jobs.read_text())
+  record=json.loads(applied.stdout);self.assertEqual(record["closed"],0)
+  self.assertNotIn("note=completed-terminal-heartbeat",self.jobs.read_text())
  def test_codex_liveness_rejects_visible_namespace_pid_without_proof(self):
   import importlib.util
   path=ROOT/"adapters/codex/bin/dispatch-liveness.py"
@@ -1558,7 +1558,7 @@ class ArtifactProofReceiptSealTest(unittest.TestCase):
   self.assertEqual(record["decisions"][0]["artifact_sha256"],self.digest)
   self.assertEqual(self.jobs.read_text(),before)
 
- def test_seal_makes_a_closed_row_reach_a_terminal_verdict(self):
+ def test_output_seal_preserved_while_common_reconcile_settles_cleanup(self):
   self.write_row()
   metadata=parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
   before=observed_attempt_liveness("done",metadata,terminal_receipt_gate=True)
@@ -1579,11 +1579,18 @@ class ArtifactProofReceiptSealTest(unittest.TestCase):
   self.assertNotIn("launch_outcome",text)
 
   sealed=parse_registry_metadata(text.strip().split("\t",5)[5])
-  self.assertEqual(post_exit_receipt_reason(sealed),
-                   "receipt-superseded-by-artifact-proof")
+  self.assertEqual(post_exit_receipt_reason(sealed), "")
   after=observed_attempt_liveness("done",sealed,terminal_receipt_gate=True)
-  self.assertEqual(after.state,"terminal")
-  self.assertEqual(after.reason,"registry-closed")
+  self.assertEqual(after.state,"unverifiable")
+  reconciled=self.invoke("reconcile","--attempt",self.attempt,"--apply")
+  self.assertEqual(reconciled.returncode,0,reconciled.stdout+reconciled.stderr)
+  decision=json.loads(reconciled.stdout)["decisions"][0]
+  self.assertEqual(decision["category"],"terminal-settled",decision)
+  self.assertFalse(decision["closed"])
+  settled=parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+  self.assertEqual({k:settled[k] for k in sealed},sealed)
+  self.assertEqual(observed_attempt_liveness("done",settled,terminal_receipt_gate=True).state,"terminal")
+  self.assertNotIn("cancellation_quiescence_receipt",settled)
 
  def test_seal_survives_a_live_tagged_process_that_outlived_the_worker(self):
   """The exact shape that made the receipt unissuable: a leaked tagged process."""
@@ -1599,7 +1606,12 @@ class ArtifactProofReceiptSealTest(unittest.TestCase):
    sealed=parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
    self.assertEqual(
     observed_attempt_liveness("done",sealed,terminal_receipt_gate=True).state,
-    "terminal")
+    "alive")
+   before=self.jobs.read_bytes()
+   recovery=self.invoke("reconcile","--attempt",self.attempt,"--apply")
+   self.assertEqual(recovery.returncode,0,recovery.stdout+recovery.stderr)
+   self.assertEqual(json.loads(recovery.stdout)["decisions"][0]["category"],"terminal-cleanup-pending")
+   self.assertEqual(self.jobs.read_bytes(),before)
    # Without the seal the same live tag still vetoes quiescence -- and now
    # reports the descendant as live process evidence instead of merely
    # withholding terminal progression, matching every other populated-scan

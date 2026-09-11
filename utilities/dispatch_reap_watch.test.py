@@ -277,15 +277,18 @@ class DispatchReapWatchTest(unittest.TestCase):
             live = D.attempt_tagged_descendants(meta)
             self.assertEqual(live.state, "populated", "residue must still be alive")
             self.assertTrue(residue_pids.issuperset({pid for pid, _s, _st in live.members}))
-            # The receipt is a complete post-exit receipt and the residue never
-            # vetoes again: reconcile, join, and successor gates all read this.
+            # The residue observation preserves output diagnostics, but the
+            # runtime still owns these live descendants after watcher exit.
             self.assertTrue(D.tagged_residue_receipt(meta))
-            self.assertEqual(D.post_exit_receipt_reason(meta), "governed-process-group-drained")
+            self.assertEqual(D.post_exit_receipt_reason(meta), "")
             verdict = D.attempt_process_quiescence(meta, terminal_receipt=True)
-            self.assertEqual(verdict.state, "quiescent", verdict.reason)
-            self.assertEqual(D.attempt_process_quiescence(meta).state, "quiescent")
+            self.assertEqual(verdict.state, "live", verdict.reason)
+            self.assertEqual(D.attempt_process_quiescence(meta).state, "live")
             observed = D.observed_attempt_liveness("done", meta)
-            self.assertEqual((observed.state, observed.reason), ("terminal", "registry-closed"))
+            self.assertEqual(observed.state, "alive")
+            before=jobs.read_bytes()
+            self.assertFalse(D.resolve_attempt_cleanup(jobs,attempt,apply=True)["settled"])
+            self.assertEqual(jobs.read_bytes(),before)
 
     def test_sd_open_47_residue_inside_the_governed_group_is_sealed_too(self):
         """review finding 11: `nohup cmd &` without setsid keeps the governed

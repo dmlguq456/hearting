@@ -35,6 +35,7 @@ from dispatch_contract import (  # noqa: E402
     resolve_agent_home,
     validate_attempt_metadata,
 )
+from dispatch_supervision import materialize as materialize_supervision
 from codex_dispatch_terminal import carrier_terminal_note  # noqa: E402
 from dispatch_completion_join import (  # noqa: E402
     OWNER_ROUTE_NODE,
@@ -368,6 +369,58 @@ def scoped_file_signature(metadata, worktree=""):
     return hashlib.sha256(json.dumps(sorted(entries), separators=(",", ":")).encode()).hexdigest()
 
 
+def runtime_tool_progress(metadata, previous=None):
+    """Observe bounded native tool identities, never prose, output or log mtime.
+
+    The exact attempt's registered log is the only input. Retain the previous
+    event when a prose-only tail displaces it or reading is temporarily unavailable.
+    A log replay of the same tool id/status grants no fresh progress.
+    """
+    latest = previous or None
+    raw_path = metadata.get("log_file", "")
+    if not raw_path or not Path(raw_path).is_absolute():
+        return latest
+    try:
+        with Path(raw_path).open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            start = max(0, handle.tell() - 262144)
+            handle.seek(start)
+            if start:
+                handle.readline()
+            lines = handle.read(262144).splitlines()
+    except OSError:
+        return latest
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        item = event.get("item")
+        if kind in {"item.started", "item.completed"} and isinstance(item, dict):
+            if item.get("type") in {"command_execution", "file_change", "mcp_tool_call", "web_search"} and item.get("id"):
+                latest = ["codex", str(item["id"])[:256], kind]
+        if kind in {"assistant", "user"} and isinstance(event.get("message"), dict):
+            content = event["message"].get("content")
+            for block in content if isinstance(content, list) else []:
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                identity = block.get("id") if block_type == "tool_use" else block.get("tool_use_id")
+                if block_type in {"tool_use", "tool_result"} and identity:
+                    latest = ["claude", str(identity)[:256], block_type]
+        part = event.get("part")
+        if kind == "tool_use" and isinstance(part, dict) and part.get("type") == "tool":
+            state = part.get("state")
+            status = state.get("status") if isinstance(state, dict) else None
+            identity = part.get("callID") or part.get("id")
+            if identity and status in {"pending", "running", "completed", "error"}:
+                latest = ["opencode", str(identity)[:256], status]
+    return latest
+
+
 def inspect(args, now):
     fields, metadata = require_row(args)
     heartbeat, _, _ = state_paths(dispatch_state_root(args.jobs), args.attempt_id)
@@ -398,8 +451,9 @@ def heartbeat(args, now):
             # have heartbeated past it before the launcher's own seed runs;
             # the existing later heartbeat is the answer, unchanged.
             return old
-        if old.get("phase") in PROGRESS_PHASES and PROGRESS_PHASES.index(args.phase) < PROGRESS_PHASES.index(old["phase"]):
-            raise DispatchContractError("progress-phase-regression", f"{old['phase']}->{args.phase}")
+        # Phases describe current work, not an irreversible workflow. A test
+        # followed by another tool call is ordinary progress. Terminal hints
+        # remain hints; the terminal commit authority owns completion.
         evidence_digest = deterministic_progress_fingerprint({
             "attempt_id": args.attempt_id, "route_id": args.route_id,
             "route_node": args.route_node, args.kind: args.evidence,
@@ -444,27 +498,30 @@ def watchdog(args, now):
     hb_path, wd_path, lock_path = state_paths(dispatch_state_root(args.jobs), args.attempt_id)
     hb = read_json(hb_path)
     background = verification_lease(args, now)
-    fingerprint = deterministic_progress_fingerprint({
-        "attempt_id": args.attempt_id, "route_id": args.route_id,
-        "route_node": args.route_node, "heartbeat": hb or None,
-        "registry_transition": {
-            "status": fields[1], "note": metadata.get("note", ""),
-        },
-        "file_signature": scoped_file_signature(metadata, fields[3]),
-        "artifact_signature": metadata.get("artifact_sha256") or None,
-        "background_verification": (
-            {
-                "command_digest": background.get("command_digest"),
-                "pid": background.get("pid"),
-                "pid_start": background.get("pid_start"),
-                "deadline": background.get("deadline"),
-            }
-            if background
-            else None
-        ),
-    })
     with locked(lock_path):
         state = read_json(wd_path)
+        tool_event = runtime_tool_progress(metadata, state.get("runtime_tool_event"))
+        state["runtime_tool_event"] = tool_event
+        fingerprint = deterministic_progress_fingerprint({
+            "attempt_id": args.attempt_id, "route_id": args.route_id,
+            "route_node": args.route_node, "heartbeat": hb or None,
+            "tool": tool_event,
+            "registry_transition": {
+                "status": fields[1], "note": metadata.get("note", ""),
+            },
+            "file_signature": scoped_file_signature(metadata, fields[3]),
+            "artifact_signature": metadata.get("artifact_sha256") or None,
+            "background_verification": (
+                {
+                    "command_digest": background.get("command_digest"),
+                    "pid": background.get("pid"),
+                    "pid_start": background.get("pid_start"),
+                    "deadline": background.get("deadline"),
+                }
+                if background
+                else None
+            ),
+        })
         # The settled attempt row owns the verdict. A cached observation or
         # an older capacity log must not override a later completion record.
         if fields[1] not in {"open", "running"}:
@@ -641,56 +698,30 @@ def watchdog(args, now):
                       "quiet_windows": quiet, "warning": int(quiet >= 1),
                       "observed_at": now, "verdict": verdict["state"]})
         if quiet >= args.watchdog_max_windows:
-            exact = inspect(args, now)  # immediate identity revalidation
-            if exact["state"] != "working" or exact.get("pid_authoritative") is not True:
-                state["action"] = "fail-closed-identity"
-            elif not args.apply:
-                state["action"] = "would-interrupt"
-            else:
-                try:
-                    signalled_pid, signalled_metadata = signal_authoritative_process_group(
-                        args, signal.SIGINT
-                    )
-                except ProcessLookupError:
-                    state.update({"action": "process-exited",
-                                  "terminal_action": "process-exited"})
-                    write_json(wd_path, state)
-                    return state
-                except PermissionError:
-                    state["action"] = "fail-closed-signal-denied"
-                    write_json(wd_path, state)
-                    return state
-                except DispatchContractError as error:
-                    state["action"] = "fail-closed-identity"
-                    state["process_reason"] = error.reason
-                    write_json(wd_path, state)
-                    return state
-
-                def still_exact(row_fields):
-                    row_meta = meta(row_fields[5])
-                    return bool(
-                        row_fields[1] in {"open", "running"}
-                        and row_meta.get("route_id") == args.route_id
-                        and row_meta.get("route_node") == args.route_node
-                        and _same_signal_identity(row_meta, signalled_metadata)
-                    )
-
-                closed = close_attempt_row_if(
-                    args.jobs, args.attempt_id, "dead-no-progress", still_exact,
-                    evidence={"classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
-                              "watchdog_windows": str(quiet)},
-                )
-                if not closed:
-                    state["action"] = "fail-closed-row-changed"
-                else:
-                    materialize_after_terminal_close(args.jobs, args.attempt_id)
-                    state["action"] = "interrupted"
-                    state["terminal_action"] = "dead-no-progress"
-                    state["signalled_pid"] = signalled_pid
+            state["action"] = "no-progress"
         else:
             state["action"] = "warning" if quiet else "observe"
         write_json(wd_path, state)
-        return defer_terminal_until_quiescent(state, metadata)
+    # No-progress is an observation, never failure or signal authority. The
+    # execution boundary retains its finite lifetime budget and cleanup duty.
+    # Queue publication runs outside the progress lock and is idempotent.
+    if state["action"] == "no-progress" and args.apply and not state.get("supervision_notice_ids"):
+        try:
+            notices = materialize_supervision(args.jobs, {args.attempt_id}, reason="no-progress")
+            state["supervision_notice_ids"] = [record["delivery_id"] for record in notices]
+            state.pop("supervision_notice_error", None)
+        except (OSError, ValueError, RuntimeError) as error:
+            state["supervision_notice_error"] = str(error)[:160]
+        with locked(lock_path):
+            current = read_json(wd_path)
+            # A concurrent newer observation owns its progress fields.
+            for key in ("supervision_notice_ids", "supervision_notice_error"):
+                if key in state:
+                    current[key] = state[key]
+                else:
+                    current.pop(key, None)
+            write_json(wd_path, current)
+    return defer_terminal_until_quiescent(state, metadata)
 
 
 def main(argv):

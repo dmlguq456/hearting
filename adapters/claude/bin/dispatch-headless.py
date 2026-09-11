@@ -112,6 +112,7 @@ from worker_bootstrap import (
     assigned_contract,
     profile_worker_type,
     render_worker_bootstrap,
+    runtime_progress_prompt,
     resolve_worker_type,
 )
 from stage_session_runtime import (  # noqa: E402
@@ -663,21 +664,7 @@ def dispatch_prompt(
         if args.profile
         else "profile=-"
     )
-    heartbeat = ""
-    if args.attempt_id and args.route_id and args.route_node:
-        base = (
-            f"python3 {shlex.quote(str(ROOT / 'utilities/dispatch-progress.py'))} heartbeat "
-            f"--attempt-id {shlex.quote(args.attempt_id)} "
-            f"--route-id {shlex.quote(args.route_id)} "
-            f"--route-node {shlex.quote(args.route_node)} "
-            "--jobs \"$AGENT_DISPATCH_JOBS\""
-        )
-        heartbeat = (
-            "Stage progress contract (SD-58):\n"
-            f"- Emit analysis on entry: {base} --phase analysis --kind registry --evidence analysis-entered\n"
-            "- After a real tool call, write, test, or artifact update, run the same command with phase tool|file-write|test|artifact and kind tool|file|test|artifact plus a deterministic id/signature.\n"
-            "- Repeated prose or an unchanged phase/evidence pair is not progress. Emit terminal only after the assigned artifact is durable.\n\n"
-        )
+    heartbeat = runtime_progress_prompt()
     completion_delivery = getattr(args, "resolved_completion_delivery", "poll-fallback")
     supervised = completion_delivery == "session-resume-supervised"
     owner_standard_plus = (

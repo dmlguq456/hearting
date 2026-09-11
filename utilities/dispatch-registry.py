@@ -48,6 +48,7 @@ from dispatch_contract import (ARTIFACT_PROOF_RECEIPT,
                                resolve_dispatch_state_root,
                                resolve_parent_extinction,
                                resolve_terminal_conflict,
+                               resolve_attempt_cleanup,
                                seal_cancellation_quiescence_receipt,
                                signal_exact_process_group,
                                ROUTE_IDENTITY_METADATA_KEYS,
@@ -608,7 +609,8 @@ def _foreground_binding(meta):
 
 
 def classify(row, args, newest_orders, rows=None, *, expected_binding=None):
-    if row["status"] not in OPEN: return "terminal", "already-terminal", None
+    if row["status"] not in OPEN:
+        return "terminal", "cleanup-check-required", None
     meta = row["meta"]
     if row.get("legacy_read_only"):
         return "legacy-read-only", "legacy-attempt-row", None
@@ -676,7 +678,10 @@ def classify(row, args, newest_orders, rows=None, *, expected_binding=None):
         getattr(args, "now", time.time()),
     )
     if exact and exact["state"] == "working": return "active", exact["rule"], None
-    if exact and exact["state"] == "done": return "terminal-heartbeat", exact["rule"], "completed-terminal-heartbeat"
+    if exact and exact["state"] == "done":
+        if _marker_backed_repair(row, args.agent_home, args.jobs):
+            return "marker-backed-stale", "completed-marker-linkage", "completed-marker"
+        return "terminal-pending", "terminal-commit-required", None
     if exact and exact["state"] == "dead":
         if _marker_backed_repair(row, args.agent_home, args.jobs):
             return "marker-backed-stale", "completed-marker-linkage", "completed-marker"
@@ -897,6 +902,12 @@ def reconcile(rows, args):
         category, reason, note = classify(
             row, args, newest, rows, expected_binding=selected_binding
         )
+        terminal_cleanup = None
+        if row["status"] not in OPEN and row.get("attempt_contract_status") == "current":
+            terminal_cleanup = resolve_attempt_cleanup(
+                args.jobs, row["meta"]["attempt_id"], apply=args.apply)
+            category = "terminal-settled" if terminal_cleanup["settled"] else "terminal-cleanup-pending"
+            reason = terminal_cleanup["reason"]
         closed = False
         cascade = []
         summary_owner = {"state": "not-applied", "reason": "dry-run"}
@@ -954,7 +965,8 @@ def reconcile(rows, args):
         decisions.append({"attempt_id": row["meta"].get("attempt_id"), "slug": row["slug"],
                           "category": category, "reason": reason, "proposed_note": note,
                           "revalidated": revalidated, "closed": closed,
-                          "cascade": cascade, "summary_owner": summary_owner})
+                          "cascade": cascade, "summary_owner": summary_owner,
+                          "cleanup": terminal_cleanup})
     record = {"at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
               "apply": args.apply, "classifier_source": ATTEMPT_CLASSIFIER_SOURCE,
               "attempted": len(selected), "closed": sum(item["closed"] for item in decisions),

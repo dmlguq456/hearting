@@ -86,6 +86,14 @@ class WorkerBootstrapTest(unittest.TestCase):
         self.assertNotIn("# Worker Type: Owner", rendered)
         self.assertNotIn("# Worker Type: Review", rendered)
 
+    def test_ordinary_worker_does_not_receive_chain_bookkeeping(self):
+        for worker_type in W.WORKER_TYPES:
+            text=W.render_worker_bootstrap(ROOT,worker_type)
+            self.assertNotIn("after at most three",text)
+            self.assertNotIn("Native helper support",text)
+            self.assertNotIn("dispatch_subsession_handoff.py",text)
+        self.assertIn("No per-tool heartbeat",W.runtime_progress_prompt())
+
     def test_render_appends_unit_persona_body(self):
         bare = W.render_worker_bootstrap(ROOT, "review")
         rendered = W.render_worker_bootstrap(ROOT, "review", unit="qa/code-review")

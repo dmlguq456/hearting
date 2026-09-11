@@ -336,6 +336,8 @@ ATTEMPT_MUTABLE_METADATA = {
     "retry_attempt_id",
     "retry_claimed_at",
     "start_permitted",
+    "cleanup_receipt_b64",
+    "cleanup_receipt_digest",
     "cancellation_quiescence_receipt",
     "cancellation_receipt_digest",
     "quiescence_pgid_proof",
@@ -2881,23 +2883,13 @@ def _detached_group_drain_receipt(metadata: dict[str, str]) -> bool:
         and metadata.get("launch_outcome") == "governed-process-group-drained"
         and metadata.get("group_reap_proof") == GROUP_REAP_PROOF
         and metadata.get("group_reap_pgid") == raw_group
-        and (
-            metadata.get("attempt_descendant_proof") == ATTEMPT_DESCENDANT_PROOF
-            or _tagged_residue_receipt(metadata)
-        )
+        and metadata.get("attempt_descendant_proof") == ATTEMPT_DESCENDANT_PROOF
         and metadata.get("attempt_descendant_observer_ns") == observer_namespace
     )
 
 
 def _tagged_residue_receipt(metadata: dict[str, str]) -> bool:
-    """Did the detached drain observer seal a typed tagged-residue receipt?
-
-    SD-OPEN-47 (H7): `dispatch-reap-watch.py` writes this only after the exact
-    leader exited, its process group drained, the attempt already carried
-    semantic terminal evidence, and tagged survivors outlived the residue grace.
-    The pids it names are residue of a finished worker; every quiescence
-    consumer treats them exactly like the operator-sealed artifact proof.
-    """
+    """Read historical residue diagnostics, without declaring those processes gone."""
 
     observer_namespace = metadata.get("pid_observer_ns", "")
     return bool(
@@ -3070,7 +3062,10 @@ def prove_attempt_quiescence(
             if (
                 allow_namespace_extinct
                 and group.state == "empty"
-                and descendants.state == "empty"
+                and (descendants.state == "empty" or (
+                    descendants.state == "unverifiable"
+                    and descendants.reason == "observer-namespace-mismatch"
+                ))
                 and observer_namespace_extinct(metadata) == "extinct"
             ):
                 return QuiescenceProof(
@@ -3099,19 +3094,7 @@ def prove_attempt_quiescence(
 
 
 def _artifact_proof_receipt(metadata: dict[str, str]) -> bool:
-    """Was an artifact-proof substitute sealed for this exact attempt and observer?
-
-    A detached drain receipt needs `attempt-tagged-empty-v1`, so a single process
-    that escaped the governed group while carrying the attempt tag makes the
-    receipt unissuable forever -- and every gate that consumes it (`reconcile`,
-    `dispatch_completion_join`) then has no terminal state to reach, even for a
-    worker that finished and wrote its artifact.  This substitute is the recorded
-    proof that the worker's own last `stage-heartbeat --phase artifact` digest
-    matches the artifact on disk, so its output was already final when the
-    governed process died.  `dispatch-registry.py reconcile
-    --seal-artifact-proof-receipt` is the only writer, and it re-derives the whole
-    chain before and after the write; this predicate only reads the seal back.
-    """
+    """Read a historical output proof; it grants no process-cleanup authority."""
 
     raw_pid = metadata.get("pid", "")
     observer_namespace = metadata.get("pid_observer_ns", "")
@@ -3137,8 +3120,6 @@ def _post_exit_receipt_reason(metadata: dict[str, str]) -> str:
         return "governed-process-group-reaped"
     if _detached_group_drain_receipt(metadata):
         return "governed-process-group-drained"
-    if _artifact_proof_receipt(metadata):
-        return "receipt-superseded-by-artifact-proof"
     return ""
 
 
@@ -3179,6 +3160,80 @@ def cancellation_receipt_reason(metadata: dict[str, str]) -> str:
     return _cancellation_receipt_reason(metadata)
 
 
+CLEANUP_RECEIPT_TYPE = "attempt-cleanup-v1"
+
+
+def _cleanup_receipt_reason(metadata: dict[str, str]) -> str:
+    """Consume only exact cleanup proof; it is neither a verdict nor retry credit."""
+    try:
+        record = json.loads(base64.b64decode(metadata.get("cleanup_receipt_b64", ""), validate=True))
+        if not isinstance(record, dict):
+            return ""
+        return "attempt-cleanup-proven" if (
+            record.get("receipt_type") == CLEANUP_RECEIPT_TYPE
+            and record.get("attempt_id") == metadata.get("attempt_id")
+            and record.get("binding_digest") == _cancellation_quiescence_binding_digest(metadata)
+            and _canonical_sha256(record) == metadata.get("cleanup_receipt_digest")
+            and record.get("namespace_authority") is True
+            and record.get("process_group", {}).get("state") == "empty"
+            and record.get("attempt_tagged_descendants", {}).get("state") == "empty"
+        ) else ""
+    except (ValueError, TypeError, AttributeError):
+        return ""
+
+
+def resolve_attempt_cleanup(jobs: Path, attempt_id: str, *, apply: bool = False) -> dict[str, object]:
+    try:
+        return _resolve_attempt_cleanup(Path(jobs), attempt_id, apply=apply)
+    except (OSError, ValueError, DispatchContractError) as error:
+        return {"attempt_id": attempt_id, "settled": False, "changed": False,
+                "reason": getattr(error, "reason", "cleanup-observation-unavailable")}
+
+
+def _resolve_attempt_cleanup(jobs: Path, attempt_id: str, *, apply: bool = False) -> dict[str, object]:
+    """Reconcile cleanup on an exact terminal row, preserving its committed result.
+
+    The runtime join and operator reconcile use this same bounded, signal-free
+    authority. A missing proof remains an obligation; no cancellation or retry
+    receipt is issued. Process observations happen outside the registry lock.
+    """
+    matches = [line.split("\t") for line in jobs.read_text(encoding="utf-8").splitlines()
+               if len(line.split("\t")) == 6
+               and row_has_attempt(line.split("\t")[5], attempt_id)]
+    result = {"attempt_id": attempt_id, "settled": False, "changed": False}
+    if len(matches) != 1:
+        return {**result, "reason": "cleanup-row-not-unique"}
+    fields = matches[0]
+    metadata = parse_registry_metadata(fields[5])
+    if fields[1] not in {"done", "killed", "cancelled"}:
+        return {**result, "reason": "cleanup-terminal-result-required"}
+    validate_attempt_metadata(metadata)
+    process = attempt_process_quiescence(metadata, terminal_receipt=True)
+    if process.state == "quiescent":
+        return {**result, "settled": True, "reason": process.reason}
+    if process.state == "live":
+        return {**result, "reason": process.reason}
+    proof = prove_attempt_quiescence(metadata, max_wait_seconds=0, allow_namespace_extinct=True)
+    if not proof.proven:
+        return {**result, "reason": process.reason,
+                "group_state": proof.process_group_state, "descendant_state": proof.descendant_state,
+                "namespace_authority": proof.namespace_authority}
+    record = _cancellation_quiescence_receipt_record(metadata, proof)
+    record["receipt_type"] = CLEANUP_RECEIPT_TYPE
+    digest = _canonical_sha256(record)
+    if not apply:
+        return {**result, "reason": "cleanup-proof-available", "proof_source": proof.source}
+    values = {"cleanup_receipt_b64": base64.b64encode(json.dumps(record, sort_keys=True).encode()).decode(),
+              "cleanup_receipt_digest": digest}
+    changed = annotate_attempt_row_if(
+        jobs, attempt_id, values, lambda fresh: fresh == fields,
+        statuses=frozenset({"done", "killed", "cancelled"}),
+    )
+    return {**result, "settled": changed, "changed": changed,
+            "reason": "attempt-cleanup-proven" if changed else "cleanup-row-changed",
+            "proof_source": proof.source, "receipt_digest": digest if changed else ""}
+
+
 def attempt_process_quiescence(
     metadata: dict[str, str], *, terminal_receipt: bool = False
 ) -> ProcessQuiescence:
@@ -3215,28 +3270,13 @@ def attempt_process_quiescence(
             and metadata.get("pid_scope") == "namespace-local"
             and not _post_exit_receipt_reason(metadata)
             and not _cancellation_receipt_reason(metadata)
+            and not _cleanup_receipt_reason(metadata)
         ):
             return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
         return result
     probe = attempt_tagged_descendants(metadata)
     if probe.state == "populated":
-        # A visible tagged process normally vetoes quiescence, because it may
-        # still be writing this attempt's output. A sealed artifact proof settles
-        # exactly that question the other way: the artifact on disk already
-        # matches the digest the worker itself recorded at its final artifact
-        # heartbeat, and the governed process is gone (checked above), so the
-        # survivor is leaked residue rather than the worker. Only at a terminal
-        # gate, and only with the operator-sealed proof -- an unsealed row keeps
-        # the veto.
-        if terminal_receipt and _artifact_proof_receipt(metadata):
-            return result
-        # SD-OPEN-47 (H7): the drain observer already proved, after terminal
-        # evidence and the residue grace, that these tagged survivors are
-        # leftovers of a finished worker. They never veto again, at any gate:
-        # the alternative is a child row no join, reconcile, or successor
-        # gate can ever close while the residue lives.
-        if _tagged_residue_receipt(metadata):
-            return result
+        # Output evidence never settles a live process cleanup obligation.
         return ProcessQuiescence(
             "live", "attempt-descendant-live", probe.members[0][0]
         )
@@ -3246,6 +3286,7 @@ def attempt_process_quiescence(
         and metadata.get("pid_scope") == "namespace-local"
         and not _post_exit_receipt_reason(metadata)
         and not _cancellation_receipt_reason(metadata)
+        and not _cleanup_receipt_reason(metadata)
     ):
         return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
     if result.state != "quiescent":
@@ -3261,7 +3302,7 @@ def attempt_process_quiescence(
         if (
             terminal_receipt
             and probe.reason == "observer-namespace-mismatch"
-            and _post_exit_receipt_reason(metadata)
+            and (_post_exit_receipt_reason(metadata) or _cleanup_receipt_reason(metadata))
         ):
             return result
         return ProcessQuiescence("unverifiable", "attempt-descendant-unverifiable")
@@ -3305,7 +3346,7 @@ def _attempt_process_quiescence_impl(metadata: dict[str, str]) -> ProcessQuiesce
         return ProcessQuiescence("unverifiable", "process-identity-invalid")
 
     candidates = authoritative_process_identities(metadata)
-    receipt_reason = _post_exit_receipt_reason(metadata)
+    receipt_reason = _post_exit_receipt_reason(metadata) or _cleanup_receipt_reason(metadata)
 
     if not candidates:
         if receipt_reason:

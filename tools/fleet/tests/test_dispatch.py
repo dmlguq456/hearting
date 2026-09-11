@@ -2040,7 +2040,7 @@ class CodexAttemptIdentityTest(unittest.TestCase):
         self.assertEqual(evidence["pid_identity_source"], "host")
         self.assertEqual((evidence["pid_local"], evidence["pid_host"]), (7, pid))
 
-    def test_namespace_local_terminal_heartbeat_is_done(self):
+    def test_namespace_local_terminal_heartbeat_is_only_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
             heartbeat_dir = os.path.join(tmp, ".dispatch", "heartbeats")
             os.makedirs(heartbeat_dir)
@@ -2057,8 +2057,8 @@ class CodexAttemptIdentityTest(unittest.TestCase):
                  mock.patch("fleet.collectors.dispatch.os.path.exists", return_value=False):
                 state = dispatch._dispatch_liveness(job, now=1000.0, track=False)
 
-        self.assertEqual(state, "done")
-        self.assertIn("terminal heartbeat", job.state_evidence["attempt"]["rule"])
+        self.assertNotEqual(state, "done")
+        self.assertNotIn("terminal heartbeat", job.state_evidence["attempt"]["rule"])
 
     def test_namespace_local_stale_heartbeat_never_uses_cwd_transcript(self):
         with tempfile.TemporaryDirectory() as tmp:

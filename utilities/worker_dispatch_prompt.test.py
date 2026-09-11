@@ -170,7 +170,7 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                     self.assertNotIn("- guard_session_id: codex-headless", prompt)
                     self.assertNotIn("codex-headless", prompt)
 
-    def test_route_bound_stage_prompts_name_deterministic_heartbeat_consumer(self):
+    def test_three_adapters_leave_progress_bookkeeping_to_runtime(self):
         for harness, (wrapper, model, _suffix) in ADAPTERS.items():
             with self.subTest(harness=harness):
                 spec=importlib.util.spec_from_file_location(f"dispatch_{harness}",wrapper)
@@ -186,17 +186,11 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                 args.artifact_root="/artifacts"
                 render=module.prompt if harness=="opencode" else module.dispatch_prompt
                 prompt,_=render(args)
-                self.assertIn("Stage progress contract (SD-58)",prompt)
-                self.assertIn("att-promptheartbeat01",prompt)
-                self.assertIn("rt-prompt",prompt)
-                self.assertIn("--phase analysis",prompt)
-                self.assertIn("unchanged phase/evidence pair is not progress",prompt)
-                heartbeat_path=(
-                    ROOT/"utilities/dispatch-progress.py"
-                    if harness=="claude"
-                    else ROOT/f"adapters/{harness}/bin/preflight.sh"
-                )
-                self.assertIn(str(heartbeat_path),prompt)
+                self.assertIn("The runtime observes tool progress",prompt)
+                self.assertIn("No per-tool heartbeat command is required",prompt)
+                self.assertNotIn("--phase analysis",prompt)
+                self.assertNotIn("Stage progress contract",prompt)
+                self.assertIn("TASK",prompt)
 
 
 if __name__ == "__main__":

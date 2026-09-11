@@ -55,6 +55,15 @@ class StageSessionStateDirTests(unittest.TestCase):
         self.assertEqual(ledger.parent, self.root / ".runtime" / "stage-sessions" / "rt-0123456789abcdef")
         self.assertEqual(artifact_producer.check_write(self.root, ledger)["reason"], "runtime-owned")
 
+    def test_only_declared_subsession_gets_chain_responsibilities(self):
+        args=_args(self.worktree,self.brief,self.fixed)
+        runtime.bind(args,artifact_root=self.root,action="dry-run")
+        fragment=runtime.prompt_fragment(args)
+        self.assertIn("dispatch_subsession_handoff.py",fragment)
+        self.assertIn("Before compaction",fragment)
+        self.assertIn("Native helper support",fragment)
+        self.assertEqual(runtime.prompt_fragment(argparse.Namespace(subsession_id=None)),"")
+
     def test_dry_run_creates_nothing(self):
         args = _args(self.worktree, self.brief, self.fixed)
         runtime.bind(args, artifact_root=self.root, action="dry-run")

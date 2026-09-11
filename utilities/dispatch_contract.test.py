@@ -2705,7 +2705,7 @@ class DispatchContractTest(unittest.TestCase):
 
  # SD-OPEN-47 (H7): a sidecar-sealed residue receipt names the survivors as
  # leftovers of a finished worker; they never veto quiescence again.
- def test_sd_open_47_tagged_residue_receipt_lifts_the_descendant_veto(self):
+ def test_historical_residue_receipt_does_not_lift_live_descendant_veto(self):
   attempt="att-residue-receipt-fixture"
   residue=subprocess.Popen([sys.executable,"-c","import time; time.sleep(30)"],
                            env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID=attempt),
@@ -2728,16 +2728,22 @@ class DispatchContractTest(unittest.TestCase):
               attempt_descendant_residue=f"{residue.pid}:1",
               attempt_descendant_residue_basis="terminal-envelope")
   self.assertTrue(D.tagged_residue_receipt(sealed))
-  self.assertEqual(D.post_exit_receipt_reason(sealed),"governed-process-group-drained")
-  self.assertEqual(D.attempt_process_quiescence(sealed).state,"quiescent")
-  self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,
-                   "quiescent")
+  self.assertEqual(D.post_exit_receipt_reason(sealed),"")
+  self.assertEqual(D.attempt_process_quiescence(sealed).state,"live")
+  self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,"live")
+  artifact=dict(sealed,post_exit_receipt_substitute=D.ARTIFACT_PROOF_RECEIPT,
+                artifact_proof_sha256="a"*64,artifact_proof_verdict="PASS",
+                artifact_proof_observer_ns=ns)
+  self.assertTrue(D._artifact_proof_receipt(artifact))
+  self.assertEqual(D.attempt_process_quiescence(artifact,terminal_receipt=True).state,"live")
   # The empty proof is still the only other accepted descendant proof.
   bogus=dict(sealed,attempt_descendant_proof="attempt-tagged-anything-v1")
   self.assertFalse(D.tagged_residue_receipt(bogus))
   self.assertEqual(D.attempt_process_quiescence(bogus).reason,"attempt-descendant-live")
   unbased=dict(sealed,attempt_descendant_residue_basis="")
   self.assertFalse(D.tagged_residue_receipt(unbased))
+  residue.terminate();residue.wait(timeout=5)
+  self.assertEqual(D.attempt_process_quiescence(artifact,terminal_receipt=True).state,"quiescent")
 
  # A-N1. A confirmed death still advances, with its original reason intact.
  def test_confirmed_death_without_tagged_processes_stays_quiescent(self):
@@ -3812,6 +3818,76 @@ class CancellationQuiescenceExtinctSourceTest(unittest.TestCase):
    proof=D.prove_attempt_quiescence(
     metadata,max_wait_seconds=0,allow_namespace_extinct=True)
   self.assertFalse(proof.proven)
+
+
+class TerminalCleanupResponsibilityTest(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+  self.jobs=Path(self.tmp.name)/"jobs.log"
+
+ def test_terminal_proof_preserves_success_and_cannot_authorize_retry(self):
+  metadata=extinct_metadata("att-cleanup-success")
+  metadata.update(note="completed-marker",completion_marker="original-marker",
+                  delivery_receipt_b64="original-receipt",failure_class="pass")
+  self.jobs.write_text(attempt_row(metadata,"done")+"\n")
+  empty=D.ProcessGroupObservation("empty")
+  mismatch=D.ProcessGroupObservation("unverifiable",reason="observer-namespace-mismatch")
+  with mock.patch.object(D,"process_group_observation",return_value=empty), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=mismatch), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+   original=self.jobs.read_bytes()
+   planned=D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"])
+   self.assertEqual(planned["reason"],"cleanup-proof-available")
+   self.assertEqual(self.jobs.read_bytes(),original)
+   result=D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"],apply=True)
+   self.assertTrue(result["settled"],result)
+   sealed=D.parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+   self.assertTrue(D._cleanup_receipt_reason(sealed))
+   self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,"quiescent")
+   again=self.jobs.read_bytes()
+   self.assertTrue(D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"],apply=True)["settled"])
+   self.assertEqual(self.jobs.read_bytes(),again)
+  self.assertEqual({k:sealed[k] for k in metadata},metadata)
+  self.assertEqual(D.cancellation_receipt_reason(sealed),"")
+  self.assertEqual(D.post_exit_receipt_reason(sealed),"")
+  self.assertNotIn("retry_attempt_id",sealed)
+  self.assertFalse(D._cleanup_receipt_reason(dict(sealed,pid_start="another-process")))
+  self.assertFalse(D._cleanup_receipt_reason(dict(sealed,cleanup_receipt_digest="sha256:wrong")))
+  populated=D.ProcessGroupObservation("populated",((4242,"900","S"),))
+  with mock.patch.object(D,"attempt_tagged_descendants",return_value=populated):
+   self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,"live")
+
+ def test_incomplete_observation_preserves_obligation_and_all_bytes(self):
+  metadata=extinct_metadata("att-cleanup-unknown")
+  self.jobs.write_text(attempt_row(metadata,"done")+"\n")
+  original=self.jobs.read_bytes()
+  with mock.patch.object(D,"process_group_observation",return_value=D.ProcessGroupObservation("empty")), \
+       mock.patch.object(D,"attempt_tagged_descendants",return_value=D.ProcessGroupObservation("unverifiable",reason="proc-permission-denied")), \
+       mock.patch.object(D,"attempt_scan_namespace_authority",return_value=False), \
+       mock.patch.object(D,"observer_namespace_extinct",return_value="extinct"):
+   result=D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"],apply=True)
+  self.assertFalse(result["settled"],result)
+  self.assertEqual(self.jobs.read_bytes(),original)
+
+ def test_live_terminal_child_remains_owned_then_real_exit_settles(self):
+  child=subprocess.Popen([sys.executable,"-c","import sys; sys.stdin.read()"],
+                         stdin=subprocess.PIPE,start_new_session=True,
+                         env=dict(os.environ,AGENT_DISPATCH_ATTEMPT_ID="att-cleanup-live"))
+  self.addCleanup(lambda: child.poll() is None and (child.kill(),child.wait(timeout=5)))
+  metadata={**D.process_launch_identity(child.pid),"attempt_id":"att-cleanup-live",
+            "note":"completed-marker","launch_lifecycle":"foreground-scoped",
+            "pid_scope":"namespace-local"}
+  self.jobs.write_text(attempt_row(metadata,"done")+"\n")
+  original=self.jobs.read_bytes()
+  self.assertFalse(D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"],apply=True)["settled"])
+  self.assertEqual(self.jobs.read_bytes(),original)
+  child.stdin.close();child.wait(timeout=5)
+  result=D.resolve_attempt_cleanup(self.jobs,metadata["attempt_id"],apply=True)
+  self.assertTrue(result["settled"],result)
+  sealed=D.parse_registry_metadata(self.jobs.read_text().strip().split("\t",5)[5])
+  self.assertEqual(sealed["note"],"completed-marker")
+  self.assertEqual(D.attempt_process_quiescence(sealed,terminal_receipt=True).state,"quiescent")
 
 
 class CancellationReceiptWedgeTest(unittest.TestCase):

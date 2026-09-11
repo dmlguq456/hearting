@@ -19,7 +19,7 @@ from dispatch_receipt_identity import receipt_digest
 import dispatch_pending_delivery as pending_delivery
 
 KIND = "supervision"
-REASONS = frozenset({"process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict"})
+REASONS = frozenset({"no-progress", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict"})
 
 
 class SupervisionError(ValueError):

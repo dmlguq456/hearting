@@ -1137,10 +1137,7 @@ def classify_attempt_evidence(ev_in, now=None):
             else f"exact attempt observed terminal action {terminal['terminal_action']}"
         )
     elif pid_scope == "namespace-local":
-        if heartbeat and heartbeat.get("phase") == "terminal":
-            state, source = "done", "heartbeat"
-            rule = "namespace-local attempt emitted an exact terminal heartbeat"
-        elif (
+        if (
             ev_in.get("pid_authoritative") is True
             and ev_in.get("pid_alive") is True
             and ev_in.get("proc_start_match") is True

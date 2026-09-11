@@ -505,7 +505,7 @@ class NamespaceLocalDescendantEvidenceTest(unittest.TestCase):
             heartbeat={"attempt_id": "att-ghost", "route_id": "rt-ghost",
                        "route_node": "execute", "phase": "terminal", "sequence": 4,
                        "updated_at": 1000.0}), now=1060.0)
-        self.assertEqual((terminal["state"], terminal["source"]), ("done", "heartbeat"))
+        self.assertEqual((terminal["state"], terminal["source"]), ("dead", "namespace"))
 
 
 if __name__ == "__main__":

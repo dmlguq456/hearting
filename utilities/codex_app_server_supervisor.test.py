@@ -759,7 +759,7 @@ class SharedReceiptlessRecoveryTest(unittest.TestCase):
         load_supervisor_module()
         import dispatch_completion_join
         self.module = dispatch_completion_join
-        self.child = argparse.Namespace(attempt_id="att-child")
+        self.child = argparse.Namespace(attempt_id="att-child", status="open")
 
     def response(self, *, closed=0, reason="namespace-not-extinct", digest=None):
         return fake_run_result(0, json.dumps({
