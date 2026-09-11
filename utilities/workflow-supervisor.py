@@ -1816,25 +1816,19 @@ def cmd_complete(args):
     terminal_nodes = WS.route_terminal_nodes(route)
     if not terminal_nodes:
         raise SupervisorError("route declares no terminal node")
-    gates = terminal_gate_state(route)
-    unproven = {node: row for node, row in gates.items() if not row["passed"]}
     with ledger.lock():
         state = ledger.state()
+        gates = terminal_gate_state(route)
+        unproven = {node: row for node, row in gates.items() if row.get("passed") is not True}
+        unproven.update({node: {"passed": False, "reason": "missing-terminal-gate"}
+                         for node in terminal_nodes if node not in gates})
         if unproven:
             print(json.dumps({"complete": False, "reason": "terminal-gate-unproven",
                               **ledger_metadata(getattr(args, "jobs", None), ledger),
                               "unproven": unproven,
                               "workflow_state": state["workflow_state"]}, sort_keys=True))
             return 3
-        for node in terminal_nodes:
-            if state["nodes"].get(node, {}).get("state") != "STAGE_SUCCEEDED":
-                ledger.record(node, "STAGE_SUCCEEDED",
-                              evidence={"terminal_gate": gates[node]}, actor="complete")
-        if ledger.state()["workflow_state"] != "TERMINAL_VERIFY":
-            ledger.set_workflow_state("TERMINAL_VERIFY", evidence={"terminal_gates": gates},
-                                      actor="complete")
-        ledger.set_workflow_state("COMPLETE", evidence={"terminal_gates": gates},
-                                  actor="complete")
+        ledger.complete(terminal_nodes, gates)
     print(json.dumps({"complete": True, **ledger_metadata(getattr(args, "jobs", None), ledger),
                       "terminal_nodes": terminal_nodes,
                       "workflow_state": ledger.state()["workflow_state"]}, sort_keys=True))

@@ -170,9 +170,13 @@ reason=unannotated-existing-stage. Existing sealed routes retain their original
 bytes/hash. New ad-hoc stages require full demand inputs.
 
 The unannotated quick owner=balanced-deep and standard+ owner=deep are compatibility
-values, never evidence of demand. Existing owner eligibility, QA, intensity, depth,
-peer authority and vendor constraints remain independent. A selected cell that
-conflicts with owner eligibility is a typed rejection, never a silent reassignment.
+defaults, used only when no owner demand is supplied. A complete owner demand
+selects its model through the same resolver as a stage; intensity does not impose
+a second profile floor. Compile and verification recompute this one selection,
+and quick's one-shot process carries its owner's selection. Registered-profile
+eligibility, QA, intensity, depth, peer authority and vendor constraints remain
+independent. Invalid demand or a profile outside the declared judgment floor
+is rejected at selection, before a route is issued.
 Capacity substitution stays inside the sealed profile and eligible vendor band.
 Effort labels are adapter/model-relative operating points, never portable scores.
 OpenCode balanced preserves the selected light point and reports

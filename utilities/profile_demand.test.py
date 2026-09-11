@@ -192,7 +192,7 @@ class RouteDemand(unittest.TestCase):
         self.assertEqual(route["owner_profile_selection"]["source"],"legacy")
 
     def test_owner_floor_unknown_target_and_partial_reject(self):
-        for demands in ({"__owner__":demand("important")},{"execute":{}},{"absent":demand()}):
+        for demands in ({"__owner__":{}},{"execute":{}},{"absent":demand()}):
             with self.assertRaises(ValueError): self.compile(profile_demands=demands)
         with self.assertRaises(ValueError):
             self.compile(profile_demands={"execute":demand("important")},explicit_profiles={"execute":"light"})
@@ -306,6 +306,59 @@ class TopExceptionRoute(unittest.TestCase):
     dispatch = F.TestRoute.dispatch
     nested = F.TestRoute.nested
     TOP = {"__owner__": "top"}
+
+    def test_owner_demand_replaces_default_for_quick_and_standard(self):
+        for judgment, scope, profile in (("predetermined", "short-local", "light"),
+                ("predetermined", "extended-multistep", "balanced"),
+                ("important", "short-local", "balanced-deep"),
+                ("difficult-uncertain", "short-local", "deep")):
+            for compile_route in (self.quick, self.staged):
+                for explicit in ({}, {"__owner__": profile}):
+                    with self.subTest(profile=profile, shape=compile_route.__name__, explicit=explicit):
+                        route = compile_route(profile_demands={"__owner__": demand(judgment, scope)},
+                                              explicit_profiles=explicit)
+                        self.assertEqual(route["owner_model_profile"], profile)
+                        R.verify_route(route, R.ROOT)
+                        for node in route["nodes"]:
+                            if node["id"] == "one-shot":
+                                self.assertEqual(node["model_profile"], profile)
+                        if profile == "light":
+                            self.assertEqual({n["model_profile"] for n in route["nodes"]
+                                              if n["unit"] == "plan/frame"}, {"balanced"})
+
+    def test_light_compose_owner_and_semantic_stages_round_trip(self):
+        for shape, graph in (("solo", None), ("staged", "plan,plan-check,test,report")):
+            route = R.compose_route(capability="autopilot-code", capability_mode="dev", shape=shape,
+                graph=graph, slug="light-owner", cwd=R.ROOT, artifact_root=R.ROOT,
+                spec_read="fixture", registered_headless_evidence=self.registered_headless(),
+                dispatch_evidence=self.dispatch(self.nested()),
+                profile_demands={"__owner__": demand()}, explicit_profiles={"__owner__": "light"})
+            self.assertEqual(route["owner_model_profile"], "light")
+            R.verify_route(route, R.ROOT)
+        route = self.staged(capability="autopilot-spec", capability_mode="app",
+            profile_demands={"__owner__": demand(), "prd-transaction": demand()},
+            explicit_profiles={"__owner__": "light", "prd-transaction": "light"})
+        R.verify_route(route, R.ROOT)
+
+    def test_owner_default_drift_and_quick_dual_selection_are_refused(self):
+        route = self.staged()
+        route["owner_model_profile"] = "light"
+        route["owner_profile_selection"] = P.resolve_profile_demand(
+            None, explicit_profile="light", legacy=True, existing_versioned_stage=True)
+        route["route_hash"] = R.route_hash(route)
+        route["route_id"] = "rt-" + route["route_hash"].split(":")[1][:16]
+        with self.assertRaises(ValueError):
+            R.verify_route(route, R.ROOT)
+        with self.assertRaisesRegex(ValueError, "owner-node-profile-selection-conflict"):
+            self.quick(profile_demands={"__owner__": demand(), "one-shot": demand("important")},
+                       explicit_profiles={"one-shot": "balanced-deep"})
+
+    def test_inline_demand_does_not_invent_an_owner_or_break_verification(self):
+        route = R.compose_route(capability="autopilot-code", capability_mode="dev", shape="direct",
+            graph=None, slug="inline-demand", cwd=R.ROOT, artifact_root=R.ROOT, spec_read="fixture",
+            profile_demands={"__owner__": demand("important")})
+        self.assertIsNone(route["owner_model_profile"])
+        R.verify_route(route, R.ROOT)
 
     def owner_demand(self, judgment="difficult-uncertain"):
         return {"__owner__": demand(judgment)}

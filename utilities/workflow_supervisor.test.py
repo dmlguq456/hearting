@@ -810,6 +810,84 @@ class TestGateRelease(WorkflowFixture):
 # C. completion is terminal-node bound
 # ---------------------------------------------------------------------------
 class TestCompletion(WorkflowFixture):
+    def complete(self, route, path, gates=None):
+        args = type("Args", (), {"route": str(path), "jobs": None})()
+        with mock.patch.object(SUP, "terminal_gate_state", return_value=(
+                gates if gates is not None else {"verify": {"passed": True}})), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return SUP.cmd_complete(args)
+
+    def test_terminal_evidence_closes_legal_path_and_repeat_is_read_only(self):
+        for initial in ("CREATED", "READY", "RUNNING", "STAGE_SUCCEEDED",
+                        "NEXT_REGISTERED", "NEXT_RUNNING", "TERMINAL_VERIFY", "COMPLETE"):
+            with self.subTest(initial=initial):
+                route, path = self.two_stage_route(route_id="rt-complete-" + initial)
+                ledger = SUP.ledger_for(route)
+                with ledger.lock():
+                    for step in WS.completion_transition_path("CREATED", initial):
+                        ledger.set_workflow_state(step)
+                    ledger.record("verify", "RUNNING")
+                self.assertEqual(self.complete(route, path), 0)
+                state = ledger.state()
+                self.assertEqual(state["workflow_state"], "COMPLETE")
+                self.assertEqual(state["nodes"]["verify"]["state"], "STAGE_SUCCEEDED")
+                before = ledger.journal_path.read_bytes()
+                self.assertEqual(self.complete(route, path), 0)
+                self.assertEqual(ledger.journal_path.read_bytes(), before)
+                states = [row["workflow_state"] for row in ledger.journal() if row["workflow_state"]]
+                self.assertEqual(states[-3:], ["STAGE_SUCCEEDED", "TERMINAL_VERIFY", "COMPLETE"])
+
+    def test_completion_refusal_prevalidates_nodes_and_preserves_obligations(self):
+        failures = WS.vocabulary()["failure_states"]
+        for failure in failures:
+            for location in ("workflow", "terminal", "predecessor"):
+                with self.subTest(failure=failure, location=location):
+                    route, path = self.two_stage_route(route_id=f"rt-{failure}-{location}")
+                    ledger = SUP.ledger_for(route)
+                    with ledger.lock():
+                        ledger.set_workflow_state("READY")
+                        ledger.set_workflow_state("RUNNING")
+                        ledger.record("verify", "RUNNING")
+                        if location == "workflow":
+                            ledger.set_workflow_state(failure)
+                        else:
+                            ledger.record("verify" if location == "terminal" else "run", failure)
+                    before = ledger.journal_path.read_bytes()
+                    with self.assertRaises(WS.WorkflowStateError):
+                        self.complete(route, path)
+                    self.assertEqual(ledger.journal_path.read_bytes(), before)
+
+    def test_missing_or_unresolved_auxiliary_gate_does_not_close(self):
+        route, path = self.two_stage_route()
+        ledger = SUP.ledger_for(route)
+        for gates in ({}, {"verify": {"passed": True}, "parallel_group:review": {"passed": False}}):
+            self.assertEqual(self.complete(route, path, gates), 3)
+            self.assertEqual(ledger.journal(), [])
+
+    def test_interrupted_complete_resumes_after_each_durable_append(self):
+        for cutoff in range(1, 6):
+            with self.subTest(cutoff=cutoff):
+                route, path = self.two_stage_route(route_id=f"rt-interrupted-{cutoff}")
+                ledger = SUP.ledger_for(route)
+                with ledger.lock():
+                    ledger.set_workflow_state("READY")
+                    ledger.set_workflow_state("RUNNING")
+                    ledger.record("verify", "READY")
+                append = type(ledger)._append
+                count = 0
+                def interrupted(instance, entry):
+                    nonlocal count
+                    append(instance, entry)
+                    count += 1
+                    if count == cutoff:
+                        raise OSError("crash after durable append")
+                with mock.patch.object(type(ledger), "_append", interrupted), self.assertRaises(OSError):
+                    self.complete(route, path)
+                self.assertEqual(self.complete(route, path), 0)
+                self.assertEqual(ledger.state()["workflow_state"], "COMPLETE")
+                closings = [row for row in ledger.journal() if row["actor"] == "complete"]
+                self.assertEqual(len(closings), 5)
+
     def test_workflow_does_not_complete_before_its_terminal_node(self):
         route, path = self.two_stage_route()
         registry = self.resource_registry(exit_code=0)

@@ -500,6 +500,14 @@ its terminal node. `BLOCKED_HUMAN_GATE` never advances automatically; only an
 explicit human release returns it to `RUNNING`. `FAILED_*` never advances a
 downstream stage.
 
+The completion writer owns the remaining successful state transitions as well
+as terminal-gate verification. It validates the whole closure before appending
+anything, then records the legal path through `STAGE_SUCCEEDED` and
+`TERMINAL_VERIFY` to `COMPLETE`. A repeated or interrupted close resumes from
+the journal without duplicating completed transitions. Human gates, failures,
+and cancellation remain unresolved obligations; a terminal marker cannot erase
+them.
+
 **Every non-terminal stage declares exactly one continuation.** A stage graph
 that leaves a stage with no way to reach the next one is the defect this
 contract exists to prevent, so the declaration is mechanical, not editorial:

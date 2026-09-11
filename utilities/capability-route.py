@@ -1992,23 +1992,25 @@ def _seal_dispatch_defaults(nodes, capability, owner_profile=None):
     )
 
 
-def _owner_profile_policy_gap(owner_profile, effective, registry):
-    """None when `owner_profile` is what the portable intensity policy admits
-    for `effective`, else the typed gap: `top-requires-owner` (the exception
-    profile on a direct route, which has no owner) or `mismatch`. One rule
-    read by both the compiler and `verify_route` (review R1 B1: the compiler
-    admitted `top` above the intensity's expected owner profile while verify
-    still demanded equality, so every `top` route compiled and then could
-    not bind, launch, harvest, or close)."""
+def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=None):
+    """One selection for compile and verify: demand, otherwise legacy default.
 
+    Intensity describes the workflow shape; its compatibility default must not
+    veto the independently validated judgment/execution demand.
+    """
+    default = registry["owner_profile_by_intensity"].get(effective) or "light"
+    selection = PROFILE.resolve_profile_demand(
+        demand, explicit_profile=explicit_profile if demand is not None else default,
+        legacy=True, existing_versioned_stage=True)
+    profile = selection["resolved_profile"]
     if effective == "direct":
-        if owner_profile == PROFILE.TOP_PROFILE:
-            return "top-requires-owner"
-        return None if owner_profile is None else "mismatch"
-    expected = registry["owner_profile_by_intensity"].get(effective)
-    if owner_profile == PROFILE.TOP_PROFILE:
-        return None
-    return None if not expected or owner_profile == expected else "mismatch"
+        if profile == PROFILE.TOP_PROFILE:
+            raise ValueError("owner-profile-top-requires-owner")
+        return None, selection
+    if profile != PROFILE.TOP_PROFILE and registry["model_profiles"].get(
+            profile, {}).get("registered_topology") is not True:
+        raise ValueError("owner-profile-ineligible-for-registered-dispatch")
+    return profile, selection
 
 
 def _owner_node(node, effective):
@@ -2188,7 +2190,7 @@ def _verify_profile_contract(route):
             raise ValueError("node-profile-explicit-map-mismatch:" + node_id)
     PROFILE.validate_profile_selection(
         route.get("owner_profile_selection"), route.get("owner_profile_demand"),
-        profile=route.get("owner_model_profile") or "light", existing_versioned_stage=True,
+        profile=route.get("owner_model_profile"), existing_versioned_stage=True,
     )
     for node in route.get("nodes", []):
         if node.get("kind") == "resource-runner":
@@ -2822,32 +2824,15 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                 node["fallback_hops"]=json.loads(json.dumps(chain))
     profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles)
     owner_demand = profile_demands.get("__owner__")
-    owner_profile_selection = PROFILE.resolve_profile_demand(
-        owner_demand, explicit_profile=(explicit_profiles.get("__owner__") if owner_demand
-                                       else owner_model_profile or "light"),
-        legacy=True, existing_versioned_stage=True,
-    )
+    owner_model_profile, owner_profile_selection = _resolve_owner_profile(
+        effective, registry, owner_demand, explicit_profiles.get("__owner__"))
     resolved_owner_profile = owner_profile_selection["resolved_profile"]
-    # A direct route seals no owner profile; the one thing it must still
-    # refuse is an explicit `top` (direct runs inline in the main session,
-    # which already IS the top model's home -- there is no owner to give it to).
-    gap = _owner_profile_policy_gap(
-        resolved_owner_profile if effective != "direct" or resolved_owner_profile == PROFILE.TOP_PROFILE else None,
-        effective, registry)
-    if gap == "top-requires-owner":
-        raise ValueError("owner-profile-top-requires-owner")
-    if gap:
-        raise ValueError("owner-profile-eligibility-conflict")
-    if effective != "direct":
-        owner_model_profile = resolved_owner_profile
-    if resolved_owner_profile == PROFILE.TOP_PROFILE:
-        # Review R1 B2 / R2 B1: the owner's own node -- and only it -- seals
-        # the same explicit `top` selection the owner did; otherwise the route
-        # claims `top` while its node says `balanced-deep`, and the launched
-        # owner's route guard refuses the mismatch.
+    if owner_demand is not None:
+        # Quick's one-shot is the owner process, so there is one selection.
+        # Semantic owner stages in standard+ remain independently selected.
         for node in nodes:
             if _owner_node(node, effective):
-                node["model_profile"] = PROFILE.TOP_PROFILE
+                node["model_profile"] = resolved_owner_profile
                 node["profile_explicit"] = True
                 node["profile_demand"] = owner_demand
     # The frame bootstrap tier ladder, applied for BOTH shapes at once, after
@@ -2862,6 +2847,9 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
     _stamp_frame_profiles(nodes, resolved_owner_profile, owner_demand)
     legacy_nodes = not composed or _versioned_subgraph(registry, recipe)
     _seal_profile_demands(nodes, profile_demands, explicit_profiles, legacy=legacy_nodes)
+    for node in nodes:
+        if _owner_node(node, effective) and node["model_profile"] != owner_model_profile:
+            raise ValueError("owner-node-profile-selection-conflict:" + node["id"])
     dispatch_defaults_digest,dispatch_allocation,owner_harness_policy=_seal_dispatch_defaults(
         nodes, capability, owner_model_profile
     )
@@ -3242,11 +3230,11 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             raise ValueError("invalid dispatch_allocation harness order")
     observed_dispatch_depths = [route["owner_dispatch_depth"]]
     effective=route.get("effective_intensity")
-    gap=_owner_profile_policy_gap(route.get("owner_model_profile"), effective, registry)
-    if gap=="top-requires-owner":
-        raise ValueError("owner-profile-top-requires-owner")
-    if gap:
-        raise ValueError("owner_model_profile differs from the portable intensity policy")
+    selected_owner, _ = _resolve_owner_profile(
+        effective, registry, route.get("owner_profile_demand"),
+        (route.get("explicit_profiles") or {}).get("__owner__"))
+    if route.get("owner_model_profile") != selected_owner:
+        raise ValueError("owner_model_profile differs from the portable owner selection")
     # The owner's own node (quick `one-shot`) must carry the profile the route
     # sealed for the owner (the policy check above already admitted it, `top`
     # included); a standard+ recipe's semantic owner node keeps the portable
@@ -3319,7 +3307,8 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             and node.get("unit") == "_kernel/owner"
             and (
                 node.get("dispatch_depth") != 1
-                or node.get("model_profile") != expected_owner_profile
+                or (route.get("profile_selection_contract_version") is None
+                    and node.get("model_profile") != expected_owner_profile)
             )
         ):
             raise ValueError(
