@@ -55,8 +55,8 @@ Why this stage exists (user directive 2026-07-24): when the direction is set
 implicitly inside plan authoring and it bends early, everything downstream
 executes the wrong direction precisely — the result is hotfix/patch cascades
 and cost blowups. Framing therefore runs as its own stage, launched directly by
-the depth-0 session ahead of the route (`core/WORKFLOW.md` frame procedure),
-not as a route-declared parallel group. Cross-harness placement is primary,
+the depth-0 session after route binding and producer begin, before owner
+launch (`core/WORKFLOW.md` frame procedure). Cross-harness placement is primary,
 while asymmetric model profiles and perspectives widen the search before
 anything commits.
 
@@ -87,7 +87,10 @@ anything commits.
    choose", say so explicitly and name the single missing fact — do not emit a
    survey without a verdict.
 5. **Write the direction brief** to the exact output path given in the prompt,
-   using the schema below.
+   using the schema below. Under producer cutover, a relative shard path is
+   rooted at `AGENT_ARTIFACT_OUTPUT_DIR` (the open cycle's `artifacts/`), not
+   `AGENT_ARTIFACT_ROOT`. Use the inherited cycle; do not begin another cycle
+   or write to legacy root-level `shards/`.
 6. Return per `_shared/dual-io.md`.
 
 ## Direction-Brief Schema
@@ -113,7 +116,7 @@ created: {YYYY-MM-DD}
    sentence a non-engineer could answer, with your recommended answer and one
    line on why you cannot decide it yourself. Facts you could establish by
    reading code or running a tool do not belong here; establish them. The
-   owner turns this list into the frame interview (SD-129).
+   dispatching depth-0 session turns this list into the frame interview (SD-129).
 
 ## Constraints
 
