@@ -165,6 +165,12 @@ class HarvestTest(unittest.TestCase):
         self.assertNotEqual(expected, self.home / ".dispatch" / "jobs.log")
 
     def test_successful_failure_detail_consumes_supervisor_outbox_once(self):
+        self._supervised_inspection_consumes_once(["--failure-detail"])
+
+    def test_successful_terminal_read_consumes_supervisor_outbox_once(self):
+        self._supervised_inspection_consumes_once([])
+
+    def _supervised_inspection_consumes_once(self, extra):
         attempt = "att-supervisor-failure-detail"
         parent = "att-supervisor-parent"
         jobs = self.base / "supervisor.jobs.log"
@@ -231,8 +237,13 @@ class HarvestTest(unittest.TestCase):
             attempt,
             "--status",
             "done",
-            "--failure-detail",
-        ]
+        ] + extra
+        before = state.read_bytes()
+        wrong_filter = list(command)
+        wrong_filter[wrong_filter.index("--status") + 1] = "open"
+        missing = subprocess.run(wrong_filter, text=True, capture_output=True, env=env)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(state.read_bytes(), before)
         result = subprocess.run(
             command, text=True, capture_output=True, env=env
         )

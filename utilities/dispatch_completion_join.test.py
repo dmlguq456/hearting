@@ -526,12 +526,8 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         )
         self.assertEqual(ready["state"], "ready")
 
-    def test_sd_open_47_done_row_with_proved_marker_is_ready_despite_tagged_residue(self):
-        """H7-c (att-f6b3feba owner / att-e72e08e0 child): the child row was
-        done and its completion marker chain existed, yet the join kept
-        returning timeout (process residue carrying the child's tag) and the
-        owner supervisor reparked forever."""
-
+    def test_committed_marker_waits_for_live_descendant_cleanup_then_delivers_success(self):
+        """A real live descendant is a cleanup obligation, never a failed PASS."""
         attempt = "att-residue-marker"
         self.marker_delivery_fixture(attempt)
         residue = subprocess.Popen(
@@ -547,73 +543,38 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             if D.attempt_tagged_descendants({"attempt_id": attempt, **identity}).state == "populated":
                 break
             time.sleep(0.1)
-        raw = self.jobs.read_text(encoding="utf-8").strip()
-        fields = raw.split("\t")
+        fields = self.jobs.read_text().strip().split("\t")
         fields[1] = "done"
         fields[5] = (
             fields[5].replace(",launch_outcome=never-launched", "")
             + ",parent_attempt_id=att-parent,launch_lifecycle=detached,"
+            + "failure_class=pass,note=completed-marker,"
             + ",".join(f"{k}={v}" for k, v in identity.items())
         )
-        self.jobs.write_text("\t".join(fields) + "\n", encoding="utf-8")
-        metadata = D.parse_registry_metadata(fields[5])
-        observed = D.observed_attempt_liveness("done", metadata, terminal_receipt_gate=True)
-        self.assertEqual(observed.state, "alive", observed.reason)
-        receipt = JOIN.join_batch(
-            jobs=self.jobs,
-            parent_attempt_id="att-parent",
-            interval=0.02,
-            timeout=1,
-            liveness_command=[str(self.live)],
-        )
-        self.assertEqual(receipt["state"], "ready", receipt)
-        self.assertEqual(receipt["children"][0]["reason"], "registry-closed-marker")
-        # review finding 1: the receipt must pass the owner supervisors' closed
-        # reason allowlists, or the owner dies at its first join instead of
-        # waiting -- validate it with the real consumers.
-        import importlib.util
-        for name, attr in (("claude-session-supervisor.py", "typed_receipt"),
-                           ("codex-app-server-supervisor.py", "_typed_receipt")):
-            spec = importlib.util.spec_from_file_location(name.replace("-", "_").replace(".py", ""),
-                                                          Path(__file__).resolve().parent / name)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            validated = getattr(module, attr)(receipt, "att-parent", {attempt})
-            self.assertEqual(validated["children"][0]["reason"], "registry-closed-marker", name)
-        # review finding 3: a live exact leader is not residue -- the marker
-        # chain alone never makes the row ready while the leader runs.
-        leader_alive = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
-                                        start_new_session=True)
-        self.addCleanup(lambda: (leader_alive.kill(), leader_alive.wait(timeout=5)))
-        alive_identity = D.process_launch_identity(leader_alive.pid)
-        alive_fields = list(fields)
-        alive_fields[5] = (
-            fields[5].split(",parent_attempt_id=")[0]
-            + ",parent_attempt_id=att-parent,launch_lifecycle=detached,"
-            + ",".join(f"{k}={v}" for k, v in alive_identity.items())
-        )
-        self.jobs.write_text("\t".join(alive_fields) + "\n", encoding="utf-8")
-        held_leader = JOIN.join_batch(
-            jobs=self.jobs,
-            parent_attempt_id="att-parent",
-            interval=0.02,
-            timeout=0.1,
-            liveness_command=[str(self.live)],
-        )
-        self.assertEqual(held_leader["state"], "timeout")
-        self.assertEqual(held_leader["children"][0]["reason"], "process-alive")
-        self.jobs.write_text("\t".join(fields) + "\n", encoding="utf-8")
-        # Without the marker chain the residue still holds the join, as before.
-        (self.root / f"execute.{attempt}.attempt.json").unlink()
-        held = JOIN.join_batch(
-            jobs=self.jobs,
-            parent_attempt_id="att-parent",
-            interval=0.02,
-            timeout=0.1,
-            liveness_command=[str(self.live)],
-        )
-        self.assertEqual(held["state"], "timeout")
+        self.jobs.write_text("\t".join(fields) + "\n")
+        before = self.jobs.read_bytes()
+        marker_bytes = (self.root / "execute.1.json").read_bytes()
+        observed = D.observed_attempt_liveness("done", D.parse_registry_metadata(fields[5]),
+                                               terminal_receipt_gate=True)
+        self.assertEqual(observed.process_reason, "attempt-descendant-live", observed)
+        held = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent",
+                               interval=0.02, timeout=0.1)
+        self.assertEqual(held["state"], "timeout", held)
+        self.assertEqual(held["children"][0]["readiness"], "pending")
         self.assertEqual(held["children"][0]["reason"], "process-alive")
+        self.assertEqual(self.jobs.read_bytes(), before)
+        # The execution boundary finishes cleanup; no new attempt or marker is needed.
+        residue.terminate()
+        residue.wait(timeout=5)
+        ready = JOIN.join_batch(jobs=self.jobs, parent_attempt_id="att-parent",
+                                interval=0.02, timeout=1)
+        self.assertEqual(ready["state"], "ready", ready)
+        self.assertEqual(ready["children"][0]["reason"], "registry-closed")
+        delivered = JOIN.receipt_with_delivery_observability(ready, jobs=self.jobs)
+        self.assertEqual(delivered["delivery_classification"], "success", delivered)
+        self.assertEqual(delivered["children"][0]["required_action"], "advance-completed")
+        self.assertEqual(self.jobs.read_bytes(), before)
+        self.assertEqual((self.root / "execute.1.json").read_bytes(), marker_bytes)
 
     def test_done_namespace_local_row_polls_until_post_exit_receipt_is_complete(self):
         attempt = "att-namespace-receipt"

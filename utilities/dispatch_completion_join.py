@@ -2919,13 +2919,9 @@ def _join_snapshot(
             )
             if row.status not in OPEN_STATES | {"done"}:
                 raise JoinContractError("owned-row-status-invalid")
-            marker_residue = (
-                row.status == "done" and observed.process_reason == "attempt-descendant-live"
-                and _marker_bound_prepare_marker_proof(row.metadata, row.attempt_id) is not None
-            )
             decision = decide_attempt(
                 row.status, row.metadata,
-                process_state="quiescent" if marker_residue else observed.process_state,
+                process_state=observed.process_state,
                 process_reason=observed.process_reason,
                 terminal_observed=observed.reason == "terminal-observed",
             )
@@ -2935,8 +2931,7 @@ def _join_snapshot(
                 pending = True
             else:
                 readiness = "ready"
-                reason = ("registry-closed-marker" if marker_residue else
-                          "registry-closed" if row.status == "done" else "terminal-observed")
+                reason = "registry-closed" if row.status == "done" else "terminal-observed"
             if (recovery is not None and readiness == "pending"
                     and reason == "process-unverifiable"
                     and row.status in OPEN_STATES

@@ -206,7 +206,7 @@ def default_runtime_jobs(environ: dict[str, str] | os._Environ[str]) -> Path:
 def consume_supervised_harvest(
     args: argparse.Namespace,
     *,
-    matched: int,
+    rows: list[list[str]],
     marked_done: int,
 ) -> bool:
     """Acknowledge one outbox action only after its harvest succeeded."""
@@ -223,9 +223,9 @@ def consume_supervised_harvest(
         or args.attempt_id in state.outbox.consumed_attempt_ids
     ):
         return True
-    succeeded = (args.mark_done and marked_done == 1) or (
-        args.failure_detail and matched == 1
-    )
+    # A successful exact terminal read performs the requested inspection.
+    # --failure-detail only selects extra output; it owns no completion gate.
+    succeeded = len(rows) == 1 and (rows[0][1] == "done" or marked_done == 1)
     if not succeeded:
         return False
     try:
@@ -352,7 +352,7 @@ def main(argv: list[str]) -> int:
 
 
     if not consume_supervised_harvest(
-        args, matched=len(rows), marked_done=marked_done
+        args, rows=rows, marked_done=marked_done
     ):
         print("check=failed")
         print("reason=supervisor-outbox-consume-failed")

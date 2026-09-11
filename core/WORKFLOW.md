@@ -478,6 +478,12 @@ worker that returned `PASS` — is stage evidence, never workflow completion. No
 acting agent, dispatch-depth-1 owner, supervisor, or runtime lifecycle hook may
 declare completion from an intermediate success.
 
+Committed success and remaining cleanup are separate facts. A marker does not
+make a live descendant quiescent: the execution boundary retains cleanup,
+and the common supervisor retains the wait or recovery notice until it ends.
+Successful exact inspection consumes its notification action; requesting more
+failure detail is optional and cannot become a second completion gate.
+
 A steward's idle-notify subscription is observation, not a continuation; it never
 satisfies the registered-continuation obligation below (`core/OPERATIONS.md §5.14`).
 

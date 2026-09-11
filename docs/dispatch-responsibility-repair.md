@@ -136,3 +136,11 @@ Codex의 기존 App Server turn/start·turn/steer 운송과 Claude의 기존 asy
 검증: 세 실제 어댑터 main에서 정확한 행 등록→전달자 준비 실패→자식 기동 0·예약 반환·실패 종결을 확인했다. 부모×자식×worker type, fork 후 부모 변경, 등록 뒤 운송 변경 거부, OpenCode 자식의 실제 sidecar 프로세스→제어 socket 및 gateway→mock App Server 전달도 검사했다. 공통 8 / Codex adapter 58 / Claude adapter 46 / OpenCode adapter 28 / managed completion 14 / gateway 47 PASS, generated 20·adaptation boundary PASS (`/tmp/parent-delivery-check-*.log`). 모델 부모의 새 자동 수신 실측은 별도 잔여다.
 
 세 adapter suite의 과거 owner identity fixture 오류는 수정 전 4bc에서도 각각 동일한 3개 오류로 재현했다(`/tmp/parent-delivery-baseline-*.log`). 존재하지 않는 route 경로를 의도적으로 넣는 identity 분류 검사에 frame gate를 외부 경계로 명시했다. 실제 main의 등록/기동/종료 관측은 유지했고 새 운송 검사는 실제 main에서 수행한다. main/release/install은 계속 보류한다.
+
+## 정리 대기와 알림 소비의 충돌 제거
+
+join에 남아 있던 예외는 유효한 완료 marker가 있으면 살아 있는 tagged 자손을 `quiescent`로 바꾸어 ready를 만들었다. 뒤쪽 전달 판정은 실제 자손을 다시 관측해 attention을 만들었다. 이 치환을 제거하여 동일한 공통 결정이 실제 자손 정리까지 기다리게 했다. 성공 기록은 보존하고, 실행 경계가 정리를 소유하며, 오래 걸리면 기존 감독자의 유한 관측과 durable notice가 사용자에게 이어진다. 실제 자손 프로세스를 유지한 동안 pending, 종료한 뒤 같은 행/marker bytes에서 success/advance-completed가 나오는 회귀를 추가했다.
+
+4bc Codex owner는 일반 exact `--status done` 수확 후에도 `supervisor-outbox-consume-failed`를 받았다. harvest가 옛 `--failure-detail` 플래그를 별도 성공 조건으로 쓰고 있었기 때문이다. 실제로 읽은 정확한 terminal 행이나 이번에 끝낸 행으로 소비를 판단한다. 상세 출력 옵션은 완료 권한이 아니다. 일반·상세 CLI 읽기의 각 최초 소비/반복 멱등성과 미일치 조회의 미소비를 검사했다. join 114 / harvest 20 / contract 223(skip 1) PASS (`/tmp/cleanup-consumption-*.log`).
+
+4bc의 최초 Codex frame attention은 marker 게시 직후 전달됐으며, 사후 같은 행의 현재 판정은 success였다. 당시 process snapshot은 확보하지 못했으므로 이 실측의 정확한 원인이 위 자손 치환이었다고 확정하지 않는다. 또한 4bc owner의 `identical-redelivery-bound:3` 사망은 별도 남은 책임 충돌이다. 운송 확인을 특정 모델 명령의 실행 여부와 결합해 반복 전달 뒤 오너를 버리는 경로도 이번 범위에서 제거해야 하며, 이 두 수정만으로 전체 종료를 선언하지 않는다.
