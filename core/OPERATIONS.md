@@ -269,7 +269,9 @@ notice. Launch dependencies, write authorization, and explicit terminal cleanup
 scopes own operation permissions. Existing human gates retain approval authority.
 
 The shared parent resolver owns harness, session, and cwd; adapters consume its
-result. A selected child and Git checkout ancestry cannot substitute for parent
+result. A registered parent advertises end-turn only with its exact live supervisor
+lease. Claude and OpenCode use the same CLI session controller with native runtime
+drivers; the controller owns join, terminal commit, resume, and receipt acknowledgement. A selected child and Git checkout ancestry cannot substitute for parent
 identity. The parent runtime supplies its native session identity independently of the
 child adapter. Dispatch carries the issued producer cycle and a concrete output
 directory in both environment and prompt. The producer record owns that path;

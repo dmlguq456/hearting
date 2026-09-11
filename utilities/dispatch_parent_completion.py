@@ -12,7 +12,8 @@ from codex_managed_dispatch import (
     MANAGED_PARENT_DELIVERY, ManagedDispatchError, probe_managed_codex_parent,
     launch_managed_completion_sidecar, registered_parent_delivery,
 )
-from dispatch_contract import DispatchContractError, annotate_attempt_row
+from dispatch_contract import (DispatchContractError, annotate_attempt_row,
+                               parse_registry_metadata, supervisor_lease_is_held)
 
 
 def interactive_parent_identity(environ=None) -> tuple[str, str]:
@@ -135,6 +136,26 @@ def _direct_registered_parent(args) -> bool:
     )
 
 
+def parent_supervisor_is_live(args) -> bool:
+    attempt = getattr(args, "parent_attempt_id", None) or os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
+    jobs = getattr(args, "jobs", None) or os.environ.get("AGENT_DISPATCH_JOBS")
+    if not attempt or not jobs:
+        return False
+    try:
+        matches = []
+        for line in Path(jobs).read_text(encoding="utf-8").splitlines():
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            metadata = parse_registry_metadata(fields[5])
+            if metadata.get("attempt_id") == attempt:
+                matches.append((fields[1], metadata))
+        return (len(matches) == 1 and matches[0][0] in {"open", "running"}
+                and supervisor_lease_is_held(jobs, matches[0][1]))
+    except (OSError, ValueError, DispatchContractError):
+        return False
+
+
 def resolve_parent_completion_delivery(args, *, probe=probe_managed_codex_parent) -> str:
     """Select completion from the witnessed parent, independently of the child."""
     args.managed_gateway_binding = None
@@ -177,8 +198,11 @@ def resolve_parent_completion_delivery(args, *, probe=probe_managed_codex_parent
     if direct_registered:
         args.parent_completion_reason = "parent-identity-unmatched"
         return "poll-fallback"
-    args.parent_completion_reason = "parent-attempt-owned"
-    return "parent-runtime-supervised"
+    if parent_supervisor_is_live(args):
+        args.parent_completion_reason = "parent-attempt-owned"
+        return "parent-runtime-supervised"
+    args.parent_completion_reason = "parent-supervisor-unavailable"
+    return "poll-fallback"
 
 
 def validate_interactive_parent_launch(args) -> None:

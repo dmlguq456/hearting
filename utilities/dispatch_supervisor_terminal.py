@@ -144,12 +144,18 @@ def _handoff_terminal(text: object, *, event: str, process_exit: int) -> Supervi
     )
 
 
-def classify_claude_result(
-    result: dict[str, Any], process_exit: int
-) -> SupervisorTerminal:
-    """Classify one final Claude print-mode result without scanning prose success."""
+def classify_claude_result(result: dict[str, Any], process_exit: int) -> SupervisorTerminal:
+    """Compatibility entry for the Claude native result adapter."""
+    return classify_session_result(result, process_exit, runtime="claude")
 
-    event = "claude-result"
+
+def classify_session_result(
+    result: dict[str, Any], process_exit: int, *, runtime: str
+) -> SupervisorTerminal:
+    """Classify the portable result produced by a native CLI session driver."""
+    if runtime not in {"claude", "opencode"}:
+        raise ValueError("session-runtime-unsupported")
+    event = f"{runtime}-result"
     is_error = result.get("is_error") is True
     subtype = result.get("subtype")
     if process_exit == 0 and not is_error and subtype in {None, "success"}:

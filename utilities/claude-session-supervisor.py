@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resume one Claude Code print session after runtime-owned child joins."""
+"""Shared CLI session controller (legacy filename) with native runtime drivers."""
 
 from __future__ import annotations
 
@@ -58,6 +58,7 @@ from route_identity import route_hash as canonical_route_hash, route_id_from_has
 from dispatch_supervisor_terminal import (
     SupervisorTerminal,
     classify_claude_result,
+    classify_session_result,
     classify_supervisor_abandonment_terminal,
     classify_supervisor_error,
     reconcile_supervisor_terminal,
@@ -278,7 +279,7 @@ def recover_cleanup_on_startup(args):
         return 0 if terminal.failure_class == "pass" else 3
     # A confirmed non-submission is free but is not successful work. A
     # confirmed submission cannot buy a second cleanup if it failed to finish.
-    terminal = classify_supervisor_abandonment_terminal("claude", "terminal-handoff-incomplete")
+    terminal = classify_supervisor_abandonment_terminal(args.runtime_harness, "terminal-handoff-incomplete")
     if not reconcile(args, terminal):
         return 70
     emit({"type": "dispatch.supervisor.error", "reason": "terminal-handoff-incomplete"})
@@ -485,7 +486,7 @@ def attempt_stage_advance(
             supervisor_phase="running-turn" if open_children else "parked",
             delivered_open_attempt_ids=open_attempt_ids,
             receipt_schema_negotiated=3,
-            harness="claude",
+            harness=getattr(args, "runtime_harness", "claude"),
             worktree=args.worktree,
         )
         try:
@@ -1082,9 +1083,18 @@ class ClaudeStreamSession:
 
 
 def resolved_turn_transport(args: argparse.Namespace) -> str:
+    if getattr(args, "runtime_harness", "claude") == "opencode":
+        return "resume-process"
     if args.turn_transport != "auto":
         return args.turn_transport
     return "resume-process" if args.claude_command else "stream-json"
+
+
+def classify_runtime_result(args, result, process_exit):
+    runtime = getattr(args, "runtime_harness", "claude")
+    if runtime == "claude":
+        return classify_claude_result(result, process_exit)
+    return classify_session_result(result, process_exit, runtime=runtime)
 
 
 def run_turn(
@@ -1096,6 +1106,12 @@ def run_turn(
     stream_session: ClaudeStreamSession | None = None,
     handoff_intent: dict | None = None,
 ) -> tuple[dict[str, Any], int]:
+    if getattr(args, "runtime_harness", "claude") == "opencode":
+        from opencode_session_runtime import run_turn as native_turn, OpenCodeTransportError
+        try:
+            return native_turn(args, prompt, emit=emit)
+        except OpenCodeTransportError as exc:
+            raise SupervisorError(str(exc)) from exc
     def submit(transport):
         if handoff_intent is not None:
             state_root = Path(args.jobs).parent
@@ -1174,6 +1190,10 @@ def run_turn(
 
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
+    value.add_argument("--runtime-harness", choices=("claude", "opencode"), default="claude")
+    value.add_argument("--opencode-command")
+    value.add_argument("--opencode-agent", default="build")
+    value.add_argument("--variant")
     value.add_argument("--worktree", required=True)
     value.add_argument("--jobs", required=True)
     value.add_argument("--parent-attempt-id", required=True)
@@ -1240,12 +1260,12 @@ def main(argv: list[str] | None = None) -> int:
     budget_state_root = Path(args.jobs).parent
     initial_prompt = sys.stdin.read()
     if not initial_prompt.strip():
-        terminal = classify_supervisor_error("claude", "initial-prompt-empty", 64)
+        terminal = classify_supervisor_error(args.runtime_harness, "initial-prompt-empty", 64)
         if not reconcile(args, terminal):
             return 70
         emit({"type": "dispatch.supervisor.error", "reason": "initial-prompt-empty"})
         return 64
-    session_id = str(uuid.uuid4())
+    session_id = "" if args.runtime_harness == "opencode" else str(uuid.uuid4())
     # This attempt log is a receipt log, never a transcript: it carries control rows
     # plus exactly one final `result`, and deliberately never echoes model text. A
     # summary producer reading only this file therefore has no conversational input
@@ -1254,14 +1274,15 @@ def main(argv: list[str] | None = None) -> int:
     # session id — control metadata, not model content — so the summary owner can
     # follow the real transcript instead. Emitted before the first turn so the
     # follower has a source from the start rather than only at completion.
-    emit(
-        {
-            "type": "dispatch.supervisor.session",
-            "parent_attempt_id": args.parent_attempt_id,
-            "session_id": session_id,
-            "cwd": args.worktree,
-        }
-    )
+    if session_id:
+        emit(
+            {
+                "type": "dispatch.supervisor.session",
+                "parent_attempt_id": args.parent_attempt_id,
+                "session_id": session_id,
+                "cwd": args.worktree,
+            }
+        )
     emit(
         {
             "type": "dispatch.supervisor.continuation-budget",
@@ -1395,10 +1416,10 @@ def main(argv: list[str] | None = None) -> int:
                 settlement = terminal_commit_adapter(args, [])
                 if settlement.result == "completed":
                     result = dict(result, result=settlement.envelope_text)
-                    terminal = classify_claude_result(result, process_rc)
+                    terminal = classify_runtime_result(args, result, process_rc)
                 else:
                     terminal = classify_supervisor_abandonment_terminal(
-                        "claude", "terminal-handoff-incomplete")
+                        args.runtime_harness, "terminal-handoff-incomplete")
                     result = {"type": "result", "subtype": "error_during_execution",
                               "is_error": True, "result": "terminal-handoff-incomplete"}
                 if not reconcile(args, terminal):
@@ -1445,7 +1466,7 @@ def main(argv: list[str] | None = None) -> int:
                             ),
                         }
                     )
-                terminal = classify_claude_result(result, process_rc)
+                terminal = classify_runtime_result(args, result, process_rc)
                 if not reconcile(args, terminal):
                     return 70
                 emit(result)
@@ -1705,7 +1726,7 @@ def main(argv: list[str] | None = None) -> int:
                     delivery_timing = advance_delivery_timing(
                         delivery_timing, "final_report_marker_ns"
                     )
-                    terminal = classify_claude_result(final_result, process_rc)
+                    terminal = classify_runtime_result(args, final_result, process_rc)
                     if not reconcile(args, terminal):
                         return 70
                     if terminal_commit_mode:
@@ -1839,7 +1860,7 @@ def main(argv: list[str] | None = None) -> int:
                 delivery_timing = advance_delivery_timing(
                     delivery_timing, "final_report_marker_ns"
                 )
-            terminal = classify_claude_result(result, process_rc)
+            terminal = classify_runtime_result(args, result, process_rc)
             if not reconcile(args, terminal):
                 return 70
             # F-1: same ordering guarantee as the terminal-fast-path site above.
@@ -1866,7 +1887,7 @@ def main(argv: list[str] | None = None) -> int:
             stream_session = None
         lease_exit = (type(exc), exc, exc.__traceback__)
         reason = exc.reason if isinstance(exc, DispatchContractError) else str(exc)
-        terminal = classify_supervisor_error("claude", reason)
+        terminal = classify_supervisor_error(args.runtime_harness, reason)
         if not reconcile(args, terminal):
             return 70
         emit({"type": "dispatch.supervisor.error", "reason": reason})
@@ -1877,7 +1898,7 @@ def main(argv: list[str] | None = None) -> int:
             stream_session = None
         lease_exit = (type(exc), exc, exc.__traceback__)
         terminal = classify_supervisor_error(
-            "claude", f"supervisor-internal-{type(exc).__name__}"
+            args.runtime_harness, f"supervisor-internal-{type(exc).__name__}"
         )
         if not reconcile(args, terminal):
             return 70

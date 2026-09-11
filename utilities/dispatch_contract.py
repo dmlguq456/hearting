@@ -1961,6 +1961,7 @@ def _supervisor_lease_metadata_valid(
     delivery_by_harness = {
         "claude": "session-resume-supervised",
         "codex": "app-server-supervised",
+        "opencode": "session-resume-supervised",
     }
     harness = metadata.get("harness", "")
     if (

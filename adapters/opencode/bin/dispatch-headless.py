@@ -64,6 +64,8 @@ from dispatch_contract import (  # noqa: E402
     reserve_governor_token,
     runtime_ancestry_binding,
     spawn_claimed_attempt,
+    SUPERVISOR_LEASE_KIND,
+    supervisor_lease_path,
     validate_nested_eligibility,
     wait_governor_reservation_claim,
 )
@@ -767,6 +769,23 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
     )
 
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
+    if getattr(args, "owner_route_binding", None):
+        binding = args.owner_route_binding
+        lease = (supervisor_lease_path(args.jobs_path, args.attempt_id) if args.attempt_id
+                 else dispatch_state_root(args.jobs_path) / "supervisor-state" / "preview-only.lease")
+        cmd = [
+            sys.executable, str(ROOT / "utilities" / "claude-session-supervisor.py"),
+            "--runtime-harness", "opencode", "--worktree", args.worktree,
+            "--jobs", str(args.jobs_path), "--parent-attempt-id", args.attempt_id or "unassigned",
+            "--state-file", str(lease.with_suffix(".json")), "--lease-file", str(lease),
+            "--route-file", binding.route_file, "--route-id", binding.route_id,
+            "--route-hash", binding.route_hash, "--opencode-agent", args.agent,
+        ]
+        if args.resolved_model_settings["source"] != "inherit":
+            cmd += ["--model", args.resolved_model_settings["model"],
+                    "--variant", args.resolved_model_settings["variant"]]
+        return (" ".join(shlex.quote(x) for x in cmd)
+                + f" < {shlex.quote(str(prompt_path))} >> {shlex.quote(str(log_path))} 2>&1")
     cmd = [
         "opencode",
         "run",
@@ -987,6 +1006,12 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
             f",owner_route_file={args.owner_route_binding.route_file}"
             f",owner_route_id={args.owner_route_binding.route_id}"
             f",owner_route_hash={args.owner_route_binding.route_hash}"
+        )
+        pipe += (
+            ",completion_delivery=session-resume-supervised,completion_delivery_reason=ok"
+            f",supervisor_lease={SUPERVISOR_LEASE_KIND}"
+            f",supervisor_lease_file={supervisor_lease_path(jobs, args.attempt_id)}"
+            f",supervisor_lease_nonce={secrets.token_hex(32)}"
         )
     settings = args.resolved_model_settings
     for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
@@ -1886,6 +1911,9 @@ def main(argv: list[str]) -> int:
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": "adapter-default",
             **stage_session_environment(args),
+            "AGENT_DISPATCH_COMPLETION_MODE": (
+                "supervised" if args.owner_route_binding else "poll"
+            ),
             "OPENCODE_CONFIG_CONTENT": args.opencode_config_content,
             **args.nested_runtime_env,
             # Headless liveness contract: the OpenCode runtime child exposes
@@ -1895,6 +1923,13 @@ def main(argv: list[str]) -> int:
             # secondary alive signal independent of the OpenCode SQLite mtime.
             "OPENCODE_DISPATCH_SLUG": args.slug,
         }
+        if args.owner_route_binding:
+            lease = supervisor_lease_path(jobs, args.attempt_id)
+            dispatch_env["AGENT_DISPATCH_COMPLETION_STATE_FILE"] = str(lease.with_suffix(".json"))
+            dispatch_env["AGENT_DISPATCH_SUPERVISOR_LEASE_FILE"] = str(lease)
+        else:
+            dispatch_env.pop("AGENT_DISPATCH_COMPLETION_STATE_FILE", None)
+            dispatch_env.pop("AGENT_DISPATCH_SUPERVISOR_LEASE_FILE", None)
         if args.worker_role:
             dispatch_env["AGENT_DISPATCH_WORKER_ROLE"] = args.worker_role
         else:
@@ -2275,6 +2310,7 @@ def main(argv: list[str]) -> int:
     print(f"parent_session_id={args.parent_session_id or '-'}")
     print(f"parent_attempt_id={args.parent_binding.attempt_id if getattr(args, 'parent_binding', None) else '-'}")
     print(f"parent_completion_delivery={args.parent_completion_delivery}")
+    print("completion_delivery=" + ("session-resume-supervised" if args.owner_route_binding else "one-shot"))
     print(f"parent_completion_reason={getattr(args, 'parent_completion_reason', 'unspecified')}")
     for key in ("managed_sidecar_state", "managed_sidecar_reason", "managed_sidecar_pid",
                 "managed_sealed_batch_id", "managed_sidecar_log"):

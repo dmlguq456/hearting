@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 새 Codex/OpenCode light 오너 검증은 고정 4efdddf0에서 진행 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
+상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 고정 4efdddf0의 Codex light owner는 실제 성공·workflow/route 완료·producer 봉인까지 확인했다. OpenCode owner는 존재하지 않는 감독자의 재개를 약속받고 종료되어, 공통 감독 연결을 수정 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -203,3 +203,14 @@ pJ는 native `chatcmpl-tool-9c9df05f68854c3b`의 실제 “맞음 / sum() 집계
 
 
 호출자 신원의 수명도 한 번의 admission으로 제한했다. 실제 worker 진입 시 공통 `worker_runtime_identity`가 current/caller를 실행 하네스로 바꾸므로, 이후 d=2 자식이 depth-0 조부모의 하네스를 자기 부모로 읽지 않는다. 세 adapter의 실제 main에서 이 전환을 확인하고 3×3×3 부모·owner·후속 자식 조합을 검사한다. 부모 선택의 새 거부 규칙을 추가하지 않았다.
+
+
+## OpenCode 자동 재개 약속과 실제 책임자의 불일치
+
+4ef의 OpenCode owner `att-acbd1881d14644bdaac832f8a0904b0b`는 단일 `opencode run`이었다. d2 test `att-df61b920346298c56d5ca9c0be8c456bba3da8410a6c8e06`의 실제 start receipt가 `parent-runtime-supervised` / `carrier-session-supervisor` / `end-turn`을 출력했지만 이를 수확하고 같은 owner를 재개할 프로세스는 없었다. owner는 1789115440373ms에 “report follows on wake” BLOCKED handoff를 남겼고 report는 시작되지 않았다. test 산출물 PASS와 owner/route 성공은 구분한다. 두 시도의 quiescence와 원문은 canonical cycle의 `artifacts/dev_logs/false-carrier-canary/` 및 `/tmp/f-r3/false-carrier-observation.json`에 보존했다. 원 route/cycle은 미완료 상태이며 별도 성공으로 닫지 않았다.
+
+등록 신분을 감독 능력으로 취급하던 공통 분기를 제거했다. 세 어댑터가 exact parent의 동일 nonce lease가 실제 보유 중인지 확인하며, 없으면 실행 가능한 bounded-wait receipt를 준다. OpenCode standard+ owner는 기존 CLI 감독 루프에 연결한다. 새 native driver는 관측한 실제 `sessionID`를 attempt에 결속하고 `opencode run --session`으로 동일 세션을 재개하는 실행 수단만 담당한다. 종료 판단·join·receipt ACK·재시도·실패 정리는 새 어댑터에 복제하지 않았다. 기존 Claude supervisor 파일명은 호환 경로로 유지한다. 일반 owner continuation을 추가한 것이며 OpenCode serial-chain owner나 deterministic stage advance를 지원한다고 확대하지 않는다.
+
+모델 없는 실제 프로세스 시험에서 동일 native session 재개, 원 세션 바인딩 보존, 종료 직전 stop 누락의 성공 금지, capacity 오류 보존, timeout의 native process reap, 세 하네스의 실제 lease 획득/반납, 실제 shared controller의 child join→동일 세션 재개→완료 commit/terminal read를 검사했다. 기존 테스트 세 건이 '자식 환경변수만으로 자동 wake를 약속한다'는 잘못된 가정을 고정했으므로 실제 감독 증거와 fallback을 검사하도록 바꿨다. native controller 9 / parent 13 / Claude supervisor 69 / Codex supervisor 34 / contract 226(skip1) / terminal 33 / classifier 10 / join 120 / adapter OpenCode30·Claude46·Codex58 PASS, generated-projections·boundary·기존 surface budget PASS다. 로그는 `/tmp/opencode-*-tests.log`, `/tmp/opencode-*-final.log`, `/tmp/opencode-controller-{generated,boundary,surface}.log`에 있다. 새로운 실제 OpenCode owner 왕복은 아직 미검증이다.
+
+4ef Codex r3는 owner `att-47e83888b32b42348b2b0a957a8dc0f2`의 실제 success 수신 08:29:36.764Z, 다섯 exact row quiescent, workflow COMPLETE 및 route close 08:30:41.309Z를 확인했다. producer는 root33의 정상 상대 primary 교정 CLI로 08:41:59Z completed/sealed, artifacts 14, manifest `sha256:f828f8ff93142c2bfe758ba95c719ae9f1499798331c803beb8c54eb8281a888`이며 cycle/index/manifest가 일치한다. 부모의 진행 중 finalizer TERM 및 45초 재실행 만료, root33의 절대 primary 입력 exit65 뒤 상대 경로 교정 exit0는 별도 실패 이력이다. 초기 frame attention/fallback도 그대로 보존한다. 무개입 완주나 전체 parity PASS를 주장하지 않는다.

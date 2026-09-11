@@ -568,18 +568,19 @@ DBs, caches, `.env*`, build output, dispatch logs, or worktrees into this repo.
 
 ## SD-110 runtime-owned deterministic stage advance — not an advance target
 
-OpenCode has no per-process session supervisor realization comparable to
-Claude session-resume or the Codex App Server, and the same route-owned
-dispatch-depth-2 evidence gap recorded above means SD-110's eligibility
-predicates cannot be locally proven here. This adapter therefore carries no
-`attempt_stage_advance` call site and no `--enable-stage-advance` flag: every
-OpenCode-bound boundary keeps today's unchanged model-turn delivery path
-regardless of `advance_class`. Its delivery receipts stay a plain v1/v2
-consumer — no `accept_stage_advance` negotiation exists on this surface — so
-it can never receive a `stage_advance` v3 block, and no route compiled for an
-OpenCode-owned node is a runtime-advance source or target. This is a parity
-gap, not a rejected design: the moment OpenCode exposes its own route-owned
-dispatch-depth-2 evidence, this section is the one to revisit.
+Registered standard+ owners use the shared CLI completion controller
+(`utilities/claude-session-supervisor.py`, retained compatibility filename).
+The native driver runs `opencode run --format json`, binds the observed
+`sessionID` to the exact attempt, and resumes with `--session`. The controller
+owns the live lease, exact child join, completion commit, receipt consumption,
+and next model turn. A registered parent without that live lease receives the
+printed bounded-wait fallback; registration alone never promises a wake.
+
+Ordinary same-session continuation does not enable SD-110 deterministic
+advance or SD-119 serial-chain owner support. The adapter exposes neither
+`--enable-stage-advance` nor stage-advance receipt negotiation. Those surfaces
+retain their checked single-session/registered-headless fallback. Interactive
+OpenCode depth-0 delivery also remains an explicit bounded wait.
 
 ## Execution access request
 

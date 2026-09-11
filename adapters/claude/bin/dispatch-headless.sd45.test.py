@@ -480,7 +480,7 @@ class ClaudeChildParentRuntimeDelivery(unittest.TestCase):
         ), mock.patch.object(WH, "probe_managed_codex_parent") as probe:
             WH.bind_parent_completion_delivery(args)
         self.assertEqual(
-            args.parent_completion_delivery, "parent-runtime-supervised"
+            args.parent_completion_delivery, "poll-fallback"
         )
         probe.assert_not_called()
 

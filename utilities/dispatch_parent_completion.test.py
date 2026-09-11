@@ -134,13 +134,16 @@ class ParentDeliveryContract(unittest.TestCase):
                 self.assertEqual(request.parent_session_id, "thread-successor")
                 self.assertEqual(request.parent_completion_reason, "managed-thread-advanced")
 
-    def test_registered_parent_retains_responsibility(self):
+    def test_registered_parent_retains_responsibility_only_with_a_live_controller(self):
         for child, wrapper in ADAPTERS.items():
             with self.subTest(child=child), \
                  mock.patch.dict(os.environ, {"AGENT_DISPATCH_CHILD": "1"}, clear=True), \
                  mock.patch.object(wrapper, "probe_managed_codex_parent") as probe:
                 self.assertEqual(wrapper.resolve_parent_completion_delivery(args(dispatch_depth=2)),
-                                 "parent-runtime-supervised")
+                                 "poll-fallback")
+                with mock.patch.object(P, "parent_supervisor_is_live", return_value=True):
+                    self.assertEqual(wrapper.resolve_parent_completion_delivery(args(dispatch_depth=2)),
+                                     "parent-runtime-supervised")
                 probe.assert_not_called()
 
     def test_unproved_codex_parent_cannot_silently_launch_without_a_carrier(self):

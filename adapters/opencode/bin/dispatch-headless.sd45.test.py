@@ -209,16 +209,16 @@ class OpenCodeParentCompletionDelivery(unittest.TestCase):
             self.assertEqual(WH.resolve_parent_completion_delivery(args), "poll-fallback")
             self.assertEqual(args.parent_completion_reason, "parent-identity-unmatched")
 
-    def test_depth_2_child_gets_parent_runtime_supervised(self):
+    def test_depth_2_child_without_controller_gets_checked_fallback(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             args = delivery_args(dispatch_depth=2)
-            self.assertEqual(WH.resolve_parent_completion_delivery(args), "parent-runtime-supervised")
-            self.assertEqual(args.parent_completion_reason, "parent-attempt-owned")
+            self.assertEqual(WH.resolve_parent_completion_delivery(args), "poll-fallback")
+            self.assertEqual(args.parent_completion_reason, "parent-supervisor-unavailable")
 
-    def test_child_process_marker_forces_parent_runtime_supervised(self):
+    def test_child_process_marker_does_not_prove_a_controller(self):
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_CHILD": "1"}, clear=True):
             args = delivery_args()
-            self.assertEqual(WH.resolve_parent_completion_delivery(args), "parent-runtime-supervised")
+            self.assertEqual(WH.resolve_parent_completion_delivery(args), "poll-fallback")
 
     def test_frame_worker_type_takes_the_same_delivery_path_as_owner(self):
         # W2 (frame-bootstrap-layer, 2026-09-10): resolve_parent_completion_delivery

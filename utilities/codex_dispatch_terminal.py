@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 
-from dispatch_supervisor_terminal import classify_claude_result, opencode_terminal_boundary
+from dispatch_supervisor_terminal import classify_session_result, opencode_terminal_boundary
 
 # OPERATIONS §5.10 "Review verdict is a result, not a worker death": a review
 # worker whose FAIL handoff names a readable in-root review artifact finished
@@ -70,6 +70,7 @@ ARTIFACT_STATES = frozenset(
 _TERMINAL_SOURCES = (
     "exact-turn-completed",
     "exact-claude-result",
+    "exact-opencode-result",
     "exact-step-finish-stop",
 )
 _LEGAL_WIRE = frozenset(
@@ -215,7 +216,8 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
     elif terminal_event == "step_finish":
         terminal_source = "exact-step-finish-stop"
     else:
-        terminal_source = "exact-claude-result"
+        terminal_source = ("exact-opencode-result" if terminal_row.get("runtime") == "opencode"
+                           else "exact-claude-result")
     final_message: str | None = None
     if terminal_event == "result":
         subtype = terminal_row.get("subtype")
@@ -228,7 +230,8 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             # is how a `top` review that simply ran out of Fable quota was
             # reported as a malformed handoff (2026-09-10, att-2164dce2).
             # One classifier, both readers.
-            supervised = classify_claude_result(terminal_row, 1)
+            runtime = "opencode" if terminal_row.get("runtime") == "opencode" else "claude"
+            supervised = classify_session_result(terminal_row, 1, runtime=runtime)
             return _result(
                 3,
                 "invalid",
@@ -238,9 +241,9 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
                 "contract-violation",
                 # the runtime case keeps its long-standing string; only the
                 # two it used to swallow get their own name
-                reason=("claude-result-runtime-error"
+                reason=(f"{runtime}-result-runtime-error"
                         if supervised.failure_class == "runtime"
-                        else f"claude-result-{supervised.failure_class}"),
+                        else f"{runtime}-result-{supervised.failure_class}"),
                 failure_note=supervised.note,
                 failure_class=supervised.failure_class,
             )
