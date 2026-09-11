@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 고정 4efdddf0의 Codex light owner는 실제 성공·workflow/route 완료·producer 봉인까지 확인했다. OpenCode owner가 존재하지 않는 감독자의 재개를 약속받고 종료한 결함은 공통 감독 연결로 수정했다. 현재 OpenAI Luna를 사용하는 실제 OpenCode owner 재개와 부모 완료 전달을 검증 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
+상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 고정 4efdddf0의 Codex light owner는 실제 성공·workflow/route 완료·producer 봉인까지 확인했다. OpenCode owner가 존재하지 않는 감독자의 재개를 약속받고 종료한 결함은 공통 감독 연결로 수정했다. OpenAI Luna를 사용하는 OpenCode 리뷰의 실제 쓰기와 동일 Codex 부모의 정상 완료 전달을 확인했다. OpenCode d1 owner의 같은 세션 재개 검증은 원 native 질문의 실제 사용자 답변을 기다린다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -226,3 +226,8 @@ pJ는 native `chatcmpl-tool-9c9df05f68854c3b`의 실제 “맞음 / sum() 집계
 소스 81112e11을 고정하고 pJ fresh OpenCode 부모 `ses_f6fd4341effexujfUk7zuotRfR`에서 r5를 시작했다. route `rt-d3a5acca2fb8820e`의 Codex frame `att-b6fba78ed2ab490ca19320cd1b672349`와 OpenCode frame `att-dd6c697a6faa471590e07ed8286fc414`는 모두 실제 light 모델로 기동했다. 후자는 OpenAI Luna의 실제 PASS와 process-group drained를 확인했다. 부모는 공개된 bounded-wait 경로를 사용한다. 이 시점의 frame 기동/부분 완료는 d1 owner의 같은 세션 재개나 전체 완료를 뜻하지 않는다.
 
 root33은 기존 Luna 부모 [61]을 재사용한다. 보고서용 compose에 direct shape와 standard intensity를 함께 전달해 기동 전 exit64를 받은 입력 오류는 `/tmp/opencode-review-receipt-r1-openai-preparation-error.json`에 보존했다. 보고서 route의 intensity를 direct로 교정하고, 별개인 실제 route-free review는 standard/light로 유지해 한 건의 실제 OpenCode→Codex 부모 완료 전달을 이어간다. 이 준비 오류 시점의 OpenCode attempt는 0건이다.
+
+
+교정한 실제 리뷰 `att-cff2ba1e36684d309ddd1be5a0e7b213`는 보고서 쓰기(check-write allow, sum=3/exit0) 뒤 11:29:13.806Z에 동일 부모 `01a08fb3-ce47-7832-8635-d1b73ac21679`로 success/registry-closed/advance-completed를 자동 전달했다. 수동 harvest는 완료 조건이 아니다. exact attempt log와 결속한 native session `ses_f6fc7ffe2ffevcVuG3luTA65il`의 assistant 5개에서 provider=openai/model=gpt-5.6-luna를 확인했다. 근거는 `2026-09-11_opencode-review-receipt-r1/artifacts/dev_logs/root33-corrected-receipt-observation.json` 및 `root33-digest-model-clarification.json`이다.
+
+`review_output_digest`는 attempt/cycle/producer/output 위치의 identity tuple hash이다. 실제 tuple 재계산 `sha256:18bb0e6345e2a160053e59afcf096dbfc96477e8df2c84d6055cb227325b436f`는 원장과 일치한다. 보고서 내용은 별도 관측 snapshot(3038bytes, SHA256 `434edc76e1c9dd4c48f15595bede0dcd83c9f56363b885f6d75bdbe7d4eb2db0`)이며, identity digest를 불변 terminal content hash라고 해석하지 않는다. 이전 `att-1d29ae31c5054f17bf13bc00be900673`에 부모 운용 brief를 잘못 전달한 입력 오류, root33의 exact watchdog SIGTERM, 정리 증명과 11:24:01.785Z 실패 알림은 보존한다. 교정 리뷰의 운송 성공은 그 실패나 전체 owner parity를 덮지 않는다. pJ r5는 두 frame PASS 및 승인 전 owner 거부 뒤 원 native 질문(`call_fmnMlz8l0Kyu1OWwVKwFohyK`)의 실제 답변을 기다리며 source811을 고정한다.
