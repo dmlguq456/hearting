@@ -157,6 +157,33 @@ class TestPositive(unittest.TestCase):
             self.assertTrue(report.ok, report.violations)
 
 
+class TestLegacyCampaignMergeFields(unittest.TestCase):
+    def test_accepts_legacy_key_and_merged_from(self):
+        doc = _valid_document()
+        doc["campaign"]["key"] = "ac-cmd-public-data"
+        doc["campaign"]["merged_from"] = {
+            "campaign_id": "camp_" + "0" * 32,
+            "goal": "old goal",
+            "key": "legacy:key",
+            "locator": "2026-09-03_old",
+            "title": "old title",
+        }
+        report = m.validate(doc)
+        self.assertTrue(report.ok, report.violations)
+
+    def test_rejects_unknown_key_inside_legacy_merged_from(self):
+        doc = _valid_document()
+        doc["campaign"]["merged_from"] = {
+            "campaign_id": "camp_" + "0" * 32,
+            "goal": "old goal",
+            "key": "legacy:key",
+            "locator": "2026-09-03_old",
+            "title": "old title",
+            "bogus": 1,
+        }
+        self.assertIn("unknown-key", _codes(m.validate_shape(doc)))
+
+
 class TestClosedSchemaUnknownKey(unittest.TestCase):
     def test_rejects_unknown_top_level_key(self):
         doc = _valid_document()
