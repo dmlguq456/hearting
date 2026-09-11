@@ -338,6 +338,22 @@ def _v_completion_criterion(value: Any, path: str, violations: List[Violation]) 
     _check_closed_object(value, path, {"statement": _v_str}, {}, violations)
 
 
+def _v_legacy_merged_from(value: Any, path: str, violations: List[Violation]) -> None:
+    _check_closed_object(
+        value,
+        path,
+        {
+            "campaign_id": _v_typed_id("campaign"),
+            "goal": _v_str,
+            "key": _v_str,
+            "locator": _v_str,
+            "title": _v_str,
+        },
+        {},
+        violations,
+    )
+
+
 def _v_campaign(value: Any, path: str, violations: List[Violation]) -> None:
     _check_closed_object(
         value,
@@ -349,7 +365,15 @@ def _v_campaign(value: Any, path: str, violations: List[Violation]) -> None:
             "title": _v_str,
             "state": _v_str,
         },
-        {},
+        {
+            # Legacy read-only campaign-merge metadata that predates the closure
+            # of this schema. It is produced only by the campaign-merge migration
+            # and must be accepted so sealed manifests stay immutable while index
+            # rebuild/verify can still validate them. Arbitrary extra keys remain
+            # rejected.
+            "key": _v_str,
+            "merged_from": _v_legacy_merged_from,
+        },
         violations,
     )
 
