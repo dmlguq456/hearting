@@ -186,6 +186,43 @@ class OpenCodeParentCompletionDelivery(unittest.TestCase):
             args = delivery_args()
             self.assertEqual(WH.resolve_parent_completion_delivery(args), "parent-runtime-supervised")
 
+    def test_frame_worker_type_takes_the_same_delivery_path_as_owner(self):
+        # W2 (frame-bootstrap-layer, 2026-09-10): resolve_parent_completion_delivery
+        # is verified not to read args.worker_type at all -- only action/
+        # dispatch_depth/launch_lifecycle/execution_surface/registered_worker/
+        # parent identity decide the branch. This proves it by calling the
+        # real function with worker_type=frame and worker_type=owner/review
+        # and asserting they land on the exact same delivery kind and reason.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            owner_args = delivery_args(worker_type="owner")
+            frame_args = delivery_args(worker_type="frame")
+            review_args = delivery_args(worker_type="review")
+            owner_delivery = WH.resolve_parent_completion_delivery(owner_args)
+            frame_delivery = WH.resolve_parent_completion_delivery(frame_args)
+            review_delivery = WH.resolve_parent_completion_delivery(review_args)
+        self.assertEqual(frame_delivery, owner_delivery)
+        self.assertEqual(frame_delivery, review_delivery)
+        self.assertEqual(frame_delivery, "claude-parent-runtime")
+        self.assertEqual(frame_args.parent_completion_reason, owner_args.parent_completion_reason)
+
+    def test_frame_worker_type_under_non_claude_parent_yields_bounded_wait(self):
+        # This pins the depth-1 `frame` case under a non-Claude (OpenCode)
+        # depth-0 parent as `parent_next=bounded-wait` with a real
+        # `parent_next_command` -- existing, correct behaviour this cycle
+        # deliberately does not change (no `opencode-turn` producer is built
+        # here). Both the delivery resolution and the receipt-line rendering
+        # are the real functions, not text parsed off a printed line.
+        with mock.patch.dict(os.environ, {}, clear=True):
+            args = delivery_args(worker_type="frame", parent_harness="opencode")
+            delivery = WH.resolve_parent_completion_delivery(args)
+        self.assertEqual(delivery, "poll-fallback")
+        self.assertEqual(args.parent_completion_reason, "parent-identity-unmatched")
+        lines = WH.parent_next_receipt_lines(delivery, "att-frame-oc-1", agent_home=str(ROOT))
+        fields = dict(line.split("=", 1) for line in lines)
+        self.assertEqual(fields["parent_next"], "bounded-wait")
+        self.assertNotEqual(fields["parent_next_command"], "-")
+        self.assertIn("att-frame-oc-1", fields["parent_next_command"])
+
     def test_register_action_stdout_carries_the_delivery_receipt(self):
         with tempfile.TemporaryDirectory() as td:
             base = Path(td); repo = base / "repo"; repo.mkdir()

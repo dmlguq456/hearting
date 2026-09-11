@@ -554,6 +554,9 @@ def human_gate_resolution(entries: list, gate: str) -> dict:
                 # that against the route binding.
                 "release_authority": evidence.get("release_authority") or None,
             })
+            result.pop("artifact_sha256", None)
+            if evidence.get("artifact_sha256"):
+                result["artifact_sha256"] = evidence["artifact_sha256"]
             continue
         if result["status"] != "blocked":
             continue
@@ -578,3 +581,31 @@ def human_gate_resolution(entries: list, gate: str) -> dict:
                 "answers": evidence.get("answers"),
             })
     return result
+
+
+def node_raises_human_gate(node: dict, gate: str) -> bool:
+    return ((node.get("continuation") or {}) == {"kind": "human-gate", "gate": gate}
+            or gate in node.get("inline_human_gates", []))
+
+
+def require_gate_artifact_current(resolution: dict) -> None:
+    digest = resolution.get("artifact_sha256")
+    path = Path(str(resolution.get("artifact") or ""))
+    if (not digest or not path.is_absolute() or not path.is_file()
+            or hashlib.sha256(path.read_bytes()).hexdigest() != digest):
+        raise WorkflowStateError("inline-gate-preview-changed-or-unbound")
+
+
+def require_inline_gate_release(route: dict, node: dict, *, jobs=None) -> None:
+    from route_identity import route_hash
+    if route.get("route_hash") != route_hash(route):
+        raise WorkflowStateError("inline-gate-route-identity-mismatch")
+    ledger = WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
+    for gate in node.get("inline_human_gates", []):
+        binding = {"gate": gate, "node": node["id"], "position": "terminal"}
+        if binding not in route.get("human_gate_bindings", []):
+            raise WorkflowStateError("inline-gate-binding-missing")
+        resolution = human_gate_resolution(ledger.journal(), gate)
+        if resolution["status"] != "proceed" or resolution.get("actor_kind") != "user":
+            raise WorkflowStateError("inline-gate-unreleased:" + gate)
+        require_gate_artifact_current(resolution)

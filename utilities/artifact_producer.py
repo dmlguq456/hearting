@@ -3170,6 +3170,37 @@ def _relative(root: Path, target: Path) -> Optional[str]:
         return None
 
 
+def _quick_refine_write_gate(root: Path, target: Path, route=None) -> None:
+    relative = _relative(Path(root).resolve(), Path(target))
+    if relative is None:
+        return
+    parts = relative.split("/")
+    if parts[:1] == ["campaigns"]:
+        index = 4 if len(parts) > 2 and parts[2] == "cycles" else 3
+        if len(parts) <= index or parts[index] != "artifacts":
+            return
+        parts = parts[index + 1:]
+    if len(parts) < 2 or parts[0] not in {"documents", "research"} or "_internal" in parts:
+        return
+    if route is None:
+        path = os.environ.get("AGENT_ROUTE_FILE") or os.environ.get("AGENT_OWNER_ROUTE_FILE")
+        if not path:
+            return  # The route/material guard independently requires a binding.
+        route = _read_json(Path(path))
+        if not isinstance(route, dict):
+            raise ProducerError("inline-gate-route-unreadable")
+    if route.get("capability") != "autopilot-refine" or route.get("effective_intensity") != "quick":
+        return
+    node = next((n for n in route.get("nodes", []) if n.get("id") == "one-shot"), {})
+    if node.get("inline_human_gates") != ["preview-disposition"]:
+        raise ProducerError("inline-gate-binding-missing")
+    import workflow_state as WS
+    try:
+        WS.require_inline_gate_release(route, node, jobs=os.environ.get("AGENT_DISPATCH_JOBS") or None)
+    except (WS.WorkflowStateError, OSError, ValueError) as exc:
+        raise ProducerError("quick-preview-approval-required", str(exc)) from exc
+
+
 def check_write(root: Path, target: Path) -> Dict[str, Any]:
     """Classify one prospective write under the artifact root.
 
@@ -3179,6 +3210,10 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
     rel = _relative(root, Path(target))
     active = is_active(root)
     base = {"cutover": "active" if active else "inactive", "target": str(target)}
+    try:
+        _quick_refine_write_gate(root, target)
+    except ProducerError as exc:
+        return {**base, "verdict": "deny", "reason": exc.code, "detail": exc.detail, "layout": "inline-gate"}
     try:
         _authorize_active_cleanup(root, "partial-report", Path(target), None)
     except ProducerError as exc:

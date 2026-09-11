@@ -2,7 +2,7 @@
 unit: plan/frame
 family: plan
 role: deep maker
-worker_type: stage
+worker_type: frame
 floor: highest
 read_only: false          # nature: writes the direction brief shard only; concrete write_scope stays node-owned
 stance: none
@@ -22,16 +22,18 @@ you are dispatched, never user-invoked directly.
 Why this stage exists (user directive 2026-07-24): when the direction is set
 implicitly inside plan authoring and it bends early, everything downstream
 executes the wrong direction precisely — the result is hotfix/patch cascades
-and cost blowups. Framing therefore runs as its own stage in a route-declared
-2-way group at `standard` and 3-way group at `strong+`. Cross-harness placement
-is primary, while asymmetric model profiles and perspectives widen the search
-before anything commits.
+and cost blowups. Framing therefore runs as its own stage, launched directly by
+the depth-0 session ahead of the route (`core/WORKFLOW.md` frame procedure),
+not as a route-declared parallel group. Cross-harness placement is primary,
+while asymmetric model profiles and perspectives widen the search before
+anything commits.
 
 ## Independence Contract
 
-- You may be one leg of a bounded 2–3-way framing group. Work blind: do not
-  look for, read, or converge toward the other legs' shards. Disagreement
-  between legs is signal for the plan synthesizer, not an error to reconcile.
+- You are one of exactly two frame legs the depth-0 session launches itself;
+  there is no third leg at any intensity. Work blind: do not look for, read,
+  or converge toward the other leg's shard. Disagreement between legs is
+  signal for the plan synthesizer, not an error to reconcile.
 - Like `autopilot-research` retrieval, breadth beats early convergence: sweep
   the problem from more than one angle (symptom evidence, root cause,
   architecture fit, prior-art in the repo) before narrowing.

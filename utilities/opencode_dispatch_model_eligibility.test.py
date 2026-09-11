@@ -95,6 +95,47 @@ class OpencodeDispatchModelEligibilityTest(unittest.TestCase):
                 worker_type="stage", role="_kernel/owner"))
         self.assertEqual(depth.exception.reason, "invalid-dispatch-model-profile")
 
+    def test_a_frame_anchor_is_admitted_by_its_own_node_seal(self):
+        # THE THREE-HARNESS PARITY POINT. The route seals `top` on the frame
+        # anchor while the owner stays `deep`, so this wrapper has to check the
+        # LAUNCHING NODE's seal, not the owner's. Each harness keeps its own
+        # copy of that call; a harness that forgets to pass `--route-node`
+        # through refuses a correctly compiled frame anchor, and only that one
+        # harness does -- which is exactly how a parity gap hides. This test
+        # exists in all three eligibility suites on purpose.
+        import json as _json, tempfile as _tempfile
+        _tmp = Path(_tempfile.mkdtemp())
+        path = _tmp / "frame-route.json"
+        path.write_text(_json.dumps({
+            "route_id": "rt-frame-fixture",
+            "owner_model_profile": "deep",
+            "nodes": [{"id": "frame", "model_profile": "top"},
+                      {"id": "frame-alternative", "model_profile": "deep"}],
+        }), encoding="utf-8")
+
+        def frame_args(node):
+            # A non-owner worker must also carry its independently sealed
+            # role; `plan/frame`'s role is `deep maker`.
+            args = selection(profile="top", route_file=str(path),
+                             worker_type="frame", role="deep maker")
+            args.route_node = node
+            return args
+
+        self.assertEqual(
+            WRAPPER.resolve_model_settings(frame_args("frame"))["profile"], "top")
+        # No node -> the owner's `deep` seal, and the owner door stays shut.
+        with self.assertRaises(WRAPPER.ModelSelectionError) as owner_view:
+            WRAPPER.resolve_model_settings(frame_args(None))
+        self.assertEqual(owner_view.exception.reason, "profile-top-route-mismatch")
+        # The sibling leg sealed `deep`, so its own seal refuses it.
+        with self.assertRaises(WRAPPER.ModelSelectionError) as sibling:
+            WRAPPER.resolve_model_settings(frame_args("frame-alternative"))
+        self.assertEqual(sibling.exception.reason, "profile-top-route-mismatch")
+        # A node the route never declared is named as a wiring bug.
+        with self.assertRaises(WRAPPER.ModelSelectionError) as unknown:
+            WRAPPER.resolve_model_settings(frame_args("frame-contrarian"))
+        self.assertEqual(unknown.exception.reason, "profile-top-route-node-unknown")
+
     def test_inheritance_stays_allowed_because_nothing_here_is_main_only(self):
         # the asymmetry claude and codex refuse: this adapter declares no
         # main-session-only list, so an inherited model can leak nothing.

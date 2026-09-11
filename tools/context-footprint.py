@@ -250,7 +250,7 @@ def main() -> int:
     kernel_bytes = utf8_bytes(kernel)
     surfaces["worker-bootstrap:kernel"] = kernel_bytes
     print(f"surface=kernel bytes={kernel_bytes} path={kernel.relative_to(root)}")
-    for worker_type in ("owner", "stage", "review", "support"):
+    for worker_type in ("owner", "stage", "review", "support", "frame"):
         fragment = root / "roles" / "worker-types" / f"{worker_type}.md"
         combined = kernel_bytes + 2 + utf8_bytes(fragment)
         surfaces[f"worker-bootstrap:{worker_type}"] = combined

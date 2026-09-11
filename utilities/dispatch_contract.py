@@ -5188,12 +5188,40 @@ def headless_attempt_policy(
         raise DispatchContractError("route-dispatch-depth-mismatch", str(node.get("dispatch_depth")))
 
     if route.get("effective_intensity") == "quick":
-        if dispatch_depth != 1 or parent_slug or route_node != "one-shot":
+        # Quick is a THREE-node route now (`frame`, `frame-alternative`,
+        # `one-shot`), so the shape check is a per-node-id table rather than a
+        # pin to a single id. Depth 1 and "no parent slug" still hold for all
+        # three; what differs is the tuple each id must carry.
+        expected_tuple = {
+            "one-shot": ("owner", "_kernel/owner"),
+            "frame": ("frame", "plan/frame"),
+            "frame-alternative": ("frame", "plan/frame"),
+        }.get(str(route_node))
+        if dispatch_depth != 1 or parent_slug or expected_tuple is None:
+            raise DispatchContractError("quick-route-shape-invalid", str(route_node))
+        if (node.get("worker_type"), node.get("unit")) != expected_tuple:
             raise DispatchContractError("quick-route-shape-invalid", str(route_node))
         if node.get("execution_surface") != "registered-headless" or node.get("registered_worker") is not True:
             raise DispatchContractError("quick-route-surface-invalid", str(node.get("execution_surface")))
-        if effective_hop != "same-harness-headless":
+        # The same-harness pin exists to keep quick's WORK pinned to one
+        # harness, so its (nonexistent) fallback budget and artifact lineage do
+        # not fragment. That reason applies to `one-shot` alone; the frame legs
+        # are an advisory pair ahead of the work, and cross-harness is the one
+        # MANDATORY independence axis for this bootstrap layer -- keeping the
+        # restriction system-wide would force both legs onto one harness and
+        # break the cycle's own acceptance criterion.
+        if route_node == "one-shot" and effective_hop != "same-harness-headless":
             raise DispatchContractError("quick-fallback-forbidden", effective_hop)
+        if route_node != "one-shot" and effective_hop not in (
+            "same-harness-headless", "cross-harness-headless"
+        ):
+            raise DispatchContractError("quick-fallback-forbidden", effective_hop)
+        # Unchanged below on purpose: candidate filtering and
+        # `terminal_attempt_limit` are per-(route_id, route_node) serial-attempt
+        # budgets, so three nodes each get their own budget from the same
+        # candidate list -- exactly right without modification. The early
+        # `return` keeps quick out of the `fallback_hops`-required check, which
+        # no depth-1 node can ever satisfy.
         candidates = [
             row
             for row in route.get("registered_headless_candidates") or []
@@ -5210,6 +5238,43 @@ def headless_attempt_policy(
             replacement_attempt_limit=1,
             replacement_notes=frozenset({"dead-protocol", "dead-permission-reject"}),
         )
+        return policy
+
+    # N1: a standard+ frame leg is depth 1 and carries NO `fallback_hops`, by
+    # construction -- the compiler attaches a checked chain only to
+    # dispatch_depth == 2 nodes. Without this early return every standard+
+    # frame registration dies at `route-fallback-hops-missing` while compile and
+    # route-verify both pass: precisely the late-failure class this cycle
+    # exists to remove.
+    #
+    # Why an early return instead of teaching the compiler to attach a chain to
+    # depth-1 nodes: `_fallback_chain` matching keys on `launch_authority`, and
+    # LAUNCH_AUTHORITIES holds only {"conductor", "ancestor-broker"}. A depth-1
+    # frame leg is launched under `launch_authority: "depth-0"`, a DIFFERENT
+    # axis; making a chain match it would mean adding a new enum value that
+    # batch, chain and manifest code all read. That is a far wider and riskier
+    # change than one guarded return, and it was rejected deliberately.
+    if (
+        int(node.get("dispatch_depth", -1)) == 1
+        and node.get("worker_type") == "frame"
+        and node.get("unit") == "plan/frame"
+    ):
+        if execution_surface != "registered-headless" or registered_worker is not True:
+            raise DispatchContractError("frame-route-surface-invalid", str(execution_surface))
+        if effective_hop not in {"same-harness-headless", "cross-harness-headless"}:
+            raise DispatchContractError("frame-route-surface-invalid", effective_hop)
+        # Standard+ HAS checked dispatch evidence (quick does not), so the
+        # requested harness is checked against it rather than taken on trust.
+        supported = [
+            row
+            for row in ((route.get("dispatch_evidence") or {}).get("tuples") or [])
+            if isinstance(row, dict)
+            and row.get("status") == "supported"
+            and row.get("child_harness") == harness
+        ]
+        if not supported:
+            raise DispatchContractError("frame-harness-unsupported", str(harness))
+        policy.update(fallback_hop=effective_hop)
         return policy
 
     chain = node.get("fallback_hops")
@@ -5999,7 +6064,7 @@ def validate_nested_eligibility(
 
 # The human gates whose owner contract implements raise + await (SD-129
 # §13.41.2-5). See `_human_gate_entry_fence`.
-FENCED_HUMAN_GATES = frozenset({"frame-review"})
+FENCED_HUMAN_GATES = frozenset({"frame-review", "preview-disposition"})
 
 
 def _human_gate_entry_fence(
@@ -6027,16 +6092,28 @@ def _human_gate_entry_fence(
     #   1. some node of THIS route raises the gate -- the SD-123 mechanism is
     #      `predecessor.continuation = {kind: human-gate, gate}` ->
     #      BLOCKED_HUMAN_GATE -> release; a binding with no raising continuation
-    #      (`intent-confirmation`) is satisfied by the §0.4 card;
+    #      is satisfied by the §0.4 card;
     #   2. the gate is in FENCED_HUMAN_GATES -- the gates whose owner contract
-    #      actually implements the raise and the wait. The topology declares
-    #      raising continuations for five more gates (`direction-confirmation`,
-    #      `preview-disposition`, `explicit-handback`, `full-run-authorization`,
-    #      `deploy-authorization`) that no capability document, skill or owner
-    #      reference tells an owner to raise; fencing those would turn a
-    #      declaration into a mandatory step nobody documented (round 2, B1).
+    #      actually implements the raise and the wait. The topology still
+    #      declares raising continuations for three more gates
+    #      (`explicit-handback`, `full-run-authorization`, `deploy-authorization`)
+    #      that no capability document, skill or owner reference tells an owner
+    #      to raise; fencing those would turn a declaration into a mandatory
+    #      step nobody documented (round 2, B1).
     # A gate joins the set in the same change that teaches its owner to raise
     # it; `dispatch_contract.test.py` pins the set against the real topology.
+    # The three direction gates the other autopilot recipes used to declare
+    # (`direction-confirmation`, `user-refine-disposition`, `intent-confirmation`)
+    # were absorbed into the one universal `frame-review` once
+    # `capabilities/autopilot-{design,draft,spec}.md` documented the raise.
+    # `preview-disposition` was NOT absorbed (user decision, 2026-09-10): it is
+    # an approval before refine's transaction applies an edit, not a direction,
+    # and it joins this set in the same change that documents its raise in
+    # `capabilities/autopilot-refine.md`. Before that change it was declared but
+    # never fenced, so no refine route ever actually waited on it.
+    # Routes compiled before that absorption are never retro-fitted: this fence
+    # reads only the route object it was handed, so an old-generation route
+    # keeps its own generation's node shape, gate names and bindings.
     raised_gates = {
         str((n.get("continuation") or {}).get("gate"))
         for n in (route.get("nodes") or [])
@@ -6091,6 +6168,127 @@ def _human_gate_entry_fence(
         )
 
 
+
+def recover_preview_gate_after_refusal(route_file, route_node, action, agent_home, jobs,
+                                      error: DispatchContractError) -> str:
+    """Outside the claim lock, turn a proved legacy preview into a real question.
+
+    The original start still fails. This never grants approval or changes a route.
+    Only a current completed review artifact can back the existing gate transaction.
+    """
+    if (action != "start" or error.reason != "human-gate-not-raised"
+            or not error.detail.startswith("preview-disposition:") or not route_file or not jobs):
+        return error.detail
+    try:
+        route = json.loads(Path(route_file).read_text())
+        bindings = [b for b in route.get("human_gate_bindings", [])
+                    if b.get("gate") == "preview-disposition" and b.get("node") == route_node
+                    and b.get("position", "entry") == "entry"]
+        raisers = [n for n in route.get("nodes", [])
+                   if n.get("continuation") == {"kind": "human-gate", "gate": "preview-disposition"}]
+        target = next(n for n in route.get("nodes", []) if n.get("id") == route_node)
+        if len(bindings) != 1 or len(raisers) != 1 or raisers[0]["id"] not in target.get("depends_on", []):
+            raise ValueError("preview-predecessor-unverified")
+        predecessor = raisers[0]
+        paths = [r / "completion" / route["route_id"] / (predecessor["id"] + ".json")
+                 for r in dispatch_state_roots(Path(agent_home), Path(jobs))]
+        marker_path = next(p for p in paths if p.is_file())
+        marker = json.loads(marker_path.read_text())
+        if not completion_marker_is_current(route, predecessor, marker_path, marker):
+            raise ValueError("preview-marker-unverified")
+        ready = completion_attempt_readiness(route, predecessor, marker, Path(jobs))
+        if ready.state != "ready":
+            raise ValueError("preview-attempt-" + ready.state)
+        artifact = Path(marker["evidence"]["path"])
+        if not artifact.is_absolute() or not artifact.is_file():
+            raise ValueError("preview-artifact-unreadable")
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).with_name("workflow-supervisor.py")),
+             "gate", "--route", str(route_file), "--gate", "preview-disposition",
+             "--block", "--jobs", str(jobs), "--artifact", str(artifact)],
+            text=True, capture_output=True, timeout=15, check=False)
+        if result.returncode:
+            raise ValueError("gate-carrier-refused: " + result.stderr.strip()[:240])
+        payload = json.loads(result.stdout)
+        if payload.get("action") != "blocked" or payload.get("workflow_state") != "BLOCKED_HUMAN_GATE":
+            raise ValueError("gate-block-unverified")
+        return error.detail + "; preview_gate_recovery=blocked delivery=" + str(payload.get("delivery", "-"))
+    except (OSError, ValueError, KeyError, StopIteration, DispatchContractError, subprocess.TimeoutExpired) as exc:
+        return error.detail + "; preview_gate_recovery=unavailable reason=" + str(exc)[:320]
+
+
+def owner_frame_launch_gate(binding, action: str, agent_home: Path,
+                            jobs: Path | None = None) -> None:
+    """The depth-0 frame must finish and be approved before an owner starts."""
+    if binding is None or action != "start":
+        return
+    route = json.loads(Path(binding.route_file).read_text(encoding="utf-8"))
+    frames = {n.get("id") for n in route.get("nodes", [])
+              if n.get("worker_type") == "frame" and n.get("dispatch_depth") == 1}
+    if not frames:
+        return  # Earlier route generations keep their original owner contract.
+    entries = [n for n in route.get("nodes", [])
+               if frames.issubset(set(n.get("depends_on", [])))]
+    if frames != {"frame", "frame-alternative"} or len(entries) != 1:
+        raise DispatchContractError("frame-owner-entry-invalid", str(route.get("route_id")))
+    completion_marker_gate(binding.route_file, entries[0]["id"], action, agent_home, jobs)
+
+
+def _frame_pair_attempt_gate(route: dict, node: dict, markers: dict,
+                             jobs: Path, registry_lines: list[str] | None) -> None:
+    """Compare the exact completed attempts, never a declared diversity label."""
+    frames = [n for n in route.get("nodes", [])
+              if n.get("id") in node.get("depends_on", [])
+              and n.get("worker_type") == "frame" and n.get("dispatch_depth") == 1]
+    if not frames:
+        return
+    if {n.get("id") for n in frames} != {"frame", "frame-alternative"}:
+        raise DispatchContractError("frame-pair-incomplete", str(node.get("id")))
+    try:
+        lines = registry_lines if registry_lines is not None else jobs.read_text().splitlines()
+    except OSError as exc:
+        raise DispatchContractError("frame-attempt-unverifiable", "registry-unreadable") from exc
+    attempts, harnesses = [], []
+    for frame in frames:
+        attempt = markers[frame["id"]].get("attempt_id")
+        rows = []
+        for line in lines:
+            fields = line.split("\t")
+            if len(fields) == 6:
+                metadata = parse_registry_metadata(fields[5])
+                if metadata.get("attempt_id") == attempt:
+                    rows.append((fields, metadata))
+        if len(rows) != 1:
+            raise DispatchContractError("frame-attempt-unverifiable", str(attempt))
+        fields, metadata = rows[0]
+        try:
+            identity = registered_node_identity(metadata, frame)
+        except ValueError as exc:
+            raise DispatchContractError("frame-attempt-unverifiable", str(attempt)) from exc
+        if (fields[1] != "done" or metadata.get("note") != "completed-marker"
+                or identity !=
+                   (route.get("route_id"), route.get("route_hash") or "", frame["id"])
+                or metadata.get("worker_type") != "frame"
+                or metadata.get("harness") not in {"codex", "claude", "opencode"}):
+            raise DispatchContractError("frame-attempt-unverifiable", str(attempt))
+        attempts.append(attempt)
+        harnesses.append(metadata["harness"])
+    if len(set(attempts)) != 2:
+        raise DispatchContractError("frame-attempt-duplicate", str(attempts))
+    if route.get("effective_intensity") == "quick":
+        candidates, field = route.get("registered_headless_candidates") or [], "harness"
+    else:
+        candidates = (route.get("dispatch_evidence") or {}).get("tuples") or []
+        field = "child_harness"
+    supported = {r.get(field) for r in candidates
+                 if isinstance(r, dict) and r.get("status") == "supported"}
+    supported &= {"codex", "claude", "opencode"}
+    if not supported or not set(harnesses).issubset(supported):
+        raise DispatchContractError("frame-harness-unsupported", str(harnesses))
+    if len(supported) > 1 and len(set(harnesses)) != 2:
+        raise DispatchContractError("frame-cross-harness-required", str(harnesses))
+
+
 def completion_marker_gate(
     route_file: str | None,
     route_node: str | None,
@@ -6100,6 +6298,7 @@ def completion_marker_gate(
     *,
     registry_lines: list[str] | None = None,
     attempt_id: str | None = None,
+    _raising_frame_gate: bool = False,
 ) -> None:
     """SD-56 decision gate: a record-bound ``--start`` must not spawn a node
     whose ``depends_on`` predecessors have no completion marker, nor one whose
@@ -6130,6 +6329,7 @@ def completion_marker_gate(
     if node is None:
         return
     missing = []
+    markers = {}
     blocked: list[tuple[str, AttemptReadiness]] = []
     for dep in node.get("depends_on", []):
         marker_path = next(
@@ -6155,6 +6355,7 @@ def completion_marker_gate(
         if dep_node is None or not completion_marker_is_current(route, dep_node, marker_path, marker):
             missing.append(dep)
             continue
+        markers[dep] = marker
         readiness = completion_attempt_readiness(
             route,
             dep_node,
@@ -6166,7 +6367,15 @@ def completion_marker_gate(
             blocked.append((dep, readiness))
     if missing:
         raise DispatchContractError("completion-marker-missing", ",".join(missing))
-    _human_gate_entry_fence(route, node, jobs)
+    if not blocked:
+        _frame_pair_attempt_gate(route, node, markers,
+                                 jobs or (resolve_dispatch_state_root(agent_home) / "jobs.log"),
+                                 registry_lines)
+    if _raising_frame_gate:
+        if set(node.get("depends_on", [])) != {"frame", "frame-alternative"}:
+            raise DispatchContractError("frame-owner-entry-invalid", str(node.get("id")))
+    else:
+        _human_gate_entry_fence(route, node, jobs)
     _auxiliary_arbitration_gate(route, node, agent_home, jobs)
     if blocked:
         reason = (

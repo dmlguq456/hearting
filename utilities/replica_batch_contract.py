@@ -18,7 +18,12 @@ DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 SUPPORTED_HARNESSES = frozenset({"claude", "codex", "opencode"})
 SUPPORTED_INDEPENDENCE = frozenset({"cross-harness", "degraded-same-harness"})
 SUPPORTED_AXES = frozenset({"cross-harness", "model-profile", "perspective"})
-SUPPORTED_PROFILES = frozenset({"deep", "balanced-deep", "balanced", "light"})
+SUPPORTED_PROFILES = frozenset({"top", "deep", "balanced-deep", "balanced", "light"})
+# At most one `top` leg per group. Two reasons, both structural: unbounded
+# top-tier fan-out is a cost and exposure risk, and if every leg in a group ran
+# `top` the "model-profile" independence axis could not be recorded as realized
+# at all, because there would be no profile difference left to derive it from.
+MAX_TOP_LEGS = 1
 MIN_WIDTH = 2
 MAX_WIDTH = 4
 
@@ -125,6 +130,10 @@ def build_manifest(
         raise ReplicaBatchContractError("parallel batch nodes must be distinct")
     if sorted(int(member["parallel_leg_index"]) for member in normalized) != list(range(size)):
         raise ReplicaBatchContractError("parallel batch leg indexes must be exact 0..N-1")
+
+    top_legs = sum(1 for member in normalized if str(member["model_profile"]) == "top")
+    if top_legs > MAX_TOP_LEGS:
+        raise ReplicaBatchContractError("top-leg-width-exceeded")
 
     harness_count = len({str(member["harness"]) for member in normalized})
     profile_count = len({str(member["model_profile"]) for member in normalized})

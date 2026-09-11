@@ -120,10 +120,13 @@ An ordinary dispatch-depth-1 owner launches through `preflight.sh dispatch-owner
 owner tuple), a separate low-level surface from `preflight.sh dispatch` below: it delegates to the portable `utilities/dispatch-owner.py`
 selector, which prefers the user-owned
 `${XDG_CONFIG_HOME:-~/.config}/hearting/dispatch-defaults.yaml` and falls back
-to `profiles/dispatch-defaults.yaml`. The SD-22 cascade is explicit target,
-hard eligibility, sealed stage affinity, profile quality band, fresh headroom,
-then recent exact-attempt balance. Capacity never crosses a quality band unless
-that profile's relief threshold is met; OpenCode is not a default deep peer.
+to `profiles/dispatch-defaults.yaml`. `core/ADAPTATION.md` owns the selection
+cascade; capacity never crosses a quality band unless the relief threshold is
+met, and OpenCode is not a default deep peer.
+
+A depth-0 frame leg uses this surface with §5.10b's tuple: one Bash call per
+leg, never two; all four `AGENT_ARTIFACT_*` variables exported every call; a
+gateway join (`parent_next=end-turn`). `OPERATIONS §5.10b` is the contract.
 
 Check `preflight.sh headless [--check] [--require-hook-trust] <worktree>`.
 Launch registered jobs only through `preflight.sh dispatch

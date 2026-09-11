@@ -395,7 +395,7 @@ def _unit_frontmatter(unit):
         raise TopologyError(f"unit {unit}: frontmatter unit id mismatch ({fields['unit']!r})")
     if not fields["role"]:
         raise TopologyError(f"unit {unit}: frontmatter role required")
-    if fields["worker_type"] not in ("owner", "stage", "review", "support"):
+    if fields["worker_type"] not in ("owner", "stage", "review", "support", "frame"):
         raise TopologyError(f"unit {unit}: invalid worker_type {fields['worker_type']!r}")
     if fields["read_only"] not in ("true", "false"):
         raise TopologyError(f"unit {unit}: read_only must be true or false")
@@ -822,6 +822,10 @@ def _validate_recipe(recipe, registry, standard_plus_owner_profile):
             f"{recipe['capability']}:quick: model_profile must match "
             f"owner_profile_by_intensity.quick ({quick_owner_profile})"
         )
+    inline_gates = quick.get("inline_human_gates", [])
+    expected_inline = ["preview-disposition"] if recipe["capability"] == "autopilot-refine" else []
+    if inline_gates != expected_inline:
+        raise TopologyError(f"{recipe['capability']}: quick inline human gates differ from the apply contract")
     for scope in quick.get("write_scope", []): _scope_root(scope)
     _validate_guard_scope(recipe, quick.get("write_scope", []), quick.get("guard_preconditions", []), registry, "quick")
     _validate_bucket_anchor(recipe, registry, quick.get("write_scope", []), None, "quick")

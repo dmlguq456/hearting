@@ -2759,6 +2759,46 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                 continue
         return rows
 
+    def test_framing_is_not_a_batch_parallel_group_in_any_recipe(self):
+        # Cheap standing pin for the property the skipped integration test
+        # below used to carry incidentally: batch must never be handed a frame
+        # group. A depth-1 node carrying `parallel_group` is refused by
+        # dispatch-batch itself (`parallel-group-depth-invalid`), so declaring
+        # one would compile and then die at launch.
+        registry = json.loads(
+            (ROOT / "capabilities" / "topologies.json").read_text(encoding="utf-8")
+        )
+        frame_legs = 0
+        for recipe in registry["recipes"]:
+            standard_plus = recipe.get("standard_plus", {})
+            for group in standard_plus.get("parallel_groups", []):
+                self.assertNotEqual(group["id"], "frame", recipe["capability"])
+            for node in standard_plus.get("nodes", []):
+                if node.get("worker_type") == "frame":
+                    frame_legs += 1
+                    self.assertNotIn("parallel_group", node)
+                    self.assertNotIn("replica_group", node)
+                    self.assertEqual(node.get("dispatch_depth"), 1)
+        self.assertEqual(frame_legs, 10)  # five recipes x two sibling legs
+
+    @unittest.skip(
+        "Frame is no longer a dispatch-batch parallel group, and this test's "
+        "whole sequence is built on launching it as one: it batches the frame "
+        "group first, completes both legs from the batch receipt's attempt "
+        "ids, then proves the frame-review gate fences the plan batch until it "
+        "is raised and released. The frame bootstrap layer moved framing to two "
+        "explicit dispatch-depth-1 sibling nodes launched by the depth-0 "
+        "session, which is a different surface entirely (dispatch-owner / "
+        "dispatch-node), so step one has no batch to run and every later step "
+        "loses the attempt ids it depends on. Skipped rather than left to pass "
+        "vacuously -- with the frame group gone the first assertions are all "
+        "empty-set comparisons that would go green while proving nothing. "
+        "Restoring it means re-founding the fixture on the real depth-1 launch "
+        "path; that is a rewrite, not a fixture refresh, and it is out of this "
+        "unit's fence. Tracked as gap G7 in the W4 evidence log. The frame "
+        "group's absence itself is asserted below and in "
+        "tools/capability_topology.test.py::test_parallel_group_declarations."
+    )
     def test_real_cross_harness_batch_overlaps_and_is_visible_in_fleet(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
@@ -2843,15 +2883,25 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
             self.assertEqual(
                 json.loads(route_path.read_text(encoding="utf-8")), route
             )
-            frame_nodes = {
-                node["id"] for node in route["nodes"]
-                if (node.get("parallel_group") or node.get("replica_group")) == "frame"
-            }
-            plan_nodes = {
-                node["id"] for node in route["nodes"]
-                if (node.get("parallel_group") or node.get("replica_group")) == "plan"
-            }
-            self.assertEqual(frame_nodes, {"frame", "frame-alternative", "frame-contrarian"})
+            def group_nodes(group):
+                return {
+                    node["id"] for node in route["nodes"]
+                    if (node.get("parallel_group") or node.get("replica_group")) == group
+                }
+            # Framing is no longer a dispatch-batch parallel group at all. The
+            # frame bootstrap layer declares its legs as explicit sibling nodes
+            # at dispatch depth 1, and a depth-1 node carrying `parallel_group`
+            # is refused by this very file (`parallel-group-depth-invalid`), so
+            # batch must see no frame group here. The third `frame-contrarian`
+            # leg the group used to add at strong+ is gone with it.
+            self.assertEqual(group_nodes("frame"), set())
+            self.assertEqual(
+                {node["id"] for node in route["nodes"]
+                 if node.get("worker_type") == "frame"},
+                {"frame", "frame-alternative"},
+            )
+            first_nodes = group_nodes("frame")
+            plan_nodes = group_nodes("plan")
             self.assertEqual(plan_nodes, {"plan", "plan-alternative"})
 
             agent_home = base / "agent-home"
@@ -2963,21 +3013,21 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                 while time.monotonic() < deadline:
                     events = self._events(events_path)
                     if sum(
-                        row.get("event") == "start" and row.get("node") in frame_nodes
+                        row.get("event") == "start" and row.get("node") in first_nodes
                         for row in events
-                    ) == len(frame_nodes):
+                    ) == len(first_nodes):
                         break
                     if process.poll() is not None:
                         break
                     time.sleep(0.05)
                 starts = [
                     row for row in self._events(events_path)
-                    if row.get("event") == "start" and row.get("node") in frame_nodes
+                    if row.get("event") == "start" and row.get("node") in first_nodes
                 ]
-                if len(starts) != len(frame_nodes) and process.poll() is not None:
+                if len(starts) != len(first_nodes) and process.poll() is not None:
                     stdout, stderr = process.communicate(timeout=5)
                 self.assertEqual(
-                    len(starts), len(frame_nodes),
+                    len(starts), len(first_nodes),
                     f"batch exited={process.poll()} stdout={stdout} stderr={stderr} "
                     f"jobs={jobs.read_text(encoding='utf-8')}",
                 )
@@ -3002,22 +3052,22 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                 visible = [
                     job for job in fleet_jobs
                     if job.parent_slug == "owner" and job.route_id == route["route_id"]
-                    and job.route_node in frame_nodes
+                    and job.route_node in first_nodes
                 ]
                 self.assertEqual(
-                    len(visible), len(frame_nodes),
+                    len(visible), len(first_nodes),
                     [(job.slug, job.route_node, job.liveness) for job in fleet_jobs],
                 )
                 self.assertEqual({job.harness for job in visible}, {"codex", "claude"})
-                self.assertEqual({job.route_node for job in visible}, frame_nodes)
+                self.assertEqual({job.route_node for job in visible}, first_nodes)
                 self.assertTrue(all(job.dispatch_depth == 2 for job in visible))
                 self.assertTrue(all(job.attempt_contract_status == "current" for job in visible))
                 self.assertTrue(all(job.liveness == "working" for job in visible))
                 route_rows = [
                     job for job in fleet_jobs
-                    if job.route_id == route["route_id"] and job.route_node in frame_nodes
+                    if job.route_id == route["route_id"] and job.route_node in first_nodes
                 ]
-                self.assertEqual(len(route_rows), len(frame_nodes))
+                self.assertEqual(len(route_rows), len(first_nodes))
                 self.assertTrue(all(job.parent_slug == "owner" for job in route_rows))
 
                 stdout, stderr = process.communicate(timeout=25)
@@ -3140,10 +3190,10 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
                     metadata = BATCH.parse_registry_metadata(fields[5])
                     if metadata.get("route_id") == route["route_id"]:
                         registered.append((fields[1], fields[4], metadata))
-                self.assertEqual(len(registered), len(frame_nodes | plan_nodes))
+                self.assertEqual(len(registered), len(first_nodes | plan_nodes))
                 self.assertEqual(
                     {metadata["route_node"] for _status, _slug, metadata in registered},
-                    frame_nodes | plan_nodes,
+                    first_nodes | plan_nodes,
                 )
                 self.assertTrue(all(
                     metadata.get("parent") == "owner"
@@ -3170,7 +3220,7 @@ class DispatchBatchIntegrationTest(unittest.TestCase):
 
             events = self._events(events_path)
             timings = {}
-            for group, nodes in (("frame", frame_nodes), ("plan", plan_nodes)):
+            for group, nodes in (("frame", first_nodes), ("plan", plan_nodes)):
                 starts_for_group = [
                     row for row in events
                     if row.get("event") == "start" and row.get("node") in nodes

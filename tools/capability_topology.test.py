@@ -5,57 +5,72 @@ from pathlib import Path
 P = Path(__file__).with_name("capability_topology.py")
 S = importlib.util.spec_from_file_location("topology", P); T = importlib.util.module_from_spec(S); S.loader.exec_module(T)
 
+# Re-baselined 2026-09-10 (frame-universal execute correction round 1): the
+# non-owner-node digest (first value per entry) had drifted out of sync with
+# the registry since 37f4e5a0 (SD-110, 2026-08-27) added `advance_class`/
+# `commit_expected`/`continuation`/`model_required_reason`/`terminal_gate` to
+# every node across the registry without a matching re-freeze; 821365b5
+# (SD-99 leg_class) and e25dfd05 (continuation contract) compounded it. All
+# of those are intentional, spec-backed registry-wide field additions (PRD
+# ref_4d540b57cb4bab92db77ffe2abcd35ff rrev_a6ee82b6, SD-99/103/110/119), so
+# this re-freeze blesses the drift rather than reverting it. `autopilot-code`,
+# `autopilot-design`, `autopilot-draft`, `autopilot-refine`, `autopilot-spec`
+# also changed intentionally in this cycle (two explicit frame-leg sibling
+# nodes replacing the removed `frame`/`frame-contrarian` parallel group).
 PRESERVED_FULL_FIELD_DIGESTS = {
     ('analyze-project', ('code', 'doc', 'paper')): (
-        "ee85d1be56de7252bd6892bd48391bbbfd7fc3b5a61412a4752cce16e731606f",
+        "75b8d6819bd9c94e787225b3c9673901037f95e9d7a80bd4fd774a0a4fdc7214",
         "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     ),
     ('analyze-user', ('init', 'update')): (
-        "24d059d438a560f471a1e748b9c20c8a2b6f651b5b8cf5899d075e4f7e20aab3",
+        "febf008be6c7daf94f64eb4ffd8dbcad754cf27f1439d8f3f95f159af20c37f2",
         "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     ),
     ('audit', ('default',)): (
-        "74b9f70f5c6106ce6e6dcf71b9ee22ef2e9345a26fba58a206aafb614f2f169f",
+        "bfa07502c8e197aa8b592f0615434dd8f15631e1beede87da14fe89987a34f25",
         "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
     ),
     ("autopilot-apply", ('default',)): (
-        "8b5adb03d56bf8b6e68c4ff78f35cde2e0076dcc3db46841658f4cb85645bf8b",
+        "eb9d1ee50cf6d9c88b96a08bace1f06985cdfccaa87be448aa85307174632eac",
         "926c9eff35134529d23574f9052da464493b09fd52cb98da03785ff7798669d7",
     ),
     ("autopilot-code", ('audit', 'debug', 'dev')): (
-        "5e4adf36d808f9ed0b420e70c69b1893b42c57799f4bfe467a0eb2e3fd65cda7",
-        "6999e2b826a3f458169cf5d54906f4da79e33090815b7439504a39aa6d4cf341",
+        "98bbd87ff7440870fc16e8a1dd8beb6cf13bf3c2385a3fb8d17b848674078f4a",
+        "3275d7d0fe9e8295fe761e5f3673070f3182ac0535ceb98a3935438848623ffe",
     ),
     ("autopilot-design", ('default',)): (
-        "c75c56b11affed41560aebf57faba71a07b9903e2f24224ce3207cbf290c9168",
+        "6417f8e67ea088edc2ee40703ea44e5aae2c0c27c7ca623d1deb408ebf00b1e8",
         "523b32502063400fd601697545d5cd4ae859308588b7176c0fa648f525e5be5e",
     ),
     ("autopilot-draft", ('doc', 'paper', 'presentation')): (
-        "962db29f856dd3f6a9a8aa9743fc57bc8aa691dad014a9cef7a432e50cea32c5",
+        "948eae0caa20b7f15d45cf51635fc2d58d8bf13b96edc2325a0061570a2caa77",
         "1bb17c28bdb34877667242530f1f0af2c3a330caa77620f1b60734f663f5f72f",
     ),
     ("autopilot-lab", ('setup',)): (
-        "502f66344295ad67f2d3e09499efcc91d47d1caf8ef3b03863f0c3b37549c2a5",
+        "5b2a8597888c3e3ffed75c389af2b4b5e01d14503e883b2a684be2d0ecb45178",
         "dd5e1116e2b49489adc69f022cc69f8f91337688de5ab08e4963a70c20e1f85a",
     ),
     ("autopilot-lab", ('eval',)): (
-        "f3b5dbd108b70b96c29f0af3e76c4cb10f9ce31aed215aa6f0f4ea2f1edac920",
+        "df6ae2485880a9b4edd9c284409c3a3491862d2a8aeb4de274d685870dc83527",
         "07c9f4e193ff843ba33a1da2a7d4af662070b4d3ebf235f07173802d2e928b51",
     ),
+    # refine re-frozen again the same cycle: `review` keeps its
+    # `preview-disposition` human-gate continuation (user decision 2026-09-10 --
+    # an approval before the edit applies, not a direction gate to absorb).
     ("autopilot-refine", ('default',)): (
-        "74d2f582f1395d07caf42fb3c4f849f2cca00e9f81f19e7b051a15fc83ca829f",
+        "f0aa0bf8bbbb0c9dff3ab060674bc0a9c7d23a40e46d823e48817aef0ae5206f",
         "17e5d03f2aaba86c476743ee29b453e0961455973c3c347cac6a9634c217b529",
     ),
     ("autopilot-research", ('academic', 'market', 'technology')): (
-        "aeca7dd3b3a3557038b8033a80ce66a23ad4be647f1bc1efc4a2314eddb2bf57",
+        "8b9ddb8934f860c3ecd1cc53cbd25435e4516b82b2b2f5a0de5c40f45032a0b2",
         "637d726f855db89ed54a3fd48362488d5e90a4d3a1b59919447f5b040075807f",
     ),
     ("autopilot-ship", ('default',)): (
-        "648616df104927558bc5cca6a65e9455f48b30be63d16d9b7b47adc26d80a313",
+        "9082445b19699eee098dbbb307b8edf3339a3f3ea65ef84f8c1e688c1f16799c",
         "913de8c5f6200a539e6fe19ec488c42120dc6e4e0a0cb2149f33a3aa8cd4f326",
     ),
     ("autopilot-spec", ('api', 'app', 'cli', 'library', 'research', 'update')): (
-                "06d04475ad6ffdb25f791fd62ff8c817dc7a6db27055378fc42e5c22f2824522",
+        "75c2f90d642e06e0de837d66e96b250218937c14b4fdea590811ba6ab6dd4226",
         "f7bf589ba369a08a7031c71db8a2523b250af84be5ef6e0e4d9b00a1cdcb897c",
     ),
 }
@@ -206,15 +221,15 @@ class TestTopology(unittest.TestCase):
     def test_parallel_group_declarations(self):
         code=next(x for x in self.r["recipes"] if x["capability"]=="autopilot-code")
         groups=code["standard_plus"]["parallel_groups"]
-        self.assertEqual([g["id"] for g in groups],["frame","plan","impl-review","plan-check"])
-        self.assertEqual(groups[0]["width_by_intensity"],{
-            "standard":2,"strong":3,"thorough":3,"adversarial":3})
-        self.assertEqual(groups[1]["width_by_intensity"],{
-            "strong":2,"thorough":3,"adversarial":3})
-        self.assertEqual(groups[2]["width_by_intensity"],{
-            "strong":2,"thorough":3,"adversarial":3})
-        self.assertEqual(groups[3]["width_by_intensity"],{
-            "strong":2,"thorough":3,"adversarial":3})
+        # `frame` is deliberately NOT a parallel group any more. The frame
+        # bootstrap layer declares its two legs as explicit sibling nodes at
+        # dispatch depth 1, because a depth-1 node carrying `parallel_group` is
+        # refused at launch, batch and join. The remaining three groups are
+        # unchanged, and all three now start at `strong`.
+        self.assertEqual([g["id"] for g in groups],["plan","impl-review","plan-check"])
+        for group in groups:
+            self.assertEqual(group["width_by_intensity"],{
+                "strong":2,"thorough":3,"adversarial":3})
         for group in groups:
             self.assertEqual(group["join_policy"],"all")
             self.assertEqual(group["independence_axes"],["cross-harness","model-profile","perspective"])
@@ -222,7 +237,11 @@ class TestTopology(unittest.TestCase):
         # Framing anchors (2-way from standard) exist exactly on the generative
         # recipes whose direction is set in-pipeline; prescriptive/bounded
         # recipes keep review-only strong anchors (user directive 2026-07-24).
-        framing={"autopilot-code":"frame","autopilot-spec":"research","autopilot-draft":"material-strategy",
+        # autopilot-code no longer appears here: its standard-tier framing
+        # anchor WAS the `frame` group, and framing is now carried by the
+        # depth-1 sibling legs instead of by a parallel group. The other four
+        # generative recipes keep their in-pipeline framing anchors unchanged.
+        framing={"autopilot-spec":"research","autopilot-draft":"material-strategy",
                  "autopilot-design":"refs","autopilot-research":"retrieval"}
         for recipe in self.r["recipes"]:
             anchors=recipe["standard_plus"].get("parallel_groups",[])
@@ -666,5 +685,95 @@ class TestTopology(unittest.TestCase):
         execute=next(n for n in code["standard_plus"]["nodes"] if n["id"]=="execute")
         execute["unit_choices"]=[c for c in execute["unit_choices"] if c!=execute["unit"]]
         self.assertRaisesRegex(T.TopologyError,"unit_choices",T.validate_registry,r)
+
+
+_WB_PATH = Path(__file__).resolve().parents[1] / "utilities" / "worker_bootstrap.py"
+_WB_SPEC = importlib.util.spec_from_file_location("worker_bootstrap_for_topology_test", _WB_PATH)
+WB = importlib.util.module_from_spec(_WB_SPEC)
+_WB_SPEC.loader.exec_module(WB)
+
+
+class DepthOneFrameNeverReachesWorkerTypeForKindTest(unittest.TestCase):
+    """frame-universal (2026-09-10): a depth-1 frame node is launched only
+    through utilities/dispatch-owner.py, a code path that never imports
+    worker_type_for_kind. That function's only callers --
+    utilities/dispatch-node.py:530 and
+    utilities/stage-dispatch-fallback.py:1064,:1512 -- are depth-2
+    stage-dispatch paths a depth-1 node structurally cannot reach. If a
+    depth-1 frame node ever did reach it, WORKER_KIND_TYPES (deliberately
+    unchanged here: "map-worker" -> "support") would silently overwrite the
+    launch tuple's own worker_type=frame. This pins the two structural facts
+    the decoupling relies on, rather than leaving them an assumption:
+    (1) worker_type_for_kind can never itself resolve to "frame", and
+    (2) no registry node of a kind that function knows how to resolve is ever
+    declared at dispatch_depth 1.
+    """
+
+    def test_worker_type_for_kind_never_yields_frame(self):
+        for kind in WB.WORKER_KIND_TYPES:
+            with self.subTest(kind=kind):
+                self.assertNotEqual(WB.worker_type_for_kind(kind), "frame")
+
+    def test_no_kind_worker_type_for_kind_resolves_is_ever_depth_one(self):
+        # "capability-owner" legitimately IS depth 1, but an owner is launched
+        # through a wholly different path (dispatch-owner.py / capability-route.py),
+        # never through worker_type_for_kind in the depth-2 stage-dispatch flow
+        # this pins; only the three kinds that resolve to a NON-owner bootstrap
+        # type are the ones a depth-1 frame node must never be confused with.
+        registry = T.load_registry()
+        non_owner_kinds = {
+            kind for kind, worker_type in WB.WORKER_KIND_TYPES.items()
+            if worker_type != "owner"
+        }
+        for recipe in registry["recipes"]:
+            nodes = recipe.get("standard_plus", {}).get("nodes", [])
+            for node in nodes:
+                if node.get("kind") in non_owner_kinds:
+                    with self.subTest(
+                        capability=recipe.get("capability"), node=node.get("id")
+                    ):
+                        if node.get("worker_type") == "frame":
+                            # The frame bootstrap legs are depth-1 non-owner
+                            # nodes on purpose -- that is the whole point of
+                            # the layer. They do NOT weaken the invariant this
+                            # test exists for, which is that a depth-1 node's
+                            # worker type is never resolved through kind-based
+                            # fallback: they declare `worker_type` themselves,
+                            # so `worker_type_for_kind` is never consulted for
+                            # them. Assert exactly that instead of the
+                            # accidental side-effect ("therefore no depth-1
+                            # non-owner node exists at all") the original
+                            # blanket assertion also happened to pin.
+                            self.assertEqual(node.get("unit"), "plan/frame")
+                            continue
+                        self.assertNotEqual(node.get("dispatch_depth"), 1)
+
+    def test_every_depth_one_non_owner_node_declares_its_own_worker_type(self):
+        # The invariant behind the exemption above, stated positively and
+        # checked for every recipe: a depth-1 node may not fall through to
+        # `worker_type_for_kind`, so it must carry an explicit `worker_type`.
+        registry = T.load_registry()
+        non_owner_kinds = {
+            kind for kind, worker_type in WB.WORKER_KIND_TYPES.items()
+            if worker_type != "owner"
+        }
+        seen = 0
+        for recipe in registry["recipes"]:
+            for node in recipe.get("standard_plus", {}).get("nodes", []):
+                if (node.get("kind") in non_owner_kinds
+                        and node.get("dispatch_depth") == 1):
+                    with self.subTest(
+                        capability=recipe.get("capability"), node=node.get("id")
+                    ):
+                        self.assertIn("worker_type", node)
+                        self.assertNotEqual(
+                            node["worker_type"],
+                            WB.worker_type_for_kind(node["kind"]),
+                            "a depth-1 node whose declared worker_type equals the "
+                            "kind fallback cannot prove the fallback was not used",
+                        )
+                    seen += 1
+        self.assertEqual(seen, 10)  # five standard+ recipes x two frame legs
+
 
 if __name__ == "__main__": unittest.main()

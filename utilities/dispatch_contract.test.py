@@ -31,6 +31,76 @@ def attempt_row(metadata,status="open"):
  pipe=CURRENT+","+",".join(f"{key}={value}" for key,value in metadata.items())
  return f"2026-08-25T00:00:00Z\t{status}\t/r\t/w\texecute\t{pipe}"
 
+class FrameLaunchGateTest(unittest.TestCase):
+ def fixture(self, base, harnesses=("codex", "claude"), candidates=("codex", "claude")):
+  route={"dispatch_contract_version":3,"route_id":"rt-frame-gate",
+         "route_hash":"sha256:frame-gate","effective_intensity":"standard",
+         "dispatch_evidence":{"tuples":[{"status":"supported","child_harness":h}
+                                         for h in candidates]},
+         "human_gate_bindings":[{"gate":"frame-review","node":"plan","position":"entry"}],
+         "nodes":[{"id":n,"dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
+                   "depends_on":[],"continuation":{"kind":"human-gate","gate":"frame-review"}}
+                  for n in ("frame","frame-alternative")]+
+                 [{"id":"plan","depends_on":["frame","frame-alternative"]}]}
+  rows=[]; markers={}
+  for node,harness in zip(route["nodes"],harnesses):
+   attempt="att-"+node["id"]
+   marker={"attempt_id":attempt,"registered_worker":True}
+   markers[node["id"]]=marker
+   metadata={"attempt_id":attempt,"route_id":route["route_id"],"route_hash":route["route_hash"],
+             "route_node":node["id"],"harness":harness,"worker_type":"frame",
+             "note":"completed-marker"}
+   rows.append(attempt_row(metadata,"done"))
+   directory=base/".dispatch"/"completion"/route["route_id"]
+   directory.mkdir(parents=True,exist_ok=True)
+   (directory/(node["id"]+".json")).write_text(json.dumps(marker))
+  path=base/"route.json";path.write_text(json.dumps(route))
+  jobs=base/"jobs.log";jobs.write_text("\n".join(rows))
+  return route,path,jobs,markers,rows
+
+ def test_actual_pair_rejects_same_harness_and_allows_recorded_single_harness(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   for harnesses,candidates,reason in (
+       (("codex","claude"),("codex","claude"),None),
+       (("codex","codex"),("codex","claude"),"frame-cross-harness-required"),
+       (("codex","codex"),("codex",),None),
+       (("codex","opencode"),("codex","claude"),"frame-harness-unsupported")):
+    with self.subTest(harnesses=harnesses,candidates=candidates):
+     route,path,jobs,markers,rows=self.fixture(base,harnesses,candidates)
+     if reason:
+      with self.assertRaises(D.DispatchContractError) as caught:
+       D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,rows)
+      self.assertEqual(caught.exception.reason,reason)
+     else:
+      D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,rows)
+
+ def test_standard_owner_is_fenced_by_real_gate_journal(self):
+  import workflow_state as WS
+  from types import SimpleNamespace
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);route,path,jobs,markers,rows=self.fixture(base)
+   binding=SimpleNamespace(route_file=str(path))
+   with mock.patch.object(D,"completion_marker_is_current",return_value=True), \
+        mock.patch.object(D,"completion_attempt_readiness",return_value=D.AttemptReadiness("ready","test")):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.owner_frame_launch_gate(binding,"start",base,jobs)
+    self.assertEqual(caught.exception.reason,"human-gate-not-raised")
+    ledger=WS.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
+    ledger.set_workflow_state("BLOCKED_HUMAN_GATE",evidence={"gate":"frame-review"},actor="gate")
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.owner_frame_launch_gate(binding,"start",base,jobs)
+    self.assertEqual(caught.exception.reason,"human-gate-unreleased")
+    ledger.set_workflow_state("RUNNING",evidence={"released_gate":"frame-review",
+      "decision":"proceed","actor_kind":"human","released_by":"test-person"},actor="gate")
+    D.owner_frame_launch_gate(binding,"start",base,jobs)
+    # A substituted pair cannot use an earlier approval to bypass diversity.
+    self.fixture(base,("codex","codex"))
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.owner_frame_launch_gate(binding,"start",base,jobs)
+    self.assertEqual(caught.exception.reason,"frame-cross-harness-required")
+
+
 class DispatchContractTest(unittest.TestCase):
  def test_cancel_closes_witness_only_on_cancelled_receipt(self):
   with tempfile.TemporaryDirectory() as td:
@@ -3035,7 +3105,7 @@ class DispatchContractTest(unittest.TestCase):
   bound node of every other recipe starts, whether or not the topology declares
   a raising continuation for its gate."""
   registry=json.loads((Path(__file__).resolve().parents[1]/"capabilities"/"topologies.json").read_text(encoding="utf-8"))
-  self.assertEqual(D.FENCED_HUMAN_GATES,frozenset({"frame-review"}))
+  self.assertEqual(D.FENCED_HUMAN_GATES,frozenset({"frame-review","preview-disposition"}))
   seen=[]
   for recipe in registry["recipes"]:
    bindings=recipe.get("human_gate_bindings") or []
@@ -3059,6 +3129,7 @@ class DispatchContractTest(unittest.TestCase):
           mock.patch.object(D,"completion_marker_is_current",return_value=True), \
           mock.patch.object(D,"completion_attempt_readiness",return_value=ready), \
           mock.patch.object(D,"_sibling_attempt_gate"), \
+          mock.patch.object(D,"_frame_pair_attempt_gate"), \
           mock.patch.object(D,"_auxiliary_arbitration_gate"):
       try:
        D.completion_marker_gate(str(path),binding["node"],"start",base,base/"jobs.log",
@@ -3068,8 +3139,133 @@ class DispatchContractTest(unittest.TestCase):
        verdict=exc.reason
      seen.append((recipe["capability"],binding["gate"],binding["node"],verdict))
   fenced=[row for row in seen if row[3]!="started"]
-  self.assertEqual(fenced,[("autopilot-code","frame-review","plan","human-gate-not-raised")],seen)
+  # `frame-review` is a universal gate now: every autopilot recipe that has a
+  # frame pair binds it to the entry of its first work node, and each of those
+  # bound nodes must be fenced. The rule is unchanged -- exactly the gates in
+  # FENCED_HUMAN_GATES fence, and nothing else does.
+  self.assertEqual(fenced,[
+   ("autopilot-code","frame-review","plan","human-gate-not-raised"),
+   ("autopilot-design","frame-review","refs","human-gate-not-raised"),
+   ("autopilot-draft","frame-review","material-strategy","human-gate-not-raised"),
+   ("autopilot-refine","frame-review","review","human-gate-not-raised"),
+   # refine's preview approval before the transaction applies an edit
+   # (user decision 2026-09-10: an approval, not a direction, so not absorbed)
+   ("autopilot-refine","preview-disposition","transaction","human-gate-not-raised"),
+   ("autopilot-spec","frame-review","research","human-gate-not-raised"),
+  ],seen)
+  self.assertEqual({row[1] for row in fenced},set(D.FENCED_HUMAN_GATES))
   self.assertGreaterEqual(len(seen),5)
+
+ def test_an_old_generation_route_keeps_its_own_gate_and_is_never_retro_fitted(self):
+  """W5 gate absorption: `autopilot-{design,draft,refine,spec}` retired their own
+  direction gates (`direction-confirmation`, `user-refine-disposition`,
+  `preview-disposition`, `intent-confirmation`) in favour of the one universal
+  `frame-review` raised by the frame legs. Routes compiled BEFORE that change
+  are never retro-fitted -- the same rule `core/WORKFLOW.md` already states for
+  the SD-123 gate ("a route sealed before this cycle keeps `inline-next` and is
+  never retro-fitted"). The fence reads only the route object it is handed, so
+  no version branch and no migration code exist: an old-generation route is
+  judged by its own nodes, gate names and bindings."""
+  registry=json.loads((Path(__file__).resolve().parents[1]/"capabilities"/"topologies.json").read_text(encoding="utf-8"))
+  today={r["capability"]:r for r in registry["recipes"]}
+
+  # (a) old-generation `autopilot-code`: one depth-2 `frame` node, no
+  # `frame-alternative` leg -- today's topology seals two depth-1 legs.
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td); route,path=self._gated_route(base,route_id="rt-oldgen-code0001")
+   self.assertEqual([n["id"] for n in route["nodes"]],["frame","plan"])
+   self.assertEqual(route["nodes"][0]["dispatch_depth"],2)
+   new_frame=[n for n in today["autopilot-code"]["standard_plus"]["nodes"] if n["id"].startswith("frame")]
+   self.assertEqual([n["id"] for n in new_frame],["frame","frame-alternative"])
+   self.assertEqual({n["dispatch_depth"] for n in new_frame},{1})
+   with mock.patch.dict(os.environ,{"AGENT_WORKFLOW_ROOT":str(base/"workflow")}):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     self._fence_start(base,path)
+    self.assertEqual(caught.exception.reason,"human-gate-not-raised")
+    ledger=self._gate_ledger(base,route)
+    with ledger.lock():
+     ledger.set_workflow_state("READY",evidence={},actor="fixture")
+     ledger.set_workflow_state("BLOCKED_HUMAN_GATE",
+      evidence={"gate":"frame-review","artifact":"interview.json"},actor="gate")
+     ledger.set_workflow_state("RUNNING",evidence={"released_gate":"frame-review",
+      "released_by":"user","actor_kind":"user","decision":"proceed"},actor="release")
+    self._fence_start(base,path)   # the old generation's own gate still opens it
+
+  # (b) old-generation `autopilot-{design,refine}`: no frame legs at all, the
+  # first work node raises the retired direction gate, and the binding sits on
+  # that gate's successor. Today's topology fences those recipes at `refs` /
+  # `review` on `frame-review`; the old route is untouched by that and starts,
+  # exactly as it did before this cycle.
+  for capability,gate,raiser,gated_node in (
+    ("autopilot-design","direction-confirmation","refs","build"),):
+   with self.subTest(capability=capability), tempfile.TemporaryDirectory() as td:
+    base=Path(td)
+    route={"dispatch_contract_version":3,"route_id":"rt-oldgen-"+capability[-6:],
+           "route_hash":"sha256:"+"7"*64,"registry_digest":"sha256:"+"8"*64,
+           "human_gates":[gate],
+           "human_gate_bindings":[{"gate":gate,"node":gated_node,"position":"entry"}],
+           "nodes":[{"id":raiser,"depends_on":[],"kind":"pipeline-stage",
+                     "completion_gate":capability+"-"+raiser,"dispatch_depth":2,
+                     "continuation":{"kind":"human-gate","gate":gate}},
+                    {"id":gated_node,"depends_on":[raiser],"kind":"pipeline-stage",
+                     "completion_gate":capability+"-"+gated_node,"dispatch_depth":2}]}
+    path=base/"route.json"; path.write_text(json.dumps(route),encoding="utf-8")
+    marker_dir=base/".dispatch"/"completion"/route["route_id"]
+    marker_dir.mkdir(parents=True)
+    (marker_dir/f"{raiser}.json").write_text(json.dumps({"attempt_id":"att-frame",
+     "registered_worker":True}),encoding="utf-8")
+    # today: one gate, `frame-review`, bound at the frame legs' shared successor
+    self.assertEqual(today[capability]["human_gates"],["frame-review"])
+    self.assertEqual(today[capability]["human_gate_bindings"],
+                     [{"gate":"frame-review","node":raiser,"position":"entry"}])
+    self.assertNotIn(gate,{(n.get("continuation") or {}).get("gate")
+                           for n in today[capability]["standard_plus"]["nodes"]})
+    # the old route: its own gate is read, found unfenced, and nothing is
+    # rewritten to `frame-review` -- the node starts with no ledger at all.
+    with mock.patch.dict(os.environ,{"AGENT_WORKFLOW_ROOT":str(base/"workflow")}):
+     self._fence_start(base,path,node=gated_node)
+    self.assertEqual(json.loads(path.read_text(encoding="utf-8")),route)
+
+  # (c) `autopilot-refine` is the exception: `preview-disposition` was NOT
+  # absorbed (user decision 2026-09-10 -- it approves an edit before the
+  # transaction applies it; it is not a direction). Today's recipe keeps it,
+  # bound at `transaction`, and it is fenced. So an old-generation refine route
+  # is judged by its own gate exactly as before -- nothing is rewritten -- but
+  # that gate now actually holds: refused until released, started after.
+  refine=today["autopilot-refine"]
+  self.assertEqual(refine["human_gates"],["frame-review","preview-disposition"])
+  self.assertIn({"gate":"preview-disposition","node":"transaction","position":"entry"},
+                refine["human_gate_bindings"])
+  self.assertEqual({n["id"]:(n.get("continuation") or {}).get("gate")
+                    for n in refine["standard_plus"]["nodes"]}["review"],"preview-disposition")
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td)
+   route={"dispatch_contract_version":3,"route_id":"rt-oldgen-refine01",
+          "route_hash":"sha256:"+"7"*64,"registry_digest":"sha256:"+"8"*64,
+          "human_gates":["preview-disposition"],
+          "human_gate_bindings":[{"gate":"preview-disposition","node":"transaction","position":"entry"}],
+          "nodes":[{"id":"review","depends_on":[],"kind":"pipeline-stage",
+                    "completion_gate":"autopilot-refine-review","dispatch_depth":2,
+                    "continuation":{"kind":"human-gate","gate":"preview-disposition"}},
+                   {"id":"transaction","depends_on":["review"],"kind":"pipeline-stage",
+                    "completion_gate":"autopilot-refine-transaction","dispatch_depth":2}]}
+   path=base/"route.json"; path.write_text(json.dumps(route),encoding="utf-8")
+   marker_dir=base/".dispatch"/"completion"/route["route_id"]; marker_dir.mkdir(parents=True)
+   (marker_dir/"review.json").write_text(json.dumps({"attempt_id":"att-review",
+    "registered_worker":True}),encoding="utf-8")
+   with mock.patch.dict(os.environ,{"AGENT_WORKFLOW_ROOT":str(base/"workflow")}):
+    with self.assertRaises(D.DispatchContractError) as caught:
+     self._fence_start(base,path,node="transaction")
+    self.assertEqual(caught.exception.reason,"human-gate-not-raised")
+    ledger=self._gate_ledger(base,route)
+    with ledger.lock():
+     ledger.set_workflow_state("READY",evidence={},actor="fixture")
+     ledger.set_workflow_state("BLOCKED_HUMAN_GATE",
+      evidence={"gate":"preview-disposition","artifact":"preview.md"},actor="gate")
+     ledger.set_workflow_state("RUNNING",evidence={"released_gate":"preview-disposition",
+      "released_by":"user","actor_kind":"user","decision":"proceed"},actor="release")
+    self._fence_start(base,path,node="transaction")
+   self.assertEqual(json.loads(path.read_text(encoding="utf-8")),route)
 
  def test_a_route_without_bindings_is_not_fenced(self):
   with tempfile.TemporaryDirectory() as td:
@@ -4798,6 +4994,209 @@ class ForegroundOutcomeSealTest(unittest.TestCase):
     D.seal_foreground_result(jobs,"att-contract",123,"456",123,exit_code=7,failure="exit-7",group_empty=True)
    self.assertEqual(ctx.exception.reason, "foreground-outcome-conflict")
    self.assertEqual(jobs.read_bytes(), committed)
+
+
+class _AttemptPolicyFixture(unittest.TestCase):
+ """Shared route-file plumbing for the depth-1 registration tests below."""
+ def policy(self,route,**kw):
+  args=dict(route_node="frame",intensity="standard",harness="codex",dispatch_depth=1,
+   parent_slug=None,execution_surface="registered-headless",registered_worker=True,
+   fallback_hop="same-harness-headless",fallback_ordinal=1,parent_harness="claude",
+   parent_transport="headless",parent_sandbox="workspace-write",launch_authority="conductor")
+  args.update(kw)
+  with tempfile.TemporaryDirectory() as td:
+   path=Path(td)/"route.json"; path.write_text(json.dumps(route))
+   return D.headless_attempt_policy(route_file=str(path),**args)
+ def refusal(self,route,**kw):
+  with self.assertRaises(D.DispatchContractError) as caught: self.policy(route,**kw)
+  return caught.exception
+
+class FrameLegRegistrationTest(_AttemptPolicyFixture):
+ """N1: a standard+ frame leg is dispatch depth 1 and carries NO `fallback_hops`.
+
+ The compiler attaches a checked chain to depth-2 nodes only, so before the
+ early return every frame registration died at `route-fallback-hops-missing`
+ while compile and route-verify both passed. These tests pin the return AND
+ the three refusals that fence it, and -- the load-bearing half -- pin that a
+ node MISSING the axes still fails loudly rather than slipping through.
+ """
+ def frame_node(self,**overrides):
+  node={"id":"frame","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame"}
+  node.update(overrides)
+  return {key:value for key,value in node.items() if value is not None}
+ def route(self,node,harnesses=("codex","claude")):
+  return {"schema_version":2,"effective_intensity":"standard",
+   "dispatch_evidence":{"tuples":[
+    {"parent_harness":"claude","parent_transport":"headless",
+     "parent_sandbox":"workspace-write","child_harness":harness,
+     "launch_authority":"conductor","status":"supported"} for harness in harnesses]},
+   "nodes":[node,{"id":"plan","dispatch_depth":2,"fallback_hops":[
+    {"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[]}]}]}
+
+ def test_a_well_formed_frame_leg_registers_on_both_headless_hops(self):
+  """The positive case, on both hops the frame pair may use. It never reaches
+  the `fallback_hops` check -- the node deliberately has no chain at all."""
+  node=self.frame_node()
+  self.assertNotIn("fallback_hops",node)
+  for hop,ordinal in (("same-harness-headless",1),("cross-harness-headless",2)):
+   with self.subTest(hop=hop):
+    policy=self.policy(self.route(node),fallback_hop=hop,fallback_ordinal=ordinal)
+    self.assertEqual(policy["fallback_hop"],hop)
+    self.assertEqual(policy["fallback_ordinal"],ordinal)
+    self.assertFalse(policy["quick"])
+    self.assertIsNone(policy["terminal_attempt_limit"])
+
+ def test_an_absent_axis_key_fails_loudly_instead_of_taking_the_early_return(self):
+  """The guard against "the key was added but nothing reads it". A frame node
+  that does not SAY it is one takes the ordinary standard+ path, where its
+  missing chain is a loud refusal -- not a silent admission."""
+  for missing in ("worker_type","unit"):
+   with self.subTest(missing=missing):
+    node=self.frame_node(**{missing:None})
+    self.assertNotIn(missing,node)
+    exception=self.refusal(self.route(node))
+    self.assertEqual(exception.reason,"route-fallback-hops-missing")
+    self.assertEqual(exception.detail,"frame")
+  # ...and a wrong value is refused the same way, not merely an absent key.
+  for wrong in ({"worker_type":"owner"},{"unit":"_kernel/owner"}):
+   with self.subTest(wrong=wrong):
+    self.assertEqual(self.refusal(self.route(self.frame_node(**wrong))).reason,
+                     "route-fallback-hops-missing")
+
+ def test_a_stringly_typed_registered_worker_is_the_frame_branchs_own_refusal(self):
+  """The one surface refusal that is genuinely the frame branch's to make.
+
+  `validate_attempt_metadata` normalizes `"1"` to True and lets the call
+  through, so the branch's `registered_worker is not True` identity check is
+  the only thing standing between a stringly-typed caller and an unchecked
+  registration -- and it must answer `frame-route-surface-invalid`, not
+  quick's `quick-route-surface-invalid`."""
+  route=self.route(self.frame_node())
+  self.assertTrue(D._registered_worker("1"))  # the validator is genuinely satisfied
+  exception=self.refusal(route,registered_worker="1")
+  self.assertEqual((exception.reason,exception.detail),
+                   ("frame-route-surface-invalid","registered-headless"))
+  self.assertNotEqual(exception.reason,"quick-route-surface-invalid")
+
+ def test_a_non_headless_surface_or_hop_is_refused_before_the_frame_branch(self):
+  """The other two frame-surface clauses are belt-and-braces: this entry point
+  always validates as a registered-headless WRAPPER, so a non-registered
+  surface or a non-headless hop is refused one layer earlier, with that
+  layer's own reason. Both layers are pinned -- the observable refusal
+  unmuted, and the branch's own clause with the outer layer muted -- so
+  neither can be dropped on the assumption that the other still covers it."""
+  route=self.route(self.frame_node())
+  for kw,outer in (
+    (dict(execution_surface="claude-subagent",registered_worker=False,
+          fallback_hop="native-subagent",fallback_ordinal=3),
+     "headless-wrapper-surface-mismatch"),
+    (dict(fallback_hop="inline",fallback_ordinal=4),
+     "registered-worker-fallback-mismatch"),
+  ):
+   with self.subTest(outer=outer):
+    self.assertEqual(self.refusal(route,**kw).reason,outer)
+    with mock.patch.object(D,"validate_attempt_metadata"):
+     inner=self.refusal(route,**kw)
+    self.assertEqual(inner.reason,"frame-route-surface-invalid")
+    self.assertNotEqual(inner.reason,"quick-route-surface-invalid")
+
+ def test_the_requested_harness_must_be_in_the_routes_checked_evidence(self):
+  """Standard+ HAS checked dispatch evidence, so the harness is verified
+  against it rather than taken on trust."""
+  route=self.route(self.frame_node(),harnesses=("codex",))
+  exception=self.refusal(route,harness="claude")
+  self.assertEqual((exception.reason,exception.detail),("frame-harness-unsupported","claude"))
+  # an `unsupported` row is not a supported row
+  degraded=self.route(self.frame_node())
+  for row in degraded["dispatch_evidence"]["tuples"]:
+   if row["child_harness"]=="claude": row["status"]="unsupported"
+  self.assertEqual(self.refusal(degraded,harness="claude").reason,"frame-harness-unsupported")
+  self.assertEqual(self.policy(degraded,harness="codex")["fallback_hop"],"same-harness-headless")
+
+ def test_launch_authority_and_depth_zero_are_not_the_same_axis(self):
+  """A frame leg is launched under `launch_authority: "depth-0"`, which is a
+  DIFFERENT axis from the fallback-chain authority enum. Conflating them was
+  the wide change this cycle deliberately rejected; pin that they stay apart."""
+  self.assertNotIn("depth-0",D.LAUNCH_AUTHORITIES)
+  self.assertEqual(D.LAUNCH_AUTHORITIES,{"conductor","ancestor-broker"})
+
+class QuickThreeNodeRegistrationTest(_AttemptPolicyFixture):
+ """Quick is a three-node route, so its shape check is a per-node-id table."""
+ NODES={
+  "one-shot":("owner","_kernel/owner"),
+  "frame":("frame","plan/frame"),
+  "frame-alternative":("frame","plan/frame"),
+ }
+ def route(self,**overrides):
+  nodes=[]
+  for node_id,(worker_type,unit) in self.NODES.items():
+   node={"id":node_id,"dispatch_depth":1,"worker_type":worker_type,"unit":unit,
+         "execution_surface":"registered-headless","registered_worker":True}
+   node.update(overrides.get(node_id) or {})
+   nodes.append(node)
+  # a node id quick's table does not know, present in the route so the walk
+  # gets past `route-node-unknown` and reaches the shape table itself
+  nodes.append({"id":"mystery","dispatch_depth":1,"worker_type":"frame","unit":"plan/frame",
+                "execution_surface":"registered-headless","registered_worker":True})
+  return {"schema_version":2,"effective_intensity":"quick","nodes":nodes,
+   "registered_headless_candidates":[
+    {"harness":harness,"transport":"headless","surface":"registered-headless",
+     "status":"supported"} for harness in ("codex","claude")]}
+
+ def test_each_node_id_must_carry_its_own_tuple(self):
+  for node_id in self.NODES:
+   with self.subTest(node_id=node_id):
+    policy=self.policy(self.route(),route_node=node_id,intensity="quick")
+    self.assertTrue(policy["quick"])
+    self.assertEqual(policy["terminal_attempt_limit"],1)  # one candidate per harness
+  for node_id,wrong in (("one-shot",{"worker_type":"frame"}),
+                        ("one-shot",{"unit":"plan/frame"}),
+                        ("frame",{"worker_type":"owner"}),
+                        ("frame",{"unit":"_kernel/owner"}),
+                        ("frame-alternative",{"worker_type":"owner"}),
+                        ("frame-alternative",{"unit":"_kernel/owner"})):
+   with self.subTest(node_id=node_id,wrong=wrong):
+    exception=self.refusal(self.route(**{node_id:wrong}),route_node=node_id,intensity="quick")
+    self.assertEqual((exception.reason,exception.detail),("quick-route-shape-invalid",node_id))
+
+ def test_a_node_id_outside_the_table_is_a_shape_refusal(self):
+  """`mystery` is a real node in the route -- it is not `route-node-unknown`.
+  Quick admits exactly three ids and nothing else, however well formed."""
+  exception=self.refusal(self.route(),route_node="mystery",intensity="quick")
+  self.assertEqual((exception.reason,exception.detail),("quick-route-shape-invalid","mystery"))
+
+ def test_the_same_harness_pin_narrowed_to_the_work_node(self):
+  """The pin exists to keep quick's WORK on one harness. The frame pair's one
+  MANDATORY independence axis is cross-harness, so keeping the restriction
+  system-wide would have broken the pair it was meant to protect."""
+  exception=self.refusal(self.route(),route_node="one-shot",intensity="quick",
+   fallback_hop="cross-harness-headless",fallback_ordinal=2,harness="claude")
+  self.assertEqual((exception.reason,exception.detail),
+                   ("quick-fallback-forbidden","cross-harness-headless"))
+  for node_id in ("frame","frame-alternative"):
+   with self.subTest(node_id=node_id):
+    policy=self.policy(self.route(),route_node=node_id,intensity="quick",
+     fallback_hop="cross-harness-headless",fallback_ordinal=2,harness="claude")
+    self.assertEqual(policy["fallback_hop"],"cross-harness-headless")
+    self.assertTrue(policy["quick"])
+  # a frame leg is still fenced to the two HEADLESS hops -- widening the pin
+  # did not open the native-subagent or inline hops to it
+  with mock.patch.object(D,"validate_attempt_metadata"):
+   for hop in ("native-subagent","inline"):
+    with self.subTest(hop=hop):
+     exception=self.refusal(self.route(),route_node="frame",intensity="quick",
+      fallback_hop=hop,fallback_ordinal=3)
+     self.assertEqual((exception.reason,exception.detail),("quick-fallback-forbidden",hop))
+
+ def test_the_surface_refusal_stays_quicks_own_reason(self):
+  """Quick reads the surface off the NODE (the frame branch reads it off the
+  caller's arguments); the two refusals must not be confused for each other."""
+  for node_id in self.NODES:
+   with self.subTest(node_id=node_id):
+    exception=self.refusal(self.route(**{node_id:{"registered_worker":False}}),
+     route_node=node_id,intensity="quick")
+    self.assertEqual(exception.reason,"quick-route-surface-invalid")
+    self.assertNotEqual(exception.reason,"frame-route-surface-invalid")
 
 
 if __name__=="__main__": unittest.main()

@@ -2,12 +2,12 @@
 """Frame interview: the questions a person answers at the `frame-review` gate,
 and the intent document their answers produce (SD-129).
 
-The owner writes `shards/frame/interview.json` after the frame group joins and
-raises the gate with it as the reviewable artifact. The depth-0 session puts
-the questions to the user one topic at a time, records the answers with
-`workflow-supervisor.py release --decision proceed --answers <file>`, and the
-owner renders `shards/frame/intent.md` from interview + answers before `plan`
-starts. `plan` reads the intent document as its brief.
+Depth-0 writes `shards/frame/interview.json` after both frame legs join and
+raises the gate with it as the reviewable artifact. Depth-0 puts the questions
+to the user one topic at a time, records the answers with
+`workflow-supervisor.py release --decision proceed --answers <file>`, and
+renders `shards/frame/intent.md` from interview + answers before the owner is
+launched. `plan` reads the intent document as its brief.
 
 The acceptance bar is the user's own sentence (2026-09-06): "핵심은 이해하기
 쉽게 사용자에게 조사를 하고 물어봐야 해". So the validator refuses, before
@@ -35,8 +35,10 @@ from pathlib import Path
 SCHEMA = "frame_interview_v1"
 ANSWERS_SCHEMA = "frame_interview_answers_v1"
 
-# Questions per raise, by intensity. `direct`/`quick` have no gate; their caps
-# govern the inline interview the depth-0 session runs inside the §0.4 card.
+# Questions per raise, by intensity. `quick` now carries the `frame-review`
+# gate too (entry-bound at its `one-shot` node), so its cap is machine-checked
+# at the raise exactly like `standard+`. Only `direct` has no gate; its cap
+# governs the inline interview the depth-0 session runs inside the §0.4 card.
 QUESTION_CAP = {
     "direct": 1, "quick": 3,
     "standard": 7, "strong": 7, "thorough": 7, "adversarial": 7,
@@ -94,8 +96,27 @@ _JARGON_PATTERNS = [_jargon_pattern(term) for term in JARGON]
 _ABBREVIATIONS = re.compile(r"\b(?:e\.g|i\.e|etc|vs|cf|Mr|Mrs|Ms|Dr|No)\.", re.I)
 _SENTENCE_END = re.compile(r"[.!?。？！]+(?:\s|$)")
 MAX_NOTE_CHARS = 500
+# An off-menu answer's note IS the whole decision -- there is no label carrying
+# any of it -- so it gets more room than an ordinary aside (2026-09-10: the
+# `landing-scope` answer of this cycle needed a scope, an exclusion list and a
+# defect callout, and did not fit in 500). `MAX_ANSWERS_BYTES` below is still
+# the real ceiling for the payload as a whole.
+MAX_OFFMENU_NOTE_CHARS = 1200
 MAX_CORRECTION_CHARS = 500
-MAX_ANSWERS_BYTES = 8192
+# The payload ceiling is DERIVED from the per-field caps, never set beside
+# them. It used to be a free-standing 8192 bytes next to caps counted in
+# characters: a Korean character is 3 UTF-8 bytes, so three valid off-menu
+# answers already broke the total, and "answer every field within its cap" no
+# longer implied "the answers are accepted". 4 bytes is the UTF-8 maximum per
+# character; 256 per question covers keys, choice and JSON punctuation.
+MAX_ANSWERS_BYTES = (
+    max(QUESTION_CAP.values()) * (MAX_OFFMENU_NOTE_CHARS * 4 + 256)
+    + MAX_CORRECTION_CHARS * 4 + 1024
+)
+# `choice` value meaning "answered, but none of the printed options apply".
+# Kept strictly distinct from `None` (the template default, "unanswered"):
+# collapsing the two would rebuild the very defect this sentinel closes.
+NONE_SENTINEL = "none"
 
 
 class InterviewError(ValueError):
@@ -317,15 +338,37 @@ def validate_answers(interview: dict, answers: dict) -> list[str]:
             errors.append(f"answers.{qid}: missing")
             continue
         choice = entry.get("choice")
-        if len(_text(entry.get("note"))) > MAX_NOTE_CHARS:
-            errors.append(f"answers.{qid}.note: {len(_text(entry.get('note')))} chars > {MAX_NOTE_CHARS}")
+        note = _text(entry.get("note"))
         options = question.get("options") if isinstance(question.get("options"), list) else []
         labels = [_text(o.get("label")) for o in options if isinstance(o, dict)]
+        # 2026-09-10, this cycle's own `landing-scope` question: the user's real
+        # answer was neither printed option, the schema had no way to say so,
+        # and the ledger recorded option 1 as if the user had picked it. An
+        # off-menu answer now says so in as many words. A label that is itself
+        # literally `"none"` is a real option, so index-conversion wins there
+        # and the sentinel reading is refused typed below -- one value never
+        # means two different things depending on the option list.
+        offmenu = choice == NONE_SENTINEL and NONE_SENTINEL not in labels
+        if offmenu:
+            if not note.strip():
+                # Off-menu means the note carries the entire decision; an empty
+                # one records no decision at all.
+                errors.append(f"answers.{qid}.note: required when no printed option applies")
+            if len(note) > MAX_OFFMENU_NOTE_CHARS:
+                errors.append(f"answers.{qid}.note: {len(note)} chars > {MAX_OFFMENU_NOTE_CHARS}")
+            continue
+        if len(note) > MAX_NOTE_CHARS:
+            errors.append(f"answers.{qid}.note: {len(note)} chars > {MAX_NOTE_CHARS}")
         if isinstance(choice, bool) or not isinstance(choice, int) or not (0 <= choice < len(labels)):
             if isinstance(choice, str) and choice in labels:
                 entry["choice"] = labels.index(choice)
+                if choice == NONE_SENTINEL:
+                    errors.append(
+                        f"answers.{qid}.choice: option label collides with the none sentinel")
             else:
-                errors.append(f"answers.{qid}.choice: must index one of {labels}")
+                errors.append(
+                    f"answers.{qid}.choice: must index one of {labels}, "
+                    f"or be {NONE_SENTINEL!r} when no printed option applies")
     return errors
 
 
@@ -377,11 +420,18 @@ def render_intent(interview: dict, answers: dict, *, now: str | None = None) -> 
         entry = given.get(qid) if isinstance(given.get(qid), dict) else {}
         options = [o for o in question.get("options", []) if isinstance(o, dict)]
         choice = entry.get("choice")
+        labels = [_text(o.get("label")) for o in options]
+        offmenu = choice == NONE_SENTINEL and NONE_SENTINEL not in labels
         chosen = options[choice] if isinstance(choice, int) and 0 <= choice < len(options) else None
         recommended = question.get("recommended")
         followed = isinstance(choice, int) and choice == recommended
         lines.append(f"- **{_text(question.get('topic'))}** (`{qid}`): {_text(question.get('question')).strip()}")
-        if chosen is not None:
+        if offmenu:
+            # No printed option was chosen, so neither `recommended` nor
+            # `user's own choice` can be said -- both would name a label the
+            # user never picked. The note below carries the actual decision.
+            lines.append("  - Decision: **제시된 선택지 없음** (off-menu)")
+        elif chosen is not None:
             tag = "recommended" if followed else "user's own choice"
             lines.append(f"  - Decision: **{_text(chosen.get('label'))}** ({tag}) — {_text(chosen.get('means')).strip()}")
         else:

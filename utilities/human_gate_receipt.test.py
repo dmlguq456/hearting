@@ -33,7 +33,7 @@ def load_module():
 
 
 class Fixture:
-    def __init__(self, root: Path, module) -> None:
+    def __init__(self, root: Path, module, *, inline=False) -> None:
         self.root = root
         self.module = module
         self.jobs = root / "registry-a" / "jobs.log"
@@ -43,8 +43,8 @@ class Fixture:
         self.owner_attempt = "att-owner"
         self.thread_id = "thread-parent"
         self.sealed_batch = "batch-original"
-        self.gate = "direction-confirmation"
-        self.route_node = "review"
+        self.gate = "preview-disposition" if inline else "direction-confirmation"
+        self.route_node = "one-shot" if inline else "review"
         self.delivery_id = "delivery-" + "a" * 32
         self.gateway_epoch = 7
         self.gate_epoch = 1
@@ -71,6 +71,11 @@ class Fixture:
                 }
             ],
         }
+        if inline:
+            route["nodes"] = route["nodes"][:1]
+            route["nodes"][0].pop("continuation")
+            route["nodes"][0]["inline_human_gates"] = [self.gate]
+            route["human_gate_bindings"][0].update(node=self.route_node, position="terminal")
         route["route_hash"] = route_hash(route)
         route["route_id"] = route_id_from_hash(route["route_hash"])
         self.route = route
@@ -213,6 +218,12 @@ class HumanGateReceiptTest(unittest.TestCase):
         self.assertLessEqual(
             len(self.module.canonical(self.fixture.receipt)), 2048
         )
+
+    def test_quick_inline_preview_gate_reaches_the_same_managed_receipt_validator(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = Fixture(Path(directory), self.module, inline=True)
+            self.assertEqual(fixture.validate(), fixture.receipt)
+            self.assertEqual(fixture.validate_record()["delivery_id"], fixture.delivery_id)
 
     def test_explicit_jobs_selects_journal_not_environment_override(self) -> None:
         foreign = self.fixture.root / "foreign-workflow"

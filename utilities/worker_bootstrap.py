@@ -6,7 +6,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-WORKER_TYPES = ("owner", "stage", "review", "support")
+WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
 RESERVED_UNITS = ("_kernel/owner", "_kernel/resource")
 _FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)

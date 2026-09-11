@@ -352,8 +352,13 @@ stamp path in `core/HOOKS.md`.
   (`dispatch_contract.completion_marker_gate`) refuses a node whose entry gate
   is unreleased only for gates that some node of the route raises through its
   continuation **and** that an owner contract implements
-  (`dispatch_contract.FENCED_HUMAN_GATES`, today `frame-review`); a binding the
-  topology merely declares is not a mandatory step. The owner itself waits on `workflow-supervisor.py await-release`
+  (`dispatch_contract.FENCED_HUMAN_GATES`, today `frame-review`). The fenced
+  set is unchanged, but every `autopilot-*` recipe now raises `frame-review`
+  from its bootstrap frame legs and fences it at its own first work node, so
+  that binding is a required step wherever those recipes declare it. A gate
+  that some other topology only declares — with no node raising it through a
+  continuation and no owner contract implementing it — still is not.
+  A depth-0 session waits on `workflow-supervisor.py await-release`
   (bounded, read-only), and every launch surface refuses to start a node whose
   entry gate is not released (`human-gate-unreleased`/`human-gate-not-raised`).
   A Codex delivery uses a distinct strict `human-gate` receipt and `hg-dlv-*`

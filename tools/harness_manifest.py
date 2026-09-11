@@ -20,7 +20,7 @@ MANIFEST_NAME = "harness-manifest.json"
 MANIFEST_PATH = ROOT / MANIFEST_NAME
 SCHEMA_VERSION = 4
 UNIT_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]*/[a-z][a-z0-9-]*$")
-UNIT_WORKER_TYPES = {"owner", "stage", "review", "support"}
+UNIT_WORKER_TYPES = {"owner", "stage", "review", "support", "frame"}
 UNIT_FLOORS = {"near-zero", "low", "moderate", "high", "highest"}
 INVOCATION_CLASSES = {
     "entry-router",

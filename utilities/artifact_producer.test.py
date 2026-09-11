@@ -47,8 +47,15 @@ def gate_evidence():
 
 
 def registered_headless():
+    # Two supported harnesses, not one: quick now compiles a cross-harness
+    # frame pair, so a single-candidate evidence set is no longer a valid quick
+    # route at all (`quick-frame-cross-harness-unavailable`). Same shape the
+    # canary's own fixture uses in `tools/artifact-producer-canary.py`.
     return {"candidates": [{
         "harness": "codex", "transport": "headless", "surface": "registered-headless",
+        "status": "supported", "probe_source": "fixture-probe", "probe_time": "2026-07-20T00:00:00Z",
+    }, {
+        "harness": "claude", "transport": "headless", "surface": "registered-headless",
         "status": "supported", "probe_source": "fixture-probe", "probe_time": "2026-07-20T00:00:00Z",
     }]}
 

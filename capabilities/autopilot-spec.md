@@ -32,6 +32,51 @@ new-intent analysis. Actual code work belongs to autopilot-code, which detects
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
+## Post-Frame Direction Gate
+
+**One gate, raised from the frame legs (SD-123/SD-129).** A `standard+` route
+compiled after this cycle seals `human_gates: ["frame-review"]` and both
+`frame` and `frame-alternative` continuations as that human gate, bound at
+`research`'s entry. `frame-review` is the recipe's only human gate: the old
+`intent-confirmation` declaration is retired, because no node ever raised it
+and no command in the harness could release it — the intent question it named
+is exactly what the frame interview now asks. A route sealed before this cycle
+keeps its own generation's gate name, binding and node shape and is **never
+retro-fitted** — the entry fence in `utilities/dispatch_contract.py` reads
+only the route object it was handed.
+
+Depth-0 launches the frame pair, joins both direction briefs, and builds
+`spec/_internal/research/frame/frame-summary.json` (five fields —
+방향/대안/위험/범위 변경/비용, ≤1KB) plus the **frame interview**
+`spec/_internal/research/frame/interview.json` (SD-129: a one-sentence
+restatement the user confirms, a plain-language brief, and at most
+`frame_interview.py`'s `QUESTION_CAP` short questions — one topic each, 2–4
+options, one recommended, no harness vocabulary, only decisions the user alone
+can make; `utilities/frame_interview.py validate` is the bar and `gate --block`
+refuses what fails it). For this capability the restatement names the product
+intent in the user's own words, which is the claim the PRD is later measured
+against. Depth-0 puts those questions to the user, records the answers with
+`workflow-supervisor.py release --gate frame-review --decision
+proceed|revise|stop --answers <file>`, and renders
+`spec/_internal/research/frame/intent.md` with `frame_interview.py
+render-intent`.
+
+The owner **receives** `intent.md`'s path as an input. It raises no gate,
+waits on no release, and renders no intent of its own — all of that is
+finished before it is launched. `intent.md` is the agreed intent `research`
+reads first, so a PRD requirement that contradicts a recorded decision is a
+`spec-review` blocker; pass its absolute path in the `research` prompt as
+`Intent:`. `revise` re-runs the frame pair before the route starts and `stop`
+cancels before anything is compiled, so neither consumes the owner's retry
+boundary. A `research` start whose entry gate is not released is refused by
+every launch surface (`human-gate-unreleased`). `direct` has no gate: the
+depth-0 session asks its one question of the same kind inline inside the §0.4
+card step — a documented obligation on the acting session, not a
+machine-checked cap, since a `direct` route carries no gate binding. The
+declared `confirmation.mode` (default `hybrid`) governs the ordered pair —
+blocking direction gate first, route notice after; `core/WORKFLOW.md` §0.4
+owns the user-facing card.
+
 ## Artifact Ownership
 
 Use the shared artifact root rule: prefer `.agent_reports/`; use legacy `.claude_reports/` only when it already exists and `.agent_reports/` does not.

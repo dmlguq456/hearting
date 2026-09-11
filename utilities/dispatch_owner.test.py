@@ -746,6 +746,16 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
                                 {"harness": "claude", "status": "unsupported"}]})
         self.assertEqual(OWNER._sealed_owner_harnesses(path), {"codex"})
 
+    def test_standard_frame_selects_child_harness_without_owner_policy(self):
+        path = self._route({"effective_intensity": "standard",
+                            "dispatch_evidence": {"tuples": [
+                                {"parent_harness": "claude", "child_harness": "codex",
+                                 "status": "supported"}]},
+                            "owner_harness_policy": {"primary": ["claude"]}})
+        context = OWNER._sealed_owner_context(path, worker_type="frame")
+        self.assertEqual(context["harnesses"], {"codex"})
+        self.assertIsNone(context["policy"])
+
     def test_direct_route_has_no_owner_to_bind(self):
         path = self._route({"effective_intensity": "direct", "dispatch_evidence": None})
         with self.assertRaises(OWNER.OwnerError) as caught:
@@ -772,7 +782,7 @@ class RouteEvidenceOwnerHarnessTest(unittest.TestCase):
         both and every quick owner died at launch.
         """
         source = Path(OWNER.__file__).read_text(encoding="utf-8")
-        body = source.split("if route_data.get(\"effective_intensity\") == \"quick\":", 1)[1]
+        body = source.split('if values["--worker-type"] == "frame" or route_data.get("effective_intensity") == "quick":', 1)[1]
         quick, standard = body.split("else:", 1)
         self.assertIn('"--route-file", binding.route_file', quick)
         code = "\n".join(
@@ -825,6 +835,26 @@ class RegisteredReviewerLaunchTest(unittest.TestCase):
         # reviewer reads, and it is the field the completion gate later checks.
         self.assertIn("--unit", forwarded)
         self.assertIn("qa/code-review", forwarded)
+
+    def test_a_frame_launch_needs_all_four_artifact_scope_variables(self):
+        # OPERATIONS §5.10b used to ask depth-0, in prose, to export all four
+        # before every frame launch. The launch checks it now: any subset is
+        # refused at the caller, naming exactly what is missing.
+        four = {name: "/fixture/" + name.lower() for name in OWNER._FRAME_ARTIFACT_ENV}
+        for dropped in OWNER._FRAME_ARTIFACT_ENV:
+            with self.subTest(dropped=dropped), mock.patch.dict(os.environ, four):
+                del os.environ[dropped]
+                with self.assertRaises(OWNER.OwnerError) as caught:
+                    self._parse("--worker-type", "frame", "--unit", "plan/frame")
+                self.assertEqual(str(caught.exception), "frame-artifact-scope-missing:" + dropped)
+        with mock.patch.dict(os.environ, four):
+            _, values, _, _, _ = self._parse("--worker-type", "frame", "--unit", "plan/frame")
+        self.assertEqual(values["--worker-type"], "frame")
+        # owner and review launches are untouched by the frame-only check
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for name in OWNER._FRAME_ARTIFACT_ENV:
+                os.environ.pop(name, None)
+            self._parse("--worker-type", "review", "--unit", "qa/code-review")
 
     def test_a_review_tuple_without_a_unit_is_refused(self):
         # `worker_type=review` with no unit reaches the mode contract as

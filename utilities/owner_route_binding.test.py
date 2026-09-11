@@ -770,5 +770,186 @@ class OwnerRouteLifecycleTest(unittest.TestCase):
                 self._attach(td, jobs, other_path, other)
 
 
+class QuickNodeBindingTest(unittest.TestCase):
+    """`derive_quick_owner_binding` now binds ONE named node of a three-node quick
+    route. The default keeps every existing owner caller byte-identical; a named
+    frame leg must get its OWN tuple, because returning the owner's hardcoded
+    `_kernel/owner` values for a frame leg would move the mis-binding bug rather
+    than close it.
+    """
+
+    HARNESSES = ("codex", "claude")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        (base / "core").mkdir(parents=True, exist_ok=True)
+        (base / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        self._previous = {key: os.environ.get(key)
+                          for key in ("AGENT_HOME", "AGENT_DISPATCH_JOBS", "XDG_STATE_HOME")}
+        os.environ["AGENT_HOME"] = str(base)
+        os.environ["XDG_STATE_HOME"] = str(base / "state")
+        jobs = base / "state" / "jobs.log"
+        jobs.parent.mkdir(parents=True, exist_ok=True)
+        jobs.write_text("", encoding="utf-8")
+        os.environ["AGENT_DISPATCH_JOBS"] = str(jobs)
+        self.addCleanup(self._restore)
+        self.route_file = base / "route.json"
+        self.route = self._compile()
+        self.route_file.write_text(json.dumps(self.route), encoding="utf-8")
+
+    def _restore(self):
+        for key, value in self._previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _compile(self):
+        return M.ROUTE.compile_route(
+            "autopilot-code", "dev", "quick", M.ROUTE.ROOT, M.ROUTE.ROOT,
+            predicates=[], transport=None, tracking="tracked",
+            tracked_gate_evidence={
+                "spec_read": {"satisfied": True, "source": "canonical-prd-sha256"},
+                "drift_verdict": "within-spec", "workflow_mode": "tracked",
+                "artifact_guard": {"satisfied": True, "source": "conductor-prechecked"}},
+            registered_headless_evidence={"candidates": [
+                {"harness": harness, "transport": "headless",
+                 "surface": "registered-headless", "status": "supported",
+                 "probe_source": "fixture-probe", "probe_time": "2026-07-20T00:00:00Z"}
+                for harness in self.HARNESSES]})
+
+    def derive(self, path=None, **kw):
+        return M.derive_quick_owner_binding(
+            path or self.route_file, worktree=M.ROUTE.ROOT, capability="autopilot-code",
+            capability_mode="dev", intensity="quick", harness="codex", **kw)
+
+    def resealed(self, mutate):
+        """A route copy with one node mutated and its identity re-sealed, so the
+        tuple check is what refuses -- not the hash check in front of it."""
+        route = json.loads(json.dumps(self.route))
+        mutate(route)
+        route["route_hash"] = M.ROUTE.route_hash(route)
+        route["route_id"] = "rt-" + route["route_hash"].split(":", 1)[1][:16]
+        path = Path(self.tmp.name) / "mutated-route.json"
+        path.write_text(json.dumps(route), encoding="utf-8")
+        return path
+
+    def test_frame_binding_accepts_quick_and_standard_child_candidates(self):
+        # Compile real standard routes, with a different parent and child.
+        for intensity in ("quick", "standard"):
+            if intensity == "quick":
+                route = self.route
+            else:
+                route = M.ROUTE.compile_route(
+                    "autopilot-code", "dev", "standard", M.ROUTE.ROOT, M.ROUTE.ROOT,
+                    predicates=[], transport="headless", tracking="tracked",
+                    tracked_gate_evidence={
+                        "spec_read": {"satisfied": True, "source": "canonical-prd-sha256"},
+                        "drift_verdict": "within-spec", "workflow_mode": "tracked",
+                        "artifact_guard": {"satisfied": True, "source": "conductor-prechecked"}},
+                    dispatch_evidence={"tuples": [{
+                        "parent_harness": "claude", "parent_transport": "headless",
+                        "parent_sandbox": M.ROUTE.WRAPPER_PARENT_SANDBOXES["claude"][0],
+                        "child_harness": "codex", "launch_authority": "conductor",
+                        "status": "supported", "probe_source": "fixture-probe",
+                        "probe_time": "2026-07-16T00:00:00Z", "failure_class": "",
+                        "checked_worktree": str(M.ROUTE.ROOT.resolve()), "failure_scope": "none",
+                        "codex_command": "ok", "retry_on_isolated_worktree": 0}]})
+            path = Path(self.tmp.name) / (intensity + ".json")
+            path.write_text(json.dumps(route))
+            for node_id in ("frame", "frame-alternative"):
+                with self.subTest(intensity=intensity, node=node_id):
+                    binding = M.derive_frame_route_binding(
+                        path, worktree=M.ROUTE.ROOT, capability="autopilot-code",
+                        capability_mode="dev", intensity=intensity, harness="codex",
+                        route_node=node_id)
+                    self.assertEqual((binding.worker_type, binding.unit, binding.dispatch_depth),
+                                     ("frame", "plan/frame", 1))
+                    self.assertEqual(binding.write_scope, f"shards/{node_id}/**")
+                    if intensity == "standard":
+                        with self.assertRaisesRegex(M.OwnerRouteBindingError, "frame-route-harness-mismatch"):
+                            M.derive_frame_route_binding(
+                                path, worktree=M.ROUTE.ROOT, capability="autopilot-code",
+                                capability_mode="dev", intensity=intensity, harness="claude",
+                                route_node=node_id)
+
+    def test_the_default_still_binds_the_one_shot_owner_exactly_as_before(self):
+        owner = next(node for node in self.route["nodes"] if node["id"] == "one-shot")
+        binding = self.derive()
+        self.assertEqual(binding.route_node, "one-shot")
+        self.assertEqual((binding.worker_type, binding.unit, binding.dispatch_depth),
+                         ("owner", "_kernel/owner", 1))
+        self.assertEqual(binding.write_scope, ";".join(owner["write_scope"]))
+        self.assertEqual(binding.completion_gate, "quick-complete")
+        self.assertEqual(binding.route_id, self.route["route_id"])
+        self.assertEqual(binding.route_hash, self.route["route_hash"])
+        self.assertEqual(binding.registry_digest, self.route["registry_digest"])
+        # naming the node explicitly is the same call
+        self.assertEqual(self.derive(route_node="one-shot"), binding)
+
+    def test_a_named_frame_leg_gets_its_own_tuple_not_the_owners(self):
+        for node_id in ("frame", "frame-alternative"):
+            with self.subTest(node_id=node_id):
+                node = next(n for n in self.route["nodes"] if n["id"] == node_id)
+                binding = self.derive(route_node=node_id)
+                self.assertEqual(binding.route_node, node_id)
+                self.assertEqual((binding.worker_type, binding.unit, binding.dispatch_depth),
+                                 ("frame", "plan/frame", 1))
+                # its OWN scope and gate, read off the node the caller named
+                self.assertEqual(binding.write_scope, f"shards/{node_id}/**")
+                self.assertEqual(binding.write_scope, ";".join(node["write_scope"]))
+                self.assertEqual(binding.completion_gate, "quick-frame")
+                self.assertNotEqual(binding.write_scope, self.derive().write_scope)
+                self.assertNotEqual(binding.completion_gate, self.derive().completion_gate)
+
+    def test_a_node_id_outside_the_quick_table_is_refused_by_name(self):
+        """No mute needed: the route is genuine, only the requested id is not one
+        quick declares. `plan` is a real standard+ node id and still not one of
+        quick's three."""
+        for node_id in ("plan", "one_shot", "", "frame-contrarian"):
+            with self.subTest(node_id=node_id):
+                with self.assertRaisesRegex(M.OwnerRouteBindingError,
+                                            "quick-node-tuple-invalid"):
+                    self.derive(route_node=node_id)
+
+    def test_a_node_that_does_not_carry_its_ids_axes_is_refused_at_both_layers(self):
+        """A route whose `frame` node claims the owner's axes is refused twice
+        over: `verify_route` will not accept the route at all, and -- with that
+        outer layer muted -- the binding's own tuple check refuses it too. Both
+        are pinned so neither can be dropped on the assumption the other holds.
+        """
+        def swap(field, value):
+            def mutate(route):
+                next(n for n in route["nodes"] if n["id"] == "frame")[field] = value
+            return mutate
+
+        for field, value in (("worker_type", "owner"), ("unit", "_kernel/owner"),
+                             ("dispatch_depth", 2)):
+            with self.subTest(field=field):
+                path = self.resealed(swap(field, value))
+                with self.assertRaisesRegex(M.OwnerRouteBindingError,
+                                            "owner-route-verification-failed"):
+                    self.derive(path=path, route_node="frame")
+                with mock.patch.object(M.ROUTE, "verify_route",
+                                       side_effect=lambda raw, *a, **k: raw):
+                    with self.assertRaisesRegex(M.OwnerRouteBindingError,
+                                                "quick-node-tuple-invalid"):
+                        self.derive(path=path, route_node="frame")
+
+    def test_a_route_missing_the_named_node_is_a_different_refusal(self):
+        """`quick-owner-node-missing` still means "the route has no such node",
+        which is a different fault from "the node exists but is the wrong shape"
+        and must not be collapsed into the tuple refusal."""
+        def drop(route):
+            route["nodes"] = [n for n in route["nodes"] if n["id"] != "frame-alternative"]
+        path = self.resealed(drop)
+        with mock.patch.object(M.ROUTE, "verify_route", side_effect=lambda raw, *a, **k: raw):
+            with self.assertRaises(M.OwnerRouteBindingError) as caught:
+                self.derive(path=path, route_node="frame-alternative")
+        self.assertEqual(str(caught.exception), "quick-owner-node-missing")
+
+
 if __name__ == "__main__":
     unittest.main()

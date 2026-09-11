@@ -207,7 +207,7 @@ usage: preflight.sh write <file> [session-id] [turn-id]
        preflight.sh nested-headless --parent-harness <h> --parent-transport <t> --parent-sandbox <s> --child-harness <h> --launch-authority <authority> --worktree <path> [--prospective-standard-owner --jobs <canonical-jobs.log>] [--user-disabled] [--json]
        preflight.sh dispatch-readiness --worktree <path> --jobs <canonical-jobs.log> --owner-harness <h>... --child-harness <h>... --output <evidence.json>
        preflight.sh broker <status|stop> --jobs <jobs.log> [--root <broker-root>]  # legacy drain only
-       preflight.sh dispatch [--dry-run|--register|--start] [--require-hook-trust] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--worker-mode <family/mode>] --qa <level> [--intensity <level>] [--dispatch-depth 1|2] [--parent <slug>] [--worker-type owner|stage|review|support] [--unit <unit>] [--assigned-contract <capability>] [--owner <capability>] (--model-profile <deep|balanced-deep|balanced|light|mini> [--model-role <role>]|--model-role <role>|--model <model> --reasoning <effort>) [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
+       preflight.sh dispatch [--dry-run|--register|--start] [--require-hook-trust] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> [--worker-mode <family/mode>] --qa <level> [--intensity <level>] [--dispatch-depth 1|2] [--parent <slug>] [--worker-type owner|stage|review|support|frame] [--unit <unit>] [--assigned-contract <capability>] [--owner <capability>] (--model-profile <deep|balanced-deep|balanced|light|mini> [--model-role <role>]|--model-role <role>|--model <model> --reasoning <effort>) [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
        preflight.sh dispatch-owner [--dry-run|--register|--start] --route-evidence <route.json> [--prompt-file <file>|--prompt-text <text>]   # the route fills the owner tuple
        preflight.sh dispatch-owner [--adapter <harness>] [--dry-run|--register|--start] --worktree <path> --slug <slug> --capability <name> --capability-mode <mode> --qa <level> --intensity <level> --dispatch-depth 1 --worker-type owner --assigned-contract <capability> --owner <capability> --model-profile <deep|balanced-deep|balanced|light> [--prompt-file <file>|--prompt-text <text>] [--jobs <jobs.log>]
        preflight.sh dispatch-chain --route <route.json> --node <id> --slug <slug> --parent <slug> [--capability-mode <mode>] [--worker-mode <family/mode>] [--model-role <role>] [--capacity-model <id> --capacity-reasoning|--capacity-effort|--capacity-variant <level>] [--progress-window-seconds N --watchdog-max-windows M] [--dry-run|--register|--start]
@@ -770,7 +770,7 @@ liveness_surface=codex-session-jsonl-mtime
 liveness_check=adapters/codex/bin/preflight.sh liveness [jobs.log]
 harvest_check=adapters/codex/bin/preflight.sh harvest [--jobs jobs.log] [--attempt-id id|--slug slug] [--mark-done]
 dispatch_prompt_contract=portable-typed-worker-bootstrap
-worker_bootstrap_source=roles/worker-bootstrap.md+roles/worker-types/<owner|stage|review|support>.md
+worker_bootstrap_source=roles/worker-bootstrap.md+roles/worker-types/<owner|stage|review|support|frame>.md
 worker_handoff=artifact,verdict,blocker
 dispatch_input_validation=capability-info,capability-mode-catalog,optional-worker-mode-info,owner-mode-axis-consistency,qa-level,intensity-dispatch_depth-parent
 worker_startup_signal=wrapper-validated-metadata-or-immutable-route

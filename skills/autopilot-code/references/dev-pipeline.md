@@ -242,44 +242,29 @@ When implementation or reporting requires result plots, experiment-log visualiza
 
 ### Higher-Intensity Perspective Extensions
 
-Registry-v6 widens only selected leverage points. `strong` uses a 3-way frame group and
-2-way plan/implementation-review groups. `thorough|adversarial` keep the 3-way frame and
-widen plan plus implementation review to three legs. Their model profiles and perspectives
-are deliberately asymmetric. Any additional security/material/specialist node still needs
-a validated compose-on-demand extension with disjoint output and a completion gate; never
-create an undeclared child or alter a sealed group width.
+Registry-v6 widens only selected leverage points: `strong` uses 2-way plan and
+implementation-review groups; `thorough|adversarial` widen plan plus implementation
+review to three legs. Frame is not part of this widening — every intensity from
+`quick` up gets exactly two frame legs, fixed (see Step 0). Their model profiles and
+perspectives are deliberately asymmetric. Any additional security/material/specialist
+node still needs a validated compose-on-demand extension with disjoint output and a
+completion gate; never create an undeclared child or alter a sealed group width.
 
-### Step 0: frame (2-way at standard, 3-way at strong+)
+### Step 0: frame (already done, by depth-0, before this route started)
 
-Skip for direct and quick (orient-lite carries the framing posture inline). Every
-compiled standard+ route opens with `parallel_group=frame`: `frame` and
-`frame-alternative` at standard, plus `frame-contrarian` at strong+. Framing expands from `standard` —
-not `strong` — because the direction decision is the point of maximum downstream
-leverage (user directive 2026-07-24: an early direction error cascades into
-hotfix/patch work and cost blowups).
+Skip only for `direct` (orient-lite carries the framing posture inline). For `quick`
+and every `standard+` intensity, the direction gate already ran (owner-execution.md
+"Pre-Route Direction Gate"): depth-0 itself launched exactly two frame legs — `frame`
+and `frame-alternative`, on two different harnesses, the anchor one tier above the
+owner's own model profile via `model_profile.frame_profile_for_owner` — as its own
+bootstrap layer, before this route or its owner existed. There is no third frame leg
+at any intensity; `strong+` widening applies only to plan and implementation review
+(above), never to frame. See `core/WORKFLOW.md` for the full depth-0 procedure.
 
-Dispatch the group with one checked `utilities/dispatch-batch.py --action start
---parallel-group frame` call. It atomically reserves every absent first-start leg and
-starts wrappers concurrently. Cross-harness requires at least two harness families across
-the group; `balanced-deep`, `light`, and (at strong+) `deep` profiles plus distinct framing
-perspectives provide asymmetric exploration. A typed same-harness degradation must be
-explicit and recorded. The legs work blind and write separate direction briefs
-(`direction-brief.md`, `direction-brief.alternative.md`, and when selected
-`direction-brief.contrarian.md`) containing a problem statement,
-root-cause/essence evidence, 2–3 direction options with trade-offs, and a
-committed direction verdict with rejected alternatives.
-
-Publish each leg's exact completion from its brief. There is no conductor-level
-merge for framing: `plan` is record-bound to every group marker, reads every brief,
-and must record which direction it adopts (and why, when the legs disagree —
-disagreement between briefs is signal, not an error).
-
-Then the post-frame direction gate (owner-execution.md "Post-Frame Direction
-Gate"): build `shards/frame/frame-summary.json` and the plain-language
-interview `shards/frame/interview.json`, raise `frame-review` with the
-interview as the artifact, wait on `workflow-supervisor.py await-release`, and
-on `proceed` render `shards/frame/intent.md` from the recorded answers. `plan`
-does not start before that — every launch surface refuses it.
+Depth-0 joined both legs, interviewed the user, released `frame-review`, and rendered
+`shards/frame/intent.md` before launching you. You receive that path as an input and
+pass it to `plan` as `Intent:`; you raise and await nothing for this gate. `plan`
+cannot start on an unreleased gate — every launch surface refuses it.
 
 ### Step 1: code-plan
 

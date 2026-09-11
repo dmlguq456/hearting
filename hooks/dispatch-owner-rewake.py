@@ -199,8 +199,8 @@ def _bash_call(payload: object) -> tuple[dict[str, Any], str] | None:
 
 
 def parse_launch(payload: object) -> Launch | None:
-    """The receipt fast path: a successful depth-1 owner start whose stdout
-    names the attempt, the registry, and this session as the parent."""
+    """The receipt fast path: a successful depth-1 owner-or-frame start whose
+    stdout names the attempt, the registry, and this session as the parent."""
 
     gate = _bash_call(payload)
     if gate is None:
@@ -351,16 +351,18 @@ def _read_registry_lines(jobs: Path) -> list[str] | None:
 def _session_owner_rows(
     jobs: Path, session: str, *, statuses: frozenset[str] = ARM_ROW_STATUSES
 ) -> list[tuple[str, float]]:
-    """Every claimed-and-started depth-1 owner row bound to `session` whose
-    latest status is in `statuses`, as ``(attempt_id, age_seconds)``, oldest
-    first. Empty on any refusal. This is the one identity check both arming
-    paths share (review R1 B1): a receipt on stdout only *names* a candidate;
-    the row proves it -- exists, `parent_sid` is this session, every
-    `REGISTRY_DEPTH1_START` key matches. A receipt may name a row that already
-    ran to `done` (a short owner finishing before the hook ran). The registry
-    path takes a *new* claim only on an open row; a row that ran to `done`
-    while this session already held its claim is still re-armable, because
-    the wake it owes was never delivered (top review M1)."""
+    """Every claimed-and-started depth-1 owner/frame/review row bound to `session`
+    whose latest status is in `statuses`, as ``(attempt_id, age_seconds)``,
+    oldest first. Empty on any refusal. This is the one identity check both
+    arming paths share (review R1 B1): a receipt on stdout only *names* a
+    candidate; the row proves it -- exists, `parent_sid` is this session,
+    every `REGISTRY_DEPTH1_START` key matches, and `worker_type` is a member
+    of `DEPTH1_WORKER_TYPES` (checked by `_worker_type_is_depth1`, not folded
+    into the equality dict -- see its module-level comment). A receipt may
+    name a row that already ran to `done` (a short owner finishing before the
+    hook ran). The registry path takes a *new* claim only on an open row; a
+    row that ran to `done` while this session already held its claim is still
+    re-armable, because the wake it owes was never delivered (top review M1)."""
 
     lines = _read_registry_lines(jobs)
     if lines is None:

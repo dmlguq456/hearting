@@ -193,12 +193,29 @@ def _sealed_route(
     )
     if route.get("workflow_contract") != workflow:
         raise ValueError("route-workflow-contract-invalid")
+    # N2: the two depth-1 bindings assert the identity of the node they name,
+    # never the route's node COUNT. Quick carries three nodes now (two frame
+    # legs plus `one-shot`), so a `len(nodes) != 1` assertion here would reject
+    # every quick route -- and it never checked the right thing anyway.
+    referenced = next(
+        (node for node in nodes if node.get("id") == expected_node), None
+    ) if expected_node is not None else None
     if binding == "quick-owner-route" and (
-        route.get("effective_intensity") != "quick" or len(nodes) != 1
-        or nodes[0].get("kind") != "capability-owner"
-        or nodes[0].get("dispatch_depth") != 1 or nodes[0].get("unit") != "_kernel/owner"
+        route.get("effective_intensity") != "quick"
+        or referenced is None
+        or referenced.get("id") != "one-shot"
+        or referenced.get("kind") != "capability-owner"
+        or referenced.get("dispatch_depth") != 1
+        or referenced.get("unit") != "_kernel/owner"
     ):
         raise ValueError("quick-owner-route-axis-invalid")
+    if binding == "frame-route" and (
+        referenced is None
+        or referenced.get("dispatch_depth") != 1
+        or referenced.get("worker_type") != "frame"
+        or referenced.get("unit") != "plan/frame"
+    ):
+        raise ValueError("frame-route-axis-invalid")
     digest = route.get("route_hash")
     if not isinstance(digest, str) or digest != ROUTES.route_hash(route):
         raise ValueError("route-self-hash-mismatch")
@@ -264,19 +281,34 @@ def _dispatch_route_references(metadata: dict) -> list[dict]:
     if any(route_present):
         if not all(route_present):
             raise ValueError("stage-route-binding-incomplete")
+        # N2: three legal axes carry a route key, not two. A depth-1 frame leg
+        # (`worker_type=frame`, `unit=plan/frame`) is neither a depth-2 stage
+        # nor the quick owner, so before this branch existed every frame leg --
+        # at quick AND at standard+ -- died here as an axis violation.
         quick_owner = (
             str(metadata.get("dispatch_depth")) == "1"
             and metadata.get("worker_type") == "owner"
             and metadata.get("unit") == "_kernel/owner"
         )
-        if str(metadata.get("dispatch_depth")) != "2" and not quick_owner:
+        frame_leg = (
+            str(metadata.get("dispatch_depth")) == "1"
+            and metadata.get("worker_type") == "frame"
+            and metadata.get("unit") == "plan/frame"
+        )
+        if str(metadata.get("dispatch_depth")) != "2" and not (quick_owner or frame_leg):
             raise ValueError("stage-route-binding-axis-invalid")
+        if quick_owner:
+            binding = "quick-owner-route"
+        elif frame_leg:
+            binding = "frame-route"
+        else:
+            binding = "stage-route"
         references.append({
             "route_file": metadata["route_file"],
             "expected_id": metadata["route_id"],
             "expected_hash": metadata["route_hash"],
             "expected_node": metadata["route_node"],
-            "binding": "quick-owner-route" if quick_owner else "stage-route",
+            "binding": binding,
         })
     return references
 

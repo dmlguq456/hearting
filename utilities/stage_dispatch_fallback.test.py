@@ -332,7 +332,12 @@ class FallbackTest(unittest.TestCase):
   path=self.route(native="supported"); same="codex/headless/workspace-write/codex/conductor"; cross="codex/headless/workspace-write/claude/conductor"
   result=self.run_chain(path,"--failed-tuple",same,"--failed-tuple",cross); self.assertEqual(result.returncode,79,result.stdout+result.stderr); self.assertIn("skipped-child-proof-missing",result.stdout); self.assertIn("selected_hop=inline",result.stdout)
   route=json.loads(path.read_text()); route["dispatch_evidence"]["native_subagent"][0]["status"]="unsupported"
-  for node in route["nodes"]: node["fallback_hops"][2]["candidates"][0]["status"]="unsupported"
+  # Only depth-2 nodes carry a fallback chain. The depth-1 frame bootstrap legs
+  # deliberately have no `fallback_hops` key at all -- recovery from a dead
+  # frame leg is an explicit depth-0 relaunch, never a machine hop -- so degrade
+  # every chain that exists instead of assuming every node has one.
+  for node in route["nodes"]:
+   if "fallback_hops" in node: node["fallback_hops"][2]["candidates"][0]["status"]="unsupported"
   route["route_hash"]=R.route_hash(route); route["route_id"]="rt-"+route["route_hash"].split(":",1)[1][:16]; path.write_text(json.dumps(route))
   result=self.run_chain(path,"--failed-tuple",same,"--failed-tuple",cross); self.assertEqual(result.returncode,79,result.stdout+result.stderr); self.assertIn("selected_hop=inline",result.stdout)
   self.assertIn("route_reuse=required",result.stdout)

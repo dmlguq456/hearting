@@ -50,7 +50,15 @@ class DispatchV20ConformanceTest(unittest.TestCase):
             "--registered-headless-evidence", str(evidence_path),
             *self.gate_args,
         ]
-        result = subprocess.run(command, text=True, capture_output=True)
+        # Use the same deliberate environment the wrapper calls use. Without
+        # `env=`, this inherited whatever `AGENT_HOME` the person running the
+        # suite happened to have, so a run from inside a registered worker
+        # resolved the installed release as the runtime root and every compile
+        # here died `launch-runtime-root-mismatch` before reaching the
+        # behavior under test. `wrapper_env()` pins `AGENT_HOME` to this
+        # checkout (dev activation), which is what makes the compile hermetic.
+        result = subprocess.run(command, text=True, capture_output=True,
+                                env=self.wrapper_env())
         if result.returncode == 0:
             route = json.loads(result.stdout)
             output = (
@@ -149,16 +157,33 @@ class DispatchV20ConformanceTest(unittest.TestCase):
                 self.assertIn("quick-headless-unavailable", result.stderr)
                 self.assertFalse(output.exists())
 
+    def cross_harness_candidates(self):
+        """Quick compiles a cross-harness frame pair, so its evidence must name
+        two supported harnesses; one candidate is no longer a compilable quick
+        route at all (`quick-frame-cross-harness-unavailable`)."""
+
+        return {"candidates": [self.candidate(harness="codex"),
+                               self.candidate(harness="claude")]}
+
+    @staticmethod
+    def owner_node(route):
+        """Quick's owner is `one-shot`, found BY ID. It used to be the route's
+        only node, so `nodes[0]` meant the same thing; quick now runs two
+        depth-1 frame legs ahead of it, and `nodes[0]` is `frame` -- whose
+        write scope is `shards/frame/**`, not the owner's."""
+
+        return next(n for n in route["nodes"] if n["id"] == "one-shot")
+
     def test_supported_quick_is_exact_registered_owner(self):
-        result, output = self.compile_quick({
-            "candidates": [self.candidate()]
-        })
+        result, output = self.compile_quick(self.cross_harness_candidates())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         route = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(route["owner_dispatch_depth"], 1)
+        # Still 1: the frame legs are depth 1 too, so the max does not rise.
         self.assertEqual(route["max_dispatch_depth"], 1)
-        self.assertEqual(len(route["nodes"]), 1)
-        node = route["nodes"][0]
+        self.assertEqual([n["id"] for n in route["nodes"]],
+                         ["frame", "frame-alternative", "one-shot"])
+        node = self.owner_node(route)
         self.assertEqual(node["dispatch_depth"], 1)
         self.assertEqual(node["unit"], "_kernel/owner")
         self.assertEqual(node["execution_surface"], "registered-headless")
@@ -174,7 +199,7 @@ class DispatchV20ConformanceTest(unittest.TestCase):
         result, output = self.compile_quick(evidence)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         route = json.loads(output.read_text(encoding="utf-8"))
-        node = route["nodes"][0]
+        node = self.owner_node(route)
         for adapter in ADAPTERS:
             with self.subTest(adapter=adapter):
                 jobs = self.base / f"{adapter}.quick.jobs.log"
@@ -221,12 +246,13 @@ class DispatchV20ConformanceTest(unittest.TestCase):
                 )
 
     def test_quick_is_serial_and_exhausts_checked_candidate_budget(self):
-        result, output = self.compile_quick({
-            "candidates": [self.candidate(harness="codex")]
-        })
+        result, output = self.compile_quick(self.cross_harness_candidates())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         route = json.loads(output.read_text(encoding="utf-8"))
-        node = route["nodes"][0]
+        # The serial budget is per `(route_id, route_node)`, so it is still the
+        # owner node's own budget that this exercises -- three nodes each get
+        # their own, they do not share one.
+        node = self.owner_node(route)
         jobs = self.base / "serial.jobs.log"
         logs = self.base / "serial.logs"
 

@@ -47,6 +47,8 @@ from dispatch_contract import (  # noqa: E402
     claim_attempt_row,
     close_attempt_row,
     completion_marker_gate,
+    owner_frame_launch_gate,
+    recover_preview_gate_after_refusal,
     ensure_terminal_claim_absent,
     PRELAUNCH_PROCESS_BLOCK_REASONS,
     codex_standard_owner_network_enabled,
@@ -257,7 +259,7 @@ def parser() -> argparse.ArgumentParser:
         default=os.environ.get("AGENT_DISPATCH_PARENT_CWD") or None,
     )
     p.add_argument("--worker-role", help="legacy compatibility metadata; not bootstrap identity")
-    p.add_argument("--worker-type", choices=("owner", "stage", "review", "support"))
+    p.add_argument("--worker-type", choices=("owner", "stage", "review", "support", "frame"))
     p.add_argument("--review-output", help="exact durable report path for a route-free review worker")
     p.add_argument("--unit", default="", help="catalog unit ref for the assigned route node (roles/units/<unit>.md)")
     p.add_argument("--assigned-contract")
@@ -401,7 +403,17 @@ def _bind_runtime_parent(args: argparse.Namespace) -> None:
 
 
 def resolve_parent_completion_delivery(args: argparse.Namespace) -> str:
-    """Select the checked parent-runtime adapter for a direct Codex child."""
+    """Select the checked parent-runtime adapter for a direct Codex child.
+
+    Not keyed on `worker_type` (2026-09-10, W2 of frame-bootstrap-layer): only
+    action/dispatch_depth/execution_surface/registered_worker/parent identity
+    decide the branch below, so a depth-1 `frame` worker takes exactly the
+    same delivery path a depth-1 `owner`/`review`/`stage`/`support` worker
+    does. Do not re-derive this by re-reading the branches; see
+    `CodexSD78CompletionDelivery.test_frame_worker_type_takes_the_same_delivery_path_as_owner`
+    in dispatch-headless.sd45.test.py, which proves it by calling this exact
+    function with `worker_type="frame"`.
+    """
     args.managed_gateway_binding = None
     current_thread = os.environ.get("CODEX_THREAD_ID") or os.environ.get(
         "CODEX_SESSION_ID"
@@ -782,6 +794,12 @@ def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
         require_top_route(
             getattr(args, "route_file", None) or getattr(binding, "route_file", None),
             profile=args.model_profile or "",
+            # Pass the launching node so a frame anchor leg is checked against
+            # ITS OWN sealed profile, not the owner's. Without this the route
+            # compiles `top` onto the anchor and this wrapper refuses it --
+            # and because each harness has its own copy of this call, omitting
+            # it in one place breaks that one harness only.
+            node=getattr(args, "route_node", None),
         )
     except ModelProfileError as exc:
         raise ModelSelectionError(exc.reason, str(exc)) from exc
@@ -2384,6 +2402,8 @@ def validate_route_record(args: argparse.Namespace) -> int:
             early_jobs, attempt_id=args.attempt_id,
         )
     except DispatchContractError as e:
+        e.detail = recover_preview_gate_after_refusal(
+            args.route_file, args.route_node, args.action, args.agent_home, early_jobs, e)
         return fail(
             e.reason,
             78 if e.reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65,
@@ -2647,11 +2667,14 @@ def main(argv: list[str]) -> int:
     except DispatchContractError as e:
         return fail(e.reason, 65, detail=e.detail, child_spawned="0")
     try:
+        owner_frame_launch_gate(args.owner_route_binding, action, agent_home, jobs)
         completion_marker_gate(
             args.route_file, args.route_node, action, agent_home, jobs,
             attempt_id=args.attempt_id,
         )
     except DispatchContractError as e:
+        e.detail = recover_preview_gate_after_refusal(
+            args.route_file, args.route_node, action, agent_home, jobs, e)
         return fail(e.reason, 78 if e.reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65,
                     detail=e.detail, child_spawned="0")
     args.parent_binding = None

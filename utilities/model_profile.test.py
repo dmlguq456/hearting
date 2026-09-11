@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 from pathlib import Path
 import re
 import sys
@@ -473,6 +474,88 @@ class TopExceptionProfileTest(unittest.TestCase):
         with self.assertRaises(PROFILE.ModelProfileError) as unreadable:
             PROFILE.require_top_route(str(tmp / "absent.json"), profile="top")
         self.assertEqual(unreadable.exception.reason, "profile-top-route-required")
+
+    def test_a_named_node_is_checked_against_its_own_seal_not_the_owners(self):
+        # The frame anchor reaches `top` while its owner sits at `deep`, so
+        # checking the owner's seal for it would refuse a correctly compiled
+        # route. `node=None` must keep meaning "check the owner".
+        import tempfile
+        tmp = Path(tempfile.mkdtemp())
+        route = tmp / "route.json"
+        route.write_text(json.dumps({
+            "owner_model_profile": "deep",
+            "nodes": [{"id": "frame", "model_profile": "top"},
+                      {"id": "frame-alternative", "model_profile": "deep"}],
+        }), encoding="utf-8")
+        # The node's own seal admits it.
+        PROFILE.require_top_route(str(route), profile="top", node="frame")
+        # The owner's seal is `deep`, so the owner door is still shut.
+        with self.assertRaises(PROFILE.ModelProfileError) as owner_door:
+            PROFILE.require_top_route(str(route), profile="top")
+        self.assertEqual(owner_door.exception.reason, "profile-top-route-mismatch")
+        # A node that exists but sealed something else is refused as a
+        # mismatch, not silently admitted by its sibling's seal.
+        with self.assertRaises(PROFILE.ModelProfileError) as sibling:
+            PROFILE.require_top_route(str(route), profile="top", node="frame-alternative")
+        self.assertEqual(sibling.exception.reason, "profile-top-route-mismatch")
+        # A node the route never declared is a wiring bug and says so.
+        with self.assertRaises(PROFILE.ModelProfileError) as unknown:
+            PROFILE.require_top_route(str(route), profile="top", node="frame-contrarian")
+        self.assertEqual(unknown.exception.reason, "profile-top-route-node-unknown")
+        # Non-top profiles still need no route at all, node or not.
+        PROFILE.require_top_route(None, profile="deep", node="frame")
+
+
+class FrameTierLadder(unittest.TestCase):
+    def test_the_ladder_maps_every_owner_profile_to_its_frame_pair(self):
+        expected = {
+            "top": {"anchor": "top", "others": "deep"},
+            "deep": {"anchor": "top", "others": "deep"},
+            "balanced-deep": {"anchor": "deep", "others": "deep"},
+            "balanced": {"anchor": "balanced-deep", "others": "balanced-deep"},
+            "light": {"anchor": "balanced", "others": "balanced"},
+        }
+        for owner, rungs in expected.items():
+            with self.subTest(owner=owner):
+                self.assertEqual(PROFILE.frame_profile_for_owner(owner), rungs)
+
+    def test_every_portable_owner_profile_has_a_rung(self):
+        # A missing rung would silently fall back to `light` for a real owner
+        # profile, which is the quiet-wrong-answer failure the table exists to
+        # prevent.
+        for profile in PROFILE.PORTABLE_PROFILES:
+            if profile == "mini":
+                continue  # `mini` is never an owner profile
+            with self.subTest(profile=profile):
+                self.assertIn(profile, PROFILE.FRAME_PROFILE_LADDER)
+
+    def test_an_unknown_or_absent_owner_profile_frames_conservatively(self):
+        for value in (None, "", "not-a-profile"):
+            with self.subTest(value=value):
+                self.assertEqual(PROFILE.frame_profile_for_owner(value),
+                                 PROFILE.FRAME_PROFILE_LADDER["light"])
+
+    def test_the_returned_mapping_cannot_mutate_the_table(self):
+        rungs = PROFILE.frame_profile_for_owner("deep")
+        rungs["anchor"] = "mini"
+        self.assertEqual(PROFILE.FRAME_PROFILE_LADDER["deep"]["anchor"], "top")
+
+    def test_frame_is_a_top_worker_type_and_the_anchor_demand_is_valid(self):
+        self.assertEqual(PROFILE.TOP_WORKER_TYPES, frozenset({"owner", "frame"}))
+        # A registered depth-1 frame worker may carry `top`; a depth-2 one
+        # still may not.
+        PROFILE.validate_registered_profile(
+            "top", registered_worker=True, dispatch_depth=1, worker_type="frame")
+        with self.assertRaises(PROFILE.ModelProfileError) as deep_frame:
+            PROFILE.validate_registered_profile(
+                "top", registered_worker=True, dispatch_depth=2, worker_type="frame")
+        self.assertEqual(deep_frame.exception.reason, "profile-top-depth-forbidden")
+        # The shape demand must actually resolve `top`, or the compiler's
+        # anchor sealing would fail at every standard+ compile.
+        selection = PROFILE.resolve_profile_demand(
+            PROFILE.FRAME_ANCHOR_SHAPE_DEMAND, explicit_profile="top")
+        self.assertEqual(selection["resolved_profile"], "top")
+        self.assertEqual(selection["reason"], "explicit-top-exception")
 
 
 if __name__ == "__main__":

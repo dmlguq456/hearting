@@ -156,6 +156,21 @@ def prepare(args) -> int:
     if capability not in {"autopilot-refine","autopilot-draft"}:
         emit({"status":"skipped","reason":"capability-does-not-own-snapshots","target":str(target)})
         return 0
+    if capability == "autopilot-refine" and intensity == "quick":
+        from artifact_producer import _quick_refine_write_gate, ProducerError
+        try:
+            _quick_refine_write_gate(artifact_root, target, route)
+        except ProducerError as exc:
+            raise SnapshotError(exc.code + ": " + exc.detail) from exc
+        # The preview is output of this same conductor, before approval. It is
+        # not a target document and must not enter the target snapshot path.
+        rel_parts = target.resolve().relative_to(artifact_root).parts
+        if rel_parts[:1] == ("campaigns",):
+            index = 4 if len(rel_parts) > 2 and rel_parts[2] == "cycles" else 3
+            rel_parts = rel_parts[index + 1:]
+        if rel_parts[:2] == ("reviews", "refine") and "reviews/refine/**" in node.get("write_scope", []):
+            emit({"status": "skipped", "reason": "quick-preview-artifact", "target": str(target)})
+            return 0
     try:
         artifact_dir,relative=target_parts(artifact_root,target)
     except SnapshotError as exc:

@@ -17,6 +17,7 @@ SPEC = importlib.util.spec_from_file_location("model_worker_governor", PATH)
 GOVERNOR = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(GOVERNOR)
+import replica_batch_contract as CONTRACT
 from replica_batch_contract import build_manifest
 
 
@@ -1164,6 +1165,72 @@ class GovernorIdentityRegressionTest(unittest.TestCase):
         self.assertEqual(result["reason"],"group-observation-incomplete")
         self.assertIsNone(self.state()["claims"][t]["released_at"])
         self.assertNotIn("release_proven",self.state()["claims"][t])
+
+
+class TopLegWidthCapTest(unittest.TestCase):
+    """Part C: at most one `top`-profile leg per parallel group.
+
+    Two structural reasons, and the test pins both ends of them. Unbounded
+    top-tier fan-out is a cost and exposure risk; and if every leg in a group ran
+    `top` there would be no profile difference left, so the `model-profile`
+    independence axis could not be derived as realized at all.
+    """
+
+    def member(self, index, *, profile, harness, node):
+        return {
+            "assignment_sha256": "sha256:" + "a" * 64,
+            "attempt_id": f"att-frame-{index}",
+            "route_node": node,
+            "harness": harness,
+            "fallback_hop": "same-harness-headless" if index == 0 else "cross-harness-headless",
+            "fallback_ordinal": index + 1,
+            "model_profile": profile,
+            "perspective": f"framing-{index}",
+            "parallel_leg_index": index,
+            "leg_class": "peer",
+        }
+
+    def build(self, profiles, realized):
+        return build_manifest(
+            parallel_group="frame",
+            route_id="rt-top-cap",
+            parent_attempt_id="att-parent-frame",
+            independence="cross-harness",
+            members=[
+                self.member(index, profile=profile,
+                            harness=("codex", "claude")[index],
+                            node=("frame", "frame-alternative")[index])
+                for index, profile in enumerate(profiles)
+            ],
+            required_independence_axes=["cross-harness", "model-profile", "perspective"],
+            realized_independence_axes=realized,
+        )
+
+    def test_top_is_a_supported_profile_at_all(self):
+        self.assertIn("top", CONTRACT.SUPPORTED_PROFILES)
+        self.assertEqual(CONTRACT.MAX_TOP_LEGS, 1)
+
+    def test_exactly_one_top_leg_seals_and_two_are_refused(self):
+        manifest, digest, legs = self.build(
+            ["top", "light"], ["cross-harness", "model-profile", "perspective"])
+        self.assertEqual([member["model_profile"] for member in manifest["members"]],
+                         ["top", "light"])
+        self.assertTrue(digest.startswith("sha256:"))
+        self.assertEqual(len(legs), 2)
+        # ...and the sealed manifest round-trips through the verifier, which
+        # rebuilds it through the same cap
+        self.assertEqual(CONTRACT.verify_manifest(manifest)[1], digest)
+        with self.assertRaises(CONTRACT.ReplicaBatchContractError) as refused:
+            # two `top` legs leave no profile difference, so `model-profile` is
+            # honestly absent from the realized axes -- the cap is what refuses
+            # this, not an axis-accounting error
+            self.build(["top", "top"], ["cross-harness", "perspective"])
+        self.assertEqual(str(refused.exception), "top-leg-width-exceeded")
+
+    def test_a_group_with_no_top_leg_is_untouched(self):
+        manifest, _digest, _legs = self.build(
+            ["balanced-deep", "light"], ["cross-harness", "model-profile", "perspective"])
+        self.assertNotIn("top", {member["model_profile"] for member in manifest["members"]})
 
 
 class GovernorReclaimTest(unittest.TestCase):
