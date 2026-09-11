@@ -38,6 +38,7 @@ from dispatch_contract import (
     attempt_process_quiescence,
     completion_marker_is_current,
     completion_attempt_readiness,
+    completion_conflict_attempt,
     dispatch_state_roots,
     ensure_global_registry_writable,
     parse_registry_metadata,
@@ -4666,10 +4667,18 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
     if digest != evidence.get("sha256"):
         return {"passed": False, "reason": "completion-evidence-hash-mismatch"}
     if marker.get("registered_worker") is True or marker.get("stage_authority") == "owner-chain":
-        readiness = completion_attempt_readiness(
-            route, node, marker, Path(jobs) if jobs is not None else _continuation_source_jobs(route))
-        if readiness.state != "ready":
-            return {"passed": False, "reason": readiness.reason}
+        try:
+            registry = Path(jobs) if jobs is not None else _continuation_source_jobs(route)
+        except ValueError:
+            registry = path.parents[2] / "jobs.log"
+        try:
+            lines = registry.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            lines = []  # Existing semantic-history contract permits archived process rows.
+        except OSError:
+            return {"passed": False, "reason": "registry-unreadable"}
+        if completion_conflict_attempt(marker, lines):
+            return {"passed": False, "reason": "terminal-evidence-conflict"}
     if exact_terminal:
         if jobs is None or not completion_marker_is_current(route, node, path, marker):
             return {"passed": False, "reason": "completion-marker-not-current"}

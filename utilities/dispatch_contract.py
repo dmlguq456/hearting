@@ -6696,6 +6696,26 @@ def completion_marker_is_current(
         return False
 
 
+def completion_conflict_attempt(marker: Mapping[str, object], registry_lines: list[str]) -> str:
+    """Find a recorded consumption hold without reclassifying an old marker.
+
+    Semantic history may outlive its process registry. Actual launch still
+    requires completion_attempt_readiness and its current execution proof.
+    """
+    for line in registry_lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        meta = parse_registry_metadata(fields[5])
+        same_chain = (marker.get("stage_authority") == "owner-chain"
+                      and marker.get("session_chain_id")
+                      and meta.get("session_chain_id") == marker["session_chain_id"])
+        same_attempt = marker.get("attempt_id") and meta.get("attempt_id") == marker["attempt_id"]
+        if (same_chain or same_attempt) and terminal_conflict_pending(meta):
+            return meta.get("attempt_id", "")
+    return ""
+
+
 def completion_attempt_readiness(
     route: dict[str, object],
     node: dict[str, object],
@@ -6711,14 +6731,9 @@ def completion_attempt_readiness(
             chain_rows = registry_lines if registry_lines is not None else jobs.read_text(encoding="utf-8").splitlines()
         except OSError:
             return AttemptReadiness("unverifiable", "registry-unreadable")
-        for line in chain_rows:
-            fields = line.split("\t")
-            if len(fields) != 6:
-                continue
-            meta = parse_registry_metadata(fields[5])
-            if (meta.get("session_chain_id") == marker.get("session_chain_id")
-                    and terminal_conflict_pending(meta)):
-                return AttemptReadiness("unverifiable", "terminal-evidence-conflict", meta.get("attempt_id"))
+        conflict = completion_conflict_attempt(marker, chain_rows)
+        if conflict:
+            return AttemptReadiness("unverifiable", "terminal-evidence-conflict", conflict)
         return AttemptReadiness("ready", "subsession-chain-quiescence-verified-at-stage-gate")
     if node.get("kind") == "resource-runner" or marker.get("registered_worker") is False:
         return AttemptReadiness("ready", "semantic-terminal-no-registered-process")
