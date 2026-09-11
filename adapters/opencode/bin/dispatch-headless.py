@@ -1882,7 +1882,7 @@ def main(argv: list[str]) -> int:
             # Same rule as the other two adapters: a worker inherits AGENT_HOME
             # at the managed release; keep its bytecode out of that tree.
             **bytecode_cache_env(),
-            "AGENT_DISPATCH_CURRENT_HARNESS": "opencode",
+            **parent_completion.worker_runtime_identity("opencode"),
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": "adapter-default",
             **stage_session_environment(args),

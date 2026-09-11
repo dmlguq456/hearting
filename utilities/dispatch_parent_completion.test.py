@@ -63,6 +63,18 @@ class ParentDeliveryContract(unittest.TestCase):
                     self.assertEqual(parser.get_default("parent_harness"), parent)
                     self.assertEqual(parser.get_default("parent_session_id"), "native-parent")
 
+    def test_cross_harness_worker_becomes_the_next_caller(self):
+        for parent in ADAPTERS:
+            for worker in ADAPTERS:
+                # The selector caller is scoped to one admission. It cannot
+                # survive as the grandparent's identity in the next launch.
+                env = {"AGENT_DISPATCH_CALLER_HARNESS": parent,
+                       "AGENT_DISPATCH_OWNER_HARNESS": worker,
+                       **P.worker_runtime_identity(worker)}
+                with self.subTest(parent=parent, worker=worker), mock.patch.dict(os.environ, env, clear=True):
+                    for grandchild in ADAPTERS.values():
+                        self.assertEqual(grandchild.parser().get_default("parent_harness"), worker)
+
     def test_parent_worktree_is_shared_evidence_for_every_child(self):
         import json
         with tempfile.TemporaryDirectory() as td:
@@ -201,6 +213,7 @@ class ParentDeliveryContract(unittest.TestCase):
                     "CODEX_THREAD_ID": "thread-parent",
                 }
                 stack.enter_context(mock.patch.dict(os.environ, environment, clear=True))
+                worker_identity = stack.enter_context(mock.patch.object(P, "worker_runtime_identity", wraps=P.worker_runtime_identity))
                 stack.enter_context(mock.patch.object(wrapper, "resolve_artifact_root", return_value=str(artifacts)))
                 if hasattr(wrapper, "check_runtime_projection"):
                     stack.enter_context(mock.patch.object(wrapper, "check_runtime_projection", return_value=0))
@@ -243,6 +256,7 @@ class ParentDeliveryContract(unittest.TestCase):
                 self.assertIn("reason=managed-sidecar-launch-failed", output.getvalue())
                 self.assertIn("child_spawned=0", output.getvalue())
                 sidecar.assert_called_once()
+                worker_identity.assert_called_once_with(child)
                 spawn.assert_not_called()
                 cancel.assert_called_once()
                 row = jobs.read_text()

@@ -200,3 +200,6 @@ OpenCode fresh parent `ses_f70775274ffeX48D6xfVUd5b1s`, route `rt-f061d15f2bd362
 후속 집중 검증은 부모 운송 12 / parent cwd 10 / join 120 / managed completion 14 / Claude supervisor 69 / Codex supervisor 34 / adapter Codex 58·Claude 46·OpenCode 30 PASS다. 생성 projection 20그룹, adaptation boundary, 기존 surface budget도 PASS다. 로그 `/tmp/parent-caller-*.log`, `/tmp/terminal-commit-*.log`, `/tmp/parent-terminal-*.log`. ready 직전 writer 실패·성공 반환 뒤 실제 미확정·이미 확정된 행·실제 부정 handoff를 각각 검사했고, 어댑터 main 시험은 parent-harness 수동 주입 없이 선택기가 내보내는 caller/owner 환경으로 carrier-before-spawn을 확인한다.
 
 pJ는 native `chatcmpl-tool-9c9df05f68854c3b`의 실제 “맞음 / sum() 집계 (추천)” 답변(1789115071747ms), 정식 frame-review release, OpenCode d=1 owner `att-acbd1881d14644bdaac832f8a0904b0b` light/GLM 기동, 첫 native read의 이번 cycle agreed intent(1789115114093ms)를 확인했다. 승인 전 owner 거부 `child_spawned=0`도 보존했다. `/tmp/f-r3/question-release-owner-read.json`과 native export가 원문 증거다. 아직 test/report 및 owner의 최종 수신·종결 합격은 아니다.
+
+
+호출자 신원의 수명도 한 번의 admission으로 제한했다. 실제 worker 진입 시 공통 `worker_runtime_identity`가 current/caller를 실행 하네스로 바꾸므로, 이후 d=2 자식이 depth-0 조부모의 하네스를 자기 부모로 읽지 않는다. 세 adapter의 실제 main에서 이 전환을 확인하고 3×3×3 부모·owner·후속 자식 조합을 검사한다. 부모 선택의 새 거부 규칙을 추가하지 않았다.

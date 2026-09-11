@@ -39,6 +39,12 @@ def default_parent_session_id(environ=None) -> str | None:
     return env.get("AGENT_DISPATCH_PARENT_SESSION_ID") or interactive_parent_identity(env)[1] or None
 
 
+def worker_runtime_identity(harness: str) -> dict[str, str]:
+    """The launched worker becomes the caller of its own subsequent children."""
+    return {"AGENT_DISPATCH_CURRENT_HARNESS": harness,
+            "AGENT_DISPATCH_CALLER_HARNESS": harness}
+
+
 def default_parent_harness(fallback: str, environ=None) -> str:
     """A selected child's runtime never replaces its caller's identity."""
     env = os.environ if environ is None else environ

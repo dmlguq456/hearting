@@ -2371,7 +2371,7 @@ def main(argv: list[str]) -> int:
             # A worker inherits AGENT_HOME at the managed release; keep its
             # bytecode out of that immutable tree (defect Q pairing).
             **bytecode_cache_env(),
-            "AGENT_DISPATCH_CURRENT_HARNESS": "claude",
+            **parent_completion.worker_runtime_identity("claude"),
             "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
             "AGENT_DISPATCH_CURRENT_SANDBOX": "adapter-default",
             **stage_session_environment(args),
