@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 고정 4efdddf0의 Codex light owner는 실제 성공·workflow/route 완료·producer 봉인까지 확인했다. OpenCode owner는 존재하지 않는 감독자의 재개를 약속받고 종료되어, 공통 감독 연결을 수정 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
+상태: 기존 리뷰의 지연 통보·쓰기·정상 완료 전달을 실측했다. 원래 quick frame의 실제 사용자 답변→release→owner intent 읽기→부모 success를 확인했고, 이후 막힌 workflow closure도 수정된 명령으로 COMPLETE까지 마쳤다. 고정 4efdddf0의 Codex light owner는 실제 성공·workflow/route 완료·producer 봉인까지 확인했다. OpenCode owner가 존재하지 않는 감독자의 재개를 약속받고 종료한 결함은 공통 감독 연결로 수정했다. 현재 OpenAI Luna를 사용하는 실제 OpenCode owner 재개와 부모 완료 전달을 검증 중이다. 전체 완료, main 병합·푸시, 릴리즈, 설치는 아직 하지 않았다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -217,3 +217,12 @@ pJ는 native `chatcmpl-tool-9c9df05f68854c3b`의 실제 “맞음 / sum() 집계
 
 
 81112e11의 실제 재검증은 사용량 steer로 보류했다. OpenCode Go headroom 3%를 현재 공통 capacity reader로 확인했으며, `usage-check.sh`의 `ok`는 잔여량이 아니라 최근 거절 marker가 없다는 뜻이므로 이를 여유로 해석하지 않았다. pJ r4는 route `rt-47f0fcedce751998`만 발급하고 bind/begin/child 이전에 중단했으며, root33의 새 Luna parent `01a08fb3-ce47-7832-8635-d1b73ac21679`도 OpenCode review 기동 전에 보류했다. 두 검증 모두 신규 attempt 0건을 canonical jobs에서 확인했다. 준비 부모 자체의 모델 사용은 있었으며 '모델 사용 0'이라고 주장하지 않는다. OpenCode 실제 owner 재개와 수정된 cross-harness 부모 success 수신은 여전히 남은 합격선이다. main/release/install은 보류한다.
+
+
+## OpenAI Luna로 실제 검증 재개
+
+사용자의 명시적인 provider 변경 지시에 따라 사용자 소유 OpenCode 모델 매핑에서 light·mini를 `openai/gpt-5.6-luna`로 변경했다. balanced는 기존 규칙대로 light에 투영되며 실제 resolver도 같은 모델을 반환했다. 나머지 프로파일과 credentials, 소스 기본값은 변경하지 않았다. 원 설정은 `/tmp/opencode-models-before-openai-luna-20260911.conf`, 변경 hash와 확인 결과는 `/tmp/opencode-openai-luna-config-observation.json`에 보존했다. Go 잔여량을 OpenAI 잔여량으로 해석하지 않는다. 두 실행 하네스가 같은 모델/provider를 사용하는 검증이며 모델 간 독립성을 주장하지 않는다.
+
+소스 81112e11을 고정하고 pJ fresh OpenCode 부모 `ses_f6fd4341effexujfUk7zuotRfR`에서 r5를 시작했다. route `rt-d3a5acca2fb8820e`의 Codex frame `att-b6fba78ed2ab490ca19320cd1b672349`와 OpenCode frame `att-dd6c697a6faa471590e07ed8286fc414`는 모두 실제 light 모델로 기동했다. 후자는 OpenAI Luna의 실제 PASS와 process-group drained를 확인했다. 부모는 공개된 bounded-wait 경로를 사용한다. 이 시점의 frame 기동/부분 완료는 d1 owner의 같은 세션 재개나 전체 완료를 뜻하지 않는다.
+
+root33은 기존 Luna 부모 [61]을 재사용한다. 보고서용 compose에 direct shape와 standard intensity를 함께 전달해 기동 전 exit64를 받은 입력 오류는 `/tmp/opencode-review-receipt-r1-openai-preparation-error.json`에 보존했다. 보고서 route의 intensity를 direct로 교정하고, 별개인 실제 route-free review는 standard/light로 유지해 한 건의 실제 OpenCode→Codex 부모 완료 전달을 이어간다. 이 준비 오류 시점의 OpenCode attempt는 0건이다.
