@@ -2603,7 +2603,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                   tracking=None, artifact_guard=None, children=None, parent_harness="claude",
                   dispatch_evidence=None, registered_headless_evidence=None,
                   transport_evidence="compose-default", jobs=None, profile_demands=None, explicit_profiles=None,
-                  campaign_key=None, parent_cycle_id=None, profile=None):
+                  campaign_key=None, parent_cycle_id=None, profile=None, work_request=None):
     """Resolve every default, then compile through the ordinary sealer."""
     if shape not in COMPOSE_SHAPES:
         raise ValueError(f"compose-shape-invalid:{shape}")
@@ -2668,6 +2668,11 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
             capability, capability_mode, requested, cwd, artifact_root,
             predicates=predicates, inline_reason="atomic-direct" if shape == "direct" else None,
             **common)
+    if work_request is not None:
+        from work_start import validate_request
+        route["work_request"] = dict(validate_request(work_request))
+        route["route_hash"] = route_hash(route)
+        route["route_id"] = ROUTE_IDENTITY.route_id_from_hash(route["route_hash"])
     return route
 
 
@@ -3079,6 +3084,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
     digest currentness stays required for anything that launches, dispatches, or
     mutates, and the closure records which case it was.
     """
+    if "work_request" in route:
+        from work_start import validate_request
+        validate_request(route["work_request"])
     if route.get("schema_version") != ROUTE_SCHEMA_VERSION:
         raise ValueError(
             f"legacy route schema_version={route.get('schema_version')!r} rejected for mutating/resume use"
@@ -5945,7 +5953,9 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     print(f"route_file={output_path.resolve()}",file=sys.stderr)
     result = (compose_receipt(route, output_path)
               if a.command == "compose" and not getattr(a, "full_record", False) else route)
-    print(json.dumps(result,sort_keys=True))
+    if not getattr(a, "start", False):
+        print(json.dumps(result,sort_keys=True))
+    return output_path.resolve()
 
 def main():
     from dispatch_parent_completion import default_parent_harness
@@ -5968,6 +5978,9 @@ def main():
     c.add_argument("--output")
     cp=sub.add_parser("compose",help="preset-free work route: name the shape (and stage subgraph), defaults fill the rest")
     cp.add_argument("--slug",required=True)
+    cp.add_argument("--start",action="store_true",help="prepare and start the selected work; the runtime owns frame launches and waiting")
+    cp.add_argument("--prompt-file",type=Path,help="the user's task, stored with the route for frame and owner execution")
+    cp.add_argument("--owner",choices=("claude","codex","opencode"),help="explicit owner runtime; otherwise use normal selection")
     cp.add_argument("--campaign-key",help="explicit work stream passed to the producer owner")
     cp.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
@@ -5992,6 +6005,18 @@ def main():
     cp.add_argument("--explain",action="store_true",help="print the [경로] card and the sealed graph without writing the route")
     cp.add_argument("--output")
     cp.add_argument("--full-record",action="store_true",help="print all sealed evidence; default prints choices and the canonical route_file")
+    cp.add_argument("--help-all",action="help",help="also show advanced/compatibility inputs")
+    if "--help-all" not in sys.argv:
+        advanced = {"parent_cycle", "profile_demands", "explicit_profiles", "intensity", "artifact_root",
+                    "signal", "drift_verdict", "tracking", "artifact_guard", "parent_harness", "jobs",
+                    "dispatch_evidence", "registered_headless_evidence", "transport_evidence", "output", "full_record"}
+        for option in cp._actions:
+            if option.dest in advanced:
+                option.help = argparse.SUPPRESS
+    start=sub.add_parser("start",help="continue one sealed work request; existing attempts are reused")
+    start.add_argument("--route",required=True,type=Path)
+    start.add_argument("--jobs",type=Path,default=None)
+    start.add_argument("--wait",action="store_true",help="the receipt's bounded wait for a parent without an automatic carrier")
     co=sub.add_parser("continuation")
     co.add_argument("--source-route",required=True)
     co.add_argument("--resume-from-node",required=True)
@@ -6044,6 +6069,8 @@ def main():
         dispatch_terminal_commit.require_current_cleanup("route-" + a.command)
     if a.command=="compose":
         shape=a.shape or ("staged" if a.graph else "direct")
+        if a.start and (a.explain or a.prompt_file is None):
+            raise ValueError("compose-start-requires-task: use --start --prompt-file <task>, without --explain")
         cwd=a.cwd or os.getcwd()
         artifact_root=a.artifact_root or _compose_artifact_root(cwd)
         route=compose_route(
@@ -6053,7 +6080,7 @@ def main():
             spec_read=a.spec_read,drift_verdict=a.drift_verdict,tracking=a.tracking,
             artifact_guard=a.artifact_guard,
             children=[c.strip() for c in a.children.split(",") if c.strip()] if a.children else None,
-            parent_harness=a.parent_harness or ("claude" if shape=="direct" else default_parent_harness("claude")),
+            parent_harness=a.owner or a.parent_harness or ("claude" if shape=="direct" else default_parent_harness("claude")),
             dispatch_evidence=json.loads(Path(a.dispatch_evidence).read_text()) if a.dispatch_evidence else None,
             registered_headless_evidence=(json.loads(Path(a.registered_headless_evidence).read_text())
                                           if a.registered_headless_evidence else None),
@@ -6061,6 +6088,7 @@ def main():
             profile_demands=json.loads(Path(a.profile_demands).read_text()) if a.profile_demands else None,
             explicit_profiles=json.loads(Path(a.explicit_profiles).read_text()) if a.explicit_profiles else None,
             profile=a.profile,
+            work_request={"text":a.prompt_file.read_text(),"owner_harness":a.owner} if a.prompt_file else None,
         )
         print(compose_card(route),file=sys.stderr)
         if a.explain:
@@ -6074,7 +6102,15 @@ def main():
                               "human_gates":route.get("human_gates"),"parallel_groups":route.get("parallel_groups"),
                               "tracked_gate_evidence":route.get("tracked_gate_evidence")},sort_keys=True))
             return 0
-        _emit_compiled_route(a,route,artifact_root)
+        path = _emit_compiled_route(a,route,artifact_root)
+        if a.start:
+            from work_start import start_work
+            print(json.dumps(start_work(route,path,Path(a.jobs or _compose_default_jobs())),ensure_ascii=False))
+        return 0
+    if a.command=="start":
+        from work_start import start_work
+        route=verify_route(json.loads(a.route.read_text()))
+        print(json.dumps(start_work(route,a.route,Path(a.jobs or _compose_default_jobs()),wait=a.wait),ensure_ascii=False))
         return 0
     if a.command=="compile":
         gate={"spec_read":{"satisfied":a.spec_read.lower() not in ("0","false","no"),"source":a.spec_read},

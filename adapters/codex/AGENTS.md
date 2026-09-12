@@ -7,9 +7,10 @@ are siblings and none is another's reference implementation. Edit core first.
 ## Source Order
 
 Codex has already loaded this file through the global instruction chain. Resolve
-`<agent-home>` from `${CODEX_HOME:-$HOME/.codex}/hearting` (falling back to
-the adapter's `agent-home.sh` resolver), and interpret every harness path below
-relative to that installed root, never relative to the working repository. Do
+`<agent-home>` from the active `AGENT_HOME`, falling back to
+`${CODEX_HOME:-$HOME/.codex}/hearting` and the shared `utilities/agent-home.sh`
+resolver. Interpret every harness path below relative to that root; a working
+repository supplies runtime code only when explicitly activated as `AGENT_HOME`. Do
 not probe `<cwd>/core/CORE.md` or report it as a missing project file. Treat
 successful root resolution as silent bootstrap bookkeeping; mention it only
 when resolution fails or materially changes the task.
@@ -59,20 +60,16 @@ and `ADAPTATION.md`; command output is authoritative for current support.
 Keep Codex `/statusline` responsible for model, context, token, limit, and session footer fields. `preflight.sh status` is an on-demand harness snapshot, including git dirty/worktree/dead-branch risks. Runtime config remains user-owned; strict projection checks read authoritative App Server `hooks/list` current-hash trust and never rewrite user trust state.
 The recommended footer fragment is `codex_setting/codex-config/tui-statusline.toml`; apply it only through explicit `preflight.sh tui-config`.
 
-Registered standard+ headless owners use the checked App Server completion
-supervisor: the runtime joins exact child batches and resumes the same thread once
-per batch. The GitHub/runtime installer projects a reversible `codex` launcher,
-so new interactive `codex`, `codex resume`, and `codex fork` sessions enter
-`utilities/codex-managed-entry.py` transparently; administrative and headless
-subcommands pass through to the recorded real CLI unchanged. The utility remains
-the explicit diagnostic entry. Single ingress keeps the TUI sole approval/
-subscription owner and sends one bounded receipt. Parent runtime decides—Codex
-gateway or Claude async-rewake/`--resume`—regardless of child. Managed completion never uses Stop continuation or a PreToolUse park; rejected steer defers once to
-idle, with crash state `sent-ambiguous`. A new unmanaged interactive Codex
-parent is rejected with `managed-entry-required` before registry mutation or
-spawn. Finite `poll-fallback` is a low-level operator-only recovery override;
-the portable owner selector and model routes cannot select it. Legacy Stop
-permits exact migration harvest only.
+The installed `codex` launcher puts interactive new/resume/fork sessions through
+`utilities/codex-managed-entry.py`; administrative/headless commands pass through.
+Runtime joins exact batches and resumes the parent once; the TUI remains the sole
+approval/subscription owner. The parent runtime selects delivery regardless of
+child harness. Managed completion never uses Stop continuation or PreToolUse
+parking. New unmanaged parents are
+rejected with `managed-entry-required` before registry mutation or
+spawn. Finite `poll-fallback` is operator recovery only; the
+portable owner selector and model routes cannot select it.
+Recovery and legacy migration details are in `OPERATIONS §5.10`.
 Arbitrary detached shell output still does not auto-resume. For non-dispatch
 long-running work, obey `preflight.sh
 loop-info runtime-watch` and its explicit automatic-follow-up-impossible fallback
@@ -115,7 +112,12 @@ entry's full loop or a promotion signal. Apply §0.3. `direct`/`solo`: one
 `[경로]` line unless destructive or external-facing (§0.4 SD-136); else the
 §0.4 card unless approved. Close with §0.5.
 
-An ordinary dispatch-depth-1 owner launches through `preflight.sh dispatch-owner
+Ordinary execution uses `preflight.sh compose --start --prompt-file <task>`;
+follow its receipt and reuse its `resume_command`. Runtime owns preparation,
+frame launches, exact attempt reuse, waiting and terminal closure. The parent
+compares completed frames and asks the native interview only at `needs-question`.
+
+The low-level dispatch-depth-1 owner surface is `preflight.sh dispatch-owner
 --start --route-evidence <route.json> --prompt-file <brief>` (the route fills the
 owner tuple), a separate low-level surface from `preflight.sh dispatch` below: it delegates to the portable `utilities/dispatch-owner.py`
 selector, which prefers the user-owned
@@ -124,9 +126,8 @@ to `profiles/dispatch-defaults.yaml`. `core/ADAPTATION.md` owns the selection
 cascade; capacity never crosses a quality band unless the relief threshold is
 met, and OpenCode is not a default deep peer.
 
-A depth-0 frame leg uses this surface with §5.10b's tuple: one Bash call per
-leg, never two; all four `AGENT_ARTIFACT_*` variables exported every call; a
-gateway join (`parent_next=end-turn`). `OPERATIONS §5.10b` is the contract.
+The selector derives each route-bound frame's identity and artifact environment;
+manual tuple/environment assembly is only the legacy route-free interface.
 
 Check `preflight.sh headless [--check] [--require-hook-trust] <worktree>`.
 Launch registered jobs only through `preflight.sh dispatch

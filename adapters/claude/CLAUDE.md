@@ -37,6 +37,13 @@ another adapter.
 
 ## Routing and Execution
 
+For ordinary execution use `capability-route.py compose --start --prompt-file
+<task>` through active `AGENT_HOME`. Runtime prepares the cycle, starts declared
+frames and reuses exact attempts. Follow `parent_next`; reuse `resume_command`
+after wakes or corrections. At `needs-question`, compare completed frames and
+ask the native interview. Actual release precedes owner execution; runtime
+closes route/cycle before success. The commands below remain low-level interfaces.
+
 Route by `core/WORKFLOW.md §0.2`: the semantic precedence names the
 capability that owns the artifacts; §0.2.1 then picks the **shape** of the
 work before any preset. `direct`, `solo`, and `staged` go through

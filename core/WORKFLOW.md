@@ -184,8 +184,24 @@ shape and explicit choices determine the route; defaults only fill omissions:
 | `solo` | one bounded piece of work that deserves its own registered session but no separate stages | `compose --shape solo` — one registered dispatch-depth-1 owner, no dispatch depth 2 |
 | `staged` | work with separate stages | `compose --shape staged` uses the capability's standard recipe; optional `--graph <stage,…>` selects a subgraph |
 
-`compose` returns the selected stages, profiles, human gates and canonical
-`route_file`; full sealed evidence stays in that file (`--full-record` prints it).
+For execution, use `compose --start --prompt-file <task>` with the selected
+shape/graph; `--profile light` or `--owner <harness>` is an explicit choice.
+The task file contains the requested work, not instructions for running the
+parent. The runtime seals it, prepares its cycle, starts the frame pair when
+declared, and returns one receipt. Reuse that receipt's `resume_command` after
+wakes or input corrections. It reuses exact attempts, carries partial admission
+obligations, and never retries a failed attempt merely because it was called
+again. Follow its `parent_next` while work is running. `needs-question` means
+both frames have been checked; compare their results and use the native frame
+interview (§0.4). After actual release, the same command starts the owner.
+Runtime settlement closes the route and cycle before owner success is delivered.
+The model does not assemble launch tuples, copy artifact variables, or manually
+harvest and finalize ordinary work. Diagnostic recovery commands name the exact
+attempt; a changed scope still belongs to the user.
+
+Without `--start`, `compose` returns the selected stages, profiles, human gates
+and canonical `route_file`; full evidence stays in that file. `--help-all`
+documents the advanced machine-compatible inputs, including `--full-record`.
 `compose` preserves the chosen stages and derives their dependencies. Inherited
 parallel presets that do not fit the selected graph are omitted; missing preset
 stages are not mandatory. The sealed result shows the realized stages and omitted
@@ -325,8 +341,8 @@ injects a selected Skill body into main, do not duplicate that read; record the
 runtime limitation rather than claiming total-token savings.
 
 **Two-stage confirmation (SD-123).** For the five frame recipes at `quick+`,
-depth-0 first compiles/binds the route and issues its producer cycle, then
-launches the two frame nodes. These steps authorize frame artifacts, not owner
+depth-0 submits `compose --start`; the runtime first compiles/binds the route,
+issues its producer cycle, and launches the two frame nodes. These steps authorize frame artifacts, not owner
 execution. After both briefs arrive, depth-0 presents this blocking direction
 card and the interview. User approval precedes the owner and the §0.4 notice:
 

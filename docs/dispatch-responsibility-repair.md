@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-현재 상태: **전체 목표는 아직 미입증이며 작업을 계속한다.** 과거 실제 운송·실행 성공과 수동 교정·마감은 아래에 각각 보존했다. 사용자가 요구한 최소 입력의 정상 작업 완주를 새로 검사했으며 첫 실행은 실패했다. 그 원인을 수정한 뒤, 이제 공통 런타임이 workflow·route·cycle 마감을 직접 맡는 경로를 검증 중이다. 소스 회귀 통과와 새 모델 완주 증거를 구분한다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전 보류한다.
+현재 상태: **전체 목표는 아직 미입증이며 작업을 계속한다.** 과거 실제 운송·실행 성공과 수동 교정·마감은 아래에 각각 보존했다. 최소 입력의 새 검증 두 차례가 준비 단계에서 실패했다. 마감뿐 아니라 준비·기동도 공통 런타임에 맡기는 공개 진입점을 추가하여 검증 중이다. 소스 회귀 통과와 새 모델 완주 증거를 구분한다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전 보류한다.
 
 아래는 HEAD별 진행·실패 기록이다. 각 절의 당시 대기/미검증 상태를 최종 상태로 읽지 않도록 최신 실측과 후속 수정은 마지막 두 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
 
@@ -336,3 +336,13 @@ controller의 기존 두 fixture는 marker나 committed receipt 없이 가짜 do
 동일한 attention을 재현했다(`/tmp/proof-closure-fixture-baseline.json`). 운송 검사의
 기대값을 정정했으며 정상 완료 증거는 위 실제 producer transaction 검사로 검증한다.
 새 모델 왕복과 자동 마감 입증은 다음 실측에서 별도로 확인한다.
+
+## 0713 최소 입력 재실측 실패와 작업 시작 책임 이동
+
+2026-09-12 r2의 두 부모는 source `0713be075ce1cf786a44c74c3c0e8c1b9d8cfd7c`와 canonical jobs를 사용하도록 기동했다. Codex 부모 `01a094dd-f395-7361-bbe8-b7b49a8b2972`는 `rt-f94abe79d034f080`을 발급했지만 frame을 시작하기 전에 일반 문장으로 승인 질문을 했다. OpenCode 부모 `ses_f6b220663fferxDGxXTPjXG7h1`은 실제 환경의 active root가 맞는데도 primary main의 명령을 선택해 route 쓰기 전에 root mismatch로 거부됐다. 두 부모 모두 child/owner 등록 0, 실제 사용자 답변 0, 과제 실행 0이다. root가 추가 준비를 중지시키고 정상 종료했다. `/tmp/responsibility-proof-20260912/r2-preparation-failure.json`과 두 native 대화록에 실패를 보존했다. 이 r2의 잘못된 명령 경로 선택은 첫 실측의 ‘동일 소스에서 미추적 산출물이 runtime dirty로 분류됨’과 다른 원인이다.
+
+마감 자동화만으로 모델의 준비 절차 부담은 해결되지 않았으므로 `compose --start --prompt-file <task>`와 같은 route를 이어받는 `start --route <file>`을 추가했다. `work_start`는 기존 selector/atomic claim/join/human gate/terminal controller를 호출하며 별도 재시도 권한이나 완료 상태 저장소를 만들지 않는다. 요청 본문과 owner 선택은 route hash에 포함된다. 모델이 frame 둘의 launch tuple·환경·attempt id를 복사하거나 begin→spawn→wait를 조립하던 일을 옮겼다. 동일 route 시작의 반복은 고정된 시도 또는 그 route의 기존 시도를 재사용한다. 부분 기동 실패와 기동 응답 유실 뒤에도 실제 등록된 시도와 전달 책임을 반환한다. 실패한 시도를 반복 호출로 새 시도로 바꾸지 않으며, 공통 판정이 인쇄한 정확한 복구 명령과 진단을 제공한다.
+
+두 frame이 공통 gate를 통과해야 `needs-question`이 되고, 실제 human release 전 owner는 시작되지 않는다. 이후 같은 진입점은 owner의 실행과 기존 terminal settlement를 이어받는다. 성공 판정과 마감 지연/충돌 판정은 `dispatch_completion_join`의 현재 snapshot을 그대로 사용한다. 모델은 결과 비교와 native 사용자 질문을 맡는다. `compose --help`에서는 일상 선택을 먼저 보이며 기존 고급 입력은 `--help-all`에 남겼다. Codex bootstrap의 설치 경로 고정 우선순위도 core의 active `AGENT_HOME` 우선순위에 맞췄다.
+
+검증: orchestration 11건(동일 호출 반복·부분 기동·기동 응답 유실·다른 부모/다른 route hash 거부·실패/충돌/미마감 성공 소비 금지·실제 selector 및 3 adapter parser/model resolver 포함), compose 관련 130건 PASS. 실제 CLI의 direct compose→canonical 저장→동일 start 재호출은 모델 없이 확인했다. `/tmp/proof-work-start-{tests,route}.log`, `/tmp/proof-work-start-cli.json`에 근거가 있다. 이는 새 부모의 실제 전체 완주 증거가 아니다. 기존 claim·실프로세스·마감 transaction 검사와 책임 경계를 공유한다.

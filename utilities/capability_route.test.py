@@ -5187,6 +5187,26 @@ class ComposeRouteTest(TestRoute):
  def compose(self,**kw):
   d=dict(capability="autopilot-code",capability_mode="dev",shape="staged",graph="execute,test,report",slug="compose-fixture",cwd=R.ROOT,artifact_root=R.ROOT,dispatch_evidence=self.evidence())
   d.update(kw); return R.compose_route(**d)
+ def test_work_request_is_sealed_and_cannot_be_replaced_at_resume(self):
+  request={"text":"Run the accepted commands, including exit 7.","owner_harness":"opencode"}
+  route=self.compose(work_request=request,profile="light")
+  self.assertEqual(route["work_request"],request)
+  R.verify_route(route,R.ROOT)
+  changed=self.compose(work_request={**request,"text":"Only run the passing command."},profile="light")
+  self.assertNotEqual(route["route_id"],changed["route_id"])
+  route["work_request"]["text"]="Only run the passing command."
+  with self.assertRaisesRegex(ValueError,"modified route hash"): R.verify_route(route,R.ROOT)
+  for bad in ({"text":"","owner_harness":None},{"text":"task","owner_harness":"invented"}, {"text":"task"}):
+   with self.assertRaises(ValueError): self.compose(work_request=bad)
+ def test_compose_start_prints_one_work_receipt_and_preserves_full_route(self):
+  import contextlib, io, types
+  with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_HOME":str(R.ROOT),"AGENT_DISPATCH_ATTEMPT_ID":""}):
+   route=self.compose(artifact_root=tmp,work_request={"text":"task","owner_harness":"codex"})
+   out=io.StringIO()
+   with contextlib.redirect_stdout(out),contextlib.redirect_stderr(io.StringIO()):
+    path=R._emit_compiled_route(types.SimpleNamespace(command="compose",start=True),route,tmp)
+   self.assertEqual(out.getvalue(),"")
+   self.assertEqual(json.loads(path.read_text()),route)
  def test_compose_receipt_keeps_choices_and_full_canonical_record(self):
   import contextlib, io, types
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_HOME":str(R.ROOT)}):

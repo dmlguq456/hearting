@@ -22,7 +22,7 @@ The canonical neutral name for the installed harness root is:
 
 Runtime code should resolve it in this order:
 
-1. `AGENT_HOME`
+1. `AGENT_HOME` (the active runtime root, including an explicitly activated checkout)
 2. adapter-specific compatibility variables such as `CLAUDE_HOME`
 3. `${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current` when a managed release is installed
 4. `$HOME/hearting` when a canonical linked checkout is present

@@ -9,7 +9,9 @@ Edit portable sources first.
 
 ## Source Order
 
-Read `core/CORE.md` first; load the remaining documents only when the task
+Resolve all paths below against active `AGENT_HOME` (shared `utilities/agent-home.sh`
+fallback), including explicitly activated source checkouts; never guess another
+checkout from cwd or previous tasks. Read `core/CORE.md` first; load remaining documents only when the task
 touches the named domain.
 
 1. `core/CORE.md`
@@ -69,6 +71,12 @@ Exit 69 means unavailable; use the reported fallback or keep the adapter row
 partial. OpenCode native UI/config owns model and context fields.
 
 ## Dispatch
+
+For ordinary execution use `preflight.sh compose --start --prompt-file <task>`.
+Runtime prepares the cycle, starts declared frames and reuses exact attempts.
+Follow `parent_next`; reuse `resume_command` after wakes or corrections. At
+`needs-question`, compare the completed frames and ask the native interview.
+Actual release precedes owner execution; runtime closes route/cycle before success.
 
 Route by `core/WORKFLOW.md §0.2`: precedence names the capability that owns
 the artifacts; §0.2.1 then picks the work **shape** before any preset.
