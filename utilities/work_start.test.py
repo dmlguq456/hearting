@@ -139,6 +139,19 @@ class WorkStartTest(unittest.TestCase):
         self.assertNotIn("parent_next", result)
         self.assertEqual(len(self.calls), 2)
 
+    def test_exited_owner_with_missing_work_reports_without_waiting_or_replacement(self):
+        import dispatch_terminal_commit as T
+        self.start(); self.ready = self.released = True; self.start()
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").replace(
+            "worker_type=owner", "workflow_completion=runtime-v1,failure_class=pass,worker_type=owner"))
+        with mock.patch.object(T, "owner_workflow_gaps", return_value={"report":"completion-marker-absent"}), \
+             mock.patch.object(W, "join_selected_attempts", side_effect=AssertionError("cannot wait for an absent executor")):
+            result = self.start(wait=True)
+        self.assertEqual(result["state"], "needs-attention", result)
+        self.assertEqual(result["reason"], "workflow-executor-exited")
+        self.assertNotIn("parent_next", result)
+        self.assertEqual(len(self.calls), 3)
+
     def test_failure_conflict_or_unsealed_workflow_never_authorizes_success(self):
         self.start(); self.ready = True
         for fields in ({"verdict":"FAIL"}, {"terminal_conflict":True}, {"workflow_complete":False}):

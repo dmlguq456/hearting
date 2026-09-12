@@ -694,6 +694,7 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     # its parent that exact handle again, rather than ask it to rediscover a
     # route or synthesize a new workflow from generic harvest instructions.
     work_commands = {}
+    completed_work = set()
     if jobs:
         from route_identity import route_hash
         for child in receipt["children"]:
@@ -703,6 +704,8 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
                 if meta.get("dispatch_depth") != "1" or meta.get("worker_type") not in {"frame", "owner"}:
                     continue
                 if meta["worker_type"] == "owner" and child["required_action"] == "advance-completed":
+                    if meta.get("workflow_completion") == "runtime-v1":
+                        completed_work.add(child["attempt_id"])
                     continue  # Already sealed; successful work has no extra command obligation.
                 path = Path(meta.get("owner_route_file") or meta.get("route_file") or "")
                 route = json.loads(path.read_text())
@@ -718,6 +721,9 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     commands = [work_commands.get(child["attempt_id"]) or
                 completion_harvest_command(child["attempt_id"], child["required_action"],
                     jobs=jobs, surface=surface) for child in receipt["children"]]
+    if completed_work and all(child["attempt_id"] in completed_work for child in receipt["children"]):
+        return ("The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
+                "Report the result to the user. No harvest, next-stage launch, route restart, or manual finalization is required.")
     if work_commands:
         text = "\n".join(dict.fromkeys(command for command in commands if command))
         return ("Continue the existing work with its exact handle:\n" + text

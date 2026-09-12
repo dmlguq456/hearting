@@ -1257,11 +1257,27 @@ def main(argv: list[str] | None = None) -> int:
                     emit=emit,
                 )
 
+            terminal = classify_codex_result(final_text)
+            if terminal.failure_class == "pass":
+                from dispatch_terminal_commit import owner_workflow_continuation
+                correction = owner_workflow_continuation(args.jobs, args.parent_attempt_id, args.route_file)
+                if correction:
+                    verdict, notice = _admit_continuation(
+                        ledger, budget_state_root, parent_attempt_id=args.parent_attempt_id,
+                        route_id=args.route_id, route_hash=args.route_hash,
+                        ordinal=continuations, purpose="ordinary", stalled=True,
+                        warning_threshold=args.continuation_warning_threshold)
+                    if not verdict.admitted:
+                        raise SupervisorError("workflow-completion-incomplete")
+                    emit({"type": "dispatch.supervisor.resumed", "parent_attempt_id": args.parent_attempt_id,
+                          "continuation_reason": "workflow-completion-incomplete", "continuation_ordinal": continuations + 1})
+                    next_prompt = _apply_notice(correction, notice)
+                    continuations += 1
+                    continue
             if delivery_timing["join_completed_ns"] is not None:
                 delivery_timing = advance_delivery_timing(
                     delivery_timing, "final_report_marker_ns"
                 )
-            terminal = classify_codex_result(final_text)
             if not reconcile(args, terminal):
                 return 70
             # F-1: flush strictly AFTER this attempt's own terminal row commits.

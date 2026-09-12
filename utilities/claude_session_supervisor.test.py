@@ -708,6 +708,35 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertNotIn("RAW_CLAUDE_SENTINEL", result.stdout)
         self.assertEqual(sum(row.get("type") == "result" for row in rows), 1)
 
+    def test_premature_pass_resumes_same_owner_before_terminal_commit(self):
+        self.jobs.write_text(owner_row(self.lease).replace("attempt_id=att-parent", "workflow_completion=runtime-v1,attempt_id=att-parent"))
+        route = self.base / "workflow-route.json"
+        value = seal_route({"schema_version": 2, "cwd": str(self.base),
+            "nodes": [{"id": "report", "dispatch_depth": 2, "terminal": True}], "resume_retry_boundaries": []})
+        route.write_text(json.dumps(value))
+        proof = self.base / "report.proof"
+        wrapper = self.base / "checked-supervisor.py"
+        wrapper.write_text(
+            "import sys, runpy, os\nfrom pathlib import Path\nfrom types import SimpleNamespace\n"
+            + "sys.path.insert(0, " + repr(str(SUPERVISOR.parent)) + ")\n"
+            + "import dispatch_terminal_commit as T\n"
+            + "T._route_module = lambda: SimpleNamespace(terminal_gate_observation=lambda *a, **k: "
+              "{'report': {'passed': Path(os.environ['FAKE_REPORT_PROOF']).exists(), 'reason': 'marker-unreadable'}})\n"
+            + "runpy.run_path(" + repr(str(SUPERVISOR)) + ", run_name='__main__')\n")
+        self.claude.write_text(self.claude.read_text().replace("resume = '--resume' in args", "resume = '--resume' in args\nif resume: open(os.environ['FAKE_REPORT_PROOF'], 'w').write('proved')"))
+        command = self.command(); command[1] = str(wrapper)
+        command += ["--route-file", str(route), "--route-id", value["route_id"], "--route-hash", value["route_hash"]]
+        result = subprocess.run(command, input="initial assignment", text=True, capture_output=True,
+            env=self.child_env(FAKE_TRACE=str(self.trace), FAKE_NO_CHILD="1", FAKE_REPORT_PROOF=str(proof)), timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        turns = [json.loads(line) for line in self.trace.read_text().splitlines() if json.loads(line).get("event") == "turn-start"]
+        self.assertEqual(len(turns), 2, turns)
+        self.assertIn("[workflow-completion-pending]", turns[1]["prompt"])
+        self.assertIn("report", turns[1]["prompt"])
+        self.assertIn("workflow-completion-incomplete", result.stdout)
+        self.assertEqual(len(self.jobs.read_text().splitlines()), 1)
+        self.assertIn("completed-supervisor", self.jobs.read_text())
+
     def test_no_child_finishes_without_resume(self):
         self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
         result = self.run_supervisor(FAKE_NO_CHILD="1")

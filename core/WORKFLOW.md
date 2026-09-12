@@ -196,7 +196,7 @@ returns `needs-attention`: report the pending work; runtime watchers retain
 execution/cleanup responsibility and the deadline grants no retry authority.
 `needs-interview` means both frames have been checked: compare their results,
 fill the returned semantic template, and use `start --route <file> --interview
-<question.json>`. The runtime registers the gate before returning `needs-question`.
+<question.json>`. It registers the gate before returning `needs-question`.
 After the native answer, use the same command with `--answers <answers.json>`;
 it records intent, releases the gate, and starts the owner. Already answered
 questions can supply both files without asking again. `--decision revise|stop`

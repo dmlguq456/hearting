@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-현재 상태: **전체 목표는 아직 미입증이며 작업을 계속한다.** `19be761e`의 두 새 부모가 공개 시작 명령으로 각자의 Codex/OpenCode frame을 완료했다. Codex 부모는 두 자동 success를 받았고 OpenCode 부모는 안내된 유한 대기로 회수했다. 두 부모 모두 실제 native 질문의 답변을 기다리며 owner는 아직 미기동이다. 이번 소스의 실제 owner 실행→자동 마감은 미입증이다. Codex 부모의 잘못된 질문을 root가 사실 교정한 개입도 보존한다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전 보류한다.
+현재 상태: **전체 목표는 아직 미입증이며 작업을 계속한다.** 두 부모의 실제 답변은 수신됐고, 공개 질문 등록·답변 release 누락을 `6877d85e`로 고쳐 원 답변으로 재개했다. Codex는 실제 test/report→자동 workflow COMPLETE·route/cycle 마감→같은 부모 success까지 확인했다. OpenCode는 두 명령과 보고서를 완료했지만 선언된 단계 증거 없이 오너가 먼저 종료해 마감이 보류됐다. 완료 확정 전에 같은 오너가 남은 작업을 맡도록 추가 수정·검증했다. 복구 오케스트레이션 6877d와 실제 실행 19be를 구분하며, OpenCode 수정본의 마감 실측은 아직 남아 있다. 원격 main 푸시·릴리즈·설치는 보류한다.
 
 아래는 HEAD별 진행·실패 기록이다. 각 절의 당시 대기/미검증 상태를 최종 상태로 읽지 않도록 최신 실측과 후속 수정은 마지막 두 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
 
@@ -432,3 +432,83 @@ CLI 70 / OpenCode native driver 9 / 공통 책임 14 검사 통과. r4 live sour
 보존했다(`/tmp/proof-work-wait-boundary-check.log`). 시험 복원 뒤 생성 20그룹과
 경계 검사를 각각 완료해 통과했다(`generated-check.log`, `boundary-final.log` 접미사).
 운영 소스나 전역 설치를 재생성한 것은 아니며 고정된 live root에는 영향이 없다.
+
+
+## 실제 답변 뒤 멈춘 공개 진입점과 복구 책임
+
+Codex 원 질문 `call_KNQWgCV98KHUkw1FmiOKCWQ0`은
+2026-09-12T16:33:42.198Z에 실제 `이해함`을 받았다. 이 질문은
+10:04:12.358Z부터 약 6.5시간 동안 유지됐다. OpenCode 원 질문
+`call_0SBOl3T7rCKzXvbNSVWmFKLq`도 실제 `셸 오케스트레이션`을 받았다.
+원문은 `/tmp/responsibility-proof-20260912/r4-native-answers.json`에 보존한다.
+이후 Codex는 같은 start가 needs-question을 반복했고, OpenCode는 질문을
+기록·렌더링했지만 raise 없이 release해 CREATED 상태에서 거부됐다. 사용자
+미응답이 아니라 공개 실행 경로가 후속 기계 작업을 모델에게 남긴 결함이다.
+
+`6877d85e`는 기존 `WorkflowLedger`와 gate/release 명령을 그대로 쓰며
+질문 등록→실제 답변 기록→intent→release를 `start`에 연결한다. 새 gate
+권위나 큐는 없다. 모델은 두 frame의 의미 비교와 native 사용자 질문만 맡고,
+경로·schema·round·등록 순서·intent 렌더링·해제 명령은 공통 코드가 맡는다.
+`--interview` 제출 뒤에만 needs-question을 반환하고, `--answers`가 같은
+시도를 이어간다. 이미 답변한 질문은 두 파일을 함께 제출해 재질문 없이 복구한다.
+
+질문/답변 파일은 기존 write-once/fsync 방식으로 보존한다. 답변 뒤 응답 유실은
+같은 journal의 확정 release를 읽어 재개한다. 봉인된 cycle에도 재제출은 읽기만
+하며 새 producer나 쓰기를 만들지 않는다. 다른 답변으로 승인 기록을 덮어쓰지
+않는다. 모든 frame이 끝난 뒤 질문 준비가 실패했을 때는 더 올 wake를 기다리라는
+거짓 end-turn 지시도 제거했다.
+
+검증: work_start 22, compose route 130, workflow supervisor 129 통과. 실제
+ledger/기존 gate/답변 검증을 사용하는 시험에서 등록 선행, 원 답변 동시 제출,
+release 응답 유실, 봉인 후 재제출, 다른 답변 거부, stop, 파일 게시 중단 후
+재개를 확인한다. native 운송은 격리했고 실제 TUI 검증과 구분한다. 생성 20그룹과
+적응 경계 통과. source/core 지시 상한을 증설하지 않았다.
+
+원 두 native 부모는 고정 19be route·frames·원 답변을 그대로 사용한다.
+`recover-actual-answers.py`는 6877d 공통 helper의 고정 hash를 읽고 정식 19be
+gate/release/start를 실제 부모 신원에서 실행한다. 원장 직접 수정, 재질문,
+대리 답변, 새 부모가 없다. 이 operator 복구는 새 HEAD의 무개입 공개 진입점
+완주와 구분하며, 실행 source를 섞어 주장하지 않는다.
+
+
+## 실제 owner 마감과 발견한 실행 책임 공백
+
+Codex `att-19caf10790d4a6ca60562a7f6ed525d9`는 실제 test
+`att-b09e1cb69e67cc147c349b6d9a1e07caddcbe3d478d76d64`와 report
+`att-8eea7f67bb3e14ca7836bdd4a32a4b368ce8c99f9b125aec`를 수집했다.
+workflow COMPLETE 2026-09-12T17:13:33.420629Z, 같은 native 부모의 success
+17:13:38.489Z를 확인했다. runtime이 route/cycle을 마감했으며 부모/root의
+manual finalize는 없었다. 실제 종료값 7과 0/stdout 3은 final_report.md 한
+파일에 기록됐다. 보고서 SHA256 `9ea926496a729103a670498463d398bb6111b056be59ae11dc8b1fad28430b98`,
+manifest `ad4cc8f305541bab7e46413c05001658743c993d28aab4b0366ac0acba1ff74a`.
+정확한 producer 재검증과 다섯 시도의 자손 정리 판정도 통과했다.
+
+OpenCode `att-083f566257f91851f70d1c3ce3f97ca5`는 두 명령을 직접 실행하고
+보고서 `83de93ea753cabbb5330bd85c7de86e3922741ca27f250c3318aafcf025c99a4`를
+썼다. 그러나 test/report 단계를 기록하지 않고 첫 턴을 PASS로 끝냈다.
+owner 행은 completed-supervisor지만 workflow RUNNING, report marker absent,
+completion_pending=true이며 manifest는 없다. 세 실제 시도의 정리는 확인했다.
+부모의 한 번의 600초 대기에는 지원되지 않는 carrier의 통보 실패가 반복됐고,
+부모는 나중에 다른 Codex cycle의 test evidence도 읽었다. 이 혼용과 보고서
+정확성·운송·workflow 미완료를 구분하며 전체 PASS로 사용하지 않는다.
+증거 `/tmp/responsibility-proof-20260912/r4-owner-proof.json` 및 native export.
+
+공통 terminal writer가 선언된 terminal gate를 마감 시에만 확인한 탓에,
+그 증거를 만들 실행자가 먼저 사라질 수 있었다. 새 `owner_workflow_continuation`은
+기존 terminal_gate_observation을 완료 확정 전에도 사용한다. 누락이면 같은
+실제 오너의 기존 continuation으로 돌리고 현재 선택한 단계만 마치게 한다.
+새 retry 권위·preset 단계·오너를 만들지 않는다. 이미 확정된 PASS에는 이
+경로가 새 모델 실행을 허가하지 않는다. 과거 미완료 행은 공개 start가 빠진
+증거와 실행자 부재를 즉시 보고하며 반복 대기/반복 finalize로 숨기지 않는다.
+
+수정 전 두 실제 supervisor 프로세스는 첫 PASS 뒤 한 턴 만에 종료한다.
+수정 후 같은 native 세션에서 두 번째 턴이 실행되고 증거 확인 뒤에만 확정한다.
+`proof-premature-pass-{codex,cli}-before.log`는 이 실패를 보존한다.
+고정 검사 Codex 36 / 공통 CLI 71 / OpenCode native driver 9, 실제 producer
+terminal transaction 9(세 하네스 포함), public entry 23 / join 123 통과.
+여기서 두 턴 시험의 모델은 protocol fixture이며 실제 모델 재검증을 대체하지 않는다.
+
+Codex 부모가 이미 끝난 전체 작업을 다음 단계 시작으로 오해한 지시도 정정했다.
+완료 영수증의 `(no harvest command; advance the route)` 대신 전체 작업과
+마감이 끝났으며 결과만 보고하라고 명시한다. 공개 결과에는 검증된 최종 handoff를
+함께 제공해 marker=null에서 별도 로그 탐색을 요구하지 않는다.

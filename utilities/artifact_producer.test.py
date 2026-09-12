@@ -2710,6 +2710,26 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
         jobs.write_text("\n".join(lines)+"\n")
         return meta
 
+    def test_executing_owner_uses_same_terminal_proof_before_and_after_settlement(self):
+        import dispatch_terminal_commit as terminal
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                fixture=TerminalTransactionIntegrationTest(); fixture.setUp()
+                try:
+                    route,path,jobs,owner,result,artifact,request=fixture._prepare_fixture(harness)
+                    jobs.write_text(jobs.read_text().replace("worker_type=owner", "attempt_schema_version=2,workflow_completion=runtime-v1,worker_type=owner"))
+                    before=jobs.read_bytes()
+                    self.assertIsNone(terminal.owner_workflow_continuation(jobs,owner,path))
+                    saved=artifact.read_bytes(); artifact.unlink()
+                    prompt=terminal.owner_workflow_continuation(jobs,owner,path)
+                    self.assertIn("[workflow-completion-pending]",prompt)
+                    self.assertIn("same owner",prompt)
+                    self.assertEqual(jobs.read_bytes(),before)
+                    artifact.write_bytes(saved)
+                    self.assertIsNone(terminal.owner_workflow_continuation(jobs,owner,path))
+                    self.assertEqual(jobs.read_bytes(),before)
+                finally: fixture.doCleanups()
+
     def test_runtime_completion_finishes_and_replays_without_changing_pass_for_three_harnesses(self):
         import dispatch_terminal_commit as terminal
         import workflow_state
@@ -2727,6 +2747,7 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                     self.assertEqual(settled.result,"completed",settled)
                     materialize_after_terminal_close(jobs,owner)
                     self.assertFalse(terminal.owner_completion_pending(jobs,"done",meta))
+                    self.assertIn(str(artifact),terminal.completed_owner_handoff(jobs,"done",meta))
                     self.assertEqual(workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs).state()["workflow_state"],"COMPLETE")
                     manifest=Path(result["cycle_dir"])/"manifest.json"
                     sealed=manifest.read_bytes()

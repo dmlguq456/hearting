@@ -3477,10 +3477,12 @@ class WorkContinuationReceiptTest(unittest.TestCase):
         self.assertNotIn("preflight.sh harvest",text)
 
     def test_closed_owner_success_has_no_additional_command_obligation(self):
-        self.jobs.write_text(self.record("owner",kind="owner"))
+        self.jobs.write_text(self.record("owner",kind="owner").replace("worker_type=owner", "workflow_completion=runtime-v1,worker_type=owner"))
         text = self.render([("owner","advance-completed")])
         self.assertNotIn("capability-route.py start",text)
         self.assertNotIn("preflight.sh harvest",text)
+        self.assertIn("requested work is complete",text)
+        self.assertNotIn("advance the route",text)
 
     def test_depth_two_and_corrupt_context_keep_exact_inspection_fallback(self):
         self.jobs.write_text(self.record("stage",kind="stage",depth="2"))

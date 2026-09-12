@@ -253,10 +253,16 @@ def _wait_expired(result):
 def _outcome(jobs, aid):
     state = current_delivery_state(jobs, aid, parent_attempt_id=aid, advance=False)
     action = delivery_required_action(state)
-    return {"attempt_id": aid, "classification": delivery_classification(state),
+    result = {"attempt_id": aid, "classification": delivery_classification(state),
             "required_action": action, "marker": state.marker,
             "recovery_command": completion_harvest_command(aid, action, jobs=str(jobs),
                 surface=str(ROOT / "adapters/codex/bin/preflight.sh"))}
+    if action == "advance-completed":
+        row = _rows(jobs).get(aid)
+        if row and row[1].get("workflow_completion") == "runtime-v1":
+            from dispatch_terminal_commit import completed_owner_handoff
+            result["handoff"] = completed_owner_handoff(jobs, *row)
+    return result
 
 
 def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=None,
@@ -333,6 +339,15 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         return {**result, "state": "needs-attention", "reason": "owner-launch-not-admitted"}
     status, metadata = rows[aid]
     result.update(owner_attempt_id=aid, owner_started=metadata.get("launch_started") == "1")
+    if status == "done" and metadata.get("failure_class") == "pass":
+        from dispatch_terminal_commit import owner_workflow_gaps
+        missing = owner_workflow_gaps(jobs, metadata, route)
+        if missing:
+            return {**result, "state": "needs-attention", "reason": "workflow-executor-exited",
+                    "missing_terminal_gates": missing, "required_action": "report-unfinished-work",
+                    "next_step": "The owner exited before the declared stages completed. Preserve its report "
+                        "and committed result, and report these missing stages. Waiting or repeating finalization "
+                        "cannot execute them. No automatic retry or replacement is authorized by this observation."}
     joined = join_selected_attempts(jobs=jobs, expected_attempts={aid}, timeout=600 if wait else 0, recover=True)
     if joined["state"] == "ready":
         outcome = _outcome(jobs, aid)

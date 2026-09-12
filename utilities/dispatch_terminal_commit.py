@@ -1031,6 +1031,45 @@ def cleanup_tool_permission(scope, *, tool, arguments, cwd, owner_attempt_id, ro
                                    owner_attempt_id=owner_attempt_id, route_id=route_id)
 
 
+def owner_workflow_gaps(jobs, metadata, route):
+    """One read-only diagnosis for execution handback and legacy recovery."""
+    if metadata.get("workflow_completion") != "runtime-v1":
+        return {}
+    if not any(n.get("terminal") and n.get("dispatch_depth") == 2 for n in route["nodes"]):
+        return {}  # A one-shot's own terminal marker is written at commit.
+    gates = _route_module().terminal_gate_observation(route, jobs=Path(jobs), exact_terminal=True)
+    return {node: value.get("reason", "unproven") for node, value in gates.items() if not value.get("passed")}
+
+
+def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
+    """Keep the executing owner until the declared work can enter settlement.
+
+    This consumes the same terminal-gate observation as settlement. A model's
+    PASS text is still a proposal here; committing it first would strand any
+    missing stage after the only executor exits. No preset stages are added.
+    """
+    from dispatch_completion_join import exact_attempt_row
+    row = exact_attempt_row(Path(jobs), owner_attempt_id)
+    if row.metadata.get("workflow_completion") != "runtime-v1":
+        return None
+    if row.status not in {"open", "running"}:
+        return None  # Never re-execute an already committed attempt.
+    route = json.loads(Path(route_file).read_text())
+    missing = owner_workflow_gaps(jobs, row.metadata, route)
+    if not missing:
+        return None
+    return (
+        "[workflow-completion-pending]\n"
+        "Your report is preserved, but the selected route still lacks completion evidence: "
+        + json.dumps(missing, ensure_ascii=False, sort_keys=True)
+        + ". Continue this same owner and the remaining declared stages through the assigned checked stage surface. "
+        "Use the existing task and user answers; do not add preset stages, ask again, or create another owner. "
+        "When a child starts, yield runtime_wait: registered-children so the runtime collects it. "
+        "Return the final handoff after the declared stages finish. If execution cannot proceed, "
+        "report the actual blocker and retained report instead of PASS. Runtime settlement owns close/finalize."
+    )
+
+
 def _completion_request(jobs, status, metadata):
     """The launch contract, not terminal words alone, assigns workflow closure."""
     if (metadata.get("workflow_completion") != "runtime-v1"
@@ -1071,6 +1110,15 @@ def owner_completion_pending(jobs, status, metadata) -> bool:
         return ledger.state()["workflow_state"] != "COMPLETE"
     except (OSError, ValueError, KeyError, TypeError, TerminalCommitError):
         return True
+
+
+def completed_owner_handoff(jobs, status, metadata):
+    """Expose the proved report after the shared consumer classified success."""
+    request = _completion_request(jobs, status, metadata)
+    if request is None:
+        return None
+    state = json.loads(_commit_state_path(request).read_text())
+    return _read_sealed_owner_envelope(request, state["terminal_commit_id"])
 
 
 def settle_owner_completion(jobs, status, metadata) -> TerminalCommitResult | None:
