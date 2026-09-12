@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-09-12T18:26:17.452403+00:00",
+  "authorization": "User explicitly authorized main push, release, and local install after acceptance judgment on 2026-09-13 KST.",
+  "version": "v2.140.0",
+  "release_source": "b16137a117b1f21f962dcb0bbe3f2686a185d175",
+  "release_url": "https://github.com/dmlguq456/hearting/releases/tag/v2.140.0",
+  "release_run": "https://github.com/dmlguq456/hearting/actions/runs/34710800469",
+  "release_and_post_publish_smoke": "SUCCESS",
+  "published_at": "2026-09-12T18:22:34Z",
+  "assets": {
+    "hearting.tar.gz": {
+      "sha256": "acaa38a19898b89febc1c5823947f04af62618e53f7dc99c467d1996b31e8eac",
+      "bytes": 6038355,
+      "matches_local_build": true
+    },
+    "install.sh": {
+      "sha256": "d51422fd85a41c396eee87a82a565ba5f86fe6c0f16022d5d14d8a2e2bf0106b",
+      "bytes": 164199,
+      "matches_local_build": true
+    }
+  },
+  "prior_version": "v2.139.1",
+  "updated_runtimes": [
+    "claude",
+    "codex",
+    "opencode"
+  ],
+  "skipped_runtimes": {},
+  "installed_status": [
+    {
+      "id": "claude.status",
+      "ok": true,
+      "detail": "channel=managed-release version=v2.140.0 drift=0 projection=fresh"
+    },
+    {
+      "id": "codex.status",
+      "ok": true,
+      "detail": "channel=managed-release version=v2.140.0 drift=0 projection=fresh"
+    },
+    {
+      "id": "opencode.status",
+      "ok": true,
+      "detail": "channel=managed-release version=v2.140.0 drift=0 projection=fresh"
+    }
+  ],
+  "doctor": [
+    {
+      "runtime": "claude",
+      "ok": true,
+      "strict": true,
+      "freshness": "fresh",
+      "source_root": "/home/Uihyeop/.local/share/hearting/releases/v2.140.0",
+      "source_revision": "release:v2.140.0:f3cf6136ba19",
+      "active_revision": "release:v2.140.0:f3cf6136ba19",
+      "bundle_checksum": "f3cf6136ba190e3be12bcd42dfa09f5e512f1cb7f4db29c318a820c9f4b9b36e",
+      "duplicate_sources": [],
+      "config_conflicts": [],
+      "surface_skew": [],
+      "compared_surfaces": [
+        "claude",
+        "codex",
+        "opencode",
+        "release"
+      ]
+    },
+    {
+      "runtime": "codex",
+      "ok": true,
+      "strict": true,
+      "freshness": "fresh",
+      "source_root": "/home/Uihyeop/.local/share/hearting/releases/v2.140.0",
+      "source_revision": "release:v2.140.0:f3cf6136ba19",
+      "active_revision": "release:v2.140.0:f3cf6136ba19",
+      "bundle_checksum": "f3cf6136ba190e3be12bcd42dfa09f5e512f1cb7f4db29c318a820c9f4b9b36e",
+      "duplicate_sources": [],
+      "config_conflicts": [],
+      "surface_skew": [],
+      "compared_surfaces": [
+        "claude",
+        "codex",
+        "opencode",
+        "release"
+      ]
+    },
+    {
+      "runtime": "opencode",
+      "ok": true,
+      "strict": true,
+      "freshness": "fresh",
+      "source_root": "/home/Uihyeop/.local/share/hearting/releases/v2.140.0",
+      "source_revision": "release:v2.140.0:f3cf6136ba19",
+      "active_revision": "release:v2.140.0:f3cf6136ba19",
+      "bundle_checksum": "f3cf6136ba190e3be12bcd42dfa09f5e512f1cb7f4db29c318a820c9f4b9b36e",
+      "duplicate_sources": [],
+      "config_conflicts": [],
+      "surface_skew": [],
+      "compared_surfaces": [
+        "claude",
+        "codex",
+        "opencode",
+        "release"
+      ]
+    }
+  ],
+  "verify": [
+    {
+      "id": "claude.runtime-activation",
+      "ok": true,
+      "detail": "freshness=fresh next=none"
+    },
+    {
+      "id": "codex.runtime-activation",
+      "ok": true,
+      "detail": "freshness=fresh next=none"
+    },
+    {
+      "id": "opencode.runtime-activation",
+      "ok": true,
+      "detail": "freshness=fresh next=none"
+    },
+    {
+      "id": "routing-config.user-policy",
+      "ok": true,
+      "detail": "valid: /home/Uihyeop/.config/hearting/dispatch-defaults.yaml"
+    },
+    {
+      "id": "report-bundle-config.root",
+      "ok": true,
+      "detail": "valid: /home/Uihyeop/.config/hearting/report-bundle.json"
+    },
+    {
+      "id": "compute-hosts-config.inventory",
+      "ok": true,
+      "detail": "ok: /home/Uihyeop/.config/hearting/compute-hosts.yaml"
+    },
+    {
+      "id": "memory-sync-config.policy",
+      "ok": true,
+      "detail": "ok: /home/Uihyeop/.config/hearting/memory-sync.json"
+    },
+    {
+      "id": "bootstrap.launcher.compute-hosts",
+      "ok": true,
+      "detail": "healthy: /home/Uihyeop/.local/bin/compute-hosts"
+    },
+    {
+      "id": "bootstrap.launcher.compute-hosts-smoke",
+      "ok": true,
+      "detail": "forwarding smoke passed"
+    }
+  ],
+  "installed_tests": {
+    "installed_public_entry": {
+      "tests": 26,
+      "result": "PASS",
+      "log": "/tmp/responsibility-release-installed-entry-tests.log",
+      "sha256": "bf3cf6f8a7f3389ff15d82638273fb821f48ae446ded4c3b5e204b1d83d59101"
+    },
+    "installed_terminal_transaction": {
+      "tests": 22,
+      "result": "PASS",
+      "log": "/tmp/responsibility-release-installed-terminal-tests.log",
+      "sha256": "6d1d40304b7fae33b1ff4fffb131c64ab5f4392921c2ca57bf463ade051222c5"
+    }
+  },
+  "user_files": {
+    "checked": 12,
+    "changed": 0
+  },
+  "session_action": {
+    "claude": {
+      "instructions": "new-session",
+      "skill": "reinvoke",
+      "agent": "new-session",
+      "hook_config": "new-session"
+    },
+    "codex": {
+      "instructions": "new-session",
+      "skill": "auto-detect-reinvoke",
+      "agent": "new-session",
+      "hook_config": "new-session"
+    },
+    "opencode": {
+      "instructions": "restart-required",
+      "skill": "restart-required",
+      "agent": "restart-required",
+      "hook_config": "restart-required"
+    }
+  },
+  "limits": [
+    "Running sessions retain their pinned instructions: Codex/Claude need a new session, OpenCode needs restart.",
+    "Older releases referenced by existing routes, attempts, or live processes were kept by the normal updater; no forced pruning.",
+    "The first release validation stopped on two unannotated temporary fixture unlinks; b16137a1 documented their exact TemporaryDirectory boundary and the release succeeded.",
+    "The PR namespace check also reported a fixture predecessor depth mismatch (hardcoded depth 2 against a depth-1 frame). Its raw log is preserved; unrelated CI was not pursued, and whole-CI-green is not claimed."
+  ],
+  "raw_evidence": [
+    {
+      "path": "/tmp/responsibility-release-published-proof.json",
+      "sha256": "5129702878d41fce2e6b65635d29f7ba1bd4053c208f711ff73d57a0afb0c1e9"
+    },
+    {
+      "path": "/tmp/responsibility-release-update.json",
+      "sha256": "31e6824c9cecd567f478fc800548d6dc5cc9db7ffe74d3a36ebd279add3a6e01"
+    },
+    {
+      "path": "/tmp/responsibility-release-doctor.json",
+      "sha256": "d7228ab84aee6ae40a0b12737b334b2fa14731686d710be62d6a8940aa4c8cdb"
+    },
+    {
+      "path": "/tmp/responsibility-release-verify.json",
+      "sha256": "ce28d6b27e0aadec6594b0d3b2ed25ce9dfc597c90e758c4d41ce51954cb08be"
+    },
+    {
+      "path": "/tmp/responsibility-release-installed-after.json",
+      "sha256": "81b122e8f2b914c44a35d38d5ebe1774e8f4e47cd128881636b802fe12de1239"
+    },
+    {
+      "path": "/tmp/responsibility-release-user-files-after.json",
+      "sha256": "ff2959b3ac4d3bf21e35d35e850274b0404b2a088880fb0117ab4492659058ba"
+    }
+  ]
+}

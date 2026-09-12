@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-현재 상태: **이번 책임 계약 수리와 그 입증을 완료했다.** 실제 Codex 오너는 원 답변→선택된 test/report→런타임 마감→같은 부모 자동 success까지 완료했다. 수정본 `e3b6eebd`의 OpenCode 오너도 이른 PASS를 같은 오너·세션에서 자동 복구하고 test/report와 workflow·route·cycle을 마친 뒤 부모의 공개 대기에 completed를 반환했다. 두 경로 모두 수동 finalize가 없었다. OpenCode 부모의 비동기 자동 wake는 지원하지 않는 경로이며 명시된 유한 대기로 검증했다. 모든 하네스의 무오류·무개입 완주나 비용 절감을 주장하지 않는다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전까지 보류한다.
+현재 상태: **이번 책임 계약 수리와 그 입증을 완료했다.** 실제 Codex 오너는 원 답변→선택된 test/report→런타임 마감→같은 부모 자동 success까지 완료했다. 수정본 `e3b6eebd`의 OpenCode 오너도 이른 PASS를 같은 오너·세션에서 자동 복구하고 test/report와 workflow·route·cycle을 마친 뒤 부모의 공개 대기에 completed를 반환했다. 두 경로 모두 수동 finalize가 없었다. OpenCode 부모의 비동기 자동 wake는 지원하지 않는 경로이며 명시된 유한 대기로 검증했다. 모든 하네스의 무오류·무개입 완주나 비용 절감을 주장하지 않는다. 2026-09-13 사용자 지시로 원격 main 푸시·v2.140.0 릴리즈·세 하네스 로컬 설치까지 완료했다. 설치 검증은 마지막 절과 [설치 입증 기록](evidence/dispatch-responsibility-install-20260913.json)에 보존한다.
 
 아래는 HEAD별 진행·실패 기록이다. 당시 대기/미검증 상태는 후속 절의 새 증거로만 갱신한다. 최종 근거와 한계는 [구조화된 입증 기록](evidence/dispatch-responsibility-proof-20260913.json)과 마지막 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
 
@@ -585,3 +585,42 @@ export와 `r5-all-opencode-native-models.json`에 있고 핵심 식별자·해�
 wake, 모든 실패 조건의 실제 모델 재현, 무오류 모델 행동과 비용 절감은 주장하지
 않는다. 지원되지 않는 실행 방식에는 확인된 fallback이 있고, 거부·미확정 상태의
 복구 또는 사용자 인계 책임은 기존 공통 controller에 남는다.
+
+
+## v2.140.0 게시·로컬 설치 완료
+
+2026-09-13 KST 사용자가 목표 달성 판단 뒤 푸시·릴리즈·설치를 모두 진행하도록
+명시했다. PR #17은 main `35af7cde` 푸시로 병합됐다. 첫 Release 실행
+`34710492170`은 새 snapshot 시험의 임시 파일 두 unlink에 범위 주석이 없어
+게시 전에 종료했다. `b16137a1`은 해당 TemporaryDirectory의 정확한 두 파일을
+명시한 테스트 주석 한 줄이며, 제품 삭제 권한이나 검사 기준은 바꾸지 않았다.
+검사기·snapshot 22·installer runtime 13 및 설치/업데이트/롤백/세 하네스
+activation/projection 검증이 통과했다. 최초 로컬 projection 실행의 dirty-source
+거부도 보존했고, 커밋된 소스 재실행은 PASS였다.
+
+정식 [Release 실행 34710800469](https://github.com/dmlguq456/hearting/actions/runs/34710800469)는
+입력 검증·게시·게시 후 설치 smoke를 모두 통과했다.
+[v2.140.0](https://github.com/dmlguq456/hearting/releases/tag/v2.140.0)의 정확한
+source는 `b16137a117b1f21f962dcb0bbe3f2686a185d175`다. 내려받은 archive와
+installer는 checksum sidecar뿐 아니라 같은 commit의 독립 로컬 빌드와도
+SHA256이 일치했다. archive `acaa38a19898b89febc1c5823947f04af62618e53f7dc99c467d1996b31e8eac`,
+installer `d51422fd85a41c396eee87a82a565ba5f86fe6c0f16022d5d14d8a2e2bf0106b`.
+
+정상 `harness update --version v2.140.0`으로 Claude/Codex/OpenCode 모두
+v2.139.1에서 전환했고 누락된 runtime은 없다. `harness verify`와 세 runtime의
+strict doctor가 exit 0, freshness=fresh, drift=0이다. 세 설치면과 managed
+release의 공통 7개 subtree 해시도 일치한다. 실제 설치 경로에서 실행한 public
+entry 26 / terminal transaction 22 검사도 PASS였다. 설정·인증 파일 12개의
+전후 바이트 해시는 동일하다. 참조 중인 구 릴리즈는 정상 updater가 보존했으며
+강제 삭제나 운영 jobs 직접 수정은 없다.
+
+설치 결과와 현재 세션 반영은 구분한다. Claude/Codex의 새 지시·hook 설정은
+새 세션에서, OpenCode는 재시작 뒤 적용된다. 기존 실행 중인 세션이 자동으로
+새 지시를 다시 읽었다고 주장하지 않는다. 또한 PR의 namespace 검사는 fixture가
+선행 frame에도 depth 2를 고정 전달하여 depth 1 계약과 충돌한 실패를 보였다.
+원문을 보존하고 기존 사용자 지시대로 별도 CI 추격은 하지 않았다. 정식 Release와
+설치 검증의 통과를 전체 CI가 모두 녹색이라는 주장으로 확대하지 않는다.
+
+[설치 입증 기록](evidence/dispatch-responsibility-install-20260913.json)에
+정확한 릴리즈·설치 source, 세 runtime 검사, 해시와 원본 로그 위치를 저장했다.
+이 절과 설치 기록은 문서만 추가하는 후속 커밋이며 새 릴리즈를 요구하지 않는다.
