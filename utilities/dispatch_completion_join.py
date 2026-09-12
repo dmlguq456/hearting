@@ -690,8 +690,41 @@ def completion_harvest_command(attempt_id: str, action: str, *, jobs: str, surfa
 
 
 def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
-    commands = [completion_harvest_command(child["attempt_id"], child["required_action"],
-                jobs=jobs, surface=surface) for child in receipt["children"]]
+    # A submitted work request already owns preparation and continuation. Give
+    # its parent that exact handle again, rather than ask it to rediscover a
+    # route or synthesize a new workflow from generic harvest instructions.
+    work_commands = {}
+    if jobs:
+        from route_identity import route_hash
+        for child in receipt["children"]:
+            try:
+                row = exact_attempt_row(Path(jobs), child["attempt_id"])
+                meta = row.metadata
+                if meta.get("dispatch_depth") != "1" or meta.get("worker_type") not in {"frame", "owner"}:
+                    continue
+                if meta["worker_type"] == "owner" and child["required_action"] == "advance-completed":
+                    continue  # Already sealed; successful work has no extra command obligation.
+                path = Path(meta.get("owner_route_file") or meta.get("route_file") or "")
+                route = json.loads(path.read_text())
+                if (not route.get("work_request") or route.get("route_hash") != route_hash(route)
+                        or route["route_hash"] != (meta.get("owner_route_hash") or meta.get("route_hash"))
+                        or route.get("route_id") != (meta.get("owner_route_id") or meta.get("route_id"))):
+                    continue
+                work_commands[child["attempt_id"]] = shlex.join([
+                    sys.executable, str(Path(__file__).absolute().with_name("capability-route.py")),
+                    "start", "--route", str(path), "--jobs", jobs])
+            except (OSError, ValueError, KeyError, JoinContractError):
+                continue  # Legacy/corrupt context retains the exact inspection surface below.
+    commands = [work_commands.get(child["attempt_id"]) or
+                completion_harvest_command(child["attempt_id"], child["required_action"],
+                    jobs=jobs, surface=surface) for child in receipt["children"]]
+    if work_commands:
+        text = "\n".join(dict.fromkeys(command for command in commands if command))
+        return ("Continue the existing work with its exact handle:\n" + text
+                + "\nThis reuses registered attempts and the shared outcome/cleanup controller. "
+                  "It returns the current frame results and whether a native user question is ready. "
+                  "Use those exact results; another cycle's artifact cannot replace a failed frame. "
+                  "No replacement launch or manual workflow/cycle finalization is implied.")
     command_text = "\n".join(command for command in commands if command) or "(no harvest command; advance the route)"
     return ("Completion bookkeeping for the listed attempts:\n" + command_text
             + "\nThe commands use the shared, runtime-neutral registry harvest compatibility surface; "

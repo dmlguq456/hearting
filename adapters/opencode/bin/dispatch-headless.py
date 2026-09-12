@@ -104,7 +104,7 @@ from owner_route_binding import (  # noqa: E402
     validate_runtime_requirements,
 )
 from worker_bootstrap import (
-    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt,
+    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt, assignment_prompt, contract_read_prompt,
     assigned_contract,
     render_worker_bootstrap,
     runtime_progress_prompt,
@@ -726,6 +726,7 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         route_node=args.route_node,
         completion_gate=args.completion_gate,
         explicit=args.assigned_contract,
+        unit=args.unit,
         root=ROOT,
     )
     heartbeat = runtime_progress_prompt()
@@ -758,13 +759,12 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         "- The wrapper already validated capability mode, optional worker mode, QA, artifact-root access, and any route record. Use worker-route only for a safety recheck.\n"
         "- The typed bootstrap contains the portable unit. A dispatch-depth-1 capability owner must not load any worker mode.\n"
         f"- Run adapters/opencode/bin/preflight.sh qa-policy {args.qa} {qa_track(args.capability)} and keep its required assurance in the artifact.\n"
-        f"- Read only the assigned {args.assigned_contract} Skill/mode and named artifact inputs. Project instruction auto-load is not treated as physically masked; do not manually load a full harness bootstrap.\n"
+        f"{contract_read_prompt(args, 'opencode')}"
         "- Preserve the reported QA/tool contracts in the artifact; owner workers launch checked adapter wrappers directly.\n\n"
         f"{heartbeat}"
         f"{stage_session_prompt(args)}"
         f"{released_task_prompt(args)}"
-        "Assignment:\n"
-        f"{task.rstrip()}\n\n"
+        f"{assignment_prompt(args, task, os.environ)}"
         "End with the kernel's exact three-line handoff as the entire final message — "
         "no summary sentence before it, nothing after it.\n",
         source,

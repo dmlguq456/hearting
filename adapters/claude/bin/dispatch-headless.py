@@ -108,7 +108,7 @@ from owner_route_binding import (  # noqa: E402
     validate_runtime_requirements,
 )
 from worker_bootstrap import (
-    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt,
+    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt, assignment_prompt, contract_read_prompt,
     supervised_owner_prompt,  # noqa: E402
     assigned_contract,
     profile_worker_type,
@@ -650,6 +650,7 @@ def dispatch_prompt(
         route_node=args.route_node,
         completion_gate=args.completion_gate,
         explicit=args.assigned_contract,
+        unit=args.unit,
         root=ROOT,
     )
     profile_note = (
@@ -713,14 +714,13 @@ def dispatch_prompt(
         f"- {profile_note}\n\n"
         "Claude realization:\n"
         "- The wrapper validates capability mode, worker unit/mode, route/scope, and the masked profile before launch. Re-run route validation only for a safety recheck.\n"
-        f"- Read only the exposed {args.assigned_contract} Skill, named artifacts, and selected specialization. General Claude custom subagents may still inherit project CLAUDE.md; do not manually load a full harness bootstrap.\n"
+        f"{contract_read_prompt(args, 'claude')}"
         "- An owner has no worker mode and must not load any unit persona.\n"
         "- Owner workers use the inherited registry, launch checked adapter wrappers directly, consume typed completion receipts, harvest artifacts, and close rows; stage/review/support workers do not dispatch.\n\n"
         f"{heartbeat}"
         f"{stage_session_prompt(args)}"
         f"{released_task_prompt(args)}"
-        "Assignment:\n"
-        f"{task.rstrip()}\n\n"
+        f"{assignment_prompt(args, task, os.environ)}"
         f"{ending}",
         source,
     )

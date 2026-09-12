@@ -346,3 +346,15 @@ controller의 기존 두 fixture는 marker나 committed receipt 없이 가짜 do
 두 frame이 공통 gate를 통과해야 `needs-question`이 되고, 실제 human release 전 owner는 시작되지 않는다. 이후 같은 진입점은 owner의 실행과 기존 terminal settlement를 이어받는다. 성공 판정과 마감 지연/충돌 판정은 `dispatch_completion_join`의 현재 snapshot을 그대로 사용한다. 모델은 결과 비교와 native 사용자 질문을 맡는다. `compose --help`에서는 일상 선택을 먼저 보이며 기존 고급 입력은 `--help-all`에 남겼다. Codex bootstrap의 설치 경로 고정 우선순위도 core의 active `AGENT_HOME` 우선순위에 맞췄다.
 
 검증: orchestration 11건(동일 호출 반복·부분 기동·기동 응답 유실·다른 부모/다른 route hash 거부·실패/충돌/미마감 성공 소비 금지·실제 selector 및 3 adapter parser/model resolver 포함), compose 관련 130건 PASS. 실제 CLI의 direct compose→canonical 저장→동일 start 재호출은 모델 없이 확인했다. `/tmp/proof-work-start-{tests,route}.log`, `/tmp/proof-work-start-cli.json`에 근거가 있다. 이는 새 부모의 실제 전체 완주 증거가 아니다. 기존 claim·실프로세스·마감 transaction 검사와 책임 경계를 공유한다.
+
+## 8a337 공개 시작 실측: 기동은 연결됐지만 단계 입력에서 실패
+
+r3는 `8a337e30cabfd073c64803b4ad9db45ea7b842ca`의 새 Codex 부모 `01a094fc-eed6-7a61-9b0d-fa5ce1ec2432`가 공개 `compose --start` 한 번으로 route `rt-2a95d521e488dd64`, cycle, Codex/OpenCode frame 둘을 실제 준비·기동했다. 두 실제 모델 모두 light/Luna(OpenCode native assistant 7건의 providerID=openai/modelID=gpt-5.6-luna)였다. 부모는 09:40:57Z 시작 결과의 `end-turn`을 따랐다. 별도 begin, tuple/env 조립, frame별 호출은 없었다.
+
+그러나 OpenCode frame `att-4be764ce5f6892c0392c7d838ebee3d9`은 전체 과제에 적힌 `final_report.md`를 자기 산출물로 이해했다. 현재 노드가 허용하는 `shards/frame-alternative/**`와 달라 쓰기 거부 뒤 BLOCKED로 끝났다. route에는 정확한 `outputs`가 선언돼 있었지만 실제 prompt가 그것을 전달하지 않고 전체 요청을 그대로 `Assignment`로 붙인 결함이다. Codex frame `att-cc1bfa6ae3f667002d2cfbe8e0291615`만 올바른 brief/PASS였다.
+
+실패 attention은 09:42:23.546Z 부모에 도착했다. 부모가 기존 cycle을 넓게 검색하고 두 frame이 완료됐다는 잘못된 전제로 질문했으므로 root가 09:43:44.954Z 및 09:45:26.790Z 두 질문을 중단했다. 실제 답변/승인/owner 기동은 0이다. Codex PASS receipt는 첫 중단 뒤 09:43:45.345Z 도착했으므로 이를 ‘두 알림이 모두 무개입으로 도착했다’고 주장하지 않는다. 두 attempt의 공통 정리 증거는 governed-process-group-drained이고 부모도 정상 종료했다. 원 자료: `/tmp/responsibility-proof-20260912/r3-failure-observation.json`, `codex-r3-events-final.json`, `r3-opencode-frame-export.json`. 전체 과제 완주는 FAIL이다.
+
+후속 수정은 공통 bootstrap의 `assignment_prompt`가 요청을 ‘나중 owner의 전체 과제’와 ‘지금 frame의 방향 brief’로 구분하고 route의 정확한 `outputs`를 실제 cycle 경로로 전달하는 것이다. 세 adapter의 수동 `Assignment` 연결을 이 함수로 교체했다. 또한 공통 completion 안내가 새 work request의 정확한 `start --route`를 다시 제공한다. 부모가 알림마다 route를 찾거나 실패한 frame을 다른 cycle의 산출물로 대체하도록 일반적인 수확/후속 명령을 추측할 필요가 없다. d2와 legacy는 기존 정확한 검사 안내를 유지하며, 이미 봉인된 owner success에는 추가 명령을 요구하지 않는다. 완료/재시도 판정 권한은 바꾸지 않았다.
+
+같은 추적에서 frame의 `assigned_contract`가 owner 기본값 `autopilot-code`를 물려받는 원인도 확인했다. 이미 frame 단위 계약을 주입하고도 다시 전체 owner Skill을 읽으라고 세 adapter가 지시했다. selector와 공통 bootstrap을 단위 계약 `plan/frame`으로 맞추고 이 중복 로딩 의무를 없앴다. 새 입력 검사는 세 실제 adapter prompt에서 정확한 cycle-local brief 경로와 단위 계약을 확인한다. 기존 owner/stage/review의 계약 선택은 유지한다. prompt 8 / bootstrap 15 / selector 78 / join 123 / gateway 47 / Codex supervisor 34 / 공통 CLI supervisor 69 PASS. 새 모델 완주 전에는 이 결과를 전체 목표 PASS로 사용하지 않는다.

@@ -182,6 +182,10 @@ class WorkerBootstrapTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             W.worker_type_for_kind("resource-runner")
 
+    def test_frame_contract_is_its_unit_even_with_legacy_owner_default(self):
+        self.assertEqual(W.assigned_contract(capability="autopilot-code",worker_type="frame",
+            route_node="frame",explicit="autopilot-code",unit="plan/frame",root=ROOT),"plan/frame")
+
 
 if __name__ == "__main__":
     unittest.main()

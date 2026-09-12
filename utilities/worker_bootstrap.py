@@ -207,6 +207,33 @@ def runtime_progress_prompt() -> str:
             "and return its final artifact and verdict.\n\n")
 
 
+def assignment_prompt(args, task: str, environ) -> str:
+    """Project the route's input/output boundary, rather than ask a caller to copy it.
+
+    A frame consumes the requested work as analysis input. In particular the
+    final task's report filename is not that frame's output filename. Route
+    validation and the write oracle retain authority over paths.
+    """
+    if getattr(args, "worker_type", None) != "frame":
+        return f"Assignment:\n{task.rstrip()}\n\n"
+    outputs = []
+    route_file = getattr(args, "route_file", None)
+    output_root = artifact_cycle_environment(environ)["AGENT_ARTIFACT_OUTPUT_DIR"]
+    if route_file:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        node = next(n for n in route["nodes"] if n["id"] == args.route_node)
+        outputs = [str(Path(output_root) / path) if output_root else path for path in node.get("outputs", [])]
+    return (
+        "User goal to analyze (the later owner's task):\n"
+        f"{task.rstrip()}\n\n"
+        "Current assignment: produce your frame direction brief, with options and a direction verdict. "
+        "Keep the analysis within the user's scope. Output filenames in the user goal describe the later "
+        "task; this frame produces only its own declared brief.\n"
+        + ("This frame's declared output: " + json.dumps(outputs, ensure_ascii=False) + "\n" if outputs else "")
+        + "\n"
+    )
+
+
 def supervised_owner_prompt() -> str:
     return (
         "Runtime-owned completion join: launch the current batch through its checked dispatch surface. "
@@ -227,6 +254,8 @@ def render_worker_bootstrap(root: Path, worker_type: str, unit: str | None = Non
     """
     if worker_type not in WORKER_TYPES:
         raise ValueError(f"invalid worker type: {worker_type}")
+    if worker_type == "frame" and not unit:
+        unit = "plan/frame"
     paths = (
         root / "roles" / "worker-bootstrap.md",
         root / "roles" / "worker-types" / f"{worker_type}.md",
@@ -246,6 +275,7 @@ def assigned_contract(
     completion_gate: str | None = None,
     explicit: str | None = None,
     root: Path | None = None,
+    unit: str | None = None,
 ) -> str:
     """Resolve the assigned portable contract without consulting worker role.
 
@@ -253,6 +283,8 @@ def assigned_contract(
     the portable catalog. Otherwise the entry capability remains the readable
     contract and the immutable route node supplies the narrower assignment.
     """
+    if worker_type == "frame":
+        return unit or "plan/frame"  # The injected unit is the contract, not the owner recipe.
     if explicit:
         return explicit
     if worker_type in {"stage", "review", "support"}:
@@ -261,6 +293,21 @@ def assigned_contract(
         if route_node and route_node.lower() in STAGE_NODE_CONTRACT:
             return STAGE_NODE_CONTRACT[route_node.lower()]
     return capability
+
+
+def contract_read_prompt(args, harness: str) -> str:
+    """One contract-loading instruction; frame units are already injected."""
+    if args.worker_type == "frame":
+        return ("- Your frame unit contract is already included above. Read its named inputs within "
+                "the requested scope; no owner capability Skill or full harness bootstrap is needed.\n")
+    if harness == "codex":
+        return (f"- Read only $AGENT_HOME/adapters/codex/skills/{args.assigned_contract}/SKILL.md; "
+                "the typed bootstrap above already contains the exact portable unit persona.\n")
+    if harness == "claude":
+        return (f"- Read only the exposed {args.assigned_contract} Skill, named artifacts, and selected specialization. "
+                "General Claude custom subagents may still inherit project CLAUDE.md; do not manually load a full harness bootstrap.\n")
+    return (f"- Read only the assigned {args.assigned_contract} Skill/mode and named artifact inputs. "
+            "Project instruction auto-load is not treated as physically masked; do not manually load a full harness bootstrap.\n")
 
 
 def handoff_template() -> str:

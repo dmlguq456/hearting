@@ -200,6 +200,44 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                 self.assertIn("TASK",prompt)
 
 
+class FrameAssignmentPromptTest(unittest.TestCase):
+    def test_real_adapter_prompts_distinguish_goal_report_from_current_frame_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            route = root / "route.json"
+            route.write_text(json.dumps({"nodes":[{"id":"frame-alternative",
+                "outputs":["shards/frame-alternative/direction-brief.md"]}]}))
+            for harness, (wrapper, model, _) in ADAPTERS.items():
+                with self.subTest(harness=harness), mock.patch.dict(os.environ,
+                        {"AGENT_ARTIFACT_OUTPUT_DIR":str(root / "artifacts")}):
+                    spec = importlib.util.spec_from_file_location("frame_assignment_"+harness, wrapper)
+                    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+                    args = module.parser().parse_args(["--worktree",str(root),"--slug","frame-task",
+                        "--capability","autopilot-code","--capability-mode","dev","--worker-mode","plan/frame",
+                        "--worker-type","frame","--unit","plan/frame","--intensity","standard",
+                        "--dispatch-depth","1","--prompt-text","Write the final task results to final_report.md.",*model])
+                    args.artifact_root=str(root);args.route_file=str(route);args.route_node="frame-alternative"
+                    args.route_id="rt-frame"
+                    render=module.prompt if harness=="opencode" else module.dispatch_prompt
+                    text,_=render(args)
+                    self.assertIn("User goal to analyze (the later owner's task)",text)
+                    self.assertIn("final_report.md",text)
+                    self.assertIn(str(root / "artifacts/shards/frame-alternative/direction-brief.md"),text)
+                    self.assertNotIn("Assignment:\nWrite the final task results",text)
+                    self.assertIn("only its own declared brief",text)
+                    self.assertEqual(args.assigned_contract,"plan/frame")
+                    self.assertIn("frame unit contract is already included",text)
+                    self.assertNotIn("Read only the assigned autopilot-code",text)
+                    self.assertNotIn("Read only the exposed autopilot-code",text)
+                    self.assertNotIn("skills/autopilot-code/SKILL.md",text)
+
+    def test_legacy_frame_keeps_its_callers_path_and_nonframe_assignment_is_unchanged(self):
+        frame=WB.assignment_prompt(SimpleNamespace(worker_type="frame"),"Analyze this work; output /tmp/brief.md",{})
+        self.assertIn("/tmp/brief.md",frame)
+        for kind in ("owner","stage","review","support"):
+            self.assertEqual(WB.assignment_prompt(SimpleNamespace(worker_type=kind),"TASK",{}),"Assignment:\nTASK\n\n")
+
+
 class ReleasedTaskPromptTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

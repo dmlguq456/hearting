@@ -3449,5 +3449,51 @@ class ExactReviewClassifierSignatureTest(unittest.TestCase):
         )
 
 
+class WorkContinuationReceiptTest(unittest.TestCase):
+    def setUp(self):
+        from route_identity import route_hash, route_id_from_hash
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "route.json"
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.route = {"work_request":{"text":"task","owner_harness":"codex"}}
+        self.route["route_hash"] = route_hash(self.route)
+        self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+        self.path.write_text(json.dumps(self.route))
+
+    def record(self, aid, kind="frame", depth="1"):
+        return row("done",aid,"parent","task",process_metadata={"dispatch_depth":depth,
+            "worker_type":kind,"route_file":str(self.path),"route_id":self.route["route_id"],
+            "route_hash":self.route["route_hash"]})
+
+    def render(self, actions):
+        return JOIN.completion_followup_text({"children":[{"attempt_id":aid,"required_action":action}
+            for aid,action in actions]},jobs=str(self.jobs),surface="/fixture/preflight.sh")
+
+    def test_two_frame_receipts_return_one_existing_work_handle_even_on_failure(self):
+        self.jobs.write_text(self.record("first")+self.record("second"))
+        text = self.render([("first","advance-completed"),("second","inspect-done-failure")])
+        self.assertEqual(text.count("capability-route.py start"),1,text)
+        self.assertIn(str(self.path),text)
+        self.assertNotIn("preflight.sh harvest",text)
+
+    def test_closed_owner_success_has_no_additional_command_obligation(self):
+        self.jobs.write_text(self.record("owner",kind="owner"))
+        text = self.render([("owner","advance-completed")])
+        self.assertNotIn("capability-route.py start",text)
+        self.assertNotIn("preflight.sh harvest",text)
+
+    def test_depth_two_and_corrupt_context_keep_exact_inspection_fallback(self):
+        self.jobs.write_text(self.record("stage",kind="stage",depth="2"))
+        text = self.render([("stage","inspect-done-failure")])
+        self.assertIn("--attempt-id stage --status done",text)
+        self.assertNotIn("capability-route.py start",text)
+        self.jobs.write_text(self.record("first"))
+        for mutation in ({"route_hash":"sha256:changed"},{"route_id":"rt-other"},{"work_request":None}):
+            self.path.write_text(json.dumps({**self.route,**mutation}))
+            text = self.render([("first","inspect-done-failure")])
+            self.assertNotIn("capability-route.py start",text)
+            self.assertIn("--attempt-id first --status done",text)
+
+
 if __name__ == "__main__":
     unittest.main()

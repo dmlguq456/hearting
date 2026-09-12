@@ -178,7 +178,7 @@ def _route_defaults(path, route_node=None):
         values.update(_node_model_settings(route, route_node))
         node = next(row for row in route["nodes"] if row.get("id") == route_node)
         if node.get("unit") == "plan/frame" and node.get("dispatch_depth") == 1:
-            values.update({"--worker-type": "frame", "--unit": "plan/frame"})
+            values.update({"--worker-type": "frame", "--unit": "plan/frame", "--assigned-contract": "plan/frame"})
     return {flag: (str(value) if value not in (None, "") else None) for flag, value in values.items()}
 
 

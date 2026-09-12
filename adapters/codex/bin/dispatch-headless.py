@@ -107,7 +107,7 @@ from owner_route_binding import (  # noqa: E402
     validate_runtime_requirements,
 )
 from worker_bootstrap import (
-    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt,
+    ARTIFACT_PRODUCER_CYCLE_ENV, artifact_cycle_environment, artifact_context_prompt, released_task_prompt, assignment_prompt, contract_read_prompt,
     supervised_owner_prompt,  # noqa: E402
     assigned_contract,
     profile_worker_type,
@@ -875,6 +875,7 @@ def dispatch_prompt(
         route_node=args.route_node,
         completion_gate=args.completion_gate,
         explicit=args.assigned_contract,
+        unit=args.unit,
         root=ROOT,
     )
     route_state = (
@@ -944,7 +945,7 @@ def dispatch_prompt(
         f"{artifact_context_prompt(os.environ)}"
         f"- route_state: {route_state}\n\n"
         "Codex realization:\n"
-        f"- Read only $AGENT_HOME/adapters/codex/skills/{args.assigned_contract}/SKILL.md; the typed bootstrap above already contains the exact portable unit persona.\n"
+        f"{contract_read_prompt(args, 'codex')}"
         "- An owner has no worker mode and must not load any unit persona path.\n"
         f"- Run $AGENT_HOME/adapters/codex/bin/preflight.sh qa-policy {args.qa} {qa_track(args.capability)} and keep its required assurance in the artifact.\n"
         "- The wrapper already validated capability mode, worker unit/mode, QA, artifact root, and any route record. Re-run worker-route only for a safety recheck.\n"
@@ -954,8 +955,7 @@ def dispatch_prompt(
         f"{no_commit_clause}"
         f"{stage_session_prompt(args)}"
         f"{released_task_prompt(args)}"
-        "Assignment:\n"
-        f"{task.rstrip()}\n\n"
+        f"{assignment_prompt(args, task, os.environ)}"
         f"{ending}",
         source,
     )
