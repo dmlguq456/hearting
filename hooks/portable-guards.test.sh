@@ -2099,6 +2099,7 @@ if "$CODEX" qa-policy adversarial code >/tmp/codex_qa_policy.out 2>/tmp/codex_qa
   && grep -q '^source=core/CONVENTIONS.md$' /tmp/codex_qa_policy.out \
   && grep -q '^qa_level=adversarial$' /tmp/codex_qa_policy.out \
   && grep -q '^qa_track=code$' /tmp/codex_qa_policy.out \
+  && grep -q '^assurance_scope=selected-checks-only:not-completion-evidence$' /tmp/codex_qa_policy.out \
   && grep -q '^fact_checker=skip-code-track$' /tmp/codex_qa_policy.out \
   && grep -q '^external_adversary=1x-external-adversary$' /tmp/codex_qa_policy.out \
   && grep -q '^codex_role_checks=.*preflight.sh role external adversary' /tmp/codex_qa_policy.out \
@@ -2112,10 +2113,11 @@ if "$OPENCODE" qa-policy adversarial code >/tmp/opencode_qa_policy.out 2>/tmp/op
   && grep -q '^source=core/CONVENTIONS.md$' /tmp/opencode_qa_policy.out \
   && grep -q '^qa_level=adversarial$' /tmp/opencode_qa_policy.out \
   && grep -q '^qa_track=code$' /tmp/opencode_qa_policy.out \
+  && grep -q '^assurance_scope=selected-checks-only:not-completion-evidence$' /tmp/opencode_qa_policy.out \
   && grep -q '^fact_checker=skip-code-track$' /tmp/opencode_qa_policy.out \
   && grep -q '^external_adversary=1x-external-adversary$' /tmp/opencode_qa_policy.out \
   && grep -q '^opencode_role_checks=.*preflight.sh role external adversary' /tmp/opencode_qa_policy.out \
-  && grep -q '^stage_graph_selector=intensity-not-qa$' /tmp/opencode_qa_policy.out \
+  && grep -q '^stage_graph_selector=explicit-graph-or-intensity-default$' /tmp/opencode_qa_policy.out \
   && grep -q '^independent_delegation_policy=claim-only-if-separate-opencode-agent-headless-or-external-pass-ran$' /tmp/opencode_qa_policy.out; then
   ok "opencode qa-policy maps QA level to reviewer and fallback contract"
 else

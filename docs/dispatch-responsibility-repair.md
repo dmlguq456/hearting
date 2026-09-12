@@ -1,8 +1,8 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-현재 상태: **전체 목표는 아직 미입증이며 작업을 계속한다.** 두 부모의 실제 답변은 수신됐고, 공개 질문 등록·답변 release 누락을 `6877d85e`로 고쳐 원 답변으로 재개했다. Codex는 실제 test/report→자동 workflow COMPLETE·route/cycle 마감→같은 부모 success까지 확인했다. OpenCode는 두 명령과 보고서를 완료했지만 선언된 단계 증거 없이 오너가 먼저 종료해 마감이 보류됐다. 완료 확정 전에 같은 오너가 남은 작업을 맡도록 추가 수정·검증했다. 복구 오케스트레이션 6877d와 실제 실행 19be를 구분하며, OpenCode 수정본의 마감 실측은 아직 남아 있다. 원격 main 푸시·릴리즈·설치는 보류한다.
+현재 상태: **이번 책임 계약 수리와 그 입증을 완료했다.** 실제 Codex 오너는 원 답변→선택된 test/report→런타임 마감→같은 부모 자동 success까지 완료했다. 수정본 `e3b6eebd`의 OpenCode 오너도 이른 PASS를 같은 오너·세션에서 자동 복구하고 test/report와 workflow·route·cycle을 마친 뒤 부모의 공개 대기에 completed를 반환했다. 두 경로 모두 수동 finalize가 없었다. OpenCode 부모의 비동기 자동 wake는 지원하지 않는 경로이며 명시된 유한 대기로 검증했다. 모든 하네스의 무오류·무개입 완주나 비용 절감을 주장하지 않는다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전까지 보류한다.
 
-아래는 HEAD별 진행·실패 기록이다. 각 절의 당시 대기/미검증 상태를 최종 상태로 읽지 않도록 최신 실측과 후속 수정은 마지막 두 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
+아래는 HEAD별 진행·실패 기록이다. 당시 대기/미검증 상태는 후속 절의 새 증거로만 갱신한다. 최종 근거와 한계는 [구조화된 입증 기록](evidence/dispatch-responsibility-proof-20260913.json)과 마지막 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
 
 사용자가 지적한 문제는 개별 어댑터의 기능 부족을 넘어선다. 여러 관측자가 실행 상태를 각각 판정하면서 재시도와 거부 권한을 갖고, 복구가 실패했을 때 누가 작업을 유지하거나 사용자에게 돌려줄지는 빠져 있었다. 과거 2026-09-01 복잡도 진단과 이번 Cairn·직렬 chain·리뷰 실측에서 같은 형태가 반복됐다. 이번에는 기존 수정을 유지하면서 결정 권한과 후속 책임을 공통 코드에 모았다.
 
@@ -10,6 +10,7 @@
 
 | 구간 | 최종 책임 | 변경 |
 |---|---|---|
+| 작업 시작·질문 후 재개 | 공통 `work_start`와 기존 selector/gate | compose/start가 cycle·기동·결과 대조·질문 등록·실제 답변 기록·intent·release를 연결한다. 모델은 의미 비교와 실제 질문을 맡는다. 누락된 내부 명령 조립, 답변 뒤 재질문, 수정 뒤 수동 상태 변경을 제거했다. |
 | 합의한 작업 전달 | 공통 worker bootstrap | 해제된 frame gate의 기록된 이해·답변을 owner와 후속 worker에 직접 전달한다. 계획 노드나 오너의 수동 prompt 복사에 의존하지 않으며 역할 preset이 작업 범위를 대신하지 않는다. |
 | 실행·수명·실패 정리 | 실행 경계와 finite watchdog | 실제 runner/fence와 등록 watchdog 신원을 구분한다. 자손 정리 증명 뒤 lease를 반환한다. 관측이 부족하면 정리 의무를 유지한다. |
 | 완료 확정 | jobs 잠금 안의 exact terminal writer | 프로세스 종료와 성공을 구분하고, 확정된 결과를 후속 관측이 뒤집지 못한다. `dispatch_attempt_policy`가 의미 결과와 남은 정리 의무를 분리한다. |
@@ -526,3 +527,61 @@ Codex 부모가 이미 끝난 전체 작업을 다음 단계 시작으로 오해
 공개 진입점 26 / workflow supervisor 129 / 생성 20그룹 통과.
 `/tmp/proof-frame-revision-{entry-final,workflow,generated}.log`에 보존한다.
 실제 gate journal을 쓰는 격리 검사이며 새 native 사용자 답변의 실측은 아니다.
+
+## e3b6 OpenCode 실제 복구·마감과 최종 입증 범위
+
+같은 native 부모 `ses_f6aee6d9dffe6ceouPtxHE2UJJ`를 고정 `e3b6eebd`로
+재개했다. `--session`과 함께 준 `--prompt`가 전달되지 않아 child 0을 확인한
+뒤 기존 peer 입력으로 검증 지시를 한 번 전달했다. 이후 부모 수동 입력은 없다.
+route `rt-30a164619496112c`는 원 답변 `셸 오케스트레이션`과 동일 과제만
+재사용한다. 답변의 원 call/route를 기록했으며 새 native 질문 검증이 아니다.
+
+공개 compose/start가 두 frame을 기동하고, 같은 start의 interview/answers
+입력으로 등록→release→오너 기동까지 수행했다. 복구 스크립트·수동 gate 명령은
+없다. 오너 `att-cb49d1e293640ec3e27b45f61177acd4`는 첫 턴을 일찍 PASS로
+끝냈다. 이번에는 감독기가 `workflow-completion-incomplete`로 같은 오너와
+native 세션 `ses_f694bc1ddffexHROh18KL3exNL`을 재개했다. test
+`att-768f64af221a4870a8509f9123925c07`, report
+`att-9273694c9a024a2587f472614bec2a70`을 이어서 실제 완료했다.
+새 오너·중복 retry는 0이다. 프로세스 fixture에서만 보던 복구가 실제 모델에서
+도달했고, 그 실행자가 빠진 증거를 만들 때까지 책임을 유지했다.
+
+런타임 마감은 workflow COMPLETE 2026-09-12T17:49:20.816784Z,
+cycle completed/sealed, `owner_completion_pending=false`로 확인했다.
+부모의 한 번의 공개 대기는 17:49:26.194Z에 completed와 검증된 handoff를
+반환했다(약 560초). 부모는 자기 cycle의 최종 보고서만 읽고 결과를 보고했다.
+수동 harvest/finalize, 새 사용자 답변, 기동 후 수동 부모 입력은 없다.
+OpenCode 비동기 wake의 증거가 아니라 명시된 유한 대기 경로의 실제 완주다.
+
+보고서 SHA256 `63360f8753c4634700a97c5387e8c8454973b85051275319a19c37c7ea026c45`,
+manifest `887df302bf9b74337c5fbedb4419058e6251476479104b04218ac01d2a60ba18`.
+실제 첫 명령 exit 7/stdout·stderr empty, 둘째 exit 0/stdout `3\n`/stderr empty가
+한 보고서에 있고 producer 재검증도 통과했다. 다섯 정확한 시도는 현재 공통
+프로세스 그룹·태그 자손 검사에서 모두 quiescent다. 오너의 과거 residue 표식은
+그대로 보존하고 현재 재관측과 구분한다. 네 OpenCode 시도의 native assistant
+8/27/12/8건은 전부 provider=openai/model=gpt-5.6-luna였다. Codex frame도
+light/Luna다. 관측 cutoff 뒤 native 부모를 정상 종료하고 source clean을 확인했다.
+
+검증 보고서의 QA 항목은 별도 제한이다. OpenCode preflight가 실제 선택과 무관한
+`assurance_scope=plan-check:selected-independent-pass:final-verify`를 출력했고
+report worker가 그대로 옮겼다. 이 route에는 plan-check가 없다. 그 문구를
+실행 증거로 인정하지 않으며 봉인된 원 보고서는 고치지 않았다. 공통 CONVENTIONS와
+code reference에 남은 ‘모든 non-direct graph의 plan-check 필수’도 명시 graph가
+recipe보다 우선한다는 기존 결정에 맞췄다. Codex/OpenCode QA 출력은 선택된
+검사의 권고이며 완료 증거가 아님을 명시한다. Claude는 같은 공통 규약·생성
+reference를 받는다. 실제 두 adapter의 5 level×2 track, 20 CLI 호출과 공통
+필드 일치, 생성 20그룹·경계·기존 surface budget을 확인했다.
+
+원 증거는 `/tmp/responsibility-proof-20260912/r5-owner-proof.json`, native 부모
+export와 `r5-all-opencode-native-models.json`에 있고 핵심 식별자·해시·시각·한계는
+버전 관리되는 [입증 기록](evidence/dispatch-responsibility-proof-20260913.json)에
+보존한다. 이전 r4 실패와 operator 복구를 삭제하거나 새 성공으로 바꿔 쓰지 않았다.
+
+입증 범위는 다음과 같다. 실행·완료·재시도·정리·통보 계약의 공통화는 위 코드와
+회귀 검사로 확인했고, 실제 Codex/OpenCode 오너의 선택된 단계 실행과 런타임
+마감은 각각 r4/r5로 확인했다. 지연 후 정상 완료는 09b의 실제 두 통보로,
+중복 retry·관측 불가·감독자 종료/재시작·정리 실패는 기록된 격리 정책 및 실제
+프로세스 검사로 확인했다. 새 Claude 모델 호출, OpenCode 부모의 자동 비동기
+wake, 모든 실패 조건의 실제 모델 재현, 무오류 모델 행동과 비용 절감은 주장하지
+않는다. 지원되지 않는 실행 방식에는 확인된 fallback이 있고, 거부·미확정 상태의
+복구 또는 사용자 인계 책임은 기존 공통 controller에 남는다.

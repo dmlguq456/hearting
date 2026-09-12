@@ -20,7 +20,7 @@ User-facing artifacts follow `<agent-home>/roles/response-policy.md`: explicit t
 
 ### `--intensity <level>`
 
-Intensity selects the stage graph; see [CONVENTIONS §1](../../../core/CONVENTIONS.md#1-pipeline-intensity-stage-graph-and-assurance-canonical).
+Intensity supplies the default graph below; an explicit graph takes precedence. See [CONVENTIONS §1](../../../core/CONVENTIONS.md#1-pipeline-intensity-stage-graph-and-assurance-canonical).
 
 - `direct`: intake → produce → sanity/report; no code-plan, plan-check, or durable plan.
 - `quick`: intake → orient-lite → micro-plan → plan-check-lite → produce → verify-lite → report; no independent QA after every stage.
@@ -28,7 +28,7 @@ Intensity selects the stage graph; see [CONVENTIONS §1](../../../core/CONVENTIO
 - `strong`: run separate 2-way plan (`plan` + `plan-alternative`) and implementation-review (`impl-review` + `impl-review-alternative`) groups before their declared convergence points; frame stays the same fixed two legs as `standard` — no third frame leg.
 - `thorough` and `adversarial`: widen plan plus implementation review to three legs by adding the sealed implementation-risk and failure-mode perspectives; frame still has no third leg at any intensity. Every width/profile/perspective comes from registry-v6; no owner invents a leg.
 
-Every non-direct graph has a plan-check, but expensive independent QA does not repeat after every substage.
+Plan-check belongs to the default recipe. Do not add it to an explicit graph that omits it or claim it ran from QA policy output. Report only actual verification evidence.
 
 ### Verification Rigor
 

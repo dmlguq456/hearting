@@ -2181,7 +2181,7 @@ check_opencode_bin_wrappers() {
 
   if ! grep -Fq 'preflight.sh qa-policy <quick|light|standard|thorough|adversarial> [code|research|doc|general]' adapters/opencode/bin/preflight.sh \
     || ! grep -Fq 'runtime_surface=opencode-qa-policy' adapters/opencode/bin/preflight.sh \
-    || ! grep -Fq 'stage_graph_selector=intensity-not-qa' adapters/opencode/bin/preflight.sh \
+    || ! grep -Fq 'stage_graph_selector=explicit-graph-or-intensity-default' adapters/opencode/bin/preflight.sh \
     || ! grep -Fq 'preflight.sh qa-policy <level> [code|research|doc|general]' adapters/opencode/AGENTS.md \
     || ! grep -Fq 'QA policy mapping' adapters/opencode/README.md \
     || ! grep -Fq 'QA policy mapping' adapters/opencode/ADAPTATION.md; then

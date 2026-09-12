@@ -10,14 +10,14 @@
 
 ## §1. Pipeline Intensity, Stage Graph, and Assurance (canonical)
 
-Pipeline intensity controls which orchestration shape an autopilot entry uses. Verification rigor—how much assurance selected checks receive—is derived from the same intensity through §1.1 rather than selected as a separate axis. There is no user-facing `--qa` selector to reconcile with the pipeline graph.
+Intensity supplies the default recipe below; an explicit graph selects its stages. Rigor (§1.1) budgets only selected checks. QA policy output is a recommendation, never evidence that a check ran. There is no separate user-facing `--qa` selector.
 
 | Stage | Meaning | Typical realization |
 |---|---|---|
 | `intake` | Parse request, mode, constraints, risk, and intensity | Route/capability preflight, spec significance, target selection |
 | `orient` | Gather only the context needed for the selected intensity | Read spec, source, or material artifacts; `orient-lite` for quick |
 | `plan` | Choose the work path before production | Absent for direct, inline micro-plan for quick, durable plan for standard+ |
-| `plan-check` | Check that the plan can safely feed production | Required for quick+; depth scales with intensity |
+| `plan-check` | Check that the plan can safely feed production | Included by the quick+ default recipe; optional in an explicit graph |
 | `produce` | Create or modify the artifact | Code, draft, report, design, spec, or note |
 | `verify` | Run a concrete checker | Tests, visual harness, claim verification, compile, consistency, or drift check |
 | `synth` | Merge independent perspectives into one path | Only when perspective workers ran |
@@ -32,7 +32,7 @@ Pipeline intensity controls which orchestration shape an autopilot entry uses. V
 | `thorough` | Strong groups plus deeper synthesis/verification | A declared group may add a third implementation-risk, failure-mode, or contrarian leg; unchanged groups remain width two | The base recipe realizes only registry-declared 2–4-way siblings; composed routes may add other bounded dispatch-depth-2 perspectives | thorough |
 | `adversarial` | Thorough plus adversarial failure-mode/security verification | Use the route-declared width and adversarial perspective; no undeclared fan-out | Bounded declared group or composed adversary/verifier; dispatch depth remains at most 2 | adversarial |
 
-Stage-local gates stay cheap and ask only whether output can feed the next stage. An independent QA pass uses another harness, execution profile, perspective, or model family and runs only where selected intensity calls for it. A declared `cross-harness` group must realize at least two eligible harnesses; N greater than the harness count gains additional independence through profile and perspective diversity. Final verification remains capability-specific. Every non-direct graph includes at least a small plan check because a bad plan corrupts every downstream stage.
+Stage gates check whether output can feed the next stage. Independent QA runs only where selected, using another harness, profile, perspective, or model family. A declared `cross-harness` group requires two eligible harnesses; further legs add profile or perspective diversity. Final verification remains capability-specific. Never add an omitted plan-check or report an unexecuted check as passed.
 
 Dispatch depth is portable route topology, not process ancestry, runtime-native
 agent nesting, or proof of registry membership. Dispatch dispatch depth 0 is user-facing
@@ -59,7 +59,7 @@ alone are insufficient.
 
 ### §1.1. Verification Rigor Tiers
 
-Rigor is an assurance budget inside the graph selected by intensity. It does not create stages, choose topology, or grant dispatch depth 2. Reviewer counts are upper bounds for a selected pass rather than automatic fan-out after every stage.
+Rigor budgets assurance inside the selected graph. It creates no stages or dispatch depth. Reviewer counts bound a selected pass; they do not require fan-out after each stage.
 
 | Rigor | Derived from | Plan check | Selected independent pass | Final verification | Retry budget |
 |---|---|---|---|---|---|
@@ -215,7 +215,7 @@ For standard+ code stage dispatch, role and profile are explicit: ordinary frame
 
 ## §3. Hard Cross-Document Invariants
 
-1. Intensity selects graph and depth; §1.1 derives assurance from intensity. There is no user-facing `--qa` axis, and rigor alone cannot open dispatch depth 2 or a full pipeline.
+1. Explicit graph selection takes precedence over the intensity recipe. §1.1 budgets selected checks; QA alone opens no stage or dispatch depth.
 2. Quick means one-session micro-plan, plan-check-lite, and verify-lite carrying the adversarial stance (§1.1). Requiring a durable plan, an added independent pass, or parallel/cross-harness reviewer fan-out for a small `direct`/`quick` task is still drift; the universal adversarial stance is a posture inside the existing check, not a new stage or session.
 3. Adversarial means thorough plus a selected external adversary, failure-mode, security, or claim-verification pass. `standard + external/Codex` is not the definition.
 4. Code has no fact-checker.

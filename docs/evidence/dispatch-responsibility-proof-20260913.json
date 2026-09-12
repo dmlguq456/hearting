@@ -1,0 +1,711 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-09-12T17:57:00.268010+00:00",
+  "scope": "Shared execution, completion, retry, cleanup, and parent handoff responsibility; recipe/profile defaults and public work entry.",
+  "codex_r4": {
+    "runtime_head": "19be761ed9123fde421df45a9d0288f2db57612a",
+    "orchestration_commit": "6877d85e449c613a7ccb45b17570a9aad88e8c8f",
+    "parent": "01a0950c-979b-7ed3-832c-b537cf20434b",
+    "owner": "att-19caf10790d4a6ca60562a7f6ed525d9",
+    "workflow": "COMPLETE",
+    "completion_pending": false,
+    "producer_verification": {
+      "status": "already-sealed",
+      "cycle_id": "cyc_14dcad3f103cddbfdbcf1329d8445f74",
+      "manifest_digest": "sha256:ad4cc8f305541bab7e46413c05001658743c993d28aab4b0366ac0acba1ff74a"
+    },
+    "files": {
+      "report": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-codex-r4-20260912/artifacts/final_report.md",
+        "sha256": "9ea926496a729103a670498463d398bb6111b056be59ae11dc8b1fad28430b98",
+        "bytes": 1116
+      },
+      "manifest": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-codex-r4-20260912/manifest.json",
+        "sha256": "ad4cc8f305541bab7e46413c05001658743c993d28aab4b0366ac0acba1ff74a",
+        "bytes": 17989
+      },
+      "intent": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-codex-r4-20260912/artifacts/shards/frame/intent.md",
+        "sha256": "6253a40ec96a172521bc969b9f26e34d00b11be45341e11a976df41ad909e951",
+        "bytes": 1275
+      }
+    },
+    "attempts": [
+      {
+        "status": "done",
+        "slug": "responsibility-proof-codex-r4-20260912-frame",
+        "attempt_id": "att-4dc79fef20ab2eeb15e8f9115700b4f2",
+        "worker_type": "frame",
+        "dispatch_depth": "1",
+        "parent_attempt_id": null,
+        "harness": "codex",
+        "model": "gpt-5.6-luna",
+        "model_profile": "light",
+        "note": "completed-marker",
+        "process_state": "quiescent",
+        "process_reason": "governed-process-group-drained"
+      },
+      {
+        "status": "done",
+        "slug": "responsibility-proof-codex-r4-20260912-frame-alternative",
+        "attempt_id": "att-99cfb3d17b942fc65296a73ccc0d9a42",
+        "worker_type": "frame",
+        "dispatch_depth": "1",
+        "parent_attempt_id": null,
+        "harness": "opencode",
+        "model": "openai/gpt-5.6-luna",
+        "model_profile": "light",
+        "note": "completed-marker",
+        "process_state": "quiescent",
+        "process_reason": "governed-process-group-drained"
+      },
+      {
+        "status": "done",
+        "slug": "responsibility-proof-codex-r4-20260912-owner",
+        "attempt_id": "att-19caf10790d4a6ca60562a7f6ed525d9",
+        "worker_type": "owner",
+        "dispatch_depth": "1",
+        "parent_attempt_id": null,
+        "harness": "codex",
+        "model": "gpt-5.6-luna",
+        "model_profile": "light",
+        "note": "completed-supervisor",
+        "process_state": "quiescent",
+        "process_reason": "governed-process-group-drained"
+      },
+      {
+        "status": "done",
+        "slug": "responsibility-proof-codex-r4-20260912-test",
+        "attempt_id": "att-b09e1cb69e67cc147c349b6d9a1e07caddcbe3d478d76d64",
+        "worker_type": "stage",
+        "dispatch_depth": "2",
+        "parent_attempt_id": "att-19caf10790d4a6ca60562a7f6ed525d9",
+        "harness": "codex",
+        "model": "gpt-5.6-luna",
+        "model_profile": "light",
+        "note": "completed-marker",
+        "process_state": "quiescent",
+        "process_reason": "governed-process-group-reaped"
+      },
+      {
+        "status": "done",
+        "slug": "responsibility-proof-codex-r4-20260912-report",
+        "attempt_id": "att-8eea7f67bb3e14ca7836bdd4a32a4b368ce8c99f9b125aec",
+        "worker_type": "stage",
+        "dispatch_depth": "2",
+        "parent_attempt_id": "att-19caf10790d4a6ca60562a7f6ed525d9",
+        "harness": "codex",
+        "model": "gpt-5.6-luna",
+        "model_profile": "light",
+        "note": "completed-marker",
+        "process_state": "quiescent",
+        "process_reason": "governed-process-group-reaped"
+      }
+    ],
+    "automatic_parent_success_at": "2026-09-12T17:13:38.489Z",
+    "manual_finalize": 0,
+    "limitations": [
+      "6877 helper recovered an older 19be route with the original native answer; execution and orchestration versions differ.",
+      "Root corrected an earlier false-premise question before the actual answer.",
+      "Old success wording caused unnecessary follow-up reads/start calls; not an error-free parent follow-up."
+    ]
+  },
+  "opencode_r4_failure": {
+    "runtime_head": "19be761ed9123fde421df45a9d0288f2db57612a",
+    "owner": "att-083f566257f91851f70d1c3ce3f97ca5",
+    "workflow": "RUNNING",
+    "completion_pending": true,
+    "files": {
+      "report": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-opencode-r4-20260912/artifacts/final_report.md",
+        "sha256": "83de93ea753cabbb5330bd85c7de86e3922741ca27f250c3318aafcf025c99a4",
+        "bytes": 1671
+      },
+      "intent": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-opencode-r4-20260912/artifacts/shards/frame/intent.md",
+        "sha256": "98b9eef4588f9f99831efd6529c11ab04c8fc53eebb4c8afeda0906d485af9b2",
+        "bytes": 1682
+      }
+    },
+    "failure": "Owner committed PASS before declared test/report evidence; workflow and cycle stayed open. Preserved, not repaired by fabricated markers."
+  },
+  "opencode_r5": {
+    "runtime_head": "e3b6eebd3c1d24a50701e07426a3c994ab5b6e1e",
+    "runtime_clean": true,
+    "parent": "ses_f6aee6d9dffe6ceouPtxHE2UJJ",
+    "route": "rt-30a164619496112c",
+    "owner": "att-cb49d1e293640ec3e27b45f61177acd4",
+    "workflow": "COMPLETE",
+    "workflow_completed_at": "2026-09-12T17:49:20.816784Z",
+    "completion_pending": false,
+    "producer_verification": {
+      "status": "already-sealed",
+      "cycle_id": "cyc_c538425ed096a592bd2044d18dbd2747",
+      "manifest_digest": "sha256:887df302bf9b74337c5fbedb4419058e6251476479104b04218ac01d2a60ba18"
+    },
+    "files": {
+      "report": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-opencode-r5-20260913/artifacts/final_report.md",
+        "sha256": "63360f8753c4634700a97c5387e8c8454973b85051275319a19c37c7ea026c45",
+        "bytes": 2153
+      },
+      "manifest": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-opencode-r5-20260913/manifest.json",
+        "sha256": "887df302bf9b74337c5fbedb4419058e6251476479104b04218ac01d2a60ba18",
+        "bytes": 19573
+      },
+      "intent": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-opencode-r5-20260913/artifacts/shards/frame/intent.md",
+        "sha256": "76d859d78ceac98fb4decce8b832fe1bdd15cf4b22c30f922e83c9b113519fdf",
+        "bytes": 1603
+      },
+      "interview": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-opencode-r5-20260913/artifacts/shards/frame/round-1/interview.json",
+        "sha256": "527a28cc09c62fd2ec2ca434c66bee1a442c5d8632a640a16cf040147ce8950c",
+        "bytes": 1518
+      },
+      "answers": {
+        "path": "/home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-opencode-r5-20260913/artifacts/shards/frame/round-1/answers.json",
+        "sha256": "4aba54da1e2f580e8935e93f72332019f2b7e971f332d44b921ad803ce0c57c5",
+        "bytes": 313
+      }
+    },
+    "answer": {
+      "answers": {},
+      "correction": "",
+      "round": 1,
+      "route_id": "rt-30a164619496112c",
+      "schema": "frame_interview_answers_v1",
+      "source_answer": "셸 오케스트레이션",
+      "source_call_id": "call_0SBOl3T7rCKzXvbNSVWmFKLq",
+      "source_route_id": "rt-d61c5f3241d72d08",
+      "understanding_confirmed": true
+    },
+    "gate_raised_at": "2026-09-12T17:39:40.061630Z",
+    "gate_released_at": "2026-09-12T17:39:40.188511Z",
+    "attempts": [
+      {
+        "status": "done",
+        "slug": "responsibility-proof-opencode-r5-20260913-frame",
+        "quiescence": {
+          "state": "quiescent",
+          "reason": "governed-process-group-drained"
+        },
+        "attempt_id": "att-cf43ad18e6555ba2394576a1cee8e387",
+        "worker_type": "frame",
+        "dispatch_depth": "1",
+        "parent_attempt_id": null,
+        "harness": "codex",
+        "model": "gpt-5.6-luna",
+        "model_profile": "light",
+        "model_tier": "light",
+        "note": "completed-marker",
+        "attempt_descendant_proof": "attempt-tagged-empty-v1",
+        "attempt_descendant_residue": null,
+        "group_reap_proof": "pgid-empty-v1"
+      },
+      {
+        "status": "done",
+        "slug": "responsibility-proof-opencode-r5-20260913-frame-alternative",
+        "quiescence": {
+          "state": "quiescent",
+          "reason": "governed-process-group-drained"
+        },
+        "attempt_id": "att-a4fbc195ff7eb51546096e9e658e630c",
+        "worker_type": "frame",
+        "dispatch_depth": "1",
+        "parent_attempt_id": null,
+        "harness": "opencode",
+        "model": "openai/gpt-5.6-luna",
+        "model_profile": "light",
+        "model_tier": "light",
+        "note": "completed-marker",
+        "attempt_descendant_proof": "attempt-tagged-empty-v1",
+        "attempt_descendant_residue": null,
+        "group_reap_proof": "pgid-empty-v1"
+      },
+      {
+        "status": "done",
+        "slug": "responsibility-proof-opencode-r5-20260913-owner",
+        "quiescence": {
+          "state": "quiescent",
+          "reason": "local-pid-gone"
+        },
+        "attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "worker_type": "owner",
+        "dispatch_depth": "1",
+        "parent_attempt_id": null,
+        "harness": "opencode",
+        "model": "openai/gpt-5.6-luna",
+        "model_profile": "light",
+        "model_tier": "light",
+        "note": "completed-supervisor",
+        "attempt_descendant_proof": "attempt-tagged-residue-v1",
+        "attempt_descendant_residue": "678905:366896543",
+        "group_reap_proof": "pgid-empty-v1"
+      },
+      {
+        "status": "done",
+        "slug": "responsibility-proof-opencode-r5-20260913-test",
+        "quiescence": {
+          "state": "quiescent",
+          "reason": "governed-process-group-drained"
+        },
+        "attempt_id": "att-768f64af221a4870a8509f9123925c07",
+        "worker_type": "stage",
+        "dispatch_depth": "2",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "harness": "opencode",
+        "model": "openai/gpt-5.6-luna",
+        "model_profile": "light",
+        "model_tier": "light",
+        "note": "completed-marker",
+        "attempt_descendant_proof": "attempt-tagged-empty-v1",
+        "attempt_descendant_residue": null,
+        "group_reap_proof": "pgid-empty-v1"
+      },
+      {
+        "status": "done",
+        "slug": "responsibility-proof-opencode-r5-20260913-report",
+        "quiescence": {
+          "state": "quiescent",
+          "reason": "governed-process-group-drained"
+        },
+        "attempt_id": "att-9273694c9a024a2587f472614bec2a70",
+        "worker_type": "stage",
+        "dispatch_depth": "2",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "harness": "opencode",
+        "model": "openai/gpt-5.6-luna",
+        "model_profile": "light",
+        "model_tier": "light",
+        "note": "completed-marker",
+        "attempt_descendant_proof": "attempt-tagged-empty-v1",
+        "attempt_descendant_residue": null,
+        "group_reap_proof": "pgid-empty-v1"
+      }
+    ],
+    "controller_events": [
+      {
+        "type": "dispatch.supervisor.continuation-budget",
+        "limit": 13,
+        "source": "sealed-block",
+        "declared_nodes": 4,
+        "retry_slots": 0,
+        "ordinary": 12,
+        "reserved": 1,
+        "stall": 12
+      },
+      {
+        "type": "dispatch.supervisor.turn-started",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "turn_ordinal": 1,
+        "transport": "resume-process",
+        "resume": false,
+        "monotonic_ns": 3668597427148910
+      },
+      {
+        "type": "dispatch.supervisor.session",
+        "runtime": "opencode",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "session_id": "ses_f694bc1ddffexHROh18KL3exNL",
+        "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/dispatch-responsibility-integration"
+      },
+      {
+        "type": "dispatch.supervisor.turn-completed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "turn_ordinal": 1,
+        "transport": "resume-process",
+        "resume": false,
+        "monotonic_ns": 3668698089083112,
+        "duration_seconds": 100.662
+      },
+      {
+        "type": "dispatch.supervisor.resumed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "continuation_reason": "workflow-completion-incomplete",
+        "continuation_ordinal": 1
+      },
+      {
+        "type": "dispatch.supervisor.turn-started",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "turn_ordinal": 2,
+        "transport": "resume-process",
+        "resume": true,
+        "monotonic_ns": 3668698139297848
+      },
+      {
+        "type": "dispatch.supervisor.session",
+        "runtime": "opencode",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "session_id": "ses_f694bc1ddffexHROh18KL3exNL",
+        "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/dispatch-responsibility-integration"
+      },
+      {
+        "type": "dispatch.supervisor.turn-completed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "turn_ordinal": 2,
+        "transport": "resume-process",
+        "resume": true,
+        "monotonic_ns": 3668817849619486,
+        "duration_seconds": 119.71
+      },
+      {
+        "type": "dispatch.supervisor.parked",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1
+      },
+      {
+        "type": "dispatch.supervisor.join-started",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1,
+        "monotonic_ns": 3668817876043917
+      },
+      {
+        "type": "dispatch.supervisor.join-completed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1,
+        "state": "ready",
+        "monotonic_ns": 3668923579151097,
+        "duration_seconds": 105.703,
+        "delivery_timing_schema_version": 1,
+        "last_child_terminal_ns": 3668923569779762,
+        "join_completed_ns": 3668923579151097,
+        "same_thread_resume_ns": null,
+        "exact_harvest_ns": null,
+        "next_stage_start_ns": null,
+        "final_report_marker_ns": null,
+        "owner_terminal_envelope_ns": null
+      },
+      {
+        "type": "dispatch.supervisor.reconciled",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_id": "att-768f64af221a4870a8509f9123925c07",
+        "outcome": "closed"
+      },
+      {
+        "type": "dispatch.supervisor.join-started",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1,
+        "monotonic_ns": 3668923880018283
+      },
+      {
+        "type": "dispatch.supervisor.join-completed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1,
+        "state": "ready",
+        "monotonic_ns": 3668924071975580,
+        "duration_seconds": 0.192,
+        "delivery_timing_schema_version": 1,
+        "last_child_terminal_ns": 3668924062063843,
+        "join_completed_ns": 3668924071975580,
+        "same_thread_resume_ns": null,
+        "exact_harvest_ns": null,
+        "next_stage_start_ns": null,
+        "final_report_marker_ns": null,
+        "owner_terminal_envelope_ns": null
+      },
+      {
+        "type": "dispatch.supervisor.resumed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "state": "ready",
+        "attempt_count": 1,
+        "continuation_reason": "actionable-completion-receipt",
+        "continuation_ordinal": 2
+      },
+      {
+        "type": "dispatch.supervisor.turn-started",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "turn_ordinal": 3,
+        "transport": "resume-process",
+        "resume": true,
+        "monotonic_ns": 3668924528954257
+      },
+      {
+        "type": "dispatch.supervisor.session",
+        "runtime": "opencode",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "session_id": "ses_f694bc1ddffexHROh18KL3exNL",
+        "cwd": "/home/nas/user/Uihyeop/personal/hearting-wt/dispatch-responsibility-integration"
+      },
+      {
+        "type": "dispatch.supervisor.turn-completed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "turn_ordinal": 3,
+        "transport": "resume-process",
+        "resume": true,
+        "monotonic_ns": 3668981686780908,
+        "duration_seconds": 57.158
+      },
+      {
+        "type": "dispatch.supervisor.owner-boundary",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "previous_attempt_ids": [
+          "att-768f64af221a4870a8509f9123925c07"
+        ],
+        "new_attempt_ids": [
+          "att-9273694c9a024a2587f472614bec2a70"
+        ],
+        "previous_count": 1,
+        "new_count": 1,
+        "ordinal": 1,
+        "delivery_timing_schema_version": 1,
+        "last_child_terminal_ns": 3668924062063843,
+        "join_completed_ns": 3668924071975580,
+        "same_thread_resume_ns": 3668924507365530,
+        "exact_harvest_ns": null,
+        "next_stage_start_ns": 3668981711406343,
+        "final_report_marker_ns": null,
+        "owner_terminal_envelope_ns": null
+      },
+      {
+        "type": "dispatch.supervisor.parked",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1
+      },
+      {
+        "type": "dispatch.supervisor.join-started",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1,
+        "monotonic_ns": 3668981712141417
+      },
+      {
+        "type": "dispatch.supervisor.join-completed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1,
+        "state": "ready",
+        "monotonic_ns": 3669077166253691,
+        "duration_seconds": 95.454,
+        "delivery_timing_schema_version": 1,
+        "last_child_terminal_ns": 3669077155295969,
+        "join_completed_ns": 3669077166253691,
+        "same_thread_resume_ns": null,
+        "exact_harvest_ns": null,
+        "next_stage_start_ns": null,
+        "final_report_marker_ns": null,
+        "owner_terminal_envelope_ns": null
+      },
+      {
+        "type": "dispatch.supervisor.reconciled",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_id": "att-9273694c9a024a2587f472614bec2a70",
+        "outcome": "closed"
+      },
+      {
+        "type": "dispatch.supervisor.join-started",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1,
+        "monotonic_ns": 3669077480271766
+      },
+      {
+        "type": "dispatch.supervisor.join-completed",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "attempt_count": 1,
+        "state": "ready",
+        "monotonic_ns": 3669077672800378,
+        "duration_seconds": 0.193,
+        "delivery_timing_schema_version": 1,
+        "last_child_terminal_ns": 3669077660543144,
+        "join_completed_ns": 3669077672800378,
+        "same_thread_resume_ns": null,
+        "exact_harvest_ns": null,
+        "next_stage_start_ns": null,
+        "final_report_marker_ns": null,
+        "owner_terminal_envelope_ns": null
+      },
+      {
+        "type": "dispatch.supervisor.terminal-fast-path",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "terminal_nodes": [
+          "report"
+        ],
+        "continuation_saved": true
+      },
+      {
+        "type": "dispatch.supervisor.delivery-timing",
+        "parent_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "same_thread_resume_count": 1,
+        "delivery_timing_schema_version": 1,
+        "last_child_terminal_ns": 3669077660543144,
+        "join_completed_ns": 3669077672800378,
+        "same_thread_resume_ns": null,
+        "exact_harvest_ns": null,
+        "next_stage_start_ns": null,
+        "final_report_marker_ns": 3669077907968627,
+        "owner_terminal_envelope_ns": 3669078202167467
+      },
+      {
+        "type": "result",
+        "runtime": "opencode",
+        "session_id": "ses_f694bc1ddffexHROh18KL3exNL",
+        "subtype": "success",
+        "is_error": false,
+        "result": "artifact: /home/nas/user/Uihyeop/personal/hearting/.agent_reports/campaigns/2026-09-12_responsibility-proof-codex-20260912/2026-09-12_responsibility-proof-opencode-r5-20260913/artifacts/final_report.md\nverdict: PASS\nblocker: none"
+      }
+    ],
+    "public_receipts": [
+      {
+        "call_id": "call_SfCaSzYmS9V99zl5nxzwLc0T",
+        "time": {
+          "start": 1789234583776,
+          "end": 1789234696006
+        },
+        "state": "needs-interview",
+        "owner_attempt_id": null,
+        "parent_next": null,
+        "completed": null
+      },
+      {
+        "call_id": "call_Xv93CPrqy6J86lplwQu9sxyr",
+        "time": {
+          "start": 1789234775064,
+          "end": 1789234797281
+        },
+        "state": "running",
+        "owner_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "parent_next": "bounded-wait",
+        "completed": null
+      },
+      {
+        "call_id": "call_0DmShuWWezUe4YSUq0qmBjzs",
+        "time": {
+          "start": 1789234806119,
+          "end": 1789235366194
+        },
+        "state": "completed",
+        "owner_attempt_id": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "parent_next": null,
+        "completed": null
+      }
+    ],
+    "native_opencode_models": [
+      {
+        "attempt": "att-a4fbc195ff7eb51546096e9e658e630c",
+        "evidence": [
+          {
+            "session": "ses_f694f1e47ffeqqHM3BvB0PyADi",
+            "assistant_count": 8,
+            "models": [
+              [
+                "openai",
+                "gpt-5.6-luna"
+              ]
+            ],
+            "export": "/tmp/responsibility-proof-20260912/att-a4fbc195ff7eb51546096e9e658e630c-native-export.json",
+            "sha256": "456ad3cc734201836b6356ebe430f6060e200c91881150c5f8000a0a161b5411"
+          }
+        ]
+      },
+      {
+        "attempt": "att-cb49d1e293640ec3e27b45f61177acd4",
+        "evidence": [
+          {
+            "session": "ses_f694bc1ddffexHROh18KL3exNL",
+            "assistant_count": 27,
+            "models": [
+              [
+                "openai",
+                "gpt-5.6-luna"
+              ]
+            ],
+            "export": "/tmp/responsibility-proof-20260912/att-cb49d1e293640ec3e27b45f61177acd4-native-export.json",
+            "sha256": "40a7e04fa45028b2a4531c3f2bed078b3fd1064541819b760b9757401704b7a6"
+          }
+        ]
+      },
+      {
+        "attempt": "att-768f64af221a4870a8509f9123925c07",
+        "evidence": [
+          {
+            "session": "ses_f6948c9f6ffeaxz2VYeIEsu5d1",
+            "assistant_count": 12,
+            "models": [
+              [
+                "openai",
+                "gpt-5.6-luna"
+              ]
+            ],
+            "export": "/tmp/responsibility-proof-20260912/att-768f64af221a4870a8509f9123925c07-native-export.json",
+            "sha256": "397ff18b273d77afd1a10592e4e294df89d190e908407ba3432f3e5f31df7f8f"
+          }
+        ]
+      },
+      {
+        "attempt": "att-9273694c9a024a2587f472614bec2a70",
+        "evidence": [
+          {
+            "session": "ses_f694620d8ffe0RG127NxGU5A5F",
+            "assistant_count": 8,
+            "models": [
+              [
+                "openai",
+                "gpt-5.6-luna"
+              ]
+            ],
+            "export": "/tmp/responsibility-proof-20260912/att-9273694c9a024a2587f472614bec2a70-native-export.json",
+            "sha256": "8f4a4267929c97e727163b7bfd4f3d7e4a5e2c529c33830765430dbcc4cb30dd"
+          }
+        ]
+      }
+    ],
+    "manual_finalize": 0,
+    "manual_harvest": 0,
+    "new_owner_retries": 0,
+    "fresh_native_questions": 0,
+    "limitations": [
+      "The r4 original native answer is reused for exactly the same task; no fresh r5 native question proof.",
+      "OpenCode parent uses its printed bounded wait; no asynchronous native wake proof.",
+      "Resumed TUI ignored --prompt; one checked peer prompt before any r5 dispatch delivered the brief.",
+      "Early owner PASS required runtime continuation in the same attempt/session; this is recovery proof, not a flawless model first turn.",
+      "Final report copied an unexecuted plan-check label from QA policy. Both command results and runtime closure are proved; that QA label is not evidence and remains preserved. The policy projection is corrected separately."
+    ]
+  },
+  "evidence": [
+    {
+      "path": "/tmp/responsibility-proof-20260912/r4-native-answers.json",
+      "sha256": "17a6180b11b1a688dfe45fc6168b87f90d6ef7b90fac80ced8719a35a8b1c4c1"
+    },
+    {
+      "path": "/tmp/responsibility-proof-20260912/r4-owner-proof.json",
+      "sha256": "4b32a7be8b8bd89180878001057bdd18beac1d35fed7bbc50ba7a94e40f53037"
+    },
+    {
+      "path": "/tmp/responsibility-proof-20260912/r5-owner-proof.json",
+      "sha256": "8224265c0db82fcecf0c746b162f6c9d06533a15e91efcbcb7a4338326b1b384"
+    },
+    {
+      "path": "/tmp/responsibility-proof-20260912/opencode-r5-parent-latest-export.json",
+      "sha256": "957b21e152da621f8f0582adfe9143e03cce608c90c48ff71854718d855721e1"
+    },
+    {
+      "path": "/tmp/responsibility-proof-20260912/r5-all-opencode-native-models.json",
+      "sha256": "e662c91098e4100ffc184be34b826b397a41581ac1b61fb6c894591eab76ebd5"
+    },
+    {
+      "path": "/tmp/responsibility-proof-20260912/r5-parent-shutdown.json",
+      "sha256": "5cf9d7274dae618d7143b4275d152665c45602849b12a1228cef43f8e5708517"
+    }
+  ],
+  "acceptance_boundaries": {
+    "actual_models": [
+      "Codex owner: actual original answer, declared stage results, runtime closure, same-parent automatic success.",
+      "OpenCode owner: exact same actual answer reused, premature PASS recovered within same owner/session, declared stage results, runtime closure, bounded parent result.",
+      "All new models use light; OpenCode native metadata confirms OpenAI gpt-5.6-luna. No new Claude model calls."
+    ],
+    "controlled_evidence": [
+      "Delayed/unknown observation, supervisor termination/restart, two-process duplicate retry race, committed-success preservation and cleanup failure are checked in the documented protocol/real-process suites.",
+      "Three harnesses share the contract; Claude validation in this repair is hermetic and historical native evidence, not a new live Claude canary."
+    ],
+    "runtime_limits": [
+      "OpenCode parent automatic asynchronous wake is unsupported in this measured path; its explicit bounded wait is the checked fallback.",
+      "OpenCode owner serial-chain supervision remains unsupported with a checked single-session fallback."
+    ],
+    "not_claimed": [
+      "Zero model errors or zero operator recovery across historical attempts.",
+      "Every deployment environment and client lifetime policy.",
+      "Measured token/billing reduction.",
+      "Global runtime installation or remote main publication."
+    ]
+  }
+}

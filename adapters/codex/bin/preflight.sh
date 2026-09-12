@@ -978,8 +978,8 @@ EOF
     printf 'fact_checker=%s\n' "$fact_checker"
     printf 'external_adversary=%s\n' "$external_adversary"
     printf 'max_round=%s\n' "$max_round"
-    printf 'assurance_scope=plan-check:selected-independent-pass:final-verify\n'
-    printf 'stage_graph_selector=intensity-not-qa\n'
+    printf 'assurance_scope=selected-checks-only:not-completion-evidence\n'
+    printf 'stage_graph_selector=explicit-graph-or-intensity-default\n'
     printf 'reviewer_counts=upper-bound-for-selected-pass-not-per-stage-loop\n'
     printf 'codex_role_checks=%s\n' "$role_checks"
     printf 'independent_delegation_policy=claim-only-if-separate-codex-agent-headless-or-external-pass-ran\n'
