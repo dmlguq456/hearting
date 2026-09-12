@@ -1046,9 +1046,6 @@ def main(argv: list[str] | None = None) -> int:
                 rows, settled = settle_runtime_wait_children(args, delivered)
                 current = {row.attempt_id: row for row in rows}
                 new_attempts = set(current).difference(delivered)
-                unstarted = unstarted_child_attempts(
-                    [current[attempt] for attempt in new_attempts]
-                )
                 partition = partition_runtime_wait_children(
                     Path(args.jobs), args.parent_attempt_id,
                     [current[attempt] for attempt in new_attempts], new_attempts,
@@ -1073,7 +1070,10 @@ def main(argv: list[str] | None = None) -> int:
             # fail-closed.
             if not wait_requested and not park_attempts:
                 delivered.update(partition.refusal_settled)
-            if unstarted or empty_wait:
+            # Collect work already admitted to the shared join before asking
+            # for another launch. A pending sibling cannot preempt that duty
+            # or make a repeated correction terminate the running children.
+            if (unstarted or empty_wait) and not park_attempts:
                 signature = tuple(sorted(unstarted))
                 if signature in launch_remediated:
                     raise SupervisorError("runtime-wait-without-started-child")

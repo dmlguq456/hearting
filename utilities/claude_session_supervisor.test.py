@@ -94,6 +94,12 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
                 state_path = os.environ['AGENT_DISPATCH_COMPLETION_STATE_FILE']
                 with open(state_path, encoding='utf-8') as state_handle:
                     delivered = json.load(state_handle)['delivered_attempt_ids']
+                if os.environ.get('FAKE_MIXED_START') == '1' and 'att-child' in delivered:
+                    jobs = os.environ['FAKE_JOBS']
+                    with open(jobs, encoding='utf-8') as h:
+                        rows = h.read().replace('launch_started=0', 'launch_started=1')
+                    with open(jobs, 'w', encoding='utf-8') as h:
+                        h.write(rows)
                 with open(os.environ['FAKE_TRACE'], 'a', encoding='utf-8') as h:
                     h.write(json.dumps({'event':'turn-start','time':time.monotonic(),
                                         'resume':resume,'session':session,'prompt':prompt,
@@ -734,6 +740,20 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
             and row.get("state") == "registration-required"
             for row in rows
         ))
+
+    def test_started_child_is_collected_before_correcting_unstarted_sibling(self):
+        pending = child_row().replace("att-child", "att-pending").replace("launch_started=1", "launch_started=0")
+        self.jobs.write_text(owner_row(self.lease) + child_row() + pending)
+        result = self.run_supervisor(FAKE_MIXED_START="1", FAKE_JOBS=str(self.jobs))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([event["event"] for event in trace], [
+            "turn-start", "join-start", "join-end", "turn-start",
+            "join-start", "join-end", "turn-start",
+        ])
+        self.assertEqual(trace[3]["delivered"], ["att-child"])
+        self.assertEqual(set(trace[-1]["delivered"]), {"att-child", "att-pending"})
+        self.assertNotIn('"state": "registration-required"', result.stdout)
 
     def test_bound_long_route_survives_thirteen_continuations_and_completes(self):
         route = self.base / "long-route.json"

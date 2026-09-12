@@ -1534,7 +1534,10 @@ def main(argv: list[str] | None = None) -> int:
             # existing empty-wait correction path.
             if not runtime_wait_requested(result.get("result")) and not park_attempts:
                 delivered.update(partition.refusal_settled)
-            if unstarted or empty_wait:
+            # Collect work already admitted to the shared join before asking
+            # for another launch. A pending sibling cannot preempt that duty
+            # or make a repeated correction terminate the running children.
+            if (unstarted or empty_wait) and not park_attempts:
                 signature = tuple(sorted(unstarted))
                 if signature in launch_remediated:
                     raise SupervisorError("runtime-wait-without-started-child")

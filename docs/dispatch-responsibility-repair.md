@@ -405,3 +405,30 @@ parent-wait-deadline`로 사용자에게 미해결 상태를 보고하도록 돌
 부분 기동·응답 유실·충돌·미봉인 성공 소비 거부를 확인한다. 기한 시험은 제어된
 관측 fixture이며 실제 모델을 600초 기다린 실측으로 주장하지 않는다. 실행 중인
 두 r4 부모의 source `19be761e`는 이 후속 수정과 별개로 고정해 두었다.
+
+## 시작한 자식의 수집 책임을 미시작 교정보다 우선
+
+마지막 책임 점검에서 일반 자식 A가 시작됐고 B는 등록만 된 혼합 상태도 확인했다.
+기존 두 controller는 B의 미시작 교정으로 먼저 모델을 재개하고, 같은 상태가 한 번
+더 나오면 A를 join하기 전에 `runtime-wait-without-started-child`로 종료했다.
+직렬 chain의 정상 꼬리 제외만으로 해결되지 않는 별도 수집 순서 문제다.
+
+공통 partition이 반환한 join 대상이 있으면 먼저 기존 join과 결과 전달을 수행하도록
+Codex App Server controller와 Claude/OpenCode 공통 CLI controller의 순서를 맞췄다.
+새 chain 예외·상태 저장소·실패 분류기를 추가하지 않았다. join 대상이 모두 수집된
+뒤에만 남은 미시작 교정을 진행한다. 이미 시작한 일을 수집할 책임이 등록 교정에
+선행하며, 기존 성공 바이트와 동일 owner의 후속 실행은 유지된다.
+
+새 회귀를 수정 전 소스에 적용하면 두 실제 supervisor 프로세스가 모두 exit 70과
+같은 오류를 반환한다. 수정 후에는 A 수집→같은 owner 재개→B 시작·수집→마지막
+owner 턴의 순서로 끝난다. 이 검사는 실제 supervisor와 native protocol fixture
+프로세스를 사용하며, 모델이나 실제 업무 worker의 완주 실측으로 주장하지 않는다.
+근거 `/tmp/proof-mixed-start-{codex,cli}-{before,after}.log`. 전체 Codex 35 / 공통
+CLI 70 / OpenCode native driver 9 / 공통 책임 14 검사 통과. r4 live source는 계속
+고정했고 이 변경을 그 실측에 포함한 것으로 보고하지 않는다.
+
+문서 생성 검사 과정에서 mutation을 수행하는 projection 시험과 읽기 경계 검사를
+잘못 병행하여 임시 `GENERATOR_SENTINEL`을 stale projection으로 관측한 실행도
+보존했다(`/tmp/proof-work-wait-boundary-check.log`). 시험 복원 뒤 생성 20그룹과
+경계 검사를 각각 완료해 통과했다(`generated-check.log`, `boundary-final.log` 접미사).
+운영 소스나 전역 설치를 재생성한 것은 아니며 고정된 live root에는 영향이 없다.

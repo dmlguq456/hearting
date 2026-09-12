@@ -109,6 +109,12 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                         state_path = os.environ.get('AGENT_DISPATCH_COMPLETION_STATE_FILE')
                         with open(state_path, encoding='utf-8') as h:
                             delivered = json.load(h)['delivered_attempt_ids']
+                        if os.environ.get('FAKE_MIXED_START') == '1' and 'att-child' in delivered:
+                            jobs = os.environ['FAKE_JOBS']
+                            with open(jobs, encoding='utf-8') as h:
+                                rows = h.read().replace('launch_started=0', 'launch_started=1')
+                            with open(jobs, 'w', encoding='utf-8') as h:
+                                h.write(rows)
                         record('turn-start', turn=turns, prompt=prompt, delivered=delivered,
                                lease_held=lease_held)
                         turn_id = f'turn-{turns}'
@@ -450,6 +456,20 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         ]
         self.assertEqual(len(parked), 1)
         self.assertEqual(parked[0]["attempt_count"], 2)
+
+    def test_started_child_is_collected_before_correcting_unstarted_sibling(self):
+        pending = child_row("att-pending").replace("launch_started=1", "launch_started=0")
+        self.jobs.write_text(owner_row(self.lease) + child_row() + pending)
+        result = self.run_supervisor(FAKE_MIXED_START="1", FAKE_JOBS=str(self.jobs))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        trace = [json.loads(line) for line in self.trace.read_text().splitlines()]
+        self.assertEqual([event["event"] for event in trace], [
+            "turn-start", "join-start", "join-end", "turn-start",
+            "join-start", "join-end", "turn-start",
+        ])
+        self.assertEqual(trace[3]["delivered"], ["att-child"])
+        self.assertEqual(set(trace[-1]["delivered"]), {"att-child", "att-pending"})
+        self.assertNotIn('"state": "registration-required"', result.stdout)
 
     def test_bound_long_route_survives_thirteen_continuations_and_completes(self):
         route = self.base / "long-route.json"
