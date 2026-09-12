@@ -13,6 +13,7 @@ import installer  # noqa: E402
 
 
 class RuntimeSnapshotTest(unittest.TestCase):
+    # destructive-ok: reason=exercise added and deleted source fingerprints; boundary=entry.py and new_entry.py under this test TemporaryDirectory
     def test_launch_revision_tracks_source_but_not_unversioned_work_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
