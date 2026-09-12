@@ -34,3 +34,7 @@ python3 tools/generate.py --check
 ```
 
 이번 점검은 현재 routing/completion 계약과 Fleet 표시의 연결에 한정한다. Fleet의 모든 수집기·성능·외부 API를 전수 감사했다는 뜻은 아니다. 설치 후 새 Fleet 프로세스에서 변경이 반영되며, 실행 중인 Fleet 프로세스의 Python 코드는 자동으로 교체되지 않는다.
+
+## 배포·설치 확인
+
+제품 변경 `24e564c0`을 main에 반영하고 [v2.140.1](https://github.com/dmlguq456/hearting/releases/tag/v2.140.1)을 게시했다. [Release 실행](https://github.com/dmlguq456/hearting/actions/runs/34715727411)은 설치·업데이트 검사와 게시 후 smoke까지 성공했다. Claude/Codex/OpenCode 로컬 설치 후 strict doctor는 모두 `fresh`, verify/update의 drift는 0이었다. 설치본의 새 7개 테스트도 PASS였으며, 변경된 Fleet 소스 4개가 커밋 bytes와 일치하고 관측한 설정·인증 파일 11개가 보존됨을 확인했다. 설치본 `fleet --once`에서도 원 세션의 legacy stage 줄은 없었다. 열린 Fleet 프로세스는 재시작해야 새 표시 코드가 적용된다.
