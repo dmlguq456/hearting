@@ -4,7 +4,7 @@ Code-work entrypoint. Detect spec context and close the `plan → execute → te
 
 ## Quick Contract
 
-- Default output: `<artifact-root>/plans/<date>_<slug>/`. `direct` creates no durable plan; `quick` uses a micro-plan; `standard+` writes the plan, checklist, `pipeline_summary`, development logs, and test logs.
+- Default output: `<artifact-root>/plans/<date>_<slug>/`. `direct` creates no durable plan; `quick` uses a micro-plan; `standard+` writes the selected graph’s declared outputs; plan/checklist belong only to selected planning work.
 - When a spec exists, emit a one-line `spec-significance` judgment before editing code. Route spec-significant changes through an `autopilot-spec` update first.
 - Recheck git and worktree state at entry and immediately before durable write-back or commit. Stop on an active merge/rebase, detached HEAD, or an unexpected HEAD change.
 - Do not parallelize QA at every stage. Scale `plan-check` and final `code-test` from the rigor derived from intensity (CONVENTIONS §1.1).
@@ -30,7 +30,11 @@ Defaults:
 - `--intensity`: choose from scope and risk. Use `direct` for a one-line task, `quick` for a small scoped change, and `standard+` for multi-stage or multi-file work. Verification rigor is derived from intensity rather than selected separately (CONVENTIONS §1.1).
 - `--user-refine`: enable only when the user explicitly requests a review or note-taking pause.
 
-## Stage Graph
+## Default Stage Graph
+
+The table is a preset. Execute the compiled graph as selected; do not add omitted
+plan, review, or implementation nodes or their artifacts. Profile defaults also
+yield to explicit choices (`compose --profile light` needs no demand JSON).
 
 | Intensity | Graph | Durable artifact | Review policy |
 |---|---|---|---|
@@ -77,12 +81,10 @@ consume the gate declarations of your assigned route.
    intent yourself — that work is already done, and a registered owner's
    release is refused typed anyway (`gate-release-authority-refused`, the gate
    is sealed `release_authority=depth-0` at the raise).
-2. `intent.md` is the brief `plan` reads first: pass its absolute path in the
-   plan prompt as `Intent:`. Its sections are Problem / Proposed Outcome /
-   Affected / Constraints / Decisions / Open Questions, and a plan that
-   contradicts a recorded decision is a plan-check blocker. When the user
-   corrected the restatement (`status: agreed-with-correction`), fold that
-   correction into the plan prompt verbatim.
+2. The runtime supplies the released understanding and actual answers in each
+   owner and stage prompt, even without a plan node. Use stage assignments for
+   stage-specific detail, not to reconstruct this context. Keep every output
+   within the agreed scope and include the decisions relevant to that stage.
 3. Your first work node is fenced by the released gate: every launch surface
    refuses to start it while the entry gate is unreleased
    (`human-gate-unreleased` / `human-gate-not-raised`, defect M). If your route

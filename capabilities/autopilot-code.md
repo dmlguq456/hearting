@@ -40,7 +40,9 @@ Artifact intensity policy:
 - `quick`: no durable `plan.md` by default; record a short summary/evidence only when a work-cycle artifact is already required;
 - `standard+`: create or resume `$AGENT_ARTIFACT_OUTPUT_DIR/plans/<date>_<slug>/`.
 
-Required public artifacts for `standard+` work cycles:
+The default full graph produces the following public artifacts. A selected
+subgraph produces only its declared outputs; omitted planning does not require
+a substitute plan or checklist:
 
 - `plan.md` at the plan root;
 - `checklist.md` at the plan root when the plan is multi-step;
@@ -93,7 +95,7 @@ Minimum role mapping:
 - review: QA/reviewer role for plan, code, and test review;
 - app UI changes: design role as critic or handoff verifier when design artifacts exist.
 
-Pipeline intensity is the primary ceremony selector. `direct` is inline and `quick` is one `balanced-deep` registered one-shot conductor; both `quick` and `standard+` open with a fixed two-leg frame bootstrap that depth-0 launches itself before the owner starts, anchor profile one tier above the owner via `model_profile.frame_profile_for_owner` — there is no third frame leg at any intensity. Every `standard+` owner uses `deep`. `strong` opens width-two plan (`deep + balanced-deep`) and implementation-review (`balanced-deep + light`) groups. `thorough|adversarial` add the declared light implementation-risk plan leg and deep failure-mode review leg. Those groups are dispatch-depth-2 siblings with disjoint artifacts, exact all-join, and route-sealed role/profile/perspective; other stages remain sequential. The same intensity determines plan-check, selected reviews, and code-test rigor without a separate user-facing QA axis. Concrete models remain adapter-specific.
+Pipeline intensity is the primary ceremony selector. `direct` is inline and `quick` is one registered one-shot conductor (default `balanced-deep`); both `quick` and `standard+` open with a fixed two-leg frame bootstrap that depth-0 launches itself before the owner starts, anchor profile one tier above the owner via `model_profile.frame_profile_for_owner` — there is no third frame leg at any intensity. The standard+ owner defaults to `deep`; an explicit profile such as `light` takes precedence, including through `compose --profile light`. `strong` opens width-two plan (`deep + balanced-deep`) and implementation-review (`balanced-deep + light`) groups. `thorough|adversarial` add the declared light implementation-risk plan leg and deep failure-mode review leg. Those groups are dispatch-depth-2 siblings with disjoint artifacts, exact all-join, and route-sealed role/profile/perspective; other stages remain sequential. The selected graph determines which stages run; intensity supplies their default review and verification rigor without a separate user-facing QA axis. Concrete models remain adapter-specific.
 
 ## Stage Mapping
 
@@ -129,10 +131,10 @@ with `frame_interview.py render-intent`.
 
 The owner **receives** `intent.md`'s path as an input. It raises no gate, waits
 on no release, and renders no intent of its own — all of that is finished before
-it is launched. `intent.md` is the agreed intent `plan` reads first (Problem /
-Proposed Outcome / Affected / Constraints / Decisions / Open Questions), so a
-plan that contradicts a recorded decision is a plan-check blocker; pass its
-absolute path in the plan prompt as `Intent:`. `revise` re-runs the frame pair
+it is launched. The runtime also renders the released understanding and answers
+into every owner and stage prompt, including graphs without plan. Each assigned
+stage stays inside that scope and records the relevant decisions; the owner
+does not have to copy the intent into each dispatch prompt. `revise` re-runs the frame pair
 before owner launch and `stop` cancels the prepared workflow, so
 neither consumes the owner's `code-refine` retry budget. A first-work-node
 start whose entry gate is not released is refused by every launch surface

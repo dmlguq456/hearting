@@ -125,6 +125,12 @@ def resolve_profile_demand(
                 "demand_digest": None, "resolved_profile": explicit_profile, "judgment_floor": "unknown",
                 "reason": "unannotated-existing-stage",
             }
+        if explicit_profile in KNOWN_PROFILES:
+            return {
+                "schema_version": 1, "source": "explicit", "resolver_version": RESOLVER_VERSION,
+                "demand_digest": None, "resolved_profile": explicit_profile,
+                "judgment_floor": "unknown", "reason": "explicit-profile-choice",
+            }
         raise ModelProfileError("new or ad-hoc stages require full profile_demand",
                                 "profile-demand-required")
     normalized = normalize_profile_demand(demand)
@@ -138,24 +144,14 @@ def resolve_profile_demand(
     else:
         if explicit_profile not in KNOWN_PROFILES:
             raise ModelProfileError("unknown explicit profile", "profile-explicit-unknown")
-        if explicit_profile == TOP_PROFILE:
-            # Above every floor, but never for predetermined work: the top
-            # model is an exception spent on judgment, not on execution length.
-            if judgment == "predetermined":
-                raise ModelProfileError("the top exception profile needs important or "
-                                        "difficult-uncertain judgment", "profile-top-predetermined")
-            allowed = (TOP_PROFILE,)
-        else:
-            allowed = JUDGMENT_FLOORS[judgment]
-        if explicit_profile not in allowed:
-            raise ModelProfileError("explicit profile is below the judgment floor",
-                                    "profile-floor-violation")
-        if judgment == "predetermined" and explicit_profile != matrix_profile:
-            raise ModelProfileError("predetermined demand only permits its exact matrix cell",
-                                    "profile-explicit-cell-mismatch")
         resolved = explicit_profile
         source = "explicit"
-        reason = ("explicit-top-exception" if explicit_profile == TOP_PROFILE
+        # The matrix recommends a budget; a caller's explicit choice owns it.
+        # Retain the old receipts for choices the former recommendation admitted.
+        recommended = (explicit_profile in JUDGMENT_FLOORS[judgment]
+                       and (judgment != "predetermined" or explicit_profile == matrix_profile))
+        reason = ("explicit-profile-choice" if not recommended and explicit_profile != TOP_PROFILE
+                  else "explicit-top-exception" if explicit_profile == TOP_PROFILE
                   else "important-explicit-deep-additional-judgment-headroom"
                   if judgment == "important" and explicit_profile == "deep"
                   else "explicit-within-floor")

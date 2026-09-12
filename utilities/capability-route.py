@@ -2000,8 +2000,8 @@ def _resolve_owner_profile(effective, registry, demand=None, explicit_profile=No
     """
     default = registry["owner_profile_by_intensity"].get(effective) or "light"
     selection = PROFILE.resolve_profile_demand(
-        demand, explicit_profile=explicit_profile if demand is not None else default,
-        legacy=True, existing_versioned_stage=True)
+        demand, explicit_profile=explicit_profile if explicit_profile is not None else default if demand is None else None,
+        legacy=explicit_profile is None, existing_versioned_stage=True)
     profile = selection["resolved_profile"]
     if effective == "direct":
         if profile == PROFILE.TOP_PROFILE:
@@ -2119,18 +2119,17 @@ def _seal_profile_demands(nodes, profile_demands=None, explicit_profiles=None, *
             continue
         node_id = node["id"]
         demand = demands.get(node_id, node.get("profile_demand"))
-        supplied = node_id in demands or "profile_demand" in node
+        supplied = demand is not None
         if supplied:
             demand = PROFILE.normalize_profile_demand(demand)
         explicit = explicit_profiles.get(node_id)
         if node.get("profile_explicit") and node_id not in explicit_profiles:
             explicit = node.get("model_profile")
         if not supplied:
-            if node_id in explicit_profiles:
-                raise ValueError("profile-demand-required:" + node_id)
-            explicit = node.get("model_profile", "light")
+            if explicit is None and legacy:
+                explicit = node.get("model_profile", "light")
         selection = PROFILE.resolve_profile_demand(
-            demand, explicit_profile=explicit, legacy=legacy,
+            demand, explicit_profile=explicit, legacy=legacy and node_id not in explicit_profiles and not node.get("profile_explicit"),
             existing_versioned_stage=legacy,
         )
         node["profile_demand"] = demand
@@ -2149,7 +2148,7 @@ def _profile_input_maps(nodes, demands, explicit):
         normalized[key] = PROFILE.normalize_profile_demand(value)
     frame_ids = {n["id"] for n in nodes if _frame_node(n)}
     for key, value in (explicit or {}).items():
-        if key not in normalized or value not in PROFILE.KNOWN_PROFILES:
+        if value not in PROFILE.KNOWN_PROFILES:
             raise ValueError("profile-explicit-input-invalid:" + key)
         if value == PROFILE.TOP_PROFILE and key != "__owner__" and key not in frame_ids:
             # The top exception profile is a dispatch-depth-1 decision: a
@@ -2177,8 +2176,8 @@ def _verify_profile_contract(route):
     owner_profile = route.get("owner_model_profile") or "light"
     owner_expected = PROFILE.resolve_profile_demand(
         demands.get("__owner__"), explicit_profile=(explicit.get("__owner__")
-            if "__owner__" in demands else owner_profile),
-        legacy=True, existing_versioned_stage=True)
+            if "__owner__" in explicit or "__owner__" in demands else owner_profile),
+        legacy="__owner__" not in explicit, existing_versioned_stage=True)
     if owner_expected != route.get("owner_profile_selection"):
         raise ValueError("owner-profile-selection-map-mismatch")
     for node in route.get("nodes", []):
@@ -2305,7 +2304,7 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
                   tracking="tracked", tracked_gate_evidence=None, dispatch_evidence=None,
                   registered_headless_evidence=None, slug=None,
                          route_origin="preset", shape=None, profile_demands=None,
-                         explicit_profiles=None, campaign_key=None, parent_cycle_id=None):
+                         explicit_profiles=None, campaign_key=None, parent_cycle_id=None, profile=None):
     registry=TOPO.load_registry(); TOPO.validate_registry(registry)
     recipe=TOPO.resolve_recipe(registry, capability, capability_mode)
     return _compile_from_recipe(
@@ -2317,7 +2316,7 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
         registered_headless_evidence=registered_headless_evidence, slug=slug,
         campaign_key=campaign_key, parent_cycle_id=parent_cycle_id,
         route_origin=route_origin, shape=shape, profile_demands=profile_demands,
-        explicit_profiles=explicit_profiles)
+        explicit_profiles=explicit_profiles, profile=profile)
 
 # ---------------------------------------------------------------------------
 # compose: the preset-free work route (SD-135).
@@ -2604,7 +2603,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
                   tracking=None, artifact_guard=None, children=None, parent_harness="claude",
                   dispatch_evidence=None, registered_headless_evidence=None,
                   transport_evidence="compose-default", jobs=None, profile_demands=None, explicit_profiles=None,
-                  campaign_key=None, parent_cycle_id=None):
+                  campaign_key=None, parent_cycle_id=None, profile=None):
     """Resolve every default, then compile through the ordinary sealer."""
     if shape not in COMPOSE_SHAPES:
         raise ValueError(f"compose-shape-invalid:{shape}")
@@ -2657,7 +2656,7 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
         dispatch_evidence=dispatch_evidence,
         registered_headless_evidence=registered_headless_evidence,
         route_origin="compose", shape=shape,
-        profile_demands=profile_demands, explicit_profiles=explicit_profiles,
+        profile_demands=profile_demands, explicit_profiles=explicit_profiles, profile=profile,
     )
     if shape == "staged" and graph:
         recipe = compose_subgraph_recipe(registry, base, parse_graph_spec(graph))
@@ -2709,7 +2708,7 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
                          tracking="tracked", tracked_gate_evidence=None, dispatch_evidence=None,
                          registered_headless_evidence=None, slug=None, composed=False,
                   route_origin="preset", shape=None, profile_demands=None,
-                  explicit_profiles=None, campaign_key=None, parent_cycle_id=None):
+                  explicit_profiles=None, campaign_key=None, parent_cycle_id=None, profile=None):
     dispatch_terminal_commit.require_current_cleanup("route-compile")
     if route_origin not in ROUTE_ORIGINS: raise ValueError("invalid route origin")
     cwd=Path(cwd).resolve(strict=True); artifact=Path(artifact_root).resolve()
@@ -2850,12 +2849,17 @@ def _compile_from_recipe(registry, recipe, capability, capability_mode, requeste
         for node in nodes:
             if node.get("dispatch_depth")==2:
                 node["fallback_hops"]=json.loads(json.dumps(chain))
+    if profile is not None:
+        if profile not in PROFILE.PORTABLE_PROFILES:
+            raise ValueError("profile-explicit-unknown:" + str(profile))
+        explicit_profiles = {**{n["id"]: profile for n in nodes if n.get("kind") != "resource-runner"},
+                             "__owner__": profile, **(explicit_profiles or {})}
     profile_demands, explicit_profiles = _profile_input_maps(nodes, profile_demands, explicit_profiles)
     owner_demand = profile_demands.get("__owner__")
     owner_model_profile, owner_profile_selection = _resolve_owner_profile(
         effective, registry, owner_demand, explicit_profiles.get("__owner__"))
     resolved_owner_profile = owner_profile_selection["resolved_profile"]
-    if owner_demand is not None:
+    if owner_demand is not None or "__owner__" in explicit_profiles:
         # Quick's one-shot is the owner process, so there is one selection.
         # Semantic owner stages in standard+ remain independently selected.
         for node in nodes:
@@ -5950,6 +5954,8 @@ def main():
     cp.add_argument("--parent-cycle",help="open or sealed predecessor cycle; causal link, not input approval")
     cp.add_argument("--profile-demands", help="JSON file mapping node ids and __owner__ to full SD-88 demands")
     cp.add_argument("--explicit-profiles", help="JSON file mapping demanded node ids to explicit profiles")
+    cp.add_argument("--profile", choices=sorted(PROFILE.PORTABLE_PROFILES),
+                    help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence")
     cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph); default staged with --graph, else direct")
     cp.add_argument("--graph",default=None,help="optional staged subgraph in your order; incompatible inherited parallel presets are omitted; optional :unit override, e.g. execute,test,report")
     cp.add_argument("--capability",default=COMPOSE_DEFAULT_CAPABILITY); cp.add_argument("--capability-mode",default=None)
@@ -6035,6 +6041,7 @@ def main():
             transport_evidence=a.transport_evidence,jobs=a.jobs,
             profile_demands=json.loads(Path(a.profile_demands).read_text()) if a.profile_demands else None,
             explicit_profiles=json.loads(Path(a.explicit_profiles).read_text()) if a.explicit_profiles else None,
+            profile=a.profile,
         )
         print(compose_card(route),file=sys.stderr)
         if a.explain:

@@ -59,12 +59,13 @@ class DemandSchema(unittest.TestCase):
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(P.ModelProfileError):
                 P.resolve_profile_demand(value)
-        for profile in ("light", "balanced", "mini"):
-            with self.assertRaises(P.ModelProfileError):
-                P.resolve_profile_demand(demand("important"), explicit_profile=profile)
-        for profile in ("balanced", "balanced-deep", "deep"):
-            with self.assertRaises(P.ModelProfileError):
-                P.resolve_profile_demand(demand(), explicit_profile=profile)
+        for value in (None, demand(), demand("important"), demand("difficult-uncertain")):
+            for profile in P.KNOWN_PROFILES:
+                row = P.resolve_profile_demand(value, explicit_profile=profile)
+                self.assertEqual(row["resolved_profile"], profile)
+                P.validate_profile_selection(row, value, profile=profile)
+        with self.assertRaises(P.ModelProfileError):
+            P.resolve_profile_demand(demand(), explicit_profile="unknown")
         row = P.resolve_profile_demand(None, explicit_profile="light", legacy=True, existing_versioned_stage=True)
         self.assertEqual(row["resolved_profile"], "light")
         self.assertIsNone(row["demand_digest"])
@@ -79,8 +80,7 @@ class DemandSchema(unittest.TestCase):
         self.assertTrue(decision["stop_conditions"])
         self.assertEqual([P.resolve_profile_demand(d)["resolved_profile"] for d in stages],
                          ["balanced-deep", "balanced", "deep", "light"])
-        with self.assertRaises(P.ModelProfileError):
-            P.resolve_profile_demand(stages[2], explicit_profile="balanced")
+        self.assertEqual(P.resolve_profile_demand(stages[2], explicit_profile="balanced")["resolved_profile"], "balanced")
 
     def test_user_whole_file_derivation_and_no_writeback(self):
         for adapter in C.ADAPTERS:
@@ -194,8 +194,9 @@ class RouteDemand(unittest.TestCase):
     def test_owner_floor_unknown_target_and_partial_reject(self):
         for demands in ({"__owner__":{}},{"execute":{}},{"absent":demand()}):
             with self.assertRaises(ValueError): self.compile(profile_demands=demands)
-        with self.assertRaises(ValueError):
-            self.compile(profile_demands={"execute":demand("important")},explicit_profiles={"execute":"light"})
+        route = self.compile(profile_demands={"execute":demand("important")},explicit_profiles={"execute":"light"})
+        self.assertEqual(next(n for n in route["nodes"] if n["id"] == "execute")["model_profile"], "light")
+        R.verify_route(route, R.ROOT)
 
     def test_tamper_rejected_before_wrapper_spawn_and_legacy_hash_stays(self):
         route=self.compile(profile_demands={"execute":demand("important")})
@@ -276,6 +277,15 @@ class RouteDemand(unittest.TestCase):
                 route=json.loads(result.stdout);node=next(n for n in route["nodes"] if n["id"]=="execute")
                 self.assertEqual(node["model_profile"],expected)
                 self.assertEqual(node["profile_selection"]["source"],"explicit" if action=="compose" else "matrix")
+            result = subprocess.run([sys.executable, str(ROOT/"utilities/capability-route.py"), "compose",
+                *common[:-2], "--shape", "staged", "--graph", "frame,frame-alternative,test,report",
+                "--profile", "light"], capture_output=True, text=True, env=env)
+            self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+            route = json.loads(result.stdout)
+            self.assertEqual(route["owner_model_profile"], "light")
+            self.assertEqual({n["model_profile"] for n in route["nodes"]}, {"light"})
+            self.assertEqual(route["profile_demands"], {})
+            R.verify_route(route, ROOT)
 
     def test_continuation_keeps_only_remaining_demand_inputs(self):
         fixture=F.TestContinuation();fixture.setUp()
@@ -339,6 +349,19 @@ class TopExceptionRoute(unittest.TestCase):
             profile_demands={"__owner__": demand(), "prd-transaction": demand()},
             explicit_profiles={"__owner__": "light", "prd-transaction": "light"})
         R.verify_route(route, R.ROOT)
+
+    def test_one_profile_option_carries_explicit_light_without_demand_files(self):
+        for shape, graph in (("solo", None), ("staged", "frame,frame-alternative,test,report"),
+                             ("staged", "test,report")):
+            route = R.compose_route(capability="autopilot-code", capability_mode="dev", shape=shape,
+                graph=graph, slug="explicit-light", cwd=R.ROOT, artifact_root=R.ROOT,
+                spec_read="fixture", registered_headless_evidence=self.registered_headless(),
+                dispatch_evidence=self.dispatch(self.nested()), profile="light")
+            self.assertEqual(route["owner_model_profile"], "light")
+            self.assertEqual({n["model_profile"] for n in route["nodes"]}, {"light"})
+            self.assertEqual(route["owner_profile_selection"]["source"], "explicit")
+            R.verify_route(route, R.ROOT)
+            self.assertNotIn("plan-check", {n["id"] for n in route["nodes"]})
 
     def test_owner_default_drift_and_quick_dual_selection_are_refused(self):
         route = self.staged()
@@ -479,8 +502,9 @@ class TopExceptionRoute(unittest.TestCase):
         with self.assertRaises(ValueError) as refused:
             R._profile_input_maps(nodes, demands, {"execute": "top"})
         self.assertEqual(str(refused.exception), "profile-explicit-top-owner-only:execute")
-        with self.assertRaises(ValueError):
-            self.staged(profile_demands=self.owner_demand("predetermined"), explicit_profiles=self.TOP)
+        route = self.staged(profile_demands=self.owner_demand("predetermined"), explicit_profiles=self.TOP)
+        self.assertEqual(route["owner_model_profile"], "top")
+        R.verify_route(route, R.ROOT)
         with self.assertRaisesRegex(ValueError, "profile-explicit-input-invalid:__owner__"):
             R._profile_input_maps(nodes, demands, {"__owner__": "summit"})
 

@@ -156,27 +156,29 @@ Predetermined work selects light for short-local execution and balanced for
 extended-multistep execution. Important judgment selects balanced-deep at either
 length; difficult-uncertain judgment selects deep at either length. Length alone
 never selects a deep profile. Important explicit deep records additional judgment
-headroom; important permits only balanced-deep/deep, difficult-uncertain only deep,
-and predetermined explicit selection must match its exact cell.
+headroom. These are recommendations: an explicit known profile takes precedence
+without requiring a demand document or a justification for overriding the matrix.
 
 The selection records schema/source/resolver_version/demand_digest/resolved_profile/
-judgment_floor/reason. `judgment_floor` is none, balanced-deep, or deep, independently
-of execution length. Compile and compose seal the normalized demand and selection
+judgment_floor/reason. `judgment_floor` retains the historical field name for the recommendation,
+not a launch minimum; it is unknown when no demand was supplied. Compile and compose seal the normalized demand and selection
 for the owner and every realized node/leg; all launch surfaces consume that seal.
 Unknown/partial inputs, empty evidence, version mismatch, or tampering fail before
 spawn. Completely unannotated versioned stages keep their existing profile with
 source=legacy, demand_digest=null, judgment_floor=unknown and
 reason=unannotated-existing-stage. Existing sealed routes retain their original
-bytes/hash. New ad-hoc stages require full demand inputs.
+bytes/hash. New ad-hoc stages provide either an explicit profile or demand inputs.
 
 The unannotated quick owner=balanced-deep and standard+ owner=deep are compatibility
-defaults, used only when no owner demand is supplied. A complete owner demand
+defaults, used only when neither an explicit profile nor an owner demand is supplied. A complete owner demand
 selects its model through the same resolver as a stage; intensity does not impose
 a second profile floor. Compile and verification recompute this one selection,
 and quick's one-shot process carries its owner's selection. Registered-profile
 eligibility, QA, intensity, depth, peer authority and vendor constraints remain
-independent. Invalid demand or a profile outside the declared judgment floor
-is rejected at selection, before a route is issued.
+independent. Invalid supplied data or an unknown profile is rejected before
+route issuance; choosing outside the recommendation is not a refusal.
+`compose --profile light` selects light for the owner and model nodes; an
+optional per-node explicit map overrides that choice without a demand file.
 Capacity substitution stays inside the sealed profile and eligible vendor band.
 Effort labels are adapter/model-relative operating points, never portable scores.
 OpenCode balanced preserves the selected light point and reports

@@ -261,3 +261,11 @@ OpenCode depth-0는 공개된 bounded-wait를 사용했고 owner 대기는 한 �
 남은 지원 경계는 OpenCode depth-0의 명시적 bounded polling과 OpenCode serial-chain owner/deterministic advance 미지원이다. 두 모델 실행 하네스에 같은 OpenAI Luna를 쓴 결과를 모델 간 독립성으로 표현하지 않는다. 과거 4bc 시도의 관측 불가 자손이 자동 정리됐다는 운영 주장은 하지 않는다. 새로운 정상·지연·중복 재시도·관측 불가·감독자 종료 계약의 근거를 각각 구분했고, release/install은 별도 사용자 확인 전 보류한다.
 
 최종 통합 확인: 3b9ea255의 깨끗한 통합 트리에서 prompt 6 / readiness 14 / join 120을 다시 통과했다(`/tmp/integration-3b9-{prompt,ready,join}.log`). PR #17의 수정 브랜치를 푸시했고 로컬 main도 같은 소스로 fast-forward했다. 원격 main은 f6d05cbb에 유지했으며, primary checkout의 기존 미추적 `dist/`는 보존했다. 이 기록 이후 문서만 고친 커밋은 위 소스 검증의 의미를 바꾸지 않는다.
+
+## 2026-09-12 — 사용자 완료 기준으로 검증 재개
+
+“배포만 남았다”는 판정을 철회하고, 간단한 작업 지시에서 합의한 결과와 마감까지 도달하는 실제 사용 흐름을 다시 검증한다. 기존 부모에게 전달했던 긴 명령 조립 지침은 성공 근거의 한계였으므로 재사용하지 않는다. 신규 부모에는 작업·하네스/모델 선택·검증 소스 root만 준다. source 수리는 계속 direct/inline이며 새 Claude 모델 호출과 전역 설치는 하지 않는다.
+
+진입부 재점검에서 intensity→owner 비교 외에 `resolve_profile_demand`가 별도의 등급 하한을 강제하고 명시 모델에도 요구서 JSON을 강제한 것을 확인했다. 명시한 알려진 모델 프로파일이 추천 행렬보다 우선하도록 공통 resolver를 정정했다. `compose --profile light`가 모든 모델 노드와 owner의 기존 explicit selection map을 작성하고, 노드별 명시 선택은 그보다 우선한다. 새 policy 객체나 대체 발급 경로를 만들지 않았다. 선택이 없으면 기존 추천·기본값을 쓰며, 알려지지 않은 모델·변조·실제 runtime 지원·top의 기존 실행 범위 검사는 남는다. 기존 허용 선택의 영수증 표현과 이미 발급된 route bytes는 유지한다.
+
+core/WORKFLOW·CONVENTIONS·capability·owner reference에 남은 “standard owner는 deep”, 생략된 plan 산출물 요구, 수동 intent 복사 지시도 정정했다. 초기 model/demand suite 실패는 과거 하한 거부를 기대하던 시험과 명시 선택이 없는 ad-hoc 구분 회귀였다. 전자는 새로운 사용자 요구에 맞춰 실제 선택 및 seal 검증으로 바꾸고, 후자는 암묵적 기본값을 사용자 명시 선택으로 잘못 기록하지 않도록 고쳤다. model 28 / demand 25 / route 387 / compose CLI 17 / adapter Codex58·Claude46·OpenCode30 및 생성20·경계·기존 surface 예산 PASS. 실제 CLI의 `--profile light`가 별도 demand 파일 없이 frame/test/report 및 owner에 전달되는 경로도 포함한다. 로그 `/tmp/proof-explicit-profile-*.log`, `/tmp/proof-surface-*.log`. 실측 합격은 아직 이 소스 검사에 포함하지 않는다.

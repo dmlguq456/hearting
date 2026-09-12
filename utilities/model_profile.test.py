@@ -78,11 +78,11 @@ class ModelProfileTest(unittest.TestCase):
                 result = PROFILE.resolve_profile_demand(self.demand(*axes))
                 self.assertEqual(result["resolved_profile"], profile)
                 self.assertTrue(result["demand_digest"])
-        with self.assertRaises(PROFILE.ModelProfileError) as caught:
-            PROFILE.resolve_profile_demand(
-                self.demand("predetermined", "short-local"), explicit_profile="deep"
-            )
-        self.assertEqual(caught.exception.reason, "profile-floor-violation")
+        for axes in expected:
+            for profile in PROFILE.PORTABLE_PROFILES:
+                row = PROFILE.resolve_profile_demand(self.demand(*axes), explicit_profile=profile)
+                self.assertEqual(row["resolved_profile"], profile)
+                PROFILE.validate_profile_selection(row, self.demand(*axes), profile=profile)
         result = PROFILE.resolve_profile_demand(
             self.demand("important"), explicit_profile="deep"
         )
@@ -432,19 +432,16 @@ class TopExceptionProfileTest(unittest.TestCase):
             PROFILE.resolve_profile_values("claude", without, "top")
         self.assertEqual(refused.exception.reason, "profile-top-undeclared")
 
-    def test_explicit_top_needs_judgment_and_never_comes_from_the_matrix(self):
-        for judgment in ("important", "difficult-uncertain"):
+    def test_explicit_top_never_comes_from_the_matrix(self):
+        for judgment in ("predetermined", "important", "difficult-uncertain"):
             row = PROFILE.resolve_profile_demand(self.demand(judgment), explicit_profile="top")
             self.assertEqual((row["resolved_profile"], row["source"], row["reason"]),
                              ("top", "explicit", "explicit-top-exception"))
             PROFILE.validate_profile_selection(row, self.demand(judgment), profile="top")
             self.assertNotEqual(PROFILE.resolve_profile_demand(self.demand(judgment))["resolved_profile"], "top")
-        with self.assertRaises(PROFILE.ModelProfileError) as refused:
-            PROFILE.resolve_profile_demand(self.demand("predetermined"), explicit_profile="top")
-        self.assertEqual(refused.exception.reason, "profile-top-predetermined")
-        # a legacy (demand-less) stage may not be lifted to top without a demand
-        with self.assertRaises(PROFILE.ModelProfileError):
-            PROFILE.resolve_profile_demand(None, explicit_profile="top", legacy=True, existing_versioned_stage=True)
+        row = PROFILE.resolve_profile_demand(None, explicit_profile="top")
+        self.assertEqual(row["source"], "explicit")
+        PROFILE.validate_profile_selection(row, profile="top")
 
     def test_top_is_limited_to_a_registered_depth_one_owner(self):
         PROFILE.validate_registered_profile("top", registered_worker=True, dispatch_depth=1, worker_type="owner")
