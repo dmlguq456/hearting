@@ -44,6 +44,7 @@ from dispatch_contract import (  # noqa: E402
     process_table_scan_scope,
 )
 from dispatch_completion_join import read_supervisor_phase_state, read_join_observation  # noqa: E402
+from dispatch_attempt_policy import terminal_conflict_pending  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
 
 try:  # W7D read-side layout resolver; absent on a pre-cutover checkout.
@@ -133,6 +134,14 @@ def _strip_autopilot_prefix(name):
     if name and name.startswith("autopilot-"):
         return name[len("autopilot-"):]
     return name
+
+
+def _attempt_attention(meta):
+    """Project the shared conflict verdict, without granting execution authority."""
+    try:
+        return "terminal-evidence-conflict" if terminal_conflict_pending(meta) else None
+    except (ValueError, TypeError, UnicodeDecodeError):
+        return "terminal-evidence-unreadable"
 
 
 def _parse_pipe_meta(pipe):
@@ -2244,6 +2253,7 @@ def _scan_registry_evidence(paths):
                 "parent_attempt_id": meta.get("parent_attempt_id"),
                 "note": meta.get("note"),
                 "registry_order": registry_order,
+                "attention_reason": _attempt_attention(meta),
             })
             # route_file/route_hash/parent name WHERE the sealed record lives and who the
             # conductor is — raw registry fields, independent of whether this particular
@@ -2267,6 +2277,10 @@ def _scan_registry_evidence(paths):
                 # A standalone Fleet must not fall back to its ambient registry
                 # when resolving a terminal-only route's completion markers.
                 "_registry_path": path,
+                "attempt_id": attempt_id,
+                "attention_reason": (_attempt_attention(meta)
+                                     if attempt_contract["attempt_contract_status"] == "current"
+                                     else None),
             })
             if attempt_contract["attempt_contract_status"] != "current":
                 continue
@@ -2770,6 +2784,7 @@ def _scan_jobs_log(path, seen_slugs, seen_keys=None, registry_priority=0,
         if dead_terminal_owner:
             job.note = meta.get("note") or "dead-runtime-exit"
         job._registry_metadata = dict(meta)
+        job.attention_reason = _attempt_attention(meta)
         job._registry_repo = repo
         job._registry_worktree = cwd
         jobs.append(job)

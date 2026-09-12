@@ -226,7 +226,7 @@ class ReplicaCollapseTest(unittest.TestCase):
             (("done", "done"), "done"),
             (("pending", "pending"), "pending"),
             (("done", "active"), "active"),
-            (("done", "pending"), "done"),
+            (("done", "pending"), "pending"),
             (("reconciling", "done"), "reconciling"),
             (("degraded", "reconciling"), "degraded"),
         )

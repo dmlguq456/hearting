@@ -1062,7 +1062,8 @@ def _recovery_reason(node_id, route_jobs, failed_job):
 
 def _node_state(node_id, route_jobs, ev_by_node, now, completion_marked=False, degradation=None):
     """One node's state, per the priority table (PRD F-41): active (live job) beats a
-    published completion marker (done); explicit killed/cancelled/fail-note evidence beats
+    published completion marker (done), except an exact unresolved conflict remains
+    attention rather than clean completion; explicit killed/cancelled/fail-note evidence beats
     exact reconciliation; the current exact ``reconcile-needed`` attempt becomes
     ``reconciling``; a generic dead/stale row inside a registry-proven recovery window becomes
     ``recovering``, and only a dead row with NO recovery path becomes failed; a clean registry row becomes done;
@@ -1072,31 +1073,44 @@ def _node_state(node_id, route_jobs, ev_by_node, now, completion_marked=False, d
     `completion_marked`: an immutable, exactly validated completion marker is authoritative
     proof that the node is done, including marker-only inline fallback legs that never had a
     jobs.log row. `active` still wins: a live re-run outranks a past marker."""
-    live = [j for j in route_jobs if getattr(j, "route_node", None) == node_id]
-    active = [j for j in live if j.liveness == "working"]
-    if active:
-        j = max(active, key=lambda row: (
+    def _best(rows):
+        return max(rows, key=lambda row: (
             -(getattr(row, "registry_priority", None)
               if getattr(row, "registry_priority", None) is not None else 0),
             getattr(row, "registry_order", None) if getattr(row, "registry_order", None) is not None else -1,
             -(getattr(row, "elapsed_min", None) if getattr(row, "elapsed_min", None) is not None else 10**9),
         ))
+
+    live = [j for j in route_jobs if getattr(j, "route_node", None) == node_id]
+    active = [j for j in live if j.liveness == "working"]
+    if active:
+        j = _best(active)
         return {"state": "active", "elapsed_min": j.elapsed_min, "model": j.model,
                 "harness": j.harness, "effort": j.effort, "pid": j.pid, "note": None, "job": j}
+    # The collector consumes the shared policy. A marker preserves historical
+    # success; it cannot erase the current attempt's outstanding inspection.
+    ev = ev_by_node.get(node_id) or {}
+    reason = ev.get("attention_reason")
+    if "attention_reason" not in ev and live:
+        current = _best(live)
+        reason = getattr(current, "attention_reason", None)
+        if reason:
+            return {"state": "attention", "elapsed_min": current.elapsed_min,
+                    "model": current.model, "harness": current.harness,
+                    "effort": current.effort, "pid": current.pid,
+                    "note": reason, "job": current}
+    if reason:
+        return {"state": "attention", "elapsed_min": _ev_elapsed(ev, now),
+                "model": ev.get("model"), "harness": ev.get("harness"),
+                "effort": ev.get("effort"), "pid": ev.get("pid"),
+                "note": reason, "job": None}
     if completion_marked:
         # F-41b: marker authority is independent of whether the successful execution
         # surface registered a worker. Preserve any terminal attempt/event telemetry,
         # but never synthesize a live job from marker or degradation evidence.
         candidates = [j for j in live if j.liveness in ("stale", "dead")]
         if candidates:
-            src = max(candidates, key=lambda row: (
-                -(getattr(row, "registry_priority", None)
-                  if getattr(row, "registry_priority", None) is not None else 0),
-                getattr(row, "registry_order", None)
-                if getattr(row, "registry_order", None) is not None else -1,
-                -(getattr(row, "elapsed_min", None)
-                  if getattr(row, "elapsed_min", None) is not None else 10**9),
-            ))
+            src = _best(candidates)
             return {"state": "done", "elapsed_min": src.elapsed_min, "model": src.model,
                     "harness": src.harness, "effort": src.effort, "pid": None,
                     "note": (ev_by_node.get(node_id) or {}).get("note"), "job": None}
@@ -1105,14 +1119,6 @@ def _node_state(node_id, route_jobs, ev_by_node, now, completion_marked=False, d
                 "harness": ev.get("harness"), "effort": ev.get("effort"), "pid": None,
                 "note": ev.get("note"), "job": None}
     failed_live = [j for j in live if j.liveness in ("stale", "dead")]
-
-    def _best(rows):
-        return max(rows, key=lambda row: (
-            -(getattr(row, "registry_priority", None)
-              if getattr(row, "registry_priority", None) is not None else 0),
-            getattr(row, "registry_order", None) if getattr(row, "registry_order", None) is not None else -1,
-            -(getattr(row, "elapsed_min", None) if getattr(row, "elapsed_min", None) is not None else 10**9),
-        ))
 
     ev = ev_by_node.get(node_id) or {}
     note = ev.get("note")

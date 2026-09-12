@@ -1158,7 +1158,7 @@ def _drop_past_stages(items, cur_i, max_width):
 def _route_current_index(route_seq):
     """The breadcrumb's CURRENT node index — the single judge every current-hue consumer
     shares (the lit token and the F-64c rail must never disagree on color)."""
-    for want in ("active", "degraded", "recovering", "reconciling"):
+    for want in ("attention", "active", "degraded", "recovering", "reconciling"):
         found = next((i for i, (_nid, st) in enumerate(route_seq) if st == want), None)
         if found is not None:
             return found
@@ -1183,6 +1183,8 @@ def _route_stage_segs(route_seq, working, max_width):
     for i, (nid, st) in enumerate(route_seq):
         if st == "failed":
             items.append((i, nid + " ✕", "lvl_r"))
+        elif st == "attention":
+            items.append((i, nid + " !", "lvl_y"))
         elif st == "degraded":
             items.append((i, nid + " ◐", "lvl_y"))
         elif st in ("reconciling", "recovering"):
@@ -1307,6 +1309,7 @@ def _is_plugin_agent(job):
 
 
 _ROUTE_STATE_MARK = {"failed": ("✕", "lvl_r"), "degraded": ("◐", "lvl_y"),
+                     "attention": ("!", "lvl_y"),
                      "reconciling": ("…", "lvl_y"), "recovering": ("…", "lvl_y"),
                      "done": ("✓", None)}
 
@@ -1602,10 +1605,10 @@ def _collapse_parallel_nodes(nodes):
     The individual legs already render as their own dispatch rows under the
     conductor (user 2026-07-24: "병렬 leg를 굳이 표현을 안해도 되잖아"), so every
     route-projection surface names the group once. State follows the F-41d precedence
-    (failed > active > degraded > reconciling > done > pending); downstream
+    (failed > attention > active > degraded > recovery > pending); downstream
     ``depends_on`` references to a member are rewritten to the merged id. In particular,
-    a completed leg plus a pending leg is steady ``done`` rather than a fabricated
-    ``active`` stage."""
+    a completed leg plus a pending leg remains pending. Completion requires
+    every member to be done; neither completion nor activity is inferred."""
     nodes = list(nodes or ())
     groups = {}
     for node in nodes:
@@ -1630,9 +1633,9 @@ def _collapse_parallel_nodes(nodes):
         states = [m.get("state") for m in members]
         state = next(
             (candidate for candidate in
-             ("failed", "active", "degraded", "recovering", "reconciling", "done", "pending")
+             ("failed", "attention", "active", "degraded", "recovering", "reconciling", "pending")
              if candidate in states),
-            "pending",
+            "done" if all(state == "done" for state in states) else "pending",
         )
         member_ids = {m.get("id") for m in members}
         deps = []
@@ -4793,6 +4796,8 @@ def _route_node_text(n):
     if st == "done":
         tail = fmt_min(elapsed) if elapsed is not None else ""
         return "%s ✓%s%s" % (nid, tail, deps), "dim", mark
+    if st == "attention":
+        return "%s ! 확인 필요%s" % (nid, deps), "lvl_y", mark
     if st == "active":
         tail = (" " + fmt_min(elapsed)) if elapsed is not None else ""
         extra = ""

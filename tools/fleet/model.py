@@ -515,6 +515,7 @@ class DispatchJob:
     owner_route_id: Optional[str] = None    # separate from a stage job's route tuple
     owner_route_hash: Optional[str] = None
     attempt_id: Optional[str] = None    # canonical registry attempt identity (SD-49)
+    attention_reason: Optional[str] = None  # shared terminal policy; separate from process liveness
     registry_order: Optional[int] = None  # append order in canonical jobs.log
     registry_priority: Optional[int] = None  # 0 canonical; larger values are legacy fallbacks
     title: Optional[str] = None         # the child session's own sidecar title, adopted in

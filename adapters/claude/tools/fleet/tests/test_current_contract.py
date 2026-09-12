@@ -1,0 +1,1 @@
+../../../../../tools/fleet/tests/test_current_contract.py

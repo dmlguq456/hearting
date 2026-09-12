@@ -691,9 +691,9 @@ class NodeStateMarkerSupersedesTest(unittest.TestCase):
     def test_done_plus_pending_plan_group_is_not_fabricated_active(self):
         """A started downstream node must not make a mixed parallel group blink.
 
-        F-41d explicitly places ``done`` above ``pending``. This is the live Claude owner
-        shape where one plan leg completed, the unused alternative never registered, and
-        execute is the only genuinely active stage.
+        A declared alternative without completion proof remains pending even if
+        execute has already started. Neither activity nor whole-group completion
+        may be inferred from the other leg or a downstream node.
         """
         record = {
             "route_hash": "sha256:test",
@@ -713,7 +713,7 @@ class NodeStateMarkerSupersedesTest(unittest.TestCase):
         )
         collapsed = render._collapse_parallel_nodes(view["nodes"])
         self.assertEqual([(node["id"], node["state"]) for node in collapsed],
-                         [("plan(2-way)", "done"), ("execute", "active")])
+                         [("plan(2-way)", "pending"), ("execute", "active")])
 
 
 class ReconciliationRenderTest(unittest.TestCase):
@@ -747,7 +747,7 @@ class ReconciliationRenderTest(unittest.TestCase):
         self.assertEqual(render._collapse_parallel_nodes(legs("degraded", "reconciling"))[0]["state"],
                          "degraded")
         self.assertEqual(render._collapse_parallel_nodes(legs("done", "pending"))[0]["state"],
-                         "done")
+                         "pending")
         self.assertEqual(render._collapse_parallel_nodes(legs("pending", "pending"))[0]["state"],
                          "pending")
 
