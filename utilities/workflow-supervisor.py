@@ -667,6 +667,14 @@ def cmd_gate(args):
                 if not Path(args.artifact).is_file():
                     raise SupervisorError("inline-gate-preview-unreadable")
                 preview_digest = hashlib.sha256(Path(args.artifact).read_bytes()).hexdigest()
+            current_state = ledger.state()["workflow_state"]
+            revised = (current_state == "FAILED_RETRYABLE"
+                       and WS.human_gate_resolution(ledger.journal(), args.gate)["status"] == "revise")
+            # Re-enter an explicitly revised gate through the existing retry
+            # state path. Validate both hops before creating a delivery record.
+            if revised:
+                WS.assert_transition(current_state, "READY")
+            WS.assert_transition("READY" if revised else current_state, "BLOCKED_HUMAN_GATE")
             record_path, created = create_gate_delivery(
                 route, args.gate, args.artifact, jobs_path, epoch,
                 route_path=args.route, release_authority=release_authority,
@@ -674,6 +682,8 @@ def cmd_gate(args):
                 questions=len(interview.get("questions") or []) if interview is not None else 0,
             )
             try:
+                if revised:
+                    ledger.set_workflow_state("READY", evidence={"retry_gate": args.gate}, actor="gate")
                 # `artifact` rides in the journal so every later reader -- the
                 # owner's await-release, the launch fence, a release that
                 # validates interview answers -- finds the reviewable path

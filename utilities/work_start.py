@@ -42,6 +42,26 @@ def _store_bytes_once(path, encoded):
         raise ValueError(f"frame-input-conflict: preserve {path}; use the existing gate revision path for changes")
 
 
+def _frame_decision_result(decision, question, question_path, answer_path):
+    result = {"state": "released" if decision == "proceed" else "cancelled" if decision == "stop" else "needs-revision",
+              "decision": decision, "interview_file": str(question_path),
+              "answers_file": str(answer_path) if answer_path.exists() else None,
+              "intent_file": str(question_path.parent.parent / "intent.md") if decision == "proceed" else None}
+    if decision == "revise":
+        from frame_interview import MAX_ROUNDS
+        if question["round"] >= MAX_ROUNDS:
+            return {**result, "state": "needs-attention", "reason": "frame-revision-round-limit",
+                    "required_action": "report-unresolved-frame",
+                    "next_step": "The recorded revision remains unresolved at the interview round limit. "
+                        "Report the user's feedback and the remaining decision; do not promise an invalid next round or start the owner."}
+        result.update(required_action="revise-frame-question", interview_template={
+            key: value for key, value in question.items() if key in {"understanding", "brief", "questions"}},
+            next_step="Revise this template from the user's feedback and submit it with --interview. "
+                "The runtime registers the next round; old questions and answers remain preserved.")
+        result["interview_template"]["round"] = question["round"] + 1
+    return result
+
+
 def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
                          decision="proceed", runtime_root=ROOT, run=subprocess.run):
     """Own raise -> actual answers -> intent -> release through existing commands.
@@ -75,7 +95,11 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         raise ValueError("frame-interview-route-mismatch")
     if supplied.get("schema", FI.SCHEMA) != FI.SCHEMA:
         raise ValueError("frame-interview-schema-mismatch")
-    if resolution["status"] in {"proceed", "revise", "stop"}:
+    next_round = bool(interview and resolution["status"] == "revise"
+                      and supplied.get("round") == resolution["epoch"] + 1)
+    if not answers and not next_round and decision == "proceed" and resolution["status"] in {"revise", "stop"}:
+        decision = resolution["status"]  # A plain resume cannot replace the person's decision.
+    if resolution["status"] in {"proceed", "revise", "stop"} and not next_round:
         # A submitted answer remains readable after its cycle is sealed. Do not
         # reopen the producer or write into a completed cycle on a lost reply.
         recorded_path = Path(resolution["artifact"])
@@ -85,7 +109,8 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             "round": supplied.get("round", recorded["round"])}
         recorded_answer = resolution.get("answers")
         if decision == "stop":
-            recorded_answer = json.loads((recorded_path.parent / "answers.json").read_text())
+            saved_answer = recorded_path.parent / "answers.json"
+            recorded_answer = json.loads(saved_answer.read_text()) if saved_answer.exists() else None
         response = json.loads(Path(answers).read_text()) if answers else recorded_answer
         if normalized != recorded or decision != resolution["status"]:
             raise ValueError("frame-input-conflict: preserve the recorded question and decision")
@@ -93,10 +118,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
             raise ValueError("frame-input-invalid: answers do not match the recorded interview")
         if response != recorded_answer:
             raise ValueError("frame-input-conflict: preserve the recorded answer")
-        return {"state": "released" if decision == "proceed" else "cancelled" if decision == "stop" else "needs-revision",
-                "decision": decision, "interview_file": str(recorded_path),
-                "answers_file": str(recorded_path.parent / "answers.json"),
-                "intent_file": str(recorded_path.parent.parent / "intent.md") if decision == "proceed" else None}
+        return _frame_decision_result(decision, recorded, recorded_path, recorded_path.parent / "answers.json")
     context = prepare_route_artifact_env(Path(path), start=False, jobs=Path(jobs))
     output = context.get("AGENT_ARTIFACT_OUTPUT_DIR")
     if not output:
@@ -119,7 +141,7 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         errors += FI.validate_answers(question, response)
     if errors:
         raise ValueError("frame-input-invalid: " + "; ".join(errors[:8]))
-    if resolution["status"] != "not-raised" and resolution.get("artifact") != str(question_path):
+    if not next_round and resolution["status"] != "not-raised" and resolution.get("artifact") != str(question_path):
         raise ValueError("frame-interview-binding-conflict: use the currently registered interview")
     _store_once(question_path, question)
     _store_once(directory / "frame-summary.json", {"route_id": route["route_id"], "frames": [
@@ -135,10 +157,10 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         if completed.returncode:
             raise ValueError(f"frame-{operation}-pending: {completed.stderr.strip()} {completed.stdout.strip()}")
 
-    if resolution["status"] == "not-raised":
+    if resolution["status"] == "not-raised" or next_round:
         command("gate", "--block", "--artifact", str(question_path))
         resolution = WS.human_gate_resolution(ledger.journal(), "frame-review")
-    if response is None:
+    if response is None and decision == "proceed":
         return {"state": "needs-question", "required_action": "ask-registered-question",
                 "interview_file": str(question_path), "interview": question,
                 "answers_template": FI.answers_template(question),
@@ -158,13 +180,11 @@ def frame_interview_step(route, path, jobs, *, interview=None, answers=None,
         if not intent.exists() or intent.read_text() != rendered:
             WS._atomic_write(intent, rendered)
     if resolution["status"] == "blocked":
-        command("release", "--decision", decision, "--answers", str(answer_path))
+        command("release", "--decision", decision, *(["--answers", str(answer_path)] if response is not None else []))
     current = WS.human_gate_resolution(ledger.journal(), "frame-review")
     if current["status"] != decision or (decision != "stop" and current.get("answers") != response):
         raise ValueError("frame-release-pending: the exact answer was not committed")
-    return {"state": "released" if decision == "proceed" else "cancelled" if decision == "stop" else "needs-revision",
-            "decision": decision, "interview_file": str(question_path), "answers_file": str(answer_path),
-            "intent_file": str(intent) if decision == "proceed" else None}
+    return _frame_decision_result(decision, question, question_path, answer_path)
 
 
 def validate_request(value):

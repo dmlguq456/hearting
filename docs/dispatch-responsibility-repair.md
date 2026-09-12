@@ -512,3 +512,17 @@ Codex 부모가 이미 끝난 전체 작업을 다음 단계 시작으로 오해
 완료 영수증의 `(no harvest command; advance the route)` 대신 전체 작업과
 마감이 끝났으며 결과만 보고하라고 명시한다. 공개 결과에는 검증된 최종 handoff를
 함께 제공해 marker=null에서 별도 로그 탐색을 요구하지 않는다.
+
+## 공개 질문의 수정·중단 후속
+
+진행 답변뿐 아니라 revise/stop도 같은 진입점이 이어받는다. 실제 수정 결정 뒤
+다음 질문을 제출하면 기존 workflow의 FAILED_RETRYABLE→READY→BLOCKED_HUMAN_GATE
+전이를 사용한다. 모델의 수동 READY 변경이 필요하지 않다. 두 전이는 전달 기록
+생성 전에 검증하고, 이전 질문·답변은 별도 round에 보존한다. 단순 재개로 이미
+받은 수정·중단 결정을 proceed로 바꾸지 않는다. 중단에는 존재하지 않는 답변
+파일을 요구하지 않으며, 기존 질문 회차 한도에서는 실행 불가능한 다음 질문 대신
+미해결 판단과 보고 책임을 반환한다. 상한이나 상태 전이 목록은 늘리지 않았다.
+
+공개 진입점 26 / workflow supervisor 129 / 생성 20그룹 통과.
+`/tmp/proof-frame-revision-{entry-final,workflow,generated}.log`에 보존한다.
+실제 gate journal을 쓰는 격리 검사이며 새 native 사용자 답변의 실측은 아니다.

@@ -391,6 +391,45 @@ class FrameInterviewStepTest(WF.WorkflowFixture):
         self.assertEqual(self.step(answers=self.answers(),decision="stop")["state"], "cancelled")
         self.assertEqual(self.calls, ["gate", "release"])
 
+    def test_stop_without_answer_and_plain_resume_preserve_cancellation(self):
+        self.step(interview=self.question_file)
+        self.assertEqual(self.step(decision="stop")["state"], "cancelled")
+        self.assertEqual(self.step()["state"], "cancelled")
+        self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_revision_registers_next_round_without_replacing_the_first(self):
+        answer=self.answers()
+        result=self.step(interview=self.question_file,answers=answer,decision="revise")
+        before=Path(result["interview_file"]).read_bytes()
+        self.assertEqual(self.step()["state"], "needs-revision")
+        question=result["interview_template"]
+        self.assertEqual(question["round"],2)
+        question["understanding"]="Run the two commands and keep both outputs in the report."
+        self.question_file.write_text(json.dumps(question))
+        second=self.step(interview=self.question_file)
+        self.assertEqual(second["state"], "needs-question")
+        self.assertEqual(self.resolution()["epoch"],2)
+        response=second["answers_template"];response["understanding_confirmed"]=True
+        answer.write_text(json.dumps(response))
+        self.assertEqual(self.step(answers=answer)["state"],"released")
+        self.assertEqual(Path(result["interview_file"]).read_bytes(),before)
+        self.assertEqual(self.calls,["gate","release","gate","release"])
+
+    def test_revision_limit_hands_back_without_an_unusable_next_command(self):
+        import frame_interview as FI
+        question=self.question
+        for number in range(1,FI.MAX_ROUNDS+1):
+            self.question_file.write_text(json.dumps(question))
+            response=FI.answers_template({**question,"route_id":self.route["route_id"]})
+            response["understanding_confirmed"]=True
+            answer=self.base/"received-answer.json";answer.write_text(json.dumps(response))
+            result=self.step(interview=self.question_file,answers=answer,decision="revise")
+            question=result.get("interview_template")
+        self.assertEqual(result["reason"],"frame-revision-round-limit")
+        self.assertIsNone(question)
+        self.assertEqual(self.resolution()["status"],"revise")
+        self.assertEqual(self.step()["state"],"needs-attention")
+
     def test_interrupted_input_publication_leaves_no_partial_question_and_replays(self):
         import artifact_receipt
         with mock.patch.object(artifact_receipt.os, "link", side_effect=OSError("publication interrupted")):
