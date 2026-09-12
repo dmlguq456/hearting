@@ -6017,6 +6017,9 @@ def main():
     start.add_argument("--route",required=True,type=Path)
     start.add_argument("--jobs",type=Path,default=None)
     start.add_argument("--wait",action="store_true",help="the receipt's bounded wait for a parent without an automatic carrier")
+    start.add_argument("--interview",type=Path,help="semantic frame question; runtime owns its registration and cycle fields")
+    start.add_argument("--answers",type=Path,help="actual native answers; runtime records intent and releases the gate")
+    start.add_argument("--decision",choices=("proceed","revise","stop"),default="proceed")
     co=sub.add_parser("continuation")
     co.add_argument("--source-route",required=True)
     co.add_argument("--resume-from-node",required=True)
@@ -6110,7 +6113,8 @@ def main():
     if a.command=="start":
         from work_start import start_work
         route=verify_route(json.loads(a.route.read_text()))
-        print(json.dumps(start_work(route,a.route,Path(a.jobs or _compose_default_jobs()),wait=a.wait),ensure_ascii=False))
+        print(json.dumps(start_work(route,a.route,Path(a.jobs or _compose_default_jobs()),wait=a.wait,
+                                   interview=a.interview,answers=a.answers,decision=a.decision),ensure_ascii=False))
         return 0
     if a.command=="compile":
         gate={"spec_read":{"satisfied":a.spec_read.lower() not in ("0","false","no"),"source":a.spec_read},

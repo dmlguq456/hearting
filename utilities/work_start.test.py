@@ -5,6 +5,8 @@ Admission and observation are controlled here to exercise crash/replay and
 refusal boundaries. Actual claim/process/closure tests live in their owners.
 """
 import json
+import contextlib
+import io
 import importlib.util
 import os
 from pathlib import Path
@@ -94,7 +96,7 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual([c[c.index("--adapter")+1] for c in self.calls], ["codex", "opencode"])
         self.ready = True
         result = self.start()
-        self.assertEqual(result["state"], "needs-question", result)
+        self.assertEqual(result["state"], "needs-interview", result)
         self.assertEqual(len(self.calls), 2)
         self.released = True
         result = self.start()
@@ -115,6 +117,26 @@ class WorkStartTest(unittest.TestCase):
         self.assertEqual(result["parent_next"], "end-turn")
         self.assertIn("capacity temporarily full", result["launches"][1]["diagnostic"])
         self.assertEqual(self.start()["state"], "preparing")
+        self.assertEqual(len(self.calls), 2)
+
+    def test_public_answer_submission_releases_then_starts_only_one_owner(self):
+        self.start(); self.ready = True
+        def release(*args, **kwargs):
+            self.assertEqual(kwargs["answers"], "actual-answers.json")
+            self.released = True
+            return {"state": "released", "decision": "proceed"}
+        with mock.patch.object(W, "frame_interview_step", side_effect=release):
+            result = self.start(interview="question.json", answers="actual-answers.json")
+        self.assertEqual(result["state"], "completed", result)
+        self.assertEqual(len(self.calls), 3)
+
+    def test_question_failure_after_frame_completion_does_not_promise_another_wake(self):
+        self.start(); self.ready = True
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t"))
+        with mock.patch.object(W, "frame_interview_step", side_effect=ValueError("bad-question")):
+            result = self.start(interview="question.json")
+        self.assertEqual(result["state"], "needs-attention", result)
+        self.assertNotIn("parent_next", result)
         self.assertEqual(len(self.calls), 2)
 
     def test_failure_conflict_or_unsealed_workflow_never_authorizes_success(self):
@@ -231,6 +253,139 @@ class WorkStartTest(unittest.TestCase):
                             self.assertEqual(args.attempt_id,W.attempt_id(route,node))
                             return subprocess.CompletedProcess(command,0,"validated","")
                         W._start(route,self.path,self.jobs,node,harness,run)
+
+
+WF = load("work_start_workflow_fixture", W.ROOT / "utilities/workflow_supervisor.test.py")
+
+
+class FrameInterviewStepTest(WF.WorkflowFixture):
+    """Real ledger/gate/answer/intent code; transport and producer location are isolated."""
+    def setUp(self):
+        super().setUp()
+        self.route, self.path = self.two_stage_route(human_gate="frame-review",
+            continuation={"kind": "human-gate", "gate": "frame-review"})
+        self.jobs = self.base / "jobs.log"
+        self.jobs.write_text("")
+        self.output = self.base / "artifacts"
+        self.calls = []
+        self.question = {"understanding": "Run the two commands and preserve their actual results.",
+            "brief": {"problem": "We need the measured results.", "outcome": "One report with both results.",
+                "affected": "The report only.", "constraints": "Preserve the expected exit code 7.", "open": ""},
+            "questions": []}
+        self.question_file = self.base / "question.json"
+        self.question_file.write_text(json.dumps(self.question))
+        import artifact_producer
+        for patch in (
+            mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.output)}),
+            mock.patch.object(WF.SUP, "create_gate_delivery", return_value=(self.base / "gate-record.json", True)),
+            mock.patch.object(WF.SUP, "retire_gate_delivery", return_value="acked"),
+        ):
+            patch.start(); self.addCleanup(patch.stop)
+
+    def run_command(self, argv, **kwargs):
+        self.calls.append(argv[2])
+        stdout, stderr = io.StringIO(), io.StringIO()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = WF.SUP.main(argv[2:])
+        except (WF.SUP.SupervisorError, WF.WS.WorkflowStateError) as exc:
+            rc = 64; stderr.write(str(exc))
+        return subprocess.CompletedProcess(argv, rc, stdout.getvalue(), stderr.getvalue())
+
+    def step(self, **kwargs):
+        return W.frame_interview_step(self.route, self.path, self.jobs, run=self.run_command, **kwargs)
+
+    def answers(self):
+        import frame_interview as FI
+        a = FI.answers_template({**self.question, "route_id": self.route["route_id"]})
+        a["understanding_confirmed"] = True
+        path = self.base / "answers.json"
+        path.write_text(json.dumps(a))
+        return path
+
+    def resolution(self):
+        ledger = WF.WS.WorkflowLedger(self.route["route_id"], self.route["route_hash"], jobs=self.jobs)
+        return WF.WS.human_gate_resolution(ledger.journal(), "frame-review")
+
+    def test_register_before_question_then_actual_answers_release_once(self):
+        self.assertEqual(self.step()["state"], "needs-interview")
+        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
+        self.assertEqual(self.resolution()["status"], "blocked")
+        self.assertEqual(self.step()["state"], "needs-question")
+        self.assertEqual(self.resolution()["epoch"], 1)
+        result = self.step(answers=self.answers())
+        self.assertEqual(result["state"], "released")
+        intent = Path(result["intent_file"]).read_bytes()
+        self.assertIn(b"status: agreed", intent)
+        self.assertEqual(self.resolution()["answers"]["understanding_confirmed"], True)
+        self.assertEqual(self.step(answers=self.answers())["state"], "released")
+        self.assertEqual(self.calls, ["gate", "release"])
+        self.assertEqual(Path(result["intent_file"]).read_bytes(), intent)
+
+    def test_already_received_answers_register_and_release_without_reasking(self):
+        result = self.step(interview=self.question_file, answers=self.answers())
+        self.assertEqual(result["state"], "released")
+        self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_committed_answer_replay_does_not_reopen_or_write_a_sealed_cycle(self):
+        import artifact_producer
+        answer = self.answers()
+        result = self.step(interview=self.question_file, answers=answer)
+        with mock.patch.object(artifact_producer, "prepare_route_artifact_env", side_effect=AssertionError("sealed cycle")), \
+             mock.patch.object(W, "_store_once", side_effect=AssertionError("sealed write")):
+            self.assertEqual(self.step(answers=answer), result)
+            self.assertEqual(self.step(interview=self.question_file), result)
+        self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_lost_release_response_replays_exact_committed_answer(self):
+        original = self.run_command
+        def lose(argv, **kwargs):
+            r = original(argv, **kwargs)
+            if argv[2] == "release":
+                return subprocess.CompletedProcess(argv, 70, "", "lost reply")
+            return r
+        with self.assertRaisesRegex(ValueError, "frame-release-pending"):
+            W.frame_interview_step(self.route,self.path,self.jobs,interview=self.question_file,
+                                  answers=self.answers(),run=lose)
+        self.assertEqual(self.resolution()["status"], "proceed")
+        self.assertEqual(self.step(answers=self.answers())["state"], "released")
+        self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_changed_answer_cannot_replace_a_committed_decision(self):
+        answer = self.answers()
+        self.step(interview=self.question_file, answers=answer)
+        before = self.resolution()
+        changed = json.loads(answer.read_text()); changed["understanding_confirmed"] = False
+        changed["correction"] = "Change the scope."
+        answer.write_text(json.dumps(changed))
+        with self.assertRaisesRegex(ValueError, "frame-input-conflict"):
+            self.step(answers=answer)
+        self.assertEqual(self.resolution(), before)
+
+    def test_invalid_or_foreign_answers_do_not_raise_a_gate(self):
+        answer = self.answers()
+        invalid = json.loads(answer.read_text()); invalid["route_id"] = "rt-foreign"
+        answer.write_text(json.dumps(invalid))
+        with self.assertRaisesRegex(ValueError, "frame-input-invalid"):
+            self.step(interview=self.question_file, answers=answer)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.resolution()["status"], "not-raised")
+
+    def test_stop_does_not_render_an_agreed_intent_or_start_anything(self):
+        result = self.step(interview=self.question_file,answers=self.answers(),decision="stop")
+        self.assertEqual(result["state"], "cancelled")
+        self.assertFalse((self.output / "shards/frame/intent.md").exists())
+        self.assertEqual(self.step(answers=self.answers(),decision="stop")["state"], "cancelled")
+        self.assertEqual(self.calls, ["gate", "release"])
+
+    def test_interrupted_input_publication_leaves_no_partial_question_and_replays(self):
+        import artifact_receipt
+        with mock.patch.object(artifact_receipt.os, "link", side_effect=OSError("publication interrupted")):
+            with self.assertRaisesRegex(OSError, "publication interrupted"):
+                self.step(interview=self.question_file)
+        self.assertFalse((self.output / "shards/frame/round-1/interview.json").exists())
+        self.assertEqual(self.resolution()["status"], "not-raised")
+        self.assertEqual(self.step(interview=self.question_file)["state"], "needs-question")
 
 
 if __name__ == "__main__":

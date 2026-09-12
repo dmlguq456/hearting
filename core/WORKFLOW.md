@@ -194,12 +194,16 @@ obligations, and never retries a failed attempt merely because it was called
 again. Follow its `parent_next` while work is running. An expired bounded wait
 returns `needs-attention`: report the pending work; runtime watchers retain
 execution/cleanup responsibility and the deadline grants no retry authority.
-`needs-question` means
-both frames have been checked; compare their results and use the native frame
-interview (§0.4). After actual release, the same command starts the owner.
+`needs-interview` means both frames have been checked: compare their results,
+fill the returned semantic template, and use `start --route <file> --interview
+<question.json>`. The runtime registers the gate before returning `needs-question`.
+After the native answer, use the same command with `--answers <answers.json>`;
+it records intent, releases the gate, and starts the owner. Already answered
+questions can supply both files without asking again. `--decision revise|stop`
+records those choices; repeated answers reuse the recorded decision.
 Runtime settlement closes the route and cycle before owner success is delivered.
-The model does not assemble launch tuples, copy artifact variables, or manually
-harvest and finalize ordinary work. Diagnostic recovery commands name the exact
+The model does not assemble launch tuples or artifact variables, harvest, or
+finalize ordinary work. Recovery commands name the exact
 attempt; a changed scope still belongs to the user.
 
 Without `--start`, `compose` returns the selected stages, profiles, human gates
@@ -375,7 +379,7 @@ cycle keeps `frame.continuation=inline-next` and is never retro-fitted onto
 this gate.
 
 **The frame interview (SD-129).** The `[방향 확인]` card is not the whole
-gate. The gate record names `shards/frame/interview.json`: a one-sentence
+gate. The gate record names its exact cycle-local interview: a one-sentence
 restatement of what the user wants, a plain-language brief, and the few
 decisions the frame legs could not settle without the user. The depth-0
 session builds that record from the joined frame legs and does the interview
@@ -384,20 +388,19 @@ itself, in this order, and never leaves it to a helper:
 1. Ask first whether the restatement is right — that sentence, verbatim,
    with 예 / 아니오(고쳐 말하기) — and record a correction in the user's words.
 2. Put the `[방향 확인]` five-field summary as the card above.
-3. Ask each interview question through `AskUserQuestion` (at most four per
-   call), one topic per question, the recommended option first and labelled
+3. Ask each interview question through the native question tool, one topic
+   per question, the recommended option first and labelled
    (권장), each option with its one-line meaning; never paraphrase a question
    into harness vocabulary, and never add questions the interview does not
    carry. A tired reader must be able to answer without opening the plan.
-4. Write the answers with `frame_interview.py answers-template` as the shape
-   and record them on the release: `workflow-supervisor.py release --route
-   <route file> --gate frame-review --decision proceed --answers <file>`.
-   `proceed` without answers is refused for an interview gate, and that
-   release is the one machine event that authorizes the owner's launch.
+4. Put the actual responses in the returned `answers_template` and submit
+   `start --route <file> --answers <file>`. The runtime renders intent and
+   records the release that authorizes owner launch. A repeated submission
+   reuses it. Legacy recovery: `workflow-supervisor.py
+   release --route <route file> --gate frame-review --decision proceed --answers <file>`.
 
-`OPERATIONS §5.10b` owns the launch that precedes all of this — one Bash call
-per leg, the artifact variables, the missing-harness re-launch, and the
-one-time `top`→`deep` demotion. Both legs
+`OPERATIONS §5.10b` owns selector mechanics and the one-time `top`→`deep`
+demotion; the public work entry owns launch calls and artifact context. Both legs
 are always waited for — past the hard limit depth-0 stops and asks, rather
 than proceeding on one — and differing direction verdicts go side by side,
 nothing downstream starting until the user picks one. Step 1 is asked even
