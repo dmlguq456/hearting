@@ -137,6 +137,22 @@ class WorkStartTest(unittest.TestCase):
             self.assertEqual(result["state"], "preparing")
         self.assertEqual(len(self.calls), 2)
 
+    def test_bounded_wait_deadline_hands_back_without_another_wait_or_retry(self):
+        for owner in (False, True):
+            with self.subTest(owner=owner):
+                self.jobs.unlink(missing_ok=True); self.calls.clear()
+                if owner:
+                    self.route["nodes"] = []
+                result = self.start(wait=True)
+                self.assertEqual(result["state"],"needs-attention",result)
+                self.assertEqual(result["reason"],"parent-wait-deadline")
+                self.assertEqual(result["required_action"],"report-pending-work")
+                self.assertNotIn("parent_next_command",result)
+                self.assertIn("runtime watchers retain",result["next_step"])
+                before = len(self.calls)
+                self.start()
+                self.assertEqual(len(self.calls),before)
+
     def test_foreign_parent_is_checked_before_any_new_sibling(self):
         self.admit(["fixture", "--route-node", "frame-alternative", "--attempt-id", W.attempt_id(self.route,"frame-alternative")])
         self.jobs.write_text(self.jobs.read_text().replace("parent_sid=parent", "parent_sid=other"))

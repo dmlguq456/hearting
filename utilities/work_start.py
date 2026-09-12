@@ -98,6 +98,18 @@ def _wait_fields(attempts, rows, resume):
             "parent_next_command": "" if automatic else resume + " --wait"}
 
 
+def _wait_expired(result):
+    """A bounded fallback owes a handoff, not another automatic wait loop."""
+    result.pop("parent_next", None)
+    result.pop("parent_next_command", None)
+    return {**result, "state": "needs-attention", "reason": "parent-wait-deadline",
+            "required_action": "report-pending-work",
+            "next_step": "The bounded wait ended while these exact attempts remain unresolved. "
+                "Their runtime watchers retain execution and cleanup responsibility. Report the pending "
+                "attempts and observation to the user; use resume_command for a requested follow-up. "
+                "This deadline neither fails the workers nor authorizes replacement attempts."}
+
+
 def _outcome(jobs, aid):
     state = current_delivery_state(jobs, aid, parent_attempt_id=aid, advance=False)
     action = delivery_required_action(state)
@@ -146,6 +158,8 @@ def _advance(route, path, jobs, result, *, wait=False, run=subprocess.run):
         joined = join_selected_attempts(jobs=jobs, expected_attempts=attempts, timeout=600 if wait else 0, recover=True)
         result["observation"] = joined
         if joined["state"] != "ready":
+            if wait:
+                return _wait_expired(result)
             return {**result, "state": "preparing",
                     "required_action": "wait-for-frame-results"}
         result.pop("parent_next", None)
@@ -177,6 +191,8 @@ def _advance(route, path, jobs, result, *, wait=False, run=subprocess.run):
         outcome = _outcome(jobs, aid)
         return {**result, "state": "completed" if outcome["classification"] == "success" else "needs-attention",
                 "result": outcome}
+    if wait:
+        return _wait_expired({**result, "observation": joined})
     directive, reason, _ = parent_next(metadata.get("parent_completion_delivery", ""), aid, agent_home=ROOT)
     return {**result, "state": "running", "parent_next": directive, "parent_next_reason": reason,
             "parent_next_command": resume + " --wait" if directive == "bounded-wait" else ""}
@@ -206,10 +222,10 @@ def start_work(route, path, jobs, *, wait=False, run=subprocess.run):
         except (OSError, ValueError) as observation_error:
             result["observation_error"] = str(observation_error)
     if result["state"] == "needs-attention":
-        result["required_action"] = "inspect-preparation"
+        result.setdefault("required_action", "inspect-preparation")
         result["resume_command"] = shlex.join([sys.executable, str(ROOT / "utilities/capability-route.py"),
                                                 "start", "--route", str(path), "--jobs", str(jobs)])
-        result["next_step"] = ("Inspect the exact diagnostic or result recovery_command. Existing workers retain "
+        result.setdefault("next_step", "Inspect the exact diagnostic or result recovery_command. Existing workers retain "
             "their runtime watcher and completion delivery. Correct the admission input or resolve the reported "
             "failure, then use resume_command; it does not create a replacement for a failed attempt. "
             "If the correction changes the requested work, ask the user before changing that work.")

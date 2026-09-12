@@ -191,7 +191,10 @@ parent. The runtime seals it, prepares its cycle, starts the frame pair when
 declared, and returns one receipt. Reuse that receipt's `resume_command` after
 wakes or input corrections. It reuses exact attempts, carries partial admission
 obligations, and never retries a failed attempt merely because it was called
-again. Follow its `parent_next` while work is running. `needs-question` means
+again. Follow its `parent_next` while work is running. An expired bounded wait
+returns `needs-attention`: report the pending work; runtime watchers retain
+execution/cleanup responsibility and the deadline grants no retry authority.
+`needs-question` means
 both frames have been checked; compare their results and use the native frame
 interview (§0.4). After actual release, the same command starts the owner.
 Runtime settlement closes the route and cycle before owner success is delivered.

@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-현재 상태: **전체 목표는 아직 미입증이며 작업을 계속한다.** 과거 실제 운송·실행 성공과 수동 교정·마감은 아래에 각각 보존했다. 최소 입력의 새 검증 두 차례가 준비 단계에서 실패했다. 마감뿐 아니라 준비·기동도 공통 런타임에 맡기는 공개 진입점을 추가하여 검증 중이다. 소스 회귀 통과와 새 모델 완주 증거를 구분한다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전 보류한다.
+현재 상태: **전체 목표는 아직 미입증이며 작업을 계속한다.** `19be761e`의 두 새 부모가 공개 시작 명령으로 각자의 Codex/OpenCode frame을 완료했다. Codex 부모는 두 자동 success를 받았고 OpenCode 부모는 안내된 유한 대기로 회수했다. 두 부모 모두 실제 native 질문의 답변을 기다리며 owner는 아직 미기동이다. 이번 소스의 실제 owner 실행→자동 마감은 미입증이다. Codex 부모의 잘못된 질문을 root가 사실 교정한 개입도 보존한다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전 보류한다.
 
 아래는 HEAD별 진행·실패 기록이다. 각 절의 당시 대기/미검증 상태를 최종 상태로 읽지 않도록 최신 실측과 후속 수정은 마지막 두 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
 
@@ -358,3 +358,50 @@ r3는 `8a337e30cabfd073c64803b4ad9db45ea7b842ca`의 새 Codex 부모 `01a094fc-e
 후속 수정은 공통 bootstrap의 `assignment_prompt`가 요청을 ‘나중 owner의 전체 과제’와 ‘지금 frame의 방향 brief’로 구분하고 route의 정확한 `outputs`를 실제 cycle 경로로 전달하는 것이다. 세 adapter의 수동 `Assignment` 연결을 이 함수로 교체했다. 또한 공통 completion 안내가 새 work request의 정확한 `start --route`를 다시 제공한다. 부모가 알림마다 route를 찾거나 실패한 frame을 다른 cycle의 산출물로 대체하도록 일반적인 수확/후속 명령을 추측할 필요가 없다. d2와 legacy는 기존 정확한 검사 안내를 유지하며, 이미 봉인된 owner success에는 추가 명령을 요구하지 않는다. 완료/재시도 판정 권한은 바꾸지 않았다.
 
 같은 추적에서 frame의 `assigned_contract`가 owner 기본값 `autopilot-code`를 물려받는 원인도 확인했다. 이미 frame 단위 계약을 주입하고도 다시 전체 owner Skill을 읽으라고 세 adapter가 지시했다. selector와 공통 bootstrap을 단위 계약 `plan/frame`으로 맞추고 이 중복 로딩 의무를 없앴다. 새 입력 검사는 세 실제 adapter prompt에서 정확한 cycle-local brief 경로와 단위 계약을 확인한다. 기존 owner/stage/review의 계약 선택은 유지한다. prompt 8 / bootstrap 15 / selector 78 / join 123 / gateway 47 / Codex supervisor 34 / 공통 CLI supervisor 69 PASS. 새 모델 완주 전에는 이 결과를 전체 목표 PASS로 사용하지 않는다.
+
+## 19be 공개 시작 실측: frame 완료와 현재 입증 경계
+
+r4 Codex 부모 `01a0950c-979b-7ed3-832c-b537cf20434b`의 route
+`rt-71e3ced7d8a5c0e7`은 Codex `att-4dc79fef20ab2eeb15e8f9115700b4f2`와
+OpenCode `att-99cfb3d17b942fc65296a73ccc0d9a42`의 실제 PASS를 각각
+09:59:10.124Z, 09:59:47.906Z에 같은 native 부모의 자동 success로 전달했다.
+부모는 제공된 동일 `start --route`를 사용했다. 두 frame의 출력 경로는 이번
+cycle의 각자 brief이며 depth 1이다. 별도 tuple/env/begin/harvest 조립은 없었다.
+
+부모는 10:00:08.966Z의 질문에서 OpenCode가 실행하지 않은 결과를 단정했다고
+잘못 해석했다. 실제 native subprocess 호출은 종료값 7과 0, 후자의 출력 3을
+확인했다. root가 잘못된 질문을 취소하고 사실을 정정했으며, 부모는
+10:04:12.358Z `call_KNQWgCV98KHUkw1FmiOKCWQ0`으로 범위 이해 질문을
+재표시했다. 이 교정은 자동 운송 이후의 개입이고 사용자 답변이나 승인이 아니다.
+무오류·무개입 완주로 보고하지 않는다.
+
+r4 OpenCode 부모 `ses_f6aee6d9dffe6ceouPtxHE2UJJ`의 route
+`rt-d61c5f3241d72d08`은 Codex `att-8c4a5054eae05cb85a623773cb13a8dd`와
+OpenCode `att-3f36e13ee6b41c67e026931f76dae360`을 실제 완료했다. 두 행의
+parent delivery는 `poll-fallback/parent-identity-unmatched`였고 부모가 인쇄된
+한 번의 `start --wait`로 회수했다. 지원하지 않는 자동 wake를 약속하지 않았다는
+증거이며 OpenCode 자동 운송의 합격 증거는 아니다. 실제 native 질문은 셸 방식과
+Python subprocess 방식 중 선택이며 별도 복제 질문이나 대리 답변을 만들지 않았다.
+
+네 frame 모두 light/Luna이며 공통 정리 판정은 `governed-process-group-drained`다.
+두 route 모두 owner 미기동·실제 답변 미수신인 관측을
+`/tmp/responsibility-proof-20260912/r4-frame-boundary-observation.json`에 기록했다.
+Codex의 exact native 원문은 `codex-r4-events-current.json`에 있다.
+이 시점의 합격은 공개 준비·기동, 정확한 frame 산출물, Codex 자동 운송 및
+OpenCode의 명시된 유한 대기까지다. 요청한 두 명령의 최종 보고서와 새 owner의
+자동 workflow/route/cycle 마감은 여전히 남은 합격선이다.
+
+## 공개 대기 기한의 후속 책임
+
+실측과 독립된 소스 점검에서 `start --wait`의 600초가 끝나면 같은 bounded-wait
+명령을 다시 지시하는 경로를 발견했다. 이 반복 지시를 제거했다. frames와 owner
+모두 기한이 끝나면 exact attempt와 관측·재개 핸들을 보존하고 `needs-attention /
+parent-wait-deadline`로 사용자에게 미해결 상태를 보고하도록 돌려준다. 실행·자손
+정리는 기존 런타임 감시자가 유지하며, 대기 기한은 실패 확정이나 새 retry 허가가
+아니다. 별도 상태 저장소·retry 정책·감시자를 추가하지 않았다.
+
+`work_start` 12개 검사 통과(`/tmp/proof-work-wait-boundary.log`): 두 경로의
+기한 만료 뒤 반복 대기 지시 부재, 같은 route 재개 시 추가 기동 없음, 기존
+부분 기동·응답 유실·충돌·미봉인 성공 소비 거부를 확인한다. 기한 시험은 제어된
+관측 fixture이며 실제 모델을 600초 기다린 실측으로 주장하지 않는다. 실행 중인
+두 r4 부모의 source `19be761e`는 이 후속 수정과 별개로 고정해 두었다.
