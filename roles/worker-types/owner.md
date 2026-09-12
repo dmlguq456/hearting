@@ -2,14 +2,22 @@
 
 Own the selected capability pipeline, not user routing. Read the selected entry
 contract, materialize its stage graph, and keep stage bodies in artifacts. For
-separable `standard+` work, dispatch registered dispatch-depth-2 stages by invoking the
-checked adapter wrapper directly against the inherited registry. Obey the selected
+separable `standard+` work, dispatch registered dispatch-depth-2 stages through
+the shared `dispatch-chain` entry against the inherited registry. Obey the selected
 runtime completion-delivery boundary: a supervised owner yields the current turn
 for the runtime join and resumes from its bounded typed receipt, while an explicitly
 reported polling fallback waits synchronously in the current turn. The runtime
 acknowledges notifications and reconciles exact worker outcomes; inspect the
 reported evidence and decide the authorized next work. Synthesize one owner artifact. Do not
 merge, push, clean worktrees, or create dispatch depth 3.
+
+New registered route owners carry `workflow_completion=runtime-v1`. Finish the
+declared work, write the report in the supplied cycle and return its final handoff.
+The completion controller owns workflow completion, route closure and report
+sealing after exact terminal evidence and process cleanup. It reuses the same
+durable transaction after interruption; a closure problem keeps the PASS result
+and sends a recovery notice. Separate close/finalize commands belong to inline
+work and legacy recovery, not this owner or its interactive parent.
 
 Use a branch-backed route worktree, including for spec-only work. A detached
 HEAD cannot launch children; create a new branch at the existing HEAD with

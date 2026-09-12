@@ -270,7 +270,7 @@ class RouteDemand(unittest.TestCase):
                 "--dispatch-evidence",str(evidence),"--profile-demands",str(demands)]
             for action,extra,expected in (("compile",["--intensity","standard","--signal","shared-contract",
                     "--transport","headless","--tracking","tracked","--workflow-mode","tracked"],"balanced-deep"),
-                    ("compose",["--shape","staged","--graph","execute,report","--explicit-profiles",str(explicit)],"deep")):
+                    ("compose",["--full-record","--shape","staged","--graph","execute,report","--explicit-profiles",str(explicit)],"deep")):
                 result=subprocess.run([sys.executable,str(ROOT/"utilities/capability-route.py"),action,*common,*extra],
                     capture_output=True,text=True,env=env)
                 self.assertEqual(result.returncode,0,result.stdout+result.stderr)
@@ -279,7 +279,7 @@ class RouteDemand(unittest.TestCase):
                 self.assertEqual(node["profile_selection"]["source"],"explicit" if action=="compose" else "matrix")
             result = subprocess.run([sys.executable, str(ROOT/"utilities/capability-route.py"), "compose",
                 *common[:-2], "--shape", "staged", "--graph", "frame,frame-alternative,test,report",
-                "--profile", "light"], capture_output=True, text=True, env=env)
+                "--profile", "light", "--full-record"], capture_output=True, text=True, env=env)
             self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
             route = json.loads(result.stdout)
             self.assertEqual(route["owner_model_profile"], "light")

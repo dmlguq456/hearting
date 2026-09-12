@@ -472,7 +472,7 @@ def verify_request_identity(request, route):
         raise TerminalCommitError("route-identity-unverified", "owner-not-current")
     fields, meta = owners[-1]
     if (meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
-            or meta.get("harness") != "claude" or binding.route_hash != digest
+            or meta.get("harness") not in dispatch_contract.WRAPPER_PARENT_HARNESSES or binding.route_hash != digest
             or fields[1] not in {"open", "running", "done"}
             or (fields[1] == "done" and meta.get("failure_class") != "pass")):
         raise TerminalCommitError("route-identity-unverified", "owner-axes")
@@ -558,6 +558,39 @@ def _proof_failure(reason: str, detail: Optional[str] = None) -> TerminalProof:
     return TerminalProof("rejected", _DETAIL_REASON_MAP.get(reason, reason), reason if detail is None else detail)
 
 
+def _prove_route_children(request, route, gates):
+    """Use the shared attempt policy for initial closure and every replay."""
+    from dispatch_attempt_policy import decide_attempt
+    related = []
+    for line in Path(request.jobs).read_text(encoding="utf-8").splitlines():
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        meta = dispatch_contract.parse_registry_metadata(fields[5])
+        if meta.get("route_id") == route["route_id"] or meta.get("parent_attempt_id") == request.owner_attempt_id:
+            related.append((fields[1], meta))
+    for node in route.get("nodes", []):
+        if node.get("terminal") is not True:
+            continue
+        matching = [(status, meta) for status, meta in related
+                    if meta.get("route_id") == route["route_id"] and meta.get("route_node") == node["id"]]
+        if (not matching or matching[-1][0] != "done" or matching[-1][1].get("failure_class") != "pass"
+                or gates.get(node["id"], {}).get("attempt_id") != matching[-1][1].get("attempt_id")):
+            return _proof_failure("terminal-attempt-not-pass")
+    for status, meta in related:
+        process = dispatch_contract.attempt_process_quiescence(meta, terminal_receipt=True)
+        decision = decide_attempt(status, meta, process_state=process.state, process_reason=process.reason)
+        if decision.action == "inspect-conflict":
+            return _proof_failure("transaction-conflict", "child-terminal-conflict")
+        if decision.action == "reconcile":
+            return _proof_failure("child-not-terminal")
+        if decision.action in {"wait", "recover"}:
+            return _proof_failure("child-not-quiescent")
+    # Retry timestamps record history. Real rows and the shared jobs-lock
+    # terminal claim decide what remains active and fence every later start.
+    return TerminalProof("proved")
+
+
 def prove_terminal_authority(request: TerminalCommitRequest) -> TerminalProof:
     """Read-only, exact terminal authority proof; it performs zero mutation."""
     try:
@@ -574,30 +607,9 @@ def prove_terminal_authority(request: TerminalCommitRequest) -> TerminalProof:
         gates = route_mod.terminal_gate_observation(route, jobs=request.jobs, exact_terminal=True)
         if not gates or any(not row.get("passed") for row in gates.values()):
             return _proof_failure("terminal-marker-not-current")
-        lines = Path(request.jobs).read_text(encoding="utf-8", errors="replace").splitlines()
-        declared = {str(node.get("id")): node for node in route.get("nodes", [])}
-        for node_id, node in declared.items():
-            matching = []
-            for line in lines:
-                fields = line.split("\t")
-                if len(fields) != 6:
-                    continue
-                meta = dispatch_contract.parse_registry_metadata(fields[5])
-                if meta.get("route_id") == route["route_id"] and meta.get("route_node") == node_id:
-                    matching.append((fields[1], meta))
-            if node.get("terminal") is True:
-                if (not matching or matching[-1][0] != "done" or matching[-1][1].get("failure_class") != "pass"
-                        or gates.get(node_id, {}).get("attempt_id") != matching[-1][1].get("attempt_id")):
-                    return _proof_failure("terminal-attempt-not-pass")
-            # Every child, not only declared terminal nodes, must be settled.
-            for status, meta in matching:
-                if status in {"open", "running"}:
-                    return _proof_failure("child-not-terminal")
-                if meta.get("retry_attempt_id") or meta.get("retry_claimed_at"):
-                    return _proof_failure("active-retry")
-                q = dispatch_contract.attempt_process_quiescence(meta, terminal_receipt=True)
-                if q.state != "quiescent":
-                    return _proof_failure("child-not-quiescent")
+        children = _prove_route_children(request, route, gates)
+        if children.status != "proved":
+            return children
         if producer_lifecycle_applies(route):
             # Binding is immutable and must still point at an open, matching cycle.
             binding = load_producer_binding(artifact_root=request.artifact_root,
@@ -678,6 +690,12 @@ def _reverify_forward_recovery(
         return _proof_failure("route-identity-unverified")
     if recomputed != existing_state_value.get("terminal_commit_id"):
         return _proof_failure("transaction-conflict", "forward-recovery-identity-mismatch")
+    try:
+        children = _prove_route_children(request, route, gates)
+    except (OSError, ValueError, TypeError) as exc:
+        return _proof_failure("transaction-conflict", type(exc).__name__)
+    if children.status != "proved":
+        return children
     claim = dispatch_contract.terminal_claim_observation(
         request.jobs, route["route_id"], request.owner_attempt_id
     )
@@ -810,38 +828,11 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
         if state.get("state") == "owner-envelope-sealed":
             if production_services:
                 _verify_settled_outputs(request, route, commit_id, binding_value)
-            # A82-10/§13.53.6: the file existing is not proof of a durable
-            # exactly-once delivery. Re-verify the envelope metadata's
-            # identity against the freshly-recomputed commit_id (belt and
-            # suspenders on top of the FileExistsError branch above, which
-            # already refuses a mismatched commit_id before we get here),
-            # and re-verify the sealed primary artifact is still the exact
-            # bytes it was sealed against -- content drift after sealing must
-            # not be replayed as an unchanged completed envelope.
-            envelope_path = path.parent / "owner-envelope.txt"
-            meta_path = path.parent / "owner-envelope.json"
             try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                envelope_text = envelope_path.read_text(encoding="utf-8")
-            except (OSError, ValueError, TypeError) as exc:
-                _record_attempt(request, "recovery-unavailable", f"envelope-unreadable:{exc}")
-                return TerminalCommitResult("recoverable", "recovery-unavailable", "envelope-unreadable", terminal_nodes)
-            if meta.get("terminal_commit_id") != commit_id:
-                _record_attempt(request, "transaction-conflict", "envelope-identity-mismatch")
-                return TerminalCommitResult("recoverable", "transaction-conflict", "envelope-identity-mismatch", terminal_nodes)
-            if _digest(envelope_text.encode()) != meta.get("content_digest"):
-                _record_attempt(request, "transaction-conflict", "envelope-content-mismatch")
-                return TerminalCommitResult("recoverable", "transaction-conflict", "envelope-content-mismatch", terminal_nodes)
-            primary_path_str = meta.get("primary_path")
-            if primary_path_str:
-                primary_path = Path(primary_path_str)
-                root = Path(request.artifact_root).resolve()
-                if not _in_root_regular(primary_path, root):
-                    _record_attempt(request, "recovery-unavailable", "primary-no-longer-in-root")
-                    return TerminalCommitResult("recoverable", "recovery-unavailable", "primary-no-longer-in-root", terminal_nodes)
-                if _digest(primary_path.read_bytes()) != meta.get("primary_digest"):
-                    _record_attempt(request, "transaction-conflict", "primary-content-drifted-after-seal")
-                    return TerminalCommitResult("recoverable", "transaction-conflict", "primary-content-drifted-after-seal", terminal_nodes)
+                envelope_text = _read_sealed_owner_envelope(request, commit_id)
+            except TerminalCommitError as exc:
+                _record_attempt(request, exc.code, exc.detail)
+                return TerminalCommitResult("recoverable", exc.code, exc.detail, terminal_nodes)
             return TerminalCommitResult("completed", None, None, terminal_nodes, envelope_text)
         return TerminalCommitResult("recoverable", "recovery-unavailable", "partial-state", terminal_nodes)
     except TerminalCommitError as exc:
@@ -853,6 +844,26 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         _record_attempt(request, "recovery-unavailable", str(exc))
         return TerminalCommitResult("recoverable", "recovery-unavailable", str(exc))
+
+
+def _read_sealed_owner_envelope(request, commit_id):
+    """One read-only envelope proof for settlement replay and delivery."""
+    slot = _commit_state_path(request).parent
+    try:
+        meta = json.loads((slot / "owner-envelope.json").read_text())
+        text = (slot / "owner-envelope.txt").read_text()
+    except (OSError, ValueError, TypeError) as exc:
+        raise TerminalCommitError("recovery-unavailable", "envelope-unreadable") from exc
+    if meta.get("terminal_commit_id") != commit_id:
+        raise TerminalCommitError("transaction-conflict", "envelope-identity-mismatch")
+    if _digest(text.encode()) != meta.get("content_digest"):
+        raise TerminalCommitError("transaction-conflict", "envelope-content-mismatch")
+    primary = Path(meta.get("primary_path") or "")
+    if not primary.is_absolute() or not _in_root_regular(primary, request.artifact_root.resolve()):
+        raise TerminalCommitError("recovery-unavailable", "primary-no-longer-in-root")
+    if _digest(primary.read_bytes()) != meta.get("primary_digest"):
+        raise TerminalCommitError("transaction-conflict", "primary-content-drifted-after-seal")
+    return text
 
 
 def _verify_settled_outputs(request, route, commit_id, binding):
@@ -1020,6 +1031,102 @@ def cleanup_tool_permission(scope, *, tool, arguments, cwd, owner_attempt_id, ro
                                    owner_attempt_id=owner_attempt_id, route_id=route_id)
 
 
+def _completion_request(jobs, status, metadata):
+    """The launch contract, not terminal words alone, assigns workflow closure."""
+    if (metadata.get("workflow_completion") != "runtime-v1"
+            or metadata.get("worker_type") != "owner" or metadata.get("dispatch_depth") != "1"
+            or status != "done" or metadata.get("failure_class") != "pass"):
+        return None
+    import owner_route_binding
+    binding, _ = owner_route_binding.resolve_owner_route_lifecycle(
+        Path(jobs), owner_attempt_id=metadata["attempt_id"])
+    path = Path(binding.route_file if binding else metadata.get("route_file", ""))
+    route = json.loads(path.read_text())
+    request = TerminalCommitRequest(path, metadata["attempt_id"], Path(jobs), Path(route["artifact_root"]))
+    verify_request_identity(request, route)
+    validate_owner_route(jobs=request.jobs, route_file=path, owner_attempt_id=request.owner_attempt_id)
+    return request
+
+
+def owner_completion_pending(jobs, status, metadata) -> bool:
+    """Read-only consumption check; success bytes remain immutable while finishing."""
+    if metadata.get("workflow_completion") != "runtime-v1" or status != "done" or metadata.get("failure_class") != "pass":
+        return False
+    try:
+        request = _completion_request(jobs, status, metadata)
+        if request is None:
+            return False
+        state = json.loads(_commit_state_path(request).read_text())
+        if state.get("state") != "owner-envelope-sealed":
+            return True
+        if _reverify_forward_recovery(request, state).status != "proved":
+            return True
+        route = json.loads(request.route_file.read_text())
+        binding = (load_producer_binding(artifact_root=request.artifact_root, route_id=route["route_id"],
+                   owner_attempt_id=request.owner_attempt_id).binding if producer_lifecycle_applies(route) else None)
+        _verify_settled_outputs(request, route, state["terminal_commit_id"], binding)
+        _read_sealed_owner_envelope(request, state["terminal_commit_id"])
+        import workflow_state as workflow
+        ledger = workflow.WorkflowLedger(state["route_id"], state["route_hash"], jobs=Path(jobs))
+        return ledger.state()["workflow_state"] != "COMPLETE"
+    except (OSError, ValueError, KeyError, TypeError, TerminalCommitError):
+        return True
+
+
+def settle_owner_completion(jobs, status, metadata) -> TerminalCommitResult | None:
+    """Runtime-owned, retryable workflow/route/cycle closure after exact PASS.
+
+    Reapers, recovering joins and explicit recovery all use this transaction.
+    A failure preserves the committed PASS and leaves an attention obligation;
+    it cannot grant another model execution or manufacture a failure result.
+    """
+    try:
+        request = _completion_request(jobs, status, metadata)
+        if request is None:
+            return None
+        if dispatch_contract.terminal_conflict_pending(metadata):
+            return TerminalCommitResult("recoverable", "transaction-conflict", "terminal-evidence-conflict")
+        process = dispatch_contract.attempt_process_quiescence(metadata, terminal_receipt=True)
+        if process.state != "quiescent":
+            return TerminalCommitResult("recoverable", "child-not-quiescent", process.reason)
+        route = json.loads(request.route_file.read_text())
+        import artifact_producer as producer
+        import workflow_state as workflow
+        # Reuse an existing immutable binding during forward recovery, including
+        # a cycle already sealed by the prior invocation.
+        binding_path = producer_binding_path(request.artifact_root, route["route_id"], request.owner_attempt_id)
+        if producer_lifecycle_applies(route) and not binding_path.exists():
+            producer.begin(request.artifact_root, route_file=request.route_file,
+                           capability=route["capability"], intensity=route["effective_intensity"],
+                           require_cycle=True, jobs=request.jobs, owner_attempt_id=request.owner_attempt_id)
+        ledger = workflow.WorkflowLedger(route["route_id"], route["route_hash"], jobs=request.jobs)
+        gates = _route_module().terminal_gate_observation(route, jobs=request.jobs, exact_terminal=True)
+        with ledger.lock():
+            ledger.completion_paths(workflow.route_terminal_nodes(route), gates)
+        result = settle_terminal_commit(request)
+        if result.result == "completed":
+            # The terminal transaction fences late starts and proves every
+            # child before the workflow can advertise COMPLETE.
+            with ledger.lock():
+                ledger.complete(workflow.route_terminal_nodes(route), gates, actor="completion-controller")
+    except (OSError, ValueError, KeyError, TypeError, TerminalCommitError) as exc:
+        result = TerminalCommitResult("recoverable", "recovery-unavailable", str(exc))
+    except Exception as exc:
+        # Producer/ledger errors are owned recovery outcomes, never a new
+        # terminal failure. Preserve their typed reason without model content.
+        result = TerminalCommitResult("recoverable", "recovery-unavailable",
+                                      str(getattr(exc, "code", type(exc).__name__)))
+    if result.result != "completed":
+        from dispatch_supervision import materialize
+        try:
+            materialize(Path(jobs), {metadata["attempt_id"]}, reason="workflow-completion-pending")
+        except (OSError, ValueError, RuntimeError) as exc:
+            # The immutable launch contract keeps the obligation discoverable
+            # even if the notice store fails. The next join retries both.
+            sys.stderr.write(f"workflow-completion-notice-pending attempt={metadata['attempt_id']} reason={exc}\n")
+    return result
+
+
 def cleanup_recover():
     """Structured exact forward settlement; no user-supplied mutation argv."""
     jobs = Path(os.environ["AGENT_DISPATCH_JOBS"])
@@ -1042,6 +1149,22 @@ def cleanup_recover():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] != ["cleanup-recover"]:
-        raise SystemExit(64)
-    raise SystemExit(cleanup_recover())
+    if sys.argv[1:] == ["cleanup-recover"]:
+        raise SystemExit(cleanup_recover())
+    import argparse
+    parser = argparse.ArgumentParser(description="Recover one runtime-owned workflow completion; never launch a model.")
+    parser.add_argument("operation", choices=["finish"])
+    parser.add_argument("--jobs", required=True, type=Path)
+    parser.add_argument("--attempt", required=True)
+    args = parser.parse_args()
+    dispatch_contract.ensure_global_registry_writable(args.jobs)
+    from dispatch_completion_join import exact_attempt_row, materialize_after_terminal_close
+    row = exact_attempt_row(args.jobs, args.attempt)
+    result = settle_owner_completion(args.jobs, row.status, row.metadata)
+    if result is None:
+        print(json.dumps({"result": "not-applicable", "reason": "no-runtime-owned-successful-workflow"}))
+        raise SystemExit(3)
+    if result.result == "completed":
+        materialize_after_terminal_close(args.jobs, args.attempt)
+    print(json.dumps({"result": result.result, "reason": result.reason, "detail": result.detail}))
+    raise SystemExit(0 if result.result == "completed" else 70)

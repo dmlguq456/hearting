@@ -8744,6 +8744,14 @@ def resolve_terminal_conflict(
     return values
 
 
+def workflow_completion_receipt(args) -> str:
+    """Seal who finishes a newly launched route owner, across all adapters."""
+    bound = getattr(args, "owner_route_binding", None) or getattr(args, "route_file", None)
+    if getattr(args, "worker_type", None) == "owner" and bound and int(args.dispatch_depth) == 1:
+        return ",workflow_completion=runtime-v1"
+    return ""
+
+
 def reconcile_attempt_terminal(
     jobs: Path,
     attempt_id: str,

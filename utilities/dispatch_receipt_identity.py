@@ -15,6 +15,11 @@ CANONICAL_CHILD_KEYS = frozenset({
     "delivery_classification",
 })
 NOTICE_KINDS = frozenset({"human-gate", "supervision"})
+COMPLETION_ACTIONS = frozenset({"complete-open", "inspect-done-failure", "advance-completed", "finish-workflow"})
+COMPLETION_REASONS = frozenset({"registry-closed", "registry-closed-marker", "terminal-observed",
+                                "row-advanced", "terminal-failure-or-unclosed"})
+JOIN_REASONS = COMPLETION_REASONS | {"process-alive", "process-unverifiable",
+                                     "terminal-commit-pending", "workflow-completion-pending"}
 
 
 def unseal_receipt(encoded: str) -> dict:

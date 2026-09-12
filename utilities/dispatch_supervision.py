@@ -19,7 +19,7 @@ from dispatch_receipt_identity import receipt_digest
 import dispatch_pending_delivery as pending_delivery
 
 KIND = "supervision"
-REASONS = frozenset({"no-progress", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict"})
+REASONS = frozenset({"no-progress", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending"})
 
 
 class SupervisionError(ValueError):
@@ -54,13 +54,17 @@ def _root(rows: dict, attempt: str) -> str:
     raise SupervisionError("supervision-lineage-unresolved")
 
 
-def _pending(rows: dict, attempts: list[str]) -> bool:
+def _pending(rows: dict, attempts: list[str], jobs: Path) -> bool:
     from dispatch_contract import observed_attempt_liveness
     from codex_dispatch_terminal import terminal_envelope_observed
     for aid in attempts:
         if aid not in rows:
             raise SupervisionError("supervision-attempt-missing")
         status, meta = rows[aid]
+        if meta.get("workflow_completion") == "runtime-v1":
+            from dispatch_terminal_commit import owner_completion_pending
+            if owner_completion_pending(jobs, status, meta):
+                return True
         proof = observed_attempt_liveness(status, meta,
             terminal_envelope=terminal_envelope_observed(meta.get("log_file")),
             terminal_receipt_gate=True)
@@ -174,7 +178,7 @@ def validate_receipt(receipt: dict, *, jobs: Path, expected_thread_id: str,
     # A recovered batch must not receive an obsolete intervention request.
     if _obligation_revision(rows, receipt["monitored_attempt_ids"], receipt["reason"]) != receipt["obligation_revision"]:
         raise SupervisionError("supervision-resolved")
-    if validate_live and not _pending(rows, receipt["monitored_attempt_ids"]):
+    if validate_live and not _pending(rows, receipt["monitored_attempt_ids"], jobs):
         raise SupervisionError("supervision-resolved")
     record = pending_delivery.read(jobs.parent, expected_thread_id, receipt["pending_delivery_id"])
     if record is None or record.get("receipt") != receipt:
@@ -209,11 +213,19 @@ def notice_is_current(record: dict) -> bool:
         raise SupervisionError("supervision-lineage-mismatch")
     if _obligation_revision(rows, receipt["monitored_attempt_ids"], receipt["reason"]) != receipt["obligation_revision"]:
         return False
-    return _pending(rows, receipt["monitored_attempt_ids"])
+    return _pending(rows, receipt["monitored_attempt_ids"], Path(receipt["job_registry"]))
 
 
 def render_text(receipt: dict) -> str:
     receipt = validate(receipt)
+    if receipt["reason"] == "workflow-completion-pending":
+        utility = Path(__file__).with_name("dispatch_terminal_commit.py")
+        command = (f"python3 {shlex.quote(str(utility))} finish --jobs {shlex.quote(receipt['job_registry'])} "
+                   f"--attempt {shlex.quote(receipt['owner_attempt_id'])}")
+        return ("The owner result remains PASS, but workflow/route/report closure is pending. "
+                "The completion controller retains the exact transaction and retries without a model turn. "
+                "Explain the outstanding closure to the user; this notice authorizes no new execution. "
+                "Existing transaction recovery: " + command)
     utility = Path(__file__).resolve().with_name("dispatch-registry.py")
     operation = "resolve-terminal-conflict" if receipt["reason"] == "terminal-evidence-conflict" else "reconcile"
     commands = [f"python3 {shlex.quote(str(utility))} {operation} --jobs "
@@ -295,14 +307,14 @@ def wait_for_child_settlement(*, jobs: Path, attempts: set[str],
     The ordinary wait controller retains the obligation and parent handback.
     """
     def observe(monitored: set[str]) -> dict:
-        if not _pending(_rows(jobs), sorted(monitored)):
+        if not _pending(_rows(jobs), sorted(monitored), jobs):
             return {"state": "settled"}
         reconcile(monitored)
-        if not _pending(_rows(jobs), sorted(monitored)):
+        if not _pending(_rows(jobs), sorted(monitored), jobs):
             return {"state": "settled"}
         receipt = join(monitored)
         reconcile(monitored)
-        if not _pending(_rows(jobs), sorted(monitored)):
+        if not _pending(_rows(jobs), sorted(monitored), jobs):
             return {"state": "settled"}
         if receipt.get("state") != "timeout":
             # A terminal-but-unclosed observation may return immediately.

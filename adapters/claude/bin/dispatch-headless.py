@@ -26,7 +26,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
-from dispatch_contract import (  # noqa: E402
+from dispatch_contract import (
+    workflow_completion_receipt,  # noqa: E402
     DispatchContractError,
     foreground_review_launch_identity,
     GROUP_REAP_PROOF,
@@ -1435,6 +1436,7 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
             f",owner_route_id={args.owner_route_binding.route_id}"
             f",owner_route_hash={args.owner_route_binding.route_hash}"
         )
+    pipe += workflow_completion_receipt(args)
     settings = args.resolved_model_settings
     for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
         pipe += f",{key}={value}"

@@ -68,12 +68,12 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
    from the owner (dispatch env pass-through) and call `begin --node <id>`
    on the same route, which resumes the owner's open cycle.
-4. **finalize after route closure.** The owner runs `artifact_producer.py
-   finalize --artifact-root <root> --cycle <cycle_id>` once the route is
-   closed: it enumerates `artifacts/`, builds and validates the D-6 manifest,
-   commits `manifest.json` (the commit point), applies the index, and seals
-   the cycle record. Empty output leaves no lineage (D-9). `recover` rolls a
-   crashed finalize forward or back from its journal.
+4. **runtime-owned closure.** A new registered owner returns its final report;
+   the shared completion controller owns workflow/route closure and exact-cycle
+   sealing after PASS and process cleanup. Interrupted closure retains the
+   result and transaction, retries without a model turn, and carries a recovery
+   notice. `roles/worker-types/owner.md` defines this shared contract. Explicit
+   close/finalize commands remain for inline work and legacy recovery.
 5. **shared admission.** `research/<topic>` output stays cycle-local. It reaches `shared/research/` only through an explicit promotion: `admit-shared --kind research --promote-research --promotion-evidence <artifacts path>`; the whole `research/` bucket is never treated as shared by default.
 
 ## Role Requirements

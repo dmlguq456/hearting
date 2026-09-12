@@ -170,6 +170,12 @@ class _TerminalCommitFixture(unittest.TestCase):
             "capability_mode": "default",
         }
         seal_fixture_route(self.route, self.route_file, self.root, self.jobs, "att-a3fixture")
+        with self.jobs.open("a") as handle:
+            handle.write(f"2026-09-07T00:00:00Z\tdone\t{self.root}\t{self.root}\texecute\t"
+                f"attempt_id=att-execute,parent_attempt_id=att-a3fixture,route_id={self.route['route_id']},"
+                "route_node=execute,attempt_schema_version=2,dispatch_depth=2,registered_worker=1,"
+                "transport=headless,execution_surface=registered-headless,fallback_hop=same-harness-headless,"
+                "harness=codex,note=completed-marker,failure_class=pass,launch_outcome=reaped-before-publish\n")
         self.gates = {"execute": {"passed": True, "evidence": str(self.artifact),
             "node_id": "execute", "attempt_id": "att-execute", "completion_gate": "code-execute",
             "marker_digest": "a" * 64, "evidence_digest": "b" * 64}}

@@ -40,16 +40,7 @@ import dispatch_notice_receipt as notice_receipt  # noqa: E402
 
 MAX_RESPONSE_BYTES = 16 * 1024
 MAX_RECEIPT_BYTES = 2048
-ALLOWED_REASONS = {
-    "registry-closed",
-    "registry-closed-marker",  # SD-OPEN-47 (H7-c): marker-proved done row
-    "terminal-observed",
-    "row-advanced",
-    "terminal-failure-or-unclosed",
-}
-REQUIRED_ACTIONS = {
-    "complete-open", "inspect-done-failure", "advance-completed",
-}
+from dispatch_receipt_identity import COMPLETION_REASONS as ALLOWED_REASONS, COMPLETION_ACTIONS as REQUIRED_ACTIONS
 
 
 class CompletionError(RuntimeError):
@@ -432,7 +423,7 @@ def normalize_receipt(
                 and status not in OPEN_STATES
             )
             or (
-                required_action in {"inspect-done-failure", "advance-completed"}
+                required_action in {"inspect-done-failure", "advance-completed", "finish-workflow"}
                 and status != "done"
             )
         ):

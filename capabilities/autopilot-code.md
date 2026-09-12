@@ -57,15 +57,10 @@ W7C write-cutover contract (`utilities/artifact_producer.py`, registry table
 `producer_lifecycle` in `capabilities/topologies.json`). The same lifecycle
 binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 
-1. **begin before the first write.** After route compile/bind, depth-0 runs
-   `begin` before either frame leg starts; the later owner inherits that cycle.
-   Without frame, the acting owner (inline for `direct`, depth-1 otherwise)
-   begins the cycle. The command is `artifact_producer.py begin --artifact-root
-   <root> --route <route file> --capability autopilot-code --intensity <intensity>`.
-   While the cutover is inactive this returns `legacy-compat` and the legacy
-   `<artifact-root>/plans/` layout stays writable; once active it
-   issues `campaign_id`/`cycle_id`/`producer_id` and the cycle directory
-   `campaigns/<campaign-locator>/<cycle-locator>/artifacts/` before any artifact exists.
+1. **prepare the route's cycle.** Registered frame/owner launch prepares or
+   resumes the route's cycle and carries its exact `AGENT_ARTIFACT_*` context.
+   Inline work uses `artifact_producer.py begin --artifact-root <root>
+   --route <route file> --capability autopilot-code --intensity direct`.
 2. **write only inside the open cycle.** Every durable artifact goes under
    `<cycle_dir>/artifacts/plans/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).
    `artifact_producer.py check-write` is the single allow/deny oracle used by
@@ -75,12 +70,14 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
    from the owner (dispatch env pass-through) and call `begin --node <id>`
    on the same route, which resumes the owner's open cycle.
-4. **finalize after route closure.** The owner runs `artifact_producer.py
-   finalize --artifact-root <root> --cycle <cycle_id>` once the route is
-   closed: it enumerates `artifacts/`, builds and validates the D-6 manifest,
-   commits `manifest.json` (the commit point), applies the index, and seals
-   the cycle record. Empty output leaves no lineage (D-9). `recover` rolls a
-   crashed finalize forward or back from its journal.
+4. **runtime-owned closure.** New registered owners write their report and
+   return the final handoff. After exact PASS and process cleanup, the shared
+   completion controller completes the workflow, closes the route and seals
+   the exact cycle. It retries interrupted settlement without another model
+   turn; pending closure preserves PASS and carries a recovery notice.
+   Inline work and legacy recovery retain explicit route close and producer
+   finalize. Runtime-owned owners and their parents have no separate finalize
+   command to remember.
 5. **shared admission.** This capability's output is cycle-local; it is never admitted to `shared/` (only `spec`, `analysis`, and explicitly promoted `research` are shared kinds).
 
 ## Role Requirements

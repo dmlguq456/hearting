@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from typing import Any
+from dispatch_receipt_identity import JOIN_REASONS, COMPLETION_ACTIONS
 
 from dispatch_completion_join import (
     JoinContractError,
@@ -327,13 +328,6 @@ def _typed_receipt(
     children: list[dict[str, str]] = []
     observed: set[str] = set()
     allowed_readiness = {"ready", "pending"}
-    allowed_reasons = {
-        "registry-closed",
-        "registry-closed-marker",  # SD-OPEN-47 (H7-c)
-        "terminal-observed",
-        "process-alive",
-        "process-unverifiable",
-    }
     for raw in raw_children:
         if not isinstance(raw, dict):
             raise SupervisorError("join-receipt-child-invalid")
@@ -347,11 +341,9 @@ def _typed_receipt(
             or attempt not in attempts
             or attempt in observed
             or readiness not in allowed_readiness
-            or reason not in allowed_reasons
+            or reason not in JOIN_REASONS
             or status not in {"open", "running", "done"}
-            or required_action not in {
-                "complete-open", "inspect-done-failure", "advance-completed"
-            }
+            or required_action not in COMPLETION_ACTIONS
         ):
             raise SupervisorError("join-receipt-child-contract-invalid")
         observed.add(attempt)

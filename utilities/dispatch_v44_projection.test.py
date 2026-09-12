@@ -139,6 +139,17 @@ def _raises(path: Path, class_name: str, function: str, exception: str) -> bool:
 
 
 class DispatchV44ProjectionTest(unittest.TestCase):
+    def test_runtime_closure_pending_survives_both_supervisor_receipt_parsers(self):
+        receipt = {"schema_version": 2, "state": "timeout", "parent_attempt_id": "att-parent",
+                   "children": [{"attempt_id": "att-owner", "status": "done", "readiness": "pending",
+                                 "reason": "workflow-completion-pending", "required_action": "finish-workflow"}]}
+        claude = CLAUDE_SUPERVISOR.typed_receipt(receipt, "att-parent", {"att-owner"})
+        codex = CODEX_SUPERVISOR._typed_receipt(receipt, "att-parent", {"att-owner"})
+        self.assertEqual(claude, codex)
+        self.assertEqual(codex["children"], receipt["children"])
+        self.assertIn("finish-workflow", MANAGED_COMPLETION.REQUIRED_ACTIONS)
+        self.assertIn("finish-workflow", MANAGED_GATEWAY.REQUIRED_ACTIONS)
+
     def test_launch_tuple_and_all_three_wrappers_project_the_same_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             launch = CAPABILITY_ROUTE.launch_compatibility_tuple(

@@ -24,7 +24,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
-from dispatch_contract import (  # noqa: E402
+from dispatch_contract import (
+    workflow_completion_receipt,  # noqa: E402
     DispatchContractError,
     foreground_review_launch_identity,
     bytecode_cache_env,
@@ -1014,6 +1015,7 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
             f",supervisor_lease_file={supervisor_lease_path(jobs, args.attempt_id)}"
             f",supervisor_lease_nonce={secrets.token_hex(32)}"
         )
+    pipe += workflow_completion_receipt(args)
     settings = args.resolved_model_settings
     for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
         pipe += f",{key}={value}"

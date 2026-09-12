@@ -852,6 +852,13 @@ def main(argv):
                 harness=selected,
             )
                 export_owner_route_env(child_env, binding)
+            if values["--worker-type"] == "owner":
+                from artifact_producer import prepare_route_artifact_env, ProducerError
+                try:
+                    child_env.update(prepare_route_artifact_env(
+                        Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs)))
+                except ProducerError as exc:
+                    raise OwnerError(f"{exc.code}:{exc.detail}") from exc
         child = subprocess.run([str(wrapper), *forwarded], env=child_env)
         return child.returncode
     except (OwnerError, OwnerRouteBindingError, OSError) as exc:

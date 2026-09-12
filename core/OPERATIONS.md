@@ -521,8 +521,10 @@ spawned a child, and every steward line that reports an armed watch, ends with
 `parent_next=end-turn` (a runtime carrier owns the wake — end the turn, start no
 wait, poll, re-arm, or recap) or `parent_next=bounded-wait` with the exact bounded
 `parent_next_command` to run once. An absent directive is not `end-turn`; never
-filter launch stdout. Completion arrives as a typed receipt naming its harvest
-command. Carrier mechanics — the Claude `asyncRewake` hook, the Codex managed
+filter launch stdout. Completion names the next authorized action; normal success
+requires no harvest. For new registered owners, the completion controller also
+closes the workflow and route and seals the exact cycle. Pending closure preserves
+PASS and carries a supervision notice with exact transaction recovery. Carrier mechanics — the Claude `asyncRewake` hook, the Codex managed
 gateway and sidecar, human-gate-in-flight wakes, receipt schema, refusal classes,
 and recovery — are runtime-owned and live in `core/ADAPTATION.md §7`.
 

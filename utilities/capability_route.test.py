@@ -5187,6 +5187,24 @@ class ComposeRouteTest(TestRoute):
  def compose(self,**kw):
   d=dict(capability="autopilot-code",capability_mode="dev",shape="staged",graph="execute,test,report",slug="compose-fixture",cwd=R.ROOT,artifact_root=R.ROOT,dispatch_evidence=self.evidence())
   d.update(kw); return R.compose_route(**d)
+ def test_compose_receipt_keeps_choices_and_full_canonical_record(self):
+  import contextlib, io, types
+  with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_HOME":str(R.ROOT)}):
+   route=self.compose(artifact_root=tmp,profile="light")
+   outputs=[]
+   with mock.patch.dict(os.environ,{"AGENT_DISPATCH_ATTEMPT_ID":""}):
+    for full in (False,True):
+     out=io.StringIO()
+     with contextlib.redirect_stdout(out),contextlib.redirect_stderr(io.StringIO()):
+      R._emit_compiled_route(types.SimpleNamespace(command="compose",full_record=full),route,tmp)
+     outputs.append(json.loads(out.getvalue()))
+   receipt,full=outputs
+   self.assertEqual(full,route)
+   self.assertEqual(json.loads(Path(receipt["route_file"]).read_text()),route)
+   self.assertEqual(receipt["owner_model_profile"],"light")
+   self.assertEqual([n["id"] for n in receipt["nodes"]],["execute","test","report"])
+   self.assertTrue(all(n["model_profile"]=="light" for n in receipt["nodes"]))
+   self.assertLess(len(json.dumps(receipt)),len(json.dumps(route))//3)
  def test_campaign_selection_is_optional_validated_and_sealed(self):
   old=self.compose()
   self.assertNotIn("campaign_key",old); self.assertNotIn("parent_cycle_id",old)

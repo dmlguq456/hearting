@@ -1273,6 +1273,7 @@ class RouteDefaultsReceiptTest(unittest.TestCase):
              mock.patch.object(OWNER, "_usage", return_value={"claude": "ok", "codex": "ok", "opencode": "ok"}), \
              mock.patch.object(OWNER._capacity, "capacity_scores", return_value={"claude": 80.0, "codex": 80.0, "opencode": 80.0}), \
              mock.patch.object(OWNER, "derive_quick_owner_binding", return_value=binding), \
+             mock.patch("artifact_producer.prepare_route_artifact_env", return_value={}), \
              mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(jobs)}), clear=True), \
              redirect_stdout(buf):
             rc = OWNER.main(["--dry-run", "--route-evidence", str(path), "--prompt-text", "probe"])
@@ -1305,6 +1306,7 @@ class RouteDefaultsReceiptTest(unittest.TestCase):
              mock.patch.object(OWNER, "_usage", return_value={"claude": "ok", "codex": "ok", "opencode": "ok"}), \
              mock.patch.object(OWNER._capacity, "capacity_scores", return_value={"claude": 80.0, "codex": 80.0, "opencode": 80.0}), \
              mock.patch.object(OWNER, "derive_quick_owner_binding", return_value=binding), \
+             mock.patch("artifact_producer.prepare_route_artifact_env", return_value={}), \
              mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(jobs)}), clear=True), \
              redirect_stdout(buf):
             rc = OWNER.main(["--dry-run", "--route-evidence", str(path), "--worktree", str(ROOT), "--slug", "probe",

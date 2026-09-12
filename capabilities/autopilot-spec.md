@@ -119,15 +119,12 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
    from the owner (dispatch env pass-through) and call `begin --node <id>`
    on the same route, which resumes the owner's open cycle.
-4. **complete → close → finalize → admit-shared.** First complete the terminal
-   node with the verified cycle-local PRD as evidence, then close the route.
-   The marker must not depend on an already-admitted shared revision. The owner runs `artifact_producer.py
-   finalize --artifact-root <root> --cycle <cycle_id>` once the route is
-   closed: it enumerates `artifacts/`, builds and validates the D-6 manifest,
-   commits `manifest.json` (the commit point), applies the index, and seals
-   the cycle record. Empty output leaves no lineage (D-9). `recover` rolls a
-   crashed finalize forward or back from its journal. Never use
-   `--allow-open-route` to bypass an unfinished terminal node.
+4. **terminal evidence before shared admission.** The terminal node uses the
+   verified cycle-local PRD as evidence, independent of any shared revision.
+   For new registered owners the shared completion controller then completes
+   the workflow, closes the route and seals the exact cycle. Inline work and
+   legacy recovery retain explicit complete/close/finalize. Shared admission
+   follows the sealed cycle; it cannot stand in for terminal evidence.
 5. **shared admission.** `spec` output is admitted to `shared/spec/` by `admit-shared --kind spec` after the cycle is sealed (canonical shared kind). A root holds one canonical `spec` reference: a repeat admit without `--reference`/`--key` lands on that single reference (several references without a selector is `shared-reference-ambiguous`); a `--key` that matches none of the existing references is refused (`shared-reference-exists`) and a second reference is only ever created with `--new-reference`.
 
 ## Role Requirements

@@ -412,13 +412,8 @@ class WorkflowLedger:
         })
         return self.state()
 
-    def complete(self, terminal_nodes, terminal_gates, *, actor="complete") -> dict:
-        """Close proven terminal nodes under the caller's ledger lock.
-
-        Prevalidate every node and workflow transition before the first append.
-        Appends remain individually durable: after an I/O interruption, retry
-        plans only the suffix still missing from the journal.
-        """
+    def completion_paths(self, terminal_nodes, terminal_gates):
+        """Validate the full completion suffix without modifying the journal."""
         current = self.state()
         if not terminal_nodes or any(
                 terminal_gates.get(node, {}).get("passed") is not True
@@ -440,6 +435,14 @@ class WorkflowLedger:
             for step in path:
                 assert_node_state(step)
             node_paths[node] = path
+        return node_paths, workflow_path
+
+    def complete(self, terminal_nodes, terminal_gates, *, actor="complete") -> dict:
+        """Append the prevalidated suffix under the caller's ledger lock.
+
+        After an I/O interruption, the same planner returns only missing steps.
+        """
+        node_paths, workflow_path = self.completion_paths(terminal_nodes, terminal_gates)
         for node, path in node_paths.items():
             for step in path:
                 self.record(node, step, evidence={"terminal_gate": terminal_gates[node]}, actor=actor)

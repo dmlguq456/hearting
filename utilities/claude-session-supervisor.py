@@ -15,6 +15,7 @@ import sys
 import time
 from typing import Any, NamedTuple
 import uuid
+from dispatch_receipt_identity import JOIN_REASONS, COMPLETION_ACTIONS
 
 from dispatch_completion_join import (
     JoinContractError,
@@ -621,18 +622,8 @@ def typed_receipt(
             or attempt in observed
             or status not in {"open", "running", "done"}
             or readiness not in {"ready", "pending"}
-            or reason not in {
-                "registry-closed",
-                # SD-OPEN-47 (H7-c): a done row proved by its marker chain
-                # while tagged residue still lives (review finding 1).
-                "registry-closed-marker",
-                "terminal-observed",
-                "process-alive",
-                "process-unverifiable",
-            }
-            or required_action not in {
-                "complete-open", "inspect-done-failure", "advance-completed"
-            }
+            or reason not in JOIN_REASONS
+            or required_action not in COMPLETION_ACTIONS
         ):
             raise SupervisorError("join-receipt-child-contract-invalid")
         observed.add(attempt)

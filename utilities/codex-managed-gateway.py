@@ -75,13 +75,7 @@ FLEET_SESSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,256}$")
 from dispatch_receipt_identity import CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS
 ALLOWED_RECEIPT_KEYS = CANONICAL_RECEIPT_KEYS | {"delivery_timing"}
 ALLOWED_CHILD_KEYS = CANONICAL_CHILD_KEYS
-ALLOWED_REASONS = {
-    "registry-closed", "registry-closed-marker", "terminal-observed", "row-advanced",
-    "terminal-failure-or-unclosed",
-}
-REQUIRED_ACTIONS = {
-    "complete-open", "inspect-done-failure", "advance-completed",
-}
+from dispatch_receipt_identity import COMPLETION_REASONS as ALLOWED_REASONS, COMPLETION_ACTIONS as REQUIRED_ACTIONS
 AGENT_HOME = Path(__file__).resolve().parents[1]
 
 
@@ -1597,7 +1591,7 @@ class ManagedGateway:
                 )
                 or (
                     required_action in {
-                        "inspect-done-failure", "advance-completed"
+                        "inspect-done-failure", "advance-completed", "finish-workflow"
                     }
                     and status != "done"
                 )

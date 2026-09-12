@@ -2668,16 +2668,16 @@ class QuickOwnerBindingIntegrationTest(ProducerTestBase):
 
 
 class TerminalTransactionIntegrationTest(ProducerTestBase):
-    def _prepare_fixture(self):
+    def _prepare_fixture(self, harness="claude"):
         import dispatch_terminal_commit as terminal
         self.activate()
         route=R.compile_route("autopilot-code","dev","standard",cwd=R.ROOT,artifact_root=self.root,
             predicates=[],transport="headless",tracking="tracked",tracked_gate_evidence=gate_evidence(),
-            slug="terminal-transaction-fixture",dispatch_evidence={"tuples":[nested("claude","codex")]})
+            slug="terminal-transaction-fixture",dispatch_evidence={"tuples":[nested(harness,"codex")]})
         route_file=Path(L.admit_runtime_route(self.root,route).route_file)
         jobs=Path(self._tmp.name)/"jobs.log"; owner="att-transaction-owner"; child="att-transaction-report"
         owner_meta=dict(attempt_id=owner,worker_type="owner",dispatch_depth="1",registered_worker="1",
-            harness="claude",owner_route_file=str(route_file),owner_route_id=route["route_id"],
+            harness=harness,owner_route_file=str(route_file),owner_route_id=route["route_id"],
             owner_route_hash=route["route_hash"])
         def row(status,slug,metadata):
             return f"2026-09-08T00:00:00Z\t{status}\t{R.ROOT}\t{R.ROOT}\t{slug}\t"+",".join(f"{k}={v}" for k,v in metadata.items())+"\n"
@@ -2696,6 +2696,111 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
             R.complete_node(route,node,node["id"],artifact,attempt_id=child,jobs=jobs)
             request=terminal.TerminalCommitRequest(route_file,owner,jobs,self.root)
             return route,route_file,jobs,owner,result,artifact,request
+
+    def _closed_owner(self, jobs, owner):
+        lines=jobs.read_text().splitlines()
+        for i,line in enumerate(lines):
+            fields=line.split("\t"); meta=D.parse_registry_metadata(fields[5])
+            if meta.get("attempt_id") != owner: continue
+            meta.update(attempt_schema_version="2", execution_surface="registered-headless", transport="headless",
+                        fallback_hop="same-harness-headless", failure_class="pass", note="completed-supervisor",
+                        workflow_completion="runtime-v1", launch_outcome="reaped-before-publish",
+                        parent_sid="fixture-parent", parent_completion_delivery="codex-managed-gateway")
+            fields[1]="done"; fields[5]=",".join(f"{k}={v}" for k,v in meta.items());lines[i]="\t".join(fields)
+        jobs.write_text("\n".join(lines)+"\n")
+        return meta
+
+    def test_runtime_completion_finishes_and_replays_without_changing_pass_for_three_harnesses(self):
+        import dispatch_terminal_commit as terminal
+        import workflow_state
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                fixture=TerminalTransactionIntegrationTest(); fixture.setUp()
+                try:
+                    route,path,jobs,owner,result,artifact,request=fixture._prepare_fixture(harness)
+                    fixture._closed_owner(jobs,owner)
+                    from dispatch_completion_join import exact_attempt_row, materialize_after_terminal_close
+                    meta=exact_attempt_row(jobs,owner).metadata
+                    before=jobs.read_bytes()
+                    self.assertTrue(terminal.owner_completion_pending(jobs,"done",meta))
+                    settled = terminal.settle_owner_completion(jobs,"done",meta)
+                    self.assertEqual(settled.result,"completed",settled)
+                    materialize_after_terminal_close(jobs,owner)
+                    self.assertFalse(terminal.owner_completion_pending(jobs,"done",meta))
+                    self.assertEqual(workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs).state()["workflow_state"],"COMPLETE")
+                    manifest=Path(result["cycle_dir"])/"manifest.json"
+                    sealed=manifest.read_bytes()
+                    self.assertEqual(P.read_cycle_record(fixture.root,result["cycle_id"])["state"],"sealed")
+                    self.assertEqual(terminal.settle_owner_completion(jobs,"done",meta).result,"completed")
+                    self.assertEqual(manifest.read_bytes(),sealed)
+                    self.assertEqual(jobs.read_bytes(),before)
+                    artifact.write_text("changed after sealing")
+                    self.assertTrue(terminal.owner_completion_pending(jobs,"done",meta))
+                finally: fixture.doCleanups()
+
+    def test_runtime_completion_failure_keeps_pass_notice_and_recovers_without_a_model(self):
+        import dispatch_terminal_commit as terminal
+        import dispatch_supervision as supervision
+        from dispatch_completion_join import exact_attempt_row, join_selected_attempts, materialize_after_terminal_close
+        route,path,jobs,owner,result,artifact,request=self._prepare_fixture()
+        self._closed_owner(jobs,owner); meta=exact_attempt_row(jobs,owner).metadata; before=jobs.read_bytes()
+        with mock.patch.object(P,"finalize_exact_cycle",side_effect=P.ProducerError("fixture-busy")):
+            materialize_after_terminal_close(jobs,owner)
+            self.assertTrue(terminal.owner_completion_pending(jobs,"done",meta))
+            import workflow_state
+            self.assertNotEqual(workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs).state()["workflow_state"],"COMPLETE")
+            receipt=join_selected_attempts(jobs=jobs,expected_attempts={owner},timeout=0,recover=False)
+            self.assertNotEqual(receipt["state"],"ready")
+        notices=supervision.materialize(jobs,{owner},reason="workflow-completion-pending")
+        self.assertTrue(supervision.notice_is_current(notices[0]))
+        self.assertEqual(jobs.read_bytes(),before)
+
+        receipt=join_selected_attempts(jobs=jobs,expected_attempts={owner},timeout=2,recover=True)
+        self.assertEqual(receipt["state"],"ready",receipt)
+        self.assertFalse(supervision.notice_is_current(notices[0]))
+        self.assertEqual(jobs.read_bytes(),before)
+
+    def test_completed_retry_history_does_not_block_closure_or_allow_late_start(self):
+        import dispatch_terminal_commit as terminal
+        route,path,jobs,owner,result,artifact,request=self._prepare_fixture()
+        lines=jobs.read_text().splitlines(); fields=lines[-1].split("\t")
+        meta=D.parse_registry_metadata(fields[5]); current=meta["attempt_id"]
+        meta.update(attempt_id="att-prior-review", failure_class="runtime", note="dead-runtime-exit",
+                    retry_attempt_id=current, retry_claimed_at="fixture-past")
+        fields[5]=",".join(f"{k}={v}" for k,v in meta.items())
+        lines.insert(-1,"\t".join(fields));jobs.write_text("\n".join(lines)+"\n")
+        self._closed_owner(jobs,owner)
+        from dispatch_completion_join import exact_attempt_row
+        owner_meta=exact_attempt_row(jobs,owner).metadata; before=jobs.read_bytes()
+        settled=terminal.settle_owner_completion(jobs,"done",owner_meta)
+        self.assertEqual(settled.result,"completed",settled)
+        self.assertEqual(jobs.read_bytes(),before)
+        with self.assertRaises(D.DispatchContractError) as caught:
+            D.ensure_terminal_claim_absent(jobs,route["route_id"],"att-prior-review")
+        self.assertEqual(caught.exception.reason,"terminal-claim-conflict")
+
+    def test_late_conflict_in_nonterminal_child_holds_consumption_without_rewriting_success(self):
+        import dispatch_terminal_commit as terminal
+        from dispatch_completion_join import exact_attempt_row
+        route,path,jobs,owner,result,artifact,request=self._prepare_fixture()
+        self._closed_owner(jobs,owner)
+        # This is a registered advisory child, separate from the report marker.
+        child=dict(attempt_id="att-advisory",parent_attempt_id=owner,worker_type="review",dispatch_depth="2",
+                   attempt_schema_version="2",registered_worker="1",execution_surface="registered-headless",
+                   transport="headless",fallback_hop="same-harness-headless",harness="codex",
+                   note="completed-review",failure_class="pass",launch_outcome="reaped-before-publish")
+        prefix=f"2026-09-08T00:00:00Z\tdone\t{R.ROOT}\t{R.ROOT}\tadvisory\t"
+        original=jobs.read_text(); jobs.write_text(original+prefix+",".join(f"{k}={v}" for k,v in child.items())+"\n")
+        meta=exact_attempt_row(jobs,owner).metadata
+        self.assertEqual(terminal.settle_owner_completion(jobs,"done",meta).result,"completed")
+        manifest=Path(result["cycle_dir"])/"manifest.json"; sealed=manifest.read_bytes()
+        child.update(terminal_conflict="1",conflicting_terminal_note="dead-runtime-exit",conflicting_failure_class="runtime")
+        jobs.write_text(original+prefix+",".join(f"{k}={v}" for k,v in child.items())+"\n")
+        conflicted=jobs.read_bytes()
+        self.assertTrue(terminal.owner_completion_pending(jobs,"done",meta))
+        self.assertNotEqual(terminal.settle_owner_completion(jobs,"done",meta).result,"completed")
+        self.assertEqual(jobs.read_bytes(),conflicted)
+        self.assertEqual(manifest.read_bytes(),sealed)
 
     def test_default_services_close_finalize_envelope_and_replay(self):
         import dispatch_terminal_commit as terminal

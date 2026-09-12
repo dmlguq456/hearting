@@ -1,6 +1,6 @@
 # 분사 책임 구조 수리 — 검증 기록
 
-현재 상태: 공통 실행·완료·재시도·정리·통보 책임을 연결했고, 실제 Codex light owner와 OpenAI Luna를 쓰는 OpenCode light owner 모두 자식 실행부터 workflow/route 종료와 cycle 봉인까지 확인했다. OpenCode 리뷰의 동일 Codex 부모 success 자동 전달도 확인했다. 마지막 OpenCode owner 실측에서 발견한 합의 내용 누락과 수동 대기의 조기 실패 판정은 공통 입력·완료 경로에서 수정하고 회귀검사를 통과했다. 이 두 후속 수정의 근거는 실제 기록 재생과 테스트이며 새 모델 왕복 PASS라고 부르지 않는다. 소스 3b9ea255를 통합 트리와 로컬 main에 병합했다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전 보류한다.
+현재 상태: **전체 목표는 아직 미입증이며 작업을 계속한다.** 과거 실제 운송·실행 성공과 수동 교정·마감은 아래에 각각 보존했다. 사용자가 요구한 최소 입력의 정상 작업 완주를 새로 검사했으며 첫 실행은 실패했다. 그 원인을 수정한 뒤, 이제 공통 런타임이 workflow·route·cycle 마감을 직접 맡는 경로를 검증 중이다. 소스 회귀 통과와 새 모델 완주 증거를 구분한다. 원격 main 푸시·릴리즈·설치는 사용자 확인 전 보류한다.
 
 아래는 HEAD별 진행·실패 기록이다. 각 절의 당시 대기/미검증 상태를 최종 상태로 읽지 않도록 최신 실측과 후속 수정은 마지막 두 절에 모았다. 정상 운송과 작업 내용의 정확성은 따로 판정한다.
 
@@ -13,6 +13,7 @@
 | 합의한 작업 전달 | 공통 worker bootstrap | 해제된 frame gate의 기록된 이해·답변을 owner와 후속 worker에 직접 전달한다. 계획 노드나 오너의 수동 prompt 복사에 의존하지 않으며 역할 preset이 작업 범위를 대신하지 않는다. |
 | 실행·수명·실패 정리 | 실행 경계와 finite watchdog | 실제 runner/fence와 등록 watchdog 신원을 구분한다. 자손 정리 증명 뒤 lease를 반환한다. 관측이 부족하면 정리 의무를 유지한다. |
 | 완료 확정 | jobs 잠금 안의 exact terminal writer | 프로세스 종료와 성공을 구분하고, 확정된 결과를 후속 관측이 뒤집지 못한다. `dispatch_attempt_policy`가 의미 결과와 남은 정리 의무를 분리한다. |
+| workflow·route·산출물 마감 | 공통 completion controller와 기존 terminal transaction | 새 owner의 기동 기록에 마감 책임을 결속한다. 모든 자식의 실제 정리와 봉인이 끝나야 workflow COMPLETE 및 부모 success를 소비한다. 중단은 같은 transaction으로 재개하며 모델에게 별도 마감 명령 조립을 요구하지 않는다. |
 | 재시도 | 동일 jobs 잠금의 retry claimant | 감시자는 exact predecessor를 제안한다. 실제 등록 시 확정 결과·정리 증거·동일 실패의 기존 후속 시도를 다시 확인한다. 명시적인 새 리뷰 round는 별개다. |
 | 대기·복구 | 공통 join과 `dispatch_supervision.wait_for_batch` | Claude/Codex supervisor와 serial driver의 대기 횟수 초과 사망 루프 세 곳을 없앴다. 수동 bounded wait의 별도 성공 note 목록도 제거하고 같은 terminal writer·정리 복구·현재 소비 판정을 사용한다. 관측 도구 실패에도 작업을 유지하며 복구·부모 인계를 연결한다. |
 | 감독자 종료 | exact orphan watcher | helper 반환만으로 상태를 지우던 경로를 없앴다. 정리가 확인되지 않으면 상태와 부모 인계 기록을 남긴다. |
@@ -296,3 +297,42 @@ release 코드로 간주하지 않는다. 설치 시 전체 checkout 청결 검�
 route 387, runtime activation 22 통과. 이는 기동 교정의 회귀 근거이며 새 모델 왕복
 합격을 대신하지 않는다. Codex/OpenCode 기본 경로의 workflow/route/producer 마감 책임 연결과
 그 실패·재개 및 정상 실측은 여전히 열린 완료 조건이다.
+
+## 2026-09-12 런타임 마감 책임과 발급 출력 정리
+
+기존 terminal transaction의 실제 호출은 Claude supervisor에 연결되어 있었다.
+이를 세 어댑터의 새 route owner 기동 계약 `workflow_completion=runtime-v1`과
+공통 종료 수집·join·현재 전달 판정에 연결했다. Claude만 허용하던 identity 검사와
+이미 완료된 retry 이력만으로 봉인을 막던 검사를 제거했다. 실제 관련 행과 기존
+jobs 잠금의 terminal claim이 남은 실행·충돌·늦은 기동을 판단한다.
+
+workflow 전이 계획은 기존 complete에서 공통 읽기 함수로 추출했다. 사람의 판단을
+기다리거나 실패 상태인 workflow를 먼저 검사하고, 실제 route/cycle transaction이
+성공한 뒤 COMPLETE를 기록한다. 봉인 도중 중단되면 원래 PASS 바이트를 보존하고
+같은 transaction의 남은 단계만 이어간다. 공통 join이 모델 재호출 없이 재개하며,
+`workflow-completion-pending` notice에 정확한 복구 명령을 연결했다. notice 저장이
+실패해도 오류를 출력하고 다음 join이 기동 계약에서 의무를 다시 찾는다.
+
+성공 소비는 봉인된 primary와 envelope digest, 현재 자식 정리·충돌 및 workflow
+완료를 재검증한다. 이미 봉인된 증거를 덮어 쓰지 않으며 뒤늦은 충돌은 현재 소비를
+보류한다. 수신기 네 곳의 서로 다른 action/reason 목록은 기존 공통 receipt 계약으로
+합쳤다. 12개 capability와 owner 지침에서 모델의 수동 close/finalize 의무를 제거했고,
+inline 및 기존 행의 명시적 복구 경로는 보존했다.
+
+일반 `compose`는 route handle, 선택한 단계·프로파일·질문만 출력한다. 모든 봉인
+자료는 canonical route 파일에 그대로 저장하며 기계 소비자는 `--full-record`로
+기존 전체 출력을 얻는다. `compile` 출력 계약은 유지했다. 실제 OpenCode preflight와
+PostToolUse의 route binding도 기본 축약 출력으로 검증했다.
+
+회귀: producer 160, route 388, contract 226(skip 1), join 120, supervision 14,
+terminal transaction 22, 세 어댑터 58/46/30 통과. 실제 producer/route/ledger를 쓰는
+공통 마감 8개 검사는 세 하네스·실패 재개·과거 retry·늦은 충돌·봉인 중 workflow
+미완료를 포함한다. workflow 129, 두 controller 34/69, receipt parity 9, carrier 14,
+gateway 47, profile demand 25, OpenCode compose binding 6, material-route guard 37 통과.
+로그 `/tmp/proof-final-*.log`, `/tmp/proof-closure-*.log`, `/tmp/proof-compact-*.log`.
+
+controller의 기존 두 fixture는 marker나 committed receipt 없이 가짜 done/pass만
+기록하고 success를 기대했다. `f1c3bfd1`의 실제 소비 함수를 같은 행에 적용해 현재와
+동일한 attention을 재현했다(`/tmp/proof-closure-fixture-baseline.json`). 운송 검사의
+기대값을 정정했으며 정상 완료 증거는 위 실제 producer transaction 검사로 검증한다.
+새 모델 왕복과 자동 마감 입증은 다음 실측에서 별도로 확인한다.

@@ -361,7 +361,8 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         self.assertEqual(len(joins), 1, rows)
         self.assertEqual(joins[0]["delivery_timing_schema_version"], 1)
         self.assertIsInstance(joins[0]["join_completed_ns"], int)
-        self.assertIn('"delivery_classification":"success"', turns[1]["prompt"])
+        # The fake join closes a row without a marker or committed receipt.
+        self.assertIn('"delivery_classification":"attention"', turns[1]["prompt"])
         timing_events = [
             row for row in rows
             if row.get("type") == "dispatch.supervisor.delivery-timing"

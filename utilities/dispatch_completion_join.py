@@ -314,6 +314,10 @@ def materialize_pending_delivery(jobs: Path, row_fields: list[str]) -> Path | No
     if len(row_fields) != 6:
         raise JoinContractError("delivery-receipt-invalid")
     metadata = parse_registry_metadata(row_fields[5])
+    if metadata.get("workflow_completion") == "runtime-v1":
+        from dispatch_terminal_commit import owner_completion_pending
+        if owner_completion_pending(jobs, row_fields[1], metadata):
+            return None
     if metadata.get("delivery_intent") != "1":
         return None
     required = (
@@ -376,6 +380,11 @@ def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None
         row = current_attempt_row(jobs, attempt_id)
         if row is None:
             return None
+        if row.metadata.get("workflow_completion") == "runtime-v1":
+            from dispatch_terminal_commit import settle_owner_completion
+            settlement = settle_owner_completion(jobs, row.status, row.metadata)
+            if settlement is not None and settlement.result != "completed":
+                return None
         return materialize_pending_delivery(jobs, row.raw.split("\t"))
     except (JoinContractError, pending_delivery.PendingDeliveryError, OSError, ImportError) as exc:
         sys.stderr.write(
@@ -634,6 +643,7 @@ class CurrentDeliveryState:
     advanced: bool
     completion_proven: bool = False
     terminal_conflict: bool = False
+    workflow_complete: bool = True
 
 
 def delivery_classification(state: CurrentDeliveryState) -> str:
@@ -648,6 +658,7 @@ def delivery_classification(state: CurrentDeliveryState) -> str:
             and state.quiescent
             and state.owned_children == 0
             and not state.terminal_conflict
+            and state.workflow_complete
         )
         else "attention"
     )
@@ -659,6 +670,8 @@ def delivery_required_action(state: CurrentDeliveryState) -> str:
     classification = delivery_classification(state)
     if classification == "success":
         return "advance-completed"
+    if not state.workflow_complete:
+        return "finish-workflow"
     if state.status in OPEN_STATES:
         return "complete-open"
     return "inspect-done-failure"
@@ -666,6 +679,9 @@ def delivery_required_action(state: CurrentDeliveryState) -> str:
 
 def completion_harvest_command(attempt_id: str, action: str, *, jobs: str, surface: str) -> str:
     """Project an already-decided record action; grant no workflow authority."""
+    if action == "finish-workflow":
+        utility = Path(__file__).with_name("dispatch_terminal_commit.py")
+        return f"python3 {shlex.quote(str(utility))} finish --jobs {shlex.quote(jobs)} --attempt {shlex.quote(attempt_id)}"
     if action not in {"complete-open", "inspect-done-failure"}:
         return ""
     registry = f"--jobs {shlex.quote(jobs)} " if jobs else ""
@@ -2678,6 +2694,9 @@ def current_delivery_state(
     if result.advanced:
         # SD-111 P2 trigger 1: the registry lock already released above.
         materialize_after_terminal_close(jobs, attempt_id)
+    from dispatch_terminal_commit import owner_completion_pending
+    current = current_attempt_row(jobs, attempt_id) if result.advanced else snapshot
+    workflow_complete = current is None or not owner_completion_pending(jobs, current.status, current.metadata)
     return CurrentDeliveryState(
         marker=result.marker,
         marker_digest=result.marker_digest,
@@ -2690,6 +2709,7 @@ def current_delivery_state(
         advanced=result.advanced,
         completion_proven=result.completion_proven,
         terminal_conflict=result.terminal_conflict,
+        workflow_complete=workflow_complete,
     )
 
 
@@ -2916,6 +2936,11 @@ def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
         else:
             reason = close_finished_child(row, jobs=jobs)
         current = exact_attempt_row(jobs, row.attempt_id)
+        if current.status == "done" and current.metadata.get("workflow_completion") == "runtime-v1":
+            from dispatch_terminal_commit import owner_completion_pending
+            materialize_after_terminal_close(jobs, current.attempt_id)
+            if owner_completion_pending(jobs, current.status, current.metadata):
+                return {"attempt_id": row.attempt_id, "closed": False, "reason": "workflow-completion-pending"}
         return {"attempt_id": row.attempt_id, "closed": current.status not in OPEN_STATES,
                 "reason": reason or ("terminal-committed" if current.status not in OPEN_STATES
                                      else "terminal-commit-unconfirmed")}
@@ -2926,6 +2951,7 @@ def settle_finished_attempt(jobs: Path, row: ChildRow) -> dict[str, object]:
 
 def _join_snapshot(
     *,
+    jobs: Path,
     initial: list[ChildRow],
     refresh: Callable[[set[str]], list[ChildRow]],
     identity: dict[str, str],
@@ -2986,6 +3012,8 @@ def _join_snapshot(
                 process_reason=observed.process_reason,
                 terminal_observed=observed.reason == "terminal-observed",
             )
+            from dispatch_terminal_commit import owner_completion_pending
+            workflow_pending = owner_completion_pending(jobs, row.status, row.metadata)
             if decision.action in {"wait", "recover"}:
                 readiness = "pending"
                 reason = "process-alive" if decision.action == "wait" else "process-unverifiable"
@@ -2993,8 +3021,10 @@ def _join_snapshot(
             else:
                 readiness = "ready"
                 reason = "registry-closed" if row.status == "done" else "terminal-observed"
-            if (settlement is not None and readiness == "ready"
-                    and row.status in OPEN_STATES and decision.action != "inspect-conflict"):
+            if workflow_pending:
+                readiness, reason, pending = "pending", "workflow-completion-pending", True
+            if (settlement is not None and (readiness == "ready" and row.status in OPEN_STATES or workflow_pending)
+                    and decision.action != "inspect-conflict"):
                 if time.monotonic() - last_settlement.get(row.attempt_id, float("-inf")) >= 2:
                     last_settlement[row.attempt_id] = time.monotonic()
                     outcome = settlement(row)
@@ -3002,7 +3032,8 @@ def _join_snapshot(
                     recovered = recovered or outcome.get("closed") is True
                 # A quiescent process is not a committed outcome. Keep the
                 # recovery obligation and its bounded parent notice active.
-                readiness, reason, pending = "pending", "terminal-commit-pending", True
+                readiness, reason, pending = "pending", ("workflow-completion-pending" if workflow_pending
+                                                        else "terminal-commit-pending"), True
             if (recovery is not None and readiness == "pending"
                     and reason == "process-unverifiable"
                     and row.metadata.get("registered_worker") == "1"
@@ -3019,9 +3050,8 @@ def _join_snapshot(
                     "status": row.status,
                     "readiness": readiness,
                     "reason": reason,
-                    "required_action": required_action_for_attempt(
-                        row.status, row.metadata
-                    ),
+                    "required_action": ("finish-workflow" if workflow_pending
+                                        else required_action_for_attempt(row.status, row.metadata)),
                 }
             )
         if recovered:
@@ -3085,6 +3115,7 @@ def join_selected_attempts(*, jobs: Path, expected_attempts: set[str],
         return [exact_attempt_row(jobs, attempt) for attempt in sorted(attempts)]
 
     return _join_snapshot(
+        jobs=jobs,
         initial=refresh(expected_attempts), refresh=refresh,
         identity={"selected_attempts": ",".join(sorted(expected_attempts))},
         interval=interval, timeout=timeout, liveness_command=None,
@@ -3110,6 +3141,7 @@ def join_batch(
 
     initial = current_children(jobs, parent_attempt_id, expected_attempts)
     return _join_snapshot(
+        jobs=jobs,
         initial=initial,
         refresh=lambda snapshot: current_children(jobs, parent_attempt_id, snapshot),
         identity={"parent_attempt_id": parent_attempt_id},
@@ -3145,6 +3177,7 @@ def join_session_batch(
         parent_completion_delivery,
     )
     return _join_snapshot(
+        jobs=jobs,
         initial=initial,
         refresh=lambda snapshot: current_session_children(
             jobs,

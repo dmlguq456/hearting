@@ -184,6 +184,8 @@ shape and explicit choices determine the route; defaults only fill omissions:
 | `solo` | one bounded piece of work that deserves its own registered session but no separate stages | `compose --shape solo` — one registered dispatch-depth-1 owner, no dispatch depth 2 |
 | `staged` | work with separate stages | `compose --shape staged` uses the capability's standard recipe; optional `--graph <stage,…>` selects a subgraph |
 
+`compose` returns the selected stages, profiles, human gates and canonical
+`route_file`; full sealed evidence stays in that file (`--full-record` prints it).
 `compose` preserves the chosen stages and derives their dependencies. Inherited
 parallel presets that do not fit the selected graph are omitted; missing preset
 stages are not mandatory. The sealed result shows the realized stages and omitted
@@ -435,30 +437,29 @@ the node. That list covers both `degraded` (the owner reviewed its own work) and
 a real result and neither blocks the route, but reporting it as review would
 make "reviewed" mean nothing (`OPERATIONS §5.10`, SD-OPEN-41(b)).
 
-For dispatched or long-running work, main emits this card only after it has
-synchronously waited or polled for terminal state, harvested the result and
-worker artifact, integrated it when authorized, and verified the final state.
-A worker handoff, background-process exit, or stage verdict alone is not task
-completion. Read-only orientation, simple factual answers, and status-only
-replies are exempt and use concise prose instead.
+For dispatched work, the parent follows the runtime's next-action receipt and
+checks the completed artifact before reporting. Normal success needs no harvest.
+A process exit or intermediate stage verdict alone is not task completion.
+Read-only orientation and status replies use concise prose instead.
 
-Reporting completion is not the same as recording it. A compiled route states
-that work began; nothing else states that it ended, and `complete` closes only a
-registered attempt in the jobs registry, so inline and `direct` work leaves no
-closure at all. Close the route in the same turn as the card:
+New registered owners carry `workflow_completion=runtime-v1`. Their completion
+controller owns the exact workflow/route/cycle closing transaction after PASS
+and child cleanup. It records COMPLETE only after sealing, retries interrupted
+closure without a model turn and sends a recovery notice while closure remains
+pending. The owner and parent have no separate close/finalize procedure.
+
+Inline work and legacy recovery explicitly record terminal completion and close
+the route before reporting:
 
 ```text
 python3 utilities/capability-route.py close --route <route.json> [--commit <sha>] [--summary <line>]
 python3 utilities/capability-route.py status --artifact-root <dir> --open-only
 ```
 
-For producer-backed work, the terminal sequence is **complete → close → finalize
-→ admit-shared** (admission only for shared kinds). Complete the terminal node
-using its verified cycle-local artifact as evidence, then close the route. Only
-then finalize the cycle so its manifest binds the terminal evidence, and admit
-the sealed output. Owner briefs must spell out this order; admission is not a
-prerequisite for the terminal marker. `--allow-open-route` is not a repair for an
-out-of-order completion sequence.
+For producer-backed work, the controller's transaction is **terminal proof →
+route close → exact cycle seal → workflow COMPLETE**. Inline and legacy recovery
+use complete, close and finalize in that order. Shared admission applies only to
+shared kinds after sealing; it is never a prerequisite for the terminal marker.
 
 `close` writes an outcome sidecar beside the immutable route record — the record
 itself cannot carry the closure, because `route_hash` covers every other field.

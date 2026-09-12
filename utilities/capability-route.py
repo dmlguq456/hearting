@@ -5877,6 +5877,21 @@ def _compose_artifact_root(cwd):
     return root
 
 
+def compose_receipt(route, path):
+    """The ordinary caller needs its choices and handle, not all sealed evidence."""
+    return {
+        "route_file": str(Path(path).resolve()), "route_id": route["route_id"],
+        "selection": route.get("selection", {}),
+        "cwd": route["cwd"], "artifact_root": route["artifact_root"],
+        "effective_intensity": route["effective_intensity"],
+        "owner_model_profile": route.get("owner_model_profile"),
+        "nodes": [{key: node[key] for key in
+                   ("id", "unit", "dispatch_depth", "model_profile", "depends_on", "terminal") if key in node}
+                  for node in route["nodes"]],
+        "human_gates": route.get("human_gates", []),
+    }
+
+
 def _emit_compiled_route(a,route,artifact_root,output=None):
     """Shared tail of compile/compose: runtime-root check, canonical write-once, owner binding, prints."""
     output=output if output is not None else getattr(a,"output",None)
@@ -5928,9 +5943,12 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     if attachment is not None:
         print("owner_route_binding_written=1", file=sys.stderr)
     print(f"route_file={output_path.resolve()}",file=sys.stderr)
-    print(json.dumps(route,sort_keys=True))
+    result = (compose_receipt(route, output_path)
+              if a.command == "compose" and not getattr(a, "full_record", False) else route)
+    print(json.dumps(result,sort_keys=True))
 
 def main():
+    from dispatch_parent_completion import default_parent_harness
     p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="command",required=True)
     c=sub.add_parser("compile"); c.add_argument("--capability",required=True); c.add_argument("--capability-mode",default="default")
     c.add_argument("--slug",required=True)
@@ -5966,13 +5984,14 @@ def main():
     cp.add_argument("--drift-verdict",default=None); cp.add_argument("--tracking",choices=sorted(TRACKING),default=None)
     cp.add_argument("--artifact-guard",default=None)
     cp.add_argument("--children",default=None,help="comma list of child harnesses to probe for staged/solo (default claude,codex)")
-    cp.add_argument("--parent-harness",default="claude",choices=("claude","codex","opencode"))
+    cp.add_argument("--parent-harness",default=None,choices=("claude","codex","opencode"),help="default: actual parent runtime")
     cp.add_argument("--jobs",default=None,help="registry for the readiness probe (default AGENT_DISPATCH_JOBS or the stable state root)")
     cp.add_argument("--dispatch-evidence",help="checked evidence JSON (skips the live probe)")
     cp.add_argument("--registered-headless-evidence",help="checked quick candidates JSON (skips the live probe)")
     cp.add_argument("--transport-evidence",default="compose-default")
     cp.add_argument("--explain",action="store_true",help="print the [경로] card and the sealed graph without writing the route")
     cp.add_argument("--output")
+    cp.add_argument("--full-record",action="store_true",help="print all sealed evidence; default prints choices and the canonical route_file")
     co=sub.add_parser("continuation")
     co.add_argument("--source-route",required=True)
     co.add_argument("--resume-from-node",required=True)
@@ -6034,7 +6053,7 @@ def main():
             spec_read=a.spec_read,drift_verdict=a.drift_verdict,tracking=a.tracking,
             artifact_guard=a.artifact_guard,
             children=[c.strip() for c in a.children.split(",") if c.strip()] if a.children else None,
-            parent_harness=a.parent_harness,
+            parent_harness=a.parent_harness or ("claude" if shape=="direct" else default_parent_harness("claude")),
             dispatch_evidence=json.loads(Path(a.dispatch_evidence).read_text()) if a.dispatch_evidence else None,
             registered_headless_evidence=(json.loads(Path(a.registered_headless_evidence).read_text())
                                           if a.registered_headless_evidence else None),

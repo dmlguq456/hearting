@@ -309,7 +309,9 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(len(observed), 1)
         self.assertEqual(observed[0]["delivery_timing_schema_version"], 1)
         self.assertIsInstance(observed[0]["join_completed_ns"], int)
-        self.assertIn('"delivery_classification":"success"', trace[3]["prompt"])
+        # This transport fixture supplies no marker/committed child receipt.
+        # A bare done/pass word must arrive as attention, not proved success.
+        self.assertIn('"delivery_classification":"attention"', trace[3]["prompt"])
         timing_events = [
             row for row in rows
             if row.get("type") == "dispatch.supervisor.delivery-timing"

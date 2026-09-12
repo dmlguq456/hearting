@@ -100,35 +100,17 @@ consume the gate declarations of your assigned route.
 
 ## Artifact Producer Lifecycle (W7C)
 
-Owner-executed, same at every intensity (`direct` inline; `quick`/`standard+`
-by the dispatch-depth-1 owner). Full contract: `capabilities/autopilot-code.md`
-§Artifact Producer Lifecycle and `producer_lifecycle` in
-`capabilities/topologies.json`.
+The shared completion controller owns registered route preparation and closure.
+The launcher supplies the exact cycle context; stage workers join it with
+`begin --node <id>` on the same route. Write artifacts under
+`$AGENT_ARTIFACT_OUTPUT_DIR/plans/...`, finish the declared work and return the
+report's final handoff. After exact PASS and process cleanup, the controller
+completes the workflow, closes the route and seals the cycle using one durable
+transaction. An interruption retains that transaction and sends a recovery
+notice; it does not convert PASS to failure or require a new model execution.
 
-1. After the route is compiled and bound, and before the first durable
-   artifact: `python3 <agent-home>/utilities/artifact_producer.py begin
-   --artifact-root <root> --route <route file> --capability autopilot-code
-   --intensity <intensity> --env-file <env>`; export the returned
-   `AGENT_ARTIFACT_*` variables. `legacy-compat` means the cutover is inactive
-   and the legacy `plans/` layout is still the write target.
-2. Write every artifact under `$AGENT_ARTIFACT_OUTPUT_DIR/plans/...`; never
-   write to a legacy top-level bucket while the cutover is active, never write
-   under `shared/`.
-3. Pass the exported `AGENT_ARTIFACT_*` variables to every stage dispatch
-   (the adapters forward them); stage workers call `begin --node <id>` and
-   join the same cycle.
-4. Run `capability-route.py complete` for the terminal node(s) before running
-   `capability-route.py close` on the same route — `close` reads the terminal
-   completion markers to decide `terminal_gate_proven`, and by default now
-   refuses (`route-close-before-complete`, exit 64) instead of permanently
-   sealing a `false` proof when `complete` has not run yet. `--allow-unproven`
-   exists only to record an intentionally abandoned route's honest `false`
-   outcome for recovery/cutover bookkeeping — never pass it to route past a
-   terminal node's ordinary completion. Never pass `--output` to
-   `complete`: it targets an existing artifact path 1:1 and a collision would
-   silently overwrite that artifact; the canonical completion marker location
-   is written regardless.
-5. Close the route, then `artifact_producer.py finalize --artifact-root <root>
-   --cycle $AGENT_ARTIFACT_CYCLE_ID`; on `recovery-required`, run
-   `artifact_producer.py recover` and retry.
-6. Only then, if this capability owns a shared kind, `admit-shared`.
+For inline `direct` work and older attempts without `workflow_completion=runtime-v1`,
+explicit `begin → terminal node complete → route close → producer finalize`
+remains the compatibility path. Shared admission is separate and applies only
+to capabilities that own a shared kind. Full producer semantics live in
+`capabilities/autopilot-code.md` and `capabilities/topologies.json`.
