@@ -533,15 +533,15 @@ For code/design/draft/refine/spec at quick+, depth-0 launches `frame` and
 shell calls** so the Claude waiter binds each attempt:
 
 ```
-export AGENT_ARTIFACT_ROOT=… AGENT_ARTIFACT_CAMPAIGN_ID=… \
-       AGENT_ARTIFACT_CYCLE_ID=… AGENT_ARTIFACT_CYCLE_DIR=…
 python3 "$AGENT_HOME/utilities/dispatch-owner.py" --adapter <harness_i> --start \
   --route-evidence <route.json> --route-node frame<suffix_i> \
-  --dispatch-depth 1 --worker-type frame --unit plan/frame \
   --prompt-file <shard_i>/prompt.txt
 ```
 
-All four artifact variables are required. Read each full receipt (§5.10a).
+The route supplies depth, type, unit, model, and output context. The selector
+prepares or resumes that route's cycle and passes its exact paths to the child;
+the producer environment travels automatically. `dispatch-node --node frame`
+uses the same selector, including parent delivery. Read each full receipt (§5.10a).
 The launch gate requires distinct actual harnesses, or two attempts with a
 reported `single-harness:<h>` seal if only one is supported. Unavailable legs
 have no machine fallback; depth-0 records a relaunch on another sealed candidate. A `top`

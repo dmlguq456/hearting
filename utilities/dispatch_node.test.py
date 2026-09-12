@@ -413,6 +413,21 @@ class DryRunCompletionMarkerPathTest(unittest.TestCase):
 
 
 class MainMaterializationTest(unittest.TestCase):
+    def test_frame_public_entry_uses_depth1_selector_for_each_adapter(self):
+        node = make_node(depth=1, dispatch_fallback=[])
+        node.update(id="frame", kind="map-worker", unit="plan/frame")
+        for adapter in ("claude", "codex", "opencode"):
+            with self.subTest(adapter=adapter):
+                argv = self._run_main(["--node", "frame", "--adapter", adapter,
+                    "--slug", "frame-probe", "--action", "start", "--prompt-text", "bounded task"],
+                    make_route(node, tuples=[]))
+                self.assertEqual(argv[1], str(ROOT / "utilities/dispatch-owner.py"))
+                self.assertEqual(argv[argv.index("--route-node") + 1], "frame")
+                self.assertEqual(argv[argv.index("--adapter") + 1], adapter)
+                self.assertEqual(argv[argv.index("--prompt-text") + 1], "bounded task")
+                self.assertNotIn("support", argv)
+                self.assertNotIn("--dispatch-depth", argv)
+
     def _run_main(self, argv, route, environ=None):
         captured = {}
 

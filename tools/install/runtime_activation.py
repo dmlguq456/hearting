@@ -364,7 +364,7 @@ def _git(runtime_args: Sequence[str], root: Path) -> Optional[str]:
     return result.stdout.strip()
 
 
-def source_revision(root: Path) -> str:
+def source_revision(root: Path, *, runtime_launch: bool = False) -> str:
     release_marker = root / "RELEASE_VERSION"
     if release_marker.is_file() and not release_marker.is_symlink():
         try:
@@ -377,6 +377,16 @@ def source_revision(root: Path) -> str:
     if not head:
         return "tree:" + _tree_digest(root)[:20]
     dirty = _git(["status", "--porcelain=v1", "--untracked-files=all"], root) or ""
+    if runtime_launch:
+        # A checkout launch identifies its versioned source plus additions to
+        # existing source directories. Root-level, unversioned work outputs
+        # are not executable release content. Installer cleanliness remains
+        # whole-checkout; it must still refuse packaging those files.
+        tracked = (_git(["ls-files"], root) or "").splitlines()
+        source_dirs = {str(Path(name).parts[0]) for name in tracked if len(Path(name).parts) > 1}
+        dirty = "\n".join(line for line in dirty.splitlines()
+                          if not line.startswith("?? ") or
+                          (len(Path(line[3:]).parts) > 1 and Path(line[3:]).parts[0] in source_dirs))
     if not dirty:
         return head
     digest = hashlib.sha256(dirty.encode())

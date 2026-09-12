@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,29 @@ import installer  # noqa: E402
 
 
 class RuntimeSnapshotTest(unittest.TestCase):
+    def test_launch_revision_tracks_source_but_not_unversioned_work_outputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            def git(*args):
+                subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+            git("init", "-q")
+            (root / "utilities").mkdir()
+            source = root / "utilities" / "entry.py"
+            source.write_text("original\n")
+            git("add", ".")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.org", "commit", "-qm", "base")
+            initial = activation.source_revision(root, runtime_launch=True)
+            (root / "final_report.md").write_text("work output\n")
+            self.assertEqual(activation.source_revision(root, runtime_launch=True), initial)
+            self.assertNotEqual(activation.source_revision(root), initial)
+            addition = root / "utilities" / "new_entry.py"
+            addition.write_text("new runtime code\n")
+            self.assertNotEqual(activation.source_revision(root, runtime_launch=True), initial)
+            addition.unlink()
+            source.write_text("changed\n")
+            self.assertNotEqual(activation.source_revision(root, runtime_launch=True), initial)
+            source.unlink()
+            self.assertNotEqual(activation.source_revision(root, runtime_launch=True), initial)
     def test_release_revision_ignores_runtime_grounding_markers(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

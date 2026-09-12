@@ -60,25 +60,12 @@ _CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role"}
 # in the registry as `worker_type=owner`, which is exactly the self-declaration
 # SD-OPEN-41(b)'s marker gate has to reject -- the degraded path was the only
 # reachable one because no normal path existed.
-#
-# `frame` (frame-universal, 2026-09-10) is a third depth-1 tuple: a bounded
-# direction-setting leg dispatched as its OWN depth-1 node rather than as a
-# depth-2 stage under an owner. It may accept `--route-evidence` (below) in a
-# way `review` never can, because no other launch path ever competes for it:
-# a depth-1 GROUPED launch is refused everywhere (`dispatch-batch.py:356-357`,
-# `dispatch-node.py:464-475`, `stage-dispatch-fallback.py:1538-1545` all
-# reject depth-1 group nodes), so a depth-1 frame node has exactly one
-# reachable launch path -- this selector -- and can never be double-claimed by
-# both this route-evidence path and a stage-dispatch path. `review`, by
-# contrast, IS launched by the stage dispatcher too (a route node's bound
-# reviewer), which is exactly why `review-worker-route-evidence-unsupported`
-# exists for review below; frame carries no such double-claim risk and is
-# exempt from that restriction.
+# Frame nodes are depth-1 advisory workers. Both public node dispatch and
+# direct owner selection use this selector; the adapter's atomic attempt claim
+# remains the single registration authority.
 _LAUNCHABLE_WORKER_TYPES = {"owner", "review", "frame"}
-# The four variables that decide where a frame leg's direction brief lands. A
-# subset lets the brief fall into an unrelated, possibly closed campaign/cycle
-# directory (the batch path's known child-launch defect drops three of four),
-# so a frame launch checks all four instead of a sentence asking depth-0 to.
+# Legacy route-free frame calls must supply their own scope. Route-bound calls
+# derive it from the producer, so inherited/partial environment is not authority.
 _FRAME_ARTIFACT_ENV = (
     "AGENT_ARTIFACT_ROOT", "AGENT_ARTIFACT_CAMPAIGN_ID",
     "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_CYCLE_DIR",
@@ -189,6 +176,9 @@ def _route_defaults(path, route_node=None):
     })
     if route_node is not None:
         values.update(_node_model_settings(route, route_node))
+        node = next(row for row in route["nodes"] if row.get("id") == route_node)
+        if node.get("unit") == "plan/frame" and node.get("dispatch_depth") == 1:
+            values.update({"--worker-type": "frame", "--unit": "plan/frame"})
     return {flag: (str(value) if value not in (None, "") else None) for flag, value in values.items()}
 
 
@@ -444,16 +434,14 @@ def _parse(argv):
             # A route node's review worker is launched by the stage dispatcher
             # with its node binding, not by this selector. Accepting route
             # evidence here would let one node be claimed by two launch paths.
-            # `frame` is exempt (see _LAUNCHABLE_WORKER_TYPES above): a depth-1
-            # frame node has no competing stage-dispatch launch path, so its
-            # route evidence can never be claimed twice.
+            # Frame's public entry points converge here and share one claim.
             raise OwnerError("review-worker-route-evidence-unsupported")
         if worker_type == "frame" and values.get("--review-output"):
             # A frame worker returns an advisory verdict through the ordinary
             # dispatch handoff (roles/worker-types/frame.md), never a durable
             # review report -- --review-output has nothing to bind to here.
             raise OwnerError("review-output-frame-forbidden")
-        if worker_type == "frame":
+        if worker_type == "frame" and not route_evidence:
             absent = [name for name in _FRAME_ARTIFACT_ENV if not os.environ.get(name)]
             if absent:
                 raise OwnerError("frame-artifact-scope-missing:" + ",".join(absent))
@@ -840,6 +828,13 @@ def main(argv):
                               "--route-hash", binding.route_hash, "--route-node", binding.route_node,
                               "--registry-digest", binding.registry_digest, "--write-scope", binding.write_scope,
                               "--completion-gate", binding.completion_gate]
+                if values["--worker-type"] == "frame":
+                    from artifact_producer import prepare_route_artifact_env, ProducerError
+                    try:
+                        child_env.update(prepare_route_artifact_env(
+                            Path(binding.route_file), start="--start" in forwarded, jobs=Path(jobs)))
+                    except ProducerError as exc:
+                        raise OwnerError(f"{exc.code}:{exc.detail}") from exc
                 # Deliberately NOT export_owner_route_env() here. The adapters
                 # treat "env binding present" as the discriminator for a
                 # standard+ owner and refuse `owner-route-binding-tuple-invalid`

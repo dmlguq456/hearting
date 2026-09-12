@@ -192,7 +192,7 @@ def _launch_source_revision(path):
     resolved=Path(path).resolve(strict=False)
     key=str(resolved)
     if key not in _LAUNCH_SOURCE_REVISION_CACHE:
-        _LAUNCH_SOURCE_REVISION_CACHE[key]=_runtime_activation_module().source_revision(resolved)
+        _LAUNCH_SOURCE_REVISION_CACHE[key]=_runtime_activation_module().source_revision(resolved,runtime_launch=True)
     return _LAUNCH_SOURCE_REVISION_CACHE[key]
 
 def _launch_content_digest(path):

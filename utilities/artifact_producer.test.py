@@ -2865,5 +2865,24 @@ class LocatorDateDuplicationTest(ProducerTestBase):
             "2026-09-05_2026-08-24-artifact-knowledge-index-w7")
 
 
+class RouteLaunchContextTest(ProducerTestBase):
+    def test_route_launch_prepares_exact_context_once_without_copied_env(self):
+        self.activate()
+        route, path = self.route()
+        preview = P.prepare_route_artifact_env(path, start=False, jobs=self.jobs)
+        self.assertEqual(preview["AGENT_ARTIFACT_CYCLE_ID"], "")
+        self.assertEqual(list(P.list_cycle_records(self.root)), [])
+        env = P.prepare_route_artifact_env(path, start=True, jobs=self.jobs)
+        with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_CYCLE_ID": "cyc_foreign",
+                                        "AGENT_ARTIFACT_OUTPUT_DIR": "/foreign/artifacts"}):
+            again = P.prepare_route_artifact_env(path, start=True, jobs=self.jobs)
+            ready = P.prepare_route_artifact_env(path, start=False, jobs=self.jobs)
+        self.assertEqual(again, env)
+        self.assertEqual(ready, env)
+        self.assertEqual(len(list(P.list_cycle_records(self.root))), 1)
+        self.assertEqual(P.read_cycle_record(self.root, env["AGENT_ARTIFACT_CYCLE_ID"])["route_id"], route["route_id"])
+        self.assertEqual(Path(env["AGENT_ARTIFACT_OUTPUT_DIR"]), Path(env["AGENT_ARTIFACT_CYCLE_DIR"]) / "artifacts")
+
+
 if __name__ == "__main__":
     unittest.main()

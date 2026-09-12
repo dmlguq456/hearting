@@ -1081,6 +1081,26 @@ class FrameModelRoleHandoffTest(unittest.TestCase):
         return ["--dry-run", "--route-evidence", path, "--route-node", node,
                 "--worker-type", "frame", "--unit", "plan/frame", "--prompt-text", "probe"]
 
+    def test_route_node_alone_supplies_frame_identity_without_copied_environment(self):
+        path = self._route(nodes=[{"id": "frame", "role": "deep maker", "model_profile": "light",
+                                 "unit": "plan/frame", "dispatch_depth": 1}])
+        with mock.patch.dict(os.environ, {}, clear=True):
+            _, values, forwarded, _, _ = OWNER._parse([
+                "--start", "--route-evidence", path, "--route-node", "frame", "--prompt-text", "probe"])
+        self.assertEqual(values["--worker-type"], "frame")
+        self.assertEqual(values["--unit"], "plan/frame")
+        self.assertEqual(values["--dispatch-depth"], "1")
+        for harness in ("codex", "claude", "opencode"):
+            spec = importlib.util.spec_from_file_location("frame_identity_" + harness,
+                ROOT / "adapters" / harness / "bin" / "dispatch-headless.py")
+            adapter = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = adapter
+            spec.loader.exec_module(adapter)
+            args = adapter.parser().parse_args(forwarded)
+            self.assertEqual(args.worker_type, "frame")
+            self.assertEqual(args.dispatch_depth, 1)
+            self.assertEqual(adapter.resolve_model_settings(args)["profile"], "light")
+
     def test_actual_adapter_parsers_and_resolvers_consume_the_selected_node_role(self):
         for node in ("frame", "frame-alternative"):
             _, values, forwarded, _, _ = OWNER._parse(self._args(node))

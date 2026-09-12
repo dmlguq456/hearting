@@ -476,6 +476,18 @@ def main():
  # does not inherit a jobs.log.lock held here.  The registration fence lives in
  # the adapter's claim_attempt_row critical section.
  if node["kind"]=="resource-runner": print("resource_runner="+str(ROOT/"utilities/resource-runner.py")+"\nroute_node="+a.node); return
+ # Frame nodes share the depth-1 selector, including cycle preparation and
+ # parent delivery. A map-worker kind alone used to turn them into support
+ # workers here and silently discard their bounded frame assignment.
+ if node.get("unit") == "plan/frame" and node.get("dispatch_depth") == 1:
+  argv=[sys.executable,str(ROOT/"utilities/dispatch-owner.py"),"--"+a.action,
+        "--adapter",a.adapter,"--route-evidence",str(Path(a.route).resolve()),
+        "--route-node",node["id"],"--slug",a.slug,"--qa",a.qa,
+        "--prompt-text",a.prompt_text]
+  if requested_jobs: argv += ["--jobs",requested_jobs]
+  if a.attempt_id: argv += ["--attempt-id",a.attempt_id]
+  argv += strip_leading_separator(a.adapter_args)
+  raise SystemExit(subprocess.run(argv,env=child_env()).returncode)
  try:
   registry=resolve_global_registry(
       ROOT,requested_jobs,int(node.get("dispatch_depth",1)),a.action,child_env())

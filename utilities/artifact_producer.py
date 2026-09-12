@@ -863,6 +863,31 @@ def _env_for(root: Path, record: Mapping[str, Any]) -> Dict[str, str]:
     }
 
 
+def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path) -> Dict[str, str]:
+    """Resolve the route's own output context; callers need not copy begin's env.
+
+    Start owns idempotent preparation. Readiness checks only read an existing
+    cycle. No inherited cycle or 'latest' directory participates in selection.
+    """
+    raw = _read_json(route_file)
+    if not isinstance(raw, dict) or not raw.get("artifact_root"):
+        raise ProducerError("route-artifact-root-missing", str(route_file))
+    root = Path(raw["artifact_root"]).resolve()
+    route = load_route(root, route_file)
+    if start:
+        return begin(root, route_file=route_file, capability=route["capability"],
+                     intensity=route["effective_intensity"], require_cycle=True, jobs=jobs)["env"]
+    records = [record for record in list_cycle_records(root)
+               if record.get("route_id") == route["route_id"] and record.get("state") == "open"]
+    if not records:
+        return {"AGENT_ARTIFACT_ROOT": str(root), **{name: "" for name in (
+            "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
+            "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR")}}
+    if len(records) != 1 or records[0].get("route_hash") != route["route_hash"]:
+        raise ProducerError("route-cycle-binding-ambiguous", route["route_id"])
+    return _env_for(root, records[0])
+
+
 def _route_naming(
     route: Mapping[str, Any], campaign: Optional[Mapping[str, Any]],
     *, title: Optional[str], goal: Optional[str], root: Optional[Path] = None,

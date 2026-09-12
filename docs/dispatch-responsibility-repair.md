@@ -269,3 +269,30 @@ OpenCode depth-0는 공개된 bounded-wait를 사용했고 owner 대기는 한 �
 진입부 재점검에서 intensity→owner 비교 외에 `resolve_profile_demand`가 별도의 등급 하한을 강제하고 명시 모델에도 요구서 JSON을 강제한 것을 확인했다. 명시한 알려진 모델 프로파일이 추천 행렬보다 우선하도록 공통 resolver를 정정했다. `compose --profile light`가 모든 모델 노드와 owner의 기존 explicit selection map을 작성하고, 노드별 명시 선택은 그보다 우선한다. 새 policy 객체나 대체 발급 경로를 만들지 않았다. 선택이 없으면 기존 추천·기본값을 쓰며, 알려지지 않은 모델·변조·실제 runtime 지원·top의 기존 실행 범위 검사는 남는다. 기존 허용 선택의 영수증 표현과 이미 발급된 route bytes는 유지한다.
 
 core/WORKFLOW·CONVENTIONS·capability·owner reference에 남은 “standard owner는 deep”, 생략된 plan 산출물 요구, 수동 intent 복사 지시도 정정했다. 초기 model/demand suite 실패는 과거 하한 거부를 기대하던 시험과 명시 선택이 없는 ad-hoc 구분 회귀였다. 전자는 새로운 사용자 요구에 맞춰 실제 선택 및 seal 검증으로 바꾸고, 후자는 암묵적 기본값을 사용자 명시 선택으로 잘못 기록하지 않도록 고쳤다. model 28 / demand 25 / route 387 / compose CLI 17 / adapter Codex58·Claude46·OpenCode30 및 생성20·경계·기존 surface 예산 PASS. 실제 CLI의 `--profile light`가 별도 demand 파일 없이 frame/test/report 및 owner에 전달되는 경로도 포함한다. 로그 `/tmp/proof-explicit-profile-*.log`, `/tmp/proof-surface-*.log`. 실측 합격은 아직 이 소스 검사에 포함하지 않는다.
+
+
+## 2026-09-12 최소 입력 실측의 실패와 기동 경로 통합
+
+`0d29d453`에서 짧은 작업 요청으로 새 Codex/OpenCode 부모를 실행했다.
+두 부모 모두 기본 프로파일 강제 없이 light route를 발급했지만, 전체 왕복은 실패했다.
+Codex 부모가 공개 `dispatch-node`로 frame을 실행하자 `map-worker` 종류만 보고
+`support`로 등록되었다. cycle 환경도 전달되지 않아 OpenCode 자식이 작업 루트에
+`final_report.md`를 썼고 `artifact-outside-root`로 실패했다. 그 미추적 산출물 때문에
+동시에 준비하던 OpenCode 부모의 runtime revision이 `+dirty`로 변하여 기동이 거부되었다.
+실행 root 자체는 같은 `0d29d453`이었다. 다른 소스를 읽은 모델 행동과 실제 거부 원인을 구분한다.
+원문은 `/tmp/responsibility-proof-20260912/`의 native export, `terminal-rows.tsv`,
+`runtime-mismatch.txt`, `misplaced-final-report.md`에 보존했다. 추가 기동 중단 후
+네 시도 모두 done 및 실제 미기동/프로세스 정리 증거를 확인하고 두 부모를 종료했다.
+owner 실행·사용자 승인·전체 완료는 이 실측에서 입증하지 않았다.
+
+교정: frame의 공개 node 기동을 기존 depth-1 selector로 연결하여 별도의 역할 결정과
+직접 어댑터 조립을 제거했다. route가 depth/type/unit/model을 공급하고 producer가
+그 route의 cycle을 멱등 준비하여 정확한 출력 환경을 전달한다. 호출자의 네 환경변수
+복사 의무를 없앴다. readiness는 cycle을 만들지 않는다. checkout 실행 revision은
+버전 관리 소스와 그 디렉터리의 새 소스를 추적하며, 루트의 미추적 작업 산출물은
+release 코드로 간주하지 않는다. 설치 시 전체 checkout 청결 검사는 유지한다.
+
+회귀: node 64, selector 78(실제 세 어댑터 parser/resolver 포함), producer 156,
+route 387, runtime activation 22 통과. 이는 기동 교정의 회귀 근거이며 새 모델 왕복
+합격을 대신하지 않는다. Codex/OpenCode 기본 경로의 workflow/route/producer 마감 책임 연결과
+그 실패·재개 및 정상 실측은 여전히 열린 완료 조건이다.
