@@ -100,8 +100,8 @@ _HINTS = {
                                                 "harness to harnesses.enabled and this profile's quality bands first. This is not a usage limit -- "
                                                 "see eligibility.* above",
     "no-eligible-route-evidence-candidate": "no sealed candidate is usable: it is usage-limited, gated, or has no positive capacity score "
-                                            "(see eligibility.* and capacity_headroom.* above). Recompose the route for another harness "
-                                            "(solo/quick: --children <harness>; staged: --parent-harness <harness>) or wait for the reset",
+                                            "(see eligibility.* and capacity_headroom.* above). Resume the same route after the reported reset, "
+                                            "or select an available candidate already sealed in this profile; changing the candidate set requires recomposition",
     "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive capacity score "
                              "(see eligibility.* and capacity_headroom.* above; utilities/usage-check.sh --harness all)",
     "exactly-one-action-required": "pass exactly one of --dry-run | --register | --start",
@@ -482,8 +482,10 @@ def _eligible(state):
     return state != "limited" and not state.startswith("limited(")
 
 
-def _usage(jobs):
+def _usage(jobs, profile=None):
     cmd = [str(ROOT / "utilities" / "usage-check.sh"), "--harness", "all"]
+    if profile:
+        cmd += ["--model-profile", profile]
     if jobs:
         cmd += ["--jobs", jobs]
     result = subprocess.run(cmd, text=True, capture_output=True, env=os.environ.copy())
@@ -674,7 +676,7 @@ def main(argv):
                     for band in _defaults.QUALITY_BANDS
                 },
             }
-        states = _usage(jobs)
+        states = _usage(jobs, profile)
         allocation = (
             sealed_context.get("allocation")
             if sealed_context and isinstance(sealed_context.get("allocation"), dict)

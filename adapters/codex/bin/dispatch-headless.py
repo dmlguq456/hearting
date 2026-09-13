@@ -2817,6 +2817,8 @@ def main(argv: list[str]) -> int:
             **args.launch_lifecycle_resolution.metadata(),
             "runtime_sandbox": effective_runtime_sandbox(args),
         }
+        from dispatch_capacity_evidence import launch_scope
+        launch_metadata.update(launch_scope("codex", dispatch_env))
         if args.dispatch_depth >= 2 and os.environ.get("AGENT_DISPATCH_CHILD") == "1":
             launch_metadata["pid_scope"] = "namespace-local"
         try:

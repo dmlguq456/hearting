@@ -80,9 +80,20 @@ class CapacityTest(unittest.TestCase):
   seed=subprocess.CompletedProcess([],0,stdout="check=ok\n",stderr="")
   observed=subprocess.CompletedProcess([],0,stdout="action=dead-capacity\nterminal_action=dead-capacity\nfailure_class=capacity\nmodel=gpt-5.6-sol\n",stderr="")
   self.args.action="start";self.args.progress_window_seconds=10
-  with mock.patch.object(F.subprocess,"run",side_effect=[seed,observed]):
+  def watch(command,**kwargs):
+   if "watchdog" not in command:return seed
+   with self.jobs.open("a") as out:
+    out.write("2026-09-13T00:00:00Z\tdone\t/r\t/w\ts\t"
+     "route_id=r,route_node=test,attempt_id=att-late-capacity,note=dead-capacity,"
+     "failure_class=capacity,launch_outcome=reaped-before-publish\n")
+   return observed
+  with mock.patch.object(F.subprocess,"run",side_effect=watch):
    state,fields=F.watch_launched_attempt(self.args,self.route,self.node,"att-late-capacity",{"child_pid":"1","child_pid_start":"1"})
   self.assertEqual(state,"capacity");self.assertEqual(fields["failure_class"],"capacity")
+  # A watchdog's cached word without the exact settled row is no retry grant.
+  with mock.patch.object(F.subprocess,"run",side_effect=[seed,observed]):
+   state,_=F.watch_launched_attempt(self.args,self.route,self.node,"att-uncommitted-capacity",{"child_pid":"1","child_pid_start":"1"})
+  self.assertEqual(state,"fail-closed")
  def test_terminal_row_wins_when_launch_heartbeat_loses_completion_race(self):
   seed=subprocess.CompletedProcess(
    [],65,stdout="check=failed\nreason=heartbeat-phase-regression\n",stderr="")

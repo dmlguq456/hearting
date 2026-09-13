@@ -232,13 +232,17 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
             # One classifier, both readers.
             runtime = "opencode" if terminal_row.get("runtime") == "opencode" else "claude"
             supervised = classify_session_result(terminal_row, 1, runtime=runtime)
+            from dispatch_capacity_evidence import native_quota
+            quota = native_quota(rows[:terminal_index + 1], observed_at=log_path.stat().st_mtime)
+            quota_fields = ({"quota_window": quota["window"], "quota_reset_epoch": str(quota["reset_epoch"]),
+                             "quota_model_scope": quota["model_scope"]} if quota else {})
             return _result(
                 3,
                 "invalid",
                 terminal_source,
                 "-",
                 "unchecked",
-                "contract-violation",
+                supervised.failure_class if supervised.failure_class in {"capacity", "auth"} else "contract-violation",
                 # the runtime case keeps its long-standing string; only the
                 # two it used to swallow get their own name
                 reason=(f"{runtime}-result-runtime-error"
@@ -246,6 +250,7 @@ def _read_terminal(path: str | Path | None) -> dict[str, object]:
                         else f"{runtime}-result-{supervised.failure_class}"),
                 failure_note=supervised.note,
                 failure_class=supervised.failure_class,
+                **quota_fields,
             )
         text = terminal_row.get("result")
         final_message = text if isinstance(text, str) else None

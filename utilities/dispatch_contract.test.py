@@ -123,6 +123,42 @@ class FrameLaunchGateTest(unittest.TestCase):
    with self.assertRaises(D.DispatchContractError):
     D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,lines)
 
+ def test_frame_global_quota_requires_current_account_all_profiles_and_cleanup(self):
+  import time
+  from datetime import datetime, timezone
+  import dispatch_capacity_evidence as Q
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td); route,path,jobs,markers,rows=self.fixture(base,("codex","codex"))
+   env={"HOME":str(base),"PATH":os.environ["PATH"]}
+   account=base/".claude.json"
+   account.write_text(json.dumps({"oauthAccount":{"accountUuid":"a","organizationUuid":"org"}}))
+   now=int(time.time()); stamp=datetime.fromtimestamp(now,timezone.utc).isoformat()
+   log=base/"att-prior-quota.claude.jsonl"
+   events=[{"type":"rate_limit_event","session_id":"quota-session","rate_limit_info":{
+    "status":"rejected","rateLimitType":"seven_day","resetsAt":now+3600}},
+    {"type":"result","session_id":"quota-session","is_error":True,"api_error_status":429}]
+   log.write_text("".join(json.dumps(r)+"\n" for r in events))
+   scope=Q.launch_scope("claude",env)
+   failed=(f"{stamp}\tdone\t{base}\t{base}\tprior\tattempt_id=att-prior-quota,harness=claude,"
+           f"route_id=other-route,note=dead-launch-exit-1,log_file={log},launch_outcome=reaped-before-publish,"
+           +",".join(f"{k}={v}" for k,v in scope.items()))
+   with mock.patch.dict(os.environ,env,clear=True):
+    # Snapshot has the failure; jobs itself deliberately doesn't. The gate
+    # consumes its locked snapshot, not a second read behind the caller.
+    D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,[failed,*rows])
+    for replacement in (failed.replace("reaped-before-publish","unknown"),
+                        failed.replace("\tdone\t","\topen\t"),failed.replace(scope["quota_scope"],"other-scope")):
+     with self.assertRaises(D.DispatchContractError):
+      D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,[replacement,*rows])
+    active=failed.replace("\tdone\t","\topen\t").replace("att-prior-quota","att-active").replace("other-route",route["route_id"])
+    with self.assertRaises(D.DispatchContractError):
+     D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,[failed,*rows,active])
+    events[0]["rate_limit_info"]["rateLimitType"]="seven_day_opus"
+    log.write_text("".join(json.dumps(r)+"\n" for r in events))
+    with self.assertRaises(D.DispatchContractError):
+     D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,[failed,*rows])
+
+
 
 class DispatchContractTest(unittest.TestCase):
  def test_cancel_closes_witness_only_on_cancelled_receipt(self):

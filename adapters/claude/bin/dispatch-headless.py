@@ -2492,6 +2492,8 @@ def main(argv: list[str]) -> int:
                 except OSError:
                     pass
         launch_metadata = args.launch_lifecycle_resolution.metadata()
+        from dispatch_capacity_evidence import launch_scope
+        launch_metadata.update(launch_scope("claude", env))
         if args.dispatch_depth >= 2 and os.environ.get("AGENT_DISPATCH_CHILD") == "1":
             launch_metadata["pid_scope"] = "namespace-local"
         try:

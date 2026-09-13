@@ -169,9 +169,10 @@ def tuple_key(row: dict) -> str:
     ))
 
 
-def _usage_states(jobs: Path) -> dict[str, str]:
+def _usage_states(jobs: Path, profile=None) -> dict[str, str]:
     result = subprocess.run(
-        [str(ROOT / "utilities/usage-check.sh"), "--harness", "all", "--jobs", str(jobs)],
+        [str(ROOT / "utilities/usage-check.sh"), "--harness", "all", "--jobs", str(jobs),
+         "--model-profile", profile or ""],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -266,7 +267,7 @@ def ordered_fallback_hops(
         # parent filter.
         return list(node["fallback_hops"]), None
     counts = attempt_counts(jobs, window=int(allocation["window"]))
-    states = _usage_states(jobs)
+    states = _usage_states(jobs, node.get("model_profile"))
     headless: dict[str, tuple[dict, dict]] = {}
     trailing_rows: list[tuple[dict, dict]] = []
     tail_hops = []
@@ -1390,6 +1391,13 @@ def capacity_retry(
         attempts.append(f"{ordinal}:{tuple_key(row)}:{rejected}")
         return "descend", {}, rejected
 
+    from dispatch_capacity_evidence import active_limits
+    quota = active_limits(args.jobs, models={harness: alt_model}).get(harness)
+    if quota:
+        reason = f"capacity-quota-until-{quota['reset_epoch']}"
+        attempts.append(f"{ordinal}:{tuple_key(row)}:{reason}")
+        return "descend", {"quota_reset_epoch": str(quota["reset_epoch"])}, reason
+
     retry_id = capacity_attempt_identity(
         args, route, node, row, ordinal, f"{alt_model}/{alt_paired}"
     )
@@ -1649,6 +1657,12 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         if hop["fallback_hop"] in {"same-harness-headless", "cross-harness-headless"}:
             for row in hop.get("candidates", []):
                 key = tuple_key(row)
+                # Re-read after an early failure too: a whole-account quota
+                # cannot be cured by changing models later in this same chain.
+                from dispatch_capacity_evidence import active_limits
+                quota = active_limits(args.jobs, profile=node.get("model_profile")).get(row.get("child_harness"))
+                if quota:
+                    row = {**row, "_allocation_skip": f"quota-until-{quota['reset_epoch']}"}
                 if row.get("_allocation_skip"):
                     attempts.append(
                         f"{ordinal}:{key}:skipped-{row['_allocation_skip']}"

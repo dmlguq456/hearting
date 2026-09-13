@@ -49,6 +49,40 @@ class DispatchOwnerTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_native_quota_blocks_selection_and_preserves_sealed_candidates(self):
+        import time
+        import dispatch_capacity_evidence as quota
+        runtime = self.home / "claude-home"
+        runtime.mkdir()
+        (runtime / ".claude.json").write_text(json.dumps({"oauthAccount": {
+            "accountUuid": "fixture-account", "organizationUuid": "fixture-org"}}))
+        env = {"HOME": str(self.home), "CLAUDE_CONFIG_DIR": str(runtime)}
+        now = int(time.time())
+        log = self.home / "att-selector-quota.claude.jsonl"
+        log.write_text(json.dumps({"type": "rate_limit_event", "session_id": "fixture",
+            "rate_limit_info": {"status": "rejected", "rateLimitType": "seven_day", "resetsAt": now + 3600}}) + "\n" +
+            json.dumps({"type": "result", "session_id": "fixture", "is_error": True, "api_error_status": 429}) + "\n")
+        stamp = datetime.fromtimestamp(now, timezone.utc).isoformat()
+        scope = quota.launch_scope("claude", env)
+        self.jobs.write_text(f"{stamp}\tdone\t/r\t/w\tfailed\t"
+            f"harness=claude,attempt_id=att-selector-quota,note=dead-launch-exit-1,log_file={log},"
+            + ",".join(f"{k}={v}" for k,v in scope.items()) + "\n")
+        before = self.jobs.read_bytes()
+        result = self.run_owner(config=self.quality_config())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("\nadapter=codex\n", result.stdout)
+        self.assertIn("eligibility.claude=limited(", result.stdout)
+        self.assertEqual(before, self.jobs.read_bytes())
+        # A Claude-only user policy stays unavailable; no quality-band widening.
+        path = self.quality_config()
+        policy = path.read_text().replace("enabled: [claude, codex, opencode]", "enabled: [claude]")
+        policy = policy.replace("primary: [claude, codex]", "primary: [claude]").replace("[opencode]", "[]")
+        path.write_text(policy)
+        refused = self.run_owner(config=path)
+        self.assertEqual(refused.returncode, 65, refused.stdout + refused.stderr)
+        self.assertIn("child_spawned=0", refused.stdout)
+        self.assertNotIn("\nadapter=codex\n", refused.stdout)
+
     def config(self, owners="claude"):
         path = self.home / "dispatch-defaults.yaml"
         path.write_text(

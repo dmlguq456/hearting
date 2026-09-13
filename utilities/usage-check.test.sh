@@ -17,6 +17,8 @@ AH="$tmp/agent_setting"; mkdir -p "$AH/.dispatch" "$AH/core"; : > "$AH/core/CORE
 # like hooks/portable-guards.test.sh does (U-7 / test-round X-1).
 unset AGENT_DISPATCH_JOBS
 jobs="$AH/.dispatch/jobs.log"
+# Use the canonical registry input, independent of the installed state root.
+export AGENT_DISPATCH_JOBS="$jobs"
 now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 old_iso=$(date -u -d '10 hours ago' +%Y-%m-%dT%H:%M:%SZ)
 # SD-16e: reset 값을 실행 시각에 비의존이 되도록 now 상대로 동적 산출한다.

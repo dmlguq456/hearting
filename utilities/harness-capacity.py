@@ -218,11 +218,18 @@ def capacity_scores(*, stale_after: int = 3600, now: float | None = None) -> dic
         codex = _codex_api_score()
         if codex is None:
             codex = _codex_score(now, stale_after)
-    return {
+    scores = {
         "claude": manual.get("claude", _claude_score(now, stale_after)),
         "codex": codex,
         "opencode": manual.get("opencode", _opencode_api_score()),
     }
+
+    from dispatch_capacity_evidence import active_limits
+    jobs = os.environ.get("AGENT_DISPATCH_JOBS")
+    if jobs:
+        for harness in active_limits(jobs, now=now):
+            scores[harness] = 0.0
+    return scores
 
 
 ORDERING_NEUTRAL_SCORE = 50.0

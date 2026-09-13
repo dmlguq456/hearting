@@ -182,9 +182,8 @@ class CodexDispatchTerminalTest(unittest.TestCase):
         broken = self.inspect(result_log("broken.jsonl", "unexpected token in json"))
         self.assertEqual(broken["reason"], "claude-result-runtime-error")
         self.assertEqual(broken["failure_note"], "dead-runtime-error")
-        for view in (capacity, auth, broken):
-            self.assertEqual((view["state"], view["blocker_reason"]),
-                             ("invalid", "contract-violation"))
+        for view, blocker in ((capacity, "capacity"), (auth, "auth"), (broken, "contract-violation")):
+            self.assertEqual((view["state"], view["blocker_reason"]), ("invalid", blocker))
 
     def test_compatibility_failure_notes_remain_stable(self):
         blocked = inspect_terminal_log(self.write_log())

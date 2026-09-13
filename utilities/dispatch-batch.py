@@ -558,7 +558,14 @@ def assign_harnesses(
         # group-level diagnostics/degradation evidence below, which
         # legitimately wants group-wide reasons.
         node_exclusions: dict[str, set[str]] = {}
+        from dispatch_capacity_evidence import active_limits
+        quota_limits = active_limits(jobs, profile=node.get("model_profile")) if jobs is not None else {}
         for adapter in SUPPORTED_BATCH_HARNESSES:
+            if adapter in quota_limits:
+                reason = f"quota-until-{quota_limits[adapter]['reset_epoch']}"
+                exclusions.setdefault(adapter, set()).add(reason)
+                node_exclusions.setdefault(adapter, set()).add(reason)
+                continue
             try:
                 selection = DISPATCH_NODE.resolve_checked_tuple(
                     route, node, adapter, parent_identity=parent_identity

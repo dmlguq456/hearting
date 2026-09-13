@@ -32,7 +32,7 @@ fail=0
 # reach those hooks at $ROOT/hooks/* (adapters/codex/bin/preflight.sh), where
 # $ROOT/utilities/memory-store.sh already resolves. A per-adapter copy would
 # assert a projection surface nothing loads.
-SHARED_UTILITY_DEFERRED="work_start.py opencode_session_runtime.py dispatch_parent_completion.py dispatch_attempt_policy.py dispatch_receipt_identity.py dispatch_notice_receipt.py dispatch_supervision.py artifact-pointer-bridge.py artifact-quiescence.py artifact-relocation.py artifact-relocation-live.py artifact-knowledge-feed.py cairn-artifact-read.sh cairn-artifact-read.ts dispatch-readiness.py verification-background-lease.py memory-store.sh compute-hosts execution_access.py execution_access_diagnose.py execution-access-diagnose.py governor_identity.py artifact_restore_sealed.py review_watchdog.py"
+SHARED_UTILITY_DEFERRED="dispatch_capacity_evidence.py work_start.py opencode_session_runtime.py dispatch_parent_completion.py dispatch_attempt_policy.py dispatch_receipt_identity.py dispatch_notice_receipt.py dispatch_supervision.py artifact-pointer-bridge.py artifact-quiescence.py artifact-relocation.py artifact-relocation-live.py artifact-knowledge-feed.py cairn-artifact-read.sh cairn-artifact-read.ts dispatch-readiness.py verification-background-lease.py memory-store.sh compute-hosts execution_access.py execution_access_diagnose.py execution-access-diagnose.py governor_identity.py artifact_restore_sealed.py review_watchdog.py"
 
 say() {
   printf '%s\n' "$*"

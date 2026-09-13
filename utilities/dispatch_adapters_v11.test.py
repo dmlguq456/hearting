@@ -719,6 +719,11 @@ class AdapterV11Test(unittest.TestCase):
     fake=fakebin/harness
     fake.write_text("#!/bin/sh\nexec sleep 60\n",encoding="utf-8"); fake.chmod(0o755)
     wrapper=self.load_wrapper(harness)
+    import json
+    from dispatch_capacity_evidence import launch_scope
+    quota_home=root/"quota-home"; quota_home.mkdir()
+    (quota_home/".claude.json").write_text(json.dumps({"oauthAccount": {
+     "accountUuid":"fixture-account", "organizationUuid":"fixture-org"}}))
     if harness=="opencode":
      attempt_id="att-opencode-governor-transfer"
      argv=["dispatch-headless.py","--start","--worktree",str(repo),"--slug","opencode-owner",
@@ -744,7 +749,7 @@ class AdapterV11Test(unittest.TestCase):
     env={**os.environ,"PATH":str(fakebin)+os.pathsep+os.environ.get("PATH",""),
          "AGENT_HOME":str(ROOT),"AGENT_ARTIFACT_ROOT":str(art),
          "AGENT_DISPATCH_JOBS":str(jobs),"XDG_STATE_HOME":str(root/"state"),
-         **env_extra}
+         "CLAUDE_CONFIG_DIR":str(quota_home), **env_extra}
     env.pop("AGENT_MODEL_GOVERNOR_ROOT",None)
     stream=io.StringIO()
     patches=[mock.patch.dict(os.environ,env,clear=True),
@@ -773,6 +778,10 @@ class AdapterV11Test(unittest.TestCase):
      for f in fields
      if len(f)==6 and DC.row_has_attempt(f[5],attempt_id)
     )
+    if harness=="claude":
+     self.assertEqual(metadata.get("quota_scope"),launch_scope(harness,env)["quota_scope"])
+    else:
+     self.assertNotIn("quota_scope",metadata)
     self.assertNotEqual(DC.post_exit_receipt_reason(metadata),"")
     quiescence=DC.attempt_process_quiescence(metadata,terminal_receipt=True)
     self.assertNotEqual(quiescence.reason,"post-exit-receipt-incomplete")
