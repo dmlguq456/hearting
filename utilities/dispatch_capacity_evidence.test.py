@@ -110,6 +110,28 @@ class QuotaEvidenceTests(unittest.TestCase):
             self.assertEqual(Q.active_limits(self.jobs, env={**self.env, key: value}), {})
         self.assertNotIn("account-a", json.dumps(Q.launch_scope("claude", self.env)))
 
+    def test_same_account_in_another_runtime_home_shares_quota(self):
+        other = self.home / "another-runtime"
+        other.mkdir()
+        (other / ".claude.json").write_text(self.config.read_text())
+        env = {**self.env, "CLAUDE_CONFIG_DIR": str(other)}
+        self.assertEqual(Q.launch_scope("claude", self.env), Q.launch_scope("claude", env))
+        self.assertIn("claude", Q.active_limits(self.jobs, env=env))
+        (other / ".claude.json").write_text(json.dumps({"oauthAccount": {
+            "accountUuid": "other-account", "organizationUuid": "org-a"}}))
+        self.assertEqual(Q.active_limits(self.jobs, env=env), {})
+
+    def test_published_v1403_scope_remains_valid_in_its_original_runtime_home(self):
+        old = Q.digest(["claude-subscription-v1", str(self.runtime.resolve()),
+                        {"accountUuid": "account-a", "organizationUuid": "org-a"}])
+        current = Q.launch_scope("claude", self.env)
+        self.jobs.write_text(self.jobs.read_text().replace(current["quota_scope"], old)
+                            .replace("quota_scope_kind=claude-subscription-v2", "quota_scope_kind=claude-subscription-v1"))
+        self.assertIn("claude", Q.active_limits(self.jobs, env=self.env))
+        self.assertTrue(Q.usage_states(self.jobs, env=self.env)["claude"].startswith("limited("))
+        self.config.write_text(json.dumps({"oauthAccount": {"accountUuid": "other", "organizationUuid": "org-a"}}))
+        self.assertEqual(Q.active_limits(self.jobs, env=self.env), {})
+
     def test_old_unscoped_attempt_is_diagnostic_and_cannot_be_rebound_retroactively(self):
         self.write(scope=False)
         self.assertEqual(Q.active_limits(self.jobs, env=self.env), {})

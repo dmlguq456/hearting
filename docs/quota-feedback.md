@@ -4,7 +4,7 @@ Claude의 실제 주간 거절이 `dead-launch-exit-1`로 남아 다음 frame �
 
 ## 공통 책임
 
-- launcher는 실제 자식 환경의 구독 계정·조직·runtime home 또는 명시 OAuth token 선택을 해시로 기록한다. 식별 원문과 토큰을 원장에 싣지 않는다. 계정 결속을 산출할 수 없거나 API/provider 경로이면 주간 구독 증거를 임의로 결속하지 않는다.
+- launcher는 실제 자식 환경의 구독 계정·조직 또는 명시 OAuth token 선택을 해시로 기록한다. runtime home은 인증 선택을 읽는 위치이며 계정 식별자에 섞지 않는다. 같은 계정의 다른 설정 디렉터리도 quota를 공유한다. 식별 원문과 토큰을 원장에 싣지 않는다. 계정 결속을 산출할 수 없거나 API/provider 경로이면 주간 구독 증거를 임의로 결속하지 않는다.
 - `dispatch_capacity_evidence.py`가 정확한 native session의 실패와 structured rejected window를 결합한다. reset, model scope, 계정 범위가 맞을 때만 현재 선택에 적용한다. 일반 429·인증 실패·허용 이벤트·이전 턴·과도한 reset은 주간 quota 증거가 아니다.
 - `usage-check.sh`의 독립 awk 판정을 없애고 같은 reader의 얇은 CLI로 바꿨다. 기존 문자형 한도도 이 reader가 처리한다. scoped native 증거를 손실된 문자 marker가 다시 전 계정/전 모델 제한으로 넓힐 수 없다. 옛 시각형 reset은 관측일 기준으로 해석해 매일 제한이 부활하지 않는다.
 - owner 선택, d=2 fallback, 병렬 배치와 용량 점수가 같은 증거를 소비한다. 품질 범위와 봉인된 후보 집합은 유지한다. 주간 전체 quota에 모델만 바꾼 같은 하네스 재시도를 쓰지 않는다. reset 뒤에는 같은 route를 재개할 수 있다.
@@ -25,4 +25,6 @@ Claude의 native quota 이벤트는 [공식 SDK의 RateLimitEvent/RateLimitInfo]
 
 초기 전체 검사에서 발견한 두 테스트 문제는 수정 전 main에서도 재현됐다. usage 테스트가 canonical jobs 대신 구 설치 경로를 기대하던 fixture를 교정했고 해당 baseline 행을 제거했다. capacity watchdog 테스트는 원장에 없는 캐시 문구만으로 retry를 기대하던 fixture였으므로 정확한 종료 행을 포함하고, 행이 없는 경우 거부되는 검증도 추가했다. 운영 판정을 약하게 바꾸지 않았다.
 
-최종 isolated runner는 11개 suite 중 PASS 10, 기존 KNOWN-FAIL 1, 새 실패 0으로 종료했다. 기존 실패는 adapter suite의 Codex App Server 가용성 preview case이며 신규 세 adapter 실제 main 검증과 구분한다. 새 quota 집중 12건 및 frame gate 4건도 통과했다. 생성 20그룹과 적응 경계 검사는 통과했다. 릴리즈·설치 결과는 완료 후 아래에 기록한다. 로컬 증거는 `/tmp/quota-feedback*.tsv`, `/tmp/quota-*-final.log`, `/tmp/quota-current-inspect.json`에 보존하며 private native 로그는 공개 첨부하지 않는다.
+최종 isolated runner는 11개 suite 중 PASS 10, 기존 KNOWN-FAIL 1, 새 실패 0으로 종료했다. 기존 실패는 adapter suite의 Codex App Server 가용성 preview case이며 신규 세 adapter 실제 main 검증과 구분한다. 새 quota 집중 14건 및 frame gate 4건도 통과했다. 생성 20그룹과 적응 경계 검사는 통과했다. 릴리즈·설치 결과는 완료 후 아래에 기록한다. 로컬 증거는 `/tmp/quota-feedback*.tsv`, `/tmp/quota-*-final.log`, `/tmp/quota-current-inspect.json`에 보존하며 private native 로그는 공개 첨부하지 않는다.
+
+계정 범위 최종 교정에서 설정 디렉터리를 식별 해시에서 분리했다. v2.140.3 취소를 요청했을 때 이미 게시가 성공 종료되어 취소되지 않았고, 이 세션은 그 버전을 로컬 설치하지 않았다. 후속 v2 scope는 같은 계정의 여러 runtime home에서 공유한다. 게시된 v1 scope는 원래 위치와 계정을 모두 증명할 수 있는 범위에서 계속 소비하며, 미결속 과거 행은 여전히 소급하지 않는다.

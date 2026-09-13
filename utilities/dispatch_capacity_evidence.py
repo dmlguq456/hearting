@@ -34,7 +34,7 @@ def _json(path):
         return {}
 
 
-def launch_scope(harness, env=None):
+def _scope_parts(harness, env=None):
     """Seal the selected authentication scope before model start, without a probe.
 
     Native weekly feedback is currently supplied by Claude subscription events.
@@ -59,8 +59,26 @@ def launch_scope(harness, env=None):
         identity = {"oauth_token_digest": hashlib.sha256(token.encode()).hexdigest()}
     elif not all(isinstance(v, str) and v for v in identity.values()):
         return {}
-    return {"quota_scope": digest(["claude-subscription-v1", str(runtime), identity]),
-            "quota_scope_kind": "claude-subscription-v1"}
+    return runtime, identity
+
+
+def _scope_candidates(harness, env=None):
+    parts = _scope_parts(harness, env)
+    if not parts:
+        return {}
+    runtime, identity = parts
+    return {
+        "claude-subscription-v2": digest(["claude-subscription-v2", identity]),
+        # v2.140.3 sealed storage location too. Honor its existing evidence
+        # only where that exact scope can still be proved; new rows use v2.
+        "claude-subscription-v1": digest(["claude-subscription-v1", str(runtime), identity]),
+    }
+
+
+def launch_scope(harness, env=None):
+    scopes = _scope_candidates(harness, env)
+    kind = "claude-subscription-v2"
+    return {"quota_scope": scopes[kind], "quota_scope_kind": kind} if scopes else {}
 
 
 def native_quota(rows, *, observed_at, now=None):
@@ -120,7 +138,7 @@ def _native_rows(path):
 
 def observations(jobs, *, now=None, env=None, registry_lines=None):
     now = time.time() if now is None else now
-    scope = launch_scope("claude", env)
+    scopes = _scope_candidates("claude", env)
     try:
         lines = registry_lines if registry_lines is not None else Path(jobs).read_text().splitlines()
     except (OSError, UnicodeError):
@@ -147,7 +165,7 @@ def observations(jobs, *, now=None, env=None, registry_lines=None):
         if not quota:
             continue
         bound_scope = meta.get("quota_scope")
-        matches = bool(bound_scope and bound_scope == scope.get("quota_scope"))
+        matches = bool(bound_scope and bound_scope == scopes.get(meta.get("quota_scope_kind")))
         found.append({**quota, "harness": "claude", "attempt_id": attempt,
                       "quota_scope": bound_scope, "scope_authority": "launch-bound" if bound_scope else "unbound",
                       "scope_matches": matches,
@@ -193,7 +211,7 @@ def usage_states(jobs, *, profile=None, models=None, unknown_window_min=60, now=
     except (OSError, UnicodeError):
         return dict.fromkeys(HARNESSES, "unknown")
     states = dict.fromkeys(HARNESSES, "ok")
-    scope = launch_scope("claude", env).get("quota_scope")
+    scopes = _scope_candidates("claude", env)
     native = observations(jobs, now=now, env=env, registry_lines=lines)
     native_ids = {r["attempt_id"] for r in native}
     legacy = {}
@@ -209,7 +227,7 @@ def usage_states(jobs, *, profile=None, models=None, unknown_window_min=60, now=
         # account change. A lossy text marker cannot widen it back to global.
         if meta.get("attempt_id") in native_ids:
             continue
-        if meta.get("quota_scope") and (harness != "claude" or meta["quota_scope"] != scope):
+        if meta.get("quota_scope") and (harness != "claude" or meta["quota_scope"] != scopes.get(meta.get("quota_scope_kind"))):
             continue
         if harness not in legacy or fields[0] > legacy[harness][0]:
             legacy[harness] = (fields[0], meta.get("reset", "-"))
