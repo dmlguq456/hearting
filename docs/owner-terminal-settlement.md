@@ -66,10 +66,13 @@ and exit during the join, with no duplicate launch or false wait directive.
 An additional resource→owner publish→owner sync case checks resource evidence
 drift and the absence of any synthetic worker/owner row.
 
-The original incident was inspected read-only: the owner and its review were
-settled, the new terminal proof passed, and the slot still contained only its
-producer binding. Operational finish, another model canary and product feature
-completion are not claimed. Private logs and their paths are retained locally,
+Initially the original incident was inspected read-only: the owner and its
+review were settled, the new proof passed, and only its producer binding existed.
+After the peer received the recovery commands, the original owner reached
+`owner-envelope-sealed`, its workflow completed and its cycle sealed. The
+installed helper reverified `completed / quiescent`. The four observed incident
+rows retained their exact bytes. This observer ran no operating-state repair,
+new model canary or product feature work. Private logs and their paths remain local,
 not attached to this repository. Direct peer alias/ID lookup failed, but the
 agent list resolved the exact thread to its pane; findings and recovery commands
 were delivered with a verified state transition.
@@ -78,3 +81,24 @@ Local verification records: `/tmp/owner-terminal-settlement.tsv`,
 `/tmp/owner-terminal-settlement-final.tsv`, `/tmp/owner-terminal-start-race.tsv`,
 `/tmp/owner-terminal-settlement-boundary-final.log`,
 `/tmp/homeos-hearting-stall-investigation.json`.
+
+## Release and installation
+
+Source `25e0b9c88d8561efe5c838fe525ea68e0662265a` is published as
+[v2.140.2](https://github.com/dmlguq456/hearting/releases/tag/v2.140.2).
+The [release run](https://github.com/dmlguq456/hearting/actions/runs/34727890189)
+passed validation, deterministic packaging and the published-release smoke test.
+An earlier run was deliberately cancelled before tag creation/publication to
+include the resource-executor boundary correction.
+
+Claude, Codex and OpenCode are installed at v2.140.2; strict runtime doctor is
+fresh for all three and verification reports no drift. All 21 changed release
+files match the source commit byte-for-byte, and the 11 snapshotted user settings
+and authentication files are unchanged. The installed resource/owner boundary
+test and read-only inspection of the recovered original owner both passed.
+Existing sessions retain their original release pins; the exact new recovery
+helper works against their existing canonical registry without another owner.
+
+Installation evidence: `/tmp/owner-terminal-runtime-doctor.json`,
+`/tmp/owner-terminal-runtime-verify.json`, `/tmp/owner-terminal-install-integrity.json`,
+`/tmp/homeos-owner-terminal-installed-inspect.json`.
