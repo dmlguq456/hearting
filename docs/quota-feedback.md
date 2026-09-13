@@ -28,3 +28,13 @@ Claude의 native quota 이벤트는 [공식 SDK의 RateLimitEvent/RateLimitInfo]
 최종 isolated runner는 11개 suite 중 PASS 10, 기존 KNOWN-FAIL 1, 새 실패 0으로 종료했다. 기존 실패는 adapter suite의 Codex App Server 가용성 preview case이며 신규 세 adapter 실제 main 검증과 구분한다. 새 quota 집중 14건 및 frame gate 4건도 통과했다. 생성 20그룹과 적응 경계 검사는 통과했다. 릴리즈·설치 결과는 완료 후 아래에 기록한다. 로컬 증거는 `/tmp/quota-feedback*.tsv`, `/tmp/quota-*-final.log`, `/tmp/quota-current-inspect.json`에 보존하며 private native 로그는 공개 첨부하지 않는다.
 
 계정 범위 최종 교정에서 설정 디렉터리를 식별 해시에서 분리했다. v2.140.3 취소를 요청했을 때 이미 게시가 성공 종료되어 취소되지 않았고, 이 세션은 그 버전을 로컬 설치하지 않았다. 후속 v2 scope는 같은 계정의 여러 runtime home에서 공유한다. 게시된 v1 scope는 원래 위치와 계정을 모두 증명할 수 있는 범위에서 계속 소비하며, 미결속 과거 행은 여전히 소급하지 않는다.
+
+## 배포·설치 결과
+
+구현 `f90e4a9f`와 계정 범위 교정 `76824cc5`를 main에 병합·푸시했다. [v2.140.4](https://github.com/dmlguq456/hearting/releases/tag/v2.140.4)는 후자와 정확히 같은 commit이다. Release 작업의 입력 검증·패키징·태그 생성은 통과했으나 게시 API가 HTTP 500을 반환했다. 동일 태그의 게시 재개 후 네 배포 파일을 업로드했고, 게시된 checksum과 로컬 패키지의 일치 및 공식 post-publish 설치·제거 smoke PASS를 확인했다. 실패한 Actions 실행을 성공으로 바꾸거나 별도 smoke를 그 실행의 성공으로 기록하지 않는다.
+
+2026-09-13 `harness update --version v2.140.4 --yes --json`이 exit 0으로 종료했고, 세 런타임 모두 v2.140.2에서 v2.140.4로 갱신됐다. `runtime doctor --runtime all --strict`와 `verify`는 exit 0, 세 런타임 fresh, drift 0이다. 릴리즈 archive SHA256은 `bfdbafc83586f2654c16de26b979cab2ecf9ac815edec330038f2ec5d6b60816`이다. 배포 대상 변경 파일 22개가 설치본과 일치했고, 설치본 quota 14건·frame gate 4건이 다시 통과했다.
+
+설치 직전·직후 비교한 사용자 설정·인증 파일 11개의 내용은 그대로다. 원 사건의 정확한 원장 행과 native 로그도 변경되지 않았다. 설치본으로 다시 읽어도 거절은 `capacity`/`seven_day`와 정확한 reset으로 분류되지만, 계정 권위는 `unbound`라 현재 선택에는 소급 적용되지 않는다. 기존 세션의 고정 release는 유지되며 새 세션부터 새 설치본을 사용한다. OpenCode에는 재시작이 필요하다. 기존 육아 작업의 재분사는 하지 않았다.
+
+설치 근거는 로컬 `/tmp/quota-installed-evidence.json`, `/tmp/quota-runtime-{update,doctor,verify}.json`, `/tmp/quota-installed*-tests.log`, `/tmp/quota-v1404-smoke.log`에 보존했다. 공급자 모델 실기동을 통한 추가 canary나 기존 supervised join의 capacity-retry 공백까지 검증됐다고 주장하지 않는다.
