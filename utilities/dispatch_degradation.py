@@ -19,6 +19,7 @@ _SURFACES = {"registered-headless", "codex-native-subagent", "claude-subagent", 
 # unknown writer is not silently dropped; record_degradation() below routes
 # it to `_unattributed.jsonl` with kind="writer-unregistered" instead.
 _WRITERS = {
+    "dispatch_contract.py",
     "stage-dispatch-fallback.py",
     "dispatch-batch.py",
     "capability-route.py",

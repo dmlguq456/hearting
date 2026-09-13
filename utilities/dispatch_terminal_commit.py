@@ -8,6 +8,7 @@ import importlib.util
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -572,6 +573,10 @@ def _prove_route_children(request, route, gates):
     for node in route.get("nodes", []):
         if node.get("terminal") is not True:
             continue
+        if gates.get(node["id"], {}).get("source") == "owner-terminal":
+            if gates[node["id"]].get("attempt_id") != request.owner_attempt_id:
+                return _proof_failure("owner-route-mismatch")
+            continue  # The common gate already proves the exact owner and its cleanup.
         matching = [(status, meta) for status, meta in related
                     if meta.get("route_id") == route["route_id"] and meta.get("route_node") == node["id"]]
         if (not matching or matching[-1][0] != "done" or matching[-1][1].get("failure_class") != "pass"
@@ -1035,10 +1040,17 @@ def owner_workflow_gaps(jobs, metadata, route):
     """One read-only diagnosis for execution handback and legacy recovery."""
     if metadata.get("workflow_completion") != "runtime-v1":
         return {}
-    if not any(n.get("terminal") and n.get("dispatch_depth") == 2 for n in route["nodes"]):
-        return {}  # A one-shot's own terminal marker is written at commit.
-    gates = _route_module().terminal_gate_observation(route, jobs=Path(jobs), exact_terminal=True)
-    return {node: value.get("reason", "unproven") for node, value in gates.items() if not value.get("passed")}
+    module = _route_module()
+    missing = {}
+    for node in route["nodes"]:
+        if module.owner_executed_terminal(node):
+            missing.update(module.owner_terminal_prerequisites(route, node, Path(jobs)))
+        elif node.get("terminal") and node.get("dispatch_depth") == 2:
+            proof = module._marker_identity_row(route, node, node["id"], node.get("terminal_gate"),
+                                                jobs=Path(jobs), exact_terminal=True)
+            if not proof.get("passed"):
+                missing[node["id"]] = proof.get("reason", "unproven")
+    return missing  # The executor's own handoff can only be proved after it exits.
 
 
 def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
@@ -1121,6 +1133,27 @@ def completed_owner_handoff(jobs, status, metadata):
     return _read_sealed_owner_envelope(request, state["terminal_commit_id"])
 
 
+def inspect_owner_completion(jobs, status, metadata):
+    """Read-only closure diagnosis; used by public start and operator recovery."""
+    result = {"attempt_id": metadata.get("attempt_id"), "state": "closure-pending"}
+    try:
+        request = _completion_request(jobs, status, metadata)
+        if request is None:
+            return {**result, "state": "not-applicable"}
+        route = json.loads(request.route_file.read_text())
+        result["terminal_gates"] = _route_module().terminal_gate_observation(
+            route, jobs=Path(jobs), exact_terminal=True)
+        result["process"] = dispatch_contract.attempt_process_quiescence(metadata, terminal_receipt=True).state
+        result["state"] = "closure-pending" if owner_completion_pending(jobs, status, metadata) else "completed"
+        path = _commit_state_path(request)
+        result["checkpoint"] = json.loads(path.read_text()).get("state") if path.exists() else "not-claimed"
+        result["recovery_command"] = shlex.join([sys.executable, str(Path(__file__).resolve()), "finish",
+            "--jobs", str(Path(jobs).resolve()), "--attempt", metadata["attempt_id"]])
+    except (OSError, ValueError, KeyError, TypeError, TerminalCommitError) as exc:
+        result.update(reason=getattr(exc, "code", "recovery-unavailable"), detail=str(exc))
+    return result
+
+
 def settle_owner_completion(jobs, status, metadata) -> TerminalCommitResult | None:
     """Runtime-owned, retryable workflow/route/cycle closure after exact PASS.
 
@@ -1149,9 +1182,13 @@ def settle_owner_completion(jobs, status, metadata) -> TerminalCommitResult | No
                            require_cycle=True, jobs=request.jobs, owner_attempt_id=request.owner_attempt_id)
         ledger = workflow.WorkflowLedger(route["route_id"], route["route_hash"], jobs=request.jobs)
         gates = _route_module().terminal_gate_observation(route, jobs=request.jobs, exact_terminal=True)
-        with ledger.lock():
-            ledger.completion_paths(workflow.route_terminal_nodes(route), gates)
-        result = settle_terminal_commit(request)
+        missing = {node: proof.get("reason", "unproven") for node, proof in gates.items() if not proof.get("passed")}
+        if missing:
+            result = TerminalCommitResult("needs-owner", "terminal-marker-not-current", json.dumps(missing, sort_keys=True))
+        else:
+            with ledger.lock():
+                ledger.completion_paths(workflow.route_terminal_nodes(route), gates)
+            result = settle_terminal_commit(request)
         if result.result == "completed":
             # The terminal transaction fences late starts and proves every
             # child before the workflow can advertise COMPLETE.
@@ -1201,13 +1238,16 @@ if __name__ == "__main__":
         raise SystemExit(cleanup_recover())
     import argparse
     parser = argparse.ArgumentParser(description="Recover one runtime-owned workflow completion; never launch a model.")
-    parser.add_argument("operation", choices=["finish"])
+    parser.add_argument("operation", choices=["inspect", "finish"])
     parser.add_argument("--jobs", required=True, type=Path)
     parser.add_argument("--attempt", required=True)
     args = parser.parse_args()
-    dispatch_contract.ensure_global_registry_writable(args.jobs)
     from dispatch_completion_join import exact_attempt_row, materialize_after_terminal_close
     row = exact_attempt_row(args.jobs, args.attempt)
+    if args.operation == "inspect":
+        print(json.dumps(inspect_owner_completion(args.jobs, row.status, row.metadata)))
+        raise SystemExit(0)
+    dispatch_contract.ensure_global_registry_writable(args.jobs)
     result = settle_owner_completion(args.jobs, row.status, row.metadata)
     if result is None:
         print(json.dumps({"result": "not-applicable", "reason": "no-runtime-owned-successful-workflow"}))

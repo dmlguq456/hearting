@@ -3608,8 +3608,12 @@ def terminal_gate_observation(route, *, jobs=None, exact_terminal=False):
     rows={}
     for node_id in terminal_ids:
         node=nodes[node_id]
-        rows[node_id]=_marker_identity_row(route,node,node_id,node.get("terminal_gate"), jobs=jobs,
-                                          exact_terminal=exact_terminal)
+        marker=completion_dir(route["route_id"],jobs=jobs)/f"{node_id}.json"
+        if owner_executed_terminal(node) and not (marker.exists() or marker.is_symlink()):
+            rows[node_id]=_owner_terminal_observation(route,node,jobs=jobs)
+        else:
+            rows[node_id]=_marker_identity_row(route,node,node_id,node.get("terminal_gate"), jobs=jobs,
+                                              exact_terminal=exact_terminal)
     for group_id,error in sorted(owner_merge_auxiliary_groups(route).items()):
         key=f"parallel_group:{group_id}"
         row=_arbitration_observation(route,group_id,error)
@@ -3629,6 +3633,79 @@ def terminal_gate_observation(route, *, jobs=None, exact_terminal=False):
                 row={"passed":False,"reason":"auxiliary-arbitration-identity-unverified"}
         rows[key]=row
     return rows
+
+def owner_executed_terminal(node):
+    """A declared owner operation has the owner's executor, not an absent child."""
+    return (node.get("terminal") is True and node.get("kind") == "capability-owner"
+            and node.get("unit") == "_kernel/owner" and node.get("dispatch_depth") == 1)
+
+
+def _owner_terminal_observation(route,node,*,jobs=None):
+    """Consume the same exact native handoff as worker completion, without
+    inventing a second attempt or publishing a synthetic worker marker.
+
+    The claim binds this proof's digest just as it binds a worker marker. All
+    subsequent readers recheck the owner, prerequisites, output and cleanup.
+    """
+    from owner_route_binding import resolve_owner_route_lifecycle
+    def absent(reason):
+        return {"passed":False,"reason":reason}
+    try:
+        jobs=Path(jobs) if jobs is not None else completion_dir(route["route_id"]).parents[1]/"jobs.log"
+        owners=[]
+        for line in jobs.read_text(encoding="utf-8").splitlines():
+            fields=line.split("\t")
+            if len(fields)!=6: continue
+            meta=parse_registry_metadata(fields[5])
+            if (meta.get("worker_type")=="owner" and meta.get("dispatch_depth")=="1"
+                    and meta.get("owner_route_id")==route["route_id"]):
+                owners.append((fields,meta))
+        if not owners: return absent("owner-attempt-absent")
+        fields,meta=owners[-1]
+        binding,_=resolve_owner_route_lifecycle(jobs,owner_attempt_id=meta["attempt_id"])
+        if (binding is None or binding.route_id!=route["route_id"] or binding.route_hash!=route["route_hash"]
+                or meta.get("registered_worker")!="1"):
+            return absent("owner-route-identity-mismatch")
+        if fields[1]!="done" or meta.get("failure_class")!="pass":
+            return absent("owner-terminal-not-pass")
+        if completion_conflict_attempt({"attempt_id":meta["attempt_id"]},["\t".join(fields)]):
+            return absent("terminal-evidence-conflict")
+        process=attempt_process_quiescence(meta,terminal_receipt=True)
+        if process.state!="quiescent": return absent("owner-not-quiescent")
+        # A PASS proposal cannot erase a missing review or other prerequisite.
+        prerequisites=owner_terminal_prerequisites(route,node,jobs)
+        if prerequisites:
+            return absent("owner-prerequisite-unproven:"+json.dumps(prerequisites,sort_keys=True))
+        terminal=inspect_terminal_attempt(meta.get("log_file"),worktree=route["cwd"],
+                                          artifact_root_metadata=route["artifact_root"],worker_type="owner")
+        if terminal.get("state")!="valid" or terminal.get("verdict")!="PASS" or terminal.get("artifact_state")!="readable":
+            return absent("owner-terminal-evidence-unverified")
+        encoded=str(terminal["artifact_path_b64"])
+        evidence=Path(base64.urlsafe_b64decode(encoded+"="*(-len(encoded)%4)).decode())
+        digest=evidence_digest(evidence)
+        identity={"route_id":route["route_id"],"route_hash":route["route_hash"],"node_id":node["id"],
+                  "attempt_id":meta["attempt_id"],"completion_gate":node["terminal_gate"],
+                  "evidence":str(evidence),"evidence_digest":digest,"source":"owner-terminal"}
+        return {**identity,"passed":True,"current":True,"reason":"owner-terminal-verified",
+                "marker_digest":hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest(),
+                "attempt_readiness":"quiescent"}
+    except (OSError,ValueError,KeyError,TypeError):
+        return absent("owner-terminal-evidence-unverified")
+
+
+def owner_terminal_prerequisites(route,node,jobs):
+    nodes={n["id"]:n for n in route["nodes"]}
+    pending=list(node.get("depends_on",[])); seen=set(); missing={}
+    while pending:
+        node_id=pending.pop()
+        if node_id in seen: continue
+        seen.add(node_id)
+        predecessor=nodes[node_id]
+        proof=_marker_identity_row(route,predecessor,node_id,predecessor.get("completion_gate"),
+                                   jobs=jobs,exact_terminal=True)
+        if not proof.get("passed"): missing[node_id]=proof["reason"]
+        pending.extend(predecessor.get("depends_on",[]))
+    return missing
 
 def terminal_gate_proven(gates):
     """Tri-state aggregate: True if every declared terminal gate passed, False if any
@@ -4734,8 +4811,10 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
     # preserves legacy inline markers whose attempt is intentionally absent.
     if jobs is None:
         return {"passed": True, "reason": "completion-marker-verified",
+                "marker_digest": hashlib.sha256(marker_bytes).hexdigest(),
                 "evidence": evidence.get("path")}
     return {"passed": True, "reason": "completion-marker-verified",
+            "marker_digest": hashlib.sha256(marker_bytes).hexdigest(),
             "evidence": evidence.get("path"), "current": True,
             "attempt_readiness": "unchecked", "attempt_id": marker.get("attempt_id")}
 

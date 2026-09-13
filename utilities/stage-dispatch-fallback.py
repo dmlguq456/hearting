@@ -1592,6 +1592,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                 effective_intensity=route["effective_intensity"],
                 round=str(round_no), max_round=str(max_round),
                 child_spawned="0",
+                **DISPATCH_NODE.review_budget_recovery_fields(node.get("kind")),
             )
 
     prior_failures = registry_failures(args.jobs, route["route_id"], node["id"])

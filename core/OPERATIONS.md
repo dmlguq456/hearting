@@ -682,6 +682,23 @@ Historical artifact and residue seals remain audit evidence: a valid artifact
 never proves that a live descendant stopped. The launcher/watchdog owns signals;
 join/reconcile own proof recovery and notification, not guessed process death.
 
+A terminal `capability-owner` node is executed by the bound depth-1 owner.
+The shared terminal observer consumes that owner's exact native PASS, readable
+output, declared prerequisite proofs and quiescence. It does not require a
+second child or a synthetic worker marker. The terminal claim binds the same
+evidence digest for closure, replay and downstream consumption. A missing
+prerequisite keeps the executing owner responsible before exit; after exit,
+`dispatch_terminal_commit.py inspect --jobs <jobs> --attempt <id>` diagnoses the
+retained obligation and `finish` retries closure without running a model.
+Public start distinguishes pending closure from a running owner.
+
+Frame diversity uses the sealed eligible candidates and exact execution results.
+If every alternative harness has a settled native quota failure on this route,
+the two completed attempts on the remaining harness may proceed with recorded
+degradation. Generic failure, an unknown process, or another route's failure
+does not establish unavailability. The accepted pair still goes through the
+same user question and release gate.
+
 Detached resource runs are first-class lab/resource jobs, not registered agent
 dispatches and not members of `jobs.log`. Every `resource-runner start`
 atomically registers its absolute run-registry path in the harness-owned global

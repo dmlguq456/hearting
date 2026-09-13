@@ -100,6 +100,29 @@ class FrameLaunchGateTest(unittest.TestCase):
      D.owner_frame_launch_gate(binding,"start",base,jobs)
     self.assertEqual(caught.exception.reason,"frame-cross-harness-required")
 
+ def test_frame_quota_failure_allows_recorded_same_harness_pair_but_not_unknown_or_live_failure(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td);route,path,jobs,markers,rows=self.fixture(base,("codex","codex"))
+   root=base/".agent_reports";root.mkdir()
+   log=base/"quota.jsonl"
+   log.write_text(json.dumps({"type":"result","subtype":"error_during_execution","is_error":True,
+                             "errors":["429 usage limit reached"],"result":"weekly rate limit exceeded"})+"\n")
+   failed=(f"2026-09-12\tdone\t{base}\t{base}\tfailed-frame\tattempt_id=att-capacity,worker_type=frame,"
+      f"dispatch_depth=1,harness=claude,route_id={route['route_id']},route_hash={route['route_hash']},"
+      f"log_file={log},artifact_root={root},launch_outcome=reaped-before-publish")
+   lines=[failed,*rows]
+   D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,lines)
+   records=[json.loads(line) for p in (base/"degradations").glob("*.jsonl") for line in p.read_text().splitlines()]
+   self.assertTrue(any(r.get("reason")=="frame-single-available-harness" and r.get("prior_attempt_ids")==["att-capacity"] for r in records),records)
+   for replacement in (failed.replace("\tdone\t","\topen\t"),failed.replace("reaped-before-publish","unknown"),
+                       failed.replace("route_id=rt-frame-gate","route_id=rt-other"),
+                       failed+",failure_class=pass"):
+    with self.assertRaises(D.DispatchContractError):
+     D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,[replacement,*rows])
+   log.write_text(json.dumps({"type":"result","is_error":True,"subtype":"error","result":"generic runtime failure"})+"\n")
+   with self.assertRaises(D.DispatchContractError):
+    D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,lines)
+
 
 class DispatchContractTest(unittest.TestCase):
  def test_cancel_closes_witness_only_on_cancelled_receipt(self):

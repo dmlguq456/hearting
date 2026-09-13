@@ -6279,6 +6279,36 @@ def owner_frame_launch_gate(binding, action: str, agent_home: Path,
     completion_marker_gate(binding.route_file, entries[0]["id"], action, agent_home, jobs)
 
 
+def _frame_capacity_failures(route: dict, lines: list[str], harnesses: set[str]) -> dict[str, str]:
+    """Exact failed frame attempts can disprove admission-time availability.
+
+    Capacity estimates and a generic exit code are not that proof. Retain the
+    latest attempt per unavailable harness, its native quota result and cleanup.
+    """
+    from codex_dispatch_terminal import inspect_terminal_attempt
+    latest = {}
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        meta = parse_registry_metadata(fields[5])
+        if (meta.get("route_id") == route["route_id"] and meta.get("route_hash") == route["route_hash"]
+                and meta.get("worker_type") == "frame" and meta.get("dispatch_depth") == "1"
+                and meta.get("harness") in harnesses):
+            latest[meta["harness"]] = (fields, meta)
+    unavailable = {}
+    for harness, (fields, meta) in latest.items():
+        if fields[1] != "done" or terminal_conflict_pending(meta) or meta.get("failure_class") == "pass":
+            continue
+        if attempt_process_quiescence(meta, terminal_receipt=True).state != "quiescent":
+            continue
+        terminal = inspect_terminal_attempt(meta.get("log_file"), worktree=fields[3],
+            artifact_root_metadata=meta.get("artifact_root"))
+        if terminal.get("failure_class") == "capacity":
+            unavailable[harness] = meta["attempt_id"]
+    return unavailable
+
+
 def _frame_pair_attempt_gate(route: dict, node: dict, markers: dict,
                              jobs: Path, registry_lines: list[str] | None) -> None:
     """Compare the exact completed attempts, never a declared diversity label."""
@@ -6331,7 +6361,18 @@ def _frame_pair_attempt_gate(route: dict, node: dict, markers: dict,
     if not supported or not set(harnesses).issubset(supported):
         raise DispatchContractError("frame-harness-unsupported", str(harnesses))
     if len(supported) > 1 and len(set(harnesses)) != 2:
-        raise DispatchContractError("frame-cross-harness-required", str(harnesses))
+        missing = supported - set(harnesses)
+        unavailable = _frame_capacity_failures(route, lines, missing)
+        if set(unavailable) != missing:
+            raise DispatchContractError("frame-cross-harness-required", str(harnesses))
+        from dispatch_degradation import record_degradation
+        recorded = record_degradation(route_id=route["route_id"], route_hash=route["route_hash"],
+            route_node=node["id"], dispatch_depth=1, writer="dispatch_contract.py", jobs=jobs,
+            fallback_hop="same-harness-headless", execution_surface="registered-headless",
+            reason="frame-single-available-harness", prior_attempt_ids=list(unavailable.values()),
+            attempt_trace=attempts, harness=harnesses[0], detail=json.dumps(unavailable, sort_keys=True))
+        if not recorded:
+            raise DispatchContractError("frame-degradation-record-pending", "retry the same gate after restoring state storage")
 
 
 def completion_marker_gate(

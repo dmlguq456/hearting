@@ -2001,6 +2001,9 @@ def main(argv: list[str] | None = None) -> int:
         # only on the exception object and died here, leaving PRD 13.30.2's "no
         # silent path" with nothing typed anywhere in the cycle.
         extra = {}
+        if reason == "review-round-budget-exhausted":
+            capped = next((n for n in nodes if n["id"] == getattr(exc, "route_node", None)), {})
+            extra.update(DISPATCH_NODE.review_budget_recovery_fields(capped.get("kind")))
         if reason in {
             "launch-runtime-root-mismatch",
             "launch-compatibility-tuple-required",

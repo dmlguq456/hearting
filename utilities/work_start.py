@@ -373,6 +373,18 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         outcome = _outcome(jobs, aid)
         return {**result, "state": "completed" if outcome["classification"] == "success" else "needs-attention",
                 "result": outcome}
+    status, metadata = _rows(jobs).get(aid, (status, metadata))
+    if status == "done":
+        from dispatch_terminal_commit import inspect_owner_completion
+        outcome = _outcome(jobs, aid)
+        if outcome["classification"] == "success":
+            return {**result, "state": "completed", "result": outcome}
+        return {**result, "state": "needs-attention", "reason": "owner-settlement-pending",
+                "required_action": outcome["required_action"], "result": outcome,
+                "closure": inspect_owner_completion(jobs, status, metadata),
+                "observation": joined,
+                "next_step": "The owner has exited. Preserve its result and inspect the exact closure "
+                    "obligation; waiting for a model turn or starting a replacement cannot finish it."}
     if wait:
         return _wait_expired({**result, "observation": joined})
     directive, reason, _ = parent_next(metadata.get("parent_completion_delivery", ""), aid, agent_home=ROOT)

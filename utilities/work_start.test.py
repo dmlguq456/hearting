@@ -165,6 +165,36 @@ class WorkStartTest(unittest.TestCase):
                 self.assertIn(W.attempt_id(self.route,"frame"), command)
                 self.assertNotIn("retry", command)
 
+    def test_exited_owner_with_pending_closure_never_promises_running_or_a_new_turn(self):
+        import dispatch_terminal_commit as T
+        self.start(); self.ready = self.released = True; self.start()
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").replace(
+            "worker_type=owner", "workflow_completion=runtime-v1,failure_class=pass,worker_type=owner"))
+        self.ready = False
+        self.statuses[W.attempt_id(self.route,"owner")] = {"workflow_complete":False}
+        with mock.patch.object(T,"owner_workflow_gaps",return_value={}):
+            for wait in (False,True):
+                result=self.start(wait=wait)
+                self.assertEqual(result["state"],"needs-attention",result)
+                self.assertEqual(result["reason"],"owner-settlement-pending")
+                self.assertIn(" finish ",result["result"]["recovery_command"])
+                self.assertNotIn("parent_next",result)
+                self.assertEqual(len(self.calls),3)
+
+    def test_owner_exits_during_join_before_the_public_receipt(self):
+        self.start(); self.ready = self.released = True; self.start()
+        def close_during_join(**kwargs):
+            self.jobs.write_text(self.jobs.read_text().replace("\topen\t","\tdone\t"))
+            return {"state":"timeout","children":[]}
+        self.statuses[W.attempt_id(self.route,"owner")] = {"workflow_complete":False}
+        with mock.patch.object(W,"join_selected_attempts",side_effect=close_during_join):
+            result=self.start()
+            self.assertEqual(result["state"],"needs-attention",result)
+            self.assertNotIn("parent_next",result)
+            self.statuses[W.attempt_id(self.route,"owner")] = {}
+            self.assertEqual(self.start()["state"],"completed")
+        self.assertEqual(len(self.calls),3)
+
     def test_unknown_process_retains_runtime_wait_without_replacement(self):
         self.start()
         for _ in range(3):

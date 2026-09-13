@@ -273,13 +273,13 @@ def artifact_evidence(armed):
 # completion markers
 # --------------------------------------------------------------------------------
 
-def terminal_gate_state(route):
+def terminal_gate_state(route, jobs=None):
     """Report, per terminal node, whether its completion gate is actually proven.
 
     Delegates to the shared `capability-route.py` seam so `status`/`complete` here and
     `close`'s outcome sidecar always agree on gate truth from the same evidence.
     """
-    return route_module().terminal_gate_observation(route)
+    return route_module().terminal_gate_observation(route, jobs=jobs)
 
 
 # --------------------------------------------------------------------------------
@@ -1769,7 +1769,7 @@ def cmd_status(args):
     state = ledger.state()
     armed = read_armed(ledger)
     terminal_nodes = WS.route_terminal_nodes(route)
-    gates = terminal_gate_state(route)
+    gates = terminal_gate_state(route, getattr(args, "jobs", None))
     node_states = state["nodes"]
     failed = {node: row for node, row in node_states.items()
               if str(row.get("state", "")).startswith("FAILED")}
@@ -1832,7 +1832,7 @@ def cmd_complete(args):
         raise SupervisorError("route declares no terminal node")
     with ledger.lock():
         state = ledger.state()
-        gates = terminal_gate_state(route)
+        gates = terminal_gate_state(route, getattr(args, "jobs", None))
         unproven = {node: row for node, row in gates.items() if row.get("passed") is not True}
         unproven.update({node: {"passed": False, "reason": "missing-terminal-gate"}
                          for node in terminal_nodes if node not in gates})

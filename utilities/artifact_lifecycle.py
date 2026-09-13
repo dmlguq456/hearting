@@ -495,11 +495,13 @@ def _marker_digest(route_module: Any, route: Mapping[str, Any]) -> str:
     if not terminal:
         raise LifecycleError("completion-terminal-node-missing")
     rows = []
+    gates = route_module.terminal_gate_observation(route)
     for node_id in terminal:
-        path = route_module.completion_dir(route["route_id"]) / f"{node_id}.json"
-        if not path.is_file():
+        proof = gates.get(node_id, {})
+        digest = proof.get("marker_digest")
+        if not proof.get("passed") or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise LifecycleError("completion-terminal-marker-unverified", node_id)
-        rows.append({"node_id": node_id, "sha256": _sha256_path(path)})
+        rows.append({"node_id": node_id, "sha256": "sha256:" + digest})
     encoded = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 

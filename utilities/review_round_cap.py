@@ -11,6 +11,21 @@ dispatch_launch_tuple.py precedent -- one definition, no duplication)."""
 from __future__ import annotations
 
 
+def recovery_fields(node_kind):
+    """A budget ends automatic review, not ownership of the findings."""
+    if node_kind == "review-worker":
+        return {"required_action": "resolve-review-findings", "recovery_owner": "owner",
+                "recovery_surface": "capability-route complete",
+                "recovery_hint": "Read the blocking reviews and the corrected artifact. Record each finding's "
+                    "resolution in an evidence-bound .owner-closure.md and use the existing owner-closure "
+                    "completion path. This records owner judgment, not independent PASS. If findings remain "
+                    "unresolved, hand them to the parent with the existing artifacts; a fresh route is not required."}
+    return {"required_action": "report-unresolved-verification", "recovery_owner": "owner",
+            "recovery_surface": "capability-route continue",
+            "recovery_hint": "Preserve the completed stages and exact failing verification evidence. "
+                "Hand back the remaining verification for an explicit continuation; do not infer PASS from a corrected plan."}
+
+
 def max_review_rounds(effective_intensity):
     """Tier-derived max round count for a capped anchor.
 

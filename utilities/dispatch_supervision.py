@@ -223,8 +223,9 @@ def render_text(receipt: dict) -> str:
         command = (f"python3 {shlex.quote(str(utility))} finish --jobs {shlex.quote(receipt['job_registry'])} "
                    f"--attempt {shlex.quote(receipt['owner_attempt_id'])}")
         return ("The owner result remains PASS, but workflow/route/report closure is pending. "
-                "The completion controller retains the exact transaction and retries without a model turn. "
+                "The completion controller owns closure; this is not a running model. "
                 "Explain the outstanding closure to the user; this notice authorizes no new execution. "
+                "Use inspect instead of finish to read the exact gates, cleanup state and checkpoint. "
                 "Existing transaction recovery: " + command)
     utility = Path(__file__).resolve().with_name("dispatch-registry.py")
     operation = "resolve-terminal-conflict" if receipt["reason"] == "terminal-evidence-conflict" else "reconcile"

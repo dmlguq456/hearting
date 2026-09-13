@@ -342,7 +342,7 @@ class SD110LedgerIsolationTest(unittest.TestCase):
     observation surface, SD-109's "no ledger row for normal completion"
     text extends unchanged to SD-110's own "normal advance"."""
 
-    def test_row_composition_and_writer_allowlist_are_the_pre_sd110_frozen_sets(self):
+    def test_row_composition_and_writer_allowlist_name_actual_owners(self):
         import dispatch_degradation as DEG
 
         self.assertEqual(
@@ -352,6 +352,7 @@ class SD110LedgerIsolationTest(unittest.TestCase):
         self.assertEqual(
             DEG._WRITERS,
             {
+                "dispatch_contract.py",
                 "stage-dispatch-fallback.py",
                 "dispatch-batch.py",
                 "capability-route.py",

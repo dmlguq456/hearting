@@ -327,6 +327,7 @@ ROUND_CAPPED_NODE_IDS = frozenset({
 })
 
 max_review_rounds = REVIEW_ROUND_CAP.max_review_rounds
+review_budget_recovery_fields = REVIEW_ROUND_CAP.recovery_fields
 
 def round_protocol_block(round_no, worker_type, node_id, prior):
  """Render the assignment block that scopes a correction round."""
@@ -555,6 +556,8 @@ def main():
    print(f"effective_intensity={route['effective_intensity']}")
    print(f"round={round_no}")
    print(f"max_round={max_round}")
+   for key,value in review_budget_recovery_fields(node.get("kind")).items():
+    print(f"{key}={value}")
    print("child_spawned=0")
    raise SystemExit(65)
  prompt_text=a.prompt_text+round_protocol_block(round_no,worker_type,node["id"],prior_rounds)

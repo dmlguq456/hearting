@@ -203,6 +203,8 @@ class FallbackTest(unittest.TestCase):
    code,printed=self.run_review_inline(path)
   self.assertEqual(code,65,printed)
   self.assertIn("reason=review-round-budget-exhausted",printed)
+  self.assertIn("required_action=resolve-review-findings",printed)
+  self.assertIn(".owner-closure.md","\n".join(printed))
   self.assertIn(f"round={cap+1}",printed)
   self.assertIn(f"max_round={cap}",printed)
   self.assertIn("child_spawned=0",printed)

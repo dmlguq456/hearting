@@ -2668,12 +2668,16 @@ class QuickOwnerBindingIntegrationTest(ProducerTestBase):
 
 
 class TerminalTransactionIntegrationTest(ProducerTestBase):
-    def _prepare_fixture(self, harness="claude"):
+    def _prepare_fixture(self, harness="claude", capability="autopilot-code"):
         import dispatch_terminal_commit as terminal
         self.activate()
-        route=R.compile_route("autopilot-code","dev","standard",cwd=R.ROOT,artifact_root=self.root,
+        route=R.compile_route(capability,"update" if capability=="autopilot-spec" else "dev","standard",cwd=R.ROOT,artifact_root=self.root,
             predicates=[],transport="headless",tracking="tracked",tracked_gate_evidence=gate_evidence(),
             slug="terminal-transaction-fixture",dispatch_evidence={"tuples":[nested(harness,"codex")]})
+        if capability=="autopilot-spec":
+            route=R.compose_route(capability=capability,capability_mode="update",shape="staged",
+                graph="review,prd-transaction",slug="terminal-transaction-fixture",cwd=R.ROOT,
+                artifact_root=self.root,intensity="standard",dispatch_evidence={"tuples":[nested(harness,"codex")]})
         route_file=Path(L.admit_runtime_route(self.root,route).route_file)
         jobs=Path(self._tmp.name)/"jobs.log"; owner="att-transaction-owner"; child="att-transaction-report"
         owner_meta=dict(attempt_id=owner,worker_type="owner",dispatch_depth="1",registered_worker="1",
@@ -2683,10 +2687,11 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
             return f"2026-09-08T00:00:00Z\t{status}\t{R.ROOT}\t{R.ROOT}\t{slug}\t"+",".join(f"{k}={v}" for k,v in metadata.items())+"\n"
         jobs.write_text(row("open","owner",owner_meta))
         with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs)}):
-            result=P.begin(self.root,route_file=route_file,capability="autopilot-code",intensity="standard",
+            result=P.begin(self.root,route_file=route_file,capability=capability,intensity="standard",
                            jobs=jobs,owner_attempt_id=owner)
-            artifact=self.write_output(result,rel="plans/fixture/final_report.md",data=b"verified fixture report\n")
-            node=next(node for node in route["nodes"] if node.get("terminal"))
+            artifact=self.write_output(result,rel=("spec/_internal/reviews/verdict.md" if capability=="autopilot-spec"
+                else "plans/fixture/final_report.md"),data=b"verified fixture report\n")
+            node=next(node for node in route["nodes"] if (node["id"]=="review" if capability=="autopilot-spec" else node.get("terminal")))
             child_meta=dict(attempt_schema_version=2,attempt_id=child,parent_attempt_id=owner,
                 dispatch_depth=2,transport="headless",execution_surface="registered-headless",registered_worker="1",
                 fallback_hop="same-harness-headless",harness="codex",route_id=route["route_id"],
@@ -2696,6 +2701,57 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
             R.complete_node(route,node,node["id"],artifact,attempt_id=child,jobs=jobs)
             request=terminal.TerminalCommitRequest(route_file,owner,jobs,self.root)
             return route,route_file,jobs,owner,result,artifact,request
+
+    def test_spec_owner_settlement_uses_native_executor_evidence_for_all_harnesses(self):
+        import dispatch_terminal_commit as terminal
+        from dispatch_completion_join import exact_attempt_row, join_selected_attempts
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                fixture=TerminalTransactionIntegrationTest(); fixture.setUp()
+                try:
+                    route,path,jobs,owner,cycle,review,request=fixture._prepare_fixture(harness,"autopilot-spec")
+                    report=fixture.write_output(cycle,rel="spec/_internal/owner-report.md",data=b"verified transaction report\n")
+                    text=f"artifact: {report}\nverdict: PASS\nblocker: none"
+                    native={
+                        "codex":[{"type":"item.completed","item":{"type":"agent_message","text":text}},
+                                 {"type":"turn.completed"}],
+                        "claude":[{"type":"result","subtype":"success","is_error":False,"result":text}],
+                        "opencode":[{"type":"text","sessionID":"ses_test","part":{"type":"text","text":text}},
+                                    {"type":"step_finish","sessionID":"ses_test","part":{"type":"step-finish","reason":"stop"}}],
+                    }[harness]
+                    log=jobs.parent/"owner.jsonl"; log.write_text("\n".join(json.dumps(r) for r in native)+"\n")
+                    jobs.write_text(jobs.read_text().replace("worker_type=owner",f"attempt_schema_version=2,worker_type=owner,log_file={log},workflow_completion=runtime-v1"))
+                    self.assertIsNone(terminal.owner_workflow_continuation(jobs,owner,path))
+                    old=review.read_bytes(); review.unlink()
+                    self.assertIn("review",terminal.owner_workflow_continuation(jobs,owner,path))
+                    review.write_bytes(old)
+                    fixture._closed_owner(jobs,owner); meta=exact_attempt_row(jobs,owner).metadata
+                    before=jobs.read_bytes()
+                    with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_ARTIFACT_ROOT":str(fixture.root)}):
+                        gates=R.terminal_gate_observation(route,jobs=jobs,exact_terminal=True)
+                        self.assertTrue(gates["prd-transaction"]["passed"],gates)
+                        snapshot={str(p):p.read_bytes() for p in fixture.root.rglob("*") if p.is_file()}
+                        diagnosis=terminal.inspect_owner_completion(jobs,"done",meta)
+                        self.assertEqual((diagnosis["state"],diagnosis["checkpoint"]),("closure-pending","not-claimed"))
+                        self.assertEqual(snapshot,{str(p):p.read_bytes() for p in fixture.root.rglob("*") if p.is_file()})
+                        marker=R.completion_dir(route["route_id"],jobs=jobs)/"prd-transaction.json"
+                        marker.write_text("{}")
+                        self.assertFalse(R.terminal_gate_observation(route,jobs=jobs)["prd-transaction"]["passed"])
+                        marker.unlink()
+                        # An unavailable native result remains an owned obligation.
+                        saved=log.read_bytes(); log.write_text("")
+                        self.assertFalse(R.terminal_gate_observation(route,jobs=jobs)["prd-transaction"]["passed"])
+                        log.write_bytes(saved)
+                        receipt=join_selected_attempts(jobs=jobs,expected_attempts={owner},timeout=0,recover=True)
+                        self.assertEqual(receipt["state"],"ready",receipt)
+                        self.assertFalse(terminal.owner_completion_pending(jobs,"done",meta))
+                        self.assertEqual(terminal.settle_owner_completion(jobs,"done",meta).result,"completed")
+                        self.assertEqual(jobs.read_bytes(),before)
+                        self.assertFalse((R.completion_dir(route["route_id"],jobs=jobs)/"prd-transaction.json").exists())
+                        self.assertEqual(P.read_cycle_record(fixture.root,cycle["cycle_id"])["state"],"sealed")
+                        report.write_text("changed after settlement")
+                        self.assertTrue(terminal.owner_completion_pending(jobs,"done",meta))
+                finally: fixture.doCleanups()
 
     def _closed_owner(self, jobs, owner):
         lines=jobs.read_text().splitlines()
