@@ -3701,10 +3701,13 @@ def owner_terminal_prerequisites(route,node,jobs):
         if node_id in seen: continue
         seen.add(node_id)
         predecessor=nodes[node_id]
-        proof=_marker_identity_row(route,predecessor,node_id,predecessor.get("completion_gate"),
-                                   jobs=jobs,exact_terminal=True)
-        if not proof.get("passed"): missing[node_id]=proof["reason"]
         pending.extend(predecessor.get("depends_on",[]))
+        if (predecessor.get("kind")=="capability-owner" and predecessor.get("unit")=="_kernel/owner"
+                and predecessor.get("dispatch_depth")==1):
+            continue  # This executor's final handoff includes its own preceding operations.
+        proof=_marker_identity_row(route,predecessor,node_id,predecessor.get("completion_gate"),
+                                   jobs=jobs,exact_terminal=predecessor.get("dispatch_depth") in (1,2))
+        if not proof.get("passed"): missing[node_id]=proof["reason"]
     return missing
 
 def terminal_gate_proven(gates):

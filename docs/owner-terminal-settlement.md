@@ -12,7 +12,9 @@ proof succeeded.
 - `capability-route.terminal_gate_observation` now resolves the actual executor.
   Existing markers retain their validation. A terminal `capability-owner`
   operation without a marker consumes its bound owner's exact native PASS,
-  readable artifact, complete prerequisite proofs and quiescence. No synthetic
+  readable artifact, complete external prerequisite proofs and quiescence. Its
+  earlier owner operations share this executor; resource predecessors retain
+  their resource marker contract without an invented agent attempt. No synthetic
   worker row or marker is written. The terminal claim binds this proof's digest.
 - `artifact_lifecycle` consumes the common evidence digest instead of independently
   requiring a marker file. Existing marker-backed manifest digests remain stable.
@@ -61,13 +63,16 @@ markers, read-only inspection and post-settlement artifact drift. Frame tests
 cover native quota evidence, recorded fallback, live/unknown processes, foreign
 routes, success rows and generic errors. Public-start tests cover delayed closure
 and exit during the join, with no duplicate launch or false wait directive.
+An additional resource→owner publish→owner sync case checks resource evidence
+drift and the absence of any synthetic worker/owner row.
 
 The original incident was inspected read-only: the owner and its review were
 settled, the new terminal proof passed, and the slot still contained only its
 producer binding. Operational finish, another model canary and product feature
 completion are not claimed. Private logs and their paths are retained locally,
-not attached to this repository. The original peer target was unavailable by
-both alias and exact thread ID when delivery was attempted.
+not attached to this repository. Direct peer alias/ID lookup failed, but the
+agent list resolved the exact thread to its pane; findings and recovery commands
+were delivered with a verified state transition.
 
 Local verification records: `/tmp/owner-terminal-settlement.tsv`,
 `/tmp/owner-terminal-settlement-final.tsv`, `/tmp/owner-terminal-start-race.tsv`,

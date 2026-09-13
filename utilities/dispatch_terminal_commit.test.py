@@ -66,6 +66,24 @@ class ProducerBindingTests(unittest.TestCase):
         with self.assertRaises(T.TerminalCommitError):
             T.producer_binding_path(self.root, "../route", "att-owner")
 
+    def test_owner_prerequisites_keep_resource_evidence_and_do_not_invent_a_second_owner(self):
+        evidence=self.root/"resource.json"; evidence.write_text('{"exit_code":0}')
+        resource={"id":"run","kind":"resource-runner","completion_gate":"lab-run"}
+        publish={"id":"publish","kind":"capability-owner","unit":"_kernel/owner",
+                 "dispatch_depth":1,"depends_on":["run"]}
+        terminal={**publish,"id":"sync","terminal":True,"depends_on":["publish"]}
+        route={"route_id":"rt-resource-owner","route_hash":"sha256:fixture","nodes":[resource,publish,terminal]}
+        directory=ROUTE.completion_dir(route["route_id"],jobs=self.jobs); directory.mkdir(parents=True)
+        marker={"route_id":route["route_id"],"route_hash":route["route_hash"],"node_id":"run",
+                "completion_gate":"lab-run","registered_worker":False,
+                "evidence":{"path":str(evidence),"sha256":ROUTE.evidence_digest(evidence)}}
+        (directory/"run.json").write_text(json.dumps(marker))
+        self.assertEqual(ROUTE.owner_terminal_prerequisites(route,terminal,self.jobs),{})
+        self.assertEqual(self.jobs.read_text(),"")
+        evidence.write_text('{"exit_code":1}')
+        self.assertEqual(ROUTE.owner_terminal_prerequisites(route,terminal,self.jobs),
+                         {"run":"completion-evidence-hash-mismatch"})
+
     def test_terminal_reasons_are_the_prd_closed_set(self):
         self.assertEqual(T.TERMINAL_REASONS, {
             "route-identity-unverified", "terminal-marker-not-current", "child-not-quiescent",
