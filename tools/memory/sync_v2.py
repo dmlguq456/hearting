@@ -3961,6 +3961,7 @@ def remote_policy(
         and semantic_state_covered
         and not error
         and not bootstrap_error
+        and bool(state.get("allowed"))
     )
     if error:
         reason = error
@@ -3974,6 +3975,8 @@ def remote_policy(
         reason = "migration-epoch-not-active"
     elif not semantic_state_covered:
         reason = "semantic-state-without-v2-objects"
+    elif not state.get("allowed"):
+        reason = state.get("reason") or "remote-readiness-required"
     else:
         reason = None
     return {

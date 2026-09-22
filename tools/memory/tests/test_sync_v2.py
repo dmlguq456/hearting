@@ -506,6 +506,52 @@ class RemotePolicyTest(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_policy_refuses_what_the_checked_readiness_gate_refused(self):
+        # `remote_policy` recomputes seed/fence/epoch/semantic coverage, but the
+        # checked gate also refuses on operational cutover state. Without
+        # honoring the gate's own verdict the policy admitted a store whose
+        # cutover had not reached v2-only.
+        connection = sqlite3.connect(":memory:")
+        try:
+            ensure_sync_schema(connection)
+            connection.commit()
+            connection.execute("BEGIN IMMEDIATE")
+            sync_v2.initialize_fresh_v2_epoch(
+                connection, "cutover-test", proof="empty-store-proof"
+            )
+            sync_v2.activate_v2_only_fence(
+                connection,
+                "cutover-test",
+                fence_proof="v2-only-writer-proof",
+                operator_authorized=True,
+            )
+            connection.execute(
+                "INSERT INTO sync_migration_state("
+                "epoch_id,phase,phase_seq,current,writer_mode,state_digest) "
+                "VALUES (?,?,?,?,?,?)",
+                ("cutover-test", "capture-enabled", 1, 1, "legacy-capture", "d" * 64),
+            )
+            connection.commit()
+
+            readiness = sync_v2.remote_readiness(connection)
+            self.assertFalse(readiness["allowed"])
+            self.assertEqual(readiness["reason"], "operational-cutover-not-v2-only")
+
+            policy = sync_v2.remote_policy(
+                {"MEM_SYNC_REMOTE": "1"},
+                bootstrap=sync_v2.trusted_bootstrap_evidence(connection),
+            )
+            self.assertFalse(policy["allowed"])
+            self.assertEqual(policy["exit_code"], 2)
+            self.assertEqual(policy["reason"], "operational-cutover-not-v2-only")
+
+            connected = sync_v2.remote_policy(
+                {"MEM_SYNC_REMOTE": "1"}, connection
+            )
+            self.assertFalse(connected["allowed"])
+        finally:
+            connection.close()
+
 
 class MigrationStorageTest(unittest.TestCase):
 
