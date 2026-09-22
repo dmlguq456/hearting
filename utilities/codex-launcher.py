@@ -427,7 +427,11 @@ def apply_interactive_permission_mode(args: list[str]) -> list[str]:
     """Prepend the bypass flag to a managed interactive invocation that wants the default.
 
     The flag goes in front so it stays a root-level option even when the invocation is
-    `resume`/`fork`; `codex-managed-entry.py` forwards these verbatim to the TUI client.
+    `resume`/`fork`. `codex-managed-entry.py` forwards it verbatim to the remote TUI for
+    a new session; for `resume`/`fork` it relocates this exact flag onto the App Server
+    as `approval_policy`/`sandbox_mode` config, because Codex >= 0.154 refuses permission
+    overrides on a remote resume ("Permission overrides are not supported when resuming
+    a remote task").
     Only this managed interactive path is affected — `codex exec` and every other
     passthrough subcommand never reach here, so the registered dispatch wrapper's
     `approval_policy=never` plus a real sandbox (stage-dispatch SD-125 (5)) is unchanged.

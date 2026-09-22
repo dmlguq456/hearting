@@ -120,6 +120,16 @@ that already states a posture of its own (`-s/--sandbox`, `-a/--ask-for-approval
 `-c approval_policy=…`/`sandbox_mode=…`/`sandbox_permissions=…` override), which
 is passed through untouched.
 
+One placement rule sits inside the managed path: Codex 0.154+ refuses permission
+overrides on a `--remote` TUI that resumes or forks an existing thread
+("Permission overrides are not supported when resuming a remote task"). For
+`codex resume` and `codex fork` the entry (`utilities/codex-managed-entry.py`)
+therefore takes the launcher's exact default flag off the remote client argv and
+starts the App Server — where the thread executes — with the equivalent
+`-c approval_policy=never -c sandbox_mode=danger-full-access`; the client inherits
+that posture. A new session keeps the flag on the client, and any posture the
+caller spelled out is forwarded verbatim in both cases.
+
 The boundary this does **not** cross is registered dispatch. `codex exec` is a
 passthrough surface that never reaches the managed path, so a registered worker
 keeps `approval_policy=never` with a real sandbox as its security boundary

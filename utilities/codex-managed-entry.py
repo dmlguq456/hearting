@@ -21,6 +21,28 @@ ROOT = Path(__file__).resolve().parents[1]
 GATEWAY = ROOT / "utilities" / "codex-managed-gateway.py"
 FEATURE = "default_mode_request_user_input"
 
+# Codex >= 0.154 refuses approval/sandbox overrides on a `--remote` TUI that
+# resumes or forks an existing thread ("Permission overrides are not supported
+# when resuming a remote task"). The launcher's default posture flag
+# (codex-launcher.py `apply_interactive_permission_mode`) still has to reach the
+# session, so for those two commands it moves onto the App Server as config --
+# the process where the thread actually executes -- and the remote client
+# inherits that posture instead of overriding it. New sessions keep the flag on
+# the client, where Codex accepts it.
+BYPASS_FLAG = "--dangerously-bypass-approvals-and-sandbox"
+REMOTE_RESUME_COMMANDS = ("resume", "fork")
+BYPASS_APP_SERVER_CONFIG = (
+    "-c", "approval_policy=never",
+    "-c", "sandbox_mode=danger-full-access",
+)
+# Mirror of codex-launcher.py VALUE_OPTIONS: root options that consume a value,
+# so the first positional (the subcommand) can be found without a CLI parser.
+_VALUE_OPTIONS = {
+    "-a", "--add-dir", "--ask-for-approval", "-c", "--cd", "--config", "-C",
+    "--disable", "--enable", "-i", "--image", "--local-provider", "-m", "--model",
+    "-p", "--profile", "--remote", "--remote-auth-token-env", "-s", "--sandbox",
+}
+
 sys.path.insert(0, str(ROOT))
 from tools.fleet import session_registry  # noqa: E402
 
@@ -144,6 +166,42 @@ def feature_capability(
 def _config_disables_feature(value: str) -> bool:
     compact = "".join(value.split()).lower()
     return compact == f"features.{FEATURE}=false"
+
+
+def _first_positional(args: list[str]) -> str | None:
+    index = 0
+    while index < len(args):
+        value = args[index]
+        if value == "--":
+            return args[index + 1] if index + 1 < len(args) else None
+        if value in _VALUE_OPTIONS:
+            index += 2
+            continue
+        if any(value.startswith(option + "=") for option in _VALUE_OPTIONS if option.startswith("--")):
+            index += 1
+            continue
+        if value.startswith("-"):
+            index += 1
+            continue
+        return value
+    return None
+
+
+def split_remote_resume_posture(client_args: list[str]) -> tuple[list[str], list[str]]:
+    """Return (remote TUI argv, extra App Server argv).
+
+    Only the exact launcher default flag on `resume`/`fork` is relocated. Any
+    other posture the caller spelled out is theirs and is forwarded verbatim.
+    """
+    trailing = list(client_args)
+    if trailing[:1] == ["--"]:
+        trailing = trailing[1:]
+    if BYPASS_FLAG not in trailing:
+        return trailing, []
+    if _first_positional(trailing) not in REMOTE_RESUME_COMMANDS:
+        return trailing, []
+    client = [value for value in trailing if value != BYPASS_FLAG]
+    return client, list(BYPASS_APP_SERVER_CONFIG)
 
 
 def explicit_feature_disable(args: list[str]) -> bool:
@@ -345,6 +403,7 @@ def execute(args: argparse.Namespace) -> int:
     capability = check_runtime(args.codex, workspace, environment)
     user_disabled = explicit_feature_disable(list(args.client_args))
     feature_status = "user-disabled" if user_disabled else capability
+    trailing, app_server_posture = split_remote_resume_posture(list(args.client_args))
     if args.check:
         print(
             canonical(
@@ -371,6 +430,7 @@ def execute(args: argparse.Namespace) -> int:
                 "--listen",
                 f"unix://{upstream}",
                 *app_server_feature_args(feature_status),
+                *app_server_posture,
             ],
             cwd=workspace,
             env=environment,
@@ -432,9 +492,6 @@ def execute(args: argparse.Namespace) -> int:
                 for token in shlex.split(args.client_command)
             ]
         else:
-            trailing = list(args.client_args)
-            if trailing[:1] == ["--"]:
-                trailing = trailing[1:]
             client = [
                 args.codex,
                 "--remote",

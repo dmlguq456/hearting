@@ -270,6 +270,75 @@ class ManagedEntryTest(unittest.TestCase):
                 "default_mode_request_user_input",
             )
 
+    def test_remote_resume_moves_bypass_flag_to_app_server_config(self) -> None:
+        # Codex >= 0.154: "Permission overrides are not supported when resuming a
+        # remote task". The launcher's default flag must reach the App Server as
+        # config and leave the remote client argv, for both resume and fork.
+        bypass = "--dangerously-bypass-approvals-and-sandbox"
+        for command in ("resume", "fork"):
+            with self.subTest(command=command):
+                self.argv_log.write_text("", encoding="utf-8")
+                result = subprocess.run(
+                    self.tui_command([bypass, "-C", str(self.workspace), command, "--last"]),
+                    text=True,
+                    capture_output=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                commands = self.logged_commands()
+                app_server = next(
+                    value
+                    for value in commands
+                    if value[:1] == ["app-server"] and "--help" not in value
+                )
+                remote = next(value for value in commands if "--remote" in value)
+                self.assertNotIn(bypass, remote)
+                self.assertEqual(remote[-4:], ["-C", str(self.workspace), command, "--last"])
+                for key in ("approval_policy=never", "sandbox_mode=danger-full-access"):
+                    self.assertIn(key, app_server)
+                    self.assertEqual(app_server[app_server.index(key) - 1], "-c")
+                self.assertNotIn("approval_policy=never", remote)
+
+    def test_new_session_keeps_bypass_flag_on_remote_client(self) -> None:
+        bypass = "--dangerously-bypass-approvals-and-sandbox"
+        result = subprocess.run(
+            self.tui_command([bypass, "-C", str(self.workspace)]),
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = self.logged_commands()
+        app_server = next(
+            value
+            for value in commands
+            if value[:1] == ["app-server"] and "--help" not in value
+        )
+        remote = next(value for value in commands if "--remote" in value)
+        self.assertIn(bypass, remote)
+        self.assertNotIn("approval_policy=never", app_server)
+        self.assertNotIn("sandbox_mode=danger-full-access", app_server)
+
+    def test_explicit_posture_on_resume_is_forwarded_verbatim(self) -> None:
+        # Only the launcher's exact default flag is relocated; a caller-chosen
+        # stance stays where the caller put it.
+        result = subprocess.run(
+            self.tui_command(["--sandbox", "read-only", "resume", "--last"]),
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = self.logged_commands()
+        app_server = next(
+            value
+            for value in commands
+            if value[:1] == ["app-server"] and "--help" not in value
+        )
+        remote = next(value for value in commands if "--remote" in value)
+        self.assertEqual(remote[-4:], ["--sandbox", "read-only", "resume", "--last"])
+        self.assertNotIn("approval_policy=never", app_server)
+
     def test_explicit_disable_forms_win_for_both_processes(self) -> None:
         forms = (
             ["--disable", "default_mode_request_user_input"],
