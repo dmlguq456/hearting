@@ -9,6 +9,9 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MEM="$ROOT/tools/memory/mem.py"
+# The new hook and memory CLI must come from the same source revision.
+export MEM_PY="$MEM"
+export AGENT_MODEL_GOVERNOR_ROOT="$HEARTING_TEST_ROOT/governor"
 [ -f "$MEM" ] || { echo "FAIL: mem.py not found at $MEM"; exit 1; }
 
 PASS=0; FAIL=0

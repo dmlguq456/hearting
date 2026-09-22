@@ -3,6 +3,13 @@
 # Fully isolated via MEM_STORE temp dir + MEM_NUDGE_INTERVAL — never touches real ~/.claude state.
 # Added 2026-06-16 (Cluster B doc-sync cycle) — commit 5a9ea18 claimed standalone-verified but committed no test.
 set -u
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$ROOT/tools/memory/test-isolation.sh"
+hearting_test_isolate
+NUDGE_ISOLATION_ROOT="$HEARTING_TEST_ROOT"
+# A worktree hook must not execute an older installed memory CLI.
+export MEM_PY="$ROOT/tools/memory/mem.py"
+export AGENT_MODEL_GOVERNOR_ROOT="$HEARTING_TEST_ROOT/governor"
 
 HOOK="$(cd "$(dirname "$0")" && pwd)/mem-turn-nudge.sh"
 [ -f "$HOOK" ] || { echo "FAIL: hook not found at $HOOK"; exit 1; }
@@ -26,7 +33,7 @@ run() {  # $1=event $2=prompt ; uses $TMP/$N/$SID env ; echoes hook stdout
     | MEM_STORE="$TMP" MEM_NUDGE_INTERVAL="$N" bash "$HOOK"
 }
 
-TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP" "$NUDGE_ISOLATION_ROOT"' EXIT
 N=3; SID="testsid"
 
 # seed a memory.db with a stable mtime (simulates an already-populated store)
