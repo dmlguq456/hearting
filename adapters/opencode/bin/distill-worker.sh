@@ -37,13 +37,12 @@ Modes:
                         model knob (OPENCODE_DISTILL_MODEL) in this tranche,
                         unlike Codex's split per-tier models.
 
-No-tools contract (verified): the worker runs `opencode run --pure --agent
-<distiller>` where the distiller agent disables every built-in tool. With zero
-tools the model cannot execute or retry a tool, so an adversarial "run this
-shell command" prompt produces no execution and no hang (acceptance: a
-`date >> file` probe never wrote, run exited 0). `--pure` also disables external
-plugins so the worker's own session never re-triggers the guard plugin, and
-MEM_DISTILL=1 guards every lifecycle re-entry.
+No-tools contract: the generated distiller agent sets the legacy `tools` wildcard
+to false and the current `permission` wildcard to deny. OpenCode applies that
+permission wildcard to built-in, custom, and MCP tools, so a tool absent from any
+finite list is closed too. `--pure` also disables external plugins so the worker's
+own session never re-triggers the guard plugin, and MEM_DISTILL=1 guards every
+lifecycle re-entry.
 
 Gates:
 - MEM_DISTILL=1            -> no-op (recursion guard)
@@ -143,7 +142,10 @@ trap 'rmdir "$lock" 2>/dev/null || true; rm -f "$prompt_file" "$out_file" "$snap
 # Ephemeral no-tools worker agent. Materialized once in a throwaway git repo so
 # `opencode run --dir` discovers it; the worker needs no project files (it has no
 # tools), only the transcript delta passed on stdin.
-workdir="$store/.opencode-distill-workdir"
+# Version the derived agent identity whenever its closed tool contract changes.
+# Existing workdirs may hold the former finite deny list and are left intact;
+# selecting v2 guarantees this run discovers the wildcard-closed agent.
+workdir="$store/.opencode-distill-workdir-v2"
 agent_file="$workdir/.opencode/agent/distiller.md"
 if [ ! -f "$agent_file" ]; then
   mkdir -p "$workdir/.opencode/agent"
@@ -152,22 +154,9 @@ if [ ! -f "$agent_file" ]; then
 description: "No-tools memory distillation worker. Emits JSON-Lines actions only."
 mode: primary
 tools:
-  bash: false
-  edit: false
-  write: false
-  read: false
-  grep: false
-  glob: false
-  list: false
-  patch: false
-  webfetch: false
-  todowrite: false
-  todoread: false
-  task: false
+  "*": false
 permission:
-  bash: deny
-  edit: deny
-  webfetch: deny
+  "*": deny
 ---
 You are a no-tools memory distillation worker. Output JSON Lines only.
 AGENT
@@ -208,13 +197,20 @@ $snapshot
 $artifacts
 === END ARTIFACTS ===
 
-Decide contextually whether any memory action is useful. Storing, reinforcing,
-merging, pruning, graduating, and reattributing are semantic judgments for you,
-not decisions made by fixed categories, keywords, scores, or thresholds.
+Decide contextually whether any memory action is useful. The storage purpose is
+limited to canonical decisions, user corrections, unresolved obligations, and
+artifact pointers. Never copy content already preserved in an artifact.
 Snapshot signals and artifact state are evidence, not automatic commands.
 
+Capsule fields are the retrieval index; an empty array makes the record unfindable.
+- aliases: 2-4 synonyms, including the other language when the body is bilingual.
+- entities: file paths, commit hashes, module names, and IDs that appear in the body.
+- topics: 1-3 broad subject tags.
+Copy the shapes below, not the literal example values; emit [] only when the field
+genuinely has no member.
+
 Output contract: stdout contains JSON objects only, one per line. Allowed shapes:
-  {"action":"add","tier":"working|durable","type":"<descriptive type>","body":"<summary>"}
+  {"action":"add","tier":"working|durable","type":"decision|user-correction|unresolved-obligation|artifact-pointer","body":"<minimal canonical content>","headline":"<retrieval headline>","aliases":["bounded retry","바운디드 재시도"],"entities":["hooks/mem-distill-dispatch.sh","D-41","a7c01b7d"],"topics":["memory-pipeline","dispatch"],"artifact_refs":[]}
   {"action":"reinforce","id":"<snapshot id>"}
   {"action":"merge","ids":["<id>","<id>"],"canonical":"<id>"}
   {"action":"prune","id":"<snapshot id>"}
@@ -223,7 +219,8 @@ Output contract: stdout contains JSON objects only, one per line. Allowed shapes
 
 Mechanical boundaries:
 - Choose the tier from its lifecycle: working is finite-lived; durable persists.
-  Type is a descriptive label, not a semantic gate.
+- artifact-pointer requires artifact_refs and its body records only why/when to
+  retrieve the artifact, never a duplicate summary.
 - Do not add an existing snapshot record again.
 - PROTECTED PENDING records are excluded from destructive IDS and remain
   untouched until explicit consumption.
