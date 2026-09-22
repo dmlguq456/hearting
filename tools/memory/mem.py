@@ -13,7 +13,7 @@ Design boundary:
     storage, retrieval, scope, lifecycle, telemetry, and recovery contracts.
   - No external Python dependencies; rg accelerates session retrieval when present.
 """
-import argparse, contextlib, datetime, fcntl, hashlib, io, json, os, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time
+import argparse, base64, contextlib, datetime, fcntl, hashlib, io, json, os, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time
 from collections import namedtuple
 from pathlib import Path
 
@@ -616,6 +616,9 @@ def norm_body(body):
 
 
 def _distill_state_path(sid):
+    if not isinstance(sid, str) or not sid or len(sid.encode("utf-8")) > 200 \
+            or "/" in sid or "\x00" in sid:
+        raise ValueError("invalid distillation session identity")
     return STORE / f".distill-state-{sid}"
 
 
@@ -627,10 +630,50 @@ def read_marker(sid):
     return p.read_text(encoding="utf-8").strip()
 
 
-def advance_marker(sid, last_uuid):
-    """Advance the marker to ``last_uuid``."""
+def advance_marker(sid, last_uuid, expected=None):
+    """Atomically update a marker; captured windows compare the starting UUID.
+
+    ``expected=None`` preserves the explicit recovery API. Automatic distillers
+    always supply the marker they observed before reading their delta.
+    """
+    path = _distill_state_path(sid)
+    if not isinstance(last_uuid, str) or not last_uuid or len(last_uuid) > 1024 \
+            or any(c in last_uuid for c in "\r\n\x00"):
+        raise ValueError("invalid distillation frontier UUID")
     STORE.mkdir(parents=True, exist_ok=True)
-    _distill_state_path(sid).write_text(last_uuid + "\n", encoding="utf-8")
+    lock = STORE / (".distill-marker-lock-" + hashlib.sha256(sid.encode()).hexdigest())
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    tmp = None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise ValueError("invalid distillation marker lock")
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError("distillation marker lock busy")
+                time.sleep(0.05)
+        current = read_marker(sid)
+        if current == last_uuid:
+            return True
+        if expected is not None and current != expected:
+            return False
+        out_fd, tmp = tempfile.mkstemp(prefix=".distill-marker-tmp-", dir=STORE)
+        with os.fdopen(out_fd, "w", encoding="utf-8") as output:
+            output.write(last_uuid + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(tmp, path)
+        tmp = None
+        return True
+    finally:
+        if tmp is not None:
+            os.unlink(tmp)
+        os.close(fd)
 
 
 # ---------- frontmatter for migration input and projection output ----------
@@ -2928,13 +2971,14 @@ class OpenCodeExportSource:
 # Other runtime adapters need only implement the same ``messages()`` interface.
 
 
-def ingest_session(source):
+def ingest_session(source, after=None):
     """Yield normalized messages strictly after the shared marker.
 
     Yield all messages when no marker exists, and none when a recorded marker is
     absent from the source to avoid conservative re-duplication.
     """
-    after = read_marker(source.sid)
+    if after is None:
+        after = read_marker(source.sid)
     started = not after
     for msg in source.messages():
         if not started:
@@ -2944,29 +2988,80 @@ def ingest_session(source):
         yield msg
 
 
-def distill(sid, advance=False, source_name="claude"):
-    """Print normalized messages after the marker and optionally advance it."""
-    if source_name == "codex":
-        source = CodexJsonlSource(sid)
-    elif source_name == "opencode":
-        source = OpenCodeExportSource(sid)
-    else:
-        source = ClaudeCodeJsonlSource(sid)
-    last_uuid = None
-    out = []
-    for msg in ingest_session(source):
-        # Track the last valid UUID across all records, including sidechains, so
-        # a trailing record without UUID cannot cause repeated distillation.
-        if msg.uuid is not None:
-            last_uuid = msg.uuid
-        if msg.is_sidechain or not (msg.text or "").strip():
+def _distill_frontier(sid, source_name, after, last_uuid):
+    payload = {
+        "v": 1, "sid": sid, "source": source_name,
+        "store": hashlib.sha256(os.fsencode(STORE.resolve())).hexdigest(),
+        "after": after, "last": last_uuid,
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    token = base64.urlsafe_b64encode(raw).decode("ascii")
+    if len(token) > 8192:
+        raise ValueError("distillation frontier exceeds bound")
+    return token
+
+
+def _advance_distill_frontier(sid, source_name, token):
+    _distill_state_path(sid)  # Reject path-shaped identities before any I/O.
+    if not isinstance(token, str) or not 1 <= len(token) <= 8192:
+        raise ValueError("invalid distillation frontier token")
+    try:
+        payload = json.loads(base64.b64decode(token, altchars=b"-_", validate=True))
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ValueError("invalid distillation frontier token") from exc
+    expected_keys = {"v", "sid", "source", "store", "after", "last"}
+    if not isinstance(payload, dict) or set(payload) != expected_keys \
+            or type(payload["v"]) is not int or payload["v"] != 1 \
+            or payload["sid"] != sid or payload["source"] != source_name \
+            or payload["store"] != hashlib.sha256(os.fsencode(STORE.resolve())).hexdigest():
+        raise ValueError("distillation frontier identity mismatch")
+    for name in ("after", "last"):
+        value = payload[name]
+        if name == "last" and value is None:
             continue
-        out.append(f"[{msg.role}] {msg.text}")
-    sys.stdout.write("\n\n".join(out))
-    if out:
-        sys.stdout.write("\n")
-    if advance and last_uuid:
-        advance_marker(sid, last_uuid)
+        if not isinstance(value, str) or len(value) > 1024 \
+                or any(c in value for c in "\r\n\x00"):
+            raise ValueError("invalid distillation frontier UUID")
+    if payload["last"] is None:
+        return True
+    return advance_marker(sid, payload["last"], expected=payload["after"])
+
+
+def distill(sid, advance=False, source_name="claude", capture=False, advance_capture=None):
+    """Read one delta; automatic workers later close only its captured window."""
+    try:
+        if advance_capture is not None:
+            if not _advance_distill_frontier(sid, source_name, advance_capture):
+                raise ValueError("distillation frontier changed; capture remains unapplied")
+            return 0
+        if source_name == "codex":
+            source = CodexJsonlSource(sid)
+        elif source_name == "opencode":
+            source = OpenCodeExportSource(sid)
+        else:
+            source = ClaudeCodeJsonlSource(sid)
+        after = read_marker(sid)
+        last_uuid = None
+        out = []
+        for msg in ingest_session(source, after=after):
+            # Retain the existing sidechain/blank-message boundary semantics.
+            if msg.uuid is not None:
+                last_uuid = msg.uuid
+            if msg.is_sidechain or not (msg.text or "").strip():
+                continue
+            out.append(f"[{msg.role}] {msg.text}")
+        delta = "\n\n".join(out) + ("\n" if out else "")
+        if capture:
+            print(json.dumps({"delta": delta, "frontier": _distill_frontier(
+                sid, source_name, after, last_uuid)}, ensure_ascii=False))
+        else:
+            sys.stdout.write(delta)
+        if advance and last_uuid and not advance_marker(sid, last_uuid, expected=after):
+            raise ValueError("distillation frontier changed; capture remains unapplied")
+        return 0
+    except (ValueError, OSError) as exc:
+        sys.stderr.write(f"[distill] {exc}\n")
+        return 2
 
 
 # ---------- export / import ----------
@@ -8894,7 +8989,10 @@ def main():
     ds.add_argument("sid")
     ds.add_argument("--source", choices=["claude", "codex", "opencode"], default=os.environ.get("MEM_SESSION_SOURCE", "claude"),
                     help="session transcript adapter source")
-    ds.add_argument("--advance", action="store_true", help="Advance the marker to the last message UUID")
+    ds_mode = ds.add_mutually_exclusive_group()
+    ds_mode.add_argument("--advance", action="store_true", help="Advance the marker to the last message UUID")
+    ds_mode.add_argument("--capture", action="store_true", help="Print JSON delta and a bounded frontier token from one read")
+    ds_mode.add_argument("--advance-capture", metavar="TOKEN", help="Atomically close only a previously captured delta window")
 
     sub.add_parser("orphans", help="Show unresolved cwd_origin values (read-only)")
 
@@ -9045,7 +9143,8 @@ def main():
     elif args.cmd == "profile":
         profile(args.aspect, list_mode=args.list)
     elif args.cmd == "distill":
-        distill(args.sid, advance=args.advance, source_name=args.source)
+        sys.exit(distill(args.sid, advance=args.advance, source_name=args.source,
+                         capture=args.capture, advance_capture=args.advance_capture))
     elif args.cmd == "orphans":
         orphans()
     elif args.cmd == "log":

@@ -156,7 +156,12 @@ else
   # Do not spawn for an empty delta. `mem distill` emits a truly empty string
   # when nothing is pending, so a whitespace-only value exits before acquiring
   # a lock.
-  delta=$(python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" 2>/dev/null || true)
+  # Capture both the displayed delta and its frontier in one read. Never
+  # acknowledge transcript messages that arrive during the model call.
+  capture=$(python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --capture 2>/dev/null) || exit 0
+  delta=$(printf '%s' "$capture" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["delta"])' 2>/dev/null) || exit 0
+  frontier=$(printf '%s' "$capture" | python3 -c 'import json,sys; print(json.load(sys.stdin)["frontier"])' 2>/dev/null) || exit 0
+  unset capture
   case "$delta" in *[![:space:]]*) ;; *) exit 0 ;; esac
 fi
 
@@ -419,7 +424,7 @@ fi
   # was nothing worth storing.
   elif [ "$worker_rc" -eq 0 ]; then
     rm -f "$FAILC" 2>/dev/null || true
-    python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --advance >/dev/null 2>&1 || true
+    python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --advance-capture "$frontier" >/dev/null 2>&1 || true
   elif [ "$worker_rc" -eq 75 ]; then
     # Capacity denial (governor class cap / reservation admission, EX_TEMPFAIL).
     # Nothing is wrong with this delta — counting these toward the strike
@@ -437,7 +442,7 @@ fi
     if [ "$_n" -ge "${MEM_DISTILL_MAX_STRIKES:-3}" ]; then
       _distill_failure_log "$SID" "$MODE" "$worker_rc" "forced-advance"
       rm -f "$FAILC" 2>/dev/null || true
-      python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --advance >/dev/null 2>&1 || true
+      python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --advance-capture "$frontier" >/dev/null 2>&1 || true
     fi
   fi
 # S5 (2026-07-09): detach child file descriptors from the parent SessionEnd
