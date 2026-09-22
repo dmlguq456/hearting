@@ -284,10 +284,10 @@ doctor_boundary() {
   printf '%s' "$$" > "$lock/pid"
   trap 'rm -rf "$lock" 2>/dev/null || true' EXIT HUP INT TERM
   "$ROOT/tools/check-adaptation-boundary.sh"
-  rc=$?
+  boundary_rc=$?
   rm -rf "$lock" 2>/dev/null || true
   trap - EXIT HUP INT TERM
-  return "$rc"
+  return "$boundary_rc"
 }
 
 doctor() {
