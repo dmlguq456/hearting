@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -83,6 +84,116 @@ class StandaloneDistributionSafetyTest(unittest.TestCase):
             distribution.disable_auto_update()
         self.assertEqual(distribution._capture_leaf(service), before)
         self.assertEqual(service.read_text(encoding="utf-8"), "foreign\n")
+
+
+class DispatchMigrationReanchorTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        base = Path(temporary.name)
+        self.candidate = base / "release"
+        self.source_root = self.candidate / ".dispatch"
+        self.environment = {"HARNESS_STATE_ROOT": str(base / "state")}
+        self.target_root = distribution.stable_state_root(self.environment)
+        relative = Path("completion/rt-test/plan.att-test.attempt.json")
+        self.source = self.source_root / relative
+        self.target = self.target_root / relative
+        self.source.parent.mkdir(parents=True)
+        self.link = {
+            "schema_version": 2,
+            "route_id": "rt-test", "node_id": "plan", "attempt_id": "att-test",
+            "dispatch_depth": 1, "transport": "headless",
+            "execution_surface": "headless", "registered_worker": True,
+            "fallback_hop": "", "evidence_sha256": "a" * 64,
+            "completion_marker": str(self.source.parent / "plan.json"),
+            "completion_marker_history": str(self.source.parent / "plan.1.json"),
+            # Normal owner-closure sidecars extend the original field set.
+            "stage_authority": "owner-closure",
+            "owner_closure_proof": {"reviews": ["review-a"], "accepted": True},
+            "future_metadata": {"label": "추가 필드", "revision": 1},
+        }
+        self.source.write_bytes(self._serialize(self.link))
+        for name in ("plan.json", "plan.1.json"):
+            (self.source.parent / name).write_text("{}\n", encoding="utf-8")
+        result = distribution.run_dispatch_state_migration(
+            self.source_root, environ=self.environment
+        )
+        self.assertEqual(result["status"], "completed")
+
+    @staticmethod
+    def _serialize(value: object) -> bytes:
+        return (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+
+    def test_reanchored_sidecar_allows_deletion_with_extension_fields(self) -> None:
+        self.assertNotEqual(self.source.read_bytes(), self.target.read_bytes())
+        expected = dict(self.link)
+        for key in ("completion_marker", "completion_marker_history"):
+            expected[key] = str(self.target.parent / Path(self.link[key]).name)
+        self.assertEqual(self.target.read_bytes(), self._serialize(expected))
+        for pass_number in range(2):
+            with self.subTest(pass_number=pass_number):
+                # Retry must retain the correctly reanchored target as well.
+                with mock.patch.dict(os.environ, self.environment, clear=True):
+                    self.assertTrue(distribution._succeed_dispatch_state(self.candidate))
+                self.assertEqual(
+                    distribution._migration_deletion_precondition(
+                        self.candidate, self.environment
+                    ),
+                    (True, ""),
+                )
+                self.assertEqual(self.source.read_bytes(), self._serialize(self.link))
+
+    def test_other_sidecar_changes_still_block_deletion(self) -> None:
+        original = self.target.read_bytes()
+        mutations = {
+            "evidence": {"evidence_sha256": "b" * 64},
+            "boolean_type": {"registered_worker": 1},
+            "extension": {"owner_closure_proof": {"reviews": [], "accepted": True}},
+            "history": {"completion_marker_history": str(self.target.parent / "plan.2.json")},
+            "wrong_root": {"completion_marker": str(self.source.parent / "plan.json")},
+        }
+        for name, changes in mutations.items():
+            with self.subTest(change=name):
+                changed = json.loads(original)
+                changed.update(changes)
+                self.target.write_bytes(self._serialize(changed))
+                self.assertEqual(
+                    distribution._migration_deletion_precondition(self.candidate, self.environment),
+                    (False, "dispatch-state-migration-blocked-live-attempt:delta-digest-mismatch"),
+                )
+        self.target.write_bytes(original)
+        marker = self.target.parent / "plan.json"
+        marker.write_text('{"changed": true}\n', encoding="utf-8")
+        self.assertFalse(distribution._migration_deletion_precondition(
+            self.candidate, self.environment
+        )[0], "ordinary files must still be byte-identical")
+
+    def test_ambiguous_source_is_not_normalized_into_deletion_proof(self) -> None:
+        original = self.source.read_bytes()
+        duplicate = original.replace(b'"schema_version": 2,', b'"schema_version": 1, "schema_version": 2,')
+        escaping = dict(self.link)
+        escaping["completion_marker"] = str(self.source_root / ".." / "outside.json")
+        rounded = dict(self.link, future_metadata=0.12345678901234568)
+        cases = {
+            "duplicate_key": duplicate,
+            "non_object": b"[ ]\n",
+            "escaping_path": self._serialize(escaping),
+            "lossy_number": self._serialize(rounded).replace(
+                b"0.12345678901234568", b"0.12345678901234567890123456789"
+            ),
+        }
+        for name, raw in cases.items():
+            with self.subTest(source=name):
+                self.source.write_bytes(raw)
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    for key in ("completion_marker", "completion_marker_history"):
+                        relative = distribution._relative_to_release(Path(parsed[key]), self.source_root)
+                        parsed[key] = str(self.target_root / relative)
+                self.target.write_bytes(self._serialize(parsed))
+                self.assertFalse(distribution._migration_deletion_precondition(
+                    self.candidate, self.environment
+                )[0])
 
 
 class ActivationFailureDiagnosticTest(unittest.TestCase):

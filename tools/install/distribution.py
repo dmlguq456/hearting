@@ -2052,6 +2052,55 @@ def run_dispatch_state_migration(
     return {"status": "completed", "migration_id": migration_id, **m0}
 
 
+def _semantic_reanchor_equal(
+    source: Path, target: Path, source_root: Path, target_root: Path
+) -> bool:
+    """Accept only the exact sidecar bytes our re-anchor operation produces.
+
+    Preserve every other field, including extensions such as owner-closure
+    proof. Reject ambiguous/lossy source JSON instead of normalizing it into
+    evidence that a release can safely be deleted. I/O errors reach the
+    caller's existing delta-unreadable refusal.
+    """
+    if not source.name.endswith(".attempt.json"):
+        return False
+
+    def unique_object(pairs: list[tuple[str, object]]) -> dict:
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError("duplicate sidecar key")
+            value[key] = item
+        return value
+
+    try:
+        original = source.read_bytes()
+        link = json.loads(original.decode("utf-8"), object_pairs_hook=unique_object)
+        if not isinstance(link, dict):
+            return False
+        # The producer and re-anchor writer use this serialization. Require
+        # a lossless round trip before changing either path (e.g. floats).
+        serialized = json.dumps(link, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        if serialized.encode("utf-8") != original:
+            return False
+        changed = False
+        for key in ("completion_marker", "completion_marker_history"):
+            value = link.get(key)
+            if not isinstance(value, str):
+                continue
+            relative = _relative_to_release(Path(value), source_root)
+            if relative is None:
+                continue
+            if ".." in relative.parts:
+                return False
+            link[key] = str(target_root / relative)
+            changed = changed or link[key] != value
+        expected = json.dumps(link, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        return changed and target.read_bytes() == expected.encode("utf-8")
+    except (ValueError, RecursionError):
+        return False
+
+
 def _migration_deletion_precondition(candidate: Path, environ: dict[str, str]) -> tuple[bool, str]:
     """Source-deletion precondition (SD-112 §13.33.2-(5)): once migration is
     promoted, a candidate's leftover `.dispatch` may be deleted only after
@@ -2076,6 +2125,10 @@ def _migration_deletion_precondition(candidate: Path, environ: dict[str, str]) -
             return False, "dispatch-state-migration-blocked-live-attempt:delta-unreconciled"
         try:
             if _sha256_file(stale_dispatch / relative) != _sha256_file(target):
+                if _semantic_reanchor_equal(
+                    stale_dispatch / relative, target, stale_dispatch, stable_root
+                ):
+                    continue
                 return False, "dispatch-state-migration-blocked-live-attempt:delta-digest-mismatch"
         except OSError:
             return False, "dispatch-state-migration-blocked-live-attempt:delta-unreadable"
