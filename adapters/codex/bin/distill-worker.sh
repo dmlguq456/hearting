@@ -117,9 +117,28 @@ fi
 # concurrent turn-nudge for the same sid cannot both run; the loser skips. Acquired
 # after the empty-delta check to minimize the hold window.
 lock="$store/.codex-distill-lock-$sid"
-if ! mkdir "$lock" 2>/dev/null; then
-  echo "codex distill worker: another distill in progress for $sid; skipping" >&2
-  exit 0
+# A turn-nudge increment and the session-end curate contend for this lock. The
+# increment is detached and bounded, and it fires while the user is still
+# working, so a session that ends shortly after one loses the race. Dropping an
+# increment is harmless -- the delta stays and a later turn redistills it -- but
+# curate is the session's only prune/merge/graduate pass and nothing retries it,
+# so it waits out a live increment instead of skipping.
+lock_wait=0
+if [ "$mode" = "curate" ]; then
+  lock_wait=${CODEX_DISTILL_LOCK_WAIT:-30}
+  case "$lock_wait" in (*[!0-9]*|"") lock_wait=30 ;; esac
+fi
+waited=0
+until mkdir "$lock" 2>/dev/null; do
+  if [ "$waited" -ge "$lock_wait" ]; then
+    echo "codex distill worker: another distill in progress for $sid; skipping" >&2
+    exit 0
+  fi
+  sleep 1
+  waited=$((waited + 1))
+done
+if [ "$waited" -gt 0 ]; then
+  echo "codex distill worker: curate waited ${waited}s for an in-flight increment" >&2
 fi
 
 prompt_file="$store/.codex-distill-prompt-$sid"
