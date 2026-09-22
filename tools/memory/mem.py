@@ -13,7 +13,7 @@ Design boundary:
     storage, retrieval, scope, lifecycle, telemetry, and recovery contracts.
   - No external Python dependencies; rg accelerates session retrieval when present.
 """
-import argparse, contextlib, datetime, fcntl, hashlib, io, json, os, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time
+import argparse, base64, contextlib, datetime, fcntl, hashlib, io, json, os, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time
 from collections import namedtuple
 from pathlib import Path
 
@@ -616,6 +616,9 @@ def norm_body(body):
 
 
 def _distill_state_path(sid):
+    if not isinstance(sid, str) or not sid or len(sid.encode("utf-8")) > 200 \
+            or "/" in sid or "\x00" in sid:
+        raise ValueError("invalid distillation session identity")
     return STORE / f".distill-state-{sid}"
 
 
@@ -627,10 +630,50 @@ def read_marker(sid):
     return p.read_text(encoding="utf-8").strip()
 
 
-def advance_marker(sid, last_uuid):
-    """Advance the marker to ``last_uuid``."""
+def advance_marker(sid, last_uuid, expected=None):
+    """Atomically update a marker; captured windows compare the starting UUID.
+
+    ``expected=None`` preserves the explicit recovery API. Automatic distillers
+    always supply the marker they observed before reading their delta.
+    """
+    path = _distill_state_path(sid)
+    if not isinstance(last_uuid, str) or not last_uuid or len(last_uuid) > 1024 \
+            or any(c in last_uuid for c in "\r\n\x00"):
+        raise ValueError("invalid distillation frontier UUID")
     STORE.mkdir(parents=True, exist_ok=True)
-    _distill_state_path(sid).write_text(last_uuid + "\n", encoding="utf-8")
+    lock = STORE / (".distill-marker-lock-" + hashlib.sha256(sid.encode()).hexdigest())
+    fd = os.open(lock, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    tmp = None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1:
+            raise ValueError("invalid distillation marker lock")
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise ValueError("distillation marker lock busy")
+                time.sleep(0.05)
+        current = read_marker(sid)
+        if current == last_uuid:
+            return True
+        if expected is not None and current != expected:
+            return False
+        out_fd, tmp = tempfile.mkstemp(prefix=".distill-marker-tmp-", dir=STORE)
+        with os.fdopen(out_fd, "w", encoding="utf-8") as output:
+            output.write(last_uuid + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(tmp, path)
+        tmp = None
+        return True
+    finally:
+        if tmp is not None:
+            os.unlink(tmp)
+        os.close(fd)
 
 
 # ---------- frontmatter for migration input and projection output ----------
@@ -2737,10 +2780,25 @@ class CodexJsonlSource:
         matches = sorted(self.sessions.glob(f"**/*{self.sid}*.jsonl"))
         return matches[-1] if matches else None
 
+    @staticmethod
+    def _text(content):
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+        return "\n".join(part["text"] for part in content
+                         if isinstance(part, dict)
+                         and part.get("type") in ("input_text", "output_text", "text", "Text")
+                         and isinstance(part.get("text"), str) and part["text"])
+
     def messages(self):
         path = self.locate()
         if path is None:
             return
+        turn = None
+        last_role_turn = None
+        mirrors = {}
+        seen_ids = set()
         with path.open(encoding="utf-8") as f:
             for i, line in enumerate(f, 1):
                 line = line.strip()
@@ -2750,33 +2808,82 @@ class CodexJsonlSource:
                     d = json.loads(line)
                 except Exception:
                     continue
+                if not isinstance(d, dict):
+                    continue
                 payload = d.get("payload") or {}
+                if not isinstance(payload, dict):
+                    continue
                 wrapper_type = d.get("type")
                 ptype = payload.get("type")
                 ts = d.get("timestamp")
-                uuid = payload.get("id") or payload.get("call_id") or f"{ts}:{i}"
+                metadata = payload.get("internal_chat_message_metadata_passthrough")
+                metadata = metadata if isinstance(metadata, dict) else {}
+                current_turn = payload.get("turn_id") or metadata.get("turn_id")
+                if isinstance(current_turn, str) and current_turn:
+                    turn = current_turn
+                uuid = payload.get("id") or payload.get("call_id")
+                role = text = representation = None
 
                 if wrapper_type == "event_msg" and ptype == "user_message":
-                    text = payload.get("message", "")
-                    if text:
-                        yield Msg("user", ts, text, uuid, False)
-                    continue
+                    role, representation = "user", "legacy-user"
+                    text = self._text(payload.get("message"))
 
-                if wrapper_type == "response_item" and ptype == "message":
-                    role = payload.get("role")
-                    # Codex also stores user turns as response_item/message, but
-                    # event_msg/user_message is the cleaner user source and avoids
-                    # duplicate distill deltas.
-                    if role != "assistant":
+                elif wrapper_type == "event_msg" and ptype == "item_completed":
+                    item = payload.get("item")
+                    if not isinstance(item, dict):
                         continue
-                    text = _content_text(payload.get("content"))
-                    if text:
-                        yield Msg(role, ts, text, uuid, False)
+                    if item.get("type") == "UserMessage":
+                        role, representation = "user", "item-user"
+                    elif item.get("type") == "AgentMessage":
+                        role, representation = "assistant", "item-assistant"
+                    else:
+                        continue  # Reasoning/tool output is not user speech.
+                    uuid = item.get("id")
+                    text = self._text(item.get("content"))
+
+                elif wrapper_type == "response_item" and ptype == "message":
+                    role = payload.get("role")
+                    representation = "response-" + str(role)
+                    content = payload.get("content")
+                    if role == "user":
+                        # Codex also writes injected AGENTS/environment blocks
+                        # with role=user. Only explicit native user.text tags
+                        # authorize this fallback; event messages need no guess.
+                        kinds = metadata.get("content_item_kinds")
+                        if not isinstance(content, list) or not isinstance(kinds, list) or len(content) != len(kinds):
+                            continue
+                        content = [part for part, kind in zip(content, kinds) if kind == "user.text"]
+                    elif role != "assistant":
+                        continue
+                    text = self._text(content)
+
+                elif wrapper_type == "response_item" and ptype in ("function_call", "custom_tool_call"):
+                    name = payload.get("name") or "tool"
+                    yield Msg("assistant", ts, f"[tool:{name}]", uuid or f"{ts}:{i}", False)
                     continue
 
-                if wrapper_type == "response_item" and ptype in ("function_call", "custom_tool_call"):
-                    name = payload.get("name") or "tool"
-                    yield Msg("assistant", ts, f"[tool:{name}]", uuid, False)
+                if not text:
+                    continue
+                uuid = uuid if isinstance(uuid, str) and uuid else f"{ts}:{i}"
+                if (role, uuid) in seen_ids:
+                    continue
+                seen_ids.add((role, uuid))
+                if last_role_turn != (role, turn):
+                    mirrors = {}
+                    last_role_turn = (role, turn)
+                if role == "user":
+                    groups = mirrors.setdefault(text, [])
+                    mirror = next((group for group in groups if representation not in group), None)
+                    if mirror is None:
+                        groups.append({representation})
+                    else:
+                        mirror.add(representation)
+                        # User mirrors have different native IDs. Keep each ID
+                        # addressable without repeating speech, including when
+                        # a capture preceded the later mirror. Assistant mirrors
+                        # share IDs and were already handled by seen_ids above.
+                        text = ""
+                yield Msg(role, ts, text, uuid, False)
 
 
 def _opencode_first_str(d, *keys):
@@ -2928,13 +3035,14 @@ class OpenCodeExportSource:
 # Other runtime adapters need only implement the same ``messages()`` interface.
 
 
-def ingest_session(source):
+def ingest_session(source, after=None):
     """Yield normalized messages strictly after the shared marker.
 
     Yield all messages when no marker exists, and none when a recorded marker is
     absent from the source to avoid conservative re-duplication.
     """
-    after = read_marker(source.sid)
+    if after is None:
+        after = read_marker(source.sid)
     started = not after
     for msg in source.messages():
         if not started:
@@ -2944,29 +3052,80 @@ def ingest_session(source):
         yield msg
 
 
-def distill(sid, advance=False, source_name="claude"):
-    """Print normalized messages after the marker and optionally advance it."""
-    if source_name == "codex":
-        source = CodexJsonlSource(sid)
-    elif source_name == "opencode":
-        source = OpenCodeExportSource(sid)
-    else:
-        source = ClaudeCodeJsonlSource(sid)
-    last_uuid = None
-    out = []
-    for msg in ingest_session(source):
-        # Track the last valid UUID across all records, including sidechains, so
-        # a trailing record without UUID cannot cause repeated distillation.
-        if msg.uuid is not None:
-            last_uuid = msg.uuid
-        if msg.is_sidechain or not (msg.text or "").strip():
+def _distill_frontier(sid, source_name, after, last_uuid):
+    payload = {
+        "v": 1, "sid": sid, "source": source_name,
+        "store": hashlib.sha256(os.fsencode(STORE.resolve())).hexdigest(),
+        "after": after, "last": last_uuid,
+    }
+    raw = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode()
+    token = base64.urlsafe_b64encode(raw).decode("ascii")
+    if len(token) > 8192:
+        raise ValueError("distillation frontier exceeds bound")
+    return token
+
+
+def _advance_distill_frontier(sid, source_name, token):
+    _distill_state_path(sid)  # Reject path-shaped identities before any I/O.
+    if not isinstance(token, str) or not 1 <= len(token) <= 8192:
+        raise ValueError("invalid distillation frontier token")
+    try:
+        payload = json.loads(base64.b64decode(token, altchars=b"-_", validate=True))
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise ValueError("invalid distillation frontier token") from exc
+    expected_keys = {"v", "sid", "source", "store", "after", "last"}
+    if not isinstance(payload, dict) or set(payload) != expected_keys \
+            or type(payload["v"]) is not int or payload["v"] != 1 \
+            or payload["sid"] != sid or payload["source"] != source_name \
+            or payload["store"] != hashlib.sha256(os.fsencode(STORE.resolve())).hexdigest():
+        raise ValueError("distillation frontier identity mismatch")
+    for name in ("after", "last"):
+        value = payload[name]
+        if name == "last" and value is None:
             continue
-        out.append(f"[{msg.role}] {msg.text}")
-    sys.stdout.write("\n\n".join(out))
-    if out:
-        sys.stdout.write("\n")
-    if advance and last_uuid:
-        advance_marker(sid, last_uuid)
+        if not isinstance(value, str) or len(value) > 1024 \
+                or any(c in value for c in "\r\n\x00"):
+            raise ValueError("invalid distillation frontier UUID")
+    if payload["last"] is None:
+        return True
+    return advance_marker(sid, payload["last"], expected=payload["after"])
+
+
+def distill(sid, advance=False, source_name="claude", capture=False, advance_capture=None):
+    """Read one delta; automatic workers later close only its captured window."""
+    try:
+        if advance_capture is not None:
+            if not _advance_distill_frontier(sid, source_name, advance_capture):
+                raise ValueError("distillation frontier changed; capture remains unapplied")
+            return 0
+        if source_name == "codex":
+            source = CodexJsonlSource(sid)
+        elif source_name == "opencode":
+            source = OpenCodeExportSource(sid)
+        else:
+            source = ClaudeCodeJsonlSource(sid)
+        after = read_marker(sid)
+        last_uuid = None
+        out = []
+        for msg in ingest_session(source, after=after):
+            # Retain the existing sidechain/blank-message boundary semantics.
+            if msg.uuid is not None:
+                last_uuid = msg.uuid
+            if msg.is_sidechain or not (msg.text or "").strip():
+                continue
+            out.append(f"[{msg.role}] {msg.text}")
+        delta = "\n\n".join(out) + ("\n" if out else "")
+        if capture:
+            print(json.dumps({"delta": delta, "frontier": _distill_frontier(
+                sid, source_name, after, last_uuid)}, ensure_ascii=False))
+        else:
+            sys.stdout.write(delta)
+        if advance and last_uuid and not advance_marker(sid, last_uuid, expected=after):
+            raise ValueError("distillation frontier changed; capture remains unapplied")
+        return 0
+    except (ValueError, OSError) as exc:
+        sys.stderr.write(f"[distill] {exc}\n")
+        return 2
 
 
 # ---------- export / import ----------
@@ -8894,7 +9053,10 @@ def main():
     ds.add_argument("sid")
     ds.add_argument("--source", choices=["claude", "codex", "opencode"], default=os.environ.get("MEM_SESSION_SOURCE", "claude"),
                     help="session transcript adapter source")
-    ds.add_argument("--advance", action="store_true", help="Advance the marker to the last message UUID")
+    ds_mode = ds.add_mutually_exclusive_group()
+    ds_mode.add_argument("--advance", action="store_true", help="Advance the marker to the last message UUID")
+    ds_mode.add_argument("--capture", action="store_true", help="Print JSON delta and a bounded frontier token from one read")
+    ds_mode.add_argument("--advance-capture", metavar="TOKEN", help="Atomically close only a previously captured delta window")
 
     sub.add_parser("orphans", help="Show unresolved cwd_origin values (read-only)")
 
@@ -9045,7 +9207,8 @@ def main():
     elif args.cmd == "profile":
         profile(args.aspect, list_mode=args.list)
     elif args.cmd == "distill":
-        distill(args.sid, advance=args.advance, source_name=args.source)
+        sys.exit(distill(args.sid, advance=args.advance, source_name=args.source,
+                         capture=args.capture, advance_capture=args.advance_capture))
     elif args.cmd == "orphans":
         orphans()
     elif args.cmd == "log":

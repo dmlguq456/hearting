@@ -104,10 +104,15 @@ find "$store" -maxdepth 1 \
      -o -name '.codex-distill-out-*' -o -name '.codex-distill-snapids-*' \) \
   -mmin +60 -delete 2>/dev/null || true
 
-delta=$(
+# Delta and frontier come from the same source read. A later prompt can append
+# messages while the model runs; completion must never acknowledge that tail.
+capture=$(
   AGENT_HOME="$AGENT_ROOT" \
-  python3 "$ROOT/tools/memory/mem.py" distill "$sid" --source codex 2>/dev/null || true
-)
+  python3 "$ROOT/tools/memory/mem.py" distill "$sid" --source codex --capture
+) || exit 69
+delta=$(printf '%s' "$capture" | python3 -c 'import json,sys; sys.stdout.write(json.load(sys.stdin)["delta"])') || exit 69
+frontier=$(printf '%s' "$capture" | python3 -c 'import json,sys; print(json.load(sys.stdin)["frontier"])') || exit 69
+unset capture
 
 if [ -z "$(printf '%s' "$delta" | tr -d '[:space:]')" ]; then
   exit 0
@@ -309,7 +314,7 @@ if [ "${CODEX_DISTILL_APPLY:-}" = "1" ]; then
   # (exec_ok=0) keeps the delta for a later real distill. Fixes the prior re-distill
   # divergence (the old worker never advanced → reprocessed the same delta every run).
   if [ "$exec_ok" = "1" ]; then
-    AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" distill "$sid" --source codex --advance >/dev/null 2>&1 || true
+    AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" distill "$sid" --source codex --advance-capture "$frontier" >/dev/null 2>&1 || true
   fi
 fi
 
