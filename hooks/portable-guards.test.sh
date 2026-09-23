@@ -2527,7 +2527,11 @@ if grep -q '^role: fast reviewer$' "$ROOT/roles/units/qa/test.md" \
 else
   bad "codex native agent projection should preserve mixed role sets"
 fi
-if grep -q 'model = "gpt-5.6-luna"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
+# memory-scout is `light:low:read-only`: its model is whatever the shipped light
+# tier names, so compare against models.conf instead of a literal model ID.
+codex_light_model=$(sed -n 's/^CFG_TIER_LIGHT_MODEL=//p' "$ROOT/adapters/codex/config/models.conf")
+if [ -n "$codex_light_model" ] \
+  && grep -Fq "model = \"$codex_light_model\"" "$TMP/codex_agent_home/agents/memory-scout.toml" \
   && grep -q 'model_reasoning_effort = "low"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
   && grep -q 'sandbox_mode = "read-only"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
   && grep -q 'Never run memory mutation commands' "$TMP/codex_agent_home/agents/memory-scout.toml"; then

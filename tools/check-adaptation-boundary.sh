@@ -1791,7 +1791,10 @@ PY
     esac
   done
 
-  if ! grep -Fq 'model = "gpt-5.6-luna"' adapters/codex/agents/memory-scout.toml \
+  # memory-scout is `light:low:read-only`, so its model is the shipped light tier's.
+  codex_light_model=$(sed -n 's/^CFG_TIER_LIGHT_MODEL=//p' adapters/codex/config/models.conf)
+  if [ -z "$codex_light_model" ] \
+    || ! grep -Fq "model = \"$codex_light_model\"" adapters/codex/agents/memory-scout.toml \
     || ! grep -Fq 'model_reasoning_effort = "low"' adapters/codex/agents/memory-scout.toml \
     || ! grep -Fq 'sandbox_mode = "read-only"' adapters/codex/agents/memory-scout.toml \
     || ! grep -Fq 'Never run memory mutation commands' adapters/codex/agents/memory-scout.toml; then

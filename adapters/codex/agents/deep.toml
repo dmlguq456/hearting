@@ -1,6 +1,6 @@
 name = "deep"
 description = "Deep investigation agent on the portable deep budget — root cause, architecture, subtle correctness."
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 developer_instructions = """
