@@ -410,7 +410,8 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
     def test_an_unrecognised_open_route_record_is_never_skipped_silently(self):
         # Skipping a real route record removes a release's protection, and that
         # is the direction that deletes data. A name the reader does not know is
-        # adjudicated by content, not waved through.
+        # adjudicated by content, not waved through: its launch_home protects
+        # that release exactly as a canonical record's does.
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             routes = self._routes_dir(base)
@@ -418,9 +419,84 @@ class ReleaseScanSelectsRouteRecordsTest(unittest.TestCase):
             legacy = routes / "2026-08-13_wwd-eval-labels.json"
             self._record(legacy, str(base / "other-release"))
             results, reason = self._scan(base)
-            self.assertTrue(
-                reason.startswith("route-record-unrecognised-name:"), reason)
+            self.assertEqual(reason, "")
+            self.assertEqual(sorted(results), sorted([
+                (self.ROUTE_ID, str(base / "release")),
+                (legacy.stem, str(base / "other-release")),
+            ]))
+            in_use, why = distribution._release_in_use(
+                base / "other-release", [], (results, reason))
+            self.assertEqual((in_use, why), (True, f"open-route:{legacy.stem}"))
+
+    def test_an_unrecognised_undecidable_route_record_still_fails_closed(self):
+        # A legacy-named record that carries a launch tuple but no usable
+        # launch_home is as untrustworthy as a canonical one.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            routes = self._routes_dir(base)
+            legacy = routes / "2026-08-13_wwd-eval-labels.json"
+            legacy.write_text(json.dumps({
+                "route_id": "rt-1111111111111111", "schema_version": 2, "nodes": [],
+                "launch_compatibility_tuple": {},
+            }), encoding="utf-8")
+            results, reason = self._scan(base)
+            self.assertEqual(reason, f"route-record-unparsable:{legacy}")
             self.assertEqual(results, [])
+
+    def test_a_pre_tuple_open_record_names_no_release(self):
+        # Measured 2026-09-23: four open alias-named records compiled before
+        # launch identity was sealed (801a50c64) held nine releases, because the
+        # scan failed on the first one's name. Such a record names no
+        # compile-time launch_home under ANY name, so it protects nothing here
+        # and must not retain every release.
+        pre_tuple = {"schema_version": 2, "capability": "autopilot-code",
+                     "effective_intensity": "standard", "nodes": [{"id": "plan"}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            routes = self._routes_dir(base)
+            self._record(routes / f"{self.ROUTE_ID}.json", str(base / "release"))
+            for name, route_id in (
+                ("2026-08-11_release_standard.json", "rt-e8ff9a17806ba943"),
+                ("rt-de672bda79961d80.json", "rt-de672bda79961d80"),
+            ):
+                (routes / name).write_text(
+                    json.dumps({**pre_tuple, "route_id": route_id}), encoding="utf-8")
+            results, reason = self._scan(base)
+            self.assertEqual(reason, "")
+            self.assertEqual(results, [(self.ROUTE_ID, str(base / "release"))])
+            self.assertEqual(
+                distribution._release_in_use(base / "other-release", [], (results, reason)),
+                (False, ""))
+
+    def test_every_undecidable_record_is_named(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            routes = self._routes_dir(base)
+            broken = [routes / f"{self.ROUTE_ID}.json", routes / "2026-08-13_legacy.json"]
+            broken[0].write_text("{ truncated", encoding="utf-8")
+            broken[1].write_text(json.dumps({
+                "route_id": "rt-1111111111111111", "nodes": [],
+                "launch_compatibility_tuple": {"launch_home": None},
+            }), encoding="utf-8")
+            results, reason = self._scan(base)
+            self.assertEqual(
+                reason, "route-record-unparsable:" + "; ".join(sorted(map(str, broken))))
+            self.assertEqual(results, [])
+
+    def test_retention_message_names_the_evidence_kind(self):
+        release = Path("/releases/v1")
+        attempt = distribution._release_retention_message(release, "open-attempt:att-1")
+        self.assertIn("is still referenced by a live dispatch attempt (open-attempt:att-1)", attempt)
+        route = distribution._release_retention_message(release, "open-route:rt-1")
+        self.assertIn("launch home of an open route record (open-route:rt-1)", route)
+        self.assertNotIn("live dispatch attempt", route)
+        unparsable = distribution._release_retention_message(
+            release, "route-record-unparsable:/r/a.json; /r/b.json")
+        self.assertIn("could not be proven unused (route-record-unparsable:/r/a.json; /r/b.json)", unparsable)
+        self.assertNotIn("live dispatch attempt", unparsable)
+        self.assertIn("capability-route.py close --route <file> --allow-unproven", unparsable)
+        self.assertNotIn("capability-route.py close",
+                         distribution._release_retention_message(release, "route-discovery-unreliable:scan-cap"))
 
     def test_a_closed_record_under_a_legacy_name_costs_nothing(self):
         # 79 such records exist on this machine, all closed. A closed record's

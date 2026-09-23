@@ -2600,7 +2600,9 @@ def _route_record_launch_home(
 
     Returns `_UNDECIDABLE` if the record looks open (no outcome sibling) but
     cannot be trusted: oversized, unreadable, unparsable, or missing the
-    field. An open-shaped record that cannot be trusted is exactly the
+    field. (A record with no launch tuple at all was compiled before launch
+    identity was sealed and names no release; it returns `None`.) An
+    open-shaped record that cannot be trusted is exactly the
     judgment-cannot-be-made case that C47-12's "undecidable = in_use" rule
     covers -- the caller must fail closed, never skip silently.
 
@@ -2618,6 +2620,15 @@ def _route_record_launch_home(
         return _UNDECIDABLE
     if not isinstance(raw, dict):
         return _UNDECIDABLE
+    if "launch_compatibility_tuple" not in raw:
+        # A record compiled before launch identity was sealed (801a50c64,
+        # 2026-08-25) names no compile-time launch_home, so this source has no
+        # release to protect for it; any live attempt it still has is pinned by
+        # the registry, stable-registry and live-process sources, which read the
+        # attempt's own launch_home. Treating it as undecidable instead made one
+        # abandoned pre-tuple record retain every release forever. A record that
+        # HAS the tuple but no usable launch_home below stays undecidable.
+        return None
     launch_home = (raw.get("launch_compatibility_tuple") or {}).get("launch_home")
     value = launch_home.get("path") if isinstance(launch_home, dict) else None
     if not isinstance(value, str) or not value:
@@ -2728,13 +2739,14 @@ def _open_route_launch_homes(environ: dict[str, str]) -> tuple[list[tuple[str, s
                 # release's protection, and that is the one direction that
                 # deletes data. So the name selects, and content adjudicates the
                 # exceptions -- anything that still looks like an open route
-                # record under an unexpected name fails the scan closed, exactly
-                # as an unparsable canonical record does. 79 legacy
-                # alias-basename records exist on this machine from before the
-                # `rt-` generator; every one is closed, so they cost nothing.
-                if _unrecognised_open_route_record(entry):
-                    return [], f"route-record-unrecognised-name:{entry}"
-                continue
+                # record under an unexpected name is judged exactly like a
+                # canonical record below: its launch_home protects that release,
+                # and an undecidable body fails the scan closed. Legacy
+                # alias-basename records predate the `rt-` generator; core keeps
+                # them readable and closeable, so an open one must neither be
+                # skipped nor, by its name alone, retain every release.
+                if not _unrecognised_open_route_record(entry):
+                    continue
             scanned += 1
             if scanned > _ROUTE_SCAN_MAX_FILES:
                 return [], "route-discovery-unreliable:scan-cap"
@@ -2747,6 +2759,7 @@ def _open_route_launch_homes(environ: dict[str, str]) -> tuple[list[tuple[str, s
         candidates[str(path.resolve(strict=False))] = path
 
     results: list[tuple[str, str]] = []
+    undecidable: list[str] = []
     registry_cache: dict = {}
     environ = environ or {}
     for path in candidates.values():
@@ -2756,8 +2769,13 @@ def _open_route_launch_homes(environ: dict[str, str]) -> tuple[list[tuple[str, s
         if launch_home is None:
             continue
         if launch_home is _UNDECIDABLE:
-            return [], f"route-record-unparsable:{path}"
+            # Name every offender, not the first: an operator who resolves one
+            # record must not discover the next only on the following update.
+            undecidable.append(str(path))
+            continue
         results.append((path.stem, launch_home))
+    if undecidable:
+        return [], "route-record-unparsable:" + "; ".join(sorted(undecidable))
     return results, ""
 
 
@@ -3026,6 +3044,32 @@ def _commit_forced_prune_gap_record(candidate: Path, environ: dict[str, str], re
                 pass
 
 
+def _release_retention_message(candidate: Path, why: str) -> str:
+    """Say which kind of evidence kept `candidate`.
+
+    Only `open-attempt:` is a live dispatch attempt. Every other reason is a
+    reference source that could not prove the release unused, and calling that
+    a live attempt sent operators hunting for a process that does not exist.
+    An undecidable route record is resolved by closing it, the path core keeps
+    open for legacy records, so the message names that command.
+    """
+
+    if why.startswith("open-attempt:"):
+        cause = "is still referenced by a live dispatch attempt"
+    elif why.startswith("open-route:"):
+        cause = "is still named as the launch home of an open route record"
+    else:
+        cause = "could not be proven unused"
+    message = f"harness release: {candidate} {cause} ({why}); keeping it instead of deleting it"
+    if why.startswith("route-record-unparsable:"):
+        message += (
+            ". Each listed route record retains every release until it parses or is "
+            "closed; close an abandoned one with `capability-route.py close --route "
+            "<file> --allow-unproven`"
+        )
+    return message
+
+
 # destructive-ok: reason=prune only retention-proved version directories; boundary=canonical children of the managed releases root
 def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) -> None:
     releases = data_root() / "releases"
@@ -3051,11 +3095,7 @@ def _cleanup_releases(keep: set[Path], *, force_prune_unproven: bool = False) ->
             continue
         in_use, why = _release_in_use(candidate, stable_snapshot, route_snapshot)
         if in_use:
-            print(
-                f"harness release: {candidate} is still referenced by a live dispatch "
-                f"attempt ({why}); keeping it instead of deleting it",
-                file=sys.stderr,
-            )
+            print(_release_retention_message(candidate, why), file=sys.stderr)
             continue
         # A runtime activation is a reference this loop never consulted. That was
         # survivable while a packaged bundle held its own copy; once a bundle
