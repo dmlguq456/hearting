@@ -6714,9 +6714,16 @@ def completion_marker_is_current(
         if not isinstance(evidence_record, dict):
             return False
         evidence = Path(str(evidence_record.get("path", "")))
-        if not evidence.is_absolute() or not evidence.is_file():
+        if not evidence.is_absolute():
             return False
-        if hashlib.sha256(evidence.read_bytes()).hexdigest() != evidence_record.get("sha256"):
+        # A directory deliverable is valid evidence (acacd2105) and the writer
+        # digests it with evidence_digest(); a raw-bytes file hash here left
+        # every directory marker permanently stale for successor dispatch.
+        try:
+            digest = _route_module().evidence_digest(evidence)
+        except (OSError, ValueError):
+            return False
+        if digest != evidence_record.get("sha256"):
             return False
         history_path = marker_path.parent / f"{node_id}.{sequence}.json"
         history = json.loads(history_path.read_text(encoding="utf-8"))

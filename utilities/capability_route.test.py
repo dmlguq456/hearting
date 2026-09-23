@@ -2185,15 +2185,19 @@ class TestContinuation(unittest.TestCase):
    row=R._marker_identity_row(source,node,"frame",node.get("completion_gate"))
    self.assertTrue(row["passed"], row)
    # and the digest the marker stored is the directory digest, not a file hash
-   marker=json.loads(
-    (R.completion_dir(source["route_id"])/"frame.json").read_text(encoding="utf-8")
-   )
+   marker_path=R.completion_dir(source["route_id"])/"frame.json"
+   marker=json.loads(marker_path.read_text(encoding="utf-8"))
    self.assertEqual(marker["evidence"]["sha256"],R.evidence_digest(bucket))
+   # the predecessor gate a successor dispatch runs has to agree too; it hashed
+   # raw file bytes, so a directory marker was never current and the next node
+   # was refused as if this one had never completed
+   self.assertTrue(R.completion_marker_is_current(source,node,marker_path))
    # a member changing invalidates the gate, so the attestation is real
    (bucket/"REPORT.md").write_text("tampered\n",encoding="utf-8")
    self.assertFalse(
     R._marker_identity_row(source,node,"frame",node.get("completion_gate"))["passed"]
    )
+   self.assertFalse(R.completion_marker_is_current(source,node,marker_path))
 
  def test_an_empty_directory_cannot_complete_a_node(self):
   # Review R2: the non-empty rule lived only on the inspector path, so the
