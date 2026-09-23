@@ -2610,13 +2610,20 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     if shape != "staged" and graph:
         raise ValueError(f"compose-graph-only-staged:{shape}")
     registry = TOPO.load_registry()
-    base = next((r for r in registry["recipes"] if r["capability"] == capability), None)
-    if base is None:
+    # A capability may own several recipes, one per mode set (autopilot-lab:
+    # setup and eval), so the recipe is keyed by (capability, mode) exactly as
+    # `compile` keys it; taking the capability's first recipe made every mode
+    # of the others unreachable. The unnamed default is unchanged: `dev` when
+    # offered, else the first recipe's first mode (autopilot-lab stays `setup`).
+    recipes = [r for r in registry["recipes"] if r["capability"] == capability]
+    if not recipes:
         raise ValueError(f"compose-capability-unknown:{capability}")
+    modes = sorted({mode for recipe in recipes for mode in recipe["modes"]})
     if capability_mode is None:
-        capability_mode = "dev" if "dev" in base["modes"] else sorted(base["modes"])[0]
-    if capability_mode not in base["modes"]:
-        raise ValueError(f"compose-mode-unknown:{capability_mode} (modes: {','.join(sorted(base['modes']))})")
+        capability_mode = "dev" if "dev" in modes else sorted(recipes[0]["modes"])[0]
+    base = next((r for r in recipes if capability_mode in r["modes"]), None)
+    if base is None:
+        raise ValueError(f"compose-mode-unknown:{capability_mode} (modes: {','.join(modes)})")
     requested = intensity or SHAPE_INTENSITY[shape]
     if requested not in ORDER:
         raise ValueError("invalid intensity")

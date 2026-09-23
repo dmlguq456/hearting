@@ -5417,6 +5417,24 @@ class ComposeRouteTest(TestRoute):
   with self.assertRaisesRegex(ValueError,"compose-mode-unknown"): self.compose(capability_mode="deploy")
   with self.assertRaisesRegex(ValueError,"compose-shape-invalid"): self.compose(shape="huge")
   with self.assertRaisesRegex(ValueError,"compose-direct-signals-conflict"): self.compose(shape="direct",graph=None,signals=["public-api"])
+ def test_recipe_is_selected_by_capability_and_mode(self):
+  # autopilot-lab owns two recipes (setup, eval); every mode of either must be
+  # reachable, and the refusal names the union rather than the first recipe's modes.
+  lab=dict(capability="autopilot-lab",graph=None)
+  direct=self.compose(capability_mode="eval",shape="direct",dispatch_evidence=None,**lab)
+  self.assertEqual((direct["capability_mode"],direct["effective_intensity"]),("eval","direct"))
+  R.verify_route(direct,R.ROOT)
+  staged=self.compose(capability_mode="eval",**lab)
+  self.assertEqual(staged["capability_mode"],"eval")
+  self.assertEqual(staged["nodes"][0]["id"],"eval-run")
+  R.verify_route(staged,R.ROOT)
+  subgraph=self.compose(capability_mode="eval",capability="autopilot-lab",graph="eval-run,metrics,report")
+  self.assertEqual([n["id"] for n in subgraph["nodes"]],["eval-run","metrics","report"])
+  setup=self.compose(capability_mode="setup",**lab)
+  self.assertEqual((setup["capability_mode"],setup["nodes"][0]["id"]),("setup","scaffold"))
+  self.assertEqual(self.compose(capability_mode=None,shape="direct",dispatch_evidence=None,**lab)["capability_mode"],"setup")
+  with self.assertRaisesRegex(ValueError,r"compose-mode-unknown:deploy \(modes: eval,setup\)"):
+   self.compose(capability_mode="deploy",**lab)
  def test_direct_shape_is_the_inline_node_with_compose_origin(self):
   route=self.compose(shape="direct",graph=None,dispatch_evidence=None)
   self.assertFalse(route.get("composed")); self.assertEqual(route["effective_intensity"],"direct")
