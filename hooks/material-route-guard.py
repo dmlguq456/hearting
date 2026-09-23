@@ -1087,6 +1087,16 @@ def _resolve_path(base: Path, raw: str) -> Path:
     return (base / path).resolve(strict=False) if not path.is_absolute() else path.resolve(strict=False)
 
 
+# A shell redirection as `_shell_segments` leaves it: optional fd, operator,
+# optional glued target (`2>/dev/null`, `>>log`, `<in`, `>|f`, `<<EOF`); with
+# no glued target the next token is the target (`> log`, `2> err`). Same shape
+# as hooks/artifact_write_targets.py's `_REDIRECT_GLUED_RE`, which only needs
+# the writing operators. `&` is a command separator for that lexer, so
+# `2>&1` / `2>&-` arrive as a bare `2>` at the end of the segment and `&>f`
+# already ends the segment before `>f`.
+_SHELL_REDIRECTION_RE = re.compile(r"^\d*(?:&>>?|>>|>[|&]?|<<<|<<-?|<[>&]?)(.*)$", re.DOTALL)
+
+
 def _git_commit_segments(
     command: str,
     base: Path,
@@ -1163,6 +1173,15 @@ def _git_commit_segments(
         offset = 0
         while offset < len(args):
             token = args[offset]
+            redirection = _SHELL_REDIRECTION_RE.match(token)
+            if redirection:
+                # `git commit -m x 2>&1 | tail`, `> /dev/null`, `< in`: the
+                # redirection and its target are not commit arguments. Read as
+                # pathspecs they narrowed the materiality diff to nothing (or
+                # made it fail), so a material commit skipped the route check.
+                # Option values never reach here: their option consumed them.
+                offset += 1 if redirection.group(1) else 2
+                continue
             if positional:
                 paths.append(token)
                 offset += 1

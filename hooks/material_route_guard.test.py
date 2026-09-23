@@ -959,6 +959,53 @@ class MaterialRouteGuardTest(unittest.TestCase):
         )
         self.assertEqual(only_source.returncode, 2)
 
+    def test_commit_chokepoint_ignores_shell_redirections(self) -> None:
+        # Redirection operators and their targets used to be read as commit
+        # pathspecs: `> /dev/null` made the materiality diff fail and `2>` or
+        # `log` narrowed it to nothing, so these material commits skipped the
+        # route check.
+        (self.repo / "app.py").write_text("print('two')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "app.py"], check=True)
+        for command in (
+            "git commit -m x 2>&1 | tail -3",
+            "git commit -m x > /dev/null",
+            "git commit -qm x 2>/dev/null",
+            "git commit -m x >log 2>&1",
+            "git commit -m x >> log",
+            "git commit -m x 2> err.log",
+            "git commit -m x 2>&-",
+            "git commit -m x < /dev/null",
+            "git commit -m x </dev/null",
+            "git commit -m x >|log",
+            "git commit -m x -- > log",
+            "git commit -m source app.py > /dev/null",
+        ):
+            with self.subTest(command=command):
+                denied = self.guard("--tool", "Bash", "--command", command)
+                self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
+
+    def test_commit_chokepoint_redirections_keep_real_pathspecs(self) -> None:
+        # Skipping redirections must not widen a genuine pathspec: a docs-only
+        # commit, or one whose pathspec excludes the staged source file, stays
+        # outside the gate.
+        (self.repo / "README.md").write_text("two\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "README.md"], check=True)
+        for command in ("git commit -m docs > /dev/null", "git commit -m docs 2>&1 | tail -3"):
+            with self.subTest(command=command):
+                allowed = self.guard("--tool", "Bash", "--command", command)
+                self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
+        (self.repo / "app.py").write_text("print('two')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "app.py"], check=True)
+        (self.repo / "README.md").write_text("three\n", encoding="utf-8")
+        for command in (
+            "git commit -m docs README.md 2>&1 | tail -1",
+            "git commit -m docs -- README.md > /dev/null",
+        ):
+            with self.subTest(command=command):
+                allowed = self.guard("--tool", "Bash", "--command", command)
+                self.assertEqual(allowed.returncode, 0, allowed.stdout + allowed.stderr)
+
     def test_new_source_file_in_repo_is_material(self) -> None:
         denied = self.guard(
             "--tool", "Write", "--file", str(self.repo / "new" / "feature.py")
