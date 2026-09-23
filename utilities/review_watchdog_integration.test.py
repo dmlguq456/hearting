@@ -15,6 +15,7 @@ from unittest import mock
 
 from dispatch_lifecycle import begin_finite_watchdog
 from review_watchdog import (
+    _pidfd_open,
     _reap_child,
     _receipt,
     _run_watchdog,
@@ -423,6 +424,38 @@ class ReviewWatchdogIntegrationTest(unittest.TestCase):
                  mock.patch("review_watchdog.signal_exact_process_group") as signaler:
                 self.assertFalse(_timeout_authority(identity, child, receipt, budget, jobs))
             signaler.assert_not_called()
+
+
+@unittest.skipUnless(sys.platform.startswith("linux"), "pidfd is Linux-only")
+class PidfdOpenFallbackTest(unittest.TestCase):
+    """Residue drain must keep pidfd exactness on a CPython without os.pidfd_open.
+
+    Builds against pre-5.3 kernel headers (conda's sysroot, for example) omit
+    os.pidfd_open while signal.pidfd_send_signal exists; the drain then failed
+    closed on every call and left attempt descendants running.
+    """
+
+    def test_raw_syscall_opens_a_pidfd_for_a_live_process(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            with mock.patch("review_watchdog.os.pidfd_open", None, create=True):
+                fd = _pidfd_open(child.pid)
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+            finally:
+                os.close(fd)
+            self.assertEqual(child.wait(timeout=5), -signal.SIGKILL)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+    def test_raw_syscall_reports_a_gone_process_as_lookup_error(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait(timeout=5)
+        with mock.patch("review_watchdog.os.pidfd_open", None, create=True):
+            with self.assertRaises(ProcessLookupError):
+                _pidfd_open(child.pid)
 
 
 if __name__ == "__main__":

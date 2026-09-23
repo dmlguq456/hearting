@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_completion_join as join  # noqa: E402
 import dispatch_contract as contract  # noqa: E402
 from dispatch_lifecycle import begin_finite_watchdog
-from review_watchdog import launch_review_watchdog
+from review_watchdog import _pidfd_open, launch_review_watchdog
 
 
 def _module(name: str, filename: str):
@@ -440,7 +440,7 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
                 observation = contract.attempt_tagged_descendants(_row(jobs).metadata)
                 for pid, start, state in observation.members:
                     try:
-                        fd = os.pidfd_open(pid)
+                        fd = _pidfd_open(pid)
                         try:
                             if contract.process_start_ticks(pid) == start and state != "Z":
                                 signal.pidfd_send_signal(fd, signal.SIGKILL)
