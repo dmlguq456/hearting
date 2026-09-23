@@ -229,6 +229,32 @@ class ExecutionAccessTest(unittest.TestCase):
             load_request(self.request_file, context=self.context)
         self.assertEqual("execution-access-invalid-json", raised.exception.reason)
 
+    def test_symlink_loop_is_invalid_even_when_resolve_does_not_raise(self) -> None:
+        # Python 3.13 stopped raising RuntimeError for a loop in non-strict
+        # resolve() and returns the unresolved path instead; mimic that so the
+        # check is exercised on every interpreter, not only on 3.13+.
+        loop_a = self.root / "loop-a"
+        loop_b = self.root / "loop-b"
+        loop_a.symlink_to(loop_b)
+        loop_b.symlink_to(loop_a)
+        original = Path.resolve
+
+        def resolve_like_py313(path: Path, strict: bool = False) -> Path:
+            try:
+                return original(path, strict=strict)
+            except RuntimeError:
+                return Path(os.path.abspath(path))
+
+        with mock.patch.object(Path, "resolve", resolve_like_py313):
+            for roots in ({"writable_roots": [str(loop_a / "leaf")], "read_roots": []},
+                          {"writable_roots": [], "read_roots": [str(loop_a)]}):
+                with self.subTest(**roots):
+                    with self.assertRaises(ExecutionAccessError) as raised:
+                        self.request(justification={}, **roots)
+                    self.assertTrue(
+                        raised.exception.reason.startswith("execution-access-path-invalid:")
+                    )
+
     def test_request_surface_cli_wins_and_environment_is_fallback(self) -> None:
         cli = self.root / "cli.json"
         inherited = self.root / "inherited.json"
