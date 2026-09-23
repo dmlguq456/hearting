@@ -3,6 +3,12 @@
 
 The distiller model only proposes JSON objects. This script owns shape checks,
 snapshot membership checks, and argv-only calls into mem.py.
+
+Exit status: 0 when every proposed record was either stored or skipped as
+invalid, 1 when `mem add` failed for a record that passed validation. Invalid
+lines and id-mutations stay best-effort (skipping them is a judgment about the
+model's output); a failed add is a store failure, and a caller that closes the
+delta window after it drops that record for good.
 """
 import argparse
 import json
@@ -45,6 +51,11 @@ def apply_actions(out_path, mem_path, mode="increment", snapshot_ids_path="",
     mem_env = os.environ.copy()
     if mode == "curate":
         mem_env["MEM_ACTOR"] = "curator"
+
+    # `mem add` exits 0 for its own benign refusals (quality gate, dedupe) and
+    # non-zero only when the write itself failed (e.g. a lock held past
+    # busy_timeout, a schema or capacity refusal, a crash).
+    add_failures = 0
 
     try:
         with open(out_path, "r", encoding="utf-8", errors="replace") as fh:
@@ -136,7 +147,9 @@ def apply_actions(out_path, mem_path, mode="increment", snapshot_ids_path="",
             for field, option in CAPSULE_LISTS.items():
                 for value in capsule[field]:
                     argv.extend([option, value])
-            subprocess.run(argv, env=mem_env)
+            if subprocess.run(argv, env=mem_env).returncode != 0:
+                add_failures += 1
+                sys.stderr.write(f"[distill-apply] mem add failed for a valid {rtype} record\n")
 
         elif action in ("reinforce", "prune", "graduate", "reattribute"):
             rid = rec.get("id")
@@ -180,7 +193,7 @@ def apply_actions(out_path, mem_path, mode="increment", snapshot_ids_path="",
         else:
             sys.stderr.write(f"[distill-parse] skip unknown action: {action!r}\n")
 
-    return 0
+    return 1 if add_failures else 0
 
 
 def main(argv=None):

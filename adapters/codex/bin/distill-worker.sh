@@ -101,7 +101,8 @@ mkdir -p "$store"
 # these; verbatim delta files must not linger — spec §5.5.5 privacy).
 find "$store" -maxdepth 1 \
   \( -name '.codex-distill-lock-*' -o -name '.codex-distill-prompt-*' \
-     -o -name '.codex-distill-out-*' -o -name '.codex-distill-snapids-*' \) \
+     -o -name '.codex-distill-out-*' -o -name '.codex-distill-snapids-*' \
+     -o -name '.codex-distill-fail-*' \) \
   -mmin +60 -delete 2>/dev/null || true
 
 delta=$(
@@ -295,21 +296,43 @@ if [ "${CODEX_DISTILL_APPLY:-}" = "1" ]; then
     echo "codex distill worker: tool-contract — no-tools/action contract not accepted; refusing CODEX_DISTILL_APPLY" >&2
     exit 69
   fi
+  apply_rc=0
   if [ "$exec_ok" = "1" ] && [ -f "$out_file" ]; then
     # shared applier (shell=False, argv-only). --mode gates id-mutations: increment =
     # add-only enforced; curate = snapshot-id membership whitelist via --snapshot-ids.
     AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/apply-distill-actions.py" \
-      "$out_file" "$ROOT/tools/memory/mem.py" --mode "$mode" --snapshot-ids "$snapids_file"
+      "$out_file" "$ROOT/tools/memory/mem.py" --mode "$mode" --snapshot-ids "$snapids_file" \
+      || apply_rc=$?
   fi
-  # Advance the distill marker after an APPLY-mode exec succeeds. The shared applier is
-  # best-effort per record (it returns 0 even if an individual `mem.py add` fails), so
-  # advance is gated on the exec, not per-record apply success — the same
-  # always-advance-after-applier semantics as the portable dispatcher (a poison delta is
-  # not reprocessed forever). A preview-only run (no APPLY) or a failed/timed-out exec
+  # Advance the distill marker after an APPLY-mode exec succeeds. Invalid records stay
+  # best-effort in the shared applier, so a poison delta is not reprocessed forever. A
+  # valid record that `mem.py add` failed to store (applier exit 1) is different: closing
+  # the window would drop it for good, so the delta is kept for up to
+  # MEM_DISTILL_MAX_STRIKES attempts — the portable dispatcher's bounded-retry rule —
+  # and only then advanced. A preview-only run (no APPLY) or a failed/timed-out exec
   # (exec_ok=0) keeps the delta for a later real distill. Fixes the prior re-distill
   # divergence (the old worker never advanced → reprocessed the same delta every run).
   if [ "$exec_ok" = "1" ]; then
-    AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" distill "$sid" --source codex --advance >/dev/null 2>&1 || true
+    strikes="$store/.codex-distill-fail-$sid"
+    advance=1
+    if [ "$apply_rc" -eq 0 ]; then
+      rm -f "$strikes" 2>/dev/null || true
+    else
+      n=$(cat "$strikes" 2>/dev/null || printf 0)
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      n=$((n + 1))
+      if [ "$n" -ge "${MEM_DISTILL_MAX_STRIKES:-3}" ]; then
+        rm -f "$strikes" 2>/dev/null || true
+        echo "codex distill worker: memory store failed for $sid ($n/${MEM_DISTILL_MAX_STRIKES:-3}); advancing" >&2
+      else
+        printf '%s\n' "$n" > "$strikes"
+        advance=0
+        echo "codex distill worker: memory store failed for $sid ($n/${MEM_DISTILL_MAX_STRIKES:-3}); keeping the delta" >&2
+      fi
+    fi
+    if [ "$advance" = "1" ]; then
+      AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" distill "$sid" --source codex --advance >/dev/null 2>&1 || true
+    fi
   fi
 fi
 

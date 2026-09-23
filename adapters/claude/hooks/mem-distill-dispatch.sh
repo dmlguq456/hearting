@@ -333,7 +333,8 @@ fi
 
 # detached spawn: adapter worker contract.
 # Bounded-retry (D, R-2): the marker advances only when the worker/governor exit
-# code says so. Zero valid applier actions is normal zero-output, not failure.
+# code and the applier's store result say so. Zero valid applier actions is
+# normal zero-output, not failure.
 # Run from the original cwd so working records receive the correct project scope.
 (
   # The per-session lock guarantees one output file without a PID suffix.
@@ -396,7 +397,8 @@ fi
   # Parse, validate, and apply action JSON with shell=False and argv-only values.
   # Untrusted stdout stays in a file; the applier passes bodies and IDs as argv
   # elements without sh -c/eval. Curate mutations are membership-limited by the
-  # snapshot ID file. Invalid actions skip without blocking marker advance.
+  # snapshot ID file. Invalid actions skip without blocking marker advance; a
+  # valid record that `mem add` could not store (applier exit 1) does block it.
   # MEM_DISTILL=1 keeps D-37 actor attribution deterministic: without it the
   # applier's `mem add` journals every distilled record as actor=manual
   # (observed 2026-08-13 — recovery-drain output was indistinguishable from
@@ -406,18 +408,21 @@ fi
   # prompt — the worker output is untrusted model text.
   _deny_flag=""
   [ "$MODE" = "periodic-curate" ] && _deny_flag="--deny-reattribute"
+  apply_rc=0
   MEM_DISTILL=1 python3 "$APPLIER" \
     "$OUT" "$MEM" --mode "$WORKER_MODE" --snapshot-ids "$SNAPIDS_FILE" \
-    ${_deny_flag:+"$_deny_flag"} || true
+    ${_deny_flag:+"$_deny_flag"} || apply_rc=$?
 
   if [ "$MODE" = "periodic-curate" ]; then
     # R-3: no delta window to close, so no marker advance and no R-2 strike
     # bookkeeping — this run is judged solely on SNAPSHOT/ARTIFACTS each cycle.
     :
-  # Bounded-retry (D, R-2): only the worker/governor exit code decides marker
-  # advance. Applier zero-output is not failure; it means the model judged there
-  # was nothing worth storing.
-  elif [ "$worker_rc" -eq 0 ]; then
+  # Bounded-retry (D, R-2): the worker/governor exit code and the applier's
+  # store result decide marker advance. Applier zero-output is not failure; it
+  # means the model judged there was nothing worth storing. A record the model
+  # did produce that `mem add` failed to store is: closing the window would drop
+  # it for good, so it takes the strike path below like a failed worker run.
+  elif [ "$worker_rc" -eq 0 ] && [ "$apply_rc" -eq 0 ]; then
     rm -f "$FAILC" 2>/dev/null || true
     python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --advance >/dev/null 2>&1 || true
   elif [ "$worker_rc" -eq 75 ]; then
@@ -429,13 +434,15 @@ fi
     # trigger retries the same delta under a free slot.
     _distill_failure_log "$SID" "$MODE" "$worker_rc" "capacity-skip"
   else
+    _rc=$worker_rc
+    [ "$worker_rc" -eq 0 ] && _rc="apply-$apply_rc"
     _n=$(cat "$FAILC" 2>/dev/null || printf 0)
     case "$_n" in ''|*[!0-9]*) _n=0 ;; esac
     _n=$((_n + 1))
     printf '%s\n' "$_n" > "$FAILC"
-    _distill_failure_log "$SID" "$MODE" "$worker_rc" "$_n"
+    _distill_failure_log "$SID" "$MODE" "$_rc" "$_n"
     if [ "$_n" -ge "${MEM_DISTILL_MAX_STRIKES:-3}" ]; then
-      _distill_failure_log "$SID" "$MODE" "$worker_rc" "forced-advance"
+      _distill_failure_log "$SID" "$MODE" "$_rc" "forced-advance"
       rm -f "$FAILC" 2>/dev/null || true
       python3 "$MEM" distill "$SID" --source "${MEM_SESSION_SOURCE:-claude}" --advance >/dev/null 2>&1 || true
     fi

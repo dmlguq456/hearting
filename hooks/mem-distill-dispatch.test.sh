@@ -848,6 +848,8 @@ printf '#!/bin/sh\nexit 1\n' > "$STUBr2fail/claude"; chmod +x "$STUBr2fail/claud
 printf '#!/bin/sh\n# empty output, success\n' > "$STUBr2ok/claude"; chmod +x "$STUBr2ok/claude"
 STUBr2cap="$(mktemp -d)"; CLEANUP+=("$STUBr2cap")
 printf '#!/bin/sh\nexit 75\n' > "$STUBr2cap/claude"; chmod +x "$STUBr2cap/claude"
+STUBr2applyfail="$(mktemp -d)"; CLEANUP+=("$STUBr2applyfail")
+printf 'import sys\nsys.exit(1)  # mem add failed for a valid record\n' > "$STUBr2applyfail/applier.py"
 
 for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
   disp="${pair%%|*}"; label="${pair##*|}"
@@ -922,6 +924,26 @@ for pair in "$DISPATCH|hooks" "$CLAUDE_DISPATCH|claude-adapter"; do
   [ -f "$STOREr2/.distill-state-$sid4" ] \
     && ok "R-2④ ($label): the later successful run advances the marker" \
     || bad "R-2④ ($label): marker not advanced by the later successful run"
+
+  # ⑤ the worker succeeds but a record it produced could not be stored
+  # (applier exit 1): the window stays on the same strike ladder instead of
+  # being acknowledged, and the third strike still forces the advance.
+  sid5="r2-store-$label"
+  r2_mkfix "$STOREr2" "$PROJr2" "$sid5"
+  export MEM_APPLIER="$STUBr2applyfail/applier.py"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid5" "$STUBr2ok"
+  [ ! -f "$STOREr2/.distill-state-$sid5" ] && [ "$(cat "$STOREr2/.distill-fail-$sid5" 2>/dev/null)" = "1" ] \
+    && ok "R-2⑤ ($label): a store failure keeps the window (strike 1)" \
+    || bad "R-2⑤ ($label): marker advanced past a record that was never stored"
+  grep -q " apply-1 increment $sid5 1\$" "$STOREr2/.distill-failures.log" 2>/dev/null \
+    && ok "R-2⑤ ($label): .distill-failures.log names the applier failure" \
+    || bad "R-2⑤ ($label): applier failure missing from .distill-failures.log"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid5" "$STUBr2ok"
+  r2_run "$disp" "$STOREr2" "$PROJr2" "$sid5" "$STUBr2ok"
+  unset MEM_APPLIER
+  [ -f "$STOREr2/.distill-state-$sid5" ] && [ ! -f "$STOREr2/.distill-fail-$sid5" ] \
+    && ok "R-2⑤ ($label): the third store failure still forces the advance" \
+    || bad "R-2⑤ ($label): store failures never released the window"
 done
 
 # ⑦ .distill-failures.log rotation — pre-seed past the 256 KiB bound, run once, expect <= 262144

@@ -121,7 +121,8 @@ mkdir -p "$store"
 # delta files must not linger (spec §5.5.5 privacy). Mirrors Codex :99-102.
 find "$store" -maxdepth 1 \
   \( -name '.opencode-distill-lock-*' -o -name '.opencode-distill-prompt-*' \
-     -o -name '.opencode-distill-out-*' -o -name '.opencode-distill-snapids-*' \) \
+     -o -name '.opencode-distill-out-*' -o -name '.opencode-distill-snapids-*' \
+     -o -name '.opencode-distill-fail-*' \) \
   -mmin +60 -delete 2>/dev/null || true
 
 # Per-sid lock (D4): mkdir is atomic — session-end and a concurrent session.idle
@@ -299,16 +300,38 @@ else
 fi
 
 if [ "${OPENCODE_DISTILL_APPLY:-}" = "1" ]; then
+  apply_rc=0
   if [ "$exec_ok" = "1" ] && [ -f "$out_file" ]; then
     AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/apply-distill-actions.py" \
-      "$out_file" "$ROOT/tools/memory/mem.py" --mode "$mode" --snapshot-ids "$snapids_file"
+      "$out_file" "$ROOT/tools/memory/mem.py" --mode "$mode" --snapshot-ids "$snapids_file" \
+      || apply_rc=$?
   fi
-  # Advance is gated on the exec, not on per-record applier success — mirrors
-  # Codex :275-284 exactly. A stricter gate would reprocess a poison delta
-  # forever; a preview-only (non-apply) run or a failed/timed-out exec keeps
-  # the delta for a later real distill.
+  # Mirrors the Codex worker: invalid records stay best-effort so a poison delta
+  # is never reprocessed forever, while a valid record that `mem.py add` failed to
+  # store keeps the delta for up to MEM_DISTILL_MAX_STRIKES attempts before the
+  # window is closed anyway. A preview-only (non-apply) run or a failed/timed-out
+  # exec keeps the delta for a later real distill.
   if [ "$exec_ok" = "1" ]; then
-    AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" distill "$sid" --source opencode --advance >/dev/null 2>&1 || true
+    strikes="$store/.opencode-distill-fail-$sid"
+    advance=1
+    if [ "$apply_rc" -eq 0 ]; then
+      rm -f "$strikes" 2>/dev/null || true
+    else
+      n=$(cat "$strikes" 2>/dev/null || printf 0)
+      case "$n" in ''|*[!0-9]*) n=0 ;; esac
+      n=$((n + 1))
+      if [ "$n" -ge "${MEM_DISTILL_MAX_STRIKES:-3}" ]; then
+        rm -f "$strikes" 2>/dev/null || true
+        echo "opencode distill worker: memory store failed for $sid ($n/${MEM_DISTILL_MAX_STRIKES:-3}); advancing" >&2
+      else
+        printf '%s\n' "$n" > "$strikes"
+        advance=0
+        echo "opencode distill worker: memory store failed for $sid ($n/${MEM_DISTILL_MAX_STRIKES:-3}); keeping the delta" >&2
+      fi
+    fi
+    if [ "$advance" = "1" ]; then
+      AGENT_HOME="$AGENT_ROOT" python3 "$ROOT/tools/memory/mem.py" distill "$sid" --source opencode --advance >/dev/null 2>&1 || true
+    fi
   fi
 fi
 
