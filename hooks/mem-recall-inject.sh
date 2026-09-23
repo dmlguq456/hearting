@@ -89,6 +89,16 @@ def transcript_turn(path):
             continue
         if not isinstance(row, dict) or row.get("type") != "user" or row.get("isSidechain") is True:
             continue
+        # A tool result is also a type:user row but not a prompt. The
+        # material-route guard skips it (_is_tool_result_user_row), so the
+        # probe must too; otherwise a prompt that writes no user row (a
+        # background task notification) binds its receipt to the last tool
+        # result, a turn the guard never computes.
+        message = row.get("message")
+        content = message.get("content") if isinstance(message, dict) else None
+        blocks = content if isinstance(content, list) else [content]
+        if any(isinstance(block, dict) and block.get("type") == "tool_result" for block in blocks):
+            continue
         uid = row.get("uuid")
         if isinstance(uid, str) and uid:
             return "transcript-user:" + uid

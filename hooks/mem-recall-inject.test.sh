@@ -44,6 +44,29 @@ expected=hashlib.sha256(b"memory-recall-turn-v1\0transcript-user:claude-user-tur
 assert value["turn_digest"] == expected
 PY
 
+# A background task notification submits a prompt without writing a type:user
+# row, so the transcript's last type:user row is a tool result. The receipt
+# must bind to the turn the material-route guard computes (it skips tool
+# results), or every notification invalidates the session's recall gate.
+printf '%s\n' \
+  '{"type":"user","uuid":"real-prompt-turn","message":{"role":"user","content":"prompt candidate"}}' \
+  '{"type":"assistant","uuid":"tool-use-row","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{}}]}}' \
+  '{"type":"user","uuid":"tool-result-row","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}' \
+  '{"type":"queue-operation","operation":"enqueue"}' \
+  > "$TMP/notification-transcript.jsonl"
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"prompt candidate","cwd":"%s","session_id":"notification-session","transcript_path":"%s"}\n' \
+  "$TMP/project" "$TMP/notification-transcript.jsonl" | "$HOOK" > "$TMP/notification-hook.out"
+python3 - "$MEM_RECALL_RECEIPTS" "$TMP/notification-transcript.jsonl" "$ROOT/hooks/material-route-guard.py" <<'PY'
+import hashlib, importlib.util, json, pathlib, sys
+key=hashlib.sha256(b"memory-recall-opportunity-v1\0notification-session").hexdigest()
+value=json.loads((pathlib.Path(sys.argv[1]) / f"{key}.json").read_text())
+spec=importlib.util.spec_from_file_location("material_route_guard", sys.argv[3])
+guard=importlib.util.module_from_spec(spec); spec.loader.exec_module(guard)
+turn=guard.transcript_turn_id(sys.argv[2])
+assert turn == "transcript-user:real-prompt-turn", turn
+assert value["turn_digest"] == guard.recall_turn_digest(turn), value["turn_digest"]
+PY
+
 printf 'not json' | "$HOOK" > "$TMP/malformed.out" 2> "$TMP/malformed.err"
 [ ! -s "$TMP/malformed.out" ] && [ ! -s "$TMP/malformed.err" ]
 
