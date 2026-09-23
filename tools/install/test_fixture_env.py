@@ -25,6 +25,7 @@ class FixtureEnvironmentTest(unittest.TestCase):
                 "XDG_CACHE_HOME": "/outside/cache",
                 "TMPDIR": "/outside/tmp",
                 "AGENT_DISPATCH_JOBS": "/outside/jobs.log",
+                "HARNESS_CODEX_BIN_DIR": "/outside/codex-ingress",
                 "PATH": os.environ.get("PATH", ""),
             }
             env = fixture_env.build_environment(root / "fixture", source, base=hostile)
@@ -38,6 +39,7 @@ class FixtureEnvironmentTest(unittest.TestCase):
                     )
             self.assertEqual(env["ZDOTDIR"], env["HOME"])
             self.assertEqual(env["AGENT_HOME"], str(source))
+            self.assertNotIn("HARNESS_CODEX_BIN_DIR", env)
 
     def test_safe_fs_rejects_outside_target_before_lock_creation(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

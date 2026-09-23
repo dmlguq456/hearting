@@ -3563,6 +3563,7 @@ def _scheduler_environment() -> dict[str, str]:
         "HARNESS_DATA_ROOT",
         "HARNESS_STATE_ROOT",
         "CODEX_HOME",
+        "HARNESS_CODEX_BIN_DIR",
         "CLAUDE_CONFIG_DIR",
     ):
         if os.environ.get(name):

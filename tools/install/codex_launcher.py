@@ -47,9 +47,40 @@ def default_codex_home() -> Path:
     return Path(raw).expanduser() if raw else _home() / ".codex"
 
 
-def default_bin_dir() -> Path:
+def _recorded_bin_dir(state: dict) -> Path:
+    raw = state.get("wrapper_path", state.get("ingress_path"))
+    if not isinstance(raw, str) or not Path(raw).is_absolute() or Path(raw).name != "codex":
+        raise CodexLauncherError("invalid recorded Codex launcher path")
+    return Path(raw).parent
+
+
+def _select_bin_dir(codex_home: Path, requested: Path | None = None) -> tuple[Path, bool]:
+    """Return the ingress directory and whether it was explicitly selected or owned.
+
+    HARNESS_CODEX_BIN_DIR selects only Codex ingress. Existing schema-2
+    installs retain their recorded path; HARNESS_BIN_DIR remains a fallback
+    for initial/legacy installs, not a request to move an owned launcher.
+    Schema 1 still takes the original migration path to a new default.
+    """
+    if requested is not None:
+        return requested.expanduser().absolute(), True
+    raw = os.environ.get("HARNESS_CODEX_BIN_DIR")
+    if raw:
+        return Path(raw).expanduser().absolute(), True
+    _validate_home(codex_home, create=False)
+    _validate_state_directory(codex_home, create=False)
+    state = _load_state(state_path(codex_home))
+    if state is not None and state.get("schema") == 2:
+        return _recorded_bin_dir(state), True
     raw = os.environ.get("HARNESS_BIN_DIR")
-    return Path(raw).expanduser() if raw else default_codex_home() / ".harness" / "bin"
+    if raw:
+        return Path(raw).expanduser().absolute(), True
+    return codex_home / ".harness" / "bin", raw is not None
+
+
+def default_bin_dir(codex_home: Path | None = None) -> Path:
+    home = (codex_home or default_codex_home()).expanduser().absolute()
+    return _select_bin_dir(home)[0]
 
 
 def vendor_bin_dir() -> Path:
@@ -678,11 +709,18 @@ def capture_snapshot(
             f"invalid-before-mutation: unsupported launcher snapshot operation: {operation}"
         )
     home = (codex_home or default_codex_home()).expanduser().absolute()
-    target = wrapper_path((bin_dir or default_bin_dir()).expanduser().absolute())
     _validate_home(home, create=False)
     _validate_state_directory(home, create=False)
     state_file = state_path(home)
     state = _load_state(state_file) if state_file.exists() else None
+    # Uninstall follows recorded ownership, even when an environment override
+    # now names another directory. Its snapshot must cover the same target.
+    selected = (
+        _recorded_bin_dir(state)
+        if operation == "uninstall" and bin_dir is None and state is not None
+        else bin_dir or default_bin_dir(home)
+    )
+    target = wrapper_path(selected.expanduser().absolute())
     targets: dict[str, Path] = {"state": state_file, "ingress": target}
     if isinstance(state, dict) and state.get("schema") == 1:
         raw_legacy = state.get("wrapper_path", state.get("ingress_path"))
@@ -805,14 +843,12 @@ def _install_impl(
             "invalid-before-mutation: managed profile install requires a profile-scoped snapshot"
         )
     codex_home = (codex_home or default_codex_home()).expanduser().absolute()
-    requested_bin = bin_dir
-    bin_dir = (bin_dir or default_bin_dir()).expanduser().absolute()
-    explicit_bin = requested_bin is not None or os.environ.get("HARNESS_BIN_DIR") is not None
-    if not explicit_bin and allow_legacy_inplace:
+    bin_dir, authorized_bin = _select_bin_dir(codex_home, bin_dir)
+    if not authorized_bin and allow_legacy_inplace:
         bin_dir = vendor_bin_dir()
     target = wrapper_path(bin_dir)
     mode = "legacy-inplace-v1" if target.parent == vendor_bin_dir().absolute() else "protected-path-v1"
-    if mode == "legacy-inplace-v1" and not allow_legacy_inplace and not explicit_bin:
+    if mode == "legacy-inplace-v1" and not allow_legacy_inplace and not authorized_bin:
         raise CodexLauncherError("legacy-inplace-v1 requires explicit compatibility authorization")
     if profile_policy not in {"manage", "manual", "deny"}:
         raise CodexLauncherError("invalid-before-mutation: invalid profile policy")
@@ -1232,7 +1268,7 @@ def status(*, codex_home: Path | None = None, bin_dir: Path | None = None) -> di
       state = _load_state(state_path(codex_home))
     if state is None:
         return {"installed": False, "healthy": False, "detail": "not-installed", "protected": False, "path_precedence": "missing", "binding_state": "missing", "migration": {"status": "none"}, "next_action": "run runtime refresh", "reason": "not-installed"}
-    target = wrapper_path((bin_dir or default_bin_dir()).expanduser().absolute())
+    target = wrapper_path((bin_dir or default_bin_dir(codex_home)).expanduser().absolute())
     real = Path(str(state.get("real_command", "")))
     real_healthy = (
         real.is_absolute()

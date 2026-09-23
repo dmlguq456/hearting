@@ -17,6 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import codex_launcher as launcher
+import distribution
 import fixture_env
 
 
@@ -580,6 +581,93 @@ class CodexLauncherInstallTest(unittest.TestCase):
                 )
         self.assertTrue(profile.is_symlink())
         self.assertEqual(real_profile.read_bytes(), b"foreign\n")
+
+    def test_scheduler_environment_keeps_existing_protected_ingress(self) -> None:
+        protected = self.codex_home / ".harness" / "bin"
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HARNESS_BIN_DIR", None)
+            launcher.install(real_command=str(self.real))
+            scheduled = distribution._scheduler_environment()
+        self.assertEqual(scheduled["HARNESS_BIN_DIR"], str(self.bin_dir))
+        before = launcher.state_path(self.codex_home).read_bytes()
+        with mock.patch.dict(os.environ, scheduled):
+            self.assertEqual(distribution.bin_dir(), self.bin_dir)
+            result = distribution._reconcile_codex_launcher()
+            self.assertEqual(result["status"], "unchanged")
+            self.assertEqual(result["target"], str(protected / "codex"))
+            self.assertEqual(launcher.status()["target"], result["target"])
+            snapshot = launcher.capture_snapshot()
+            try:
+                self.assertEqual(snapshot["ingress"], result["target"])
+            finally:
+                launcher.discard_snapshot(snapshot)
+        self.assertEqual(launcher.state_path(self.codex_home).read_bytes(), before)
+        self.assertTrue(self.target.is_symlink(), "the vendor binding must stay untouched")
+
+    def test_legacy_environment_install_survives_environment_change(self) -> None:
+        # Both the historical vendor location and custom protected directories
+        # remain where the original HARNESS_BIN_DIR installed them.
+        for original in (self.bin_dir, self.root / "custom-ingress"):
+            with self.subTest(original=original), mock.patch.dict(
+                os.environ, {"HARNESS_BIN_DIR": str(original)}
+            ):
+                created = launcher.install()
+                before = launcher.state_path(self.codex_home).read_bytes()
+                os.environ.pop("HARNESS_BIN_DIR")
+                self.assertEqual(launcher.install()["target"], created["target"])
+                os.environ["HARNESS_BIN_DIR"] = str(self.root / "hearting-bin")
+                self.assertEqual(launcher.install()["target"], created["target"])
+                self.assertEqual(launcher.status()["target"], created["target"])
+                self.assertEqual(launcher.state_path(self.codex_home).read_bytes(), before)
+                self.assertEqual(launcher.uninstall()["status"], "restored")
+        self.assertTrue(self.target.is_symlink())
+
+    def test_codex_specific_override_is_separate_and_explicit(self) -> None:
+        protected = self.root / "codex-ingress"
+        with mock.patch.dict(os.environ, {"HARNESS_CODEX_BIN_DIR": str(protected)}):
+            result = launcher.install(real_command=str(self.real))
+            self.assertEqual(result["target"], str(protected / "codex"))
+            self.assertEqual(distribution.bin_dir(), self.bin_dir)
+            self.assertEqual(
+                distribution._scheduler_environment()["HARNESS_CODEX_BIN_DIR"],
+                str(protected),
+            )
+            os.environ["HARNESS_CODEX_BIN_DIR"] = str(self.root / "different-ingress")
+            with self.assertRaisesRegex(launcher.CodexLauncherError, "different bin directory"):
+                launcher.install()
+            # Uninstall already follows its recorded target, independent of
+            # environment selectors; its rollback snapshot must do so too.
+            snapshot = launcher.capture_snapshot(operation="uninstall")
+            try:
+                self.assertEqual(snapshot["ingress"], result["target"])
+            finally:
+                launcher.discard_snapshot(snapshot)
+            self.assertEqual(launcher.uninstall()["status"], "restored")
+        self.assertTrue(self.target.is_symlink())
+
+    def test_explicit_codex_home_selects_its_own_default_ingress(self) -> None:
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(self.root / "other-home")}):
+            os.environ.pop("HARNESS_BIN_DIR", None)
+            result = launcher.install(codex_home=self.codex_home, real_command=str(self.real))
+            expected = str(self.codex_home / ".harness" / "bin" / "codex")
+            self.assertEqual(result["target"], expected)
+            self.assertEqual(launcher.status(codex_home=self.codex_home)["target"], expected)
+            snapshot = launcher.capture_snapshot(codex_home=self.codex_home)
+            try:
+                self.assertEqual(snapshot["ingress"], expected)
+            finally:
+                launcher.discard_snapshot(snapshot)
+
+    def test_invalid_recorded_ingress_fails_without_falling_back(self) -> None:
+        launcher.state_path(self.codex_home).parent.mkdir(parents=True, exist_ok=True)
+        for target in (None, "relative/codex", str(self.root / "not-codex")):
+            with self.subTest(target=target):
+                state = {"schema": 2, "phase": "installed", "wrapper_path": target}
+                launcher.state_path(self.codex_home).write_text(json.dumps(state))
+                before = launcher.state_path(self.codex_home).read_bytes()
+                with self.assertRaises(launcher.CodexLauncherError):
+                    launcher.default_bin_dir()
+                self.assertEqual(launcher.state_path(self.codex_home).read_bytes(), before)
 
     def test_default_install_never_touches_vendor_bin_dir(self) -> None:
         # With no explicit bin_dir/HARNESS_BIN_DIR, install must land under
