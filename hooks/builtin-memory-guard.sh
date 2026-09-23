@@ -63,5 +63,11 @@ rc=$?
 if [ "$rc" -eq 0 ]; then
   exit 0
 fi
-[ "$rc" -eq 2 ] && printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason"
+if [ "$rc" -eq 2 ]; then
+  # The reason quotes a mem command line. Claude Code treats unparseable hook
+  # output as a non-blocking error and lets the write through, so an unescaped
+  # quote here turns the deny into an allow.
+  reason_json=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason_json"
+fi
 exit 0

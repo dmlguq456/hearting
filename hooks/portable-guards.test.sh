@@ -619,6 +619,15 @@ if "$MEM" --file "$TMP/runtime/projects/abc/memory/MEMORY.md" >"$TMP/mem.out" 2>
 else
   [ "$?" -eq 2 ] && ok "builtin memory guard exits 2" || bad "builtin memory guard wrong exit"
 fi
+# Claude Code feeds hook JSON on stdin and parses stdout as the decision;
+# unparseable output is a non-blocking error there, so the write goes through.
+if printf '{"tool_name":"Write","tool_input":{"file_path":"%s"}}' "$TMP/runtime/projects/abc/memory/MEMORY.md" \
+  | "$MEM" 2>/dev/null \
+  | python3 -c 'import json, sys; d = json.load(sys.stdin)["hookSpecificOutput"]; sys.exit(0 if d["permissionDecision"] == "deny" and "mem.py add" in d["permissionDecisionReason"] else 1)' 2>/dev/null; then
+  ok "builtin memory guard stdin mode emits a parseable deny decision"
+else
+  bad "builtin memory guard stdin mode must emit valid JSON with permissionDecision=deny"
+fi
 if "$CODEX" write "$TMP/runtime/projects/abc/memory/MEMORY.md" testsid >"$TMP/codex.out" 2>"$TMP/codex.err"; then
   bad "codex preflight should block memory file write"
 else
