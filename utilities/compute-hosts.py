@@ -46,6 +46,7 @@ LOCAL = "local"
 OWNER_CLAIMS = ".process-owners.json"
 OWNER_CLAIMS_LOCK = ".process-owners.lock"
 OWNER_CLAIMS_SCHEMA = 1
+STOPPED_MARKER = "stopped"
 SSH_BRIDGE_MAX_PROCESSES = 8192
 SSH_BRIDGE_MAX_SOCKET_ROWS = 32768
 SSH_BRIDGE_MAX_FDS = 256
@@ -1387,9 +1388,14 @@ def _run_state(config, run_id):
             exit_code = int(exit_path.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             exit_code = None
+    # A run killed by `stop` never reaches the line that writes exit_code, so
+    # without this marker it would read as running forever. An exit code,
+    # when present, always wins.
+    state = "finished" if exit_code is not None else "running"
+    if exit_code is None and (run_dir / STOPPED_MARKER).is_file():
+        state = "stopped"
     return {"run_id": run_id, "dir": run_dir, "meta": meta,
-            "exit_code": exit_code,
-            "state": "finished" if exit_code is not None else "running"}
+            "exit_code": exit_code, "state": state}
 
 
 def cmd_runs(args):
@@ -1415,7 +1421,7 @@ def cmd_runs(args):
         return 0
     for row in rows:
         tail = (f"exit {row['exit_code']}" if row["exit_code"] is not None
-                else "running")
+                else row["state"])
         command = " ".join(row["meta"].get("command") or [])
         print(f"  {row['run_id']:<34} {tail:<10} {command[:60]}")
     if not rows:
@@ -1435,6 +1441,8 @@ def cmd_tail(args):
         print(line)
     if state["exit_code"] is not None:
         print(f"-- finished, exit {state['exit_code']} --")
+    elif state["state"] != "running":
+        print(f"-- {state['state']}, no exit code --")
     return 0
 
 
@@ -1448,7 +1456,17 @@ def cmd_stop(args):
     (name, host), = _select(config, [host_name])
     result = remote(host, f"tmux kill-session -t {shlex.quote(args.run_id)} "
                           f"2>/dev/null && echo stopped || echo 'not running'")
-    print((result.stdout or result.stderr).strip())
+    answer = (result.stdout or result.stderr).strip()
+    # Only a kill this call performed is recorded. "not running" proves
+    # nothing: a run launched by the setsid fallback has no tmux session.
+    if result.returncode == 0 and answer.splitlines()[-1:] == ["stopped"]:
+        try:
+            (state["dir"] / STOPPED_MARKER).write_text(
+                datetime.datetime.now().isoformat(timespec="seconds") + "\n",
+                encoding="utf-8")
+        except OSError as exc:
+            print(f"note: could not record the stop: {exc}", file=sys.stderr)
+    print(answer)
     return 0
 
 

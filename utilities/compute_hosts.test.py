@@ -7,6 +7,7 @@ launch, log, exit code, listing — is exercised without a network.
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -360,6 +361,89 @@ class ComputeHostsTest(unittest.TestCase):
             time.sleep(0.1)
         log = (self.run_root / run_id / "log").read_text(encoding="utf-8")
         self.assertEqual(log, "|")
+
+    def fake_tmux_env(self):
+        """PATH with a stand-in tmux; never the operator's server or config.
+
+        new-session starts the payload in its own session and records its
+        pid; kill-session hangs that session up the way tmux does, so the
+        payload dies before it can write exit_code.
+        """
+        fakebin = self.root / "fake-tmux-bin"
+        fakebin.mkdir()
+        # Outside self.root, which tearDown removes before cleanups reap.
+        sessions = Path(tempfile.mkdtemp(dir="/var/tmp"))
+        self.addCleanup(shutil.rmtree, sessions, True)
+        tmux = fakebin / "tmux"
+        tmux.write_text(
+            "#!/bin/sh\n"
+            f"dir={sessions}\n"
+            "case \"$1\" in\n"
+            "new-session) setsid /bin/sh -c \"$5\" </dev/null >/dev/null 2>&1 &\n"
+            "  echo $! > \"$dir/$4\" ;;\n"
+            "kill-session) [ -f \"$dir/$3\" ] || exit 1\n"
+            "  kill -HUP \"-$(cat \"$dir/$3\")\" 2>/dev/null || exit 1\n"
+            "  rm -f \"$dir/$3\" ;;\n"
+            "*) exit 1 ;;\n"
+            "esac\n",
+            encoding="utf-8")
+        tmux.chmod(0o755)
+
+        def reap():
+            for pidfile in sessions.iterdir():
+                try:
+                    os.killpg(int(pidfile.read_text()), 9)
+                except (OSError, ValueError):
+                    pass
+        self.addCleanup(reap)
+        return {**self.env, "HOME": str(self.root),
+                "PATH": str(fakebin) + os.pathsep + os.environ["PATH"]}
+
+    def test_stopped_run_is_reported_stopped_not_running(self):
+        env = self.fake_tmux_env()
+
+        def tool(*args):
+            return subprocess.run([sys.executable, str(TOOL), *args],
+                                  text=True, capture_output=True, env=env)
+
+        result = tool("run", "here", "--name", "long", "--",
+                      "bash", "-c", "echo started; sleep 60")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        run_id = result.stdout.split()[1]
+        log = self.run_root / run_id / "log"
+        for _ in range(50):
+            if log.is_file() and log.read_text(encoding="utf-8").strip():
+                break
+            time.sleep(0.1)
+        self.assertEqual(json.loads(tool("runs", "--json").stdout)[0]["state"],
+                         "running")
+        stopped = tool("stop", run_id)
+        self.assertEqual(stopped.stdout.strip(), "stopped", stopped.stderr)
+        time.sleep(0.3)
+        self.assertFalse((self.run_root / run_id / "exit_code").exists())
+        listed = json.loads(tool("runs", "--json").stdout)
+        self.assertEqual(listed[0]["state"], "stopped")
+        self.assertIsNone(listed[0]["exit_code"])
+        self.assertIn("stopped", tool("runs").stdout)
+        self.assertIn("-- stopped, no exit code --", tool("tail", run_id).stdout)
+
+    def test_stop_after_the_run_finished_keeps_its_exit_code(self):
+        env = self.fake_tmux_env()
+        result = subprocess.run(
+            [sys.executable, str(TOOL), "run", "here", "--", "bash", "-c", "exit 3"],
+            text=True, capture_output=True, env=env)
+        run_id = result.stdout.split()[1]
+        exit_path = self.run_root / run_id / "exit_code"
+        for _ in range(50):
+            if exit_path.is_file():
+                break
+            time.sleep(0.1)
+        stopped = subprocess.run([sys.executable, str(TOOL), "stop", run_id],
+                                 text=True, capture_output=True, env=env)
+        self.assertEqual(stopped.stdout.strip(), "not running", stopped.stderr)
+        listed = json.loads(self.run_tool("runs", "--json").stdout)
+        self.assertEqual((listed[0]["state"], listed[0]["exit_code"]), ("finished", 3))
+        self.assertFalse((self.run_root / run_id / "stopped").exists())
 
     def test_failure_exit_code_is_preserved(self):
         result = self.run_tool("run", "here", "--", "bash", "-c", "exit 7")
