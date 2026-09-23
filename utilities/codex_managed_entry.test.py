@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -341,6 +343,77 @@ class ManagedEntryTest(unittest.TestCase):
         remote = next(value for value in commands if "--remote" in value)
         self.assertNotIn("--enable", app_server)
         self.assertNotIn("--enable", remote)
+
+    def owned_processes(self) -> list[int]:
+        """Live processes whose argv names this test's private directory."""
+        found = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                argv = (entry / "cmdline").read_bytes()
+                state = (entry / "stat").read_text().rsplit(")", 1)[1].split()[0]
+            except (OSError, IndexError):
+                continue
+            if str(self.base).encode() in argv and state != "Z":
+                found.append(int(entry.name))
+        return found
+
+    def start_waiting_client(self) -> subprocess.Popen[str]:
+        waiting = self.base / "waiting-client.py"
+        started = self.base / "client-started"
+        waiting.write_text(
+            "import pathlib, sys, time\n"
+            f"pathlib.Path({str(started)!r}).write_text('1')\n"
+            "time.sleep(60)\n",
+            encoding="utf-8",
+        )
+        command = self.command()
+        command[command.index("--client-command") + 1] = f"{sys.executable} {waiting}"
+        # SIGINT must reach Python as KeyboardInterrupt even when the test
+        # runner itself was started with SIGINT ignored.
+        # stderr goes to a file: an orphaned child holding an inherited pipe
+        # would otherwise hang the test instead of failing it.
+        self.stderr_path = self.base / "entry-stderr.txt"
+        with self.stderr_path.open("w", encoding="utf-8") as stderr:
+            process = subprocess.Popen(
+                command, text=True, stdout=subprocess.DEVNULL, stderr=stderr,
+                env={**os.environ, "FLEET_SESSION_REGISTRY_DIR": str(self.base / "fleet")},
+                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
+            )
+        self.addCleanup(lambda: [os.kill(pid, signal.SIGKILL) for pid in self.owned_processes()])
+        deadline = time.monotonic() + 15
+        while not started.exists():
+            self.assertIsNone(process.poll(), self.stderr_path.read_text(encoding="utf-8"))
+            self.assertLess(time.monotonic(), deadline, "client never started")
+            time.sleep(0.05)
+        return process
+
+    def assert_torn_down(self) -> None:
+        deadline = time.monotonic() + 5
+        while self.owned_processes() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual(self.owned_processes(), [])
+        for name in ("app-server.sock", "managed-tui.sock", "managed-control.sock"):
+            self.assertFalse((self.state / name).exists(), name)
+
+    def test_sigterm_tears_down_client_app_server_and_gateway(self) -> None:
+        process = self.start_waiting_client()
+        process.send_signal(signal.SIGTERM)
+        process.wait(timeout=30)
+        stderr = self.stderr_path.read_text(encoding="utf-8")
+        self.assertEqual(process.returncode, 128 + signal.SIGTERM, stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assert_torn_down()
+
+    def test_ctrl_c_exits_130_without_traceback_after_cleanup(self) -> None:
+        process = self.start_waiting_client()
+        process.send_signal(signal.SIGINT)
+        process.wait(timeout=30)
+        stderr = self.stderr_path.read_text(encoding="utf-8")
+        self.assertEqual(process.returncode, 130, stderr)
+        self.assertNotIn("Traceback", stderr)
+        self.assert_torn_down()
 
 
 if __name__ == "__main__":

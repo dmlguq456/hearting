@@ -260,6 +260,38 @@ def terminate(process: subprocess.Popen[Any] | None) -> None:
         process.wait(timeout=5)
 
 
+def terminate_client(process: subprocess.Popen[Any] | None) -> None:
+    """Stop the TUI client, which shares this process group and tty."""
+
+    if process is None or process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+class EntrySignal(BaseException):
+    """SIGTERM/SIGHUP, raised so the launch's `finally` cleanup still runs."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def raise_entry_signal(signum: int, _frame: Any) -> None:
+    raise EntrySignal(signum)
+
+
+def shield_cleanup() -> None:
+    # A second Ctrl-C or TERM must not abort the teardown that the first one
+    # started; the process exits as soon as cleanup returns.
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_IGN)
+
+
 def cleanup_socket(path: Path) -> None:
     """Remove only an exact leftover socket inside the explicit state dir."""
 
@@ -480,6 +512,8 @@ def execute(args: argparse.Namespace) -> int:
             pass
         return client_proc.wait()
     finally:
+        shield_cleanup()
+        terminate_client(client_proc)
         for pid in (client_pid, app_server_pid):
             if pid is not None:
                 try:
@@ -494,8 +528,17 @@ def execute(args: argparse.Namespace) -> int:
 
 def main() -> int:
     args = parser().parse_args()
+    # Without handlers, TERM/HUP (closed terminal, supervisor stop) would kill
+    # this process outright and orphan the app-server and gateway, which run in
+    # their own sessions. Unwinding through execute() reuses its cleanup.
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, raise_entry_signal)
     try:
         return execute(args)
+    except KeyboardInterrupt:
+        return 128 + signal.SIGINT
+    except EntrySignal as exc:
+        return 128 + exc.signum
     except (EntryError, OSError) as exc:
         print(
             canonical({"status": "error", "reason": str(exc)}),
