@@ -147,5 +147,106 @@ class LineContinuationTest(unittest.TestCase):
         )
 
 
+class NewlineAndHeredocTest(unittest.TestCase):
+    """An unquoted newline ends a command like `;`, and a here-document body is
+    stdin text, not shell words. Before this, the second line of a multi-line
+    command became operands of the first (`mkdir -p x` + newline + `ls x` wrote
+    `ls`), and heredoc'd scripts or commit messages produced redirect targets
+    such as `0.5` or `=` -- real `artifact-write-outside-node-scope` blocks on
+    `…/ls`, `…/0.0`, `…/4` and `…/$E/metrics.jsonl` (2026-09-09..18)."""
+
+    @staticmethod
+    def segments(cmd):
+        return list(t._shell_segments(cmd))
+
+    def test_newline_separates_commands(self):
+        result = t.parse("mkdir -p /r/x/eval\nls /r/x", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/x/eval"])
+        self.assertEqual(result["undecidable"], [])
+
+    def test_newline_inside_quotes_stays_part_of_the_word(self):
+        self.assertEqual(
+            self.segments('echo "a\nb"\nls'),
+            [["echo", "a\nb"], ["ls"]],
+        )
+        result = t.parse("printf 'one\nmkdir /r/bogus\n' > /r/q\ntouch /r/t", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/q", "/r/t"])
+
+    def test_heredoc_body_is_not_tokenized_as_shell(self):
+        result = t.parse("cat <<EOF > /r/notes.txt\nratio > 0.5 means pass\nEOF", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/notes.txt"])
+        self.assertEqual(result["undecidable"], [])
+
+    def test_commit_message_heredoc_invents_no_target(self):
+        result = t.parse("git commit -F - <<'MSG'\nfix: a >= 4\nMSG", Path("/r"))
+        self.assertEqual(result, {"decidable": [], "undecidable": []})
+
+    def test_heredoc_body_cannot_hide_the_operator_line_write(self):
+        # An apostrophe in the body used to make shlex fail on the whole
+        # command, so the real write below was neither blocked nor recorded.
+        result = t.parse("cat <<EOF > /r/p.md\nit's fine\nEOF", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/p.md"])
+        result = t.parse("cat <<EOF | tee /r/tee\nbody > 3\nEOF", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/tee"])
+
+    def test_heredoc_operator_forms(self):
+        cmd = (
+            "cat <<-'EOF' > /r/t\n\tx > 1\n\tEOF\n"
+            'cat <<"END" >/r/u\ny > 2\nEND\n'
+            "cat << \\STOP > /r/v\nz > 3\nSTOP\n"
+            "cat <<A <<-B > /r/two\na > 4\nA\n\tb > 5\n\tB\n"
+            "touch /r/after"
+        )
+        result = t.parse(cmd, Path("/r"))
+        self.assertEqual(
+            result["decidable"], ["/r/after", "/r/t", "/r/two", "/r/u", "/r/v"]
+        )
+        self.assertEqual(result["undecidable"], [])
+
+    def test_unterminated_heredoc_keeps_the_old_tokenization(self):
+        # Without a terminator line the pre-pass does not guess where shell
+        # text resumes: the lines before the heredoc are split, the rest is
+        # tokenized exactly as before this change.
+        result = t.parse("touch /r/first\ncat <<EOF\nno terminator > 3\n", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/3", "/r/first"])
+
+    def test_arithmetic_shift_is_not_a_heredoc(self):
+        result = t.parse("echo $((1<<2)) > /r/n\ntouch /r/m", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/m", "/r/n"])
+
+    def test_continuation_still_joins_across_the_newline(self):
+        result = t.parse("mkdir -p /r/a \\\n  /r/b\nls /r/c", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/a", "/r/b"])
+
+
+class UnknownCwdTest(unittest.TestCase):
+    """After a `cd` this parser cannot follow, the shell's cwd is unknown:
+    relative targets are Tier B, never resolved against the old cwd."""
+
+    def test_cd_to_undecidable_directory(self):
+        result = t.parse("cd $X/sub; echo hi >> out.txt", Path("/r"))
+        self.assertEqual(result["decidable"], [])
+        self.assertEqual(
+            [row["reason"] for row in result["undecidable"]],
+            ["relative-target-after-unknown-cd"],
+        )
+        result = t.parse("cd `pwd`/sub; echo hi >> /r/abs.txt; touch rel", Path("/r"))
+        self.assertEqual(result["decidable"], ["/r/abs.txt"])
+        self.assertEqual(len(result["undecidable"]), 1)
+
+    def test_cd_inside_a_multiline_subshell_or_conditional(self):
+        for cmd in (
+            "(\n  cd /r/sub\n  make\n)\ntouch out.txt",
+            "if [ -d b ]; then\n  cd b\nfi\ntouch out.txt",
+        ):
+            with self.subTest(cmd=cmd):
+                result = t.parse(cmd, Path("/r"))
+                self.assertEqual(result["decidable"], [])
+                self.assertEqual(
+                    [row["reason"] for row in result["undecidable"]],
+                    ["relative-target-after-unknown-cd"],
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

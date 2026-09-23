@@ -1582,6 +1582,63 @@ class MaterialRouteGuardTest(unittest.TestCase):
         )
         self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
 
+    def test_j_a_commit_on_a_later_line_is_still_seen_by_the_gate(self):
+        # An unquoted newline separates commands. The tokenizer used to read it
+        # as a space, so the second line joined the first line's segment and
+        # its commit was parsed as arguments of the first `git` (`status`).
+        (self.repo / "app.py").write_text("print('two')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "app.py"], check=True)
+        denied = self.guard(
+            "--tool", "Bash", "--command", "git status --short\ngit commit -m wip",
+            opportunity=False,
+        )
+        self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
+
+    def test_j_a_cd_on_its_own_line_moves_the_gate_to_that_repository(self):
+        # `cd other` + newline + `git commit` used to be one segment: the cd was
+        # ignored and the materiality diff ran in the session repository.
+        other = self.base / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
+        (other / "tool.py").write_text("print('one')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(other), "add", "tool.py"], check=True)
+        denied = self.guard(
+            "--tool", "Bash",
+            "--command", "cd %s\ngit commit -m wip" % shlex.quote(str(other)),
+            opportunity=False,
+        )
+        self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
+
+    def test_j_a_heredoc_commit_message_is_not_read_as_pathspecs(self):
+        # The message body used to be tokenized as shell words, and every word
+        # became a pathspec that narrowed the materiality diff to nothing.
+        (self.repo / "app.py").write_text("print('two')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "app.py"], check=True)
+        for command in (
+            "git commit -F - <<'MSG'\nfix: a >= 4\nMSG",
+            "git commit -F - <<MSG\nfix: don't stop\nMSG",
+        ):
+            with self.subTest(command=command):
+                denied = self.guard("--tool", "Bash", "--command", command, opportunity=False)
+                self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
+
+    def test_j_a_cd_inside_a_multiline_conditional_does_not_move_the_gate_away(self):
+        # With newlines separating commands a `cd` inside `if`...`fi` or a
+        # subshell is a segment of its own, but it may never run or may not
+        # persist. The commit must still be checked where it may actually run.
+        (self.repo / "app.py").write_text("print('two')\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "app.py"], check=True)
+        outside = self.base / "outside"
+        outside.mkdir()
+        for command in (
+            "if false; then\n  cd %s\nfi\ngit status\ngit commit -m wip",
+            "(\n  cd %s\n)\ngit status\ngit commit -m wip",
+        ):
+            command %= shlex.quote(str(outside))
+            with self.subTest(command=command):
+                denied = self.guard("--tool", "Bash", "--command", command, opportunity=False)
+                self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
+
 
 class ArtifactBucketCapsTest(unittest.TestCase):
     """W7C: one bucket table gates legacy, cycle, and shared layouts."""

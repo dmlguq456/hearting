@@ -5,7 +5,8 @@ Given a shell command string and a cwd, returns the set of literal write
 targets it can decide (Tier A: `>`/`>>`/`tee`/`cp`/`mv`/`install`/`ln`/
 `mkdir -p`/`touch`/`rm`, with one level of `sh -c "<literal>"` recursion) and
 the set of segments it cannot decide (Tier B: `$`/backtick/`$(`/glob-meta
-targets, interpreter-mediated writes, or a parse failure).
+targets, interpreter-mediated writes, relative targets after a `cd` it cannot
+follow, or a parse failure).
 
 Fail-safe by construction: anything not confidently Tier A becomes Tier B,
 never a Tier A block. Never silently loses information — an unparseable
@@ -31,6 +32,7 @@ _spec = _ilu.spec_from_file_location(
 _mrg = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(_mrg)
 _shell_segments = _mrg._shell_segments  # noqa: SLF001 (deliberate reuse, not duplication)
+_opens_compound = _mrg._opens_compound  # noqa: SLF001
 
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
 _INTERPRETERS = {"python", "python3", "perl", "ruby", "node", "awk"}
@@ -55,7 +57,15 @@ def parse(command: str, cwd: Path) -> dict:
     decidable: list[str] = []
     undecidable: list[dict] = []
 
-    def walk(cmd: str, base: Path, depth: int) -> None:
+    def add(cwd: Path | None, raw: str, segment: list[str]) -> None:
+        # With the cwd unknown (see the `cd` branch below) only an absolute
+        # path is still a confident Tier A target.
+        if cwd is None and not Path(raw).is_absolute():
+            undecidable.append({"reason": "relative-target-after-unknown-cd", "segment": " ".join(segment)[:200]})
+        else:
+            decidable.append(_resolve(cwd or Path("/"), raw))
+
+    def walk(cmd: str, base: Path | None, depth: int) -> None:
         if depth > 1:
             undecidable.append({"reason": "recursion-depth-exceeded", "segment": cmd[:200]})
             return
@@ -65,14 +75,28 @@ def parse(command: str, cwd: Path) -> dict:
             undecidable.append({"reason": "parse-error", "segment": cmd[:200]})
             return
         current_cwd = base
+        scoped = False
         for segment in segments:
             if not segment:
                 continue
             head = Path(segment[0]).name
+            scoped = scoped or _opens_compound(segment)
 
-            if head == "cd" and len(segment) == 2 and not segment[1].startswith("-"):
-                current_cwd = Path(_resolve(current_cwd, segment[1]))
-                continue
+            if head in {"cd", "pushd", "popd"}:
+                # Follow only a plain `cd <literal>` outside any subshell,
+                # group, loop or conditional seen so far. Any other directory
+                # change (`cd $X/sub`, `cd "$(...)"`, bare `cd`, `cd -`,
+                # pushd/popd, or a cd that may be scoped or skipped) leaves the
+                # cwd unknown: later relative targets become Tier B rather
+                # than being resolved against a directory the shell never
+                # entered. Absolute targets stay Tier A.
+                plain = head == "cd" and len(segment) == 2 and not segment[1].startswith("-")
+                if not plain or scoped or _is_undecidable_target(segment[1]):
+                    current_cwd = None
+                elif current_cwd is not None or Path(segment[1]).is_absolute():
+                    current_cwd = Path(_resolve(current_cwd or Path("/"), segment[1]))
+                if plain:
+                    continue
 
             if head in _SHELLS:
                 try:
@@ -114,7 +138,7 @@ def parse(command: str, cwd: Path) -> dict:
                     if _is_undecidable_target(target):
                         undecidable.append({"reason": "undecidable-redirect-target", "segment": " ".join(segment)[:200]})
                     else:
-                        decidable.append(_resolve(current_cwd, target))
+                        add(current_cwd, target, segment)
                 idx += consumed
             if redirected:
                 continue
@@ -131,13 +155,13 @@ def parse(command: str, cwd: Path) -> dict:
 
             if head == "tee":
                 for a in args:
-                    decidable.append(_resolve(current_cwd, a))
+                    add(current_cwd, a, segment)
             elif head in {"cp", "mv", "install", "ln"}:
                 # Last literal argument is the destination.
-                decidable.append(_resolve(current_cwd, args[-1]))
+                add(current_cwd, args[-1], segment)
             elif head in {"mkdir", "touch", "rm"}:
                 for a in args:
-                    decidable.append(_resolve(current_cwd, a))
+                    add(current_cwd, a, segment)
 
     walk(command, cwd, 0)
     return {"decidable": sorted(set(decidable)), "undecidable": undecidable}

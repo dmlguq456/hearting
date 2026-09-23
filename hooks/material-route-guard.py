@@ -836,9 +836,193 @@ def require_recall_opportunity(session_id: str, turn_id: str, root: Path) -> Non
         raise RouteError("recall-opportunity-result-count-invalid")
 
 
+# Unquoted shell metacharacters that end a here-document delimiter word.
+_HEREDOC_WORD_END = frozenset(" \t\n;&|<>()")
+
+
+def _heredoc_operator(command: str, index: int) -> tuple[int, str, bool, bool] | None:
+    """Read the here-document operator at `command[index]` (`<<`, not `<<<`).
+
+    Returns `(end, delimiter, strip_tabs, quoted)` with `end` just past the
+    delimiter word, or None for a word this reader does not handle confidently
+    (empty, an expansion, an escape inside quotes, a newline inside quotes).
+    """
+    length = len(command)
+    position = index + 2
+    strip_tabs = position < length and command[position] == "-"
+    if strip_tabs:
+        position += 1
+    while position < length and command[position] in " \t":
+        position += 1
+    word: list[str] = []
+    quoted = False
+    while position < length and command[position] not in _HEREDOC_WORD_END:
+        char = command[position]
+        if char == "\\":
+            if position + 1 >= length or command[position + 1] == "\n":
+                return None
+            word.append(command[position + 1])
+            quoted = True
+            position += 2
+        elif char in "'\"":
+            close = command.find(char, position + 1)
+            if close < 0:
+                return None
+            text = command[position + 1:close]
+            if "\n" in text or (char == '"' and any(c in text for c in "\\$`")):
+                return None
+            word.append(text)
+            quoted = True
+            position = close + 1
+        elif char in "$`":
+            return None
+        else:
+            word.append(char)
+            position += 1
+    if not word:
+        return None
+    return position, "".join(word), strip_tabs, quoted
+
+
+def _heredoc_bodies_end(
+    command: str, start: int, pending: list[tuple[str, bool, bool]]
+) -> int | None:
+    """Index just past the terminator line of the last `pending` here-document.
+
+    The bodies follow each other from `start`, in operator order. None when a
+    terminator line is missing.
+    """
+    position = start
+    for delimiter, strip_tabs, quoted in pending:
+        joined = False
+        while True:
+            if position >= len(command):
+                return None
+            newline = command.find("\n", position)
+            stop = len(command) if newline < 0 else newline
+            line = command[position:stop]
+            position = stop + 1
+            if not joined and (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+            # In an unquoted body `\`+newline joins lines, so the next line
+            # cannot be the terminator (bash reads `foo\` + `EOF` as `fooEOF`).
+            joined = not quoted and (len(line) - len(line.rstrip("\\"))) % 2 == 1
+    return min(position, len(command))
+
+
+def _explicit_command_breaks(command: str) -> str:
+    """Pre-pass for `_shell_segments`: expose the command's line structure.
+
+    shlex below splits commands only on `;&|` and reads everything else as
+    words, which misses two pieces of shell syntax:
+
+    * An unquoted, unescaped newline ends a command exactly like `;`. Without
+      this, `mkdir -p out/eval` + newline + `ls out` became ONE `mkdir` with
+      `ls` as an operand, and a `git commit` on a later line hid behind the
+      first line's `git status`. It is emitted as "\\n;": the newline first,
+      so a backslash ending a comment line escapes that newline (dropped
+      below like any continuation artefact), never the separator.
+    * A here-document body is stdin text, not shell words: `x > 0.5` in a
+      heredoc'd script is not a redirect and a commit message line is not a
+      pathspec. The operator and its delimiter (`<<EOF`, `<<-EOF`,
+      `<< 'EOF'`, several on one line) become a space, the rest of that line
+      is kept (`cat <<EOF > out` still writes `out`), and the body and
+      terminator lines are dropped.
+
+    Quotes, backslash escapes, comments and `((...))` arithmetic are tracked
+    only to locate those two constructs; nothing else is rewritten. A
+    here-document that cannot be delimited confidently (a delimiter word not
+    read above, or no terminator line) returns everything from its line on
+    verbatim -- the old tokenization -- rather than guessing where shell text
+    resumes.
+    """
+    out: list[str] = []
+    spans: list[tuple[int, int]] = []           # heredoc operators on this line
+    pending: list[tuple[str, bool, bool]] = []  # their (delimiter, <<-, quoted)
+    line_start = index = 0
+    quote = ""
+    comment = False
+    word_start = True
+    arithmetic = 0
+    length = len(command)
+    while index < length:
+        char = command[index]
+        if comment and char != "\n":
+            index += 1
+            continue
+        comment = False
+        if quote:
+            if char == quote:
+                quote = ""
+            elif char == "\\" and quote == '"':
+                index += 1
+            index += 1
+            continue
+        if char == "\n":
+            resume = index + 1
+            if pending:
+                resume = _heredoc_bodies_end(command, resume, pending)
+                if resume is None:
+                    break
+            line = command[line_start:index]
+            for start, stop in reversed(spans):
+                line = line[:start - line_start] + " " + line[stop - line_start:]
+            out.append(line + "\n;")
+            line_start = index = resume
+            spans, pending, word_start = [], [], True
+            continue
+        if char == "\\":
+            index += 2  # an escaped character, `\`+newline continuation included
+            word_start = False
+            continue
+        if char in "'\"":
+            quote = char
+        elif char == "#" and word_start:
+            comment = True
+        elif command.startswith("((", index):
+            arithmetic += 1
+            index += 1
+        elif command.startswith("))", index) and arithmetic:
+            arithmetic -= 1
+            index += 1
+        elif command.startswith("<<<", index):
+            index += 2  # a here-string: an ordinary word follows
+        elif command.startswith("<<", index) and not arithmetic:
+            operator = _heredoc_operator(command, index)
+            if operator is None:
+                break
+            stop, delimiter, strip_tabs, quoted = operator
+            spans.append((index, stop))
+            pending.append((delimiter, strip_tabs, quoted))
+            index = stop
+            continue
+        word_start = char in " \t;&|()<>"
+        index += 1
+    out.append(command[line_start:])
+    return "".join(out)
+
+
+# Segment heads that open a subshell, brace group, function body, loop or
+# conditional. Once newlines separate commands, a `cd` on its own line inside
+# `(`...`)` or `if`...`fi` is a segment of its own, yet it may not outlive the
+# construct (a subshell's cd) or may never run; cwd tracking that follows it
+# must not treat it as a plain top-level `cd`.
+_COMPOUND_HEADS = frozenset({
+    "{", "if", "then", "elif", "else", "for", "select", "while", "until", "do",
+    "case", "function", "coproc",
+})
+
+
+def _opens_compound(segment: list[str]) -> bool:
+    head = segment[0]
+    return head in _COMPOUND_HEADS or head.startswith("(") or head.endswith("()")
+
+
 def _shell_segments(command: str) -> Iterable[list[str]]:
     try:
-        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer = shlex.shlex(
+            _explicit_command_breaks(command), posix=True, punctuation_chars=";&|"
+        )
         lexer.whitespace_split = True
         lexer.commenters = ""
         tokens = list(lexer)
@@ -1096,24 +1280,32 @@ def _git_commit_segments(
     if depth > 4:
         return []
     found: list[tuple[Path, bool, str, list[str]]] = []
-    current_cwd = base.resolve()
+    # Every directory the command may be in at this point. A `cd` after a
+    # subshell, group, loop or conditional was opened may not persist or may
+    # not run at all, so it adds its target instead of replacing the cwd: the
+    # commit is then checked in each candidate repository, never in fewer.
+    cwds = [base.resolve()]
+    scoped = False
     for segment in _shell_segments(command):
         if not segment:
             continue
+        scoped = scoped or _opens_compound(segment)
         if Path(segment[0]).name in {"sh", "bash", "zsh", "dash", "ksh"}:
             try:
                 shell_index = segment.index("-c")
             except ValueError:
                 shell_index = -1
             if shell_index >= 0 and shell_index + 1 < len(segment):
-                found.extend(
-                    _git_commit_segments(
-                        segment[shell_index + 1], current_cwd, depth=depth + 1
+                for current_cwd in cwds:
+                    found.extend(
+                        _git_commit_segments(
+                            segment[shell_index + 1], current_cwd, depth=depth + 1
+                        )
                     )
-                )
                 continue
         if segment[0] == "cd" and len(segment) == 2 and not segment[1].startswith("-"):
-            current_cwd = _resolve_path(current_cwd, segment[1])
+            moved = [_resolve_path(current_cwd, segment[1]) for current_cwd in cwds]
+            cwds = list(dict.fromkeys((cwds + moved) if scoped else moved))
             continue
         git_index = next(
             (index for index, value in enumerate(segment) if Path(value).name == "git"),
@@ -1122,23 +1314,23 @@ def _git_commit_segments(
         if git_index is None:
             continue
         index = git_index + 1
-        command_cwd = current_cwd
+        command_cwds = cwds
         while index < len(segment):
             token = segment[index]
             if token == "-C" and index + 1 < len(segment):
-                command_cwd = _resolve_path(command_cwd, segment[index + 1])
+                command_cwds = [_resolve_path(cwd, segment[index + 1]) for cwd in command_cwds]
                 index += 2
                 continue
             if token.startswith("-C") and len(token) > 2:
-                command_cwd = _resolve_path(command_cwd, token[2:])
+                command_cwds = [_resolve_path(cwd, token[2:]) for cwd in command_cwds]
                 index += 1
                 continue
             if token == "--work-tree" and index + 1 < len(segment):
-                command_cwd = _resolve_path(command_cwd, segment[index + 1])
+                command_cwds = [_resolve_path(cwd, segment[index + 1]) for cwd in command_cwds]
                 index += 2
                 continue
             if token.startswith("--work-tree="):
-                command_cwd = _resolve_path(command_cwd, token.split("=", 1)[1])
+                command_cwds = [_resolve_path(cwd, token.split("=", 1)[1]) for cwd in command_cwds]
                 index += 1
                 continue
             if token in {"-c", "--config-env", "--exec-path", "--git-dir", "--work-tree"}:
@@ -1221,7 +1413,8 @@ def _git_commit_segments(
                 continue
             paths.append(token)
             offset += 1
-        found.append((command_cwd, all_tracked, path_mode, paths))
+        for command_cwd in dict.fromkeys(command_cwds):
+            found.append((command_cwd, all_tracked, path_mode, paths))
     return found
 
 
