@@ -1119,6 +1119,50 @@ class MaterialRouteGuardTest(unittest.TestCase):
         self.assertEqual(tail, ["--slug", "x", "--cwd", str(self.repo)])
         self.assertIsNone(fixture_guard._route_compile_argv(["capability-route.py", "status", "--artifact-root", "x"]))
 
+    def test_posttool_compose_start_inline_binds_via_start_receipt(self) -> None:
+        """`compose --start` prints the start receipt instead of the compose
+        receipt. An inline route is executed by this very session, so that
+        receipt must still let the PostToolUse bind resolve the canonical route
+        file; otherwise the session's next write is `session-route-missing`."""
+        task = self.base / "task.txt"
+        task.write_text("fix the fixture typo\n", encoding="utf-8")
+        command = [
+            sys.executable, str(ROUTER), "compose",
+            "--slug", "compose-start-fixture", "--unassigned", "--cwd", str(self.repo),
+            "--start", "--prompt-file", str(task), "--jobs", str(self.base / "jobs.log"),
+        ]
+        result = subprocess.run(
+            command, text=True, capture_output=True,
+            env={**os.environ, "AGENT_HOME": str(ROOT)},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        receipt = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(receipt["state"], "inline")
+        self.assertEqual(receipt["required_action"], "execute-inline")
+
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": " ".join(shlex.quote(part) for part in command)},
+            "tool_response": {"stdout": result.stdout, "stderr": result.stderr},
+            "cwd": str(self.repo),
+            "session_id": "compose-start-session",
+        }
+        hook_result = subprocess.run(
+            [sys.executable, str(GUARD)], input=json.dumps(payload), text=True,
+            capture_output=True, env={**os.environ, "AGENT_HOME": str(self.home)},
+        )
+        self.assertEqual(hook_result.returncode, 0, hook_result.stderr)
+        allowed = self.guard(
+            "--tool", "Edit", "--file", str(self.repo / "app.py"), session="compose-start-session"
+        )
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertEqual(Path(receipt["artifact_root"]), (self.repo / ".agent_reports").resolve())
+        self.assertEqual(
+            Path(receipt["route_file"]),
+            Path(receipt["artifact_root"]) / ".runtime" / "routes" / f"{receipt['route_id']}.json",
+        )
+
     def test_posttool_compile_without_output_and_without_stdout_does_not_bind(self) -> None:
         command = self._compile_command()
         shell_command = " ".join(shlex.quote(part) for part in command)

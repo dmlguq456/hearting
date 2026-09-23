@@ -421,7 +421,14 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
 
 def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
                decision="proceed", run=subprocess.run):
+    # `artifact_root` rides along with the handle, as in `compose_receipt`: this
+    # receipt replaces that one on stdout under `compose --start`, and the
+    # material-route guard's PostToolUse bind resolves the canonical route file
+    # from `route_id` + `artifact_root` there. Without it an inline route (the
+    # only shape the calling session executes itself) is never bound, and the
+    # session's next edit or commit is denied `session-route-missing`.
     result = {"route_file": str(Path(path).resolve()), "route_id": route["route_id"],
+              "artifact_root": route.get("artifact_root"),
               "launches": [], "owner_started": False,
               "resume_command": shlex.join([sys.executable, str(ROOT / "utilities/capability-route.py"),
                   "start", "--route", str(Path(path).resolve()), "--jobs", str(Path(jobs).resolve())])}
