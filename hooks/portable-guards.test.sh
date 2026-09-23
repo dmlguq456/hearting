@@ -363,6 +363,97 @@ else
   bad "an owned draft document target should pass snapshot preparation"
 fi
 
+# An implicit-anchor recipe keeps its stage scopes bare and resolves them
+# inside its cycle bucket: autopilot-lab's eval `media` node declares
+# `report/media/**` under `cycle_anchors: ["experiments/<cycle>"]`, and the lab
+# contract and `resolve_output_dir` writers place the cycle at
+# `experiments/<slug>/` (cutover inactive) or
+# `<cycle>/artifacts/experiments/<slug>/` (cutover active). The node-scope
+# check must accept that layout in both states while keeping the node boundary
+# and the single-segment `<cycle>`.
+lab_media_route() {
+  lab_project=$1
+  mkdir -p "$lab_project/.agent_reports" "$lab_project/.dispatch"
+  AGENT_HOME="$ROOT" AGENT_DISPATCH_JOBS="$lab_project/.dispatch/jobs.log" \
+  python3 "$ROOT/utilities/capability-route.py" compile \
+    --slug lab-media-scope --capability autopilot-lab --capability-mode eval \
+    --intensity direct --cwd "$lab_project" \
+    --artifact-root "$lab_project/.agent_reports" \
+    --predicate atomic-outcome --predicate known-scope \
+    --predicate no-shared-contract --predicate no-resource-run \
+    --predicate no-artifact-handoff --predicate no-independent-verifier \
+    --predicate focused-verification --tracking untracked \
+    --spec-read not-applicable --drift-verdict no-project-spec \
+    --workflow-mode untracked --artifact-guard preflight-passed \
+    --inline-reason atomic-direct >"$lab_project/route.out" 2>"$lab_project/route.err" || return 1
+  python3 - "$lab_project/.agent_reports/.runtime/routes/$(fixture_route_id "$lab_project/route.out").json" "$ROOT" <<'PY'
+import json,sys
+from pathlib import Path
+route_path,root=sys.argv[1:3]
+sys.path.insert(0,str(Path(root)/"utilities"))
+import route_identity
+route=json.loads(Path(route_path).read_text(encoding="utf-8"))
+inline=next(node for node in route["nodes"] if node["id"]=="inline")
+inline["write_scope"]=["report/media/**"]
+inline["outputs"]=["report/media/**"]
+route["route_hash"]=route_identity.route_hash(route)
+route["route_id"]=route_identity.route_id_from_hash(route["route_hash"])
+out=Path(route_path).parent/f"{route['route_id']}.json"
+out.write_text(json.dumps(route),encoding="utf-8")
+print(out)
+PY
+}
+lab_scope_probe() {
+  AGENT_ROUTE_FILE="$1" AGENT_ROUTE_ID="$(fixture_route_id "$1")" AGENT_ROUTE_NODE=inline \
+    "$ART" --file "$2" >"$TMP/$3.out" 2>"$TMP/$3.err"
+}
+route_lab_legacy=$(lab_media_route "$TMP/lablegacy")
+lab_legacy_exp="$TMP/lablegacy/.agent_reports/experiments/2026-09-23_lab-media-scope"
+mkdir -p "$lab_legacy_exp/report/media" "$lab_legacy_exp/analysis" "$lab_legacy_exp/extra/report/media"
+if lab_scope_probe "$route_lab_legacy" "$lab_legacy_exp/report/media/fig.png" art_lab_legacy_in; then
+  ok "a bare lab stage scope matches inside its legacy experiments/<cycle> bucket"
+else
+  bad "a bare lab stage scope should match inside its legacy experiments/<cycle> bucket"
+fi
+if lab_scope_probe "$route_lab_legacy" "$lab_legacy_exp/analysis/notes.md" art_lab_legacy_out; then
+  bad "the lab cycle anchor must not widen the node scope"
+else
+  [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' "$TMP/art_lab_legacy_out.err" \
+    && ok "the lab cycle anchor keeps the node scope boundary" \
+    || bad "anchored out-of-scope lab write missing structured scope failure"
+fi
+if lab_scope_probe "$route_lab_legacy" "$lab_legacy_exp/extra/report/media/fig.png" art_lab_legacy_nested; then
+  bad "the lab <cycle> anchor must bind exactly one path segment"
+else
+  [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' "$TMP/art_lab_legacy_nested.err" \
+    && ok "the lab <cycle> anchor binds exactly one path segment" \
+    || bad "nested lab anchor rejection missing structured scope failure"
+fi
+route_lab_active=$(lab_media_route "$TMP/labactive")
+if python3 "$ROOT/utilities/artifact_producer.py" begin \
+    --artifact-root "$TMP/labactive/.agent_reports" --route "$route_lab_active" \
+    --capability autopilot-lab --intensity direct --campaign-key lab-media-scope-stream \
+    --env-file "$TMP/labactive/producer.env" >"$TMP/art_lab_begin.out" 2>&1 \
+  && lab_active_output=$(sed -n 's/^AGENT_ARTIFACT_OUTPUT_DIR=//p' "$TMP/labactive/producer.env") \
+  && [ -n "$lab_active_output" ]; then
+  lab_active_exp="$lab_active_output/experiments/2026-09-23_lab-media-scope"
+  mkdir -p "$lab_active_exp/report/media" "$lab_active_exp/analysis"
+  if lab_scope_probe "$route_lab_active" "$lab_active_exp/report/media/fig.png" art_lab_active_in; then
+    ok "a bare lab stage scope matches inside the open cycle's experiments/<cycle> bucket"
+  else
+    bad "a bare lab stage scope should match inside the open cycle's experiments/<cycle> bucket"
+  fi
+  if lab_scope_probe "$route_lab_active" "$lab_active_exp/analysis/notes.md" art_lab_active_out; then
+    bad "the open-cycle lab anchor must not widen the node scope"
+  else
+    [ "$?" -eq 2 ] && grep -q 'artifact-write-outside-node-scope' "$TMP/art_lab_active_out.err" \
+      && ok "the open-cycle lab anchor keeps the node scope boundary" \
+      || bad "open-cycle out-of-scope lab write missing structured scope failure"
+  fi
+else
+  bad "producer begin should open a cycle for the active-cutover lab scope fixture"
+fi
+
 echo "== artifact guard Bash channel (C-2b, Tier A/B/C) =="
 # Bash-mode target resolution and Tier B observation placement are cwd-scoped
 # (matching the real runtime, where a PreToolUse hook inherits the session's

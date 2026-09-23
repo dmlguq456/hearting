@@ -256,8 +256,12 @@ esac
 # every layer: only `spec/` was bound, so a worker could emit any other
 # artifact its node never claimed. Node scopes are cycle-relative vocabulary
 # (`plan/**`, `dev_logs/**`, `plans/<cycle>/**`). The producer oracle above
-# supplies their concrete cycle output root; `<cycle>`/`<topic>` are
-# single-segment wildcards. Only worker-authored regions
+# supplies their concrete cycle output root (the artifact root while the
+# cutover is inactive); `<cycle>`/`<topic>` are single-segment wildcards. A
+# bare scope of an implicit-anchor recipe also matches inside that recipe's
+# declared `cycle_anchors` bucket (`report/media/**` as
+# `experiments/<cycle>/report/media/**`), where its capability contract and
+# `resolve_output_dir` writers place the cycle. Only worker-authored regions
 # are bound: artifact-root files and dot-prefixed machine state belong to the
 # runtime, and `_internal/` already exited above.
 case "$fp" in
@@ -272,7 +276,8 @@ case "$fp" in
       # not an "owner writes anywhere" carve-out.
       if [ -z "$route_node" ] || [ "$route_node" = "-" ]; then
         :
-      elif ! python3 - "$route_file" "$route_id" "$route_node" "$cr" "$fp" "$cutover_verdict" <<'PY'
+      elif ! python3 - "$route_file" "$route_id" "$route_node" "$cr" "$fp" "$cutover_verdict" \
+        "$SCRIPT_DIR/../capabilities/topologies.json" <<'PY'
 import fnmatch,json,re,sys
 from pathlib import Path
 WORKTREE_ONLY={"source-scoped"}
@@ -297,13 +302,35 @@ def component_match(value, pattern):
                for value_part,pattern_part in zip(values,parts))
 def bound(rel,pat):
     return component_match(rel,pat.removeprefix("^"))
+def cycle_anchors(route):
+    # tools/capability_topology.py `_validate_bucket_anchor`: an implicit-anchor
+    # recipe keeps stage scopes bare and resolves them inside its cycle bucket;
+    # a literal-anchor recipe already spells the bucket in every scope.
+    try:
+        registry=json.loads(Path(sys.argv[7]).read_text(encoding="utf-8"))
+        mode=route.get("capability_mode") or "default"
+        spec=next(row for row in registry["recipes"]
+                  if row["capability"]==route["capability"] and mode in row["modes"])["artifact_scope"]
+    except Exception:
+        return [],set(),[]
+    if spec.get("anchor_mode","implicit")!="implicit": return [],set(),[]
+    return ([re.sub(r"<[a-z_]+>", "*", anchor) for anchor in spec.get("cycle_anchors",[])],
+            set(spec.get("external_scopes",[])),spec.get("root_anchors",[]))
 try:
     route=json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     if route.get("route_id")!=sys.argv[2]: raise ValueError("route id mismatch")
     node=next(row for row in route["nodes"] if row["id"]==sys.argv[3])
     scope_root=json.loads(sys.argv[6]).get("output_dir") or sys.argv[4]
     rel=Path(sys.argv[5]).resolve().relative_to(Path(scope_root).resolve()).as_posix()
-    pats=[pat for scope in node["write_scope"] for pat in patterns(scope)]
+    anchors,external,root_anchors=cycle_anchors(route)
+    pats=[]
+    for scope in node["write_scope"]:
+        own=patterns(scope)
+        pats+=own
+        root=scope[:-3] if scope.endswith("/**") else scope
+        if scope in external or any(root==a or root.startswith(a+"/") for a in root_anchors): continue
+        pats+=[anchor+"/"+pat for anchor in anchors for pat in own
+               if not pat.startswith("^") and pat!=anchor and not pat.startswith(anchor+"/")]
     ok=any(part.startswith(".") for part in rel.split("/")) or any(bound(rel,pat) for pat in pats)
 except Exception:
     ok=False
