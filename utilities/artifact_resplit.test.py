@@ -1507,7 +1507,9 @@ class SupersessionEventTests(Fixture):
         self.assertEqual(record["superseded_event_id"], event["event_id"])
 
 
-HEARTING_CANARY_ROOT = Path("/home/nas/user/Uihyeop/personal/hearting/.agent_reports")
+# The canary is one maintainer's live artifact root, not a fixture: opt in explicitly
+# so a machine that merely mounts the same share never audits it by accident.
+HEARTING_CANARY_ROOT = Path(os.environ.get("HEARTING_CANARY_ROOT") or "/nonexistent/hearting-canary")
 HEARTING_CANARY_LUMP = "cyc_7d129f5a4b4059fdc8ff3005333e1668"
 # The five deviations the canary run recorded before this cycle. It is spelled out
 # rather than derived from `DEVIATION_CHECKS` so that adding a check cannot silently
