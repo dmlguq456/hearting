@@ -2193,6 +2193,58 @@ class SubmitSettlementTest(unittest.TestCase):
 
 
 
+class StreamTurnIdleDeadlineTest(unittest.TestCase):
+    """`--turn-timeout` bounds silence on the stream transport, not turn length."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.program = self.root / "stream_claude.py"
+
+    def session(self, body):
+        # Reads the one realtime user message, then runs `body`; the argv the
+        # supervisor appends (flags, settings) is ignored.
+        self.program.write_text(
+            "import json, sys, time\n"
+            "sys.stdin.readline()\n"
+            "def say(value):\n"
+            " sys.stdout.write(json.dumps(value) + '\\n'); sys.stdout.flush()\n"
+            + body)
+        args = SimpleNamespace(
+            worktree=str(self.root), state_file=None,
+            claude_command=shlex.join([sys.executable, str(self.program)]),
+            add_dir=[], model=None, effort=None, disallowed_tool=[],
+            permission_mode=None, allowed_tool=[])
+        stream = supervisor.ClaudeStreamSession(args, "sess")
+        self.addCleanup(stream.close)
+        self.addCleanup(stream.process.kill)  # runs first: close() need not wait
+        return stream
+
+    def test_turn_that_keeps_streaming_outlives_the_idle_timeout(self):
+        stream = self.session(
+            "for _ in range(8):\n"
+            " say({'type': 'assistant', 'message': {}}); time.sleep(0.1)\n"
+            "say({'type': 'result', 'subtype': 'success', 'result': 'done'})\n")
+        result, _ = stream.run_turn("work", 0.3)
+        self.assertEqual(result["result"], "done")
+
+    def test_silent_turn_still_fails_at_the_idle_timeout(self):
+        stream = self.session(
+            "say({'type': 'assistant', 'message': {}})\ntime.sleep(10)\n")
+        started = time.monotonic()
+        with self.assertRaisesRegex(supervisor.SupervisorError, "claude-turn-process-failed"):
+            stream.run_turn("work", 0.3)
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_turn_ceiling_bounds_a_turn_that_never_stops_talking(self):
+        stream = self.session(
+            "while True:\n"
+            " say({'type': 'assistant', 'message': {}}); time.sleep(0.05)\n")
+        with self.assertRaisesRegex(supervisor.SupervisorError, "claude-turn-process-failed"):
+            stream.run_turn("work", 0.3, max_duration=0.6)
+
+
 class DurableHandoffTransportTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -2261,6 +2313,15 @@ class DurableHandoffTransportTest(unittest.TestCase):
         with self.assertRaisesRegex(supervisor.SupervisorError, "recovery-unavailable"):
             self.send(stream_session=stream)
         self.assertEqual(stream.submit.call_count, 1)
+
+    def test_stream_handoff_turn_keeps_turn_timeout_as_absolute_lifetime(self):
+        # The cleanup scope expires at turn_timeout + 60 s, so the handoff turn
+        # must not inherit the idle-only deadline of ordinary turns.
+        self.args.turn_ceiling = 86400.0
+        stream = SimpleNamespace(submit=mock.Mock(return_value=({"type": "result"}, 0)))
+        self.send(stream_session=stream)
+        self.assertEqual(stream.submit.call_args.kwargs,
+                         {"timeout": 1, "max_duration": 1})
 
     def test_prompt_drift_never_calls_transport(self):
         stream = SimpleNamespace(submit=mock.Mock())

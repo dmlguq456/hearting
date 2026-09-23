@@ -108,6 +108,22 @@ event('step_finish', part={'reason':'stop'})
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
 
+    def test_output_restarts_the_idle_turn_timeout(self):
+        # A turn that keeps emitting progress for longer than turn_timeout is
+        # working, not wedged: the timeout bounds silence, not total length.
+        self.args.turn_timeout = .3
+        self.program("for _ in range(8):\n event('step_start', part={})\n time.sleep(.1)\n"
+                     "event('text', part={'text':'done'})\nevent('step_finish', part={'reason':'stop'})\n")
+        result, code = runtime.run_turn(self.args, 'start', emit=self.events.append)
+        self.assertEqual(code, 0)
+        self.assertEqual(result.get('result'), 'done')
+
+    def test_turn_ceiling_bounds_a_chatty_turn(self):
+        self.args.turn_timeout = .3
+        self.program("while True:\n event('step_start', part={})\n time.sleep(.05)\n")
+        with self.assertRaisesRegex(runtime.OpenCodeTransportError, 'turn-timeout'):
+            runtime.run_turn(self.args, 'start', emit=self.events.append, max_duration=.5)
+
 
 class SharedControllerTest(unittest.TestCase):
     def setUp(self):

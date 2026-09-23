@@ -87,8 +87,13 @@ def command(args, session: str) -> list[str]:
     return result
 
 
-def run_turn(args, prompt: str, *, emit) -> tuple[dict, int]:
-    """Stream one exact native turn, then return the portable result envelope."""
+def run_turn(args, prompt: str, *, emit, max_duration=None) -> tuple[dict, int]:
+    """Stream one exact native turn, then return the portable result envelope.
+
+    `args.turn_timeout` is an idle bound restarted by every output chunk, the
+    same contract as the Claude stream transport; `max_duration` optionally
+    caps the whole turn.
+    """
     session = read_binding(args)
     if session:
         emit({"type": "dispatch.supervisor.session", "runtime": "opencode",
@@ -99,7 +104,12 @@ def run_turn(args, prompt: str, *, emit) -> tuple[dict, int]:
     runtime_error = None
     buffer = b""
     oversized = False
-    deadline = time.monotonic() + args.turn_timeout
+    started = time.monotonic()
+    ceiling = started + max_duration if max_duration is not None else None
+    deadline = started + args.turn_timeout
+
+    def limit() -> float:
+        return deadline if ceiling is None else min(deadline, ceiling)
 
     def event(line: bytes) -> None:
         nonlocal session, final_text, terminal_stop, runtime_error
@@ -150,7 +160,7 @@ def run_turn(args, prompt: str, *, emit) -> tuple[dict, int]:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 eof = False
                 while not eof:
-                    remaining = deadline - time.monotonic()
+                    remaining = limit() - time.monotonic()
                     if remaining <= 0:
                         raise OpenCodeTransportError("opencode-turn-timeout")
                     for key, _ in selector.select(min(1.0, remaining)):
@@ -158,6 +168,7 @@ def run_turn(args, prompt: str, *, emit) -> tuple[dict, int]:
                         if not chunk:
                             eof = True
                             break
+                        deadline = time.monotonic() + args.turn_timeout
                         buffer += chunk
                         while b"\n" in buffer:
                             line, buffer = buffer.split(b"\n", 1)
@@ -170,7 +181,7 @@ def run_turn(args, prompt: str, *, emit) -> tuple[dict, int]:
                 if buffer and not oversized:
                     event(buffer)
             try:
-                code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+                code = process.wait(timeout=max(0.01, limit() - time.monotonic()))
             except subprocess.TimeoutExpired as exc:
                 raise OpenCodeTransportError("opencode-turn-timeout") from exc
         finally:
