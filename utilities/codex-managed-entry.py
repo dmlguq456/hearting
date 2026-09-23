@@ -229,13 +229,35 @@ def check_runtime(codex: str, workspace: Path, environment: dict[str, str]) -> s
     return feature_capability(codex, workspace, environment)
 
 
+def socket_ready(path: Path) -> bool:
+    """Whether `path` is a listening socket, directly or through Codex's link.
+
+    Codex 0.156 creates the requested `--listen unix://` path as a symlink to
+    its daemon socket (`/tmp/codex-daemon-<uid>/<digest>`) instead of binding
+    it. The state dir is owner-private (checked before launch), so a link at
+    this exact path was written by the app-server this entry started; accept
+    it once it resolves to a socket owned by this user. A link whose target is
+    not there yet keeps the caller waiting.
+    """
+    info = path.lstat()
+    if stat.S_ISSOCK(info.st_mode):
+        return True
+    if not stat.S_ISLNK(info.st_mode) or info.st_uid != os.geteuid():
+        return False
+    try:
+        target = path.stat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISSOCK(target.st_mode) and target.st_uid == os.geteuid()
+
+
 def wait_socket(path: Path, process: subprocess.Popen[Any], timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise EntryError(f"process-exited-before-socket:{process.returncode}")
         try:
-            if stat.S_ISSOCK(path.lstat().st_mode):
+            if socket_ready(path):
                 return
         except FileNotFoundError:
             pass
@@ -261,13 +283,17 @@ def terminate(process: subprocess.Popen[Any] | None) -> None:
 
 
 def cleanup_socket(path: Path) -> None:
-    """Remove only an exact leftover socket inside the explicit state dir."""
+    """Remove only an exact leftover socket inside the explicit state dir.
+
+    For Codex's link form only the link at this exact path is removed; its
+    daemon socket outside the state dir belongs to Codex, not to this entry.
+    """
 
     try:
         info = path.lstat()
     except FileNotFoundError:
         return
-    if stat.S_ISSOCK(info.st_mode):
+    if stat.S_ISSOCK(info.st_mode) or stat.S_ISLNK(info.st_mode):
         path.unlink()
 
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -64,9 +66,15 @@ class ManagedEntryTest(unittest.TestCase):
                     raise SystemExit(0)
                 listen = sys.argv[sys.argv.index('--listen') + 1]
                 path = listen[len('unix://'):] if listen.startswith('unix://') else listen
+                # Codex 0.156+ binds a daemon socket elsewhere and links the
+                # requested path to it.
+                link_dir = os.environ.get('FAKE_SOCKET_LINK_DIR')
+                bind_path = os.path.join(link_dir, 'daemon.sock') if link_dir else path
                 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                server.bind(path)
+                server.bind(bind_path)
                 server.listen(1)
+                if link_dir:
+                    os.symlink(bind_path, path)
                 stop = False
                 def end(*_args):
                     global stop
@@ -159,6 +167,42 @@ class ManagedEntryTest(unittest.TestCase):
             "managed-control.sock",
         ):
             self.assertFalse((self.state / name).exists())
+
+    def test_codex_linked_listen_socket_is_ready_and_its_link_is_cleaned(self) -> None:
+        # Codex 0.156 creates the requested --listen path as a symlink to its
+        # daemon socket; an lstat-only readiness check timed out on it
+        # (`socket-start-timeout:app-server.sock`) while the server was up.
+        daemon = self.base / "daemon"
+        daemon.mkdir(mode=0o700)
+        with mock.patch.dict(os.environ, {"FAKE_SOCKET_LINK_DIR": str(daemon)}, clear=False):
+            result = subprocess.run(self.command(), text=True, capture_output=True, timeout=40)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertTrue(self.result.exists())
+        for name in ("app-server.sock", "managed-tui.sock", "managed-control.sock"):
+            path = self.state / name
+            self.assertFalse(path.exists() or path.is_symlink(), name)
+
+    def test_socket_ready_accepts_only_a_link_to_an_owned_socket(self) -> None:
+        spec = importlib.util.spec_from_file_location("codex_managed_entry_fixture", ENTRY)
+        entry = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(entry)
+        daemon = self.base / "daemon"
+        daemon.mkdir(mode=0o700)
+        target = daemon / "daemon.sock"
+        link = self.state / "app-server.sock"
+        link.symlink_to(target)
+        self.assertFalse(entry.socket_ready(link), "a link whose socket is not bound yet")
+        target.write_text("not a socket\n", encoding="utf-8")
+        self.assertFalse(entry.socket_ready(link), "a link to a regular file")
+        target.unlink()
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(server.close)
+        server.bind(str(target))
+        self.assertTrue(entry.socket_ready(link))
+        entry.cleanup_socket(link)
+        self.assertFalse(link.is_symlink())
+        self.assertTrue(target.exists(), "the daemon socket outside the state dir is left alone")
 
     def test_client_failure_and_gateway_fault_clean_only_exact_session_sockets(self) -> None:
         sentinel = self.state / "unrelated.sock"
