@@ -123,7 +123,9 @@ def decode(enc):
         except Exception:
             return None
         for name in children:
-            e = re.sub(r"[/._]", "-", name)
+            # Claude Code's projects-dir rule (utilities/claude_project_dir.py),
+            # duplicated per the note above; UTF-16 so an astral char is two '-'.
+            e = "".join(ch if ch.isascii() and ch.isalnum() else "-" * (len(ch.encode("utf-16-le")) // 2) for ch in name)
             if body == e:
                 cand = cur / name
                 if cand.is_dir():

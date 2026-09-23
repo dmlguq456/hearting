@@ -14,10 +14,18 @@ import datetime
 import json
 import os
 import re
+import sys
 
 from . import procscan
 from .. import session_registry
 from ..model import ContextEvidence, SubAgent
+
+# The one projects-dir encoder lives in the harness utilities/, which the
+# dispatch collector already puts on sys.path the same way.
+_UTILITIES = os.path.join(os.path.dirname(os.path.realpath(__file__)), "..", "..", "..", "utilities")
+if os.path.normpath(_UTILITIES) not in map(os.path.normpath, sys.path):
+    sys.path.insert(0, os.path.normpath(_UTILITIES))
+from claude_project_dir import encode_project_dir  # noqa: E402
 
 
 def _home():
@@ -26,8 +34,7 @@ def _home():
 
 
 def _enc_cwd(cwd):
-    # projects dir encoding: '/', '.', '_' → '-' (matches dispatch-liveness.sh sed).
-    return "".join("-" if ch in "/._" else ch for ch in cwd)
+    return encode_project_dir(cwd)
 
 
 def _mtime(path):

@@ -31,6 +31,7 @@ if str(TOOLS) not in sys.path:
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from claude_project_dir import encode_project_dir  # noqa: E402
 from dispatch_contract import (  # noqa: E402
     DispatchContractError,
     PID_HOST_NAMESPACE_PROOF,
@@ -317,8 +318,7 @@ def _claude_projects_root() -> Path:
 
 
 def _encoded_cwd(cwd: str) -> str:
-    # projects dir encoding: '/', '.', '_' -> '-' (same rule as the fleet collector).
-    return "".join("-" if ch in "/._" else ch for ch in cwd)
+    return encode_project_dir(cwd)
 
 
 def announced_session(

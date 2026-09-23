@@ -20,7 +20,7 @@ for a in "$@"; do
   case "$a" in --fix) FIX=1;; -h|--help) echo "usage: index-check.sh [memory_dir] [--fix]"; exit 2;; *) DIR="$a";; esac
 done
 if [ -z "$DIR" ]; then
-  enc=$(printf '%s' "$PWD" | sed 's#[/._]#-#g'); DIR="$ROOT/$enc/memory"
+  enc=$(python3 "$SCRIPT_DIR/../../utilities/claude_project_dir.py" "$PWD"); DIR="$ROOT/$enc/memory"
 fi
 [ -d "$DIR" ] || { echo "memory directory not found: $DIR"; exit 0; }
 IDX="$DIR/MEMORY.md"

@@ -289,7 +289,7 @@ while IFS=$'\t' read -r ts status repo wt slug pipe || [ -n "${ts:-}" ]; do
       evidence_label="OpenCode heartbeat/log"
       ;;
     *)
-      enc=$(printf '%s' "${wt:-}" | sed 's#[/._]#-#g')
+      enc=$(python3 "$SCRIPT_DIR/claude_project_dir.py" "${wt:-}")
       name=""
       case "$pipe" in *profile=*) name=${pipe##*profile=}; name=${name%%,*};; esac
       if [ -n "$name" ]; then

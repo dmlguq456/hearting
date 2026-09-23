@@ -46,6 +46,7 @@ from dispatch_contract import (  # noqa: E402
 from dispatch_completion_join import read_supervisor_phase_state, read_join_observation  # noqa: E402
 from dispatch_attempt_policy import terminal_conflict_pending  # noqa: E402
 from codex_dispatch_terminal import terminal_envelope_observed  # noqa: E402
+from claude_project_dir import encode_project_dir  # noqa: E402
 
 try:  # W7D read-side layout resolver; absent on a pre-cutover checkout.
     import artifact_reader  # noqa: E402
@@ -1260,9 +1261,9 @@ def _supervised_claude_transcript(job, receipt_path):
             return None, "supervisor-worktree-mismatch"
     except (OSError, TypeError, ValueError):
         return None, "supervisor-worktree-mismatch"
-    # Claude's project encoding is deterministic (`/`, `.`, `_` -> `-`).  Do not
+    # Claude's project encoding is deterministic (`encode_project_dir`).  Do not
     # glob for this session id: a same-id file under another project is not evidence.
-    encoded_cwd = "".join("-" if ch in "/._" else ch for ch in announced_cwd)
+    encoded_cwd = encode_project_dir(announced_cwd)
     project_dir = os.path.realpath(os.path.join(_proj_home(), "projects", encoded_cwd))
     transcript = os.path.realpath(os.path.join(project_dir, session_id + ".jsonl"))
     try:
@@ -1791,7 +1792,7 @@ def _enrich_opencode_attempt_session(job):
 
 
 def _enc(path):
-    return "".join("-" if ch in "/._" else ch for ch in path)
+    return encode_project_dir(path)
 
 
 def _model_display(mid):

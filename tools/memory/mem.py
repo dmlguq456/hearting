@@ -21,6 +21,12 @@ MEM_MODULE_DIR = Path(__file__).resolve().parent
 if str(MEM_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(MEM_MODULE_DIR))
 
+# Appended, not prepended: the harness utilities/ must never shadow a sibling
+# module of this package. It supplies Claude Code's projects-dir encoder.
+if str(MEM_MODULE_DIR.parents[1] / "utilities") not in sys.path:
+    sys.path.append(str(MEM_MODULE_DIR.parents[1] / "utilities"))
+
+from claude_project_dir import encode_project_dir, encode_project_dir_component
 import git_exchange_v2
 import migration_v2
 import protocol_v2
@@ -196,6 +202,9 @@ def today():
 
 
 def enc_cwd(path):
+    # A memory-store key namespace (project_key fallbacks, source keys), frozen
+    # so stored rows stay addressable. It is NOT Claude Code's projects-dir
+    # name for every path; locate that with `encode_project_dir`.
     return re.sub(r"[/._]", "-", str(path))
 
 
@@ -544,15 +553,17 @@ def _decode_enc_cwd(enc):
         except Exception:
             return None
         for name in children:
-            e = re.sub(r"[/._]", "-", name)   # Encode one component without a leading separator.
-            if body == e:
-                cand = cur / name
-                if cand.is_dir():
-                    return cand
-            elif body.startswith(e + "-"):
-                r = walk(cur / name, body[len(e):], depth + 1)  # Remaining text begins with '-'.
-                if r is not None:
-                    return r
+            # Encode one component without a leading separator, by both rules:
+            # Claude Code's projects-dir names and the legacy `enc_cwd` keys.
+            for e in dict.fromkeys((encode_project_dir_component(name), re.sub(r"[/._]", "-", name))):
+                if body == e:
+                    cand = cur / name
+                    if cand.is_dir():
+                        return cand
+                elif body.startswith(e + "-"):
+                    r = walk(cur / name, body[len(e):], depth + 1)  # Remaining text begins with '-'.
+                    if r is not None:
+                        return r
         return None
     return walk(Path("/"), enc, 0)
 
@@ -2631,7 +2642,7 @@ def topics(query=None, limit=30, include_superseded=False):
 
 
 def _recall_sessions(query, cwd):
-    base = PROJECTS / enc_cwd(Path.cwd()) if cwd else PROJECTS
+    base = PROJECTS / encode_project_dir(Path.cwd()) if cwd else PROJECTS
     if not base.exists():
         print(f"(no session records: {base})")
         return
@@ -4491,7 +4502,7 @@ def promote_candidates():
 # ---------- projection ----------
 def project(cwd=None):
     cwd = Path(cwd) if cwd else Path.cwd()
-    encc = enc_cwd(cwd)                      # dest dir (harness convention — unchanged)
+    encc = encode_project_dir(cwd)           # dest dir: Claude Code's projects-dir name
     pkey = project_key(cwd)                  # filter key (E-3)
     dest = PROJECTS / encc / "memory"
     dest.mkdir(parents=True, exist_ok=True)

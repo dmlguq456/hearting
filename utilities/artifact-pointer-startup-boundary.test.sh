@@ -96,7 +96,7 @@ mkdir -p "$CODEX_SESSIONS" "$MEM_PROJECTS"
 cat > "$CODEX_SESSIONS/w5-startup.jsonl" <<'JSONL'
 {"timestamp":"2026-08-24T00:00:00Z","type":"event_msg","payload":{"type":"user_message","id":"w5-startup-user","message":"startup distill sentinel"}}
 JSONL
-encoded=$(printf '%s' "$ROOT" | sed 's#/#-#g')
+encoded=$(python3 "$ROOT/utilities/claude_project_dir.py" "$ROOT")
 mkdir -p "$MEM_PROJECTS/$encoded"
 
 run_real() {
