@@ -640,7 +640,10 @@ _ROLE_MODEL_NAME = {"opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku", "fable
 
 # Bare dispatch roles are resolved by the current runtimes but preserved raw by collectors.
 # Centralize their human-facing names here; unknown values remain byte-for-byte unchanged.
-_DISPATCH_MODEL_NAMES = {"opus": "Opus 5", "sonnet": "Sonnet 5", "haiku": "Haiku 4.5"}
+# These must track what the current Claude Code resolves each alias to: since the Opus 5.5
+# release `opus` launches claude-opus-5-5 (observed on Claude Code 2.1.280 in registered
+# owners started with `--model opus`), so "Opus 5" would name a model no longer running.
+_DISPATCH_MODEL_NAMES = {"opus": "Opus 5.5", "sonnet": "Sonnet 5", "haiku": "Haiku 4.5"}
 
 
 def _clean_model(name):
@@ -806,8 +809,8 @@ _HW = 16                      # Bare harness-badge width — narrow/stack L1 bad
 _HMW = 40                     # F-33/F-64/F-65: WIDE-layout harness field. The latest small
                               # expansion is 38→40 (user 2026-08-06) so a dispatch-depth-2 spawned row
                               # retains two more cells after paying for its hierarchy prefix.
-                              # the labels that actually render are `claude code (Opus 5·xhigh)`
-                              # at 26 cells and `codex (gpt-5.6-sol·xhigh)` at 25; at 40 the
+                              # the labels that actually render are `claude code (Opus 5.5·xhigh)`
+                              # at 28 cells and `codex (gpt-5.6-sol·xhigh)` at 25; at 40 the
                               # 33-cell `opencode (claude-sonnet-4-5·high)` worst case fits even
                               # behind the dispatch-depth-1 prefix (40-5=35) and the dispatch-depth-2 field keeps
                               # 32 cells under the F-64 ladder, while staying below the
