@@ -358,9 +358,11 @@ def bind_existing_runtime_route(
 def read_admitted_cycle(
     artifact_root: Path, campaign_id: str, cycle_id: str
 ) -> Optional[Mapping[str, Any]]:
-    # Admission must not trust the rebuildable campaigns/INDEX cache. Resolve
-    # stable identity from campaign/manifest records so readable locators,
-    # renamed sealed locators, and the historical ID layout remain readable.
+    # The index only ever offers a candidate; the record proves it every call.
+    # An index that is stale, missing, or absent is never admission's answer --
+    # it changes only whether that answer costs a cache hit or a record scan,
+    # so readable locators, renamed sealed locators, and the historical ID
+    # layout all still resolve.
     try:
         directory = artifact_locator.find_path_by_id(Path(artifact_root), cycle_id)
     except artifact_locator.LocatorError as exc:

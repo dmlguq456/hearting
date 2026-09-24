@@ -46,7 +46,7 @@ import stat
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -349,7 +349,16 @@ def campaign_dir(root: Path, campaign_id: str, record: Optional[Mapping[str, Any
     this function never derives a readable path from the stable ID.
     """
     root = Path(root)
-    found = artifact_locator.find_path_by_id(root, campaign_id)
+
+    def candidates() -> Iterator[Path]:
+        if record is not None and record.get("campaign_id") == campaign_id and record.get("locator"):
+            try:
+                campaigns = artifact_locator.safe_child(root, root, "campaigns")
+                yield artifact_locator.safe_child(root, campaigns, record["locator"])
+            except artifact_locator.LocatorError:
+                return
+
+    found = artifact_locator.locate(root, campaign_id, candidates=candidates)
     if found is not None and (found / "campaign.json").is_file():
         return found
     try:
@@ -365,13 +374,43 @@ def cycle_dir(root: Path, campaign_id: str, cycle_id: str,
               record: Optional[Mapping[str, Any]] = None) -> Path:
     """Resolve an existing cycle, accepting readable, hybrid, and old layouts."""
     root = Path(root)
-    found = artifact_locator.find_path_by_id(root, cycle_id)
-    if found is not None:
-        return found
     if record is None:
         record = read_cycle_record(root, cycle_id)
-    campaign = read_campaign(root, campaign_id)
-    parent = campaign_dir(root, campaign_id, campaign)
+    campaign_record = read_campaign(root, campaign_id)
+
+    def owner_campaign_candidates() -> Iterator[Path]:
+        if campaign_record is not None and campaign_record.get("locator"):
+            try:
+                campaigns = artifact_locator.safe_child(root, root, "campaigns")
+                yield artifact_locator.safe_child(root, campaigns, campaign_record["locator"])
+            except artifact_locator.LocatorError:
+                return
+
+    def cycle_candidates() -> Iterator[Path]:
+        if record is None or record.get("campaign_id") != campaign_id:
+            return
+        try:
+            parent = campaign_dir(root, campaign_id, campaign_record)
+        except ProducerError:
+            return
+        if record.get("locator"):
+            try:
+                yield artifact_locator.safe_child(root, parent, record["locator"])
+            except artifact_locator.LocatorError:
+                pass
+        try:
+            cycles = artifact_locator.safe_child(root, parent, "cycles")
+            yield artifact_locator.safe_child(root, cycles, cycle_id)
+        except artifact_locator.LocatorError:
+            pass
+
+    found = artifact_locator.locate(
+        root, cycle_id, candidates=cycle_candidates,
+        owner_campaign_id=campaign_id, owner_campaign_candidates=owner_campaign_candidates,
+    )
+    if found is not None:
+        return found
+    parent = campaign_dir(root, campaign_id, campaign_record)
     try:
         if record is not None and record.get("campaign_id") == campaign_id and record.get("locator"):
             return artifact_locator.safe_child(root, parent, record["locator"])
@@ -730,14 +769,23 @@ def _route_node(route: Mapping[str, Any], node_id: Optional[str]) -> Optional[Di
 
 
 def _campaign_path(root: Path, campaign_id: str,
-                   record: Optional[Mapping[str, Any]] = None) -> Path:
+                   record: Optional[Mapping[str, Any]] = None, *, creating: bool = False) -> Path:
+    if creating and record is not None and record.get("campaign_id") == campaign_id and record.get("locator"):
+        # A campaign directory being created does not exist yet, so any
+        # lookup would fail and fall through to a needless lenient full scan.
+        # The record's own `locator` is authoritative at creation time.
+        try:
+            campaigns = artifact_locator.safe_child(root, root, "campaigns")
+            return artifact_locator.safe_child(root, campaigns, record["locator"]) / "campaign.json"
+        except artifact_locator.LocatorError as exc:
+            raise ProducerError("record-locator-invalid", exc.detail or exc.code) from exc
     return campaign_dir(root, campaign_id, record) / "campaign.json"
 
 
 def read_campaign(root: Path, campaign_id: str) -> Optional[Dict[str, Any]]:
     if not artifact_identity.is_well_formed(campaign_id, "campaign"):
         return None
-    found = artifact_locator.find_path_by_id(root, campaign_id)
+    found = artifact_locator.locate(root, campaign_id)
     if found is not None:
         record = _read_json(found / "campaign.json")
         if record is not None and record.get("campaign_id") == campaign_id:
@@ -762,7 +810,7 @@ def find_campaign_by_key(root: Path, key: str) -> Optional[Dict[str, Any]]:
 
 
 def _write_campaign(root: Path, record: Dict[str, Any], *, exclusive: bool) -> None:
-    path = _campaign_path(root, record["campaign_id"], record)
+    path = _campaign_path(root, record["campaign_id"], record, creating=exclusive)
     artifact_campaign.check_campaign_write(root, path, record)
     _ensure_dir(path.parent)
     if exclusive:
@@ -1394,6 +1442,8 @@ def begin(
                     "env": _env_for(root, record),
                     **_campaign_degradation(bound_campaign),
                 }
+        if campaign is not None:
+            artifact_locator.prepare_index_update(root, [campaign["campaign_id"]])
         index = artifact_admission.load_index(root)
         if campaign is None and campaign_key is None:
             campaign = find_campaign_by_key(root, UNASSIGNED_KEY)
@@ -1510,7 +1560,7 @@ def begin(
                     owner_begin=owner_begin)
             except dispatch_terminal_commit.TerminalCommitError as exc:
                 raise ProducerError(exc.code, exc.detail) from exc
-        artifact_locator.rebuild_indexes(root)
+        artifact_locator.update_indexes(root, [campaign["campaign_id"]])
         return {
             "status": "begun", "layout": "cycle", "campaign_id": campaign["campaign_id"],
             "cycle_id": new_cycle_id, "producer_id": producer_id, "cycle_dir": str(target),
@@ -2524,6 +2574,7 @@ def _checkpoint_commit(
 
 def _remove_empty_cycle(root: Path, record: Mapping[str, Any]) -> None:
     directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
+    artifact_locator.prepare_index_update(root, [record["campaign_id"]])
     artifacts = directory / "artifacts"
     binding = directory / artifact_locator.CYCLE_BINDING
     if binding.is_file() and not binding.is_symlink():
@@ -2546,7 +2597,7 @@ def _remove_empty_cycle(root: Path, record: Mapping[str, Any]) -> None:
                 _write_campaign(root, campaign, exclusive=False)
         else:
             _write_campaign(root, campaign, exclusive=False)
-    artifact_locator.rebuild_indexes(root)
+    artifact_locator.update_indexes(root, [record["campaign_id"]])
 
 
 def _review_lease_dir(root: Path, cycle_id: str) -> Path:
@@ -3275,9 +3326,22 @@ def finalize(
     if owns_lock:
         lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     interim_guard = contextlib.ExitStack()
+    sweep_unresolved: List[Dict[str, Any]] = []
+
+    def _finish(payload: Dict[str, Any]) -> Dict[str, Any]:
+        # duplicate-copy: an unrelated campaign the recovery sweep had to
+        # isolate (§3.6a) is surfaced on every return, not swallowed.
+        if sweep_unresolved:
+            payload = dict(payload)
+            payload["recovery_unresolved"] = sweep_unresolved
+        return payload
+
     try:
         if _recovery_scope == "root":
-            _recover_locked(root, now=now)
+            pre = read_cycle_record(root, cycle_id)
+            sweep = _recover_locked(root, now=now,
+                                    target_campaign_id=pre["campaign_id"] if pre else None)
+            sweep_unresolved = sweep.get("unresolved", [])
         elif _recovery_scope == "exact":
             _recover_exact_cycle_locked(root, cycle_id, expected_binding, now=now)
         else:
@@ -3305,10 +3369,10 @@ def finalize(
             manifest_path = _record_cycle_manifest_path(root, record)
             if expected_binding is not None or _path_entry_present(manifest_path):
                 verified = _verify_sealed_cycle_locked(root, record, expected_binding)
-                return {**verified, "storage_state": "sealed", "cycle_state": published}
-            return {"status": "already-sealed", "cycle_id": cycle_id,
+                return _finish({**verified, "storage_state": "sealed", "cycle_state": published})
+            return _finish({"status": "already-sealed", "cycle_id": cycle_id,
                     "manifest_digest": record.get("manifest_digest"),
-                    "storage_state": "sealed", "cycle_state": published}
+                    "storage_state": "sealed", "cycle_state": published})
         if record.get("state") != "open":
             raise ProducerError("cycle-not-open", record.get("state", "?"))
         # The open-cycle checkpoint assigns IDs under this lock; holding it until
@@ -3347,6 +3411,7 @@ def finalize(
         route = load_route(root, Path(record["route_file"]))
         if route["route_hash"] != record["route_hash"]:
             raise ProducerError("route-hash-drift", cycle_id)
+        artifact_locator.prepare_index_update(root, [record["campaign_id"]])
         adopted_root_outputs: List[str] = []
         if adopt_root_outputs and state != "abandoned":
             raise ProducerError("root-output-adoption-requires-abandoned")
@@ -3385,7 +3450,7 @@ def finalize(
                 record["abandon_reason"] = abandon_reason
             _write_cycle_record(root, record, exclusive=False)
             remove_interim(root, cycle_id)
-            return {"status": "no-lineage", "cycle_id": cycle_id, "lineage_committed": False}
+            return _finish({"status": "no-lineage", "cycle_id": cycle_id, "lineage_committed": False})
         # An open predecessor may be linked at begin; the existing manifest
         # index still requires that predecessor to be admitted before its child.
         # Refuse before staging a manifest so the owner can seal the parent and
@@ -3472,7 +3537,7 @@ def finalize(
         if document["cycle"]["state"] == "active":
             sealed_result["provisional"] = True
             sealed_result["warning"] = PROVISIONAL_SEAL_WARNING
-        return sealed_result
+        return _finish(sealed_result)
     finally:
         interim_guard.close()
         if owns_lock:
@@ -3632,7 +3697,7 @@ def _commit_sealed(
                    cycle_path=os.path.relpath(str(directory), str(root)))
     _remove_journal(root, record["cycle_id"])
     remove_interim(root, record["cycle_id"])
-    artifact_locator.rebuild_indexes(root)
+    artifact_locator.update_indexes(root, [record["campaign_id"]])
     artifact_cycle_titles.emit_after_seal_locked(root, sealed, document, directory / "manifest.json")
 
 
@@ -3641,8 +3706,32 @@ def _commit_sealed(
 # ---------------------------------------------------------------------------
 
 
-def _recover_locked(root: Path, *, now: Optional[float] = None) -> Dict[str, List[str]]:
-    result: Dict[str, List[str]] = {"rolled_forward": [], "rolled_back": [], "dropped": [], "open": []}
+def _is_recoverable_locator_defect(exc: BaseException) -> bool:
+    """§3.6a's isolation only ever catches a *locator* defect on the record
+    being resolved -- never any other `ProducerError` (a live-review fence, a
+    digest mismatch, ...), which must keep propagating unconditionally."""
+
+    if isinstance(exc, artifact_locator.LocatorError):
+        return True
+    return isinstance(exc, ProducerError) and exc.code == "record-locator-invalid"
+
+
+def _recover_locked(root: Path, *, now: Optional[float] = None,
+                    target_campaign_id: Optional[str] = None) -> Dict[str, Any]:
+    """Root-scope crash recovery. Visits every open record and journal entry.
+
+    A record whose campaign is not `target_campaign_id` is isolated (§3.6a):
+    a locator defect while resolving *that* record (a hand-copied campaign
+    folder, a binding conflict) is reported in ``unresolved`` and the record
+    is left exactly as found -- no write, still ``open``, journal untouched --
+    so the next sweep retries it unchanged. A record whose campaign *is* the
+    target still raises, because that is the campaign this operation touches.
+    ``target_campaign_id=None`` (bare ``recover()``) isolates every record.
+    """
+
+    result: Dict[str, Any] = {
+        "rolled_forward": [], "rolled_back": [], "dropped": [], "open": [], "unresolved": [],
+    }
     journal_dir = producer_dir(root) / "journal"
     if journal_dir.is_dir():
         for entry in sorted(journal_dir.glob("*.json")):
@@ -3660,7 +3749,17 @@ def _recover_locked(root: Path, *, now: Optional[float] = None) -> Dict[str, Lis
             document = _read_json(manifest_path)
             if document is not None and artifact_manifest.manifest_digest(document) == journal.get("manifest_digest"):
                 _raise_if_recovery_fenced(root, cycle_id, now=now)
-                _commit_sealed(root, record, document, journal["manifest_digest"], now=now)
+                try:
+                    artifact_locator.prepare_index_update(root, [record["campaign_id"]])
+                    _commit_sealed(root, record, document, journal["manifest_digest"], now=now)
+                except (artifact_locator.LocatorError, ProducerError) as exc:
+                    if not _is_recoverable_locator_defect(exc) or record["campaign_id"] == target_campaign_id:
+                        raise
+                    result["unresolved"].append({
+                        "cycle_id": cycle_id, "campaign_id": record["campaign_id"],
+                        "code": exc.code, "detail": exc.detail, "phase": "journal",
+                    })
+                    continue
                 result["rolled_forward"].append(cycle_id)
             elif document is None:
                 # Crash before the commit point: cycle stays open.
@@ -3673,21 +3772,31 @@ def _recover_locked(root: Path, *, now: Optional[float] = None) -> Dict[str, Lis
     for record in list_cycle_records(root):
         if record.get("state") != "open":
             continue
-        directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
-        if not directory.is_dir():
-            dropped = dict(record)
-            dropped["state"] = "dropped"
-            dropped["sealed_on"] = _rfc3339(now)
-            _write_cycle_record(root, dropped, exclusive=False)
-            result["dropped"].append(record["cycle_id"])
-            continue
-        if (directory / "manifest.json").is_file():
-            document = _read_json(directory / "manifest.json")
-            if document is not None:
-                _raise_if_recovery_fenced(root, record["cycle_id"], now=now)
-                _commit_sealed(root, record, document, artifact_manifest.manifest_digest(document), now=now)
-                result["rolled_forward"].append(record["cycle_id"])
+        try:
+            directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
+            if not directory.is_dir():
+                dropped = dict(record)
+                dropped["state"] = "dropped"
+                dropped["sealed_on"] = _rfc3339(now)
+                _write_cycle_record(root, dropped, exclusive=False)
+                result["dropped"].append(record["cycle_id"])
                 continue
+            if (directory / "manifest.json").is_file():
+                document = _read_json(directory / "manifest.json")
+                if document is not None:
+                    _raise_if_recovery_fenced(root, record["cycle_id"], now=now)
+                    artifact_locator.prepare_index_update(root, [record["campaign_id"]])
+                    _commit_sealed(root, record, document, artifact_manifest.manifest_digest(document), now=now)
+                    result["rolled_forward"].append(record["cycle_id"])
+                    continue
+        except (artifact_locator.LocatorError, ProducerError) as exc:
+            if not _is_recoverable_locator_defect(exc) or record["campaign_id"] == target_campaign_id:
+                raise
+            result["unresolved"].append({
+                "cycle_id": record["cycle_id"], "campaign_id": record["campaign_id"],
+                "code": exc.code, "detail": exc.detail, "phase": "open",
+            })
+            continue
         result["open"].append(record["cycle_id"])
     shared_dir = producer_dir(root) / "shared-journal"
     if shared_dir.is_dir():
@@ -3721,7 +3830,17 @@ def recover(root: Path, *, now: Optional[float] = None) -> Dict[str, Any]:
     try:
         step1 = artifact_admission._recover_locked(root, now=now)
         producer = _recover_locked(root, now=now)
-        return {"status": "recovered", "admission": step1, "producer": producer}
+        locator_index = artifact_locator.verify_indexes(root, repair=True)
+        # duplicate-copy: an unrelated campaign's defect stops only itself
+        # (locator_index stays "problems", no repair write for it) and the
+        # producer sweep's own isolated records (Step 3.9), never this call's
+        # exit status -- `recover` keeps reporting success, typed, so a caller
+        # retrying its own unrelated seal is not blocked by someone else's
+        # hand-copied folder (Step 3.9b).
+        status = ("recovered"
+                  if not producer.get("unresolved") and locator_index.get("status") in {"current", "rebuilt"}
+                  else "recovered-with-problems")
+        return {"status": status, "admission": step1, "producer": producer, "locator_index": locator_index}
     finally:
         artifact_admission._release_lock(root, lock_fd)
 
@@ -3960,7 +4079,9 @@ def admit_shared(
     alloc = allocator or artifact_identity.IdAllocator()
     lock_fd = artifact_admission._acquire_lock(root, artifact_admission.LOCK_TIMEOUT_DEFAULT, now=now)
     try:
-        _recover_locked(root)
+        pre = read_cycle_record(root, cycle_id)
+        sweep = _recover_locked(root, now=now, target_campaign_id=pre["campaign_id"] if pre else None)
+        sweep_unresolved = sweep.get("unresolved", [])
         record = read_cycle_record(root, cycle_id)
         if record is None:
             raise ProducerError("cycle-unknown", cycle_id)
@@ -4104,12 +4225,15 @@ def admit_shared(
         journal["state"] = "published"
         _write_atomic(shared_journal_path(root, revision_id), _json_bytes(journal), 0o600)
         _commit_shared(root, journal)
-        return {
+        result = {
             "status": "admitted", "kind": SHARED_KINDS[kind], "shared_reference_id": reference_id,
             "shared_reference_revision_id": revision_id, "reference_created": created,
             "revision_dir": str(target), "content_digest": content_digest, "file_count": len(rows),
             "promotion": revision["promotion"],
         }
+        if sweep_unresolved:
+            result["recovery_unresolved"] = sweep_unresolved
+        return result
     finally:
         artifact_admission._release_lock(root, lock_fd)
 
@@ -4198,11 +4322,13 @@ def mark_cycle_superseded(
             raise ProducerError("cycle-unknown", cycle_id)
         if record.get("state") != "sealed":
             raise ProducerError("cycle-not-sealed", record.get("state", "?"))
+        artifact_locator.prepare_index_update(root, [record["campaign_id"]])
         updated = dict(record)
         updated["state"] = "superseded"
         updated["superseded_by"] = list(superseded_by)
         updated["superseded_event_id"] = superseded_event_id
         _write_cycle_record(root, updated, exclusive=False)
+        artifact_locator.update_indexes(root, [record["campaign_id"]])
         return {"status": "updated", "cycle_id": cycle_id, "state": "superseded",
                 "superseded_by": updated["superseded_by"], "superseded_event_id": superseded_event_id}
     finally:
@@ -4222,9 +4348,11 @@ def mark_campaign_superseded(root: Path, campaign_id: str, *, now: Optional[floa
             record = read_cycle_record(root, cycle_id)
             if record is None or record.get("state") != "superseded":
                 raise ProducerError("campaign-has-live-cycles", campaign_id)
+        artifact_locator.prepare_index_update(root, [campaign_id])
         updated = dict(campaign)
         updated["state"] = "superseded"
         _write_campaign(root, updated, exclusive=False)
+        artifact_locator.update_indexes(root, [campaign_id])
         return {"status": "updated", "campaign_id": campaign_id, "state": "superseded"}
     finally:
         artifact_admission._release_lock(root, lock_fd)

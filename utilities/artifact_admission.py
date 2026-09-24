@@ -22,6 +22,7 @@ import json
 import os
 import re
 import stat
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -181,6 +182,47 @@ def _lock_file_path(root: Path) -> Path:
     return _admission_dir(root) / "lock.flock"
 
 
+# Per-thread record of which roots (realpath) this thread currently holds the
+# producer-admission flock for. `dispatch_lock_order.held()` tracks lock ranks
+# but not which root -- a process holding root A's lock and writing root B's
+# index would look identical to "no lock held" at the rank level. `holds_lock`
+# closes that gap for callers (locator `update_indexes`/`locate`) that must
+# never write a root's index without holding *that root's* mutex.
+_HELD_ROOTS_STATE = threading.local()
+
+
+def _held_roots() -> set:
+    roots = getattr(_HELD_ROOTS_STATE, "roots", None)
+    if roots is None:
+        roots = set()
+        _HELD_ROOTS_STATE.roots = roots
+    return roots
+
+
+def holds_lock(root: Path) -> bool:
+    """Whether this thread currently holds the producer-admission flock for `root`."""
+    return str(Path(root).resolve()) in _held_roots()
+
+
+def try_acquire_lock(root: Path) -> Optional[int]:
+    """Non-blocking producer-admission acquire; ``None`` on any contention (never raises).
+
+    Refuses before touching the OS lock when this thread already declares a
+    rank at or above ``producer-admission`` -- entering would be a re-entry or
+    a reverse-order acquisition, and `dispatch_lock_order.enter` would refuse
+    it anyway, but only after this call had already taken and had to release
+    the real flock.
+    """
+    held_ranks = [dispatch_lock_order.RANK[name] for name in dispatch_lock_order.held()
+                  if name in dispatch_lock_order.RANK]
+    if held_ranks and max(held_ranks) >= dispatch_lock_order.RANK["producer-admission"]:
+        return None
+    try:
+        return _acquire_lock(root, 0.0)
+    except (AdmissionBusy, dispatch_lock_order.LockOrderError):
+        return None
+
+
 def _acquire_lock(root: Path, timeout: float, now: Optional[float] = None) -> int:
     """Acquire the admission mutex; returns an fd holding an exclusive flock.
 
@@ -228,6 +270,7 @@ def _acquire_lock(root: Path, timeout: float, now: Optional[float] = None) -> in
                     # rather than blocking on `flock` until the admission
                     # timeout turns a contract violation into a "busy" report.
                     dispatch_lock_order.enter("producer-admission")
+                    _held_roots().add(str(Path(root).resolve()))
                     result_fd, fd = fd, -1  # ownership transferred to caller
                     return result_fd
         finally:
@@ -247,6 +290,7 @@ def _acquire_lock(root: Path, timeout: float, now: Optional[float] = None) -> in
 
 
 def _release_lock(root: Path, fd: int) -> None:
+    _held_roots().discard(str(Path(root).resolve()))
     dispatch_lock_order.leave("producer-admission")
     # Unlink before unlocking, while exclusivity still holds; a waiter that
     # locked the old inode fails its path/inode verification and retries.
