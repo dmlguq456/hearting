@@ -51,6 +51,7 @@ RETIRED_PATH_PATTERNS = [
 # Concrete model-ID patterns — mirrors tools/check-model-config.py.
 MODEL_PATTERNS = [
     re.compile(r"gpt-5\.\d"),                                   # codex: gpt-5.6-sol, ...
+    re.compile(r"\bgpt-\d+-[a-z]"),                             # codex: gpt-6-sol, gpt-6-astra, ...
     re.compile(r"claude-(?:opus|sonnet|haiku|fable)-\d"),       # claude versioned full ids
     re.compile(r"opencode-go/[a-z0-9]"),                        # opencode-go provider model-id
     re.compile(r"\bglm-\d"),                                    # opencode glm-5.2

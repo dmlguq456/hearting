@@ -640,7 +640,9 @@ _ROLE_MODEL_NAME = {"opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku", "fable
 
 # Bare dispatch roles are resolved by the current runtimes but preserved raw by collectors.
 # Centralize their human-facing names here; unknown values remain byte-for-byte unchanged.
-_DISPATCH_MODEL_NAMES = {"opus": "Opus 5", "sonnet": "Sonnet 5", "haiku": "Haiku 4.5"}
+# Checked 2026-09-24 against the owners' transcripts: `--model opus` resolved to
+# `claude-opus-5-5` (the table said "Opus 5" and read as an outdated owner model).
+_DISPATCH_MODEL_NAMES = {"opus": "Opus 5.5", "sonnet": "Sonnet 5", "haiku": "Haiku 4.5"}
 
 
 def _clean_model(name):
