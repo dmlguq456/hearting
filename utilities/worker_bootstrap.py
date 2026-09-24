@@ -5,8 +5,8 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
 UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
@@ -147,10 +147,17 @@ def artifact_context_prompt(environ) -> str:
             "- Resolve relative artifact paths beneath artifact_output_dir.\n")
 
 
-@dataclass(frozen=True)
-class NodeScope:
+class NodeScope(NamedTuple):
     """A route node's declared scope, resolved to one absolute directory (or
-    stated as unresolved, never guessed)."""
+    stated as unresolved, never guessed).
+
+    A plain dataclass here breaks under `importlib.util.spec_from_file_location`
+    + `exec_module` loading that never registers this module in `sys.modules`:
+    `dataclass()` resolves string annotations via `sys.modules[cls.__module__]`
+    and crashes with AttributeError when that lookup is None
+    (tools/capability_topology.test.py loads this file that way). NamedTuple
+    needs no such lookup and stays immutable and attribute-accessed the same way.
+    """
     output_dir: str | None
     outputs: tuple[str, ...]
     write_scope: tuple[str, ...]
