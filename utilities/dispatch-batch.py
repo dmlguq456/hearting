@@ -1808,7 +1808,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--action", choices=("dry-run", "start"), default="dry-run")
     parser.add_argument("--slug-prefix", required=True)
     parser.add_argument("--parent", required=True)
-    parser.add_argument("--qa", default="standard")
+    parser.add_argument("--qa", default=None)
     parser.add_argument("--jobs", type=Path)
     parser.add_argument("--log-dir", type=Path)
     parser.add_argument(
@@ -2387,8 +2387,6 @@ def main(argv: list[str] | None = None) -> int:
                 "start",
                 "--slug",
                 str(leg["slug"]),
-                "--qa",
-                args.qa,
                 "--parent",
                 args.parent,
                 "--prompt-text",
@@ -2412,6 +2410,10 @@ def main(argv: list[str] | None = None) -> int:
                 "--fallback-ordinal",
                 str(leg["ordinal"]),
             ]
+            if args.qa:
+                # Omitted when unset: dispatch-node.py's wrapper derives it
+                # from --intensity (dispatch_mode_contract.resolve_qa).
+                command += ["--qa", args.qa]
             env = {
                 # This launches a depth-2 node (dispatch-node.py), which
                 # always supplies its own --route via `command` above. An

@@ -30,7 +30,10 @@ class RuntimeSnapshotTest(unittest.TestCase):
             initial = activation.source_revision(root, runtime_launch=True)
             (root / "final_report.md").write_text("work output\n")
             self.assertEqual(activation.source_revision(root, runtime_launch=True), initial)
-            self.assertNotEqual(activation.source_revision(root), initial)
+            # Both modes now share one root-level filter (`_release_content_skip`):
+            # an untracked top-level work output is not release content in either
+            # mode, so the default call agrees with the launch call here too.
+            self.assertEqual(activation.source_revision(root), initial)
             addition = root / "utilities" / "new_entry.py"
             addition.write_text("new runtime code\n")
             self.assertNotEqual(activation.source_revision(root, runtime_launch=True), initial)
@@ -110,6 +113,66 @@ class RuntimeSnapshotTest(unittest.TestCase):
                     state, root / "backup", 0,
                     preserve_names=("managed-sessions",),
                 )
+
+
+class ReleaseContentSkipTest(unittest.TestCase):
+    """`_release_content_skip` is the one filter cleanliness, copy, and the
+    bundle key share: a root-level untracked item (e.g. an unversioned
+    `dist/` build output) is not release content anywhere."""
+
+    def _git_checkout(self, root: Path) -> Path:
+        checkout = root / "checkout"
+        checkout.mkdir()
+
+        def git(*args):
+            subprocess.run(["git", "-C", str(checkout), *args], check=True, capture_output=True)
+
+        git("init", "-q")
+        (checkout / "utilities").mkdir()
+        (checkout / "utilities" / "tool.py").write_text("print(1)\n", encoding="utf-8")
+        git("add", ".")
+        git(
+            "-c", "user.name=Fixture", "-c", "user.email=fixture@example.org",
+            "commit", "-qm", "base",
+        )
+        return checkout
+
+    def test_packaged_ignores_root_untracked_release_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = self._git_checkout(root)
+            dist = checkout / "dist"
+            dist.mkdir()
+            (dist / "a.tgz").write_bytes(b"binary")
+
+            revision = activation.source_revision(checkout)
+            self.assertNotIn("+dirty:", revision)
+
+            state_home = root / "codex-home"
+            previous = os.environ.get("CODEX_HOME")
+            os.environ["CODEX_HOME"] = str(state_home)
+            try:
+                bundle_source = activation._build_bundle("codex", checkout, revision, "global")
+            finally:
+                if previous is None:
+                    os.environ.pop("CODEX_HOME", None)
+                else:
+                    os.environ["CODEX_HOME"] = previous
+
+            self.assertFalse((bundle_source / "dist").exists())
+            self.assertTrue((bundle_source / "utilities" / "tool.py").is_file())
+
+    def test_source_dir_untracked_file_stays_dirty_in_both_modes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = self._git_checkout(root)
+            baseline_launch = activation.source_revision(checkout, runtime_launch=True)
+            baseline_default = activation.source_revision(checkout)
+            (checkout / "utilities" / "new.py").write_text("print(2)\n", encoding="utf-8")
+            self.assertNotEqual(
+                activation.source_revision(checkout, runtime_launch=True), baseline_launch
+            )
+            self.assertNotEqual(activation.source_revision(checkout), baseline_default)
 
 
 class SurfaceSkewTest(unittest.TestCase):

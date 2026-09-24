@@ -3,16 +3,23 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import re
 from typing import Any
 
+import opencode_server_log
 from dispatch_contract import reconcile_attempt_terminal
 
 
 CLASSIFIER_SOURCE = "supervisor-terminal-v1"
+# CodexErrorInfo discriminants that mean the same thing as the Claude/OpenCode
+# 429 envelope -- everything else (notably `serverOverloaded`, transient
+# overload rather than a rate/usage limit) falls through to the shared
+# regex/status classification below instead of being trusted blindly.
+_CODEX_CAPACITY_STRUCTURED_CODES = frozenset({"usageLimitExceeded", "rateLimitExceeded"})
+_CODEX_AUTH_STRUCTURED_CODE = "unauthorized"
 _MAX_TAIL_BYTES = 1024 * 1024
 # Trailing-block anchor, kept in step with codex_dispatch_terminal._HANDOFF_RE —
 # the two must accept the same envelopes, or one surface reads a child as
@@ -52,6 +59,10 @@ class SupervisorTerminal:
     reconcile_reason: str
     process_exit: str
     api_status: str = ""
+    # Set only by missing_result_terminal when an OpenCode server-log read
+    # upgrades a missing result to a typed capacity/auth verdict -- the path
+    # to the evidence a human or later reader would need to check the read.
+    capacity_log: str = ""
 
     def evidence(self) -> dict[str, str]:
         values = {
@@ -64,6 +75,8 @@ class SupervisorTerminal:
         }
         if self.api_status:
             values["api_status"] = self.api_status
+        if self.capacity_log:
+            values["capacity_log"] = self.capacity_log
         return values
 
 
@@ -149,23 +162,25 @@ def classify_claude_result(result: dict[str, Any], process_exit: int) -> Supervi
     return classify_session_result(result, process_exit, runtime="claude")
 
 
-def classify_session_result(
-    result: dict[str, Any], process_exit: int, *, runtime: str
+def classify_runtime_failure(
+    runtime: str,
+    *,
+    event: str,
+    process_exit: int,
+    status: str = "",
+    text: str = "",
+    structured_code: str = "",
 ) -> SupervisorTerminal:
-    """Classify the portable result produced by a native CLI session driver."""
-    if runtime not in {"claude", "opencode"}:
-        raise ValueError("session-runtime-unsupported")
-    event = f"{runtime}-result"
-    is_error = result.get("is_error") is True
-    subtype = result.get("subtype")
-    if process_exit == 0 and not is_error and subtype in {None, "success"}:
-        return _handoff_terminal(
-            result.get("result"), event=event, process_exit=process_exit
-        )
+    """Shared failure classifier for every runtime's non-success envelope.
 
-    status = _api_status(result)
-    text = "\n".join(_bounded_strings(result))
-    if status == "429":
+    `structured_code` (a CodexErrorInfo discriminant, or any exact-match
+    typed reason a caller already knows) is checked first, alongside `status`
+    (an HTTP status code, e.g. extracted from a nested `httpStatusCode`).
+    Falling through to the `text` regex match keeps this byte-identical to
+    the pre-extraction claude/opencode behaviour for callers that pass no
+    structured evidence at all.
+    """
+    if status == "429" or structured_code in _CODEX_CAPACITY_STRUCTURED_CODES:
         return SupervisorTerminal(
             "dead-capacity",
             "capacity",
@@ -174,7 +189,7 @@ def classify_session_result(
             str(process_exit),
             status,
         )
-    if status in {"401", "403"}:
+    if status in {"401", "403"} or structured_code == _CODEX_AUTH_STRUCTURED_CODE:
         return SupervisorTerminal(
             "dead-auth",
             "auth",
@@ -211,6 +226,27 @@ def classify_session_result(
     )
 
 
+def classify_session_result(
+    result: dict[str, Any], process_exit: int, *, runtime: str
+) -> SupervisorTerminal:
+    """Classify the portable result produced by a native CLI session driver."""
+    if runtime not in {"claude", "opencode"}:
+        raise ValueError("session-runtime-unsupported")
+    event = f"{runtime}-result"
+    is_error = result.get("is_error") is True
+    subtype = result.get("subtype")
+    if process_exit == 0 and not is_error and subtype in {None, "success"}:
+        return _handoff_terminal(
+            result.get("result"), event=event, process_exit=process_exit
+        )
+
+    status = _api_status(result)
+    text = "\n".join(_bounded_strings(result))
+    return classify_runtime_failure(
+        runtime, event=event, process_exit=process_exit, status=status, text=text
+    )
+
+
 def classify_codex_result(final_text: object, process_exit: int = 0) -> SupervisorTerminal:
     if process_exit != 0:
         return SupervisorTerminal(
@@ -222,6 +258,71 @@ def classify_codex_result(final_text: object, process_exit: int = 0) -> Supervis
         )
     return _handoff_terminal(
         final_text, event="turn.completed", process_exit=process_exit
+    )
+
+
+def codex_turn_failure_terminal(payload: dict[str, Any]) -> SupervisorTerminal:
+    """Classify a `dispatch.supervisor.turn.failed` payload.
+
+    One function, two callers: the live event loop (codex-app-server-
+    supervisor.py) calls this the moment it raises `TurnFailed`, and
+    `classify_supervisor_log`'s codex branch below calls it again on the same
+    logged payload after the process has exited. Sharing this function is
+    what guarantees they agree -- there is deliberately no second,
+    independent parse of `codex_error_info` anywhere else.
+    """
+    codex_error_info = payload.get("codex_error_info")
+    structured_code, status = "", ""
+    if isinstance(codex_error_info, str):
+        structured_code = codex_error_info
+    elif isinstance(codex_error_info, dict):
+        kind = codex_error_info.get("kind")
+        http_status = codex_error_info.get("http_status")
+        structured_code = kind if isinstance(kind, str) else ""
+        status = str(http_status) if isinstance(http_status, int) else ""
+    text = "\n".join(
+        str(payload.get(key) or "") for key in ("message", "additional_details")
+    )
+    return classify_runtime_failure(
+        "codex",
+        event="turn.failed",
+        process_exit=70,
+        status=status,
+        text=text,
+        structured_code=structured_code,
+    )
+
+
+_MISSING_RESULT_NOTE = "dead-missing-result"
+_MISSING_RESULT_RECONCILE_REASON = "governed-process-group-drained"
+
+
+def missing_result_terminal(metadata: dict[str, Any]) -> SupervisorTerminal:
+    """Classify a detached attempt closed with no result envelope.
+
+    Only OpenCode has a durable per-session server log outside the attempt's
+    own (possibly absent) output; reading it -- through the single
+    exact-session-bound `opencode_server_log.session_error` seam -- can
+    upgrade the verdict to a typed capacity/auth close with `capacity_log`
+    evidence. Every other harness, or an unreadable/ambiguous/non-capacity
+    read, keeps the conservative `dead-missing-result` note every writer used
+    before this function existed: no evidence means no guess (LOOP §4).
+    """
+    if metadata.get("harness") == "opencode":
+        found = opencode_server_log.session_error(metadata)
+        if found is not None:
+            error_text, log_path = found
+            terminal = classify_runtime_failure(
+                "opencode", event="opencode-server-log", process_exit=70, text=error_text
+            )
+            if terminal.failure_class in {"capacity", "auth"}:
+                return replace(terminal, capacity_log=str(log_path))
+    return SupervisorTerminal(
+        _MISSING_RESULT_NOTE,
+        "protocol",
+        "dispatch-reap-missing-result",
+        _MISSING_RESULT_RECONCILE_REASON,
+        "0",
     )
 
 
@@ -421,6 +522,16 @@ def classify_supervisor_log(path: str | Path | None, harness: str) -> Supervisor
         # below (R3 dispatch.supervisor.error, else R4 terminal-event-missing);
         # opencode rows never match turn.completed/result so that loop is
         # harness-safe as-is.
+    # A structured TurnFailed row is checked first, in its own pass: the
+    # live raiser always emits a plain dispatch.supervisor.error *after* it
+    # (same "app-server-turn-failed" reason, no structured detail), which
+    # sits at a later index and would otherwise win the single backward scan
+    # below and downgrade a capacity/auth answer to a generic dead-runtime-
+    # exit. This row type never appears in a claude/opencode log (only
+    # codex-app-server-supervisor.py emits it), so the pass is harness-safe.
+    for index in range(len(rows) - 1, -1, -1):
+        if rows[index].get("type") == "dispatch.supervisor.turn.failed":
+            return codex_turn_failure_terminal(rows[index])
     for index in range(len(rows) - 1, -1, -1):
         row = rows[index]
         event = row.get("type")

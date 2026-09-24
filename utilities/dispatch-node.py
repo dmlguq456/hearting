@@ -421,7 +421,7 @@ def bind_dispatch_evidence(route, node, adapter, adapter_args, parent_identity=N
 
 
 def main():
- p=argparse.ArgumentParser(); p.add_argument("--route",required=True); p.add_argument("--node",required=True); p.add_argument("--adapter",choices=("claude","codex","opencode"),required=True); p.add_argument("--action",choices=("dry-run","register","start"),default="dry-run"); p.add_argument("--slug",required=True); p.add_argument("--qa",default="standard"); p.add_argument("--parent"); p.add_argument("--jobs"); p.add_argument("--prompt-text",default="Execute the selected immutable route node and emit its completion evidence."); p.add_argument("--subsession-id"); p.add_argument("--subsession-index",type=int); p.add_argument("--subsession-count",type=int); p.add_argument("--subsession-mode",choices=("serial","parallel")); p.add_argument("--subsession-purpose",choices=("planned","gap-retry"),default="planned"); p.add_argument("--session-chain-id"); p.add_argument("--phase-brief"); p.add_argument("--stage-authority",choices=(0,1),type=int,default=1); p.add_argument("--fixed-file",action="append",default=[]); p.add_argument("--narrow-verify"); p.add_argument("--expected-round-trips",type=int); p.add_argument("--state-dir"); p.add_argument("--attempt-id"); p.add_argument("adapter_args",nargs=argparse.REMAINDER)
+ p=argparse.ArgumentParser(); p.add_argument("--route",required=True); p.add_argument("--node",required=True); p.add_argument("--adapter",choices=("claude","codex","opencode"),required=True); p.add_argument("--action",choices=("dry-run","register","start"),default="dry-run"); p.add_argument("--slug",required=True); p.add_argument("--qa",default=None); p.add_argument("--parent"); p.add_argument("--jobs"); p.add_argument("--prompt-text",default="Execute the selected immutable route node and emit its completion evidence."); p.add_argument("--subsession-id"); p.add_argument("--subsession-index",type=int); p.add_argument("--subsession-count",type=int); p.add_argument("--subsession-mode",choices=("serial","parallel")); p.add_argument("--subsession-purpose",choices=("planned","gap-retry"),default="planned"); p.add_argument("--session-chain-id"); p.add_argument("--phase-brief"); p.add_argument("--stage-authority",choices=(0,1),type=int,default=1); p.add_argument("--fixed-file",action="append",default=[]); p.add_argument("--narrow-verify"); p.add_argument("--expected-round-trips",type=int); p.add_argument("--state-dir"); p.add_argument("--attempt-id"); p.add_argument("adapter_args",nargs=argparse.REMAINDER)
  a=p.parse_args(); route=json.loads(Path(a.route).read_text())
  verify=subprocess.run(
   [sys.executable,str(ROOT/"utilities/capability-route.py"),"verify","--route",a.route,
@@ -475,8 +475,11 @@ def main():
  if node.get("unit") == "plan/frame" and node.get("dispatch_depth") == 1:
   argv=[sys.executable,str(ROOT/"utilities/dispatch-owner.py"),"--"+a.action,
         "--adapter",a.adapter,"--route-evidence",str(Path(a.route).resolve()),
-        "--route-node",node["id"],"--slug",a.slug,"--qa",a.qa,
+        "--route-node",node["id"],"--slug",a.slug,
         "--prompt-text",a.prompt_text]
+  # Omitted when unset: the selector derives it from the route's
+  # effective_intensity (dispatch_mode_contract.resolve_qa).
+  if a.qa: argv += ["--qa",a.qa]
   if requested_jobs: argv += ["--jobs",requested_jobs]
   if a.attempt_id: argv += ["--attempt-id",a.attempt_id]
   argv += strip_leading_separator(a.adapter_args)
@@ -555,10 +558,13 @@ def main():
    raise SystemExit(65)
  prompt_text=a.prompt_text+round_protocol_block(round_no,worker_type,node["id"],prior_rounds)
  if round_no>=2: print(f"correction_round={round_no}")
- argv=[sys.executable,str(wrapper),"--"+a.action,"--worktree",route["cwd"],"--slug",a.slug,"--capability",route["capability"],"--capability-mode",route["capability_mode"],"--qa",a.qa,"--intensity",route["effective_intensity"],"--dispatch-depth",str(node.get("dispatch_depth",1)),"--worker-type",worker_type,"--unit",node.get("unit",""),"--assigned-contract",contract,"--owner",route["capability"],"--route-file",str(Path(a.route).resolve()),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node",node["id"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--jobs",str(registry.path),"--prompt-text",prompt_text]
+ argv=[sys.executable,str(wrapper),"--"+a.action,"--worktree",route["cwd"],"--slug",a.slug,"--capability",route["capability"],"--capability-mode",route["capability_mode"],"--intensity",route["effective_intensity"],"--dispatch-depth",str(node.get("dispatch_depth",1)),"--worker-type",worker_type,"--unit",node.get("unit",""),"--assigned-contract",contract,"--owner",route["capability"],"--route-file",str(Path(a.route).resolve()),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node",node["id"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--jobs",str(registry.path),"--prompt-text",prompt_text]
  unit=node.get("unit","")
  if unit and not unit.startswith("_kernel/"):
   argv += ["--worker-mode",unit]
+ # Omitted when unset: the wrapper derives it from --intensity
+ # (dispatch_mode_contract.resolve_qa, CONVENTIONS §1.1, single SoT).
+ if a.qa: argv += ["--qa",a.qa]
  affinity=node.get("harness_affinity")
  if affinity: argv += ["--harness-affinity",affinity]
  if node.get("dispatch_depth")==2:

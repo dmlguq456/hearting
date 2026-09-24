@@ -97,6 +97,7 @@ from dispatch_mode_contract import (  # noqa: E402
     capability_mode_from_route_file,
     DispatchModeContractError,
     normalize_dispatch_modes,
+    resolve_qa,
     validate_capability_mode,
     validate_route_mode_axes,
 )
@@ -152,18 +153,11 @@ from execution_access import (  # noqa: E402
     bind_request as bind_execution_access_request,
     receipt_fragment as execution_access_receipt_fragment,
 )
-QA_LEVELS = {"quick", "light", "standard", "thorough", "adversarial"}
-# Verification rigor is derived from intensity — CONVENTIONS §1.1 mapping table (SoT).
-# `--qa` is no longer a user-facing axis; optional, derived from --intensity when omitted.
-# The jobs.log `qa=` field is retained (derived value) for fleet-collector compatibility.
-QA_FROM_INTENSITY = {
-    "direct": "light",
-    "quick": "quick",
-    "standard": "standard",
-    "strong": "standard",
-    "thorough": "thorough",
-    "adversarial": "adversarial",
-}
+# Verification rigor is derived from intensity via resolve_qa
+# (dispatch_mode_contract.py, the single qa/intensity SoT — CONVENTIONS §1.1).
+# `--qa` is no longer a user-facing axis; optional, derived from --intensity
+# when omitted. The jobs.log `qa=` field is retained (derived value) for
+# fleet-collector compatibility.
 INTENSITY_LEVELS = {"direct", "quick", "standard", "strong", "thorough", "adversarial"}
 # standard+ per OPERATIONS.md §5.10 — the SD-78 runtime-owned completion clause
 # is scoped to this set for owner (conductor) launches only.
@@ -1988,15 +1982,10 @@ def validate_dispatch_inputs(args: argparse.Namespace) -> int:
         )
         if rc != 0:
             return rc
-    if args.qa is None:
-        args.qa = QA_FROM_INTENSITY.get(args.intensity, "standard")
-    if args.qa not in QA_LEVELS:
-        return fail(
-            "invalid-dispatch-qa",
-            64,
-            qa=args.qa,
-            allowed_qa="quick,light,standard,thorough,adversarial",
-        )
+    try:
+        args.qa = resolve_qa(args.intensity, args.qa)
+    except DispatchModeContractError as exc:
+        return fail(exc.reason, 64, **exc.fields)
     if args.intensity not in INTENSITY_LEVELS:
         return fail(
             "invalid-dispatch-intensity",

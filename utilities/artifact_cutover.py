@@ -38,6 +38,7 @@ These commands run only against an artifact root whose producer cutover is activ
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import importlib.util
 import json
@@ -2172,8 +2173,9 @@ def retire(root: Path, *, maps: Sequence[Path], backup_root: Path, excludes: Seq
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     p = sub.add_parser("migrate-delta")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--census-rows", required=True, help="jsonl rows from artifact-delta-census.py --rows-output")

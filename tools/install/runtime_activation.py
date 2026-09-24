@@ -22,7 +22,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 import paths
 
@@ -463,6 +463,38 @@ def _tree_digest(root: Path, skip=None) -> str:
     return digest.hexdigest()
 
 
+def _release_content_skip(root: Path) -> Callable[[Path], bool]:
+    """One top-level filter shared by cleanliness, copy, and digest.
+
+    A root-level, untracked item (e.g. an unversioned `dist/` build output
+    sitting beside the checkout) is not release content: it does not belong
+    to the launch/dirty judgment, the packaged copy, or the bundle key. An
+    untracked file inside a tracked source directory is unaffected -- it
+    stays dirty and stays in the digest, in every mode. Not a git worktree at
+    all means there is nothing to distinguish, so nothing is skipped.
+    """
+    if _git(["rev-parse", "--is-inside-work-tree"], root) != "true":
+        return lambda _path: False
+    tracked = (_git(["ls-files"], root) or "").splitlines()
+    tracked_top = {Path(name).parts[0] for name in tracked if name}
+    root = Path(root)
+
+    def _skip(path: Path) -> bool:
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            return False
+        if not rel.parts:
+            return False
+        # The top-level component decides it, however deep `path` itself is:
+        # `git status --untracked-files=all` lists an untracked directory's
+        # files individually rather than the directory, so an unversioned
+        # `dist/a.tgz` must be judged by `dist`, not by its own name.
+        return rel.parts[0] not in tracked_top
+
+    return _skip
+
+
 def _git(runtime_args: Sequence[str], root: Path) -> Optional[str]:
     try:
         result = subprocess.run(
@@ -476,6 +508,10 @@ def _git(runtime_args: Sequence[str], root: Path) -> Optional[str]:
 
 
 def source_revision(root: Path, *, runtime_launch: bool = False) -> str:
+    # `runtime_launch` is kept only for caller compatibility (e.g.
+    # utilities/capability-route.py). The root-level filter below now applies
+    # the same way regardless of its value -- see `_release_content_skip`.
+    del runtime_launch
     release_marker = root / "RELEASE_VERSION"
     if release_marker.is_file() and not release_marker.is_symlink():
         try:
@@ -488,16 +524,15 @@ def source_revision(root: Path, *, runtime_launch: bool = False) -> str:
     if not head:
         return "tree:" + _tree_digest(root)[:20]
     dirty = _git(["status", "--porcelain=v1", "--untracked-files=all"], root) or ""
-    if runtime_launch:
-        # A checkout launch identifies its versioned source plus additions to
-        # existing source directories. Root-level, unversioned work outputs
-        # are not executable release content. Installer cleanliness remains
-        # whole-checkout; it must still refuse packaging those files.
-        tracked = (_git(["ls-files"], root) or "").splitlines()
-        source_dirs = {str(Path(name).parts[0]) for name in tracked if len(Path(name).parts) > 1}
-        dirty = "\n".join(line for line in dirty.splitlines()
-                          if not line.startswith("?? ") or
-                          (len(Path(line[3:]).parts) > 1 and Path(line[3:]).parts[0] in source_dirs))
+    # A checkout identifies its versioned source plus additions to existing
+    # source directories. Root-level, unversioned work outputs (e.g. an
+    # unversioned `dist/` build directory) are not executable release
+    # content, in either the launch checkout or the packaged copy.
+    skip = _release_content_skip(root)
+    dirty = "\n".join(
+        line for line in dirty.splitlines()
+        if not line.startswith("?? ") or not skip(root / line[3:].split(" -> ")[-1])
+    )
     if not dirty:
         return head
     digest = hashlib.sha256(dirty.encode())
@@ -735,8 +770,19 @@ def _linked_entries(
     return existing
 
 
-def _bundle_ignore(_directory: str, names: List[str]) -> set:
-    return {name for name in names if name in _IGNORE_NAMES}
+def _bundle_ignore(source_root: Path, skip: Callable[[Path], bool]) -> Callable[[str, List[str]], set]:
+    # `copytree`'s `ignore` is called once per visited directory; the release-
+    # content filter only applies at the root call (`skip` already refuses
+    # anything below the top level), matching `_release_content_skip`.
+    root_str = str(source_root)
+
+    def _ignore(directory: str, names: List[str]) -> set:
+        ignored = {name for name in names if name in _IGNORE_NAMES}
+        if directory == root_str:
+            ignored.update(name for name in names if skip(source_root / name))
+        return ignored
+
+    return _ignore
 
 
 def _validate_source_symlinks(source_root: Path) -> None:
@@ -798,8 +844,9 @@ def _build_bundle(runtime: str, source_root: Path, revision: str, scope: str) ->
         raise ActivationError("packaged activation refuses a dirty git source")
     state_dir = paths.harness_state_dir(runtime, scope)
     _validate_source_symlinks(source_root)
+    skip = _release_content_skip(source_root)
     key = re.sub(r"[^A-Za-z0-9._-]+", "-", revision)[:48]
-    key += "-" + _tree_digest(source_root)[:12]
+    key += "-" + _tree_digest(source_root, skip=skip)[:12]
     bundle = state_dir / "bundles" / key
     bundle_source = bundle / "source"
     metadata_path = bundle / "bundle.json"
@@ -829,7 +876,7 @@ def _build_bundle(runtime: str, source_root: Path, revision: str, scope: str) ->
                 source_root,
                 staging_source,
                 symlinks=True,
-                ignore=_bundle_ignore,
+                ignore=_bundle_ignore(source_root, skip),
             )
         _atomic_json(
             staging / "bundle.json",

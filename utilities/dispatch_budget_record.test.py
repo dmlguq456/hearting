@@ -317,5 +317,49 @@ class DurableHandoffCrashTest(unittest.TestCase):
             self.assertEqual(BR.read_rows(td, "owner"), ())
 
 
+class CompleteTerminalHandoffDeferredTest(unittest.TestCase):
+    """C16 (S3a): `complete_terminal_handoff`'s guard via `verdict_pass`.
+
+    The guard is the only thing under test -- once past it, prove that by
+    asserting the next real step (`terminal_handoff_root`) was reached,
+    instead of building the rest of the claim/lock/write plumbing here.
+    """
+
+    def _jobs(self, tmp, metadata):
+        jobs = Path(tmp) / "jobs.log"
+        pipe = ",".join(f"{k}={v}" for k, v in metadata.items())
+        jobs.write_text(f"2026-09-24T00:00:00Z\tdone\t/r\t/w\towner\t{pipe}\n", encoding="utf-8")
+        return jobs
+
+    def _claim(self):
+        return {"owner_attempt_id": "att-owner-deferred", "claim_id": "cl-1",
+                "route_hash": "sha256:" + "a" * 64, "continuation_ordinal": 1}
+
+    def test_pending_deferred_owner_is_rejected_by_the_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = self._jobs(tmp, {
+                "attempt_id": "att-owner-deferred", "note": "completion-deferred",
+                "failure_class": "infrastructure",
+                "classifier_source": "registered-wrapper-completion-transient-v1",
+            })
+            with self.assertRaises(BR.TerminalHandoffConflict) as caught:
+                BR.complete_terminal_handoff(tmp, self._claim(), jobs=jobs, terminal_commit_id="tc-1")
+            self.assertEqual(caught.exception.args[0], "terminal-owner-not-reconciled")
+
+    def test_completed_deferred_owner_passes_the_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = self._jobs(tmp, {
+                "attempt_id": "att-owner-deferred", "note": "completed-marker",
+                "failure_class": "infrastructure",
+                "classifier_source": "registered-wrapper-completion-transient-v1",
+                "completion_marker": "/artifacts/.runtime/completions/one-shot.json",
+            })
+            with mock.patch.object(
+                BR, "terminal_handoff_root", side_effect=RuntimeError("reached-past-the-guard"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "reached-past-the-guard"):
+                    BR.complete_terminal_handoff(tmp, self._claim(), jobs=jobs, terminal_commit_id="tc-1")
+
+
 if __name__ == "__main__":
     unittest.main()

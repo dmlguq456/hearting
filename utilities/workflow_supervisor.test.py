@@ -2887,5 +2887,41 @@ class TestGateRecipientIsNeverAFrameLeg(WorkflowFixture):
             self.assert_owner_is_the_one_shot_row(jobs, route)
 
 
+class TestRegisteredEvidenceDeferredCompletion(unittest.TestCase):
+    """C2 (S3a): a marker-bound deferred row now reads as terminal success."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+
+    def _row(self, status, meta_extra):
+        meta = "attempt_id=att-deferred,route_node=execute," + meta_extra
+        return "\t".join(["2026-09-24T00:00:00Z", status, "repo", str(self.base), "slug", meta])
+
+    def test_pending_deferred_row_is_not_success(self):
+        jobs = self.base / "jobs.log"
+        jobs.write_text(self._row(
+            "done",
+            "note=completion-deferred,failure_class=infrastructure,"
+            "classifier_source=registered-wrapper-completion-transient-v1",
+        ) + "\n", encoding="utf-8")
+        evidence = SUP.registered_evidence({"predecessor_id": "att-deferred", "jobs": str(jobs)})
+        self.assertTrue(evidence["terminal"])
+        self.assertFalse(evidence["succeeded"])
+
+    def test_marker_bound_deferred_row_is_success(self):
+        jobs = self.base / "jobs.log"
+        jobs.write_text(self._row(
+            "done",
+            "note=completed-marker,failure_class=infrastructure,"
+            "classifier_source=registered-wrapper-completion-transient-v1,"
+            "completion_marker=/artifacts/.runtime/completions/execute.json",
+        ) + "\n", encoding="utf-8")
+        evidence = SUP.registered_evidence({"predecessor_id": "att-deferred", "jobs": str(jobs)})
+        self.assertTrue(evidence["terminal"])
+        self.assertTrue(evidence["succeeded"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -13,7 +13,7 @@ Design boundary:
     storage, retrieval, scope, lifecycle, telemetry, and recovery contracts.
   - No external Python dependencies; rg accelerates session retrieval when present.
 """
-import argparse, contextlib, datetime, fcntl, hashlib, io, json, os, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time
+import argparse, contextlib, datetime, fcntl, functools, hashlib, io, json, os, re, shutil, sqlite3, stat, subprocess, sys, tarfile, tempfile, time
 from collections import namedtuple
 from pathlib import Path
 
@@ -6246,7 +6246,8 @@ def _configure_migration_parser(sub):
     migration = sub.add_parser(
         "migration", help="Operate a sealed existing-store protocol-v2 cutover"
     )
-    phases = migration.add_subparsers(dest="migration_cmd", required=True)
+    phases = migration.add_subparsers(dest="migration_cmd", required=True,
+                                      parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
 
     status = _migration_leaf(phases.add_parser("status", help="Read migration state"))
     status.add_argument("--store")
@@ -6257,7 +6258,8 @@ def _configure_migration_parser(sub):
     ))
 
     roster = phases.add_parser("roster", help="Seal membership or final evidence")
-    roster_phases = roster.add_subparsers(dest="migration_roster_cmd", required=True)
+    roster_phases = roster.add_subparsers(dest="migration_roster_cmd", required=True,
+                                          parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     member = _migration_leaf(roster_phases.add_parser("membership-seal"), mutating=True)
     member.add_argument("--member", action="append", default=[], required=True)
     member.add_argument("--retirement", action="append", default=[])
@@ -6275,7 +6277,8 @@ def _configure_migration_parser(sub):
     snapshot.add_argument("--json", dest="json_output", action="store_true")
     snapshot.add_argument("--expect")
     snapshot.add_argument("--apply", action="store_true")
-    snapshot_phases = snapshot.add_subparsers(dest="migration_snapshot_cmd")
+    snapshot_phases = snapshot.add_subparsers(dest="migration_snapshot_cmd",
+                                              parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     snapshot_verify = _migration_leaf(snapshot_phases.add_parser("verify"), epoch=False)
     snapshot_verify.add_argument("--manifest", required=True)
     snapshot.add_argument("--membership")
@@ -6284,7 +6287,8 @@ def _configure_migration_parser(sub):
     snapshot.add_argument("--out")
 
     seed = phases.add_parser("seed", help="Plan, build, verify, or publish seed objects")
-    seed_phases = seed.add_subparsers(dest="migration_seed_cmd", required=True)
+    seed_phases = seed.add_subparsers(dest="migration_seed_cmd", required=True,
+                                      parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     seed_plan = _migration_leaf(seed_phases.add_parser("plan"))
     seed_plan.add_argument("--snapshot", required=True)
     seed_plan.add_argument("--kind", choices=("snapshot", "delta"), required=True)
@@ -6303,7 +6307,8 @@ def _configure_migration_parser(sub):
     seed_publish.add_argument("--ref", required=True)
 
     fence = phases.add_parser("fence", help="Plan, arm, or activate old-writer fence")
-    fence_phases = fence.add_subparsers(dest="migration_fence_cmd", required=True)
+    fence_phases = fence.add_subparsers(dest="migration_fence_cmd", required=True,
+                                        parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     fence_plan = _migration_leaf(fence_phases.add_parser("plan"))
     fence_plan.add_argument("--membership", required=True)
     fence_arm = _migration_leaf(fence_phases.add_parser("arm"), mutating=True)
@@ -6314,12 +6319,14 @@ def _configure_migration_parser(sub):
     fence_activate.add_argument("--barrier-receipt", action="append", default=[], required=True)
 
     barrier = phases.add_parser("barrier", help="Enter the final semantic-writer barrier")
-    barrier_phases = barrier.add_subparsers(dest="migration_barrier_cmd", required=True)
+    barrier_phases = barrier.add_subparsers(dest="migration_barrier_cmd", required=True,
+                                            parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     barrier_enter = _migration_leaf(barrier_phases.add_parser("enter"), mutating=True)
     barrier_enter.add_argument("--replica", required=True)
 
     delta = phases.add_parser("delta", help="Drain the captured post-snapshot tail")
-    delta_phases = delta.add_subparsers(dest="migration_delta_cmd", required=True)
+    delta_phases = delta.add_subparsers(dest="migration_delta_cmd", required=True,
+                                        parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     delta_drain = _migration_leaf(delta_phases.add_parser("drain"), mutating=True)
     delta_drain.add_argument("--replica", required=True)
     delta_drain.add_argument("--snapshot", required=True)
@@ -6327,7 +6334,8 @@ def _configure_migration_parser(sub):
     delta_drain.add_argument("--out", required=True)
 
     no_tail = phases.add_parser("no-tail", help="Verify captured-tail completeness")
-    no_tail_phases = no_tail.add_subparsers(dest="migration_no_tail_cmd", required=True)
+    no_tail_phases = no_tail.add_subparsers(dest="migration_no_tail_cmd", required=True,
+                                            parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     no_tail_verify = _migration_leaf(no_tail_phases.add_parser("verify"))
     no_tail_verify.add_argument("--replica", required=True)
     no_tail_verify.add_argument("--snapshot", required=True)
@@ -6359,7 +6367,8 @@ def _configure_migration_parser(sub):
                       help="Run one exchange sync after a successful join")
 
     rollback = phases.add_parser("rollback", help="Prepare, verify, apply, or close rollback")
-    rollback_phases = rollback.add_subparsers(dest="migration_rollback_cmd", required=True)
+    rollback_phases = rollback.add_subparsers(dest="migration_rollback_cmd", required=True,
+                                              parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     rollback_prepare = _migration_leaf(rollback_phases.add_parser("prepare"), mutating=True)
     rollback_prepare.add_argument("--equality", required=True)
     rollback_prepare.add_argument("--out", required=True)
@@ -8705,8 +8714,9 @@ def _migration_command_locked(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(prog="mem", description="Unified Memory System")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap = argparse.ArgumentParser(prog="mem", description="Unified Memory System", allow_abbrev=False)
+    sub = ap.add_subparsers(dest="cmd", required=True,
+                            parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
 
     a = sub.add_parser("add", help="Add a record manually")
     a.add_argument("tier", choices=TIERS)
@@ -8807,7 +8817,8 @@ def main():
     rv.add_argument("--artifact-ref", action="append", default=None)
 
     replica = sub.add_parser("replica", help="Inspect or explicitly rotate local replica identity")
-    replica_sub = replica.add_subparsers(dest="replica_cmd", required=True)
+    replica_sub = replica.add_subparsers(dest="replica_cmd", required=True,
+                                         parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     replica_show = replica_sub.add_parser("status", help="Show copy-detection status")
     replica_show.add_argument("--json", dest="json_output", action="store_true")
     replica_rotate = replica_sub.add_parser("rotate", help="Start a new replica identity boundary")

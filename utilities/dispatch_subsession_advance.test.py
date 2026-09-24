@@ -879,5 +879,38 @@ class WiredFlushIntegrationTest(unittest.TestCase):
                 sandbox.close()
 
 
+class ChainDeliveryNoticeDeferredTest(unittest.TestCase):
+    """C14 (S3a): a marker-bound deferred slice counts as success in the notice."""
+
+    def _result(self):
+        return SA.ChainDriveResult(
+            receipt={}, joined_rows=(), attempts=frozenset(), joined_before={},
+            traversed=frozenset(), last_advanced_attempt_id=None, refusal=None,
+            closed=(), unclosed=(),
+        )
+
+    def _row(self, attempt_id, metadata):
+        return SimpleNamespace(attempt_id=attempt_id, metadata=metadata)
+
+    def test_pending_deferred_row_counts_as_a_chain_notice_failure(self):
+        rows = [self._row("att-pending", {
+            "session_chain_id": "ssc-fixture",
+            "note": "completion-deferred", "failure_class": "infrastructure",
+            "classifier_source": "registered-wrapper-completion-transient-v1",
+        })]
+        notice = SA.chain_delivery_notice(self._result(), rows)
+        self.assertIn("att-pending=completion-deferred", notice)
+
+    def test_marker_bound_deferred_row_does_not_count_as_a_failure(self):
+        rows = [self._row("att-completed", {
+            "session_chain_id": "ssc-fixture",
+            "note": "completed-marker", "failure_class": "infrastructure",
+            "classifier_source": "registered-wrapper-completion-transient-v1",
+            "completion_marker": "/artifacts/.runtime/completions/execute.json",
+        })]
+        notice = SA.chain_delivery_notice(self._result(), rows)
+        self.assertEqual(notice, "")
+
+
 if __name__ == "__main__":
     unittest.main()

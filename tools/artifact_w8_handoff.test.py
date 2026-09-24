@@ -336,6 +336,14 @@ class BundleBoundaryCLITest(producer_fixture.ProducerTestBase):
         self.assertEqual(result.returncode, 2)
         self.assertFalse(bundle.exists())
 
+    def test_include_prefix_does_not_arm_namespace_delete(self):
+        # Plan item 2: argparse's default allow_abbrev=True let the unique
+        # prefix "--include-w" silently arm the namespace-delete boundary.
+        bundle, result = self.issue("include-w-prefix", "--include-w", success=False)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unrecognized arguments", result.stderr)
+        self.assertFalse(bundle.exists())
+
     def test_cli_refuses_missing_sealed_member_before_bundle_creation(self):
         record = w8.P.read_cycle_record(self.root, self.source_cycle)
         directory = w8.P.cycle_dir(self.root, record["campaign_id"], self.source_cycle)

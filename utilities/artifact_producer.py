@@ -37,6 +37,7 @@ import contextlib
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -4391,8 +4392,16 @@ def check_write(root: Path, target: Path) -> Dict[str, Any]:
                 "cycle_id": cycle_id, "campaign_id": campaign_id, "bucket": bucket,
                 "output_dir": str(cycle_path / "artifacts")}
     if active:
-        return {**base, "verdict": "deny", "reason": "legacy-top-level-write-denied", "layout": "legacy",
-                "bucket": top, "hint": LEGACY_WRITE_HINT}
+        denial = {**base, "verdict": "deny", "reason": "legacy-top-level-write-denied", "layout": "legacy",
+                  "bucket": top, "hint": LEGACY_WRITE_HINT}
+        # Item 7: name where the caller's own cycle actually expects this write,
+        # so a stage worker's error names its fix rather than just the refusal.
+        # The reason token above stays exactly what it was (D-86: the fleet
+        # cutover gate compares it verbatim).
+        output_dir = os.environ.get("AGENT_ARTIFACT_OUTPUT_DIR")
+        if output_dir:
+            denial["expected_output_dir"] = output_dir
+        return denial
     klass = classify_root(root)
     if klass["state"] == "malformed":
         # Same reason string as begin(). A damaged cutover record does not
@@ -4488,8 +4497,9 @@ def _checkpoint_cli(args: argparse.Namespace) -> Dict[str, Any]:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
 
     p = sub.add_parser("activate")
     p.add_argument("--artifact-root", required=True)

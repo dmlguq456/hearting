@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 import worker_bootstrap as W
+import dispatch_terminal_commit as T
+import artifact_producer as AP
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -185,6 +190,69 @@ class WorkerBootstrapTest(unittest.TestCase):
     def test_frame_contract_is_its_unit_even_with_legacy_owner_default(self):
         self.assertEqual(W.assigned_contract(capability="autopilot-code",worker_type="frame",
             route_node="frame",explicit="autopilot-code",unit="plan/frame",root=ROOT),"plan/frame")
+
+
+class NodeScopeTest(unittest.TestCase):
+    """Item 7: a stage worker's prompt must carry the route node's resolved
+    (absolute) scope -- env binding first, the owner's producer binding
+    second, and an explicit unbound statement when neither is available."""
+
+    def _route(self, tmp: Path) -> Path:
+        route_file = tmp / "route.json"
+        route_file.write_text(json.dumps({
+            "route_id": "rt-scope-test",
+            "artifact_root": str(tmp / "artifact_root"),
+            "nodes": [{
+                "id": "research",
+                "outputs": ["shards/research/notes.md"],
+                "write_scope": ["spec/<component>/_internal/research/**"],
+            }],
+        }), encoding="utf-8")
+        return route_file
+
+    def test_stage_worker_prompt_carries_resolved_node_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            route_file = self._route(root)
+            cycle_dir = root / "artifact_root" / "campaigns" / "camp1" / "cyc1"
+            env = {"AGENT_ARTIFACT_CYCLE_ID": "cyc1", "AGENT_ARTIFACT_CYCLE_DIR": str(cycle_dir)}
+            args = SimpleNamespace(worker_type="stage", route_file=str(route_file), route_node="research")
+            prompt = W.assignment_prompt(args, "do the research", env)
+            self.assertIn(
+                str(cycle_dir / "artifacts" / "spec" / "<component>" / "_internal" / "research" / "**"),
+                prompt,
+            )
+            self.assertIn(str(cycle_dir / "artifacts" / "shards" / "research" / "notes.md"), prompt)
+
+    def test_scope_resolves_from_producer_binding_without_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            route_file = self._route(root)
+            cycle_dir = root / "artifact_root" / "campaigns" / "camp1" / "cyc1"
+            args = SimpleNamespace(
+                worker_type="stage", route_file=str(route_file), route_node="research",
+                parent_attempt_id="att-owner",
+            )
+            binding = T.ProducerBindingResult(
+                "loaded", root / "binding.json",
+                {"campaign_id": "camp1", "cycle_id": "cyc1"}, "digest", True,
+            )
+            with mock.patch.object(T, "load_producer_binding", return_value=binding), \
+                 mock.patch.object(AP, "cycle_dir", return_value=cycle_dir):
+                prompt = W.assignment_prompt(args, "do the research", {})
+            self.assertIn(
+                str(cycle_dir / "artifacts" / "spec" / "<component>" / "_internal" / "research" / "**"),
+                prompt,
+            )
+
+    def test_scope_unbound_is_stated_not_guessed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            route_file = self._route(root)
+            args = SimpleNamespace(worker_type="stage", route_file=str(route_file), route_node="research")
+            prompt = W.assignment_prompt(args, "do the research", {})
+            self.assertIn("no open cycle is bound", prompt)
+            self.assertNotIn(str(root / "artifact_root"), prompt)
 
 
 if __name__ == "__main__":

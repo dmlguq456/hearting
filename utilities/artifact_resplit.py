@@ -4,6 +4,7 @@ D-80 proposal validator; compat append and retire stay in artifact_cutover."""
 from __future__ import annotations
 
 import argparse
+import functools
 import base64
 import datetime
 import hashlib
@@ -3436,9 +3437,10 @@ def _print(payload: Any) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="artifact_resplit.py")
+    parser = argparse.ArgumentParser(prog="artifact_resplit.py", allow_abbrev=False)
     parser.add_argument("--artifact-root", required=True)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
 
     lump_index_p = sub.add_parser("lump-index")
     lump_index_p.add_argument("--root-slug", help="D-79 <root-slug> for a fresh scan "
@@ -3451,7 +3453,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     dev.add_argument("--lump-cycle-id")
 
     validate_p = sub.add_parser("campaign-proposal")
-    validate_sub = validate_p.add_subparsers(dest="proposal_command", required=True)
+    validate_sub = validate_p.add_subparsers(dest="proposal_command", required=True,
+                                             parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     v = validate_sub.add_parser("validate")
     v.add_argument("--proposal", required=True)
     v.add_argument("--lump-inventory")

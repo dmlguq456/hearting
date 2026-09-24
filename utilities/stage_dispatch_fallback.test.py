@@ -322,6 +322,15 @@ class FallbackTest(unittest.TestCase):
   # unit-io stage: the readable contract stays the entry capability; the
   # plan/frame unit persona carries the stage contract (same as design build).
   self.assertEqual(command[command.index("--assigned-contract")+1],"autopilot-code")
+ def test_fallback_argv_omits_default_qa(self):
+  # --qa is not a user-facing axis (CONVENTIONS §1.1): the wrapper derives it
+  # from --intensity (dispatch_mode_contract.resolve_qa), so this dispatcher
+  # must not forward a hardcoded default when the caller omitted it.
+  path=self.route(same_status="supported"); route=json.loads(path.read_text()); node=next(n for n in route["nodes"] if n["id"]=="plan")
+  args=SimpleNamespace(action="dry-run",slug="stage",parent="owner",mode="dev/refactor",qa=None,worker_role=None,model_role="deep maker",prompt_file=None,jobs=self.jobs,route=path,launch_lifecycle="detached",foreground_timeout=123.0)
+  command=F.wrapper_command(args,route,node,self.tuple("codex","supported"),1,"att-test")
+  self.assertNotIn("--qa",command)
+  self.assertEqual(command[command.index("--intensity")+1],route["effective_intensity"])
  def test_explicit_parent_mismatch_fails_before_registration(self):
   path=self.route(same_status="supported")
   cmd=[sys.executable,str(ROOT/"utilities/stage-dispatch-fallback.py"),"--route",str(path),"--node","plan","--slug","fallback-plan","--parent","wrong-owner","--capability-mode","dev","--worker-mode","plan/plan-author","--jobs",str(self.jobs),"--register"]

@@ -54,6 +54,10 @@ EXIT_USAGE = 64
 class _UsageExitParser(argparse.ArgumentParser):
     """Use the PRD usage exit code 64 instead of argparse's default 2."""
 
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
     def error(self, message):
         self.print_usage(sys.stderr)
         self.exit(EXIT_USAGE, f"{self.prog}: error: {message}\n")
@@ -68,7 +72,7 @@ def build_parser():
         ),
     )
     # Common options inherited by all subcommands.
-    common = argparse.ArgumentParser(add_help=False)
+    common = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     common.add_argument(
         "--runtime", action="append", choices=RUNTIMES, dest="runtimes",
         help="Target runtime (repeatable); defaults to the positional target or all runtimes.",

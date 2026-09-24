@@ -1127,7 +1127,29 @@ class RouteDerivedOwnerTupleTest(unittest.TestCase):
         with self.assertRaises(OWNER.OwnerError) as caught:
             OWNER._parse(["--start", "--prompt-file", "/p.md"])
         self.assertTrue(str(caught.exception).startswith("missing-required:"))
-        self.assertIn("--qa", str(caught.exception))
+        # `--qa` is not a user-facing axis (CONVENTIONS §1.1): it is derived
+        # from `--intensity` via resolve_qa, never listed as missing.
+        self.assertNotIn("--qa", str(caught.exception))
+
+    def test_qa_not_required_without_route_evidence(self):
+        # Not forwarded: the wrapper derives the identical value from the
+        # --intensity already in `forwarded` (resolve_qa is the single SoT).
+        _, values, forwarded, _, _ = OWNER._parse(
+            ["--dry-run", "--worktree", "/w", "--slug", "s", "--capability", "autopilot-code",
+             "--capability-mode", "dev", "--intensity", "thorough", "--dispatch-depth", "1",
+             "--worker-type", "owner", "--owner", "autopilot-code",
+             "--assigned-contract", "autopilot-code", "--model-profile", "balanced-deep"])
+        self.assertEqual(values["--qa"], "thorough")
+        self.assertNotIn("--qa", forwarded)
+
+    def test_explicit_qa_mismatch_refused(self):
+        with self.assertRaises(OWNER.OwnerError) as caught:
+            OWNER._parse(
+                ["--dry-run", "--worktree", "/w", "--slug", "s", "--capability", "autopilot-code",
+                 "--capability-mode", "dev", "--qa", "standard", "--intensity", "quick",
+                 "--dispatch-depth", "1", "--worker-type", "owner", "--owner", "autopilot-code",
+                 "--assigned-contract", "autopilot-code", "--model-profile", "balanced-deep"])
+        self.assertEqual(str(caught.exception), "qa-intensity-mismatch explicit=standard derived=quick")
 
 
 class FrameModelRoleHandoffTest(unittest.TestCase):
@@ -1188,7 +1210,7 @@ class FrameModelRoleHandoffTest(unittest.TestCase):
 
     def test_explicit_complete_tuple_still_gets_the_sealed_role(self):
         args = self._args() + ["--worktree", "/w/tree", "--slug", "s", "--capability", "autopilot-code",
-            "--capability-mode", "audit", "--qa", "standard", "--intensity", "quick",
+            "--capability-mode", "audit", "--intensity", "quick",
             "--dispatch-depth", "1", "--assigned-contract", "autopilot-code",
             "--owner", "autopilot-code", "--model-profile", "deep"]
         _, values, forwarded, _, _ = OWNER._parse(args)
@@ -1286,10 +1308,10 @@ class RefusalHintTest(unittest.TestCase):
             self.assertIn(flag, hint, flag)
         _, values, _, _, derived = OWNER._parse(
             ["--dry-run", "--worktree", "/w", "--slug", "s", "--capability", "autopilot-code",
-             "--capability-mode", "dev", "--qa", "standard", "--intensity", "quick", "--dispatch-depth", "1",
+             "--capability-mode", "dev", "--intensity", "quick", "--dispatch-depth", "1",
              "--worker-type", "owner", "--owner", "autopilot-code", "--assigned-contract", "autopilot-code",
              "--model-profile", "balanced-deep"])
-        self.assertEqual(values["--qa"], "standard")
+        self.assertEqual(values["--qa"], "quick")
         self.assertEqual(derived, [])
 
     def test_unknown_reason_prints_no_hint_line(self):
@@ -1374,7 +1396,7 @@ class RouteDefaultsReceiptTest(unittest.TestCase):
              mock.patch.dict(os.environ, _isolated_env({"AGENT_DISPATCH_JOBS": str(jobs)}), clear=True), \
              redirect_stdout(buf):
             rc = OWNER.main(["--dry-run", "--route-evidence", str(path), "--worktree", str(ROOT), "--slug", "probe",
-                             "--capability", "autopilot-code", "--capability-mode", "audit", "--qa", "standard",
+                             "--capability", "autopilot-code", "--capability-mode", "audit",
                              "--intensity", "quick", "--dispatch-depth", "1", "--worker-type", "owner",
                              "--owner", "autopilot-code", "--assigned-contract", "autopilot-code",
                              "--model-profile", "balanced-deep", "--prompt-text", "probe"])

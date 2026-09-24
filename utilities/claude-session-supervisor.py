@@ -44,9 +44,10 @@ from dispatch_completion_join import (
     begin_supervisor_turn,
 )
 from dispatch_contract import (
-    SUCCESS_NOTES as COMPLETION_JOIN_SUCCESS_NOTES,
     DispatchContractError,
     hold_supervisor_lease,
+    success_note,
+    verdict_pass,
 )
 from dispatch_continuation_budget import (
     AdmitVerdict,
@@ -379,10 +380,7 @@ def terminal_route_completion(
             continue
         if (
             getattr(row, "status", "") != "done"
-            or not (
-                metadata.get("failure_class") == "pass"
-                or metadata.get("note") in COMPLETION_JOIN_SUCCESS_NOTES
-            )
+            or not (verdict_pass(metadata) or success_note(metadata))
             or metadata.get("route_id") != args.route_id
             or metadata.get("route_hash") != args.route_hash
         ):

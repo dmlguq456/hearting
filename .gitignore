@@ -105,3 +105,6 @@ loops/.hold
 
 # 렌더 검증 스크린샷 (QA 산출물, 로컬 전용)
 docs/.visual-harness/
+
+# build-release.py 기본 출력(root-anchored, 위생용 — 판정은 _release_content_skip이 함)
+/dist/

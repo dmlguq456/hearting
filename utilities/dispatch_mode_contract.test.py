@@ -11,6 +11,7 @@ from pathlib import Path
 from dispatch_mode_contract import (
     DispatchModeContractError,
     normalize_dispatch_modes,
+    resolve_qa,
     validate_capability_mode,
     validate_manifest_mode_axes,
     validate_route_mode_axes,
@@ -169,6 +170,42 @@ class DispatchModeContractTest(unittest.TestCase):
         with self.assertRaises(DispatchModeContractError) as caught:
             validate_route_mode_axes(row, route)
         self.assertEqual("route-capability-mode-mismatch", caught.exception.reason)
+
+
+class ResolveQaTest(unittest.TestCase):
+    def test_resolve_qa_derives_and_refuses_mismatch(self):
+        self.assertEqual("thorough", resolve_qa("thorough"))
+        with self.assertRaises(DispatchModeContractError) as caught:
+            resolve_qa("thorough", "standard")
+        self.assertEqual("qa-intensity-mismatch", caught.exception.reason)
+        self.assertEqual(
+            {"explicit": "standard", "derived": "thorough"},
+            dict(caught.exception.fields),
+        )
+
+    def test_resolve_qa_accepts_explicit_value_matching_the_derived_one(self):
+        self.assertEqual("standard", resolve_qa("standard", "standard"))
+
+    def test_resolve_qa_refuses_explicit_value_outside_qa_levels(self):
+        with self.assertRaises(DispatchModeContractError) as caught:
+            resolve_qa("standard", "extreme")
+        self.assertEqual("invalid-dispatch-qa", caught.exception.reason)
+        self.assertEqual(
+            {"qa": "extreme", "allowed_qa": "quick,light,standard,thorough,adversarial"},
+            dict(caught.exception.fields),
+        )
+
+    def test_resolve_qa_refuses_unknown_intensity_instead_of_deriving_standard(self):
+        with self.assertRaises(DispatchModeContractError) as caught:
+            resolve_qa("extreme")
+        self.assertEqual("invalid-dispatch-intensity", caught.exception.reason)
+        self.assertEqual(
+            {
+                "intensity": "extreme",
+                "allowed_intensity": "direct,quick,standard,strong,thorough,adversarial",
+            },
+            dict(caught.exception.fields),
+        )
 
 
 if __name__ == "__main__":

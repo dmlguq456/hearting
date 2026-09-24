@@ -228,7 +228,7 @@ def reharvest(rows, dispatcher=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(
-        description="Rewind distill markers over the worker-outage window.")
+        description="Rewind distill markers over the worker-outage window.", allow_abbrev=False)
     ap.add_argument("--since", default=DEFAULT_SINCE,
                     help=f"ISO-8601 outage start (default {DEFAULT_SINCE})")
     ap.add_argument("--apply", action="store_true",

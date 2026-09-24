@@ -438,7 +438,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             row = jobs.read_text(encoding="utf-8")
             self.assertIn("\tdone\t", row)
             self.assertIn("note=dead-missing-result", row)
-            self.assertIn("dispatch-reap-missing-result-v1", row)
+            self.assertIn("terminal_event=dispatch-reap-missing-result", row)
             ledger = base / "degradations" / "rt-reap-leg.jsonl"
             with ledger.open(encoding="utf-8") as stream:
                 events = [json.loads(line) for line in stream]
@@ -471,6 +471,75 @@ class DispatchReapWatchTest(unittest.TestCase):
             with ledger.open(encoding="utf-8") as stream:
                 replayed_events = [json.loads(line) for line in stream]
             self.assertEqual(replayed_events, events)
+
+    def test_opencode_usage_limit_death_closes_capacity(self):
+        # plan.md item 5: an OpenCode attempt that leaves no result envelope
+        # closes as dead-capacity (not the generic dead-missing-result) when
+        # its exact session binds to one ERROR line in the OpenCode server
+        # log naming a usage-limit death.
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            jobs = base / "jobs.log"
+            attempt = "att-opencode-capacity"
+            attempt_log = base / f"{attempt}.opencode.jsonl"
+            attempt_log.write_text(
+                json.dumps({"type": "step_start", "sessionID": "ses_cap111"}) + "\n",
+                encoding="utf-8",
+            )
+            server_log_dir = (
+                base / ".dispatch" / "opencode-runtime" / attempt
+                / "data" / "opencode" / "log"
+            )
+            server_log_dir.mkdir(parents=True)
+            server_log = server_log_dir / "opencode.log"
+            server_log.write_text(
+                json.dumps({
+                    "level": "ERROR", "time": "2026-08-09T00:00:05Z",
+                    "session": {"id": "ses_cap111"},
+                    "error": {"error": "Monthly usage limit reached. Resets in 13 days"},
+                }) + "\n",
+                encoding="utf-8",
+            )
+            worker = subprocess.Popen(
+                ["sleep", "0.08"],
+                env={**os.environ, D.ATTEMPT_DESCENDANT_ENV: attempt},
+                start_new_session=True,
+            )
+            identity = D.process_launch_identity(worker.pid)
+            metadata = ",".join(
+                f"{key}={value}"
+                for key, value in {
+                    **identity,
+                    "attempt_id": attempt,
+                    "launch_lifecycle": "detached",
+                    "log_file": str(attempt_log),
+                    "harness": "opencode",
+                }.items()
+            )
+            jobs.write_text(
+                f"2026-08-09T00:00:00Z\topen\t{base}\t{base}\tworker\t"
+                f"{CURRENT},{metadata}\n",
+                encoding="utf-8",
+            )
+            watcher = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(WATCH),
+                    "--jobs", str(jobs),
+                    "--attempt-id", attempt,
+                    "--pid", str(worker.pid),
+                    "--pid-start", identity["pid_start"],
+                    "--pgid", identity["pgid"],
+                    "--interval", "0.02",
+                ],
+            )
+            worker.wait(timeout=5)
+            self.assertEqual(watcher.wait(timeout=5), 0)
+            row = jobs.read_text(encoding="utf-8")
+            self.assertIn("\tdone\t", row)
+            self.assertIn("note=dead-capacity", row)
+            self.assertIn("failure_class=capacity", row)
+            self.assertIn(f"capacity_log={server_log}", row)
 
     def test_an_already_closed_owner_is_settled_after_the_group_drains(self):
         # 2026-09-17: the supervisor closed its owner row (completed-supervisor)
@@ -577,7 +646,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             row = jobs.read_text(encoding="utf-8")
             self.assertIn("\tdone\t", row)
             self.assertIn("note=dead-missing-result", row)
-            self.assertIn("dispatch-reap-missing-result-v1", row)
+            self.assertIn("terminal_event=dispatch-reap-missing-result", row)
             self.assertEqual(
                 (base / "degradations").read_text(encoding="utf-8"),
                 "not-a-directory",
@@ -667,7 +736,7 @@ class DispatchReapWatchTest(unittest.TestCase):
             leg_row = next(line for line in row.splitlines() if "att-leg" in line)
             self.assertEqual(leg_row.split("\t")[1], "done")
             self.assertIn("note=dead-missing-result", leg_row)
-            self.assertIn("dispatch-reap-missing-result-v1", leg_row)
+            self.assertIn("terminal_event=dispatch-reap-missing-result", leg_row)
 
     def test_foreign_or_terminal_parent_row_is_not_a_completion_window(self):
         cases = {

@@ -642,6 +642,58 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertIn("\tdone\t/repo\t/wt\towner\t", registry)
         self.assertIn("note=dead-protocol", registry)
 
+    def test_failed_turn_with_usage_limit_closes_capacity(self):
+        # plan.md item 4: a structured Codex TurnError (codexErrorInfo =
+        # usageLimitExceeded) must close as capacity, not the generic
+        # dead-runtime-exit a bare non-zero exit or unstructured reason gets.
+        capacity_app = self.base / "capacity_app.py"
+        capacity_app.write_text(
+            textwrap.dedent(
+                """\
+                import json, sys
+                def send(value):
+                    print(json.dumps(value), flush=True)
+                for line in sys.stdin:
+                    value = json.loads(line)
+                    method = value.get('method')
+                    if method == 'initialize':
+                        send({'jsonrpc':'2.0','id':value['id'],'result':{'server':'fake'}})
+                    elif method == 'initialized':
+                        pass
+                    elif method == 'thread/start':
+                        send({'jsonrpc':'2.0','id':value['id'],'result':{'thread':{'id':'thread-1'}}})
+                    elif method == 'turn/start':
+                        send({'jsonrpc':'2.0','id':value['id'],'result':{'turn':{'id':'turn-1'}}})
+                        send({'jsonrpc':'2.0','method':'turn/completed','params':{
+                            'threadId':'thread-1','turn':{'id':'turn-1','status':'failed',
+                                'error':{'message':"You've hit your usage limit",
+                                         'codexErrorInfo':'usageLimitExceeded',
+                                         'additionalDetails':'Resets in 13 days'}}}})
+                """
+            ),
+            encoding="utf-8",
+        )
+        self.jobs.write_text(owner_row(self.lease), encoding="utf-8")
+        result = subprocess.run(
+            self.command(broken_app=capacity_app),
+            input="initial assignment",
+            text=True,
+            capture_output=True,
+            env={**os.environ, "FAKE_TRACE": str(self.trace)},
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 70, result.stderr + result.stdout)
+        rows = [json.loads(line) for line in result.stdout.splitlines()]
+        failed = [row for row in rows if row.get("type") == "dispatch.supervisor.turn.failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["codex_error_info"], "usageLimitExceeded")
+        self.assertIn("usage limit", failed[0]["message"])
+        self.assertIn("Resets in 13 days", failed[0]["additional_details"])
+        registry = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("\tdone\t/repo\t/wt\towner\t", registry)
+        self.assertIn("note=dead-capacity", registry)
+        self.assertIn("failure_class=capacity", registry)
+
     # -- Phase 4 (plan.md, round_1 finding 1 dependency): owner restoration,
     # byte-isomorphic Codex case (SD-43 sibling principle: a Claude PASS is
     # not proxy evidence for Codex). --

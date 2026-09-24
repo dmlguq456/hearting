@@ -570,6 +570,23 @@ class QuickWorkerTypeAxesTest(unittest.TestCase):
                 self.assertEqual(owner.route_hash, self.route["route_hash"])
                 self.assertEqual(owner.route_file, str(self.route_file.resolve()))
 
+    def test_a_completed_deferred_quick_owner_row_is_accepted(self):
+        """C8 (S3a): the `done` branch's atomic pass check now goes through
+        `verdict_pass`, so a marker-bound deferred owner row (failure_class
+        stays `infrastructure`, only note/completion_marker prove success) is
+        accepted instead of refused as `quick-owner-axes`."""
+        node_id, worker_type, attempt = "one-shot", "owner", "att-quick-deferred"
+        self.registered_row(node_id, worker_type, attempt)
+        deferred_row = self.jobs.read_text(encoding="utf-8").rstrip("\n").replace(
+            "\topen\t", "\tdone\t",
+        ) + (",note=completed-marker,failure_class=infrastructure"
+             ",classifier_source=registered-wrapper-completion-transient-v1"
+             ",completion_marker=/artifacts/.runtime/completions/one-shot.json") + "\n"
+        self.jobs.write_text(deferred_row, encoding="utf-8")
+        owner = T.validate_owner_route(jobs=self.jobs, route_file=self.route_file,
+                                       owner_attempt_id=attempt)
+        self.assertEqual(owner.route_id, self.route["route_id"])
+
     def test_a_worker_type_outside_the_widened_pair_is_still_refused(self):
         """Widened to `{owner, frame}`, not opened. A `review` or `stage` row
         holding the same otherwise-valid tuple must still fail closed."""
@@ -595,6 +612,134 @@ class QuickWorkerTypeAxesTest(unittest.TestCase):
                                    owner_attempt_id=attempt)
         self.assertEqual((caught.exception.code, caught.exception.detail),
                          ("route-identity-unverified", "quick-owner-tuple"))
+
+
+class OwnerCompletionStateTest(_TerminalCommitFixture):
+    """plan.md item 8: `owner_completion_state` types the not-claimed-checkpoint
+    finishing gate instead of collapsing every non-complete case into the old
+    unconditional `owner_completion_pending() -> True`."""
+
+    def _metadata(self, **overrides):
+        meta = {
+            "workflow_completion": "runtime-v1", "worker_type": "owner",
+            "dispatch_depth": "1", "attempt_id": "att-a3fixture",
+            "failure_class": "pass",
+        }
+        meta.update(overrides)
+        return meta
+
+    def test_completion_state_blocked_on_attempt_not_current(self):
+        # A later attempt already claimed this route node -- this attempt can
+        # never complete, so the caller must stop waiting on it, not retry
+        # forever the way a bare `pending`/True would.
+        gates = {"execute": {"passed": False, "reason": "completion-attempt-not-current"}}
+        with mock.patch.object(T, "_route_module") as route_module:
+            route_module.return_value.terminal_gate_observation.return_value = gates
+            state = T.owner_completion_state(self.jobs, "done", self._metadata())
+            self.assertEqual((state.state, state.reason),
+                              ("blocked", "completion-attempt-not-current"))
+            self.assertFalse(T.owner_completion_pending(self.jobs, "done", self._metadata()))
+
+    def test_completion_state_evidence_hash_mismatch_is_blocked(self):
+        gates = {"execute": {"passed": False, "reason": "completion-evidence-hash-mismatch"}}
+        with mock.patch.object(T, "_route_module") as route_module:
+            route_module.return_value.terminal_gate_observation.return_value = gates
+            state = T.owner_completion_state(self.jobs, "done", self._metadata())
+        self.assertEqual((state.state, state.reason),
+                          ("blocked", "completion-evidence-hash-mismatch"))
+
+    def test_completion_state_marker_absent_stays_pending(self):
+        # Cannot be proven permanent -- the marker may simply not be written
+        # yet, so this must keep retrying, not be reported as a dead end.
+        gates = {"execute": {"passed": False, "reason": "completion-marker-absent"}}
+        with mock.patch.object(T, "_route_module") as route_module:
+            route_module.return_value.terminal_gate_observation.return_value = gates
+            state = T.owner_completion_state(self.jobs, "done", self._metadata())
+            self.assertEqual((state.state, state.reason),
+                              ("pending", "completion-marker-absent"))
+            self.assertTrue(T.owner_completion_pending(self.jobs, "done", self._metadata()))
+
+    def test_completion_state_not_applicable_for_non_runtime_v1_row(self):
+        state = T.owner_completion_state(
+            self.jobs, "done", self._metadata(workflow_completion="")
+        )
+        self.assertEqual(state.state, "not-applicable")
+
+
+class CompletionRequestDeferredGuardTest(unittest.TestCase):
+    """C10 (S3a): `_completion_request`'s atomic pass check via `verdict_pass`."""
+
+    def test_pending_deferred_owner_is_rejected_by_the_guard(self):
+        metadata = {
+            "workflow_completion": "runtime-v1", "worker_type": "owner",
+            "dispatch_depth": "1", "attempt_id": "att-owner-deferred",
+            "note": "completion-deferred", "failure_class": "infrastructure",
+            "classifier_source": "registered-wrapper-completion-transient-v1",
+        }
+        self.assertIsNone(T._completion_request(Path("/nonexistent/jobs.log"), "done", metadata))
+
+    def test_completed_deferred_owner_passes_the_guard(self):
+        # The guard is the only thing under test -- once past it, prove that
+        # by asserting the next real step (route resolution) was reached,
+        # instead of building the rest of the owner/route plumbing here.
+        metadata = {
+            "workflow_completion": "runtime-v1", "worker_type": "owner",
+            "dispatch_depth": "1", "attempt_id": "att-owner-deferred",
+            "note": "completed-marker", "failure_class": "infrastructure",
+            "classifier_source": "registered-wrapper-completion-transient-v1",
+            "completion_marker": "/artifacts/.runtime/completions/one-shot.json",
+        }
+        with mock.patch.object(
+            owner_route_binding, "resolve_owner_route_lifecycle",
+            side_effect=RuntimeError("reached-past-the-guard"),
+        ):
+            with self.assertRaises(RuntimeError):
+                T._completion_request(Path("/nonexistent/jobs.log"), "done", metadata)
+
+
+class ProveRouteChildrenDeferredTest(unittest.TestCase):
+    """C9 (S3a): a marker-bound deferred child node row satisfies terminal proof."""
+
+    def _request(self, jobs):
+        return T.TerminalCommitRequest(Path("/route.json"), "att-owner", jobs, Path("/root"))
+
+    def _child_row(self, jobs, route_id, node_id, attempt_id, metadata_extra):
+        meta = {
+            "attempt_id": attempt_id, "route_id": route_id, "route_node": node_id,
+        }
+        meta.update(metadata_extra)
+        pipe = ",".join(f"{k}={v}" for k, v in meta.items())
+        jobs.write_text(f"2026-09-24T00:00:00Z\tdone\t/w\t/w\t{node_id}\t{pipe}\n", encoding="utf-8")
+
+    def test_completed_deferred_child_satisfies_terminal_proof(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            route = {"route_id": "rt-children-deferred",
+                     "nodes": [{"id": "execute", "terminal": True}]}
+            self._child_row(jobs, route["route_id"], "execute", "att-execute-deferred", {
+                "note": "completed-marker", "failure_class": "infrastructure",
+                "classifier_source": "registered-wrapper-completion-transient-v1",
+                "completion_marker": "/artifacts/.runtime/completions/execute.json",
+                "launch_outcome": "reaped-before-publish",
+            })
+            gates = {"execute": {"attempt_id": "att-execute-deferred"}}
+            proof = T._prove_route_children(self._request(jobs), route, gates)
+        self.assertEqual(proof.status, "proved")
+
+    def test_pending_deferred_child_is_not_terminal_pass(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            route = {"route_id": "rt-children-pending",
+                     "nodes": [{"id": "execute", "terminal": True}]}
+            self._child_row(jobs, route["route_id"], "execute", "att-execute-pending", {
+                "note": "completion-deferred", "failure_class": "infrastructure",
+                "classifier_source": "registered-wrapper-completion-transient-v1",
+                "launch_outcome": "reaped-before-publish",
+            })
+            gates = {"execute": {"attempt_id": "att-execute-pending"}}
+            proof = T._prove_route_children(self._request(jobs), route, gates)
+        self.assertEqual(proof.status, "rejected")
+        self.assertEqual(proof.detail, "terminal-attempt-not-pass")
 
 
 if __name__ == "__main__":

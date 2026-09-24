@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -666,6 +667,135 @@ class GovernorTest(unittest.TestCase):
             self.assertEqual(
                 json.loads(Path(temp_dir, "state.json").read_text())["reservations"],
                 before["reservations"],
+            )
+
+    def _peer_row_metadata(self, member, *, manifest_digest, legs, note="", failure_class=""):
+        value = (
+            "attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            f"fallback_hop={member['fallback_hop']},harness={member['harness']},"
+            f"child_harness={member['harness']},route_id=rt-governor,"
+            "route_hash=sha256:source-route,"
+            f"route_node={member['route_node']},"
+            "parent_attempt_id=att-parent-governor,"
+            f"fallback_ordinal={member['fallback_ordinal']},"
+            f"attempt_id={member['attempt_id']},launch_claimed=1,"
+            "parallel_group=plan,replica_group=plan,"
+            "reservation_kind=parallel-batch,batch_declared_size=2,"
+            "batch_group=plan,batch_route_id=rt-governor,"
+            "batch_parent_attempt_id=att-parent-governor,"
+            f"batch_attempt_id={member['attempt_id']},"
+            f"batch_route_node={member['route_node']},"
+            f"batch_harness={member['harness']},"
+            f"batch_fallback_hop={member['fallback_hop']},"
+            f"batch_fallback_ordinal={member['fallback_ordinal']},"
+            f"batch_model_profile={member['model_profile']},"
+            f"batch_perspective={member['perspective']},"
+            f"batch_parallel_leg_index={member['parallel_leg_index']},"
+            "batch_leg_class=peer,batch_auxiliary_check=-,"
+            "batch_independence=cross-harness,"
+            f"batch_assignment_sha256={member['assignment_sha256']},"
+            f"batch_manifest_sha256={manifest_digest},"
+            f"batch_leg_sha256={legs[member['attempt_id']]}"
+        )
+        if note:
+            value += f",note={note}"
+        if failure_class:
+            value += f",failure_class={failure_class}"
+        return value
+
+    def test_validate_batch_peer_deferred_completion(self):
+        """C17 (S3a): `require_terminal_success` via `verdict_pass`.
+
+        A peer the completion budget closed typed-deferred and then
+        published a marker for (note=completed-marker, failure_class stays
+        infrastructure -- DR-1 never overwrites a non-empty class) must be
+        immutable terminal success the same way an absent-class row already
+        is; a peer still only pending must still refuse.
+        """
+        manifest, digest, legs = self.manifest()
+        peer_member, other_member = manifest["members"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            route_path = Path(temp_dir, "route.json")
+            route_path.write_text(json.dumps({
+                "route_id": "rt-governor",
+                "route_hash": "sha256:source-route",
+                "registry_digest": "sha256:source-registry",
+                "cwd": temp_dir,
+                "nodes": [
+                    {"id": "plan", "parallel_group": "plan", "replica_group": "plan",
+                     "dispatch_depth": 2, "completion_gate": "plan-gate"},
+                    {"id": "plan-replica", "parallel_group": "plan", "replica_group": "plan",
+                     "dispatch_depth": 2, "completion_gate": "plan-replica-gate"},
+                ],
+            }), encoding="utf-8")
+            jobs = Path(temp_dir, "jobs.log")
+            peer = {
+                "agent_home": temp_dir, "attempt_id": peer_member["attempt_id"],
+                "jobs": str(jobs), "route": str(route_path),
+            }
+
+            def row(note, failure_class):
+                meta = self._peer_row_metadata(
+                    peer_member, manifest_digest=digest, legs=legs,
+                    note=note, failure_class=failure_class,
+                )
+                return f"2026-09-24T00:00:00Z\tdone\t{temp_dir}\t{temp_dir}\tpeer\t{meta}\n"
+
+            jobs.write_text(row(
+                "completion-deferred", "infrastructure,"
+                "classifier_source=registered-wrapper-completion-transient-v1",
+            ), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ValueError, "partial continuation peer is not immutable terminal success"
+            ):
+                GOVERNOR._validate_batch_peer(
+                    peer, manifest, digest, legs, [other_member["attempt_id"]],
+                    require_terminal_success=True,
+                )
+
+            evidence = Path(temp_dir, "peer-output.md")
+            evidence.write_text("peer output\n", encoding="utf-8")
+            evidence_digest = hashlib.sha256(evidence.read_bytes()).hexdigest()
+            completion = Path(temp_dir, "completion", "rt-governor")
+            completion.mkdir(parents=True)
+            marker_path = completion / "plan.json"
+            history_path = completion / "plan.1.json"
+            marker = {
+                "schema_version": 2, "sequence": 1, "route_id": "rt-governor",
+                "route_hash": "sha256:source-route", "registry_digest": "sha256:source-registry",
+                "node_id": "plan", "completion_gate": "plan-gate",
+                "attempt_id": peer_member["attempt_id"], "dispatch_depth": 2,
+                "transport": "headless", "execution_surface": "registered-headless",
+                "registered_worker": True, "fallback_hop": peer_member["fallback_hop"],
+                "evidence": {"path": str(evidence), "sha256": evidence_digest},
+            }
+            marker_json = json.dumps(marker, sort_keys=True)
+            marker_path.write_text(marker_json, encoding="utf-8")
+            history_path.write_text(marker_json, encoding="utf-8")
+            (completion / f"plan.{peer_member['attempt_id']}.attempt.json").write_text(
+                json.dumps({
+                    "schema_version": 2, "route_id": "rt-governor", "node_id": "plan",
+                    "attempt_id": peer_member["attempt_id"], "dispatch_depth": 2,
+                    "transport": "headless", "execution_surface": "registered-headless",
+                    "registered_worker": True, "fallback_hop": peer_member["fallback_hop"],
+                    "evidence_sha256": evidence_digest,
+                    "completion_marker": str(marker_path),
+                    "completion_marker_history": str(history_path),
+                }, sort_keys=True),
+                encoding="utf-8",
+            )
+            dead_pid = "99999999"
+            jobs.write_text(row(
+                "completed-marker", "infrastructure,"
+                "classifier_source=registered-wrapper-completion-transient-v1,"
+                f"completion_marker={marker_path},"
+                f"pid={dead_pid},pid_start=1,pgid={dead_pid},"
+                f"pid_observer_ns={os.readlink('/proc/self/ns/pid')}"
+            ), encoding="utf-8")
+            GOVERNOR._validate_batch_peer(
+                peer, manifest, digest, legs, [other_member["attempt_id"]],
+                require_terminal_success=True,
             )
 
     def test_batch_reserve_python_api_requires_verified_issuer_capability(self):

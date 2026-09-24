@@ -662,6 +662,70 @@ class ClaudeSessionSupervisorTest(unittest.TestCase):
         ).hexdigest()
         self.assertNotEqual(legacy_digest, digest)
 
+    def test_terminal_route_completion_deferred_rows(self):
+        """C3 (S3a): `verdict_pass(metadata) or success_note(metadata)` replaces
+        the inline `failure_class == "pass" or note in SUCCESS_NOTES` OR.
+
+        A row the completion budget already published the marker for reads
+        the literal note `completed-marker` regardless of its deferred origin
+        (the marker-append writer stamps that note unconditionally), so this
+        is a pinning test, not a red/green regression: both the pre-swap and
+        post-swap expressions already accept it. A row still only
+        typed-deferred (no marker) is excluded before and after, the same way
+        an ordinary non-pass row always was.
+        """
+        route = self.base / "terminal-route-deferred.json"
+        route_value = seal_route({
+            "schema_version": 2,
+            "cwd": str(self.base),
+            "nodes": [{"id": "report", "terminal": True}],
+            "workflow_contract": {"terminal_nodes": ["report"]},
+            "resume_retry_boundaries": [],
+        })
+        route.write_text(json.dumps(route_value), encoding="utf-8")
+        marker = self.base / "report.json"
+        marker.write_text(json.dumps({
+            "schema_version": 2,
+            "route_id": route_value["route_id"],
+            "route_hash": route_value["route_hash"],
+            "node_id": "report",
+            "attempt_id": "att-deferred",
+        }), encoding="utf-8")
+        args = SimpleNamespace(
+            route_file=str(route),
+            route_id=route_value["route_id"],
+            route_hash=route_value["route_hash"],
+        )
+        completed_row = SimpleNamespace(
+            status="done",
+            attempt_id="att-deferred",
+            metadata={
+                "note": "completed-marker",
+                "failure_class": "infrastructure",
+                "classifier_source": "registered-wrapper-completion-transient-v1",
+                "completion_marker": str(marker),
+                "route_id": route_value["route_id"],
+                "route_hash": route_value["route_hash"],
+                "route_node": "report",
+            },
+        )
+        self.assertEqual(
+            supervisor.terminal_route_completion(args, [completed_row]), ("report",)
+        )
+        pending_row = SimpleNamespace(
+            status="done",
+            attempt_id="att-deferred",
+            metadata={
+                "note": "completion-deferred",
+                "failure_class": "infrastructure",
+                "classifier_source": "registered-wrapper-completion-transient-v1",
+                "route_id": route_value["route_id"],
+                "route_hash": route_value["route_hash"],
+                "route_node": "report",
+            },
+        )
+        self.assertEqual(supervisor.terminal_route_completion(args, [pending_row]), ())
+
     def test_supervisor_source_has_no_second_inline_route_hash_expression(self):
         """A82-1: supervisor must call the canonical helper exactly once and
         must not carry its own inline sha256-over-bare-route expression."""

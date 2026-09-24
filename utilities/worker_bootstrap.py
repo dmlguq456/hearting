@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 WORKER_TYPES = ("owner", "stage", "review", "support", "frame")
@@ -146,6 +147,74 @@ def artifact_context_prompt(environ) -> str:
             "- Resolve relative artifact paths beneath artifact_output_dir.\n")
 
 
+@dataclass(frozen=True)
+class NodeScope:
+    """A route node's declared scope, resolved to one absolute directory (or
+    stated as unresolved, never guessed)."""
+    output_dir: str | None
+    outputs: tuple[str, ...]
+    write_scope: tuple[str, ...]
+    source: str  # "env" | "producer-binding" | "unbound"
+
+
+def resolve_node_scope(
+    route, node_id: str | None, environ, *, parent_attempt_id: str | None = None,
+) -> NodeScope:
+    """One resolver for "what is this node's write scope, as an absolute path".
+
+    Node ranges are declared cycle-relative (`capabilities/autopilot-spec.md`,
+    `hooks/artifact-guard.sh`). A route-bound worker's own cycle environment
+    names the open cycle directly; a worker launched without that environment
+    (observed 2026-09-08: a depth-2 spec worker with only `artifact_root` in
+    its prompt) falls back to the owning attempt's read-only producer binding.
+    Neither source available means the caller must say so, not guess a
+    root-relative path that the write oracle then refuses.
+    """
+    node = None
+    if node_id:
+        node = next((n for n in route.get("nodes", []) if n.get("id") == node_id), None)
+    outputs = tuple((node or {}).get("outputs", []))
+    write_scope = tuple((node or {}).get("write_scope", []))
+    env_output_dir = artifact_cycle_environment(environ)["AGENT_ARTIFACT_OUTPUT_DIR"]
+    if env_output_dir:
+        return NodeScope(env_output_dir, outputs, write_scope, "env")
+    artifact_root = route.get("artifact_root")
+    route_id = route.get("route_id")
+    if parent_attempt_id and artifact_root and route_id:
+        import artifact_producer
+        import dispatch_terminal_commit
+        try:
+            binding = dispatch_terminal_commit.load_producer_binding(
+                artifact_root=Path(artifact_root), route_id=route_id,
+                owner_attempt_id=parent_attempt_id,
+            )
+            record = binding.binding or {}
+            campaign_id, cycle_id = record.get("campaign_id"), record.get("cycle_id")
+            if campaign_id and cycle_id:
+                cdir = artifact_producer.cycle_dir(Path(artifact_root), campaign_id, cycle_id)
+                return NodeScope(str(cdir / "artifacts"), outputs, write_scope, "producer-binding")
+        except (dispatch_terminal_commit.TerminalCommitError, artifact_producer.ProducerError):
+            pass
+    return NodeScope(None, outputs, write_scope, "unbound")
+
+
+def _resolved_paths(output_dir: str, paths) -> list[str]:
+    return [str(Path(output_dir) / path) for path in paths]
+
+
+def node_scope_prompt(scope: "NodeScope") -> str:
+    if scope.output_dir:
+        return (
+            "This node's declared outputs / write scope (absolute): "
+            f"outputs={json.dumps(_resolved_paths(scope.output_dir, scope.outputs), ensure_ascii=False)} "
+            f"write_scope={json.dumps(_resolved_paths(scope.output_dir, scope.write_scope), ensure_ascii=False)}\n"
+        )
+    return (
+        "This node's declared scope is cycle-relative; no open cycle is bound — "
+        "do not write under the artifact root.\n"
+    )
+
+
 def released_task_prompt(args) -> str:
     """Carry the same released task across owner/stage and runtime boundaries.
 
@@ -215,14 +284,26 @@ def assignment_prompt(args, task: str, environ) -> str:
     validation and the write oracle retain authority over paths.
     """
     if getattr(args, "worker_type", None) != "frame":
-        return f"Assignment:\n{task.rstrip()}\n\n"
+        route_file = getattr(args, "route_file", None)
+        if not route_file:
+            return f"Assignment:\n{task.rstrip()}\n\n"
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        scope = resolve_node_scope(
+            route, getattr(args, "route_node", None), environ,
+            parent_attempt_id=getattr(args, "parent_attempt_id", None),
+        )
+        return f"Assignment:\n{task.rstrip()}\n\n{node_scope_prompt(scope)}\n"
     outputs = []
     route_file = getattr(args, "route_file", None)
-    output_root = artifact_cycle_environment(environ)["AGENT_ARTIFACT_OUTPUT_DIR"]
     if route_file:
         route = json.loads(Path(route_file).read_text(encoding="utf-8"))
-        node = next(n for n in route["nodes"] if n["id"] == args.route_node)
-        outputs = [str(Path(output_root) / path) if output_root else path for path in node.get("outputs", [])]
+        scope = resolve_node_scope(
+            route, getattr(args, "route_node", None), environ,
+            parent_attempt_id=getattr(args, "parent_attempt_id", None),
+        )
+        outputs = (
+            _resolved_paths(scope.output_dir, scope.outputs) if scope.output_dir else list(scope.outputs)
+        )
     return (
         "User goal to analyze (the later owner's task):\n"
         f"{task.rstrip()}\n\n"

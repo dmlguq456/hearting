@@ -1253,6 +1253,25 @@ class ManagedGatewayTest(unittest.TestCase):
         self.assertEqual(result["reason"], "receipt-child-contract-invalid")
         self.assertEqual(self.server.counts(), before)
 
+    def test_closure_blocked_done_child_accepts_inspect_recovery(self) -> None:
+        # item 8, unfinishable-watch: a proven-permanent owner_completion_
+        # state("blocked") child is `attention`+`done` like an ordinary
+        # delivery failure, but its only legal required_action is
+        # `inspect-recovery` -- retrying it as `inspect-done-failure` would
+        # fold it back into the ordinary (and here permanently futile) retry
+        # loop this receipt exists to stop.
+        request = receipt_request("batch-closure-blocked")
+        request["receipt"]["delivery_classification"] = "attention"
+        request["receipt"]["children"][0].update(
+            {
+                "reason": "closure-blocked:completion-attempt-not-current",
+                "required_action": "inspect-recovery",
+                "delivery_classification": "attention",
+            }
+        )
+        result = control(self.control, request)
+        self.assertEqual(result["status"], "accepted", result)
+
     def test_actionable_receipt_emits_exact_harvest_command(self) -> None:
         request = receipt_request("batch-open")
         child = request["receipt"]["children"][0]

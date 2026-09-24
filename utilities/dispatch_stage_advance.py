@@ -1084,8 +1084,8 @@ class RealStageAdvanceServices:
     """Checked subprocess boundary. `close_gate` calls
     `capability-route.py complete` (the identical command
     `dispatch_completion_join.close_finished_child` already issues for the
-    existing SD-78 non-model gate-close path, reusing its bounded-retry seam
-    `run_route_completion`). `claim` delegates to
+    existing SD-78 non-model gate-close path, reusing its shared budget/
+    backoff seam `complete_route_with_budget`). `claim` delegates to
     `dispatch_contract.claim_stage_advance`. `start_successor` execs
     `stage-dispatch-fallback.py --start` in the same argument shape the model
     uses."""
@@ -1123,13 +1123,12 @@ class RealStageAdvanceServices:
             value = metadata.get(key)
             if value:
                 command += [flag, str(value)]
-        reason = JOIN.run_route_completion(command)
-        if reason:
-            # `complete` is exact-attempt idempotent -- the same one bounded
-            # retry `close_finished_child` uses recovers the
-            # marker-written/row-not-yet-closed publication window
-            # (dispatch_completion_join.py close_finished_child).
-            reason = JOIN.run_route_completion(command)
+        # `complete` is exact-attempt idempotent -- the same shared budget/
+        # backoff `close_finished_child` uses (dispatch_completion_join.py)
+        # recovers the marker-written/row-not-yet-closed publication window
+        # and distinguishes a genuine rejection from a transient transport
+        # failure instead of treating both as one bounded retry.
+        reason = JOIN.complete_route_with_budget(command)
         if reason:
             raise StageAdvanceError("stage-advance-gate-unproven", reason)
         return {"reason": ""}
@@ -1182,7 +1181,9 @@ class RealStageAdvanceServices:
             "--parent", request.parent_attempt_id,
             "--capability-mode", route.get("capability_mode") or "",
             "--worker-mode", unit,
-            "--qa", "standard",
+            # No --qa literal: stage-dispatch-fallback.py derives it from the
+            # node's own --intensity (route effective_intensity) via
+            # dispatch_mode_contract.resolve_qa, the single source of truth.
             "--model-role", model_role,
             "--prompt-file", str(prompt_file),
             "--jobs", jobs_path,

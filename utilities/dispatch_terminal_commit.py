@@ -21,6 +21,7 @@ import artifact_lifecycle
 import route_identity
 import dispatch_contract
 import dispatch_lock_order
+from dispatch_attempt_policy import verdict_pass
 
 _TOPOLOGY = None
 
@@ -431,7 +432,7 @@ def validate_owner_route(*, jobs: Path, route_file: Path, owner_attempt_id: str)
                     or meta.get("worker_type") not in {"owner", "frame"}
                     or meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
                     or fields[1] not in {"open", "running", "done"}
-                    or (fields[1] == "done" and meta.get("failure_class") != "pass")):
+                    or (fields[1] == "done" and not verdict_pass(meta))):
                 raise TerminalCommitError("route-identity-unverified", "quick-owner-axes")
             quick = owner_route_binding.derive_quick_owner_binding(route_file,
                 worktree=fields[3], capability=meta.get("capability", ""),
@@ -475,7 +476,7 @@ def verify_request_identity(request, route):
     if (meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
             or meta.get("harness") not in dispatch_contract.WRAPPER_PARENT_HARNESSES or binding.route_hash != digest
             or fields[1] not in {"open", "running", "done"}
-            or (fields[1] == "done" and meta.get("failure_class") != "pass")):
+            or (fields[1] == "done" and not verdict_pass(meta))):
         raise TerminalCommitError("route-identity-unverified", "owner-axes")
 
 
@@ -579,7 +580,7 @@ def _prove_route_children(request, route, gates):
             continue  # The common gate already proves the exact owner and its cleanup.
         matching = [(status, meta) for status, meta in related
                     if meta.get("route_id") == route["route_id"] and meta.get("route_node") == node["id"]]
-        if (not matching or matching[-1][0] != "done" or matching[-1][1].get("failure_class") != "pass"
+        if (not matching or matching[-1][0] != "done" or not verdict_pass(matching[-1][1])
                 or gates.get(node["id"], {}).get("attempt_id") != matching[-1][1].get("attempt_id")):
             return _proof_failure("terminal-attempt-not-pass")
     for status, meta in related:
@@ -1086,7 +1087,7 @@ def _completion_request(jobs, status, metadata):
     """The launch contract, not terminal words alone, assigns workflow closure."""
     if (metadata.get("workflow_completion") != "runtime-v1"
             or metadata.get("worker_type") != "owner" or metadata.get("dispatch_depth") != "1"
-            or status != "done" or metadata.get("failure_class") != "pass"):
+            or status != "done" or not verdict_pass(metadata)):
         return None
     import owner_route_binding
     binding, _ = owner_route_binding.resolve_owner_route_lifecycle(
@@ -1099,19 +1100,65 @@ def _completion_request(jobs, status, metadata):
     return request
 
 
-def owner_completion_pending(jobs, status, metadata) -> bool:
+@dataclass(frozen=True)
+class CompletionState:
+    """One owner row's finishing state -- the single place that tells a proven
+    permanent block apart from ordinary in-flight or unclassified work.
+
+    `state` is one of `not-applicable | complete | pending | blocked | unknown`.
+    `blocked` is reserved for a *proven* permanent reason, read only from the
+    not-yet-claimed terminal gate: `completion-attempt-not-current` (a later
+    attempt already claimed this route node) or `completion-evidence-hash-
+    mismatch` (the route's own completion marker no longer matches its
+    digest). A bare `completion-marker-absent`, a route-close still in
+    flight, a claimed-but-unsealed checkpoint, a forward-recovery reverify
+    conflict (also raised for a sealed envelope whose evidence merely
+    changed after settlement -- recoverable by restoring the file, matching
+    `settle_terminal_commit`'s own `recoverable` classification for the same
+    reason), or any exception is `pending`/`unknown` -- all may still resolve
+    on their own and must never be reported as a dead end (A82-7/§13.53.5's
+    own "never a silent pass-through" applies just as much to a silent
+    permanent-failure guess).
+    """
+
+    state: str
+    reason: str = ""
+
+
+_PROVEN_BLOCKED_GATE_REASONS = frozenset({
+    "completion-attempt-not-current", "completion-evidence-hash-mismatch",
+})
+
+
+def owner_completion_state(jobs, status, metadata) -> CompletionState:
     """Read-only consumption check; success bytes remain immutable while finishing."""
-    if metadata.get("workflow_completion") != "runtime-v1" or status != "done" or metadata.get("failure_class") != "pass":
-        return False
+    if metadata.get("workflow_completion") != "runtime-v1" or status != "done" or not verdict_pass(metadata):
+        return CompletionState("not-applicable")
     try:
         request = _completion_request(jobs, status, metadata)
         if request is None:
-            return False
-        state = json.loads(_commit_state_path(request).read_text())
+            return CompletionState("not-applicable")
+        commit_state_path = _commit_state_path(request)
+        if not commit_state_path.exists():
+            route = json.loads(request.route_file.read_text())
+            gates = _route_module().terminal_gate_observation(route, jobs=request.jobs, exact_terminal=True)
+            reasons = {proof.get("reason") for proof in gates.values() if not proof.get("passed")}
+            blocked = reasons & _PROVEN_BLOCKED_GATE_REASONS
+            if blocked:
+                return CompletionState("blocked", sorted(blocked)[0])
+            return CompletionState("pending", sorted(r for r in reasons if r)[0] if reasons else "")
+        state = json.loads(commit_state_path.read_text())
         if state.get("state") != "owner-envelope-sealed":
-            return True
+            return CompletionState("pending", str(state.get("state") or ""))
+        # `_reverify_forward_recovery`'s own `transaction-conflict` is deliberately
+        # NOT escalated to `blocked` here: it also fires for a sealed envelope
+        # whose evidence file changed (or was corrupted) after settlement --
+        # system-wide convention already treats that as `recoverable`
+        # (`settle_terminal_commit`'s own `result_kind` branch), since restoring
+        # the file resolves it. A proven-permanent reason is only ever read
+        # from the not-claimed gate inspection above.
         if _reverify_forward_recovery(request, state).status != "proved":
-            return True
+            return CompletionState("pending", "forward-recovery-not-proved")
         route = json.loads(request.route_file.read_text())
         binding = (load_producer_binding(artifact_root=request.artifact_root, route_id=route["route_id"],
                    owner_attempt_id=request.owner_attempt_id).binding if producer_lifecycle_applies(route) else None)
@@ -1119,9 +1166,22 @@ def owner_completion_pending(jobs, status, metadata) -> bool:
         _read_sealed_owner_envelope(request, state["terminal_commit_id"])
         import workflow_state as workflow
         ledger = workflow.WorkflowLedger(state["route_id"], state["route_hash"], jobs=Path(jobs))
-        return ledger.state()["workflow_state"] != "COMPLETE"
-    except (OSError, ValueError, KeyError, TypeError, TerminalCommitError):
-        return True
+        if ledger.state()["workflow_state"] == "COMPLETE":
+            return CompletionState("complete")
+        return CompletionState("pending", "workflow-not-complete")
+    except (OSError, ValueError, KeyError, TypeError, TerminalCommitError) as exc:
+        return CompletionState("unknown", str(getattr(exc, "code", type(exc).__name__)))
+
+
+def owner_completion_pending(jobs, status, metadata) -> bool:
+    """Thin compatibility wrapper: `pending` or `unknown` liveness is still open.
+
+    `blocked` (a proven permanent reason) and `not-applicable`/`complete` are
+    not pending -- a caller that only needs the old bool keeps its meaning,
+    while `join`'s own decision logic reads `owner_completion_state` directly
+    to tell `blocked` apart instead of waiting on it forever.
+    """
+    return owner_completion_state(jobs, status, metadata).state in {"pending", "unknown"}
 
 
 def completed_owner_handoff(jobs, status, metadata):

@@ -26,6 +26,7 @@ read as "the stage succeeded".
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import importlib.util
 import json
@@ -40,7 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 
-from dispatch_contract import SUCCESS_NOTES  # noqa: E402
+from dispatch_contract import success_note, verdict_pass  # noqa: E402
 import workflow_state as WS  # noqa: E402
 import resource_run_registry as RR  # noqa: E402
 import dispatch_pending_delivery as PENDING  # noqa: E402
@@ -227,9 +228,13 @@ def registered_evidence(armed):
     # now satisfy an armed stage's terminal evidence. That is not an authority
     # grant: arming names an exact attempt id, so a slice only counts where a
     # supervisor was armed on that slice deliberately.
+    # 6번: `success_note`/`verdict_pass` fold in a marker-bound deferred row
+    # (note=completed-marker, failure_class stays infrastructure) as success;
+    # `note == "completed"` and the bare empty-class allowance are this
+    # consumer's own extra literals, kept exactly as before.
     succeeded = (
-        note in (*SUCCESS_NOTES, "completed")
-        and failure_class in ("", "pass")
+        (success_note(meta) or note == "completed")
+        and (verdict_pass(meta) or failure_class == "")
     )
     # A live exact PID after a terminal row is draining, not quiescent: the successor
     # must not start while the predecessor's process group still holds resources.
@@ -2271,8 +2276,9 @@ def cmd_survey(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="workflow-supervisor")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(prog="workflow-supervisor", allow_abbrev=False)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
 
     arm = sub.add_parser("arm", help="register a continuation watch for one node")
     arm.add_argument("--route", required=True)

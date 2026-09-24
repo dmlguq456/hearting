@@ -1082,6 +1082,33 @@ class WrapperFailureClassificationTest(unittest.TestCase):
         finally:
             sandbox.close()
 
+    def test_successor_argv_omits_qa(self):
+        # plan.md item 3: the caller no longer hardcodes a "--qa","standard"
+        # literal that fights the node's actual effective_intensity --
+        # stage-dispatch-fallback.py derives --qa from --intensity itself
+        # (dispatch_mode_contract.resolve_qa, single source of truth) once the
+        # flag is simply absent from argv.
+        services = SA.RealStageAdvanceServices()
+        route = make_route([node("a"), node("b", depends_on=("a",))])
+        sandbox = Sandbox()
+        try:
+            route_file = sandbox.write_route(route)
+            request = make_request(sandbox, route_file, predecessor_node="a")
+            claim = SA.StageAdvanceClaim(
+                stage_advance_id="sadv-fixture", claim_key=(route["route_hash"], "b", 0),
+                successor_attempt_id="att-fixture", replayed=False,
+            )
+            fake_completed = SimpleNamespace(returncode=0, stdout="check=ok\n", stderr="")
+            with mock.patch.object(SA.subprocess, "run", return_value=fake_completed) as run:
+                services.start_successor(
+                    request, claim=claim, successor=node("b"), slug="slug",
+                    prompt_file=route_file,
+                )
+            argv = run.call_args.args[0]
+            self.assertNotIn("--qa", argv)
+        finally:
+            sandbox.close()
+
 
 class ClaimConflictTest(unittest.TestCase):
     def test_second_predecessor_same_claim_key_conflicts(self):
@@ -1139,6 +1166,51 @@ class ClaimConflictTest(unittest.TestCase):
             self.assertEqual(first.successor_attempt_id, second.successor_attempt_id)
         finally:
             sandbox.close()
+
+
+class RealStageAdvanceServicesCompletionBudgetTest(unittest.TestCase):
+    """6번: `close_gate` shares `complete_route_with_budget`'s budget/backoff
+    instead of its own separate one-bounded-retry copy."""
+
+    def _request(self, jobs: Path) -> SA.StageAdvanceRequest:
+        return SA.StageAdvanceRequest(
+            jobs=jobs, route_file=Path("/route.json"),
+            predecessor_node="execute", predecessor_terminal_attempt_id="att-pred",
+            parent_attempt_id="att-owner", supervisor_phase="stage",
+            delivered_open_attempt_ids=frozenset(), receipt_schema_negotiated=1,
+            harness="claude", worktree="/wt",
+        )
+
+    def test_close_gate_delegates_to_the_shared_completion_budget(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"  # absent -> _predecessor_metadata returns {}
+            services = SA.RealStageAdvanceServices()
+            calls = []
+            with mock.patch.object(
+                SA.JOIN, "complete_route_with_budget",
+                side_effect=lambda command: calls.append(command) or "",
+            ):
+                services.close_gate(
+                    self._request(jobs), node="review",
+                    terminal_attempt_id="att-pred", artifact="/report.md",
+                )
+            self.assertEqual(len(calls), 1)
+            self.assertIn("complete", calls[0])
+
+    def test_close_gate_surfaces_the_budgets_final_reason_as_gate_unproven(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            services = SA.RealStageAdvanceServices()
+            with mock.patch.object(
+                SA.JOIN, "complete_route_with_budget",
+                return_value="completion-transient:TimeoutExpired",
+            ):
+                with self.assertRaises(SA.StageAdvanceError) as caught:
+                    services.close_gate(
+                        self._request(jobs), node="review",
+                        terminal_attempt_id="att-pred", artifact="/report.md",
+                    )
+            self.assertEqual(caught.exception.reason, "stage-advance-gate-unproven")
 
 
 class NoGitMutationTest(unittest.TestCase):

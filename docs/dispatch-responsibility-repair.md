@@ -624,3 +624,52 @@ entry 26 / terminal transaction 22 검사도 PASS였다. 설정·인증 파일 1
 [설치 입증 기록](evidence/dispatch-responsibility-install-20260913.json)에
 정확한 릴리즈·설치 source, 세 runtime 검사, 해시와 원본 로그 위치를 저장했다.
 이 절과 설치 기록은 문서만 추가하는 후속 커밋이며 새 릴리즈를 요구하지 않는다.
+
+## 2026-09-24 완료 서비스가 타임아웃을 넘겨 살아 있던 결함
+
+읽기 전용 실측(신호 없음)으로 Codex 완료 서비스 6개가 v2.151.0에서 최대
+3일 넘게 떠 있는 것을 확인했다. 원인은 층이 둘이다. `owner_completion_pending`이
+"진행 중", "이 시도로는 영원히 닫을 수 없음", "예외"를 bool 하나로 뭉갰고,
+사이드카 `wait_for_batch` 루프 자신에게는 기한이 없어 join이 86,400초 기한마다
+새로 뜨는 join을 무한히 재기동했다. 6건 중 4건은 터미널 게이트가 이미
+`completion-attempt-not-current`(다른 시도가 같은 route node를 선점) 또는
+`completion-evidence-hash-mismatch`(마커의 봉인 증거가 더 이상 digest와
+일치하지 않음)를 증명하고 있었다.
+
+`dispatch_terminal_commit.owner_completion_state`가 `not-applicable | complete
+| pending | blocked | unknown` 타입을 반환한다. `blocked`는 위 두 터미널 게이트
+사유가 실제로 관측됐을 때만 쓰고, 마커 부재나 봉인 후 재검증 충돌
+(`_reverify_forward_recovery`의 `transaction-conflict`, 봉인된 증거 파일이
+settlement 뒤에 변경된 경우에도 뜨므로)은 여전히 `pending`이다 — 후자를
+`blocked`로 올렸다가 기존 "봉인 뒤 증거 변조" 회귀 시험(`artifact_producer.test.py`)이
+깨지는 것을 실측으로 확인하고 되돌렸다. join은 `blocked` 행에 대해 더 이상
+`settlement()`을 재시도하지 않고, 대신 별도 `closure-blocked` supervision
+notice를 한 번 기록한다. `dispatch_supervision.wait_for_batch`에는 선택 인자
+`deadline`과 `stop_check`를 추가했다(기본값 `None`이면 기존 호출자는 동작이
+바뀌지 않는다). 사이드카(`codex-managed-completion.py`)는 자신의 `--timeout`을
+이 `deadline`으로 쓰고, 도달하면 `watch-deadline` notice를 기록한 뒤 알림
+courier가 claim·ack할 때까지 최대 130초를 기다리고 `deliver` 없이
+`{"status":"retryable","reason":"watch-deadline"}`/exit 75로 끝난다. `stop_check`는
+게이트웨이 소켓 연결이 ENOENT/ECONNREFUSED로 실패하고 감시 중인 모든 시도가
+이미 종료 상태일 때만 `receiver-unavailable`로 즉시 멈춘다(연결됐지만 "아직
+준비 안 됨"인 경우는 기존 재시도 경로를 그대로 쓴다). 두 경로 모두
+`.completion.lock` 삭제나 살아 있는 프로세스 신호 없이 기록·통보만 한다.
+
+같은 슬라이스에서 join의 5곳 전량 레지스트리 읽기와 `dispatch_supervision._rows`를
+새 `dispatch_registry_cache.registry_lines`(inode/mtime/ctime/size 키 캐시)로
+묶었고, 반복되는 동일 settlement 결과(`closed`, `reason`)는 재시도 간격을
+2 → 4 → … → 60초로 늘리며, 결과가 바뀌거나 레지스트리 stat 키가 바뀌면 2초로
+되돌린다. 살아 있는 옛 릴리스(v2.151.0) 프로세스 6개는 신호를 보내지 않았고,
+새 코드가 배포돼도 스스로 멈추지 않으므로 정리 여부는 배포 뒤 사용자가 정한다.
+게이트웨이 `op:status` 모양은 바꾸지 않았다.
+
+회귀: `dispatch_terminal_commit` 32(신규 `OwnerCompletionStateTest` 4 포함),
+`dispatch_completion_join` 162(신규 `JoinClosureBlockedTest` 1,
+`SettlementBackoffTest` 2, `RouteFreeReviewMissingResultTest` 1 포함),
+`dispatch_supervision` 20(신규 `wait_for_batch` deadline/stop_check 시험 4 포함),
+`codex_managed_completion` 16(신규 사이드카 deadline/receiver-unavailable 시험
+2 포함), `dispatch_registry_cache` 5(신규 모듈), `artifact_producer`의
+`TerminalTransactionIntegrationTest` 11 통과. 실측으로 검증하지 못한 것:
+"수신자 없음" 실제 사례(관측 0건), 살아 있는 6개 프로세스가 새 코드에서
+실제로 끝나는지(옛 릴리스로 돌고 있어 재현 불가), route-closed에서 멈춘
+시도의 settle 실패 원인(별도 결함 후보로 남김).

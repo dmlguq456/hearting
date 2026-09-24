@@ -1083,6 +1083,30 @@ class CheckWriteTest(ProducerTestBase):
         os.environ["AGENT_ARTIFACT_CYCLE_DIR"] = result["cycle_dir"]
         self.assertEqual(P.resolve_output_dir(self.root, "experiments")[1], "cycle")
 
+    def test_root_spec_write_denial_names_expected_output_dir(self):
+        # Item 7: check_write's own allow/deny judgment is unchanged -- only the
+        # denial detail grows an `expected_output_dir` hint, and only when the
+        # caller's cycle environment names one. The reason token is immutable
+        # (D-86: the fleet cutover gate compares it verbatim).
+        self.activate()
+        target = self.root / "spec" / "c" / "_internal" / "x.md"
+        denial = P.check_write(self.root, target)
+        self.assertEqual((denial["verdict"], denial["reason"]), ("deny", "legacy-top-level-write-denied"))
+        self.assertNotIn("expected_output_dir", denial)
+
+        route, route_file, result = self.begin()
+        output_dir = Path(result["cycle_dir"]) / "artifacts"
+        with mock.patch.dict(os.environ, {"AGENT_ARTIFACT_OUTPUT_DIR": str(output_dir)}):
+            denial_with_hint = P.check_write(self.root, target)
+            self.assertEqual(
+                (denial_with_hint["verdict"], denial_with_hint["reason"]),
+                ("deny", "legacy-top-level-write-denied"),
+            )
+            self.assertEqual(denial_with_hint["expected_output_dir"], str(output_dir))
+            resolved_target = output_dir / "spec" / "c" / "_internal" / "x.md"
+            allowed = P.check_write(self.root, resolved_target)
+            self.assertEqual(allowed["verdict"], "allow")
+
 
 class FinalizeTest(ProducerTestBase):
     def test_finalize_seals_manifest_index_and_record(self):

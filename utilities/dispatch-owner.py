@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
+from dispatch_mode_contract import DispatchModeContractError, resolve_qa
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,14 +47,17 @@ _MODEL_ENV = re.compile(
     r"^[A-Za-z0-9]+_DISPATCH_(MODEL|MODEL_ROLE|MODEL_PROFILE|REASONING|EFFORT|VARIANT)$"
 )
 _REQUIRED = {
-    "--worktree", "--slug", "--capability", "--capability-mode", "--qa",
+    "--worktree", "--slug", "--capability", "--capability-mode",
     "--intensity", "--dispatch-depth", "--worker-type", "--assigned-contract",
     "--owner", "--model-profile",
 }
 # Captured for validation but not required: `--unit` is meaningless for an owner
 # (the tuple contract pins it to `_kernel/owner`) and mandatory for the SD-OPEN-40
-# review launch below.
-_CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role"}
+# review launch below. `--qa` is not a user-facing axis (CONVENTIONS §1.1): when
+# absent it is derived from `--intensity` below; when present it is checked
+# against that same derivation, both through resolve_qa (the single qa/intensity
+# SoT).
+_CAPTURED = _REQUIRED | {"--unit", "--review-output", "--model-role", "--qa"}
 # SD-OPEN-40: the depth-1 tuples this selector may launch. `review` exists so an
 # independent reviewer can be a *registered review worker* instead of an owner
 # wearing a reviewer's prompt. Before it, every ad-hoc independent review landed
@@ -86,7 +90,7 @@ _ROUTE_FIELDS = {
 _ROUTE_SEALED = {"--worktree", "--capability", "--capability-mode", "--intensity"}
 _HINTS = {
     "missing-required": "with --route-evidence <route.json> pass only --prompt-file <file> (or --prompt-text); "
-                        "without it: --worktree --slug --capability --capability-mode --qa <level> --intensity --dispatch-depth 1 "
+                        "without it: --worktree --slug --capability --capability-mode --intensity --dispatch-depth 1 "
                         "--worker-type owner --owner <capability> --assigned-contract <capability> "
                         "--model-profile deep|balanced-deep|balanced|light (top only from a route that seals it)",
     "route-evidence-arg-mismatch": "omit that flag or pass the route's own value; the route seals it",
@@ -383,7 +387,11 @@ def _parse(argv):
     # Owner tuples retain gap-fill compatibility. Frame launches always read
     # their node: a complete caller tuple cannot replace its sealed model axes.
     gaps = [flag for flag in _REQUIRED if not values.get(flag)]
-    if route_evidence and (gaps or route_node) and values.get("--worker-type", "owner") in {"owner", "frame"}:
+    route_gap_filled = bool(
+        route_evidence and (gaps or route_node)
+        and values.get("--worker-type", "owner") in {"owner", "frame"}
+    )
+    if route_gap_filled:
         sealed_flags = _ROUTE_SEALED | ({"--model-profile", "--model-role"} if route_node else set())
         for flag, sealed in _route_defaults(route_evidence, route_node).items():
             if values.get(flag):
@@ -395,12 +403,20 @@ def _parse(argv):
             values[flag] = sealed
             forwarded.extend((flag, sealed))
             derived.append(flag)
-        # The wrapper derives --qa from --intensity when it is absent
-        # (CONVENTIONS §1.1); a route-backed launch need not repeat it.
-        required.discard("--qa")
     missing = sorted(flag for flag in required if not values.get(flag))
     if missing:
         raise OwnerError("missing-required:" + ",".join(missing))
+    # Single qa/intensity SoT (resolve_qa): derive `values["--qa"]` when the
+    # caller omitted it, or refuse typed here -- before the wrapper ever
+    # launches -- when an explicit legacy value contradicts the derived one.
+    # Skipped when the route itself gap-filled the tuple and the caller named
+    # no --qa: the wrapper derives the identical value from the --intensity
+    # the route already sealed, so nothing here would need refusing either.
+    if values.get("--qa") is not None or not route_gap_filled:
+        try:
+            values["--qa"] = resolve_qa(values["--intensity"], values.get("--qa"))
+        except DispatchModeContractError as exc:
+            raise OwnerError(str(exc)) from exc
     if len(actions) != 1:
         raise OwnerError("exactly-one-action-required")
     worker_type = values["--worker-type"]
