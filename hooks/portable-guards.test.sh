@@ -2527,7 +2527,7 @@ if grep -q '^role: fast reviewer$' "$ROOT/roles/units/qa/test.md" \
 else
   bad "codex native agent projection should preserve mixed role sets"
 fi
-if grep -q 'model = "gpt-5.6-luna"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
+if grep -q 'model = "gpt-6-luna"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
   && grep -q 'model_reasoning_effort = "low"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
   && grep -q 'sandbox_mode = "read-only"' "$TMP/codex_agent_home/agents/memory-scout.toml" \
   && grep -q 'Never run memory mutation commands' "$TMP/codex_agent_home/agents/memory-scout.toml"; then
