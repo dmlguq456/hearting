@@ -566,6 +566,85 @@ class OutOfBandHealingTest(F.ProducerTestBase, IndexEquivalenceMixin):
         finally:
             adm._release_lock(self.root, fd)
 
+    def test_heal_root_recomputes_after_a_concurrent_seal_interleaves(self):
+        """Deterministic reproduction of review round 1's Must-fix #1:
+        `_heal_root`'s pre-lock `_scan_lenient` result must never become the
+        bytes it writes, or a seal that completes in the gap between that scan
+        and the (try-)lock attempt loses its row. Patches
+        `artifact_admission.try_acquire_lock` -- the exact seam `_heal_via_lock`
+        calls -- so a complete producer transition (begin a new campaign,
+        close, finalize; it publishes its own `update_indexes` write) runs
+        just before the real lock attempt, deterministically, with no
+        subprocess or sleep-based timing needed.
+
+        Fails on the pre-fix code: reverting the `_heal_root` change above and
+        rerunning this test makes it fail (the interleaved cycle's row is
+        overwritten out of INDEX.json/INDEX.md by the stale pre-lock bytes);
+        confirmed locally, then the fix was restored."""
+
+        first = self._sealed_cycle("heal-interleave-1", "heal-interleave")
+        json_path = self.root / "campaigns" / "INDEX.json"
+        json_path.unlink()  # forces resolve_path into locate()'s root-wide fallback
+
+        real_try_acquire_lock = adm.try_acquire_lock
+        triggered = [False]
+        interleaved = {}
+
+        def side_effect(root):
+            if not triggered[0]:
+                triggered[0] = True
+                interleaved.update(self._sealed_cycle("heal-interleave-2", "heal-interleave-other"))
+            return real_try_acquire_lock(root)
+
+        with mock.patch.object(adm, "try_acquire_lock", side_effect=side_effect):
+            resolved = loc.resolve_path(self.root, first["cycle_id"])
+
+        self.assertEqual(resolved, Path(first["cycle_dir"]))
+        self.assertTrue(interleaved, "the interleaved transition must have run during the heal")
+        md = (self.root / "campaigns" / "INDEX.md").read_text(encoding="utf-8")
+        self.assertIn(interleaved["cycle_id"], md,
+                      "the interleaved seal's row must survive locate()'s opportunistic heal")
+        self.assert_index_matches_full_rebuild("after a seal interleaves with locate()'s root-wide heal")
+
+    def test_hand_copied_campaign_conflict_detected_regardless_of_directory_sort_order(self):
+        """Review round 1 🟡: the fix recorded in the dev log (`_plan_update`'s
+        merge-conflict check keying off the colliding identifier, not the rel
+        being rescanned) must hold under both possible `sorted(rescan_rels)`
+        orderings of a hand-copied campaign folder, not just the one the
+        existing `test_hand_copied_campaign_folder_is_isolated_and_reported`
+        happens to produce (its `-copy` suffix always sorts after the
+        original)."""
+
+        for order, name_copy in (
+            ("copy-sorts-before", lambda name: "0-" + name),
+            ("copy-sorts-after", lambda name: name + "-zzz-copy"),
+        ):
+            with self.subTest(order):
+                target = self._sealed_cycle(f"dup-order-target-{order}", f"dup-order-target-{order}")
+                other = self._sealed_cycle(f"dup-order-other-{order}", f"dup-order-other-{order}")
+                camp_dir = Path(target["cycle_dir"]).parent
+                copy_dir = camp_dir.with_name(name_copy(camp_dir.name))
+                expected_first = copy_dir.name if order == "copy-sorts-before" else camp_dir.name
+                self.assertEqual(sorted([camp_dir.name, copy_dir.name])[0], expected_first)
+                shutil.copytree(camp_dir, copy_dir)
+                try:
+                    before_json = (self.root / "campaigns" / "INDEX.json").read_bytes()
+
+                    # an unrelated campaign's transition succeeds; the copy is skipped.
+                    update = loc.prepare_index_update(self.root, [other["campaign_id"]])
+                    skipped_ids = {row["id"] for row in update.skipped}
+                    self.assertIn(target["campaign_id"], skipped_ids)
+
+                    # touching the duplicated campaign itself is refused, before any write.
+                    with self.assertRaises(loc.LocatorError) as ctx:
+                        loc.prepare_index_update(self.root, [target["campaign_id"]])
+                    self.assertEqual(ctx.exception.code, "locator-index-duplicate-id")
+                    self.assertEqual(ctx.exception.detail, target["campaign_id"])
+                    after_json = (self.root / "campaigns" / "INDEX.json").read_bytes()
+                    self.assertEqual(before_json, after_json, "prepare_index_update must not write")
+                finally:
+                    shutil.rmtree(copy_dir)
+
     def test_parser_round_trip_on_adversarial_titles(self):
         for title in ADVERSARIAL_TITLES:
             route, route_file = self.route(slug="parser-" + str(abs(hash(title)) % 10000),

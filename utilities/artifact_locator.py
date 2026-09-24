@@ -1242,12 +1242,25 @@ def _scan_lenient(root: Path) -> Tuple[Dict[str, str], Rows, Set[str], Optional[
 
 
 def _heal_root(root: Path, mapping: Dict[str, str], rows: Rows) -> None:
+    # `mapping`/`rows` come from a pre-lock scan; they are only a cheap filter
+    # to skip taking the lock when nothing looks stale. The write itself must
+    # recompute from a fresh scan taken *after* the lock is held, or a seal
+    # that completes during this function's pre-lock scan gets its fresh
+    # write clobbered by these stale bytes (lost update).
     json_bytes, md_bytes = render_indexes(mapping, rows)
     current_json = _regular_bytes(campaigns_dir(root) / INDEX_JSON)
     current_md = _regular_bytes(campaigns_dir(root) / INDEX_MD)
     if current_json == json_bytes and current_md == md_bytes:
         return
-    _heal_via_lock(root, lambda: _write_index_pair(root, json_bytes, md_bytes))
+
+    def write() -> None:
+        fresh_mapping, fresh_rows, duplicates, defect = _scan_lenient(root)
+        if duplicates or defect is not None:
+            return
+        fresh_json, fresh_md = render_indexes(fresh_mapping, fresh_rows)
+        _write_index_pair(root, fresh_json, fresh_md)
+
+    _heal_via_lock(root, write)
 
 
 def locate(
