@@ -3478,15 +3478,15 @@ class CycleBucketDeclarationTest(unittest.TestCase):
                 rows[cells[0].strip("`").rstrip("/")] = cells[2].strip("`")
         self.assertEqual(set(rows), set(P.BUCKET_TYPES))
         self.assertTrue(set(rows.values()) <= {"C-DUR", "C-INT"}, rows)
-        # The primary auto-nomination skips exactly the C-INT names of CORE §3
-        # (the top-level table and the cycle bucket table together).
+        # The primary auto-nomination skips exactly the CORE §3 `C-INT` names that
+        # are not themselves a cycle bucket (`reviews/` is support only at the root).
         section = text[text.index("## 3. Artifact Root"):text.index("## 3.1.")]
         c_int = set()
         for line in section.splitlines():
             cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
             if len(cells) == 3 and cells[2] == "`C-INT`":
                 c_int |= {name.rstrip("/") for name in cells[0].replace("`", "").replace(",", " ").split()}
-        self.assertEqual(P.SUPPORT_SEGMENTS, c_int)
+        self.assertEqual(P.SUPPORT_SEGMENTS, c_int - set(rows))
 
 
 class PrimarySupportExclusionTest(unittest.TestCase):
@@ -3495,12 +3495,17 @@ class PrimarySupportExclusionTest(unittest.TestCase):
 
     def test_support_paths_are_not_auto_nominated_while_output_exists(self):
         rows = [("artifacts/_internal/prompts/report.md", b""),
-                ("artifacts/reviews/verdict.json", b""),
                 ("artifacts/shards/retrieval/survey.md", b""),
                 ("artifacts/research/related-work/survey.md", b"")]
         self.assertEqual(P._choose_primary(rows, None), "artifacts/research/related-work/survey.md")
         rows.append(("artifacts/research/final_report.md", b""))
         self.assertEqual(P._choose_primary(rows, None), "artifacts/research/final_report.md")
+
+    def test_audit_report_under_reviews_is_output(self):
+        # 2026-09-24 user: audit reports are shown, so `reviews/` is a durable bucket.
+        rows = [("artifacts/_internal/audit-brief.md", b""),
+                ("artifacts/reviews/audit/audit-report.md", b"")]
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/reviews/audit/audit-report.md")
 
     def test_support_only_cycle_keeps_its_first_row(self):
         rows = [("artifacts/_internal/dispatch/retrieval_prompt.md", b""),

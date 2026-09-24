@@ -237,10 +237,10 @@ exactly the keys of `BUCKET_TYPES` in `utilities/artifact_producer.py`, and
 bucket; its files carry type `file`. The class is the display intent readers
 such as Cairn use: `C-DUR` is a durable work product meant to be shown, `C-INT`
 is support material that is kept but not listed. When `finalize` picks a
-primary artifact itself, it skips any path through a `C-INT` name (`_internal/`,
-`reviews/`, `shards/`) while the cycle holds another file, then takes the first
-`PRIMARY_CANDIDATES` name, then the first remaining file; an explicit `--primary`
-is kept as given.
+primary artifact itself, it skips any path through a top-level `C-INT` name
+that is not a cycle bucket (`_internal/`, `shards/`) while the cycle holds
+another file, then takes the first `PRIMARY_CANDIDATES` name, then the first
+remaining file; an explicit `--primary` is kept as given.
 
 | Bucket | Meaning | Disposition class |
 |---|---|---|
@@ -255,7 +255,7 @@ is kept as given.
 | `apply-log/` | the report of applying a draft cheatsheet to the real source and verifying it (`autopilot-apply`) | `C-DUR` |
 | `release-config/` | release configuration and ship checklist (`autopilot-ship`); a root-level `release-config/` stays wrong-base residue | `C-DUR` |
 | `user_profile/` | the evidence and report behind a cross-project user-preference profile (`analyze-user`) | `C-DUR` |
-| `reviews/` | review support material | `C-INT` |
+| `reviews/` | audit and review reports (`audit`, stage reviews); a root-level `reviews/` stays support material | `C-DUR` |
 
 **Campaign closure.** `artifact_producer.py campaign-status|campaign-close|campaign-recover`
 owns administrative satisfaction. Status verifies the campaign's exact cycle

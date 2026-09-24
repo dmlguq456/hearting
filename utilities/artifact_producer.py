@@ -167,9 +167,9 @@ MEDIA_TYPES = {
 PRIMARY_CANDIDATES = (
     "final_report.md", "report.md", "prd.md", "plan.md", "handoff.md", "verdict.json",
 )
-# CORE §3 `C-INT` names: support material is kept in the manifest but is not
-# auto-nominated as a cycle's primary artifact.
-SUPPORT_SEGMENTS = frozenset({"_internal", "reviews", "shards"})
+# CORE §3 top-level `C-INT` names that are not a cycle bucket: support material is
+# kept in the manifest but is not auto-nominated as a cycle's primary artifact.
+SUPPORT_SEGMENTS = frozenset({"_internal", "shards"})
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -1592,7 +1592,7 @@ def _enumerate_output(directory: Path, *, exclude_hidden: bool = False,
 
 
 def _is_support_locator(rel: str) -> bool:
-    """A path through a CORE §3 `C-INT` name (`_internal/`, `reviews/`, `shards/`)."""
+    """A path through a CORE §3 support name that is not a cycle bucket (`_internal/`, `shards/`)."""
     return any(part in SUPPORT_SEGMENTS for part in rel.split("/")[1:])
 
 
