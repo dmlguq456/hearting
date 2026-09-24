@@ -1791,7 +1791,7 @@ PY
     esac
   done
 
-  if ! grep -Fq 'model = "gpt-5.6-luna"' adapters/codex/agents/memory-scout.toml \
+  if ! grep -Fq 'model = "gpt-6-luna"' adapters/codex/agents/memory-scout.toml \
     || ! grep -Fq 'model_reasoning_effort = "low"' adapters/codex/agents/memory-scout.toml \
     || ! grep -Fq 'sandbox_mode = "read-only"' adapters/codex/agents/memory-scout.toml \
     || ! grep -Fq 'Never run memory mutation commands' adapters/codex/agents/memory-scout.toml; then
