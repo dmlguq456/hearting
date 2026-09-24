@@ -224,8 +224,12 @@ class GovernorTest(unittest.TestCase):
             claimed, unclaimed = GOVERNOR.reserve(
                 temp_dir, "dispatch", 2, total=5, budget=2
             )
+            # title has its own rolling start-budget pool now, so two pending
+            # dispatch reservations never block a title admission.
+            title_lease = GOVERNOR.acquire(temp_dir, "title", total=5, budget=2)
+            GOVERNOR.release(temp_dir, title_lease)
             with self.assertRaisesRegex(ValueError, "start budget"):
-                GOVERNOR.acquire(temp_dir, "title", total=5, budget=2)
+                GOVERNOR.acquire(temp_dir, "dispatch", total=5, budget=2)
 
             lease = GOVERNOR.claim_reservation(temp_dir, claimed, "dispatch")
             state = json.loads(Path(temp_dir, "state.json").read_text())
@@ -1058,6 +1062,275 @@ print(json.dumps({"returncode": result.returncode, "stderr": result.stderr}))
             )
 
 
+class StartBudgetClassPoolTest(unittest.TestCase):
+    """§3.0(a)-(c): per-class rolling start budgets, `start_records` provenance,
+    and typed refusals -- a background class must never spend the dispatch
+    pool, and a full dispatch pool must never block a background class."""
+
+    def test_title_budget_full_does_not_refuse_dispatch(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for _ in range(GOVERNOR.CLASS_START_BUDGETS["title"]):
+                token = GOVERNOR.acquire(temp_dir, "title")
+                GOVERNOR.release(temp_dir, token)
+            with self.assertRaisesRegex(ValueError, "start budget"):
+                GOVERNOR.acquire(temp_dir, "title")
+            dispatch_token = GOVERNOR.acquire(temp_dir, "dispatch")
+            GOVERNOR.release(temp_dir, dispatch_token)
+
+    def test_dispatch_budget_full_refuses_dispatch_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for _ in range(GOVERNOR.CLASS_START_BUDGETS["dispatch"]):
+                token = GOVERNOR.acquire(temp_dir, "dispatch")
+                GOVERNOR.release(temp_dir, token)
+            with self.assertRaisesRegex(ValueError, "start budget"):
+                GOVERNOR.acquire(temp_dir, "dispatch")
+            title_token = GOVERNOR.acquire(temp_dir, "title")
+            GOVERNOR.release(temp_dir, title_token)
+
+    def test_each_background_class_has_its_own_pool(self):
+        self.assertEqual(
+            GOVERNOR.CLASS_START_BUDGETS,
+            {"dispatch": 20, "title": 12, "distill": 4, "loop": 4},
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            for worker_class in ("distill", "loop"):
+                for _ in range(GOVERNOR.CLASS_START_BUDGETS[worker_class]):
+                    token = GOVERNOR.acquire(temp_dir, worker_class)
+                    GOVERNOR.release(temp_dir, token)
+                with self.assertRaisesRegex(ValueError, "start budget"):
+                    GOVERNOR.acquire(temp_dir, worker_class)
+            # Exhausting distill and loop leaves title and dispatch untouched.
+            for worker_class in ("title", "dispatch"):
+                token = GOVERNOR.acquire(temp_dir, worker_class)
+                GOVERNOR.release(temp_dir, token)
+
+    def test_start_budget_env_per_class_and_legacy_dispatch_env(self):
+        self.assertEqual(GOVERNOR.start_budget("title"), 12)
+        with mock.patch.dict(os.environ, {"AGENT_MODEL_WORKER_START_BUDGET_TITLE": "3"}, clear=False):
+            self.assertEqual(GOVERNOR.start_budget("title"), 3)
+        with mock.patch.dict(os.environ, {"AGENT_MODEL_WORKER_START_BUDGET_TITLE": "not-a-number"}, clear=False):
+            self.assertEqual(GOVERNOR.start_budget("title"), 12)
+        with mock.patch.dict(os.environ, {"AGENT_MODEL_WORKER_START_BUDGET_TITLE": "0"}, clear=False):
+            self.assertEqual(GOVERNOR.start_budget("title"), 12)
+        # The legacy global env applies to `dispatch` only.
+        with mock.patch.dict(os.environ, {"AGENT_MODEL_WORKER_START_BUDGET": "5"}, clear=False):
+            self.assertEqual(GOVERNOR.start_budget("dispatch"), 5)
+            self.assertEqual(GOVERNOR.start_budget("title"), 12)
+        # A class-specific env takes precedence over the legacy global one.
+        with mock.patch.dict(
+            os.environ,
+            {"AGENT_MODEL_WORKER_START_BUDGET": "5", "AGENT_MODEL_WORKER_START_BUDGET_DISPATCH": "9"},
+            clear=False,
+        ):
+            self.assertEqual(GOVERNOR.start_budget("dispatch"), 9)
+        self.assertEqual(GOVERNOR.start_budget("title", 2), 2)
+
+    def test_start_records_carry_class_label_pid_and_prune_by_window(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token = GOVERNOR.acquire(temp_dir, "title", label="att-probe")
+            state = json.loads(Path(temp_dir, "state.json").read_text())
+            records = state["start_records"]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["class"], "title")
+            self.assertEqual(records[0]["label"], "att-probe")
+            self.assertEqual(records[0]["pid"], os.getpid())
+            GOVERNOR.release(temp_dir, token)
+
+            # A record older than the window is pruned on the next state change.
+            state = json.loads(Path(temp_dir, "state.json").read_text())
+            state["start_records"][0]["at"] -= GOVERNOR.START_WINDOW_SECONDS
+            Path(temp_dir, "state.json").write_text(json.dumps(state))
+            GOVERNOR.check(temp_dir, "title")
+            pruned = json.loads(Path(temp_dir, "state.json").read_text())
+            self.assertEqual(pruned["start_records"], [])
+
+    def test_start_record_label_is_truncated(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            GOVERNOR.acquire(temp_dir, "title", label="x" * 500)
+            state = json.loads(Path(temp_dir, "state.json").read_text())
+            self.assertEqual(len(state["start_records"][0]["label"]), GOVERNOR.START_LABEL_MAX)
+
+    def test_malformed_start_record_is_dropped_without_blocking_admission(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "state.json").write_text(json.dumps({
+                "schema_version": 2, "claims": {}, "leases": {}, "reservations": {},
+                "starts": [], "start_records": ["not-a-dict", {"class": "title"}, {"at": True, "class": "title"}],
+            }))
+            GOVERNOR.check(temp_dir, "title")
+            state = json.loads(Path(temp_dir, "state.json").read_text())
+            self.assertEqual(state["start_records"], [])
+
+    def test_legacy_state_bare_float_starts_counted_as_dispatch(self):
+        """A mixed-release period: an old writer's unattributed floats fill
+        the dispatch pool (compatibility, plan §2.5), but never the
+        independent title pool the new code just introduced."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            now = time.time()
+            Path(temp_dir, "state.json").write_text(json.dumps({
+                "schema_version": 2, "claims": {}, "leases": {}, "reservations": {},
+                "starts": [now - 10] * GOVERNOR.CLASS_START_BUDGETS["dispatch"],
+            }))
+            with self.assertRaisesRegex(ValueError, "start budget"):
+                GOVERNOR.acquire(temp_dir, "dispatch")
+            token = GOVERNOR.acquire(temp_dir, "title")
+            state = json.loads(Path(temp_dir, "state.json").read_text())
+            self.assertEqual(state["schema_version"], 2)
+            title_records = [r for r in state["start_records"] if r["class"] == "title"]
+            self.assertEqual(len(title_records), 1)
+            GOVERNOR.release(temp_dir, token)
+
+    def test_refusal_json_on_stdout_with_retry_after(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            now = time.time()
+            stamps = [now - i for i in range(GOVERNOR.CLASS_START_BUDGETS["dispatch"])]
+            Path(temp_dir, "state.json").write_text(json.dumps({
+                "schema_version": 2, "claims": {}, "leases": {}, "reservations": {},
+                "starts": stamps, "start_records": [],
+            }))
+            result = subprocess.run(
+                [sys.executable, str(PATH), "--root", temp_dir, "reserve",
+                 "--class", "dispatch", "--count", "1", "--pid", str(os.getpid())],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 75, result.stderr)
+            payload = json.loads(result.stdout.strip())
+            self.assertEqual(payload["state"], "refused")
+            self.assertEqual(payload["refusal"], "start-budget")
+            self.assertEqual(payload["class"], "dispatch")
+            self.assertTrue(payload["retryable"])
+            expected = (min(stamps) + GOVERNOR.START_WINDOW_SECONDS) - time.time()
+            self.assertAlmostEqual(payload["retry_after_seconds"], expected, delta=2)
+            self.assertIn(
+                "model-worker-governor: rolling model-worker start budget reached",
+                result.stderr,
+            )
+
+    def test_cap_refusal_is_typed_without_time(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cap = GOVERNOR.CLASS_LIMITS["title"]
+            tokens = [GOVERNOR.acquire(temp_dir, "title") for _ in range(cap)]
+            result = subprocess.run(
+                [sys.executable, str(PATH), "--root", temp_dir, "reserve",
+                 "--class", "title", "--count", "1", "--pid", str(os.getpid())],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 75, result.stderr)
+            payload = json.loads(result.stdout.strip())
+            self.assertEqual(payload["refusal"], "class-cap")
+            self.assertIsNone(payload["retry_after_seconds"])
+            self.assertIsNone(payload["frees_at"])
+            for token in tokens:
+                GOVERNOR.release(temp_dir, token)
+
+    def test_kill_switch_refusal_has_no_refusal_json(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, "KILL_SWITCH").touch()
+            result = subprocess.run(
+                [sys.executable, str(PATH), "--root", temp_dir, "acquire", "--class", "title"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 75, result.stderr)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("kill switch", result.stderr)
+
+    def test_status_reports_start_usage_per_class(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            GOVERNOR.acquire(temp_dir, "title", label="att-one")
+            status = subprocess.run(
+                [sys.executable, str(PATH), "--root", temp_dir, "status"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            data = json.loads(status.stdout)
+            usage = data["start_usage"]["title"]
+            self.assertEqual(usage["used"], 1)
+            self.assertEqual(usage["reserved"], 0)
+            self.assertEqual(usage["limit"], 12)
+            self.assertIsNotNone(usage["frees_at"])
+            self.assertEqual(usage["labels"], ["att-one"])
+            self.assertEqual(data["start_usage"]["dispatch"]["used"], 0)
+
+
+class CrossVersionGovernorCompatibilityTest(unittest.TestCase):
+    """The shared `state.json` must round-trip between this branch and the
+    sealed base release it installs alongside (plan §2.5)."""
+
+    BASE_REVISION = "3d2a5066"
+
+    def _extract_base_governor(self, temp_dir):
+        base_dir = Path(temp_dir) / "base"
+        base_dir.mkdir()
+        for name in ("model-worker-governor.py", "governor_identity.py", "replica_batch_contract.py"):
+            result = subprocess.run(
+                ["git", "show", f"{self.BASE_REVISION}:utilities/{name}"],
+                cwd=str(PATH.parent), capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                return None
+            (base_dir / name).write_text(result.stdout, encoding="utf-8")
+        return base_dir / "model-worker-governor.py"
+
+    def test_new_state_is_readable_by_base_release_governor(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_governor = self._extract_base_governor(temp_dir)
+            if base_governor is None:
+                self.skipTest("git show <base>:... unavailable (shallow clone)")
+            root = Path(temp_dir) / "root"
+            GOVERNOR.acquire(str(root), "dispatch", label="att-new")
+            GOVERNOR.acquire(str(root), "title", label="att-title")
+
+            status = subprocess.run(
+                [sys.executable, str(base_governor), "--root", str(root), "status"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(status.returncode, 0, status.stderr)
+            data = json.loads(status.stdout)
+            self.assertEqual(data["schema_version"], 2)
+            self.assertIn("start_records", data)
+
+            acquired = subprocess.run(
+                [sys.executable, str(base_governor), "--root", str(root),
+                 "acquire", "--class", "dispatch"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(acquired.returncode, 0, acquired.stderr)
+            state = json.loads((root / "state.json").read_text())
+            self.assertEqual(len(state["start_records"]), 2)
+            self.assertEqual(len(state["starts"]), 2)
+            stamps, reserved = GOVERNOR._start_pool(state, "dispatch")
+            self.assertEqual(len(stamps), 2)
+            self.assertEqual(reserved, 0)
+
+    def test_old_writer_output_read_by_new_code(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            base_governor = self._extract_base_governor(temp_dir)
+            if base_governor is None:
+                self.skipTest("git show <base>:... unavailable (shallow clone)")
+            root = Path(temp_dir) / "root"
+            acquired = subprocess.run(
+                [sys.executable, str(base_governor), "--root", str(root),
+                 "acquire", "--class", "dispatch"],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(acquired.returncode, 0, acquired.stderr)
+
+            status = json.loads(
+                subprocess.run(
+                    [sys.executable, str(PATH), "--root", str(root), "status"],
+                    capture_output=True, text=True,
+                ).stdout
+            )
+            self.assertEqual(status["schema_version"], 2)
+            self.assertEqual(len(status["starts"]), 1)
+
+            token = GOVERNOR.acquire(str(root), "title")
+            state = json.loads((root / "state.json").read_text())
+            self.assertEqual(
+                len([r for r in state["start_records"] if r["class"] == "title"]), 1
+            )
+            GOVERNOR.release(str(root), token)
+
+
 class GovernorIdentityRegressionTest(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory(); self.root=Path(self.temp.name)
@@ -1432,7 +1705,11 @@ class GovernorReclaimTest(unittest.TestCase):
                 GOVERNOR.acquire(self.root, "title", total=8, budget=1)
         reclaim.assert_called_once_with(self.root)
         self.assertEqual(self.state()["leases"], {})
-        self.assertEqual(len(self.state()["starts"]), 1)
+        # title starts are recorded in start_records, not the dispatch-only
+        # ``starts`` float list.
+        self.assertEqual(self.state()["starts"], [])
+        title_records = [r for r in self.state()["start_records"] if r["class"] == "title"]
+        self.assertEqual(len(title_records), 1)
 
     def test_reclaimed_capacity_lost_to_contender_does_not_loop(self):
         self._dead_claimant_lease()

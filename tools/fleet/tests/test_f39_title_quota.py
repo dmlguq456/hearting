@@ -1,4 +1,5 @@
 """Focused F-39 quota, OpenCode read-only source, and no-provider guards."""
+import json
 import os
 import importlib.util
 import sqlite3
@@ -20,12 +21,17 @@ class QuotaTest(unittest.TestCase):
         self.old = {k: os.environ.get(k) for k in (
             "FLEET_TITLE_STATE_DIR", "FLEET_TITLE_COMMAND", "FLEET_TITLE_CONCURRENCY",
             "FLEET_TITLE_MAX_STARTS", "FLEET_TITLE_PRIORITY_MAX_STARTS",
-            "FLEET_TITLE_DISABLE", "AGENT_ARTIFACT_ROOT",
+            "FLEET_TITLE_DISABLE", "AGENT_ARTIFACT_ROOT", "AGENT_HOME",
             "AGENT_MODEL_GOVERNOR_ROOT", "AGENT_MODEL_WORKER_TOTAL",
             "AGENT_MODEL_WORKER_START_BUDGET", "AGENT_MODEL_WORKERS_DISABLED",
         )}
         os.environ["FLEET_TITLE_STATE_DIR"] = os.path.join(self.tmp.name, "state")
         os.environ["AGENT_MODEL_GOVERNOR_ROOT"] = os.path.join(self.tmp.name, "governor")
+        # `run_worker` resolves the governor script through `AGENT_HOME`, which
+        # in a real session points at the installed release, not this checkout
+        # -- pin it here so the test exercises this worktree's governor instead
+        # of whatever happens to be installed.
+        os.environ["AGENT_HOME"] = os.path.join(os.path.dirname(__file__), "..", "..", "..")
         os.environ["AGENT_MODEL_WORKER_TOTAL"] = "5"
         os.environ["AGENT_MODEL_WORKER_START_BUDGET"] = "20"
         os.environ.pop("AGENT_ARTIFACT_ROOT", None)
@@ -76,8 +82,14 @@ class QuotaTest(unittest.TestCase):
     def test_debounce_and_child_debounce_are_the_approved_values(self):
         self.assertEqual(rt.DEBOUNCE_SEC, 600)
         self.assertEqual(rt.WORKING_DEBOUNCE_SEC, 120)
-        self.assertEqual(rt.CHILD_DEBOUNCE_SEC, 90)
+        self.assertEqual(rt.CHILD_DEBOUNCE_SEC, 600)
         self.assertEqual(rt.SUMMARY_RETRY_DELAYS, (30, 60, 120))
+        # A dispatched child's periodic title refresh and an ordinary owner's
+        # periodic summary refresh (dispatch_summary.py) now share the same
+        # 10-minute cadence -- two literals that must never drift apart.
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "utilities"))
+        import dispatch_summary
+        self.assertEqual(rt.CHILD_DEBOUNCE_SEC, dispatch_summary.DEFAULT_PERIODIC_DEBOUNCE)
 
     def test_priority_recovery_adds_only_two_starts_after_regular_budget_is_full(self):
         now = 2000.0
@@ -195,6 +207,20 @@ class QuotaTest(unittest.TestCase):
             self.assertEqual(rt.run_worker("prompt"), "Fleet title work")
             self.assertEqual(rt.run_worker("prompt"), "")
         self.assertEqual(len(calls), 1)
+
+    def test_title_worker_records_session_label(self):
+        class Done:
+            returncode = 0
+            stdout = "Fleet title work"
+        with mock.patch.object(rt.subprocess, "run", side_effect=lambda *a, **k: Done()):
+            output = rt.run_worker("prompt", capacity_held=True, label="dispatch-att-x")
+        self.assertEqual(output, "Fleet title work")
+        governor_root = os.environ["AGENT_MODEL_GOVERNOR_ROOT"]
+        with open(os.path.join(governor_root, "state.json"), encoding="utf-8") as stream:
+            state = json.loads(stream.read())
+        records = [record for record in state["start_records"] if record["class"] == "title"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["label"], "dispatch-att-x")
 
 
 class OpenCodeReadOnlyTest(unittest.TestCase):

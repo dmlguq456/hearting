@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 from types import SimpleNamespace
@@ -90,6 +91,40 @@ class WorkStartTest(unittest.TestCase):
     def start(self, **kwargs):
         return W.start_work(self.route, self.path, self.jobs, run=self.admit, **kwargs)
 
+    def refusal_receipt(self, *, worker_class="dispatch", retry_after_seconds=1,
+                         frees_at=None, retryable="1", reason="model-worker-governor-denied",
+                         child_spawned="0"):
+        if frees_at is None:
+            frees_at = int(time.time()) + (retry_after_seconds or 60)
+        lines = [
+            "check=failed", f"reason={reason}",
+            f"detail=rolling model-worker start budget reached: class={worker_class} "
+            f"used=20 limit=20 retry_after_seconds={retry_after_seconds}",
+            f"child_spawned={child_spawned}",
+        ]
+        if retryable is not None:
+            lines += [
+                f"retryable={retryable}", "refusal=start-budget", f"worker_class={worker_class}",
+                f"retry_after_seconds={retry_after_seconds}", f"frees_at={frees_at}",
+            ]
+        return "\n".join(lines) + "\n"
+
+    def make_run(self, *, refuse_node, refuse_times=1, receipt=None):
+        """A `run` fixture that refuses one node's launch a bounded number of
+        times (typed refusal receipt, no registered row), then falls through
+        to the normal admitting fixture."""
+        counts = {"n": 0}
+
+        def run(command, **kwargs):
+            node = command[command.index("--route-node") + 1] if "--route-node" in command else "owner"
+            if node == refuse_node and counts["n"] < refuse_times:
+                counts["n"] += 1
+                return subprocess.CompletedProcess(command, 75, receipt or self.refusal_receipt(), "")
+            return self.admit(command, **kwargs)
+
+        run.counts = counts
+        return run
+
     def test_repeated_start_and_restart_keep_both_frames_then_one_owner(self):
         for _ in range(3):
             result = self.start()
@@ -121,6 +156,105 @@ class WorkStartTest(unittest.TestCase):
         self.assertIn("capacity temporarily full", result["launches"][1]["diagnostic"])
         self.assertEqual(self.start()["state"], "preparing")
         self.assertEqual(len(self.calls), 2)
+
+    def test_typed_budget_refusal_is_waiting_capacity_not_failure(self):
+        run = self.make_run(refuse_node="frame-alternative", refuse_times=99,
+                             receipt=self.refusal_receipt(retry_after_seconds=1))
+        result = W.start_work(self.route, self.path, self.jobs, run=run)
+        self.assertEqual(result["state"], "waiting-capacity", result)
+        self.assertEqual(result["refused_attempt_id"], W.attempt_id(self.route, "frame-alternative"))
+        self.assertEqual(result["refused_node"], "frame-alternative")
+        self.assertFalse(result["spawned"])
+        self.assertIn("retry_at", result)
+        self.assertEqual(len(result["frame_attempts"]), 1)
+        self.assertEqual(result["parent_next"], "bounded-wait")
+        self.assertTrue(result["parent_next_command"].endswith("--wait"))
+        self.assertNotIn("failed attempt", result["next_step"])
+
+    def test_resume_after_capacity_relaunches_refused_attempt_exactly_once(self):
+        run = self.make_run(refuse_node="frame-alternative", refuse_times=1,
+                             receipt=self.refusal_receipt(retry_after_seconds=1))
+        first = W.start_work(self.route, self.path, self.jobs, run=run)
+        self.assertEqual(first["state"], "waiting-capacity", first)
+        self.assertEqual(len(self.calls), 1)  # only "frame" admitted so far
+
+        second = W.start_work(self.route, self.path, self.jobs, run=run)
+        self.assertEqual(second["state"], "preparing", second)
+        self.assertEqual(len(second["frame_attempts"]), 2)
+        self.assertEqual(len(self.calls), 2)  # frame-alternative admitted exactly once
+
+        W.start_work(self.route, self.path, self.jobs, run=run)
+        self.assertEqual(len(self.calls), 2)  # both rows exist; no further launch call
+
+    def test_resume_wait_sleeps_until_retry_then_launches_once(self):
+        run = self.make_run(refuse_node="frame-alternative", refuse_times=1,
+                             receipt=self.refusal_receipt(retry_after_seconds=7))
+        sleeps = []
+        result = W.start_work(self.route, self.path, self.jobs, run=run, wait=True,
+                               sleep=sleeps.append, clock=lambda: 1_800_000_000.0)
+        self.assertEqual(sleeps, [7])
+        self.assertNotEqual(result["state"], "waiting-capacity", result)
+        self.assertEqual(len(result["frame_attempts"]), 2)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(result["capacity_waited_seconds"], 7)
+        self.assertEqual(W.join_selected_attempts.call_args.kwargs["timeout"], 600 - 7)
+
+    def test_resume_wait_refused_again_hands_back_without_another_wait(self):
+        run = self.make_run(refuse_node="frame-alternative", refuse_times=99,
+                             receipt=self.refusal_receipt(retry_after_seconds=3))
+        sleeps = []
+        result = W.start_work(self.route, self.path, self.jobs, run=run, wait=True,
+                               sleep=sleeps.append, clock=lambda: 1_800_000_000.0)
+        self.assertEqual(sleeps, [3])  # exactly one wait, never a retry loop
+        self.assertEqual(result["state"], "waiting-capacity", result)
+        self.assertNotIn("parent_next", result)
+        self.assertNotIn("parent_next_command", result)
+        self.assertEqual(result["required_action"], "report-capacity-wait")
+        self.assertEqual(result["capacity_waited_seconds"], 3)
+
+    def test_owner_budget_refusal_is_waiting_capacity(self):
+        run = self.make_run(refuse_node="owner", refuse_times=99,
+                             receipt=self.refusal_receipt(retry_after_seconds=5))
+        self.ready = True
+        self.released = True
+        result = W.start_work(self.route, self.path, self.jobs, run=run)
+        self.assertEqual(result["state"], "waiting-capacity", result)
+        self.assertEqual(result["refused_attempt_id"], W.attempt_id(self.route, "owner"))
+        self.assertEqual(result["refused_node"], "owner")
+        self.assertFalse(result["spawned"])
+
+    def test_spawned_then_exit_75_is_never_relaunched(self):
+        def crashed_after_claim(command, **kwargs):
+            registered = self.admit(command, **kwargs)
+            receipt = registered.stdout + self.refusal_receipt(retry_after_seconds=5, child_spawned="1")
+            return subprocess.CompletedProcess(command, 75, receipt, "worker crashed after claim")
+        result = W.start_work(self.route, self.path, self.jobs, run=crashed_after_claim)
+        self.assertNotEqual(result["state"], "waiting-capacity", result)
+        calls_after_first = len(self.calls)
+        W.start_work(self.route, self.path, self.jobs, run=crashed_after_claim)
+        self.assertEqual(len(self.calls), calls_after_first)  # rows exist; no relaunch
+
+    def test_receipt_refusal_with_existing_row_trusts_registry(self):
+        def raced(command, **kwargs):
+            node = command[command.index("--route-node") + 1] if "--route-node" in command else "owner"
+            if node == "frame-alternative":
+                self.admit(command, **kwargs)  # a concurrent resume already admitted this exact aid
+                return subprocess.CompletedProcess(command, 75, self.refusal_receipt(), "")
+            return self.admit(command, **kwargs)
+        result = W.start_work(self.route, self.path, self.jobs, run=raced)
+        self.assertNotEqual(result["state"], "waiting-capacity", result)
+        self.assertEqual(len(result["frame_attempts"]), 2)
+
+    def test_untyped_or_kill_switch_refusal_stays_needs_attention(self):
+        def kill_switch(command, **kwargs):
+            node = command[command.index("--route-node") + 1] if "--route-node" in command else "owner"
+            if node == "frame-alternative":
+                receipt = self.refusal_receipt(retryable=None, reason="model-worker-governor-denied")
+                return subprocess.CompletedProcess(command, 75, receipt, "kill switch")
+            return self.admit(command, **kwargs)
+        result = W.start_work(self.route, self.path, self.jobs, run=kill_switch)
+        self.assertEqual(result["state"], "needs-attention", result)
+        self.assertEqual(result["reason"], "frame-launch-not-admitted")
 
     def test_automatic_frames_use_real_selector_usage_gate_before_wrapper_launch(self):
         owner = load("work_start_capacity_owner", W.ROOT / "utilities/dispatch-owner.py")

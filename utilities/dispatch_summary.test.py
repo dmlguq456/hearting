@@ -28,6 +28,12 @@ class DispatchSummaryTest(unittest.TestCase):
         os.environ.update({
             "FLEET_TITLE_STATE_DIR": str(Path(self.tmp.name) / "titles"),
             "AGENT_MODEL_GOVERNOR_ROOT": str(Path(self.tmp.name) / "governor"),
+            # `refresh_title.run_worker` resolves the governor script through
+            # `AGENT_HOME`, which in a real session points at the installed
+            # release, not this checkout -- pin it here (it also reaches the
+            # spawned `refresh_title.py` subprocess through inherited env) so
+            # the test exercises this worktree's governor.
+            "AGENT_HOME": str(ROOT),
             "AGENT_MODEL_WORKER_TOTAL": "5",
             "AGENT_MODEL_WORKER_START_BUDGET": "20",
             "FLEET_TITLE_CONCURRENCY": "4",
@@ -91,6 +97,62 @@ class DispatchSummaryTest(unittest.TestCase):
         state = json.loads(S.owner_state_path("codex", attempt).read_text())
         self.assertEqual(state["status"], "terminal")
         self.assertTrue(state["final_refresh_complete"])
+
+    def test_periodic_refresh_uses_ten_minute_debounce_without_priority(self):
+        """A live dispatch child's periodic title refresh must not spend the
+        rolling start budget the way a 90s cadence did (intent decision
+        `child-title-interval`); initial/final stay immediate and priority."""
+        attempt = "att-periodic-cadence"
+        directory = Path(self.tmp.name)
+        log = directory / f"owner.{attempt}.codex.jsonl"
+        log.write_text(json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "start"},
+        }) + "\n", encoding="utf-8")
+        script = directory / "grow_transcript.py"
+        script.write_text(
+            "import json, pathlib, sys, time\n"
+            "p = pathlib.Path(sys.argv[1])\n"
+            "for i in range(6):\n"
+            "    with p.open('a', encoding='utf-8') as f:\n"
+            "        f.write(json.dumps({'type': 'item.completed', 'item': "
+            "{'type': 'agent_message', 'text': 'chunk-%d' % i}}) + chr(10))\n"
+            "    time.sleep(0.05)\n"
+            "time.sleep(0.1)\n",
+            encoding="utf-8",
+        )
+        child = subprocess.Popen(
+            [sys.executable, str(script), str(log)], start_new_session=True
+        )
+        start = S.process_observation(child.pid)[1]
+        self.assertTrue(start)
+        calls = []
+
+        def fake_refresh(*args, **kwargs):
+            calls.append(kwargs)
+            return True
+
+        with mock.patch.object(S, "_refresh", side_effect=fake_refresh):
+            rc = S.supervise(
+                attempt_id=attempt, harness="codex", transcript=log,
+                target_pid=child.pid, target_start=start,
+                poll=0.02, initial_delay=0,
+                final_grace=1, log_quiet=0.05,
+            )
+        child.wait(timeout=5)
+        self.assertEqual(rc, 0)
+        phases = [call["phase"] for call in calls]
+        self.assertEqual(phases[0], "initial")
+        self.assertEqual(phases[-1], "final")
+        periodic_calls = [call for call in calls if call["phase"] == "periodic"]
+        self.assertTrue(periodic_calls, "expected at least one periodic refresh attempt")
+        for call in periodic_calls:
+            self.assertEqual(call["debounce"], S.DEFAULT_PERIODIC_DEBOUNCE)
+            self.assertIs(call["priority"], False)
+        self.assertEqual(calls[0]["debounce"], 0)
+        self.assertIs(calls[0]["priority"], True)
+        self.assertEqual(calls[-1]["debounce"], 0)
+        self.assertIs(calls[-1]["priority"], True)
 
     def test_reconcile_reattaches_only_one_live_exact_attempt(self):
         attempt = "att-summary-recover"

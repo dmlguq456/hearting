@@ -8,6 +8,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import secrets
 import subprocess
@@ -108,6 +109,18 @@ CLASS_LIMITS = {"dispatch": 8, "distill": 1, "title": 4, "loop": 2}
 START_WINDOW_SECONDS = 600
 DEFAULT_TOTAL_LIMIT = 12
 DEFAULT_START_BUDGET = 20
+# Separate rolling start budgets per class (per START_WINDOW_SECONDS). A cheap
+# background call (title refresh, memory distill, a loop tick) used to spend
+# the same rolling budget as an expensive dispatch launch, so a session with
+# several live dispatch children could starve every new dispatch admission on
+# their own periodic title updates alone. DEFAULT_START_BUDGET stays equal to
+# CLASS_START_BUDGETS["dispatch"] -- it is the same pool under its old name.
+CLASS_START_BUDGETS = {"dispatch": DEFAULT_START_BUDGET, "title": 12, "distill": 4, "loop": 4}
+# Eight is the same "recent tail" size `status` already uses for
+# `identity_diagnostics` -- enough for an operator to see the last few
+# starts of a class without the receipt growing unbounded.
+START_LABEL_TAIL = 8
+START_LABEL_MAX = 128
 RESERVATION_ENV = "AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN"
 TOKEN_BYTES = 16
 CLAIM_RECEIPT_SECONDS = START_WINDOW_SECONDS
@@ -130,6 +143,35 @@ def class_limit(worker_class: str) -> int:
         if value >= 1:
             return value
     return CLASS_LIMITS[worker_class]
+
+
+def start_budget(worker_class: str, override: int | None = None) -> int:
+    """Per-class rolling start budget, overridable per class or (dispatch only)
+    through the legacy global env.
+
+    `override` is the request-scoped `budget=` keyword every caller already
+    accepts; it now narrows to *this class's* budget rather than a single
+    shared one. `AGENT_MODEL_WORKER_START_BUDGET_<CLASS>` takes precedence over
+    the legacy `AGENT_MODEL_WORKER_START_BUDGET`, which only ever applied to
+    `dispatch`. A malformed or non-positive env value keeps the default,
+    matching `class_limit()`; an explicit non-positive `override` still fails
+    closed like the pre-existing `_limits` contract.
+    """
+    if override is not None:
+        if isinstance(override, bool) or not isinstance(override, int) or override < 1:
+            raise ValueError("model-worker limits must be positive")
+        return override
+    raw = os.environ.get("AGENT_MODEL_WORKER_START_BUDGET_" + worker_class.upper())
+    if raw is None and worker_class == "dispatch":
+        raw = os.environ.get("AGENT_MODEL_WORKER_START_BUDGET")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            return CLASS_START_BUDGETS[worker_class]
+        if value >= 1:
+            return value
+    return CLASS_START_BUDGETS[worker_class]
 
 BATCH_RESERVATION_KEYS = (
     "reservation_kind",
@@ -315,9 +357,17 @@ def _owned_group_metadata(pid: int) -> dict[str, object]:
 
 
 def _limits(total: int | None, budget: int | None) -> tuple[int, int]:
+    """Resolve the global concurrency total; `budget` here is dispatch-only.
+
+    Every caller now resolves its own class's start budget through
+    `start_budget(worker_class, budget)` after calling this for `total`. The
+    `budget` slot is kept (defaulting to the `dispatch` class) only so
+    `reclaim`'s `_limits(None, None)[0]` total lookup is unaffected by a
+    malformed per-class env value.
+    """
     total = total if total is not None else int(os.environ.get("AGENT_MODEL_WORKER_TOTAL", DEFAULT_TOTAL_LIMIT))
-    budget = budget if budget is not None else int(os.environ.get("AGENT_MODEL_WORKER_START_BUDGET", DEFAULT_START_BUDGET))
-    if total < 1 or budget < 1:
+    budget = start_budget("dispatch", budget)
+    if total < 1:
         raise ValueError("model-worker limits must be positive")
     return total, budget
 
@@ -335,6 +385,7 @@ def _state_change(root: str | Path, fn: Callable[[dict[str, Any], float], Any]) 
                 "leases": {},
                 "reservations": {},
                 "starts": [],
+                "start_records": [],
             }
         except (json.JSONDecodeError, OSError) as exc:
             raise ValueError(f"invalid governor state: {exc}") from exc
@@ -347,6 +398,8 @@ def _state_change(root: str | Path, fn: Callable[[dict[str, Any], float], Any]) 
             raise ValueError("invalid governor state: reservations must be an object")
         if not isinstance(data.get("starts", []), list):
             raise ValueError("invalid governor state: starts must be an array")
+        if not isinstance(data.get("start_records", []), list):
+            raise ValueError("invalid governor state: start_records must be an array")
         schema_version = data.get("schema_version", 1)
         if isinstance(schema_version, bool) or not isinstance(schema_version, int):
             raise ValueError("invalid governor state: schema_version must be an integer")
@@ -357,9 +410,30 @@ def _state_change(root: str | Path, fn: Callable[[dict[str, Any], float], Any]) 
         data.setdefault("leases", {})
         data.setdefault("reservations", {})
         data.setdefault("starts", [])
+        data.setdefault("start_records", [])
 
         now = time.time()
         data["starts"] = [stamp for stamp in data.get("starts", []) if now - stamp < START_WINDOW_SECONDS]
+        # `start_records` is the class/label/pid provenance for every start,
+        # including the background classes that never touch `starts`. An old
+        # release never writes this key, so it is missing (not malformed) on a
+        # state file it produced -- `.get(..., [])` above already covers that.
+        # A malformed *element* (corrupt write, foreign schema) is dropped
+        # rather than raised: a damaged background-pool record must never
+        # block admission for every class.
+        data["start_records"] = [
+            {
+                "at": record["at"],
+                "class": record.get("class"),
+                "label": record.get("label", ""),
+                "pid": record.get("pid"),
+            }
+            for record in data.get("start_records", [])
+            if isinstance(record, dict)
+            and not isinstance(record.get("at"), bool)
+            and isinstance(record.get("at"), (int, float))
+            and now - record["at"] < START_WINDOW_SECONDS
+        ]
         # Process disappearance and namespace observations never authorize
         # automatic capacity return.  Explicit cancel/release is required.
         # A short-lived runner may finish before its reserving wrapper observes
@@ -402,8 +476,68 @@ CAP_RECOVERY_HINT = (
 # only after a capacity refusal has unwound the state lock.
 
 
-class _CapacityReached(ValueError):
+class _AdmissionRefused(ValueError):
+    """Admission refused for a reason a caller can present as a typed retry."""
+
+    def __init__(self, message: str, refusal: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.refusal = refusal
+
+
+class _CapacityReached(_AdmissionRefused):
     """A concurrency cap refused admission (not validation or start budget)."""
+
+
+class _StartBudgetReached(_AdmissionRefused):
+    """The rolling per-class start budget refused admission."""
+
+
+def _start_pool(data: dict[str, Any], worker_class: str) -> tuple[list[float], int]:
+    """The timestamps and unclaimed-reservation count backing one class's budget.
+
+    `dispatch` is judged against the legacy `starts` float list (so an old
+    release's unattributed starts still count there); every other class is
+    judged against its own `start_records` entries so a background start never
+    spends the dispatch pool.
+    """
+    reservations = data["reservations"]
+    reserved = sum(1 for item in reservations.values() if item.get("class") == worker_class)
+    if worker_class == "dispatch":
+        return list(data.get("starts", [])), reserved
+    stamps = [
+        record["at"] for record in data.get("start_records", []) if record.get("class") == worker_class
+    ]
+    return stamps, reserved
+
+
+def _budget_refusal(
+    worker_class: str, stamps: list[float], reserved: int, count: int, limit: int, now: float
+) -> _StartBudgetReached:
+    used = len(stamps) + reserved
+    ordered = sorted(stamps)
+    need = used + count - limit
+    if need <= len(ordered):
+        frees_at = ordered[need - 1] + START_WINDOW_SECONDS
+    else:
+        # An unclaimed reservation is blocking, not a timestamped start; there
+        # is no earlier evidence than "wait out a full window".
+        frees_at = now + START_WINDOW_SECONDS
+    retry_after_seconds = max(1, min(START_WINDOW_SECONDS, math.ceil(frees_at - now)))
+    refusal = {
+        "state": "refused",
+        "refusal": "start-budget",
+        "class": worker_class,
+        "used": used,
+        "limit": limit,
+        "retryable": True,
+        "retry_after_seconds": retry_after_seconds,
+        "frees_at": int(frees_at),
+    }
+    message = (
+        f"rolling model-worker start budget reached: class={worker_class} used={used} "
+        f"limit={limit} retry_after_seconds={retry_after_seconds}"
+    )
+    return _StartBudgetReached(message, refusal)
 
 
 def _admit_with_reclaim(root: str | Path, operation: Callable) -> Any:
@@ -426,6 +560,8 @@ def _assert_available(
     total: int,
     budget: int,
     count: int = 1,
+    *,
+    now: float,
 ) -> None:
     root = Path(root)
     if worker_class not in CLASS_LIMITS:
@@ -438,19 +574,47 @@ def _assert_available(
     reservations = data["reservations"]
     occupied = [*leases.values(), *reservations.values()]
     if len(occupied) + count > total:
-        raise _CapacityReached("global model-worker cap reached" + CAP_RECOVERY_HINT)
-    if sum(item.get("class") == worker_class for item in occupied) + count > class_limit(worker_class):
-        raise _CapacityReached(f"{worker_class} class cap reached" + CAP_RECOVERY_HINT)
-    # Unclaimed reservations hold rolling-budget capacity. Claiming one moves
-    # that capacity from ``reservations`` to ``starts`` in the same lock.
-    if len(data["starts"]) + len(reservations) + count > budget:
-        raise ValueError("rolling model-worker start budget reached")
+        raise _CapacityReached("global model-worker cap reached" + CAP_RECOVERY_HINT, {
+            "state": "refused", "refusal": "global-cap", "class": worker_class,
+            "used": len(occupied), "limit": total, "retryable": True,
+            "retry_after_seconds": None, "frees_at": None,
+        })
+    class_used = sum(item.get("class") == worker_class for item in occupied)
+    limit = class_limit(worker_class)
+    if class_used + count > limit:
+        raise _CapacityReached(f"{worker_class} class cap reached" + CAP_RECOVERY_HINT, {
+            "state": "refused", "refusal": "class-cap", "class": worker_class,
+            "used": class_used, "limit": limit, "retryable": True,
+            "retry_after_seconds": None, "frees_at": None,
+        })
+    # Unclaimed reservations of this class hold rolling start-budget capacity.
+    # Claiming one moves that capacity from ``reservations`` into the class's
+    # start pool (``starts`` for dispatch, ``start_records`` otherwise) in the
+    # same lock.
+    stamps, reserved = _start_pool(data, worker_class)
+    if len(stamps) + reserved + count > budget:
+        raise _budget_refusal(worker_class, stamps, reserved, count, budget, now)
+
+
+def _record_start(data: dict[str, Any], worker_class: str, now: float, pid: int, label: str) -> None:
+    """Append the class/label/pid provenance record, plus the legacy dispatch float.
+
+    Only `dispatch` writes `starts`: that list is the compatibility read path a
+    sealed old release's judgment (`len(starts)+len(reservations)`) still uses,
+    so a background start must never inflate it.
+    """
+    data.setdefault("start_records", []).append(
+        {"at": now, "class": worker_class, "label": (label or "")[:START_LABEL_MAX], "pid": pid}
+    )
+    if worker_class == "dispatch":
+        data["starts"].append(now)
 
 
 def check(root: str | Path, worker_class: str, *, total: int | None = None, budget: int | None = None) -> None:
     """Check admission without consuming a rolling-start budget entry."""
-    total, budget = _limits(total, budget)
-    _state_change(root, lambda data, now: _assert_available(root, data, worker_class, total, budget))
+    total, _ = _limits(total, None)
+    budget = start_budget(worker_class, budget)
+    _state_change(root, lambda data, now: _assert_available(root, data, worker_class, total, budget, now=now))
 
 
 def acquire(
@@ -460,8 +624,10 @@ def acquire(
     *,
     total: int | None = None,
     budget: int | None = None,
+    label: str = "",
 ) -> str:
-    total, budget = _limits(total, budget)
+    total, _ = _limits(total, None)
+    budget = start_budget(worker_class, budget)
     pid = os.getpid() if pid is None else pid
     starttime = process_starttime(pid)
     if starttime is None:
@@ -472,7 +638,7 @@ def acquire(
     def operation(data: dict[str, Any], now: float) -> str:
         if process_starttime(pid) != starttime:
             raise ValueError("requesting process identity changed")
-        _assert_available(root, data, worker_class, total, budget)
+        _assert_available(root, data, worker_class, total, budget, now=now)
         token = _new_token(data)
         data["leases"][token] = {
             "class": worker_class,
@@ -483,7 +649,7 @@ def acquire(
             **({"claimant_identity": identity, "claimant_witness": handle.binding()} if handle is not None else {}),
             **_owned_group_metadata(pid),
         }
-        data["starts"].append(now)
+        _record_start(data, worker_class, now, pid, label)
         return token
 
     try:
@@ -1045,7 +1211,8 @@ def reserve(
     witness_binding: dict[str, Any] | None = None,
 ) -> list[str]:
     """Atomically reserve ``count`` future leases for one live owner process."""
-    total, budget = _limits(total, budget)
+    total, _ = _limits(total, None)
+    budget = start_budget(worker_class, budget)
     pid = os.getpid() if pid is None else pid
     starttime = process_starttime(pid)
     if starttime is None:
@@ -1145,7 +1312,7 @@ def reserve(
         owner_identity = identity
         if witness_binding is not None:
             owner_identity = _validate_owner_witness(root, witness_binding, pid, starttime)
-        _assert_available(root, data, worker_class, total, budget, count)
+        _assert_available(root, data, worker_class, total, budget, count, now=now)
         tokens = []
         for index in range(count):
             token = _new_token(data)
@@ -1242,8 +1409,14 @@ def reservation_check(
     return _state_change(root, operation)
 
 
-def claim_reservation(root: str | Path, token: str, worker_class: str) -> str:
-    """Move one reservation into a lease owned by this governor-run process."""
+def claim_reservation(root: str | Path, token: str, worker_class: str, *, label: str = "") -> str:
+    """Move one reservation into a lease owned by this governor-run process.
+
+    The recorded start label prefers the reservation's own `batch_attempt_id`
+    (the identity a parallel-batch reservation already carries) over the
+    caller-supplied `label`, since that is the more specific provenance when
+    both are present.
+    """
     _validate_reservation_token(token)
     pid = os.getpid()
     starttime = process_starttime(pid)
@@ -1293,7 +1466,8 @@ def claim_reservation(root: str | Path, token: str, worker_class: str) -> str:
             "claimant_witness": handle.binding(),
             **_owned_group_metadata(pid),
         }
-        data["starts"].append(now)
+        effective_label = str(reservation.get("batch_attempt_id") or label)
+        _record_start(data, worker_class, now, pid, effective_label)
         return token
 
     try:
@@ -1434,6 +1608,7 @@ def main() -> int:
     acquire_parser = commands.add_parser("acquire")
     acquire_parser.add_argument("--class", dest="worker_class", required=True)
     acquire_parser.add_argument("--pid", type=int)
+    acquire_parser.add_argument("--label", default="")
     check_parser = commands.add_parser("check")
     check_parser.add_argument("--class", dest="worker_class", required=True)
     reserve_parser = commands.add_parser("reserve")
@@ -1461,6 +1636,7 @@ def main() -> int:
     release_parser.add_argument("--token", required=True)
     run_parser = commands.add_parser("run")
     run_parser.add_argument("--class", dest="worker_class", required=True)
+    run_parser.add_argument("--label")
     run_parser.add_argument("command_argv", nargs=argparse.REMAINDER)
     commands.add_parser("status")
     reclaim_parser = commands.add_parser("reclaim")
@@ -1468,7 +1644,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "acquire":
-        print(acquire(args.root, args.worker_class, args.pid))
+        print(acquire(args.root, args.worker_class, args.pid, label=args.label))
     elif args.command == "check":
         check(args.root, args.worker_class)
         print("governor=available")
@@ -1586,22 +1762,39 @@ def main() -> int:
         diagnostics = [_identity_diagnostic(args.root, row) for row in
                        [*data["reservations"].values(), *data["leases"].values()][:8]
                        if isinstance(row, dict)]
+        start_usage = {}
+        for worker_class in CLASS_START_BUDGETS:
+            stamps, reserved = _start_pool(data, worker_class)
+            class_records = sorted(
+                (record for record in data.get("start_records", []) if record.get("class") == worker_class),
+                key=lambda record: record.get("at", 0),
+            )
+            start_usage[worker_class] = {
+                "used": len(stamps) + reserved,
+                "reserved": reserved,
+                "limit": start_budget(worker_class),
+                "frees_at": (int(min(stamps) + START_WINDOW_SECONDS) if stamps else None),
+                "labels": [record.get("label", "") for record in class_records[-START_LABEL_TAIL:]],
+            }
         # An operator reading a full governor needs to know whether the
         # occupancy is live work or dead claimants, without diffing /proc.
         print(json.dumps({**data, "identity_diagnostics": diagnostics,
-                          "reclaimable_leases": reclaimable(args.root, data)}, sort_keys=True))
+                          "reclaimable_leases": reclaimable(args.root, data),
+                          "start_usage": start_usage}, sort_keys=True))
     else:
         command = args.command_argv[1:] if args.command_argv[:1] == ["--"] else args.command_argv
         if not command:
             raise ValueError("worker command is required")
+        label = args.label or os.environ.get("AGENT_DISPATCH_ATTEMPT_ID") or Path(command[0]).name
         if RESERVATION_ENV in os.environ:
             token = claim_reservation(
                 args.root,
                 os.environ[RESERVATION_ENV],
                 args.worker_class,
+                label=label,
             )
         else:
-            token = acquire(args.root, args.worker_class)
+            token = acquire(args.root, args.worker_class, label=label)
         child_env = dict(os.environ)
         child_env.pop(RESERVATION_ENV, None)
         returned = None
@@ -1636,5 +1829,11 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except (ValueError, IdentityCaptureError) as exc:
+        if isinstance(exc, _AdmissionRefused):
+            # A typed refusal is retryable evidence, not a validation failure:
+            # put it on stdout (its own JSON line, ahead of the stderr
+            # sentence) so a caller like `_governor_json` can parse it even
+            # though the process exits non-zero.
+            print(json.dumps(exc.refusal, sort_keys=True))
         print(f"model-worker-governor: {exc}", file=sys.stderr)
         raise SystemExit(75)

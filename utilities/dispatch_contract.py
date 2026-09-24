@@ -3545,8 +3545,40 @@ def _governor_json(
         and not (allow_absent and isinstance(payload, dict) and payload.get("state") == "absent")
     ) or not isinstance(payload, dict):
         detail = (result.stderr or result.stdout).strip()[:512] or f"exit-{result.returncode}"
-        raise DispatchContractError("model-worker-governor-denied", detail)
+        exc = DispatchContractError("model-worker-governor-denied", detail)
+        # A typed admission refusal (`_AdmissionRefused`) puts its JSON on
+        # stdout ahead of the stderr sentence `detail` already captured, so
+        # `payload` is preserved for a retryable receipt without changing
+        # `reason`/`detail`. A kill-switch or validation `ValueError` prints no
+        # such JSON, so `payload` stays `{}` and this is a no-op.
+        if isinstance(payload, dict) and payload.get("state") == "refused":
+            exc.admission = payload
+        raise exc
     return payload
+
+
+def governor_refusal_fields(exc: DispatchContractError) -> dict[str, str]:
+    """Retry-shaped receipt fields from a typed governor admission refusal.
+
+    Only a `retryable` refusal (the governor's `_AdmissionRefused` JSON) gets
+    these; a kill-switch or validation error carries no `admission` payload at
+    all, so this returns `{}` and the adapter's existing refusal receipt is
+    unchanged.
+    """
+    admission = getattr(exc, "admission", None)
+    if not isinstance(admission, dict) or admission.get("retryable") is not True:
+        return {}
+
+    def field(value: object) -> str:
+        return "-" if value is None else str(value)
+
+    return {
+        "retryable": "1",
+        "refusal": field(admission.get("refusal")),
+        "worker_class": field(admission.get("class")),
+        "retry_after_seconds": field(admission.get("retry_after_seconds")),
+        "frees_at": field(admission.get("frees_at")),
+    }
 
 
 def replica_batch_expectation(
