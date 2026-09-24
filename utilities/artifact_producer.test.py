@@ -3463,5 +3463,54 @@ class CycleBindingAndIndexOrderTest(ProducerTestBase):
         self.assertEqual(P.recover_cycle_times(self.root, backup_store=store)["counts"], {"no-match": 1})
 
 
+class CycleBucketDeclarationTest(unittest.TestCase):
+    """CORE §3 "Cycle payload buckets" is the declaration readers such as Cairn
+    trust; it must name exactly the buckets the producer types."""
+
+    def test_core_cycle_bucket_table_equals_bucket_types(self):
+        core = Path(__file__).resolve().parents[1] / "core" / "CORE.md"
+        text = core.read_text(encoding="utf-8")
+        start = text.index("**Cycle payload buckets.**")
+        rows = {}
+        for line in text[start:].split("**Campaign closure.**", 1)[0].splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) == 3 and cells[0].startswith("`") and cells[2].startswith("`"):
+                rows[cells[0].strip("`").rstrip("/")] = cells[2].strip("`")
+        self.assertEqual(set(rows), set(P.BUCKET_TYPES))
+        self.assertTrue(set(rows.values()) <= {"C-DUR", "C-INT"}, rows)
+        # The primary auto-nomination skips exactly the C-INT names of CORE §3
+        # (the top-level table and the cycle bucket table together).
+        section = text[text.index("## 3. Artifact Root"):text.index("## 3.1.")]
+        c_int = set()
+        for line in section.splitlines():
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) == 3 and cells[2] == "`C-INT`":
+                c_int |= {name.rstrip("/") for name in cells[0].replace("`", "").replace(",", " ").split()}
+        self.assertEqual(P.SUPPORT_SEGMENTS, c_int)
+
+
+class PrimarySupportExclusionTest(unittest.TestCase):
+    """2026-09-24 TF-Rehancer: a research cycle sealed `_internal/prompts/report.md`
+    as its primary, so Cairn (which does not list C-INT paths) dropped the cycle."""
+
+    def test_support_paths_are_not_auto_nominated_while_output_exists(self):
+        rows = [("artifacts/_internal/prompts/report.md", b""),
+                ("artifacts/reviews/verdict.json", b""),
+                ("artifacts/shards/retrieval/survey.md", b""),
+                ("artifacts/research/related-work/survey.md", b"")]
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/research/related-work/survey.md")
+        rows.append(("artifacts/research/final_report.md", b""))
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/research/final_report.md")
+
+    def test_support_only_cycle_keeps_its_first_row(self):
+        rows = [("artifacts/_internal/dispatch/retrieval_prompt.md", b""),
+                ("artifacts/shards/retrieval/_internal/raw.txt", b"")]
+        self.assertEqual(P._choose_primary(rows, None), "artifacts/_internal/dispatch/retrieval_prompt.md")
+
+    def test_explicit_primary_inside_support_still_wins(self):
+        rows = [("artifacts/_internal/notes.md", b""), ("artifacts/plans/report.md", b"")]
+        self.assertEqual(P._choose_primary(rows, "_internal/notes.md"), "artifacts/_internal/notes.md")
+
+
 if __name__ == "__main__":
     unittest.main()

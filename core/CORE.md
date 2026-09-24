@@ -229,6 +229,34 @@ absolute/escaping paths and out-of-payload files remain invalid. Cycle controls
 and legacy relocation/exclusion retain their contracts. Invalid paths identify
 the locator and reason before payload reads or manifest publication.
 
+**Cycle payload buckets.** The top-level table above closes only the names
+directly under the artifact root. Inside a cycle, the first segment below
+`artifacts/` is the bucket, and this table closes the bucket names: it lists
+exactly the keys of `BUCKET_TYPES` in `utilities/artifact_producer.py`, and
+`artifact_producer.test.py` fails when the two differ. Another first segment (for example `shards/`) is not a
+bucket; its files carry type `file`. The class is the display intent readers
+such as Cairn use: `C-DUR` is a durable work product meant to be shown, `C-INT`
+is support material that is kept but not listed. When `finalize` picks a
+primary artifact itself, it skips any path through a `C-INT` name (`_internal/`,
+`reviews/`, `shards/`) while the cycle holds another file, then takes the first
+`PRIMARY_CANDIDATES` name, then the first remaining file; an explicit `--primary`
+is kept as given.
+
+| Bucket | Meaning | Disposition class |
+|---|---|---|
+| `plans/` | implementation cycle plans, reports and evidence (`autopilot-code`) | `C-DUR` |
+| `documents/` | document drafts, refinements and cheatsheets (`autopilot-draft`, `autopilot-refine`) | `C-DUR` |
+| `designs/` | design references, tokens, components and handoff (`autopilot-design`) | `C-DUR` |
+| `spec/` | blueprint components (`autopilot-spec`); the source for `admit-shared --kind spec` | `C-DUR` |
+| `research/` | topic research and external references (`autopilot-research`) | `C-DUR` |
+| `experiments/` | experiment setup, evaluation and run logs (`autopilot-lab`) | `C-DUR` |
+| `analysis_project/` | whole-project source analysis (`analyze-project`) | `C-DUR` |
+| `analysis/` | analysis reports that are not a whole-project analysis, such as diagnoses and measurements | `C-DUR` |
+| `apply-log/` | the report of applying a draft cheatsheet to the real source and verifying it (`autopilot-apply`) | `C-DUR` |
+| `release-config/` | release configuration and ship checklist (`autopilot-ship`); a root-level `release-config/` stays wrong-base residue | `C-DUR` |
+| `user_profile/` | the evidence and report behind a cross-project user-preference profile (`analyze-user`) | `C-DUR` |
+| `reviews/` | review support material | `C-INT` |
+
 **Campaign closure.** `artifact_producer.py campaign-status|campaign-close|campaign-recover`
 owns administrative satisfaction. Status verifies the campaign's exact cycle
 membership, sealed manifests and their payloads and prints a reviewable goal,
