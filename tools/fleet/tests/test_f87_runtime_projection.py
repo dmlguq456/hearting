@@ -35,8 +35,17 @@ class RuntimeProjectionTest(unittest.TestCase):
                     "HARNESS_CAPACITY_REFRESH_DISABLE": "1",
                     "CODEX_HOME": str(root / "codex"), "FLEET_TITLE_STATE_DIR": str(root / "titles"),
                     "PYTHONDONTWRITEBYTECODE": "1"})
+        env.pop("CODEX_THREAD_ID", None)
         env.update(overrides)
         return env
+
+    def own_claude_session(self, root, sid):
+        """Make THIS test process a Claude runtime on ``sid`` for its children: the
+        projection only reports a session whose runtime is an ancestor of the hook, and
+        it reads that from `<CLAUDE_CONFIG_DIR>/sessions/<pid>.json`, like Claude Code."""
+        sessions = Path(self.env(root)["CLAUDE_CONFIG_DIR"]) / "sessions"
+        sessions.mkdir(parents=True, exist_ok=True)
+        (sessions / ("%d.json" % os.getpid())).write_text(json.dumps({"sessionId": sid}))
 
     def statusline(self, root, sid, title, helper=True):
         path = Path(self.env(root)["AGENT_HOME"]) / "tools/fleet/session_handle.py"
@@ -64,6 +73,17 @@ class RuntimeProjectionTest(unittest.TestCase):
         log.write_text("")
         env = self.env(root)
         env.update({"PATH": str(bindir) + os.pathsep + env["PATH"], "HERDR_PANE_ID": "pane-7", "HERDR_LOG": str(log), "HERDR_MODE": mode, "HERDR_EXIT": "7" if mode == "nonzero" else "0"})
+        # The reporting process must be the session's own runtime (may_report): Codex by
+        # its CODEX_THREAD_ID, Claude by its session file, OpenCode by the process name.
+        interpreter = sys.executable
+        if harness == "codex":
+            env["CODEX_THREAD_ID"] = sid
+        elif harness == "claude":
+            self.own_claude_session(root, sid)
+        elif harness == "opencode":
+            interpreter = str(bindir / "opencode")
+            if not os.path.lexists(interpreter):
+                os.symlink(sys.executable, interpreter)
         if formatter is not None:
             env["HERDR_SESSION_METADATA_FORMATTER"] = str(formatter)
         if harness == "codex":
@@ -74,7 +94,7 @@ class RuntimeProjectionTest(unittest.TestCase):
         else:
             code = ("import sys;sys.path.insert(0,%r);from tools.fleet.herdr_projection import project;assert project(%r,%r,worker=%r)"
                     % (str(ROOT), harness, sid, worker))
-        result = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True)
+        result = subprocess.run([interpreter, "-c", code], env=env, capture_output=True)
         rows = [json.loads(x) for x in log.read_text().splitlines()] if log.exists() else []
         return result, rows
 
@@ -85,6 +105,8 @@ class RuntimeProjectionTest(unittest.TestCase):
         env = self.env(root, **env_overrides)
         env.update({"PATH": str(bindir) + os.pathsep + env["PATH"], "HERDR_PANE_ID": "pane-7",
                     "HERDR_LOG": str(log), "HERDR_MODE": "ok", "HERDR_EXIT": "0"})
+        if isinstance(sid, str) and sid:
+            self.own_claude_session(root, sid)
         log.write_text("")
         body = json.dumps(payload if payload is not None else {"session_id": sid})
         result = subprocess.run([sys.executable, str(ROOT / "hooks/herdr-session-projection.py")],
@@ -251,6 +273,77 @@ class RuntimeProjectionTest(unittest.TestCase):
                 _, rows = self.project(root, "abcdefgh-%s" % harness, harness=harness,
                                        worker=True)
                 self.assertEqual(rows, [], harness)
+
+    def test_codex_prompt_hook_with_a_fake_session_never_reaches_the_live_pane(self):
+        """The 2026-09-24 leak: `portable-guards.test.sh` fed `directpromptsid` to the Codex
+        prompt hook while inheriting the pane's HERDR_*, and a live header read
+        `[0d] codex`. The hook's process is not that session's runtime, so nothing is sent
+        — neither the header nor `report-agent-session`."""
+        hook = ROOT / "adapters/codex/hooks/userprompt-lifecycle.py"
+        payload = json.dumps({"prompt": "deterministic recall", "session_id": "directpromptsid",
+                              "turn_id": "directturnid", "cwd": ""})
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bindir, log = self.stub(root)
+            for thread in ("real-codex-thread", None):
+                env = self.env(root)
+                env.update({"PATH": str(bindir) + os.pathsep + env["PATH"],
+                            "HERDR_ENV": "1", "HERDR_PANE_ID": "wB:pN",
+                            "HERDR_SOCKET_PATH": str(root / "live.sock"),
+                            "HERDR_LOG": str(log), "HERDR_MODE": "ok", "HERDR_EXIT": "0"})
+                if thread:
+                    env["CODEX_THREAD_ID"] = thread
+                log.write_text("")
+                subprocess.run([sys.executable, str(hook)], input=payload, text=True,
+                               capture_output=True, env=env, timeout=60)
+                if thread is None and self._under_codex_runtime():
+                    continue   # without a thread id, a Codex ancestor is the only proof
+                self.assertEqual(log.read_text(), "", thread)
+
+    @staticmethod
+    def _under_codex_runtime():
+        from tools.fleet.herdr_projection import runtime_identity
+        return runtime_identity()[0] == "codex"
+
+    def test_identity_guard_rejects_a_foreign_session_and_reports_the_own_one(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bindir, log = self.stub(root)
+            self.own_claude_session(root, "real-claude-session")
+            env = self.env(root)
+            env.update({"PATH": str(bindir) + os.pathsep + env["PATH"], "HERDR_PANE_ID": "pane-7",
+                        "HERDR_LOG": str(log), "HERDR_MODE": "ok", "HERDR_EXIT": "0"})
+            code = ("import sys;sys.path.insert(0,%r);from tools.fleet.herdr_projection import project;"
+                    "project('claude', sys.argv[1], worker=False)" % str(ROOT))
+            for sid, reported in (("foreign-session", False), ("real-claude-session", True)):
+                log.write_text("")
+                subprocess.run([sys.executable, "-c", code, sid], env=env, check=True)
+                rows = [json.loads(x) for x in log.read_text().splitlines()]
+                self.assertEqual(bool(rows), reported, sid)
+                if reported:
+                    self.assertIn("--agent-session-id", rows[0])
+                    self.assertEqual(rows[0][rows[0].index("--agent-session-id") + 1], sid)
+            # Codex: the runtime's own CODEX_THREAD_ID decides, whatever the payload says.
+            env["CODEX_THREAD_ID"] = "real-thread"
+            code = code.replace("'claude'", "'codex'")
+            for sid, reported in (("directpromptsid", False), ("real-thread", True)):
+                log.write_text("")
+                subprocess.run([sys.executable, "-c", code, sid], env=env, check=True)
+                self.assertEqual(bool(log.read_text().strip()), reported, sid)
+
+    def test_no_runtime_identity_means_no_report(self):
+        """CI, a detached helper, a fake config dir: nothing to prove → nothing sent."""
+        from tools.fleet import herdr_projection as hp
+        with unittest.mock.patch.object(hp, "runtime_identity", return_value=(None, None)), \
+                unittest.mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CODEX_THREAD_ID", None)
+            for harness in hp.HARNESSES:
+                self.assertFalse(hp.may_report(harness, "abcdefgh-1", worker=False), harness)
+        with unittest.mock.patch.object(hp, "runtime_identity", return_value=("claude", "s-1")):
+            self.assertTrue(hp.may_report("claude", "s-1", worker=False))
+            self.assertFalse(hp.may_report("claude", "s-2", worker=False))
+            self.assertFalse(hp.may_report("opencode", "s-1", worker=False))
+            self.assertFalse(hp.may_report("claude", "s-1", worker=True))
 
     def test_opencode_projects_through_the_same_shared_surface(self):
         sid = "abcdefgh-opencode"

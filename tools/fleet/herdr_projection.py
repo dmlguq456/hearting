@@ -19,6 +19,15 @@ Both halves go into `title`, because that is the only field herdr paints above t
 Display-only and fail-soft throughout: no herdr, no pane, no title, or a slow formatter
 all mean "report less", never an error. Registered workers project nothing at all — the
 pane belongs to the interactive session that owns it.
+
+Every herdr report from a hook — this projection and `hooks/herdr-agent-state.sh` — asks
+`may_report()` first. A process may report a session only when it IS that session's
+runtime, proven from the process itself, never from the payload. Test suites run the real
+hooks with fake session ids while inheriting the interactive pane's `HERDR_PANE_ID` and
+often strip the worker markers, so the worker check alone let `directpromptsid` repaint a
+live pane as `[0d] codex` and take over its `agent_session_id` (2026-09-24). When the
+identity cannot be established the report is skipped: the header keeps its previous text
+until the real session's next hook (user decision, 2026-09-24 stale-title).
 """
 from __future__ import annotations
 
@@ -52,6 +61,95 @@ def is_worker() -> bool:
     if os.environ.get("AGENT_SESSION_ROLE") == "worker":
         return True
     return any(os.environ.get(name) for name in _WORKER_ENV)
+
+
+_MAX_ANCESTORS = 32
+
+
+def _parent(pid: int):
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as handle:
+            return int(handle.read().rsplit(b")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _comm(pid: int) -> str:
+    try:
+        with open("/proc/%d/comm" % pid, encoding="utf-8", errors="replace") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _claude_sessions_dir() -> Path:
+    config = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(config).expanduser() if config else Path.home() / ".claude"
+
+
+def _claude_session_of(pid: int):
+    """The session id Claude Code itself records for process ``pid``, or None.
+
+    `sessions/<pid>.json` is rewritten on `/clear` (measured 2026-09-24: a probe session's
+    file moved from d153cbe1… to 87f90316… on `/clear`), so it follows the session the
+    runtime is on now, not the one it started with.
+    """
+    try:
+        with open(_claude_sessions_dir() / "sessions" / ("%d.json" % pid),
+                  encoding="utf-8") as handle:
+            value = json.load(handle).get("sessionId")
+    except Exception:
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def runtime_identity():
+    """``(harness, session_id | None)`` of the nearest runtime process above this one.
+
+    Walks this process and its ancestors: the first one Claude has a session file for is
+    a Claude runtime with that session; a process named ``codex``/``codex-*`` or ``opencode`` is that
+    runtime (its own session id is not readable from the process). ``(None, None)`` when
+    no runtime is found — CI, a detached helper, a test with a fake config dir.
+    """
+    pid = os.getpid()
+    for _ in range(_MAX_ANCESTORS):
+        if not pid or pid <= 1:
+            break
+        session = _claude_session_of(pid)
+        if session:
+            return "claude", session
+        comm = _comm(pid)
+        if comm == "codex" or comm.startswith("codex-"):
+            return "codex", None
+        if comm == "opencode":
+            return "opencode", None
+        pid = _parent(pid)
+    return None, None
+
+
+def may_report(harness: str, session_id: str, *, worker=None) -> bool:
+    """The ONE decision whether this process may report ``session_id`` to herdr.
+
+    - never for a registered/background worker (D-42);
+    - Claude: the nearest Claude runtime above this process must be on ``session_id``;
+    - Codex: ``CODEX_THREAD_ID`` — set by Codex in the environment of what it runs — must
+      equal ``session_id`` when present; otherwise the nearest runtime must be Codex;
+    - OpenCode: the nearest runtime must be OpenCode.
+    Unknown identity is a refusal, never a guess.
+    """
+    harness = str(harness or "").lower()
+    if harness not in HARNESSES or not isinstance(session_id, str) or not session_id:
+        return False
+    if worker if worker is not None else is_worker():
+        return False
+    if harness == "codex":
+        thread = os.environ.get("CODEX_THREAD_ID", "")
+        if thread:
+            return thread == session_id
+    runtime, own = runtime_identity()
+    if runtime != harness:
+        return False
+    return own == session_id if runtime == "claude" else True
 
 
 def _runtime_name(harness: str, session_id: str) -> str:
@@ -225,13 +323,11 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
             report_session=True) -> bool:
     """Report this session's pane metadata to herdr. Always returns True (fail-soft)."""
     harness = str(harness or "").lower()
-    if harness not in HARNESSES or not session_id:
-        return True
-    if worker if worker is not None else is_worker():
-        return True
     pane = pane_id or os.environ.get("HERDR_PANE_ID", "")
     herdr = shutil.which("herdr")
     if not pane or not herdr:
+        return True
+    if not may_report(harness, session_id, worker=worker):
         return True
     title = session_title(harness, session_id)
     label, custom_title = _formatter_overrides(harness, session_id, title)
@@ -269,7 +365,11 @@ def main(argv=None) -> int:
                         help="skip report-agent-session (the runtime's own hook owns it)")
     parser.add_argument("--print", action="store_true",
                         help="print the composed metadata instead of reporting it")
+    parser.add_argument("--may-report", action="store_true",
+                        help="exit 0 when this process may report the session, else 1")
     args = parser.parse_args(argv)
+    if args.may_report:
+        return 0 if may_report(args.harness, args.session_id) else 1
     if args.print:
         agent, title = compose(args.harness, args.session_id)
         print(json.dumps({"display_agent": agent, "title": title}, ensure_ascii=False))

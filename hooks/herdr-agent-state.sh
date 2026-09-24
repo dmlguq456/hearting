@@ -7,17 +7,10 @@
 
 set -eu
 
-# Registered/background workers have their own Fleet/dispatch liveness and must
-# never overwrite the interactive main pane's state (D-42).
-if [ "${AGENT_SESSION_ROLE:-}" = "worker" ] \
-  || [ "${AGENT_DISPATCH_CHILD:-}" = "1" ] \
-  || [ -n "${AGENT_DISPATCH_DEPTH:-}" ] \
-  || [ -n "${OPENCODE_DISPATCH_SLUG:-}" ] \
-  || [ "${FLEET_TITLE_REFRESH:-}" = "1" ] \
-  || [ "${MEM_DISTILL:-}" = "1" ]; then
-  cat >/dev/null 2>&1
-  exit 0
-fi
+# Whether this process may report at all — a registered worker (D-42), or a process that
+# is not the runtime of the payload's session (a test feeding a fake session id while it
+# inherits this pane's HERDR_*) — is decided once, by `may_report()` in
+# tools/fleet/herdr_projection.py, the same check the pane-header projection uses.
 
 action="${1:-}"
 hook_input_file="$(mktemp "${TMPDIR:-/tmp}/herdr-claude-hook.XXXXXX")" || exit 0
@@ -34,12 +27,14 @@ esac
 [ -n "${HERDR_PANE_ID:-}" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" python3 - <<'PY'
+HERDR_ACTION="$action" HERDR_HOOK_INPUT_FILE="$hook_input_file" HERDR_HOOK_SCRIPT="$0" python3 - <<'PY'
 import json
 import os
 import random
 import socket
+import sys
 import time
+from pathlib import Path
 
 source = "herdr:claude"
 action = os.environ.get("HERDR_ACTION", "")
@@ -71,10 +66,34 @@ if is_subagent and action in ("idle", "release"):
     # Subagent completion must not make the parent pane look done early.
     raise SystemExit(0)
 
+def _may_report(session):
+    """tools/fleet/herdr_projection.may_report, or False when it cannot be found."""
+    # This hook's own release first: an older AGENT_HOME may predate may_report.
+    roots = []
+    script = os.environ.get("HERDR_HOOK_SCRIPT")
+    if script:
+        roots += [parent / "tools" for parent in Path(script).resolve().parents]
+    home = os.environ.get("AGENT_HOME")
+    if home:
+        roots.append(Path(home) / "tools")
+    for tools in roots:
+        if not (tools / "fleet" / "herdr_projection.py").is_file():
+            continue
+        try:
+            sys.path.insert(0, str(tools))
+            from fleet.herdr_projection import may_report
+            return may_report("claude", session)
+        except Exception:
+            return False
+    return False
+
+
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
 agent_session_id = session_id if isinstance(session_id, str) and session_id else None
+if not _may_report(agent_session_id):
+    raise SystemExit(0)
 if action == "release":
     request = {
         "id": request_id,
