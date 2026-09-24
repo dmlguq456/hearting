@@ -77,6 +77,21 @@ def cwd(payload: dict[str, Any]) -> Path:
     return Path.cwd()
 
 
+def effective_cwd(payload: dict[str, Any], args: dict[str, Any]) -> Path:
+    """The directory a shell tool actually ran in (route-guard-recovery
+    correction 2): `exec_command({cmd, workdir})` runs `cmd` in `workdir`, not
+    in the session's own `cwd`. A relative `workdir` resolves against the
+    session `cwd`; an absent one falls back to it unchanged. Using the session
+    `cwd` here instead denied real `git commit`s bound with `--cwd <worktree>`
+    as `session-marker-cwd-mismatch` (9 observed cases)."""
+    base = cwd(payload)
+    workdir = first_string(args, "workdir", "workDir")
+    if not workdir:
+        return base
+    path = Path(workdir)
+    return path if path.is_absolute() else base / path
+
+
 def normalize(base: Path, raw: str) -> str:
     if not raw or raw == "/dev/null":
         return ""
@@ -243,7 +258,7 @@ def target_files(payload: dict[str, Any]) -> list[str]:
         return patch_files(base, patch_text(payload, args))
 
     if is_shell_tool(name):
-        return shell_write_files(base, shell_command(payload, args))
+        return shell_write_files(effective_cwd(payload, args), shell_command(payload, args))
 
     return []
 
@@ -268,9 +283,10 @@ def main() -> int:
     env.setdefault("AGENT_HOME", str(ROOT))
     if is_shell_tool(name):
         command = shell_command(payload, args)
+        shell_cwd = str(effective_cwd(payload, args))
         result = subprocess.run(
             [str(PREFLIGHT), "worktree-path", "--tool", "Bash",
-             "--command", command, "--cwd", str(cwd(payload)),
+             "--command", command, "--cwd", shell_cwd,
              "--session", session_id],
             cwd=str(ROOT), env=env, text=True, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False,
@@ -280,7 +296,7 @@ def main() -> int:
             return hook_block(detail or "worktree-path preflight failed")
         material_args = [
             str(PREFLIGHT), "material-route", "check", "--tool", "Bash",
-            "--command", command, "--cwd", str(cwd(payload)),
+            "--command", command, "--cwd", shell_cwd,
             "--session", session_id,
         ]
         if turn_id:

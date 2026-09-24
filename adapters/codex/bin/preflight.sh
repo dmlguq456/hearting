@@ -398,7 +398,7 @@ case "$cmd" in
     [ "$#" -ge 2 ] && [ "$#" -le 4 ] || { echo "codex preflight: write expects <file> [session-id] [turn-id]" >&2; exit 64; }
     file=$2
     case "$file" in -*) echo "codex preflight: write file must be absolute or ./-prefixed" >&2; exit 64;; esac
-    sid=${3:-${AGENT_DISPATCH_ATTEMPT_ID:-codex}}
+    sid=${3:-${AGENT_DISPATCH_ATTEMPT_ID:-${CODEX_THREAD_ID:-codex}}}
     guard_identity_hard_fail_if_worker "$sid"
     turn=${4:-}
     if [ "${AGENT_DISPATCH_STAGE_AUTHORITY:-1}" = "0" ]; then
@@ -461,7 +461,7 @@ case "$cmd" in
   read)
     [ "$#" -ge 2 ] || { echo "codex preflight: read requires a file path" >&2; exit 64; }
     file=$2
-    sid=${3:-${AGENT_DISPATCH_ATTEMPT_ID:-codex}}
+    sid=${3:-${AGENT_DISPATCH_ATTEMPT_ID:-${CODEX_THREAD_ID:-codex}}}
     guard_identity_hard_fail_if_worker "$sid"
     "$ROOT/hooks/core-read-marker.sh" --file "$file" --session "$sid" || exit $?
     "$ROOT/hooks/spec-read-marker.sh" --file "$file" --session "$sid" || exit $?
@@ -479,7 +479,7 @@ case "$cmd" in
     [ "$#" -ge 2 ] || { echo "codex preflight: route requires a capability name" >&2; exit 64; }
     name=$2
     cwd=${3:-$PWD}
-    sid=${4:-codex}
+    sid=${4:-${CODEX_THREAD_ID:-codex}}
     mode=${5:-}
     intensity=${6:-}
     [ "$#" -le 6 ] || { echo "codex preflight: route accepts at most capability, cwd, session-id, mode, and intensity" >&2; exit 64; }
@@ -519,7 +519,7 @@ case "$cmd" in
     [ "$#" -ge 2 ] || { echo "codex preflight: $cmd requires a capability name" >&2; exit 64; }
     name=$2
     cwd=${3:-$PWD}
-    sid=${4:-${AGENT_DISPATCH_ATTEMPT_ID:-codex}}
+    sid=${4:-${AGENT_DISPATCH_ATTEMPT_ID:-${CODEX_THREAD_ID:-codex}}}
     guard_identity_hard_fail_if_worker "$sid"
     if ! "$ROOT/adapters/codex/bin/capability-map.sh" "$name" >/dev/null 2>/dev/null; then
       printf 'check=failed\nreason=unknown-capability\ncapability=%s\n' "$name"
@@ -530,7 +530,7 @@ case "$cmd" in
     ;;
   session-end)
     cwd=${2:-$PWD}
-    sid=${3:-codex}
+    sid=${3:-${CODEX_THREAD_ID:-codex}}
     # D-42 defense in depth: worker exit owns no sync/curator lifecycle.
     is_worker_session && exit 0
     # Everything below is measured in tens of seconds against a 3-second hook (see
@@ -563,7 +563,7 @@ case "$cmd" in
     ;;
   prompt-signal)
     cwd=${2:-$PWD}
-    sid=${3:-codex}
+    sid=${3:-${CODEX_THREAD_ID:-codex}}
     status=$(AGENT_ADAPTER=codex "$ROOT/utilities/harness-status.sh" "$cwd" "$sid")
     artifact_root_kind=$(printf '%s\n' "$status" | awk -F= '$1=="artifact_root_kind"{print $2; exit}')
     git_operation=$(printf '%s\n' "$status" | awk -F= '$1=="git_operation"{print $2; exit}')
@@ -593,7 +593,7 @@ case "$cmd" in
     ;;
   turn-nudge)
     cwd=${2:-$PWD}
-    sid=${3:-codex}
+    sid=${3:-${CODEX_THREAD_ID:-codex}}
     # Return before creating or advancing any worker turn state (D-42).
     is_worker_session && exit 0
     [ -n "$sid" ] && [ "$sid" != "default" ] || exit 0

@@ -182,7 +182,7 @@ shape and explicit choices determine the route; defaults only fill omissions:
 |---|---|---|
 | `direct` | one atomic, reversible change the session makes and checks inline | `capability-route.py compose --campaign-key <stream> --slug <slug>` — the inline node, dispatch depth 0 |
 | `solo` | one bounded piece of work that deserves its own registered session but no separate stages | `compose --shape solo` — one registered dispatch-depth-1 owner, no dispatch depth 2 |
-| `staged` | work with separate stages | `compose --shape staged` uses the capability's standard recipe; optional `--graph <stage,…>` selects a subgraph |
+| `staged` | work with separate stages | `compose --shape staged` uses the capability's standard recipe; optional `--graph <stage,…>` selects a subgraph — list a capability's valid stage ids, units, and human gates with `capability-route.py stages [--capability <cap>]` before guessing at `--graph` |
 
 For execution, use `compose --campaign-key <stream> --start --prompt-file
 <task>` with the selected shape/graph (the campaign choice is required:

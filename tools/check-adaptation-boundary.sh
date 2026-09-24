@@ -32,7 +32,7 @@ fail=0
 # reach those hooks at $ROOT/hooks/* (adapters/codex/bin/preflight.sh), where
 # $ROOT/utilities/memory-store.sh already resolves. A per-adapter copy would
 # assert a projection surface nothing loads.
-SHARED_UTILITY_DEFERRED="dispatch_owner_input.py artifact_campaign.py dispatch_capacity_evidence.py work_start.py opencode_session_runtime.py dispatch_parent_completion.py dispatch_attempt_policy.py dispatch_receipt_identity.py dispatch_notice_receipt.py dispatch_supervision.py artifact-pointer-bridge.py artifact-quiescence.py artifact-relocation.py artifact-relocation-live.py artifact-knowledge-feed.py cairn-artifact-read.sh cairn-artifact-read.ts dispatch-readiness.py verification-background-lease.py memory-store.sh compute-hosts execution_access.py execution_access_diagnose.py execution-access-diagnose.py governor_identity.py artifact_restore_sealed.py review_watchdog.py campaign_title_repair.py artifact_metadata_amendment.py artifact_locator_amendment.py artifact_cycle_titles.py interactive-main-recovery.py"
+SHARED_UTILITY_DEFERRED="dispatch_owner_input.py artifact_campaign.py dispatch_capacity_evidence.py work_start.py opencode_session_runtime.py dispatch_parent_completion.py dispatch_attempt_policy.py dispatch_receipt_identity.py dispatch_notice_receipt.py dispatch_supervision.py artifact-pointer-bridge.py artifact-quiescence.py artifact-relocation.py artifact-relocation-live.py artifact-knowledge-feed.py cairn-artifact-read.sh cairn-artifact-read.ts dispatch-readiness.py verification-background-lease.py memory-store.sh compute-hosts execution_access.py execution_access_diagnose.py execution-access-diagnose.py governor_identity.py artifact_restore_sealed.py review_watchdog.py campaign_title_repair.py artifact_metadata_amendment.py artifact_locator_amendment.py artifact_cycle_titles.py interactive-main-recovery.py transcript_turn.py"
 
 say() {
   printf '%s\n' "$*"
@@ -2019,7 +2019,7 @@ check_codex_native_hook_projection() {
     || ! grep -Fq '[ -n "${AGENT_REVIEW_OUTPUT:-}" ] && material_tool=ArtifactWrite' adapters/opencode/bin/preflight.sh \
     || ! grep -Fq '"$0" material-route check --tool "$material_tool" --file "$file" --cwd "$(dirname "$file")" --session "$sid"' adapters/opencode/bin/preflight.sh \
     || ! grep -Fq 'material-route", "check", "--tool", "Bash"' "$pre_bridge" \
-    || ! grep -Fq 'material-route", "bind", "--route"' "$read_bridge" \
+    || ! grep -Fq 'guard.bind_after_compile(' "$read_bridge" \
     || grep -Fq 'AGENT_PARENT_PARK_ONLY' "$pre_bridge" \
     || ! grep -Fq 'SessionEnd' adapters/codex/hooks/sessionend-lifecycle.py \
     || ! grep -Fq 'Stop is a' adapters/codex/hooks/sessionend-lifecycle.py; then

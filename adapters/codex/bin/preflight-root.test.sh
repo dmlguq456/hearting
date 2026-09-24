@@ -97,4 +97,24 @@ mutation(){
   fi
   pass "$name"
 }
-case "$case_name" in runtime-home-logical|bundle-hearting|source-checkout) layout;; physical-copy) physical_copy;; explicit-agent-home|activation-before-source) precedence "$case_name";; converted-guards) converted;; mutation-adapter-wrapper|mutation-byte-modified-wrapper) mutation "$case_name";; "") for c in runtime-home-logical bundle-hearting source-checkout physical-copy explicit-agent-home activation-before-source converted-guards mutation-adapter-wrapper mutation-byte-modified-wrapper; do "$0" --case "$c"; done;; *) printf 'SKIP unknown-case=%s\n' "$case_name"; exit 0;; esac
+session_id_default_codex_thread(){
+  # route-guard-recovery correction 1 regression test: `preflight.sh write
+  # <file>` with NO session-id argument must default to `$CODEX_THREAD_ID`
+  # (the same value the hook payload's `session_id` carries), not the bare
+  # literal `codex` -- 143 of 258 observed direct-run refusals never passed
+  # the thread id through.
+  case_name=session-id-default-codex-thread
+  [ "$adapter" = codex ] || skip_typed "$case_name" "codex-only"
+  source=$tmp/source-$case_name
+  mkdir -p "$tmp/home" "$tmp/codex" "$tmp/config"
+  FIXTURE_LOG=$tmp/$case_name.log
+  export FIXTURE_LOG
+  make_source "$source"
+  : > "$source/target"
+  printf '#!/usr/bin/env sh\nprintf "%%s\\n" "$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)/core-first-guard.sh" >> "${FIXTURE_LOG:?}"\nwhile [ "$#" -gt 0 ]; do case $1 in --session) printf "session=%%s\\n" "$2" >> "$FIXTURE_LOG"; shift 2;; *) shift;; esac; done\nexit 0\n' > "$source/hooks/core-first-guard.sh"
+  chmod +x "$source/hooks/core-first-guard.sh"
+  (cd "$source" && FIXTURE_LOG="$FIXTURE_LOG" AGENT_HOME= AGENT_DISPATCH_ATTEMPT_ID= HOME="$tmp/home" CODEX_HOME="$tmp/codex" XDG_CONFIG_HOME="$tmp/config" CODEX_THREAD_ID=thread-fixture-abc "$source/adapters/$adapter/bin/preflight.sh" write "$source/target") || fail "$case_name" "write invocation failed"
+  grep -Fqx "session=thread-fixture-abc" "$FIXTURE_LOG" || fail "$case_name" "session-id default did not use CODEX_THREAD_ID"
+  pass "$case_name"
+}
+case "$case_name" in runtime-home-logical|bundle-hearting|source-checkout) layout;; physical-copy) physical_copy;; explicit-agent-home|activation-before-source) precedence "$case_name";; converted-guards) converted;; mutation-adapter-wrapper|mutation-byte-modified-wrapper) mutation "$case_name";; session-id-default-codex-thread) session_id_default_codex_thread;; "") for c in runtime-home-logical bundle-hearting source-checkout physical-copy explicit-agent-home activation-before-source converted-guards mutation-adapter-wrapper mutation-byte-modified-wrapper session-id-default-codex-thread; do "$0" --case "$c"; done;; *) printf 'SKIP unknown-case=%s\n' "$case_name"; exit 0;; esac

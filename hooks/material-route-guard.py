@@ -37,10 +37,14 @@ from typing import Any, Iterable, NamedTuple
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 from dispatch_contract import (  # noqa: E402
+    DispatchContractError,
+    installed_source_layout,
     resolve_agent_home as _resolve_agent_home,
     resolve_dispatch_state_root,
+    route_grounding_state_dir,
 )
 from artifact_producer import review_output_write_authorized_from_cycle  # noqa: E402
+from transcript_turn import transcript_turn_id  # noqa: E402
 
 STATE_DIR_NAME = ".route-grounding"
 MARKER_SCHEMA = 1
@@ -134,7 +138,20 @@ RECALL_RECEIPT_MAX_RESULTS = 6
 
 
 class RouteError(RuntimeError):
-    """The presented route proof is missing or invalid."""
+    """The presented route proof is missing or invalid.
+
+    ``str(exc)`` stays the bare reason token every caller and test compares
+    against (``str(exc) == "route-closed"``); optional diagnostic context
+    (marker cwd, missing/present ``AGENT_ROUTE_*`` names, route capability and
+    accepted set, route file) lives in ``exc.context`` instead of the message
+    so recovery-command formatting can use it without any caller re-deriving
+    the same values from scratch (route-guard-recovery D2/D7).
+    """
+
+    def __init__(self, reason: str, *, context: dict[str, Any] | None = None) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.context: dict[str, Any] = context or {}
 
 
 def _run(command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -194,56 +211,6 @@ def recall_turn_digest(turn_id: str) -> str:
     ).hexdigest()
 
 
-def _is_tool_result_user_row(row: dict[str, Any]) -> bool:
-    """Return whether a Claude ``type:user`` row is a tool result, not a prompt."""
-    message = row.get("message")
-    if not isinstance(message, dict):
-        return False
-    content = message.get("content")
-    blocks = content if isinstance(content, list) else [content]
-    return any(
-        isinstance(block, dict) and block.get("type") == "tool_result"
-        for block in blocks
-    )
-
-
-def transcript_turn_id(path_value: object) -> str:
-    """Derive the current Claude turn from the bounded tail of its transcript."""
-    if not isinstance(path_value, str) or not path_value:
-        return ""
-    path = Path(path_value)
-    try:
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode) or path.is_symlink():
-            return ""
-        with path.open("rb") as handle:
-            start = max(0, info.st_size - 1024 * 1024)
-            handle.seek(start)
-            if start:
-                handle.readline()
-            lines = handle.read().splitlines()
-    except OSError:
-        return ""
-    for raw in reversed(lines):
-        try:
-            row = json.loads(raw)
-        except (UnicodeDecodeError, ValueError, TypeError, json.JSONDecodeError):
-            continue
-        if (not isinstance(row, dict) or row.get("type") != "user"
-                or row.get("isSidechain") is True
-                or _is_tool_result_user_row(row)):
-            continue
-        uid = row.get("uuid")
-        if isinstance(uid, str) and uid:
-            return f"transcript-user:{uid}"
-        material = json.dumps(
-            [row.get("timestamp"), row.get("message")],
-            sort_keys=True, ensure_ascii=False, separators=(",", ":"),
-        )
-        return "transcript-user-hash:" + hashlib.sha256(material.encode()).hexdigest()
-    return ""
-
-
 def recall_receipt_dir() -> Path:
     explicit = os.environ.get("MEM_RECALL_RECEIPTS")
     if explicit:
@@ -259,7 +226,17 @@ def recall_receipt_path(session_id: str) -> Path:
 
 
 def state_dir(agent_home: Path) -> Path:
-    return agent_home / STATE_DIR_NAME
+    # Reuses the one classifier (dispatch_contract._versioned_source_layout via
+    # route_grounding_state_dir) instead of a second one here: an installed
+    # release or Codex bundle keeps its marker in the stable per-user state
+    # root, not inside the release tree itself, so a release swap does not
+    # unbind every session (route-guard-recovery D3).
+    try:
+        return route_grounding_state_dir(agent_home, os.environ)
+    except DispatchContractError as exc:
+        raise RouteError(
+            "route-grounding-state-root-unresolved", context={"detail": str(exc)}
+        ) from exc
 
 
 def marker_path(agent_home: Path, session_id: str) -> Path:
@@ -454,7 +431,14 @@ def verify_route(
     route = _load_route(route_file)
     capabilities = accepted_capabilities or {"autopilot-code"}
     if route.get("capability") not in capabilities:
-        raise RouteError("route-capability-not-accepted")
+        raise RouteError(
+            "route-capability-not-accepted",
+            context={
+                "route_capability": route.get("capability"),
+                "accepted_capabilities": sorted(capabilities),
+                "route_file": str(route_file),
+            },
+        )
     if route.get("effective_intensity") not in INTENSITIES:
         raise RouteError("route-intensity-invalid")
     route_cwd = Path(str(route.get("cwd", ""))).resolve(strict=False)
@@ -503,7 +487,7 @@ def verify_route(
     ):
         raise RouteError("route-source-commit-stale")
     if not allow_closed and route_is_closed(route_file):
-        raise RouteError("route-closed")
+        raise RouteError("route-closed", context={"route_file": str(route_file)})
     if expected_route_id and route.get("route_id") != expected_route_id:
         raise RouteError("route-id-mismatch")
     if expected_node:
@@ -560,6 +544,13 @@ def clear_route(session_id: str, agent_home: Path) -> None:
     gc_markers(agent_home)
 
 
+def _worker_route_env_context() -> dict[str, Any]:
+    names = ("AGENT_ROUTE_FILE", "AGENT_ROUTE_ID", "AGENT_ROUTE_NODE")
+    present = sorted(name for name in names if os.environ.get(name))
+    missing = sorted(name for name in names if not os.environ.get(name))
+    return {"present": present, "missing": missing}
+
+
 def session_route(
     session_id: str,
     root: Path,
@@ -568,8 +559,12 @@ def session_route(
     accepted_capabilities: set[str] | None = None,
 ) -> dict[str, Any]:
     marker = _load_session_marker(session_id, agent_home)
-    if Path(str(marker.get("cwd", ""))).resolve(strict=False) != root.resolve():
-        raise RouteError("session-marker-cwd-mismatch")
+    marker_cwd = Path(str(marker.get("cwd", ""))).resolve(strict=False)
+    if marker_cwd != root.resolve():
+        raise RouteError(
+            "session-marker-cwd-mismatch",
+            context={"marker_cwd": str(marker_cwd), "target_cwd": str(root.resolve())},
+        )
     route = verify_route(
         Path(str(marker.get("route_file", ""))),
         root,
@@ -594,7 +589,9 @@ def _load_session_marker(
             raise RouteError("session-marker-unsafe")
         marker = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError) as exc:
-        raise RouteError("session-route-missing") from exc
+        raise RouteError(
+            "session-route-missing", context={"agent_home": str(agent_home)}
+        ) from exc
     if not isinstance(marker, dict) or marker.get("schema_version") != MARKER_SCHEMA:
         raise RouteError("session-marker-invalid")
     if marker.get("session_key") != session_key(session_id):
@@ -622,7 +619,9 @@ def artifact_active_route(
     is_worker = bool(route_file_raw or route_id or route_node)
     if is_worker:
         if not route_file_raw or not route_id:
-            raise RouteError("worker-route-binding-incomplete")
+            raise RouteError(
+                "worker-route-binding-incomplete", context=_worker_route_env_context()
+            )
         route_file = Path(route_file_raw)
         unverified = _load_route(route_file)
         sealed_root = Path(str(unverified.get("cwd", ""))).resolve(
@@ -671,7 +670,9 @@ def worker_route(
     if not route_file and not route_id and not route_node:
         return None
     if not route_file or not route_id:
-        raise RouteError("worker-route-binding-incomplete")
+        raise RouteError(
+            "worker-route-binding-incomplete", context=_worker_route_env_context()
+        )
     # A registered worker's route lifetime is owned by the dispatch contract, which
     # closes the route only after the worker's own node is terminal. Applying the
     # main-session closure rule here would refuse a worker mid-stage on a route a
@@ -1050,29 +1051,130 @@ def route_compile_invocations(command: str, cwd: Path) -> list[CompileInvocation
     return invocations
 
 
-def _compiled_route_fields(tool_response: object) -> tuple[str | None, Path | None]:
-    """Read `route_id` and `artifact_root` from a compile/compose invocation's
-    stdout (the sealed route JSON)."""
+def _tool_response_streams(tool_response: object) -> tuple[str, str]:
+    """Normalize a hook's `tool_response` to `(stdout, stderr)`, both possibly
+    empty (route-guard-recovery correction 4: Codex's PostToolUse
+    `tool_response` shape is unconfirmed, so every shape observed anywhere in
+    the codebase is accepted rather than guessed at). Accepts a plain string
+    (treated as stdout); a dict with `stdout`/`stderr` or the Codex spelling
+    `output`/`error`; or a list of `{"text": …}` content-block items (joined
+    as stdout, the shape a content-block tool result uses). An unrecognized
+    shape returns `("", "")` -- a no-op, not a guess, since compose's own
+    self-bind (D5) is the primary path and a wrong guess here could bind the
+    wrong route."""
+    if isinstance(tool_response, str):
+        return tool_response, ""
+    if isinstance(tool_response, list):
+        parts = [
+            item["text"]
+            for item in tool_response
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        ]
+        return "\n".join(parts), ""
     if not isinstance(tool_response, dict):
-        return None, None
-    stdout = tool_response.get("stdout")
-    if not isinstance(stdout, str) or not stdout.strip():
-        return None, None
+        return "", ""
+
+    def _first_str(*keys: str) -> str:
+        for key in keys:
+            value = tool_response.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
+    return _first_str("stdout", "output"), _first_str("stderr", "error")
+
+
+def _route_from_stdout_tail(stdout: str, artifact_root_override: Path | None) -> Path | None:
+    """Scan `stdout` from the last line backwards for a compile/compose/start
+    receipt JSON object and resolve it to a route record path (D6): a start
+    receipt's own `route_file` is accepted directly; a compile/compose
+    record's `route_id` resolves against the canonical
+    `<artifact_root>/.runtime/routes/<route_id>.json`, where an argv
+    `--artifact-root` wins over the JSON's own field.
+    """
+    for line in reversed(stdout.splitlines()):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        route_file = record.get("route_file")
+        if isinstance(route_file, str) and route_file:
+            return Path(route_file)
+        route_id = record.get("route_id")
+        if not (isinstance(route_id, str) and route_id):
+            continue
+        root = artifact_root_override
+        if root is None:
+            stdout_root = record.get("artifact_root")
+            if isinstance(stdout_root, str) and stdout_root and Path(stdout_root).is_absolute():
+                root = Path(stdout_root)
+        if root is not None:
+            return root / ".runtime" / "routes" / f"{route_id}.json"
+    return None
+
+
+_ROUTE_FILE_STDERR_RE = re.compile(r"^route_file=(.+)$", re.MULTILINE)
+
+
+def _route_from_stderr(stderr: str) -> Path | None:
+    last: str | None = None
+    for match in _ROUTE_FILE_STDERR_RE.finditer(stderr):
+        last = match.group(1).strip()
+    return Path(last) if last else None
+
+
+def bind_after_compile(
+    command: str,
+    cwd: Path,
+    tool_response: object,
+    session_id: str,
+    agent_home: Path,
+) -> str | None:
+    """Bind this session's marker after a `compile`/`compose` invocation the
+    hook observed on stdout/stderr, and return a short warning when the bind
+    fails instead of failing silently (D6). One implementation shared by the
+    Claude `hook_main` PostToolUse branch and the Codex bridge
+    (`adapters/codex/hooks/posttooluse-read-marker.py`), replacing each
+    runtime's own duplicate parsing.
+
+    A silent bind failure here previously meant the very next material Edit
+    was denied `session-route-missing`, whose own recovery text said
+    "compile/compose and bind" -- the exact step that had just failed without
+    saying why.
+    """
+    invocations = route_compile_invocations(command, cwd)
+    if len(invocations) != 1:
+        # Zero: nothing compile-shaped ran, nothing to bind. Two or more: which
+        # route is ambiguous, and any `compose` among them already bound
+        # itself directly at emit time (D5) -- a hook-level guess here would
+        # at best duplicate that bind and at worst attach the wrong route.
+        return None
+    invocation = invocations[0]
+    if len(invocation.outputs) > 1:
+        # More than one `--output` in the single invocation: which route was
+        # actually written is ambiguous, so bind nothing rather than guess.
+        return None
+    route_file = invocation.outputs[0] if invocation.outputs else None
+    if route_file is None:
+        stdout, stderr = _tool_response_streams(tool_response)
+        route_file = _route_from_stdout_tail(stdout, invocation.artifact_root)
+        if route_file is None:
+            route_file = _route_from_stderr(stderr)
+    if route_file is None or not session_id:
+        return None
     try:
-        route = json.loads(stdout.strip().splitlines()[-1])
-    except (json.JSONDecodeError, IndexError):
-        return None, None
-    if not isinstance(route, dict):
-        return None, None
-    route_id = route.get("route_id")
-    root = route.get("artifact_root")
-    root_path = Path(root).resolve(strict=False) if isinstance(root, str) and root and Path(root).is_absolute() else None
-    return (route_id if isinstance(route_id, str) and route_id else None), root_path
-
-
-def _compiled_route_id(tool_response: object) -> str | None:
-    """Read `route_id` from a compile invocation's stdout (the route JSON)."""
-    return _compiled_route_fields(tool_response)[0]
+        bind_route(route_file, invocation.effective_cwd, session_id, agent_home)
+    except RouteError as exc:
+        warning = recovery_text(exc, agent_home, invocation.effective_cwd, session_id)
+        return f"material-route-guard: bind 실패(reason={exc.reason}).{warning}"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"material-route-guard: bind 시도 중 오류({type(exc).__name__})."
+    return None
 
 
 def route_compile_outputs(command: str, cwd: Path) -> list[Path]:
@@ -1401,18 +1503,146 @@ def check_action(
             require_recall_opportunity(session_id, turn_id, repo)
 
 
-def deny_json(reason: str) -> None:
-    recovery = ""
+def agent_home_display(agent_home: Path) -> str:
+    """The AGENT_HOME path to print in a recovery command (D4).
+
+    An installed `shared-release` whose sibling `…/hearting/current` resolves
+    to the same tree survives the next release install; the literal release
+    path in `agent_home` does not (it stops existing on upgrade, right when a
+    stale session most needs the recovery command to still work). Anything
+    else — a bundle, a dev checkout, a test-isolated home — prints its own
+    resolved path, since it has no such upgrade-surviving pointer.
+    """
+    resolved = Path(agent_home).resolve(strict=False)
+    layout, _runtime_home = installed_source_layout(resolved)
+    if layout == "shared-release":
+        parts = resolved.parts
+        for index, part in enumerate(parts):
+            if part == "hearting" and index + 2 < len(parts) and parts[index + 1] == "releases":
+                current = Path(*parts[: index + 1]) / "current"
+                try:
+                    if current.resolve(strict=False) == resolved:
+                        return str(current)
+                except OSError:
+                    pass
+                break
+    return str(resolved)
+
+
+def _current_harness() -> str:
+    """Which runtime is asking, for a recovery command's own entry point
+    (correction 3: Claude gets the `material-route-guard.py bind` form, Codex
+    gets the `preflight.sh material-route bind` form). Only distinguishes the
+    interactive-session env vars each adapter's own hooks already set;
+    ambiguity or absence defaults to `claude`, the CLI's original behavior
+    before this existed."""
+    if os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID"):
+        return "codex"
+    if os.environ.get("OPENCODE_SESSION_ID"):
+        return "opencode"
+    return "claude"
+
+
+def bind_recovery_command(
+    route_file: str, cwd: str, session_id: str, agent_home: Path, harness: str = "claude"
+) -> str:
+    """The exact `bind` command that reconnects an existing route to this
+    session — the one definition consumed by recovery text and by compose's
+    own self-bind failure line (D1/D7). `harness` selects the entry point a
+    session of that runtime actually has on hand: Claude calls the guard
+    script directly, Codex goes through its own `preflight.sh` router."""
+    ah = agent_home_display(agent_home)
+    if harness == "codex":
+        sid = session_id or '"$CODEX_THREAD_ID"'
+        return (
+            f"{ah}/adapters/codex/bin/preflight.sh material-route bind "
+            f"--route {route_file} --cwd {cwd} --session {sid}"
+        )
+    return (
+        f"python3 {ah}/hooks/material-route-guard.py bind "
+        f"--route {route_file} --cwd {cwd} --session {session_id or '<session-id>'}"
+    )
+
+
+def _compose_recovery_command(agent_home: Path, cwd: str, *, capability: str = "") -> str:
+    ah = agent_home_display(agent_home)
+    capability_flag = f"--capability {capability} " if capability else ""
+    return (
+        f"python3 {ah}/utilities/capability-route.py compose {capability_flag}"
+        f"--campaign-key <stream> --slug <slug> --cwd {cwd}"
+    )
+
+
+def recovery_text(
+    exc: RouteError, agent_home: Path, cwd: Path, session_id: str, harness: str = "claude"
+) -> str:
+    """One short Korean recovery sentence plus the exact command(s), shared by
+    the Claude hook's `deny_json` and the CLI's `cli()` (D7). Every reason
+    below was observed denying real work with no recovery command in the
+    message: `session-route-missing` alone denied Claude ~321 times and Codex
+    ~2,145 times over 30 days. `harness` is a hint only (correction 3): it
+    never changes which reason is raised, only which entry point the printed
+    bind command names.
+    """
+    reason = exc.reason
+    context = exc.context
+    root = str(cwd)
+    compose_cmd = _compose_recovery_command(agent_home, root)
+    if reason in {
+        "session-route-missing",
+        "session-marker-invalid",
+        "session-marker-foreign",
+        "session-marker-route-hash-mismatch",
+        "session-marker-unsafe",
+    }:
+        return (
+            f" 이 세션에 연결된 route가 없습니다. compose가 세션을 직접 연결합니다: {compose_cmd}"
+            f" | 이미 만든 route가 있으면 재연결: "
+            f"{bind_recovery_command('<route_file>', root, session_id, agent_home)}"
+        )
+    if reason == "session-marker-cwd-mismatch":
+        marker_cwd = context.get("marker_cwd", "?")
+        target_cwd = context.get("target_cwd", root)
+        return (
+            f" route는 {marker_cwd}에 봉인됐지만 대상은 {target_cwd}입니다. "
+            f"{_compose_recovery_command(agent_home, target_cwd)}"
+        )
     if reason == "route-closed":
-        recovery = (
-            " 이 세션의 bind marker가 가리키는 route는 이미 close(outcome 기록)됐습니다. "
-            "새 작업은 capability-route.py compile로 새 route를 열고 다시 bind하세요."
+        route_file = context.get("route_file", "<route_file>")
+        return (
+            f" 이 세션의 bind marker가 가리키는 route({route_file})는 이미 close(outcome 기록)됐습니다. "
+            f"compose로 새 route를 열고 다시 bind하세요: {compose_cmd}"
+        )
+    if reason == "route-capability-not-accepted":
+        got = context.get("route_capability", "?")
+        accepted = ",".join(str(item) for item in (context.get("accepted_capabilities") or []))
+        return (
+            f" route capability={got}는 허용되지 않습니다(허용: {accepted}). "
+            f"{_compose_recovery_command(agent_home, root, capability='<허용값>')}"
+        )
+    if reason == "worker-route-binding-incomplete":
+        present = ",".join(context.get("present") or []) or "(none)"
+        missing = ",".join(context.get("missing") or []) or "(none)"
+        rebind = bind_recovery_command("<route_file>", root, session_id, agent_home, harness)
+        return (
+            f" AGENT_ROUTE_FILE/ID/NODE 중 present={present} missing={missing}. "
+            "등록 워커라면 dispatch 래퍼 결함이니 재기동하세요; 대화형 세션에는 이 변수를 직접 "
+            f"설정하지 마세요 — compose가 세션을 직접 연결합니다: {compose_cmd} | 이미 만든 "
+            f"route를 재연결하려면: {rebind}"
         )
     if reason.startswith("recall-opportunity"):
-        recovery = (
-            " 현재 turn의 memory candidate probe가 없거나 오래됐습니다. "
-            "prompt hook을 다시 거치거나 mem recall-gate로 recall/skip을 명시하세요."
+        return (
+            " 현재 turn의 memory candidate probe가 없거나 오래됐습니다. prompt hook을 "
+            "다시 거치거나 명시하세요: "
+            'python3 ' + agent_home_display(agent_home) + '/tools/memory/mem.py recall-gate '
+            '--decision recall --query "<주제>" 또는 --decision skip --reason "<이유>"'
         )
+    return ""
+
+
+def deny_json(exc: RouteError, agent_home: Path, cwd: Path, session_id: str) -> None:
+    reason = exc.reason
+    recovery = recovery_text(exc, agent_home, cwd, session_id)
     print(
         json.dumps(
             {
@@ -1447,45 +1677,26 @@ def hook_main(payload: dict[str, Any], agent_home: Path) -> int:
         tool in {"Bash", "bash", "Shell", "shell", "exec_command", "functions.exec_command"}
         or tool.endswith(".exec_command")
     ):
-        invocations = route_compile_invocations(str(tool_input.get("command") or ""), cwd)
-        outputs = [path for invocation in invocations for path in invocation.outputs]
-        if session_id and len(outputs) == 1 and len(invocations) == 1:
-            try:
-                bind_route(outputs[0], invocations[0].effective_cwd, session_id, agent_home)
-            except RouteError as exc:
-                # A silent failure here is worse than none: the next Edit is denied
-                # `session-route-missing`, whose advice is "compile and bind" —
-                # which is exactly what just failed. Say why, once, on stderr.
-                if str(exc) == "route-closed":
-                    print(
-                        "material-route-guard: bind skipped — that route was "
-                        "already closed when this compile ran, so its closure was "
-                        "not retired. Recompile (an identical request reopens the "
-                        "same route id and retires the stale closure), then bind.",
-                        file=sys.stderr,
-                    )
-            except (OSError, subprocess.SubprocessError):
-                pass
-        elif (
-            session_id
-            and len(invocations) == 1
-            and not invocations[0].outputs
-        ):
-            # `--output` was omitted, so compile wrote its canonical default. The
-            # route_id is only known from the compiled route JSON on stdout; if
-            # that is not readable, bind nothing rather than guess (no silent
-            # over-binding). An argv `--artifact-root` wins; a `compose` that
-            # defaulted it is resolved from the same stdout record.
-            route_id, stdout_root = _compiled_route_fields(payload.get("tool_response"))
-            artifact_root = invocations[0].artifact_root or stdout_root
-            if route_id and artifact_root is not None:
-                canonical = (
-                    artifact_root / ".runtime" / "routes" / f"{route_id}.json"
+        warning = bind_after_compile(
+            str(tool_input.get("command") or ""),
+            cwd,
+            payload.get("tool_response"),
+            session_id,
+            agent_home,
+        )
+        if warning:
+            print(
+                json.dumps(
+                    {
+                        "hookSpecificOutput": {
+                            "hookEventName": "PostToolUse",
+                            "additionalContext": warning,
+                        }
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
                 )
-                try:
-                    bind_route(canonical, invocations[0].effective_cwd, session_id, agent_home)
-                except (RouteError, OSError, subprocess.SubprocessError):
-                    pass
+            )
         return 0
     if event != "PreToolUse":
         return 0
@@ -1505,9 +1716,9 @@ def hook_main(payload: dict[str, Any], agent_home: Path) -> int:
             turn_id=turn_id,
         )
     except RouteError as exc:
-        deny_json(str(exc))
+        deny_json(exc, agent_home, cwd, session_id)
     except (OSError, subprocess.SubprocessError):
-        deny_json("route-guard-check-failed")
+        deny_json(RouteError("route-guard-check-failed"), agent_home, cwd, session_id)
     return 0
 
 
@@ -1530,6 +1741,8 @@ def cli(argv: list[str]) -> int:
     clear.add_argument("--session", required=True)
     args = parser.parse_args(argv)
     agent_home = resolve_agent_home(args.agent_home)
+    cwd = Path(getattr(args, "cwd", None) or os.getcwd())
+    session_id = getattr(args, "session", "")
     try:
         if args.action == "bind":
             bind_route(Path(args.route), Path(args.cwd), args.session, agent_home)
@@ -1546,7 +1759,12 @@ def cli(argv: list[str]) -> int:
         else:
             clear_route(args.session, agent_home)
     except RouteError as exc:
-        print(f"{DENIAL} [reason={exc}]", file=sys.stderr)
+        # The CLI action is the one shared entry point both Claude (direct
+        # invocation) and Codex (`preflight.sh material-route ...`) call, so
+        # unlike `deny_json` (Claude-only) the harness is not implied by the
+        # caller -- read it from whichever adapter's own session env is set.
+        recovery = recovery_text(exc, agent_home, cwd, session_id, harness=_current_harness())
+        print(f"{DENIAL}{recovery} [reason={exc}]", file=sys.stderr)
         return 2
     except (OSError, subprocess.SubprocessError):
         print(f"{DENIAL} [reason=route-guard-check-failed]", file=sys.stderr)

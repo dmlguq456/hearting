@@ -10,6 +10,9 @@ GUARD_S=importlib.util.spec_from_file_location("guard",GUARD_P); G=importlib.uti
 FLEET_P=P.parent.parent/"tools"/"fleet"/"route.py"
 FLEET_S=importlib.util.spec_from_file_location("fleet_route",FLEET_P)
 FLEET_ROUTE=importlib.util.module_from_spec(FLEET_S); FLEET_S.loader.exec_module(FLEET_ROUTE)
+MATERIAL_GUARD_P=P.parent.parent/"hooks"/"material-route-guard.py"
+MATERIAL_GUARD_S=importlib.util.spec_from_file_location("material_route_guard_for_compose_test",MATERIAL_GUARD_P)
+MATERIAL_ROUTE_GUARD=importlib.util.module_from_spec(MATERIAL_GUARD_S); MATERIAL_GUARD_S.loader.exec_module(MATERIAL_ROUTE_GUARD)
 sys.path.insert(0,str(P.parent))
 import dispatch_contract as D
 import dispatch_runtime_support as RUNTIME_SUPPORT
@@ -5394,15 +5397,16 @@ class ComposeRouteTest(TestRoute):
   self.assertNotIn("impl-review-alternative",[n["id"] for n in grouped["nodes"]])
   self.assertTrue(grouped["nodes"][-1]["terminal"])
   R.verify_route(grouped,R.ROOT)
-  # (2) a terminal frame raises no gate (nothing follows it) and is forced to
-  # model-required; a dropped sink drops the conditional extension with it.
-  route=self.compose(graph="plan,plan-check,frame")
-  self.assertEqual([n["id"] for n in route["nodes"]],["plan","plan-check","frame"])
-  self.assertTrue(route["nodes"][-1]["terminal"])
-  self.assertEqual(route["parallel_groups"],[]); self.assertEqual(route["human_gates"],[])
-  self.assertEqual(route["conditional_extensions"],[])
-  self.assertEqual(route["nodes"][-1]["advance_class"],"model-required")
-  R.verify_route(route,R.ROOT)
+  # (2) route-guard-recovery D9: `plan`/`plan-check` are real descendants of
+  # `frame` in the base recipe (`plan.depends_on == ["frame",
+  # "frame-alternative"]`), so naming them before `frame` is now a refused
+  # caller-order violation, not a way to make `frame` a gate-dropping
+  # terminal -- `frame`/`frame-alternative` have no predecessor in this
+  # recipe, so nothing can legally precede a real descendant of theirs and
+  # still leave `frame` last. The "terminal raises no gate" rule itself is
+  # unchanged; this graph is just no longer a way to reach it.
+  with self.assertRaisesRegex(ValueError,"compose-graph-order:plan-before-frame"):
+   self.compose(graph="plan,plan-check,frame")
  def test_unit_override_must_be_a_declared_choice(self):
   route=self.compose(graph="execute:dev/refactor,test")
   self.assertEqual(route["nodes"][0]["unit"],"dev/refactor"); self.assertEqual(route["nodes"][0]["role"],"fast implementer")
@@ -5455,6 +5459,118 @@ class ComposeRouteTest(TestRoute):
   self.assertEqual(route["selection"]["route_origin"],"preset"); self.assertEqual(route["selection"]["shape"],"direct")
   self.assertEqual(R.shape_for_intensity("quick"),"solo"); self.assertEqual(R.shape_for_intensity("thorough"),"staged")
   with self.assertRaisesRegex(ValueError,"invalid route origin"): R.compile_route(**self.args(route_origin="guess"))
+ def _clear_self_bind_identity(self):
+  # D5 self-bind reads real ambient identity/dispatch env; every test process
+  # in this file inherits the running worker's OWN AGENT_ROUTE_*/session env,
+  # so the fixture below explicitly clears and restores it to get a clean slate.
+  keys=("AGENT_ROUTE_FILE","AGENT_ROUTE_ID","AGENT_ROUTE_NODE","AGENT_DISPATCH_DEPTH",
+        "AGENT_DISPATCH_CALLER_HARNESS","AGENT_DISPATCH_CURRENT_HARNESS",
+        "CLAUDE_CODE_SESSION_ID","CLAUDE_SESSION_ID","CODEX_THREAD_ID","CODEX_SESSION_ID",
+        "OPENCODE_SESSION_ID","AGENT_HOME")
+  saved={k:os.environ.get(k) for k in keys}
+  def restore():
+   for k,v in saved.items():
+    if v is None: os.environ.pop(k,None)
+    else: os.environ[k]=v
+  self.addCleanup(restore)
+  for k in keys: os.environ.pop(k,None)
+ def test_compose_self_binds_the_calling_session_directly(self):
+  # D5: bind is a direct file write inside `_emit_compiled_route`, not a
+  # parse of whatever the caller's shell let through -- so it survives a
+  # command shaped like `compose ... | tail -1`, which the old PostToolUse
+  # hook path (parsing captured stdout) could not.
+  self._clear_self_bind_identity()
+  fixture_home=Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree,fixture_home,ignore_errors=True)
+  (fixture_home/"core").mkdir(parents=True); (fixture_home/"core"/"CORE.md").write_text("core\n",encoding="utf-8")
+  (fixture_home/"utilities").symlink_to(R.ROOT/"utilities",target_is_directory=True)
+  artifact_root=Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree,artifact_root,ignore_errors=True)
+  route=self.compose(artifact_root=artifact_root,cwd=R.ROOT)
+  output_path=artifact_root/".runtime"/"routes"/f"{route['route_id']}.json"
+  output_path.parent.mkdir(parents=True); output_path.write_text(json.dumps(route))
+  os.environ["AGENT_HOME"]=str(fixture_home)
+  os.environ["CLAUDE_CODE_SESSION_ID"]="fixture-self-bind-session"
+  import types
+  captured=io.StringIO()
+  with contextlib.redirect_stderr(captured):
+   R._compose_self_bind(types.SimpleNamespace(command="compose"),route,output_path)
+  self.assertIn(f"session_route_bound=1 harness=claude route_id={route['route_id']}",captured.getvalue())
+  marker=MATERIAL_ROUTE_GUARD.marker_path(fixture_home,"fixture-self-bind-session")
+  self.assertTrue(marker.is_file())
+  self.assertEqual(json.loads(marker.read_text())["route_id"],route["route_id"])
+  # `compile` never self-binds (D5): only `compose` may.
+  captured2=io.StringIO()
+  with contextlib.redirect_stderr(captured2):
+   R._compose_self_bind(types.SimpleNamespace(command="compile"),route,output_path)
+  self.assertEqual(captured2.getvalue(),"")
+ def test_compose_self_bind_skips_when_marker_dir_is_not_also_tmp(self):
+  # A throwaway/test route under a tmp artifact root must never overwrite a
+  # REAL session's marker just because both realpaths happen to sit under the
+  # OS temp dir; the guard only skips when the marker directory is NOT also
+  # under (the patched) tmp -- same test `_record_route_chain` already uses.
+  self._clear_self_bind_identity()
+  sandbox=Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree,sandbox,ignore_errors=True)
+  fake_tmp=sandbox/"fake-tmp"; (fake_tmp/"artifacts").mkdir(parents=True)
+  fixture_home=sandbox/"agent-home"  # sibling of fake-tmp, NOT under it
+  (fixture_home/"core").mkdir(parents=True); (fixture_home/"core"/"CORE.md").write_text("core\n",encoding="utf-8")
+  route=self.compose(artifact_root=fake_tmp/"artifacts",cwd=R.ROOT)
+  output_path=(fake_tmp/"artifacts")/".runtime"/"routes"/f"{route['route_id']}.json"
+  os.environ["AGENT_HOME"]=str(fixture_home)
+  os.environ["CLAUDE_CODE_SESSION_ID"]="fixture-tmp-guard-session"
+  import types
+  captured=io.StringIO()
+  with mock.patch("tempfile.gettempdir",return_value=str(fake_tmp)), contextlib.redirect_stderr(captured):
+   R._compose_self_bind(types.SimpleNamespace(command="compose"),route,output_path)
+  self.assertIn("session_route_bound=0 reason=tmp-artifact-root",captured.getvalue())
+  marker=MATERIAL_ROUTE_GUARD.marker_path(fixture_home,"fixture-tmp-guard-session")
+  self.assertFalse(marker.exists())
+ def test_graph_order_refuses_consumer_before_producer(self):
+  # D9: a caller-supplied `--graph` order may not place a node before a
+  # producer it transitively `depends_on` in the base recipe; siblings with
+  # no ancestor relationship (e.g. `frame`/`frame-alternative`) stay free.
+  with self.assertRaisesRegex(ValueError,r"compose-graph-order:test-before-execute \(recipe order: "):
+   self.compose(graph="test,execute")
+  for graph in ("execute,impl-review,test,report",):
+   route=self.compose(graph=graph)
+   self.assertEqual([n["id"] for n in route["nodes"]],graph.split(","))
+   R.verify_route(route,R.ROOT)
+  frame_route=self.compose(graph="frame,frame-alternative,test,report")
+  self.assertEqual([n["id"] for n in frame_route["nodes"] if not n.get("parallel_leg_index")],
+                   ["frame","frame-alternative","test","report"])
+  R.verify_route(frame_route,R.ROOT)
+  spec_route=self.compose(capability="autopilot-spec",capability_mode="update",
+                          graph="review,prd-transaction",signals=["shared-contract"])
+  R.verify_route(spec_route,R.ROOT)
+  research_route=self.compose(capability="autopilot-spec",capability_mode="update",
+                              graph="research,review,prd-transaction",
+                              signals=["shared-contract"])
+  R.verify_route(research_route,R.ROOT)
+  report_only=self.compose(graph="report")
+  self.assertEqual([n["id"] for n in report_only["nodes"]],["report"])
+  R.verify_route(report_only,R.ROOT)
+ def test_graph_unknown_node_names_stages_command(self):
+  with self.assertRaisesRegex(ValueError,r"compose-graph-unknown-node.*capability-route\.py stages"):
+   self.compose(graph="execute,deploy")
+ def test_stages_subcommand_lists_recipe_order_units_and_gates(self):
+  env=dict(os.environ); env["AGENT_HOME"]=str(R.ROOT)
+  result=subprocess.run([sys.executable,str(P),"stages","--capability","autopilot-code","--json"],
+                        text=True,capture_output=True,env=env)
+  self.assertEqual(result.returncode,0,result.stderr)
+  blocks=json.loads(result.stdout)
+  self.assertEqual(len(blocks),1)
+  block=blocks[0]
+  self.assertEqual(block["capability"],"autopilot-code")
+  self.assertEqual([n["id"] for n in block["nodes"]],
+                   ["frame","frame-alternative","plan","plan-check","execute","impl-review","test","report"])
+  execute_node=next(n for n in block["nodes"] if n["id"]=="execute")
+  self.assertIn("dev/backend",execute_node["unit_choices"])
+  plan_node=next(n for n in block["nodes"] if n["id"]=="plan")
+  self.assertIn("frame-review",plan_node["human_gates"])
+  self.assertTrue(next(n for n in block["nodes"] if n["id"]=="report")["terminal"])
+  # every-capability form and the text rendering both work too
+  result_all=subprocess.run([sys.executable,str(P),"stages"],text=True,capture_output=True,env=env)
+  self.assertEqual(result_all.returncode,0,result_all.stderr)
+  self.assertIn("capability=autopilot-code",result_all.stdout)
+  self.assertIn(" execute unit=dev/backend",result_all.stdout)
 
 class OwnerRegisteredCompletionTest(unittest.TestCase):
  """노드 키가 없는 실제 depth-1 오너 행도 등록 완료로 결속한다."""
