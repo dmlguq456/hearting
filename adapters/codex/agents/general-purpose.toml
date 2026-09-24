@@ -1,6 +1,6 @@
 name = "general-purpose"
 description = "General-purpose delegated agent for research, code search, and multi-step tasks on the balanced-deep budget."
-model = "gpt-5.6-sol"
+model = "gpt-6-sol"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"
 developer_instructions = """

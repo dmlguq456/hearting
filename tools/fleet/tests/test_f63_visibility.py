@@ -76,7 +76,7 @@ class F63VisibilityTest(unittest.TestCase):
         self.assertNotIn("d2", owner_block)
 
     def test_dispatch_model_name_map_preserves_unknown(self):
-        self.assertEqual(render._dispatch_display_model("opus"), "Opus 5")
+        self.assertEqual(render._dispatch_display_model("opus"), "Opus 5.5")
         self.assertEqual(render._dispatch_display_model("claude-haiku-4-5-20251001"), "Haiku 4.5")
         self.assertEqual(render._dispatch_display_model("glm-5.2"), "glm-5.2")
 

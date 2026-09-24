@@ -210,8 +210,8 @@ class ModelProfileTest(unittest.TestCase):
         # no main-session-only KEY — the restriction is carried by never naming
         # Astra in a tier or cascade, which is what this test pins.
         config = PROFILE.load_config(ROOT / "adapters" / "codex" / "config" / "models.conf")
-        self.assertEqual(self._declared_point(config, "deep"), ("gpt-5.6-sol", "xhigh"))
-        self.assertEqual(self._declared_point(config, "balanced-deep"), ("gpt-5.6-sol", "medium"))
+        self.assertEqual(self._declared_point(config, "deep"), ("gpt-6-sol", "xhigh"))
+        self.assertEqual(self._declared_point(config, "balanced-deep"), ("gpt-6-sol", "medium"))
         cascade = [entry.split(":", 1)[0] for entry in config["CFG_TIER_DEEP_FAILOVER_CASCADE"].split()]
         self.assertEqual(cascade[0], config["CFG_TIER_DEEP_MODEL"])
         self.assertEqual(config["CFG_TIER_DEEP_EFFORT"], "xhigh")  # review MI-4, as above
@@ -285,11 +285,10 @@ class ModelProfileTest(unittest.TestCase):
             home = Path(temporary)
             user = home / "agent-config" / "models.conf"
             user.parent.mkdir()
+            # Replace the line whatever the shipped model is, so a model refresh
+            # cannot silently turn this into a no-op edit (2026-09-24, gpt-6-sol).
             user.write_text(
-                shipped.replace(
-                    "CFG_TIER_DEEP_MODEL=gpt-5.6-sol",
-                    "CFG_TIER_DEEP_MODEL=user/deep",
-                )
+                re.sub(r"(?m)^CFG_TIER_DEEP_MODEL=.*$", "CFG_TIER_DEEP_MODEL=user/deep", shipped, count=1)
             )
             resolved, receipt = PROFILE.resolve_runtime_profile(
                 adapter, "deep", runtime=home, source_root=ROOT
