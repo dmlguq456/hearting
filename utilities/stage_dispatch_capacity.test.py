@@ -41,17 +41,17 @@ class CapacityTest(unittest.TestCase):
   self.assertFalse(F.allowed_capacity_settings("codex",cascade[1][0],"not-a-real-effort"))
   failed,alternative=cascade[0][0],cascade[1][0]
   self.assertEqual(int(alternative==failed),0)
- def fake_retry(self,early="-"):
+ def fake_retry(self,early="-",model="gpt-5.6-luna"):
   def run(*_args,**_kwargs):
-   attempt=F.capacity_attempt_identity(self.args,self.route,self.node,self.row,1,"gpt-5.6-luna/medium")
+   attempt=F.capacity_attempt_identity(self.args,self.route,self.node,self.row,1,f"{model}/medium")
    status="done" if early=="capacity" else "open"
    note=",note=dead-capacity" if early=="capacity" else ""
    with self.jobs.open("a") as out:
     out.write(f"2026-07-16T00:00:01Z\t{status}\t/r\t/w\ts\t"
-     f"route_id=r,route_node=test,attempt_id={attempt},model=gpt-5.6-luna,"
+     f"route_id=r,route_node=test,attempt_id={attempt},model={model},"
      "capacity_retry=1,prior_attempt_id=att-initial0001,cooled_model=gpt-5.6-sol,"
      f"selection_source=orchestrator-explicit{note}\n")
-   return subprocess.CompletedProcess([],0,stdout=f"check=ok\nmodel=gpt-5.6-luna\nearly_death={early}\nattempt_id={attempt}\nduplicate_attempt=0\n",stderr="")
+   return subprocess.CompletedProcess([],0,stdout=f"check=ok\nmodel={model}\nearly_death={early}\nattempt_id={attempt}\nduplicate_attempt=0\n",stderr="")
   return run
  def test_one_different_model_retry_succeeds_and_is_persisted(self):
   trace=[]
@@ -167,10 +167,11 @@ class CapacityTest(unittest.TestCase):
   self.args.capacity_model=None  # no explicit alternative -> derive from config cascade
   cascade=F.capacity_cascade("codex")  # the exhausted model is the cascade head, whatever it is
   self.failed={**self.failed,"model":cascade[0][0]}
-  with mock.patch.object(F,"wrapper_command",return_value=["fake"]),\
-       mock.patch.object(F.subprocess,"run",side_effect=self.fake_retry()):
+  with mock.patch.object(F,"wrapper_command",return_value=["fake"]) as wrapper,\
+       mock.patch.object(F.subprocess,"run",side_effect=self.fake_retry(model=cascade[1][0])):
    state,fields,_=F.capacity_retry(self.args,self.route,self.node,self.row,1,self.failed,[])
-  self.assertEqual(state,"success");self.assertEqual(fields["model"],cascade[1][0])
+  self.assertEqual(state,"success");self.assertEqual(wrapper.call_args.args[6],cascade[1])
+  self.assertEqual(fields["model"],cascade[1][0])
  def capacity_retry_from(self,failed_model,expected):
   self.args.capacity_model=None;self.args.capacity_effort=None
   self.row={**self.row,"child_harness":"claude"}
