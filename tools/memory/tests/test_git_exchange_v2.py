@@ -382,6 +382,62 @@ class BareGitExchangeTest(unittest.TestCase):
             "validation must batch retained commits and object contents",
         )
 
+    def test_git_returns_only_after_its_own_maintenance_finishes(self):
+        # Git's auto maintenance detaches by default and keeps rewriting the
+        # exchange after the command returns; the tree validator then races a
+        # lock file that vanishes between listdir and stat. Force maintenance
+        # to trigger on every fetch and require that no git lock survives the
+        # command that started it.
+        exchange = new_exchange(self.root / "foreground-maintenance.git", self.remote, REF)
+        original_command_env = exchange._command_env
+
+        def maintenance_pressure(args):
+            command, env = original_command_env(args)
+            pressure = [
+                "-c", "gc.auto=1", "-c", "gc.autoPackLimit=1",
+                "-c", "transfer.unpackLimit=1",
+                "-c", "maintenance.autoDetach=true", "-c", "gc.autoDetach=true",
+            ]
+            return [command[0], *pressure, *command[1:]], env
+
+        exchange._command_env = maintenance_pressure
+        original_run = exchange._run
+        leftovers = []
+
+        def checked_run(*args, **kwargs):
+            result = original_run(*args, **kwargs)
+            found = sorted(
+                str(path.relative_to(exchange.root))
+                for pattern in ("gc.pid", "**/*.lock")
+                for path in exchange.root.glob(pattern)
+            )
+            if found:
+                leftovers.append((args[0], found))
+            return result
+
+        exchange._run = checked_run
+        tip = None
+        entries = {}
+        for number in range(4):
+            operation = make_operation(
+                replica_id=REPLICA_A,
+                counter=number + 1,
+                record_id=f"record-{number}",
+                body=f"body {number}",
+            )
+            entries[operation_path(operation["op_id"])] = (
+                "100644", canonical_bytes(operation)
+            )
+            tip = commit_bare_tree(
+                self.remote,
+                dict(entries),
+                parent=tip,
+                message=f"add-only commit {number}",
+            )
+            git(self.remote, "update-ref", REF, tip)
+            exchange_fetch_validate(exchange)
+        self.assertEqual(leftovers, [])
+
     def test_ambient_git_object_directory_is_not_inherited(self):
         op = self._op(REPLICA_A, "record-a", "alpha")
         outside = self.root / "ambient-object-dir"
