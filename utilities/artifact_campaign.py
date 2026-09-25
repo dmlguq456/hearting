@@ -847,6 +847,18 @@ def _publish_event(root, path, event):
         os.unlink(tmp)
 
 
+def _index_update(fn, root, campaign_id):
+    """`close`'s own errors are `CampaignError`; the locator layer cannot import
+    this module (its own lazy-import convention), so it reports the very same
+    `fold_campaign` conflict as a `LocatorError`. Re-wrap at this boundary so a
+    caller catching `CampaignError` still sees every failure this call can
+    produce, including one `scan_campaign` surfaces through `_campaign_view`."""
+    try:
+        fn(root, [campaign_id])
+    except locator.LocatorError as exc:
+        raise CampaignError(exc.code, exc.detail) from exc
+
+
 def _materialize(root, path, event):
     import artifact_producer as producer
     current, _ = read_json(root, path)
@@ -876,7 +888,11 @@ def close(root, selection, *, harness=None, session=None, recover=False):
     try:
         committed = _load_event(root, path)
         if committed:
-            return _materialize(root, path, committed)
+            campaign_id = committed["target_id"]
+            _index_update(locator.prepare_index_update, root, campaign_id)
+            result = _materialize(root, path, committed)
+            _index_update(locator.update_indexes, root, campaign_id)
+            return result
         if event is not None:
             raise CampaignError("campaign-committed-event-disappeared")
         latest = _snapshot(root, path)
@@ -901,9 +917,13 @@ def close(root, selection, *, harness=None, session=None, recover=False):
         manifest._v_event_row(event, "$", violations)
         if violations:
             raise CampaignError("campaign-event-invalid", violations[:3])
+        campaign_id = event["target_id"]
+        _index_update(locator.prepare_index_update, root, campaign_id)
         try:
             _publish_event(root, path, event)
-            return _materialize(root, path, event)
+            result = _materialize(root, path, event)
+            _index_update(locator.update_indexes, root, campaign_id)
+            return result
         except OSError as exc:
             if _load_event(root, path) is not None:
                 recovery = ["python3", str(Path(__file__).with_name("artifact_producer.py")),
