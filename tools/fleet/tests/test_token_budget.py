@@ -421,6 +421,74 @@ class AccountingTest(unittest.TestCase):
                               aggregate["unavailable_token_samples"]),
                              (8, 8, 8))
 
+    def test_writer_stamped_before_a_later_writer_cannot_rewind_last_observed(self):
+        # Force the interleaving behind the flaky concurrent test: writer A
+        # reads the clock, writer B stamps later but takes the lock first, then
+        # A commits. A stamp taken outside the lock left last < first, which the
+        # validator rejects, so the reader saw no record at all.
+        import threading
+        from fleet import token_accounting
+
+        stamps = iter(f"2026-09-25T00:00:0{second}.000000Z" for second in range(10))
+        clock_lock = threading.Lock()
+
+        def ordered_clock():
+            with clock_lock:
+                return next(stamps)
+
+        a_ready = threading.Event()
+        b_done = threading.Event()
+        real_lock = token_accounting.DirectoryLock
+
+        class GatedLock(real_lock):
+            def __enter__(self):
+                if threading.current_thread().name == "writer-a":
+                    a_ready.set()
+                    b_done.wait(5)
+                return super().__enter__()
+
+        original_clock = token_accounting.utc_now
+        token_accounting.utc_now = ordered_clock
+        token_accounting.DirectoryLock = GatedLock
+        try:
+            with tempfile.TemporaryDirectory() as state:
+                event = self.event(reason="same_band", total=None)
+                results = {}
+
+                def write(key):
+                    results[key] = record_accounting(
+                        SID, event, adapter="codex", state_dir=state)
+
+                writer_a = threading.Thread(target=write, args=("a",), name="writer-a")
+                writer_a.start()
+                self.assertTrue(a_ready.wait(5))
+                write("b")
+                b_done.set()
+                writer_a.join(5)
+                self.assertEqual(results, {"a": True, "b": True})
+                aggregate = read_accounting(SID, adapter="codex", state_dir=state)
+                self.assertIsNotNone(aggregate)
+                self.assertEqual(aggregate["hook_invocations"], 2)
+                self.assertLessEqual(aggregate["first_observed_at"],
+                                     aggregate["last_observed_at"])
+        finally:
+            token_accounting.utc_now = original_clock
+            token_accounting.DirectoryLock = real_lock
+
+    def test_explicit_older_observation_keeps_last_observed_monotonic(self):
+        with tempfile.TemporaryDirectory() as state:
+            event = self.event(reason="normal", total=None)
+            self.assertTrue(record_accounting(
+                SID, event, adapter="codex", state_dir=state,
+                observed_at="2026-09-25T00:00:05.000000Z"))
+            self.assertTrue(record_accounting(
+                SID, event, adapter="codex", state_dir=state,
+                observed_at="2026-09-25T00:00:01.000000Z"))
+            aggregate = read_accounting(SID, adapter="codex", state_dir=state)
+            self.assertIsNotNone(aggregate)
+            self.assertEqual(aggregate["hook_invocations"], 2)
+            self.assertEqual(aggregate["last_observed_at"], "2026-09-25T00:00:05.000000Z")
+
     def test_private_receipt_and_read_only_diagnostics(self):
         with tempfile.TemporaryDirectory() as state:
             receipt_path = Path(state) / "private" / "receipt.json"

@@ -114,6 +114,14 @@ def _timestamp_epoch(value: Any) -> Optional[float]:
         return None
 
 
+def _not_before(stamp: str, floor: str) -> str:
+    stamp_epoch = _timestamp_epoch(stamp)
+    floor_epoch = _timestamp_epoch(floor)
+    if stamp_epoch is None or floor_epoch is None or stamp_epoch >= floor_epoch:
+        return stamp
+    return floor
+
+
 def _valid_aggregate(value: Any, *, adapter: str, digest: str) -> bool:
     if not isinstance(value, dict):
         return False
@@ -340,14 +348,18 @@ def record_accounting(session_id: str, event: dict[str, Any], *, adapter: str = 
     try:
         if not isinstance(session_id, str) or not session_id:
             return False
-        observed_at = observed_at or utc_now()
         directory = accounting_dir(state_dir)
         directory.mkdir(parents=True, exist_ok=True)
         digest = session_digest(session_id)
         path = directory / f"{digest}.json"
         with DirectoryLock(directory):
-            current = _load(path, adapter=adapter, digest=digest, observed_at=observed_at)
-            updated = reduce_accounting(current, event, observed_at=observed_at)
+            # Stamp under the lock and never rewind: a stamp taken before
+            # another writer's commit would leave last_observed_at < first and
+            # the whole aggregate would read back as invalid.
+            stamp = observed_at or utc_now()
+            current = _load(path, adapter=adapter, digest=digest, observed_at=stamp)
+            stamp = _not_before(stamp, current["last_observed_at"])
+            updated = reduce_accounting(current, event, observed_at=stamp)
             _atomic_replace(path, canonical_bytes(updated))
             _prune(directory)
         return True

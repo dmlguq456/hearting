@@ -348,6 +348,11 @@ class GitExchange:
             "-c", "core.symlinks=false",
             "-c", "core.fsyncObjectFiles=true",
             "-c", "filter.lfs.required=false",
+            # Auto maintenance must finish before git returns: a detached run
+            # keeps rewriting the exchange (lock files appear and vanish) while
+            # the next validation walks the tree.
+            "-c", "maintenance.autoDetach=false",
+            "-c", "gc.autoDetach=false",
             "--git-dir", str(self.root), *args,
         ]
         return command, env
