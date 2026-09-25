@@ -840,6 +840,24 @@ def _proc_rollout(pid, cwd, home):
     return None
 
 
+def session_id_of_process(pid):
+    """The thread a live Codex process has open, or None — proven by its rollout fd.
+
+    `_proc_rollout` is the one resolver: the rollout file a process holds open is the
+    runtime's own record of which thread it is running (measured 2026-09-25: a managed
+    `codex app-server` holds exactly its thread's rollout open between turns, while the
+    `codex --remote` TUI holds none). The herdr report gate
+    (`herdr_projection.may_report`) calls this, so no payload or environment value can
+    stand in for it; a process holding several unmatched rollouts proves nothing.
+    """
+    try:
+        cwd = os.readlink("/proc/%d/cwd" % int(pid))
+    except (OSError, ValueError):
+        return None
+    path = _proc_rollout(pid, cwd, _home())
+    return _sid(path) if path else None
+
+
 def _session_created(meta):
     value = meta.get("timestamp")
     if not isinstance(value, str):

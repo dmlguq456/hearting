@@ -22,7 +22,8 @@ pane belongs to the interactive session that owns it.
 
 Every herdr report from a hook — this projection and `hooks/herdr-agent-state.sh` — asks
 `may_report()` first. A process may report a session only when it IS that session's
-runtime, proven from the process itself, never from the payload. Test suites run the real
+runtime, proven from the process itself, never from the payload or the environment
+(OpenCode proves the harness only — see `may_report`). Test suites run the real
 hooks with fake session ids while inheriting the interactive pane's `HERDR_PANE_ID` and
 often strip the worker markers, so the worker check alone let `directpromptsid` repaint a
 live pane as `[0d] codex` and take over its `agent_session_id` (2026-09-24). When the
@@ -82,74 +83,72 @@ def _comm(pid: int) -> str:
         return ""
 
 
-def _claude_sessions_dir() -> Path:
-    config = os.environ.get("CLAUDE_CONFIG_DIR")
-    return Path(config).expanduser() if config else Path.home() / ".claude"
-
-
-def _claude_session_of(pid: int):
-    """The session id Claude Code itself records for process ``pid``, or None.
-
-    `sessions/<pid>.json` is rewritten on `/clear` (measured 2026-09-24: a probe session's
-    file moved from d153cbe1… to 87f90316… on `/clear`), so it follows the session the
-    runtime is on now, not the one it started with.
-    """
-    try:
-        with open(_claude_sessions_dir() / "sessions" / ("%d.json" % pid),
-                  encoding="utf-8") as handle:
-            value = json.load(handle).get("sessionId")
-    except Exception:
-        return None
-    return value if isinstance(value, str) and value else None
-
-
 def runtime_identity():
     """``(harness, session_id | None)`` of the nearest runtime process above this one.
 
-    Walks this process and its ancestors: the first one Claude has a session file for is
-    a Claude runtime with that session; a process named ``codex``/``codex-*`` or ``opencode`` is that
-    runtime (its own session id is not readable from the process). ``(None, None)`` when
-    no runtime is found — CI, a detached helper, a test with a fake config dir.
+    Walks this process and its ancestors and asks Fleet's own collectors which session
+    each one is — never a second copy of their resolution:
+
+    - Claude: `collectors.claude.session_id_of_process` (its `sessions/<pid>.json`, else
+      the statusline tap matched by pid + start time, for the hours a live process's
+      registry file goes missing — F-25 tier 2);
+    - Codex: a process named ``codex``/``codex-*`` is the runtime only once
+      `collectors.codex.session_id_of_process` finds the thread's rollout open in it; a
+      Codex process holding none (the `--remote` TUI, `codex-code-mode-host`) is passed
+      over for the ancestor that does, and no proof anywhere means ``("codex", None)``;
+    - OpenCode: a process named ``opencode`` — its session id is not readable from the
+      process, so it is always ``("opencode", None)``.
+
+    ``(None, None)`` when no runtime is found — CI, a detached helper, a test with a fake
+    config dir.
     """
-    pid = os.getpid()
+    from fleet.collectors import claude as claude_collector, codex as codex_collector
+    pid, codex_seen = os.getpid(), False
     for _ in range(_MAX_ANCESTORS):
         if not pid or pid <= 1:
             break
-        session = _claude_session_of(pid)
+        try:
+            session = claude_collector.session_id_of_process(pid)
+        except Exception:
+            session = None
         if session:
             return "claude", session
         comm = _comm(pid)
         if comm == "codex" or comm.startswith("codex-"):
-            return "codex", None
-        if comm == "opencode":
+            codex_seen = True
+            try:
+                thread = codex_collector.session_id_of_process(pid)
+            except Exception:
+                thread = None
+            if thread:
+                return "codex", thread
+        elif comm == "opencode":
             return "opencode", None
         pid = _parent(pid)
-    return None, None
+    return ("codex", None) if codex_seen else (None, None)
 
 
 def may_report(harness: str, session_id: str, *, worker=None) -> bool:
     """The ONE decision whether this process may report ``session_id`` to herdr.
 
     - never for a registered/background worker (D-42);
-    - Claude: the nearest Claude runtime above this process must be on ``session_id``;
-    - Codex: ``CODEX_THREAD_ID`` — set by Codex in the environment of what it runs — must
-      equal ``session_id`` when present; otherwise the nearest runtime must be Codex;
-    - OpenCode: the nearest runtime must be OpenCode.
-    Unknown identity is a refusal, never a guess.
+    - Claude and Codex: the nearest runtime above this process must be proven to be on
+      ``session_id`` (see `runtime_identity`); the payload and the environment
+      (``CODEX_THREAD_ID`` included) are never the proof;
+    - OpenCode: only the harness is proven — the nearest runtime must be OpenCode — and
+      the session id is NOT checked, because OpenCode exposes none from the process. A
+      fake id under a real OpenCode ancestor is therefore still reported.
+    Unknown identity is a refusal, never a guess: the header keeps its previous text.
     """
     harness = str(harness or "").lower()
     if harness not in HARNESSES or not isinstance(session_id, str) or not session_id:
         return False
     if worker if worker is not None else is_worker():
         return False
-    if harness == "codex":
-        thread = os.environ.get("CODEX_THREAD_ID", "")
-        if thread:
-            return thread == session_id
     runtime, own = runtime_identity()
     if runtime != harness:
         return False
-    return own == session_id if runtime == "claude" else True
+    return True if runtime == "opencode" else own == session_id
 
 
 def _runtime_name(harness: str, session_id: str) -> str:

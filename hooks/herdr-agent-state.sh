@@ -84,7 +84,11 @@ def _may_report(session):
             from fleet.herdr_projection import may_report
             return may_report("claude", session)
         except Exception:
-            return False
+            # A stale or half-synced tree must not hide a good one further down the list.
+            sys.path.remove(str(tools))
+            for name in [n for n in sys.modules if n == "fleet" or n.startswith("fleet.")]:
+                del sys.modules[name]
+            continue
     return False
 
 

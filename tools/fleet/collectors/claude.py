@@ -508,6 +508,26 @@ def _tap_sid_by_pid(home, pid, proc_start):
     return best_sid
 
 
+def session_id_of_process(pid, home=None):
+    """The session a live Claude process is on now, or None — the F-25 tier order.
+
+    Tier 1 is the runtime's own `sessions/<pid>.json` (rewritten on `/clear`, so it follows
+    the current session); tier 2 is the statusline tap matched by pid AND start time, for
+    the hours a live process's registry row goes missing. `enrich` resolves a board row
+    the same way; the herdr report gate (`herdr_projection.may_report`) calls this so a
+    pane and the board never disagree about which session a process is. A registry row
+    whose `procStart` names another process (a recycled pid) is not this process's.
+    """
+    home = home or _home()
+    start = procscan.read_proc_start(pid)
+    record = read_registry(pid, home) or {}
+    sid = record.get("sessionId")
+    claimed = record.get("procStart")
+    if isinstance(sid, str) and sid and (claimed is None or str(claimed) == str(start)):
+        return sid
+    return _tap_sid_by_pid(home, pid, start)
+
+
 def enrich(sess):
     home = _home()
 

@@ -5314,6 +5314,20 @@ else bad "herdr pane state should no-op for harness worker markers"; fi
 if ! grep -q 'pane-foreign' "$predrecv" 2>/dev/null; then
   ok "herdr pane state stays silent for a session that is not its runtime's own"
 else bad "herdr pane state must not report a foreign session id"; fi
+# A stale tree beside the hook whose projection fails to import must not hide the good
+# AGENT_HOME copy further down the candidate list.
+mkdir -p "$predtmp/stale/hooks" "$predtmp/stale/tools/fleet"
+cp "$HERDR" "$predtmp/stale/hooks/herdr-agent-state.sh"
+: > "$predtmp/stale/tools/fleet/__init__.py"
+printf 'raise ImportError("stale tree")\n' > "$predtmp/stale/tools/fleet/herdr_projection.py"
+printf '{"hook_event_name":"PreToolUse","session_id":"pred-herdr"}' \
+  | AGENT_HOME="$ROOT" CLAUDE_CONFIG_DIR="$predclaude" HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" \
+    HERDR_PANE_ID=pane-fallback sh "$predtmp/stale/hooks/herdr-agent-state.sh" working >/dev/null 2>&1 || true
+predwait=0
+while ! grep -q 'pane-fallback' "$predrecv" 2>/dev/null && [ "$predwait" -lt 30 ]; do predwait=$((predwait + 1)); sleep 0.1; done
+if grep -q 'pane-fallback' "$predrecv" 2>/dev/null; then
+  ok "herdr pane state falls through a broken candidate tree to AGENT_HOME"
+else bad "herdr pane state must try the next candidate tree when one fails to import"; fi
 kill "$predsrv" 2>/dev/null || true
 wait "$predsrv" 2>/dev/null || true
 rm -rf "$predtmp"
