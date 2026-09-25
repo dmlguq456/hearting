@@ -2388,6 +2388,43 @@ def _compose_inputs(base_nodes, base_node, kept):
     return inputs or ["task"]
 
 
+def _compose_graph_order_violation(base_nodes, ids):
+    """First caller-order violation in a `--graph` selection (D9): a consumer
+    named before a producer it transitively `depends_on` in the base recipe.
+    Two nodes with no ancestor relationship either way (parallel/alternative
+    siblings, e.g. `frame`/`frame-alternative`) may appear in either order --
+    only `compose_subgraph_recipe` re-links edges in the CALLER's order, so
+    nothing before this check ever refused a graph that silently reordered a
+    real dependency (e.g. `test,execute` sealed with `test` running before the
+    `execute` output it reads).
+
+    Returns `(consumer, producer)` for the first violation found scanning
+    `ids` left to right, or `None` when the order is consistent.
+    """
+    base_order = list(base_nodes)
+    ancestor_cache: dict[str, set[str]] = {}
+
+    def ancestors(node_id):
+        cached = ancestor_cache.get(node_id)
+        if cached is not None:
+            return cached
+        ancestor_cache[node_id] = set()  # defend against a cyclic recipe
+        result: set[str] = set()
+        for parent in base_nodes[node_id].get("depends_on") or []:
+            result.add(parent)
+            result |= ancestors(parent)
+        ancestor_cache[node_id] = result
+        return result
+
+    position = {node_id: index for index, node_id in enumerate(ids)}
+    for index, node_id in enumerate(ids):
+        selected_ancestors = ancestors(node_id) & position.keys()
+        for ancestor in sorted(selected_ancestors, key=base_order.index):
+            if position[ancestor] > index:
+                return node_id, ancestor
+    return None
+
+
 def compose_subgraph_recipe(registry, base_recipe, graph_spec):
     """Cut the caller's stage subgraph out of the capability's own recipe.
 
@@ -2406,6 +2443,15 @@ def compose_subgraph_recipe(registry, base_recipe, graph_spec):
         raise ValueError(
             "compose-graph-unknown-node:" + ",".join(unknown)
             + " (available: " + ",".join(base_nodes) + ")"
+            + " (run `capability-route.py stages --capability "
+            + base_recipe["capability"] + "` to list valid stage ids)"
+        )
+    violation = _compose_graph_order_violation(base_nodes, ids)
+    if violation:
+        consumer, producer = violation
+        raise ValueError(
+            f"compose-graph-order:{consumer}-before-{producer} "
+            "(recipe order: " + ",".join(base_nodes) + ")"
         )
     def gate_group(node_id):
         base = base_nodes[node_id]
@@ -6426,6 +6472,101 @@ def _resolve_compose_plan(a):
         return None, None
 
 
+def _load_material_route_guard():
+    spec = importlib.util.spec_from_file_location(
+        "material_route_guard", ROOT / "hooks" / "material-route-guard.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _compose_self_bind(a, route, output_path):
+    """Bind this `compose` call's own interactive session directly to the
+    route it just sealed (route-guard-recovery D5), instead of depending on a
+    PostToolUse hook to parse stdout/stderr afterward -- which silently never
+    binds when stdout is truncated (`| tail`), the shell ran more than one
+    compile/compose, or the artifact root cannot be resolved from the tool
+    response. `compile` is excluded: tooling and migrations call it in bulk,
+    so it stays on the hook fallback path (`bind_after_compile`). A bind
+    failure or skip here is reported on stderr and never fails compose itself
+    or changes its stdout."""
+    if a.command != "compose":
+        return
+    guard = None
+    sid_for_recover = "<session-id>"
+    reason = None
+    harness = ""
+    try:
+        guard = _load_material_route_guard()
+        agent_home = guard.resolve_agent_home()
+        if (
+            os.environ.get("AGENT_ROUTE_FILE")
+            or os.environ.get("AGENT_ROUTE_ID")
+            or os.environ.get("AGENT_ROUTE_NODE")
+        ):
+            reason = "registered-worker"
+        else:
+            try:
+                depth = int(os.environ.get("AGENT_DISPATCH_DEPTH") or 0)
+            except (TypeError, ValueError):
+                depth = 0
+            if depth >= 2:
+                reason = "dispatch-depth"
+            else:
+                from dispatch_parent_completion import interactive_parent_identity
+                sid = ""
+                try:
+                    harness, sid = interactive_parent_identity()
+                except DispatchContractError as exc:
+                    reason = exc.reason
+                if reason is None:
+                    if sid:
+                        sid_for_recover = sid
+                    if not harness or not sid:
+                        reason = "no-session-identity"
+                    else:
+                        # Same tmp-artifact-root test as `_record_route_chain`:
+                        # a throwaway test route must never overwrite a real
+                        # session's marker just because both realpaths land
+                        # under the OS temp dir; only refuse when the marker
+                        # directory itself is NOT also under tmp (an isolated
+                        # test home keeps both tmp, which is fine).
+                        real_tmp = os.path.realpath(tempfile.gettempdir())
+                        real_root = os.path.realpath(str(route.get("artifact_root") or ""))
+                        root_is_tmp = real_root == real_tmp or real_root.startswith(real_tmp + os.sep)
+                        if root_is_tmp:
+                            real_state = os.path.realpath(str(guard.state_dir(agent_home)))
+                            state_is_tmp = (
+                                real_state == real_tmp or real_state.startswith(real_tmp + os.sep)
+                            )
+                            if not state_is_tmp:
+                                reason = "tmp-artifact-root"
+                        if reason is None:
+                            guard.bind_route(output_path, Path(route["cwd"]), sid, agent_home)
+                            print(
+                                f"session_route_bound=1 harness={harness} route_id={route['route_id']}",
+                                file=sys.stderr,
+                            )
+                            return
+    except Exception as exc:
+        reason = getattr(exc, "reason", None) or type(exc).__name__
+    try:
+        recover = guard.bind_recovery_command(
+            str(output_path), str(route.get("cwd", "")), sid_for_recover, guard.resolve_agent_home(),
+            harness or "claude",
+        ) if guard is not None else (
+            f"python3 $AGENT_HOME/hooks/material-route-guard.py bind --route {output_path} "
+            f"--cwd {route.get('cwd', '')} --session {sid_for_recover}"
+        )
+    except Exception:
+        recover = (
+            f"python3 $AGENT_HOME/hooks/material-route-guard.py bind --route {output_path} "
+            f"--cwd {route.get('cwd', '')} --session {sid_for_recover}"
+        )
+    print(f"session_route_bound=0 reason={reason or 'unknown'} recover={recover}", file=sys.stderr)
+
+
 def _emit_compiled_route(a,route,artifact_root,output=None):
     """Shared tail of compile/compose: runtime-root check, canonical write-once, owner binding, prints."""
     output=output if output is not None else getattr(a,"output",None)
@@ -6479,6 +6620,7 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
     plan, plan_source = getattr(a, "_route_chain_plan", (None, None))
     _record_route_chain(route, str(output_path.resolve()), a.command,
                         plan=plan, plan_source=plan_source)
+    _compose_self_bind(a, route, output_path.resolve())
     print(f"route_file={output_path.resolve()}",file=sys.stderr)
     result = (compose_receipt(route, output_path)
               if a.command == "compose" and not getattr(a, "full_record", False) else route)
@@ -6519,11 +6661,14 @@ def main():
     cp.add_argument("--profile", choices=sorted(PROFILE.PORTABLE_PROFILES),
                     help="explicit model budget for owner and model nodes; node-specific --explicit-profiles takes precedence")
     cp.add_argument("--shape",choices=COMPOSE_SHAPES,default=None,help="direct (inline) | solo (one registered owner) | staged (capability recipe, optionally narrowed by --graph); default staged with --graph, else direct")
-    cp.add_argument("--graph",default=None,help="optional staged subgraph in your order; incompatible inherited parallel presets are omitted; optional :unit override, e.g. execute,test,report")
+    cp.add_argument("--graph",default=None,help="optional staged subgraph in your order (see `capability-route.py stages --capability <cap>` for valid ids); incompatible inherited parallel presets are omitted; optional :unit override, e.g. execute,test,report")
     cp.add_argument("--capability",default=COMPOSE_DEFAULT_CAPABILITY); cp.add_argument("--capability-mode",default=None)
     cp.add_argument("--intensity",default=None,help="default by shape: direct/quick/standard; staged accepts strong+")
     cp.add_argument("--cwd",default=None,help="default: current directory"); cp.add_argument("--artifact-root",default=None,help="default: utilities/artifact-root.sh for cwd")
-    cp.add_argument("--signal",action="append",default=[])
+    cp.add_argument("--signal",action="append",default=[],
+                    help="promotion signal (repeatable), e.g. shared-contract: promotes shared spec/contract "
+                         "work to a registered owner by forcing at least standard effective intensity, "
+                         "even when --intensity would otherwise infer direct/quick")
     cp.add_argument("--spec-read",default="auto",help="auto: refuse when a spec/prd.md exists unless you name it here")
     cp.add_argument("--drift-verdict",default=None); cp.add_argument("--tracking",choices=sorted(TRACKING),default=None)
     cp.add_argument("--artifact-guard",default=None)
@@ -6539,7 +6684,7 @@ def main():
     cp.add_argument("--help-all",action="help",help="also show advanced/compatibility inputs")
     if "--help-all" not in sys.argv:
         advanced = {"parent_cycle", "profile_demands", "explicit_profiles", "intensity", "artifact_root",
-                    "signal", "drift_verdict", "tracking", "artifact_guard", "parent_harness", "jobs",
+                    "drift_verdict", "tracking", "artifact_guard", "parent_harness", "jobs",
                     "dispatch_evidence", "registered_headless_evidence", "transport_evidence", "output", "full_record"}
         for option in cp._actions:
             if option.dest in advanced:
@@ -6604,9 +6749,47 @@ def main():
                      help="permit sealing terminal_gate_proven=false for a route closed before its terminal node completed")
     st=sub.add_parser("status"); st.add_argument("--artifact-root",required=True)
     st.add_argument("--open-only",action="store_true",help="list only routes with no recorded outcome")
+    sg=sub.add_parser("stages",help="list a capability's (or every capability's) stage ids, in recipe order, for --graph")
+    sg.add_argument("--capability",default=None,help="default: every capability")
+    sg.add_argument("--json",action="store_true")
     a=p.parse_args()
-    if a.command not in {"verify", "node", "status", "close"} and not (a.command == "complete" and a.check):
+    if a.command not in {"verify", "node", "status", "close", "stages"} and not (a.command == "complete" and a.check):
         dispatch_terminal_commit.require_current_cleanup("route-" + a.command)
+    if a.command=="stages":
+        registry=TOPO.load_registry()
+        rows=[r for r in registry["recipes"] if a.capability is None or r["capability"]==a.capability]
+        if not rows:
+            raise ValueError(f"unknown capability: {a.capability}")
+        blocks=[]
+        for recipe in rows:
+            group_by_node={g.get("node"):g.get("id") for g in (recipe["standard_plus"].get("parallel_groups") or [])}
+            gate_by_node={}
+            for row in recipe.get("human_gate_bindings") or []:
+                gate_by_node.setdefault(row.get("node"), []).append(row.get("gate"))
+            blocks.append({
+                "capability":recipe["capability"],"modes":list(recipe["modes"]),
+                "topology_class":recipe["topology_class"],
+                "nodes":[{
+                    "id":node["id"],"unit":node.get("unit"),
+                    "unit_choices":node.get("unit_choices") or [],
+                    "parallel_group":group_by_node.get(node["id"]),
+                    "human_gates":gate_by_node.get(node["id"], []),
+                    "terminal":node.get("terminal") is True,
+                } for node in recipe["standard_plus"]["nodes"]],
+            })
+        if a.json:
+            print(json.dumps(blocks,sort_keys=True))
+        else:
+            for block in blocks:
+                print(f"capability={block['capability']} modes={','.join(block['modes'])} "
+                      f"topology={block['topology_class']}")
+                for node in block["nodes"]:
+                    choices=f" unit_choices={','.join(node['unit_choices'])}" if node["unit_choices"] else ""
+                    group=f" parallel_group={node['parallel_group']}" if node["parallel_group"] else ""
+                    gates=f" human_gate={','.join(node['human_gates'])}" if node["human_gates"] else ""
+                    terminal=" terminal=1" if node["terminal"] else ""
+                    print(f"  {node['id']} unit={node['unit']}{choices}{group}{gates}{terminal}")
+        return 0
     if a.command=="compose":
         shape=a.shape or ("staged" if a.graph else "direct")
         if a.start and (a.explain or a.prompt_file is None):

@@ -44,6 +44,34 @@ expected=hashlib.sha256(b"memory-recall-turn-v1\0transcript-user:claude-user-tur
 assert value["turn_digest"] == expected
 PY
 
+# D1/D8: a queued follow-up during work leaves `tool_result`/`isMeta`/
+# `attachment` rows after the real prompt row; the hook and the route guard
+# used to compute "the current turn" with two different scans and disagreed
+# (34 of 55 `recall-opportunity-turn-mismatch` denials over 30 days traced to
+# this). Both now import `utilities/transcript_turn.py`, so prove they land
+# on the identical row for the identical file.
+printf '%s\n' \
+  '{"type":"user","uuid":"real-user-turn","message":{"role":"user","content":"prompt candidate"}}' \
+  '{"type":"assistant","uuid":"assistant-reply","message":{"role":"assistant","content":"working on it"}}' \
+  '{"type":"user","uuid":"tool-result-row","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}' \
+  '{"type":"user","uuid":"meta-row","isMeta":true,"message":{"role":"user","content":"attachment context"}}' \
+  '{"type":"attachment","uuid":"queued-row","message":{"role":"user","content":"queued follow-up"}}' \
+  > "$TMP/mixed-transcript.jsonl"
+printf '{"hook_event_name":"UserPromptSubmit","prompt":"prompt candidate","cwd":"%s","session_id":"mixed-session","transcript_path":"%s"}\n' \
+  "$TMP/project" "$TMP/mixed-transcript.jsonl" | "$HOOK" > "$TMP/mixed-hook.out"
+python3 - "$MEM_RECALL_RECEIPTS" "$ROOT" "$TMP/mixed-transcript.jsonl" <<'PY'
+import hashlib, json, pathlib, sys
+receipts, root, transcript = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
+key = hashlib.sha256(b"memory-recall-opportunity-v1\0mixed-session").hexdigest()
+value = json.loads((receipts / f"{key}.json").read_text())
+sys.path.insert(0, str(root / "utilities"))
+from transcript_turn import transcript_turn_id
+guard_turn = transcript_turn_id(transcript)
+assert guard_turn == "transcript-user:real-user-turn", guard_turn
+expected = hashlib.sha256(b"memory-recall-turn-v1\0" + guard_turn.encode()).hexdigest()
+assert value["turn_digest"] == expected, (value["turn_digest"], expected)
+PY
+
 printf 'not json' | "$HOOK" > "$TMP/malformed.out" 2> "$TMP/malformed.err"
 [ ! -s "$TMP/malformed.out" ] && [ ! -s "$TMP/malformed.err" ]
 

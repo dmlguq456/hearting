@@ -47,8 +47,8 @@ FORMAT=hook-json
 if [ "$#" -eq 0 ]; then
   fields=()
   while IFS= read -r -d '' field; do fields+=("$field"); done < <(
-    python3 -c '
-import hashlib, json, os, stat, sys
+    HOOK_DIR="$HOOK_DIR" AGENT_HOME="$AGENT_HOME" python3 -c '
+import json, os, sys
 try:
     value = json.load(sys.stdin)
 except Exception:
@@ -68,34 +68,26 @@ def nested(obj, names):
                 return found
     return ""
 def transcript_turn(path):
+    # One definition of "the current turn" (route-guard-recovery D1/D8):
+    # this used to reimplement the guard`s transcript scan and skipped a
+    # different set of rows (no isMeta/isCompactSummary skip), so a
+    # candidate-probe receipt written here and checked by the guard disagreed
+    # on the current turn for any prompt followed by an attachment row.
     if not path:
         return ""
-    try:
-        info = os.lstat(path)
-        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
-            return ""
-        with open(path, "rb") as handle:
-            start = max(0, info.st_size - 1024 * 1024)
-            handle.seek(start)
-            if start:
-                handle.readline()
-            lines = handle.read().splitlines()
-    except OSError:
-        return ""
-    for raw in reversed(lines):
+    hook_dir = os.environ.get("HOOK_DIR", "")
+    agent_home = os.environ.get("AGENT_HOME", "")
+    for base in (hook_dir and os.path.join(hook_dir, "..", "utilities"),
+                 agent_home and os.path.join(agent_home, "utilities")):
+        if not base or base in sys.path:
+            continue
+        sys.path.insert(0, base)
         try:
-            row = json.loads(raw)
-        except Exception:
+            from transcript_turn import transcript_turn_id
+        except ImportError:
+            sys.path.remove(base)
             continue
-        if not isinstance(row, dict) or row.get("type") != "user" or row.get("isSidechain") is True:
-            continue
-        uid = row.get("uuid")
-        if isinstance(uid, str) and uid:
-            return "transcript-user:" + uid
-        message = row.get("message")
-        stamp = row.get("timestamp")
-        material = json.dumps([stamp, message], sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        return "transcript-user-hash:" + hashlib.sha256(material.encode()).hexdigest()
+        return transcript_turn_id(path)
     return ""
 turn = nested(value, ("turn_id", "turnID", "message_id", "messageID"))
 if not turn:

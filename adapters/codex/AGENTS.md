@@ -10,10 +10,9 @@ Codex has already loaded this file through the global instruction chain. Resolve
 `<agent-home>` from the active `AGENT_HOME`, falling back to
 `${CODEX_HOME:-$HOME/.codex}/hearting` and the shared `utilities/agent-home.sh`
 resolver. Interpret every harness path below relative to that root; a working
-repository supplies runtime code only when explicitly activated as `AGENT_HOME`. Do
-not probe `<cwd>/core/CORE.md` or report it as a missing project file. Treat
-successful root resolution as silent bootstrap bookkeeping; mention it only
-when resolution fails or materially changes the task.
+repository supplies runtime code only when explicitly activated as `AGENT_HOME`.
+Don't probe `<cwd>/core/CORE.md` or report it missing. Mention root resolution
+only when it fails or materially changes the task.
 
 Read `<agent-home>/core/CORE.md` first; load the remaining documents only when
 the task touches the named domain.
@@ -36,7 +35,7 @@ local projection, and parity gaps; plan a checked fallback.
 - Capabilities come from `capabilities/`; Codex-native generated Skills/plugin, agents, and modes live under `adapters/codex/`. Expose them through `codex_setting/codex-plugin-marketplace`, `codex_setting/codex-agents`, and `codex_setting/codex-modes`.
 - Hooks are Codex bridges under `codex_setting/codex-hooks`; never project Claude settings, commands, hooks, or allowedTools.
 - Before using a capability or mode, run `adapters/codex/bin/preflight.sh capability-info <capability>` or `preflight.sh mode-info <family/mode>` and obey named `tool_contract`, `tool_contract_check`, `runtime_surface`, and `fallback`.
-- Before edits run `preflight.sh write <file> [session-id]`. Read the governing core file first for `adapters/**`; mark actual core/spec reads with `preflight.sh read <file> [session-id]`. Run `preflight.sh capability <name> [cwd] [session-id]` for spec changes.
+- Before edits run `preflight.sh write <file> [session-id]` (default: `$CODEX_THREAD_ID`, same as the hook payload's `session_id`). Read the governing core file first for `adapters/**`; mark actual core/spec reads with `preflight.sh read <file> [session-id]`. Run `preflight.sh capability <name> [cwd] [session-id]` for spec changes. Never set `AGENT_ROUTE_*` yourself — `compose` binds the route.
 - Shell/Bash/`functions.exec_command` reads and writes have targeted hook coverage; use explicit read/write/design preflight for ambiguous guarded I/O.
 
 Detailed lifecycle and edge-case contracts live in `adapters/codex/README.md`
@@ -121,7 +120,7 @@ compares completed frames and asks the native interview only at `needs-question`
 
 The low-level dispatch-depth-1 owner surface is `preflight.sh dispatch-owner
 --start --route-evidence <route.json> --prompt-file <brief>` (the route fills the
-owner tuple), a separate low-level surface from `preflight.sh dispatch` below: it delegates to the portable `utilities/dispatch-owner.py`
+owner tuple); it delegates to the portable `utilities/dispatch-owner.py`
 selector, which prefers the user-owned
 `${XDG_CONFIG_HOME:-~/.config}/hearting/dispatch-defaults.yaml` and falls back
 to `profiles/dispatch-defaults.yaml`. `core/ADAPTATION.md` owns the selection

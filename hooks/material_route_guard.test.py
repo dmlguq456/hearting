@@ -1582,6 +1582,231 @@ class MaterialRouteGuardTest(unittest.TestCase):
         )
         self.assertEqual(denied.returncode, 2, denied.stdout + denied.stderr)
 
+    def test_state_dir_survives_a_simulated_release_upgrade(self) -> None:
+        # D3: the marker used to live INSIDE the release tree
+        # (`<agent_home>/.route-grounding`), so installing a new release wiped
+        # every session's bind (29 release folders each carrying their own
+        # marker set, observed). Two release-shaped `agent_home` paths sharing
+        # one `HARNESS_STATE_ROOT` must resolve to the SAME state dir.
+        state_root = self.base / "state-root"
+        release_v1 = self.base / "hearting" / "releases" / "v1"
+        release_v2 = self.base / "hearting" / "releases" / "v2"
+        for release in (release_v1, release_v2):
+            (release / "core").mkdir(parents=True)
+            (release / "core" / "CORE.md").write_text("core\n", encoding="utf-8")
+        original_state_root = os.environ.get("HARNESS_STATE_ROOT")
+
+        def restore() -> None:
+            if original_state_root is None:
+                os.environ.pop("HARNESS_STATE_ROOT", None)
+            else:
+                os.environ["HARNESS_STATE_ROOT"] = original_state_root
+
+        self.addCleanup(restore)
+        os.environ["HARNESS_STATE_ROOT"] = str(state_root)
+        dir_v1 = MATERIAL_GUARD.state_dir(release_v1)
+        dir_v2 = MATERIAL_GUARD.state_dir(release_v2)
+        self.assertEqual(dir_v1, dir_v2)
+        self.assertEqual(dir_v1, (state_root / "route-grounding").resolve())
+        marker_v1 = MATERIAL_GUARD.marker_path(release_v1, "shared-session")
+        marker_v1.parent.mkdir(parents=True, exist_ok=True)
+        marker_v1.write_text(
+            json.dumps({"schema_version": 1, "session_key": MATERIAL_GUARD.session_key("shared-session")}),
+            encoding="utf-8",
+        )
+        marker_v2 = MATERIAL_GUARD.marker_path(release_v2, "shared-session")
+        self.assertEqual(marker_v1, marker_v2)
+        self.assertTrue(marker_v2.is_file())
+        # A dev checkout / test-isolated home is unaffected: it keeps the
+        # plain `<agent_home>/.route-grounding` layout used before D3.
+        self.assertEqual(MATERIAL_GUARD.state_dir(self.home), self.home / ".route-grounding")
+
+    def test_codex_hook_binds_bare_compose_without_output(self) -> None:
+        # D1/D6: Codex's own prior duplicate (`bind_material_route`) only
+        # recognized `--output`, so a bare `compose` (output path omitted)
+        # never bound on Codex. It now delegates to the shared
+        # `bind_after_compile`, resolved from `tool_response` the same way
+        # Claude's PostToolUse branch already works.
+        codex_hook = ROOT / "adapters" / "codex" / "hooks" / "posttooluse-read-marker.py"
+        self.assertTrue(codex_hook.is_file())
+        command = (
+            f"{sys.executable} {ROUTER} compose --slug codex-fixture "
+            f"--cwd {self.repo} --artifact-root {self.artifacts} --unassigned"
+        )
+        compose_env = self.isolated_env()
+        # The real checkout, not the minimal `self.home` fixture: compose seals
+        # a launch-compatibility tuple against the full AGENT_HOME tree, which
+        # a fixture carrying only `core/CORE.md` + a `utilities` symlink fails.
+        # The Codex-hook step below still uses `self.home`.
+        compose_env["AGENT_HOME"] = str(ROOT)
+        # Force D5 self-bind to skip so this test isolates the hook fallback.
+        compose_env["AGENT_DISPATCH_DEPTH"] = "2"
+        compose_result = subprocess.run(shlex.split(command), text=True, capture_output=True, env=compose_env)
+        self.assertEqual(compose_result.returncode, 0, compose_result.stderr)
+        self.assertIn("session_route_bound=0 reason=dispatch-depth", compose_result.stderr)
+        payload = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "functions.exec_command",
+            "tool_input": {"command": command},
+            "cwd": str(self.repo),
+            "session_id": "codex-fixture-session",
+            "tool_response": {"stdout": compose_result.stdout, "stderr": compose_result.stderr},
+        }
+        hook_env = self.isolated_env()
+        hook_env["AGENT_HOME"] = str(self.home)
+        hook_result = subprocess.run(
+            [sys.executable, str(codex_hook)], input=json.dumps(payload), text=True,
+            capture_output=True, env=hook_env,
+        )
+        self.assertEqual(hook_result.returncode, 0, hook_result.stderr)
+        marker = MATERIAL_GUARD.marker_path(self.home, "codex-fixture-session")
+        self.assertTrue(marker.is_file(), hook_result.stderr)
+
+    def test_denial_messages_carry_an_exact_recovery_command(self) -> None:
+        # D7: every reason below was observed denying real work with no
+        # recovery command in the message (`session-route-missing` alone:
+        # Claude ~321, Codex ~2,145 denials over 30 days).
+        cases = {
+            "session-route-missing": {},
+            "session-marker-cwd-mismatch": {"marker_cwd": "/a", "target_cwd": "/b"},
+            "route-closed": {"route_file": "/x/route.json"},
+            "route-capability-not-accepted": {
+                "route_capability": "audit", "accepted_capabilities": ["autopilot-code"],
+            },
+            "worker-route-binding-incomplete": {
+                "present": ["AGENT_ROUTE_FILE"], "missing": ["AGENT_ROUTE_ID", "AGENT_ROUTE_NODE"],
+            },
+            "recall-opportunity-missing": {},
+        }
+        for reason, context in cases.items():
+            exc = MATERIAL_GUARD.RouteError(reason, context=context)
+            text = MATERIAL_GUARD.recovery_text(exc, self.home, self.repo, "session-a")
+            self.assertTrue(text.strip(), reason)
+            self.assertIn("python3", text, reason)
+        # Claude PreToolUse hook JSON path.
+        payload = {
+            "hook_event_name": "PreToolUse", "tool_name": "Edit",
+            "tool_input": {"file_path": str(self.repo / "app.py")},
+            "cwd": str(self.repo), "session_id": "missing-route-session",
+        }
+        env = self.isolated_env()
+        env["AGENT_HOME"] = str(self.home)
+        result = subprocess.run(
+            [sys.executable, str(GUARD)], input=json.dumps(payload), text=True,
+            capture_output=True, env=env,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        hook_payload = json.loads(result.stdout)
+        reason_text = hook_payload["hookSpecificOutput"]["permissionDecisionReason"]
+        self.assertIn("session-route-missing", reason_text)
+        self.assertIn("python3", reason_text)
+        self.assertIn("compose", reason_text)
+        # CLI (`check`) path.
+        cli_result = self.guard(
+            "--tool", "Edit", "--file", str(self.repo / "app.py"),
+            session="missing-route-session-cli", opportunity=False,
+        )
+        self.assertEqual(cli_result.returncode, 2)
+        self.assertIn("python3", cli_result.stderr)
+        self.assertIn("compose", cli_result.stderr)
+
+    def test_missing_route_recovery_names_the_git_root_and_caller_harness(self) -> None:
+        # Codex checks an Edit with `--cwd "$(dirname "$file")"`. compose seals
+        # `--cwd` verbatim and bind verifies it against the git root, so a
+        # recovery command naming the subdirectory would seal a route that can
+        # never bind; it must name the edited checkout's root instead.
+        subdir = self.repo / "pkg"
+        subdir.mkdir()
+        target = subdir / "mod.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        result = subprocess.run(
+            [
+                sys.executable, str(GUARD), "--agent-home", str(self.home),
+                "check", "--tool", "Edit", "--file", str(target),
+                "--cwd", str(subdir), "--session", "missing-route-subdir",
+            ],
+            text=True, capture_output=True,
+            env={**self.isolated_env(), "MEM_RECALL_RECEIPTS": str(self.receipts)},
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("[reason=session-route-missing]", result.stderr)
+        root = str(self.repo.resolve())
+        self.assertIn(f"--slug <slug> --cwd {root} ", result.stderr)
+        self.assertNotIn(f"--cwd {subdir.resolve()}", result.stderr)
+        exc = MATERIAL_GUARD.RouteError("session-route-missing")
+        codex_text = MATERIAL_GUARD.recovery_text(exc, self.home, subdir, "thread-a", harness="codex")
+        self.assertIn("preflight.sh material-route bind", codex_text)
+        self.assertIn(f"--cwd {root} ", codex_text)
+
+    def test_worker_route_binding_incomplete_names_vars_and_harness_bind_form(self) -> None:
+        # route-guard-recovery correction 3: all 77 observed
+        # `worker-route-binding-incomplete` denials over 30 days were
+        # interactive/depth-0 sessions that inlined only AGENT_ROUTE_FILE=...
+        # into a command. The message must name which of FILE/ID/NODE are
+        # present/missing, tell an interactive session not to set these
+        # itself, and print a bind command in the CALLER's own harness form
+        # (Claude: `material-route-guard.py bind`; Codex:
+        # `preflight.sh material-route bind`) -- D1 keeps this one function.
+        context = {"present": ["AGENT_ROUTE_FILE"], "missing": ["AGENT_ROUTE_ID", "AGENT_ROUTE_NODE"]}
+        exc = MATERIAL_GUARD.RouteError("worker-route-binding-incomplete", context=context)
+        claude_text = MATERIAL_GUARD.recovery_text(exc, self.home, self.repo, "session-a", harness="claude")
+        self.assertIn("AGENT_ROUTE_FILE", claude_text)
+        self.assertIn("AGENT_ROUTE_ID", claude_text)
+        self.assertIn("AGENT_ROUTE_NODE", claude_text)
+        self.assertIn("compose", claude_text)
+        self.assertIn("material-route-guard.py bind", claude_text)
+        codex_text = MATERIAL_GUARD.recovery_text(exc, self.home, self.repo, "session-a", harness="codex")
+        self.assertIn("AGENT_ROUTE_ID", codex_text)
+        self.assertIn("preflight.sh material-route bind", codex_text)
+
+    def test_tool_response_streams_accepts_string_and_list_shapes(self) -> None:
+        # Correction 4: Codex's PostToolUse `tool_response` shape is
+        # unconfirmed, so the shared parser must accept every shape observed
+        # or plausible: a plain string as stdout, and a list of content-block
+        # `{"text": ...}` items (joined) as stdout, in addition to the dict
+        # shapes exercised elsewhere in this file.
+        self.assertEqual(
+            MATERIAL_GUARD._tool_response_streams("route_file=/x/route.json"),
+            ("route_file=/x/route.json", ""),
+        )
+        self.assertEqual(
+            MATERIAL_GUARD._tool_response_streams(
+                [{"type": "text", "text": '{"route_id": "r1", "artifact_root": "/tmp/x"}'}]
+            ),
+            ('{"route_id": "r1", "artifact_root": "/tmp/x"}', ""),
+        )
+        self.assertEqual(MATERIAL_GUARD._tool_response_streams([{"not_text": "x"}]), ("", ""))
+        self.assertEqual(MATERIAL_GUARD._tool_response_streams(None), ("", ""))
+
+    def test_codex_hooks_resolve_effective_cwd_from_exec_command_workdir(self) -> None:
+        # Correction 2: Codex shell calls are `exec_command({cmd, workdir})`;
+        # the actual execution directory is `workdir`; the session's own
+        # `cwd` is only the fallback when `workdir` is absent. Both Codex
+        # bridges (Pre `pretooluse-write-guard.py`, Post
+        # `posttooluse-read-marker.py`) must resolve the identical effective
+        # cwd from the identical payload shape -- disagreement here is what
+        # let a `git commit` bound with `--cwd <worktree>` be refused
+        # `session-marker-cwd-mismatch` (9 observed cases).
+        pre_path = ROOT / "adapters" / "codex" / "hooks" / "pretooluse-write-guard.py"
+        post_path = ROOT / "adapters" / "codex" / "hooks" / "posttooluse-read-marker.py"
+        pre_spec = importlib.util.spec_from_file_location("pretooluse_write_guard_for_test", pre_path)
+        pre = importlib.util.module_from_spec(pre_spec)
+        pre_spec.loader.exec_module(pre)
+        post_spec = importlib.util.spec_from_file_location("posttooluse_read_marker_for_test", post_path)
+        post = importlib.util.module_from_spec(post_spec)
+        post_spec.loader.exec_module(post)
+        payload = {"cwd": str(self.repo)}
+        relative = {"command": "git commit -m wip", "workdir": "sub/worktree"}
+        self.assertEqual(pre.effective_cwd(payload, relative), self.repo / "sub" / "worktree")
+        self.assertEqual(post.effective_cwd(payload, relative), self.repo / "sub" / "worktree")
+        other_worktree = self.base / "other-worktree"
+        absolute = {"command": "git commit -m wip", "workdir": str(other_worktree)}
+        self.assertEqual(pre.effective_cwd(payload, absolute), other_worktree)
+        self.assertEqual(post.effective_cwd(payload, absolute), other_worktree)
+        no_workdir = {"command": "git status"}
+        self.assertEqual(pre.effective_cwd(payload, no_workdir), self.repo)
+        self.assertEqual(post.effective_cwd(payload, no_workdir), self.repo)
+
 
 class ArtifactBucketCapsTest(unittest.TestCase):
     """W7C: one bucket table gates legacy, cycle, and shared layouts."""

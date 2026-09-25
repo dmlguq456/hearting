@@ -76,6 +76,21 @@ def cwd(payload: dict[str, Any]) -> Path:
     return Path(raw) if raw else Path.cwd()
 
 
+def effective_cwd(payload: dict[str, Any], args: dict[str, Any]) -> Path:
+    """The directory a shell tool actually ran in (route-guard-recovery
+    correction 2), matching `pretooluse-write-guard.py`'s definition:
+    `exec_command({cmd, workdir})` runs `cmd` in `workdir`, not the session's
+    own `cwd`. Binding by the wrong cwd here is what made a `git commit` run
+    with `workdir:<worktree>` refuse the next Edit as
+    `session-marker-cwd-mismatch`."""
+    base = cwd(payload)
+    workdir = first_string(args, "workdir", "workDir")
+    if not workdir:
+        return base
+    path = Path(workdir)
+    return path if path.is_absolute() else base / path
+
+
 def normalize(base: Path, raw: str) -> str:
     if not raw or raw == "/dev/null":
         return ""
@@ -141,30 +156,44 @@ def read_target(payload: dict[str, Any]) -> str:
     return ""
 
 
+def _tool_response(payload: dict[str, Any]) -> object:
+    for key in ("tool_response", "toolResponse", "response", "result"):
+        value = payload.get(key)
+        if isinstance(value, (dict, str)) and value:
+            return value
+    return None
+
+
 def bind_material_route(payload: dict[str, Any], session_id: str) -> None:
+    """Thin call-site over the one shared implementation
+    (`hooks/material-route-guard.py::bind_after_compile`, route-guard-recovery
+    D1/D6): Codex's own prior duplicate only recognized `--output`, so a bare
+    `compose`/`compile` (output path omitted) never bound here."""
     name = tool_name(payload)
     if not is_shell_tool(name):
         return
-    command = shell_command(payload, tool_input(payload))
+    args = tool_input(payload)
+    command = shell_command(payload, args)
     guard_path = ROOT / "hooks" / "material-route-guard.py"
     spec = importlib.util.spec_from_file_location("material_route_guard", guard_path)
     if not spec or not spec.loader:
         return
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
-    invocations = guard.route_compile_invocations(command, cwd(payload).resolve(strict=False))
-    outputs = [path for invocation in invocations for path in invocation.outputs]
-    if len(outputs) != 1 or len(invocations) != 1:
-        return
-    effective_cwd = invocations[0].effective_cwd
-    env = os.environ.copy()
-    env.setdefault("AGENT_HOME", str(_agent_home()))
-    subprocess.run(
-        [str(PREFLIGHT), "material-route", "bind", "--route", str(outputs[0]),
-         "--cwd", str(effective_cwd), "--session", session_id],
-        cwd=str(ROOT), env=env, text=True, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, check=False,
+    warning = guard.bind_after_compile(
+        command,
+        effective_cwd(payload, args).resolve(strict=False),
+        _tool_response(payload),
+        session_id,
+        _agent_home(),
     )
+    if warning:
+        # Codex PostToolUse bridges keep stdout empty (adapters/codex/README.md:
+        # "Interaction bridges keep stdout empty and never own approve/deny").
+        # No additionalContext-equivalent channel is proven for this event, so
+        # the warning goes to stderr like every other PostToolUse diagnostic
+        # this bridge already writes.
+        sys.stderr.write(warning + "\n")
 
 
 def main() -> int:

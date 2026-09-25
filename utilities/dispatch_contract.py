@@ -5444,6 +5444,37 @@ def stable_state_root(environ: dict[str, str] | os._Environ[str]) -> Path:
     return state_root(environ) / "dispatch"
 
 
+def route_grounding_state_dir(
+    agent_home: str | Path,
+    environ: dict[str, str] | os._Environ[str] | None = None,
+) -> Path:
+    """Where session route-bind markers live for `agent_home`.
+
+    An installed layout (`shared-release`/`bundle`) has no runtime-owned mutable
+    directory beside it that survives a release swap, so markers there move to
+    the stable per-user state root (route-guard-recovery D3): every release
+    install previously carried its own `.route-grounding`, unbinding every
+    session's marker on each upgrade. A development checkout or test-isolated
+    home keeps the plain `<agent_home>/.route-grounding` layout used before
+    this existed. Reuses `_versioned_source_layout` rather than adding a new
+    classifier.
+    """
+
+    env = os.environ if environ is None else environ
+    layout, _runtime_home = _versioned_source_layout(agent_home)
+    if layout in ("shared-release", "bundle"):
+        return state_root(env) / "route-grounding"
+    return Path(agent_home).expanduser().resolve(strict=False) / ".route-grounding"
+
+
+def installed_source_layout(agent_home: str | Path) -> tuple[str, Path | None]:
+    """Public wrapper over `_versioned_source_layout` for callers outside this
+    module (e.g. recovery-command formatting) that need the same
+    installed/bundle/checkout classification without a second classifier."""
+
+    return _versioned_source_layout(agent_home)
+
+
 LAUNCH_MISMATCH_VALUE_MAX = 180
 
 # `\t` delimits row fields and `,`/`=` delimit metadata pairs. The rest is every
