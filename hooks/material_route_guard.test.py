@@ -1710,6 +1710,34 @@ class MaterialRouteGuardTest(unittest.TestCase):
         self.assertIn("python3", cli_result.stderr)
         self.assertIn("compose", cli_result.stderr)
 
+    def test_missing_route_recovery_names_the_git_root_and_caller_harness(self) -> None:
+        # Codex checks an Edit with `--cwd "$(dirname "$file")"`. compose seals
+        # `--cwd` verbatim and bind verifies it against the git root, so a
+        # recovery command naming the subdirectory would seal a route that can
+        # never bind; it must name the edited checkout's root instead.
+        subdir = self.repo / "pkg"
+        subdir.mkdir()
+        target = subdir / "mod.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        result = subprocess.run(
+            [
+                sys.executable, str(GUARD), "--agent-home", str(self.home),
+                "check", "--tool", "Edit", "--file", str(target),
+                "--cwd", str(subdir), "--session", "missing-route-subdir",
+            ],
+            text=True, capture_output=True,
+            env={**self.isolated_env(), "MEM_RECALL_RECEIPTS": str(self.receipts)},
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("[reason=session-route-missing]", result.stderr)
+        root = str(self.repo.resolve())
+        self.assertIn(f"--slug <slug> --cwd {root} ", result.stderr)
+        self.assertNotIn(f"--cwd {subdir.resolve()}", result.stderr)
+        exc = MATERIAL_GUARD.RouteError("session-route-missing")
+        codex_text = MATERIAL_GUARD.recovery_text(exc, self.home, subdir, "thread-a", harness="codex")
+        self.assertIn("preflight.sh material-route bind", codex_text)
+        self.assertIn(f"--cwd {root} ", codex_text)
+
     def test_worker_route_binding_incomplete_names_vars_and_harness_bind_form(self) -> None:
         # route-guard-recovery correction 3: all 77 observed
         # `worker-route-binding-incomplete` denials over 30 days were

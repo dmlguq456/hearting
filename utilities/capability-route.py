@@ -6553,7 +6553,8 @@ def _compose_self_bind(a, route, output_path):
         reason = getattr(exc, "reason", None) or type(exc).__name__
     try:
         recover = guard.bind_recovery_command(
-            str(output_path), str(route.get("cwd", "")), sid_for_recover, guard.resolve_agent_home()
+            str(output_path), str(route.get("cwd", "")), sid_for_recover, guard.resolve_agent_home(),
+            harness or "claude",
         ) if guard is not None else (
             f"python3 $AGENT_HOME/hooks/material-route-guard.py bind --route {output_path} "
             f"--cwd {route.get('cwd', '')} --session {sid_for_recover}"

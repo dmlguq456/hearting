@@ -558,7 +558,13 @@ def session_route(
     *,
     accepted_capabilities: set[str] | None = None,
 ) -> dict[str, Any]:
-    marker = _load_session_marker(session_id, agent_home)
+    try:
+        marker = _load_session_marker(session_id, agent_home)
+    except RouteError as exc:
+        # The recovery command must name the checkout being edited, not the
+        # caller's cwd: a route composed with `--cwd <subdir>` can never bind.
+        exc.context.setdefault("target_cwd", str(root.resolve()))
+        raise
     marker_cwd = Path(str(marker.get("cwd", ""))).resolve(strict=False)
     if marker_cwd != root.resolve():
         raise RouteError(
@@ -1532,15 +1538,16 @@ def agent_home_display(agent_home: Path) -> str:
 def _current_harness() -> str:
     """Which runtime is asking, for a recovery command's own entry point
     (correction 3: Claude gets the `material-route-guard.py bind` form, Codex
-    gets the `preflight.sh material-route bind` form). Only distinguishes the
-    interactive-session env vars each adapter's own hooks already set;
-    ambiguity or absence defaults to `claude`, the CLI's original behavior
-    before this existed."""
-    if os.environ.get("CODEX_THREAD_ID") or os.environ.get("CODEX_SESSION_ID"):
-        return "codex"
-    if os.environ.get("OPENCODE_SESSION_ID"):
-        return "opencode"
-    return "claude"
+    gets the `preflight.sh material-route bind` form). Uses the one caller
+    identity resolver compose's self-bind also uses; ambiguity or absence
+    defaults to `claude`, the CLI's original behavior before this existed.
+    Imported lazily: only a denial pays for it, never an allowed check."""
+    try:
+        from dispatch_parent_completion import interactive_parent_identity
+        harness, _session = interactive_parent_identity()
+    except Exception:
+        harness = ""
+    return harness or "claude"
 
 
 def bind_recovery_command(
@@ -1586,7 +1593,10 @@ def recovery_text(
     """
     reason = exc.reason
     context = exc.context
-    root = str(cwd)
+    # compose seals `--cwd` verbatim and bind verifies it against the git root,
+    # so a subdirectory (Codex passes the edited file's dirname) would print a
+    # command whose route can never bind.
+    root = str(context.get("target_cwd") or project_root(Path(cwd)))
     compose_cmd = _compose_recovery_command(agent_home, root)
     if reason in {
         "session-route-missing",
@@ -1598,7 +1608,7 @@ def recovery_text(
         return (
             f" 이 세션에 연결된 route가 없습니다. compose가 세션을 직접 연결합니다: {compose_cmd}"
             f" | 이미 만든 route가 있으면 재연결: "
-            f"{bind_recovery_command('<route_file>', root, session_id, agent_home)}"
+            f"{bind_recovery_command('<route_file>', root, session_id, agent_home, harness)}"
         )
     if reason == "session-marker-cwd-mismatch":
         marker_cwd = context.get("marker_cwd", "?")
