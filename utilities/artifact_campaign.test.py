@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -601,25 +602,37 @@ class CampaignTest(F.ProducerTestBase):
         self.assertEqual(hits, [])
 
     def test_a24_12_old_reader_compatibility_boundaries(self):
-        if subprocess.run(["git", "cat-file", "-e", "307a4b3a^{commit}"],
-                          cwd=Path(__file__).resolve().parents[1], capture_output=True).returncode:
+        # The isolated runner swaps HOME, so the caller's safe.directory no
+        # longer covers a checkout owned by another uid; without this the
+        # test skipped locally while CI (same-owner checkout) ran it.
+        git = ["git", "-c", "safe.directory=*"]
+        repo = Path(__file__).resolve().parents[1]
+        if subprocess.run(git + ["cat-file", "-e", "307a4b3a^{commit}"],
+                          cwd=repo, capture_output=True).returncode:
             self.skipTest("base revision is unavailable in this shallow checkout")
         archive = Path(self._tmp.name) / "old-reader.tar"
         old_root = Path(self._tmp.name) / "old-reader"
         old_root.mkdir()
         with archive.open("wb") as stream:
-            subprocess.run(["git", "archive", "307a4b3a", "utilities"],
-                           cwd=Path(__file__).resolve().parents[1], check=True, stdout=stream)
+            subprocess.run(git + ["archive", "307a4b3a", "utilities"], cwd=repo, check=True, stdout=stream)
         subprocess.run(["tar", "-xf", str(archive), "-C", str(old_root)], check=True)
         old_utilities = old_root / "utilities"
-        script = ("import sys,json; from pathlib import Path; sys.path.insert(0,sys.argv[1]); "
-                  "import artifact_producer as P; root=Path(sys.argv[2]); action=sys.argv[3]; "
-                  "campaign=sys.argv[4]; "
-                  "exec(\"try:\\n r=P.read_campaign(root,campaign) if action=='read' else "
-                  "P.begin(root,route_file=Path(sys.argv[5]),capability='autopilot-code',intensity='direct',campaign_id=campaign)"
-                  "\
- print('state='+str((r or {}).get('state')))\
-except Exception as e: print('code='+str(getattr(e,'code',type(e).__name__)))\")")
+        script = textwrap.dedent("""\
+            import sys
+            from pathlib import Path
+            sys.path.insert(0, sys.argv[1])
+            import artifact_producer as P
+            root, action, campaign = Path(sys.argv[2]), sys.argv[3], sys.argv[4]
+            try:
+                if action == "read":
+                    r = P.read_campaign(root, campaign)
+                else:
+                    r = P.begin(root, route_file=Path(sys.argv[5]), capability="autopilot-code",
+                                intensity="direct", campaign_id=campaign)
+                print("state=" + str((r or {}).get("state")))
+            except Exception as e:
+                print("code=" + str(getattr(e, "code", type(e).__name__)))
+            """)
         self._write_v1_close()
         C.reopen(self.root, self.path, reason="legacy reopen")
         self._begin(campaign=self.campaign, slug="legacy-reader-reopen")
@@ -631,7 +644,11 @@ except Exception as e: print('code='+str(getattr(e,'code',type(e).__name__)))\")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("campaign-projection-conflict", result.stdout)
 
-        other_route, other_file, other = self.begin(campaign_key="legacy-reader-v2")
+        # setUp already admitted the default fixture route; a second begin needs
+        # its own route or admission refuses route-composite-duplicate-runtime.
+        other_route, other_file = self.route(slug="legacy-reader-v2", gate_source="legacy-reader-v2")
+        other = P.begin(self.root, route_file=other_file, capability="autopilot-code",
+                        intensity="direct", campaign_key="legacy-reader-v2")
         self.write_output(other); self.close(other_route, other_file)
         P.finalize(self.root, cycle_id=other["cycle_id"])
         other_path = Path(other["cycle_dir"]).parent / "campaign.json"
