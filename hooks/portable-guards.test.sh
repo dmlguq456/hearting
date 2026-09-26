@@ -59,6 +59,10 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export AGENT_HOME="$TMP/agent_home"
 export AGENT_MODEL_GOVERNOR_ROOT="$TMP/repo/.agent_reports/.runtime/model-worker-governor"
+# This suite starts more distill workers than the rolling distill start
+# budget (4 per 10 min) allows in one governor root; the budget has its own
+# suite, so lift it here and keep every other admission rule.
+export AGENT_MODEL_WORKER_START_BUDGET_DISTILL=1000
 export MEM_RECALL_RECEIPTS="$TMP/recall-opportunities"
 
 recall_opportunity() {
