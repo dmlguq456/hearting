@@ -2831,9 +2831,9 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                 unassigned=True)
         route_file=Path(L.admit_runtime_route(self.root,route).route_file)
         jobs=Path(self._tmp.name)/"jobs.log"; owner="att-transaction-owner"; child="att-transaction-report"
-        owner_meta=dict(attempt_id=owner,worker_type="owner",dispatch_depth="1",registered_worker="1",
-            harness=harness,owner_route_file=str(route_file),owner_route_id=route["route_id"],
-            owner_route_hash=route["route_hash"])
+        owner_meta=dict(attempt_id=owner,worker_type="owner",unit="_kernel/owner",dispatch_depth="1",
+            registered_worker="1",harness=harness,owner_route_file=str(route_file),
+            owner_route_id=route["route_id"],owner_route_hash=route["route_hash"])
         def row(status,slug,metadata):
             return f"2026-09-08T00:00:00Z\t{status}\t{R.ROOT}\t{R.ROOT}\t{slug}\t"+",".join(f"{k}={v}" for k,v in metadata.items())+"\n"
         jobs.write_text(row("open","owner",owner_meta))

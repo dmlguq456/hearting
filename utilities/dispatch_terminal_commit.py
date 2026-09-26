@@ -560,30 +560,129 @@ def _proof_failure(reason: str, detail: Optional[str] = None) -> TerminalProof:
     return TerminalProof("rejected", _DETAIL_REASON_MAP.get(reason, reason), reason if detail is None else detail)
 
 
+def _related_route_identity(metadata, route):
+    """Classify one registry row against the route's canonical identities.
+
+    Depth-1 owners bind through ``owner_route_*`` while depth-2 workers bind
+    through their own route tuple.  Any alias that names this route is
+    validated rather than ignored, so a malformed or conflicting row cannot
+    disappear from the quiescence sweep.
+    """
+    expected_id = route.get("route_id")
+    expected_hash = route.get("route_hash")
+    nodes = [node for node in route.get("nodes", []) if isinstance(node, Mapping)]
+    owner_nodes = [
+        node for node in nodes
+        if node.get("dispatch_depth") == 1
+        and node.get("kind") == "capability-owner"
+        and node.get("unit") == "_kernel/owner"
+        and node.get("terminal") is True
+    ]
+
+    owner_values = (metadata.get("owner_route_id"), metadata.get("owner_route_hash"))
+    route_values = (metadata.get("route_id"), metadata.get("route_hash"))
+    # An empty expected alias must never match an empty row value: a route
+    # without a hash (or a row without one) is not evidence that the row
+    # names this route.  Compare only aliases that are actually present.
+    owner_names_this_route = (
+        (bool(expected_id) and expected_id in owner_values)
+        or (bool(expected_hash) and expected_hash in owner_values)
+    )
+    route_names_this_route = (
+        (bool(expected_id) and expected_id in route_values)
+        or (bool(expected_hash) and expected_hash in route_values)
+    )
+
+    # Relevance precedes validation.  An incomplete tuple that names another
+    # route is not evidence about this transaction and cannot veto its cleanup.
+    # Conversely, once either canonical alias names this route, malformed or
+    # conflicting identity remains a fail-closed condition.
+    if not owner_names_this_route and not route_names_this_route:
+        return False
+
+    # Some legacy/non-owner topologies carry an owner binding in their
+    # registry fixture even though the route declares no terminal owner node.
+    # That tuple was never part of this sweep's identity contract.  Preserve
+    # the historical non-applicability while still letting an exact depth-2
+    # route tuple below identify a real worker on such a topology.
+    if owner_names_this_route and not owner_nodes and not route_names_this_route:
+        return False
+
+    try:
+        dispatch_depth = int(metadata.get("dispatch_depth"))
+    except (TypeError, ValueError):
+        raise ValueError("registered dispatch depth invalid")
+
+    # Only a depth-1 capability owner binds through inherited owner_route_*.
+    # Depth-2 rows may legitimately carry that context, but their own exact
+    # route tuple is the worker identity that cleanup must consume.
+    if dispatch_depth == 1 and any(owner_values):
+        if not owner_names_this_route:
+            raise ValueError("owner route alias mismatch")
+        if not all(owner_values) or len(owner_nodes) != 1:
+            raise ValueError("owner route binding incomplete")
+        identity = route_identity.registered_node_identity(metadata, owner_nodes[0])
+        if identity[:2] != (expected_id, expected_hash):
+            raise ValueError("owner route alias mismatch")
+        return True
+
+    if not route_names_this_route:
+        return False
+    node_id = metadata.get("route_node")
+    matching_nodes = [node for node in nodes if node.get("id") == node_id]
+    if len(matching_nodes) != 1:
+        raise ValueError("registered route node missing")
+    # The historical sweep admitted hash-less rows by route id.  Keep that
+    # narrow compatibility for already-proved legacy rows; an explicit hash
+    # still has to match the canonical route below.
+    if metadata.get("route_id") == expected_id and not metadata.get("route_hash"):
+        return True
+    identity = route_identity.registered_node_identity(metadata, matching_nodes[0])
+    if identity != (expected_id, expected_hash, node_id):
+        raise ValueError("registered route identity mismatch")
+    return True
+
+
 def _prove_route_children(request, route, gates):
     """Use the shared attempt policy for initial closure and every replay."""
     from dispatch_attempt_policy import decide_attempt
     related = []
-    for line in Path(request.jobs).read_text(encoding="utf-8").splitlines():
+    seen_attempts = set()
+    for row_index, line in enumerate(Path(request.jobs).read_text(encoding="utf-8").splitlines()):
         fields = line.split("\t")
         if len(fields) != 6:
             continue
         meta = dispatch_contract.parse_registry_metadata(fields[5])
-        if meta.get("route_id") == route["route_id"] or meta.get("parent_attempt_id") == request.owner_attempt_id:
+        try:
+            same_route = _related_route_identity(meta, route)
+        except (TypeError, ValueError):
+            return _proof_failure("owner-route-mismatch")
+        related_by_parent = meta.get("parent_attempt_id") == request.owner_attempt_id
+        if same_route or related_by_parent:
+            identity = meta.get("attempt_id") or f"row-{row_index}"
+            if identity in seen_attempts:
+                return _proof_failure("transaction-conflict", "duplicate-related-attempt")
+            seen_attempts.add(identity)
             related.append((fields[1], meta))
     for node in route.get("nodes", []):
         if node.get("terminal") is not True:
             continue
-        if gates.get(node["id"], {}).get("source") == "owner-terminal":
-            if gates[node["id"]].get("attempt_id") != request.owner_attempt_id:
+        gate = gates.get(node["id"], {})
+        if gate.get("source") == "owner-terminal":
+            if gate.get("attempt_id") != request.owner_attempt_id:
                 return _proof_failure("owner-route-mismatch")
             continue  # The common gate already proves the exact owner and its cleanup.
-        matching = [(status, meta) for status, meta in related
-                    if meta.get("route_id") == route["route_id"] and meta.get("route_node") == node["id"]]
-        if (not matching or matching[-1][0] != "done" or not verdict_pass(matching[-1][1])
-                or gates.get(node["id"], {}).get("attempt_id") != matching[-1][1].get("attempt_id")):
+        # terminal_gate_observation(exact_terminal=True) has already consumed
+        # the canonical identity/readiness proof.  Do not reimplement a
+        # child-only route_id/route_node matcher here: depth-1 owner rows bind
+        # through owner_route_* and inline markers intentionally have no row.
+        # A passed exact-terminal gate is itself the shared current/readiness
+        # proof.
+        if not gate.get("passed"):
             return _proof_failure("terminal-attempt-not-pass")
     for status, meta in related:
+        if status == "done" and dispatch_contract.completed_marker_verdict_contradicts(meta):
+            return _proof_failure("terminal-attempt-not-pass")
         process = dispatch_contract.attempt_process_quiescence(meta, terminal_receipt=True)
         decision = decide_attempt(status, meta, process_state=process.state, process_reason=process.reason)
         if decision.action == "inspect-conflict":
@@ -1107,10 +1206,10 @@ class CompletionState:
 
     `state` is one of `not-applicable | complete | pending | blocked | unknown`.
     `blocked` is reserved for a *proven* permanent reason, read only from the
-    not-yet-claimed terminal gate: `completion-attempt-not-current` (a later
-    attempt already claimed this route node) or `completion-evidence-hash-
-    mismatch` (the route's own completion marker no longer matches its
-    digest). A bare `completion-marker-absent`, a route-close still in
+    not-yet-claimed terminal gate: `completion-attempt-not-current` (the fence
+    saw a later recorded attempt for the same canonical node identity) or
+    `completion-evidence-hash-mismatch` (the route's own completion marker no
+    longer matches its digest). A bare `completion-marker-absent`, a route-close still in
     flight, a claimed-but-unsealed checkpoint, a forward-recovery reverify
     conflict (also raised for a sealed envelope whose evidence merely
     changed after settlement -- recoverable by restoring the file, matching

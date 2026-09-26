@@ -4962,21 +4962,26 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
     if exact_terminal:
         if jobs is None or not completion_marker_is_current(route, node, path, marker):
             return {"passed": False, "reason": "completion-marker-not-current"}
-        matches = []
-        for line in Path(jobs).read_text(encoding="utf-8").splitlines():
-            fields = line.split("\t")
-            if len(fields) != 6:
-                continue
-            meta = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
-            if meta.get("route_id") == route["route_id"] and meta.get("route_node") == node_id:
-                matches.append((fields, meta))
-        if (not matches or matches[-1][0][1] != "done"
-                or not verdict_pass(matches[-1][1])
-                or matches[-1][1].get("attempt_id") != marker.get("attempt_id")
-                or completion_attempt_readiness(route, node, marker, Path(jobs)).state != "ready"):
-            return {"passed": False, "reason": "completion-attempt-not-current"}
+        try:
+            lines = Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return {"passed": False, "reason": "registry-unreadable", "current": False,
+                    "attempt_id": marker.get("attempt_id")}
+        # The readiness helper is the single exact-attempt proof.  In
+        # particular, it resolves depth-1 owner rows through owner_route_* and
+        # admits supported no-process markers without inventing a registry row.
+        # A second route_id/route_node scan here would reject both cases and
+        # could disagree with the shared conflict/quiescence policy.
+        readiness = completion_attempt_readiness(route, node, marker, Path(jobs), registry_lines=lines)
+        if readiness.state != "ready":
+            return {"passed": False, "reason": readiness.reason, "current": False,
+                    "attempt_id": marker.get("attempt_id"), "attempt_readiness": readiness.state}
+        stale = _registered_marker_fence(route, node, marker, lines)
+        if stale is not None:
+            return {"passed": False, "reason": stale, "current": False,
+                    "attempt_id": marker.get("attempt_id"), "attempt_readiness": readiness.state}
         return {"passed": True, "reason": "completion-marker-verified", "current": True,
-                "node_id": node_id, "attempt_id": marker["attempt_id"], "completion_gate": gate,
+                "node_id": node_id, "attempt_id": marker.get("attempt_id"), "completion_gate": gate,
                 "marker_digest": hashlib.sha256(marker_bytes).hexdigest(), "evidence_digest": digest,
                 "evidence": evidence["path"], "attempt_readiness": "quiescent"}
     # Gate currentness is the pre-A2a marker identity/evidence contract.  The
@@ -4991,6 +4996,39 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
             "marker_digest": hashlib.sha256(marker_bytes).hexdigest(),
             "evidence": evidence.get("path"), "current": True,
             "attempt_readiness": "unchecked", "attempt_id": marker.get("attempt_id")}
+
+
+def _registered_marker_fence(route, node, marker, lines):
+    """Retain the terminal-retry fence after canonical readiness succeeds.
+
+    Readiness proves the marker's exact attempt, identity, terminal row, and
+    process state. This small second axis preserves the older reader contract:
+    a marker from an earlier attempt is stale once a later row for the same
+    canonical node identity has been recorded. Inline/resource markers have no
+    registry attempt and are already fully proved by readiness. Returns the
+    stale reason, or ``None`` when the marker is not fenced out.
+    """
+    if node.get("kind") == "resource-runner" or marker.get("registered_worker") is False:
+        return None
+    attempt_id = marker.get("attempt_id")
+    if not isinstance(attempt_id, str) or not attempt_id:
+        return "marker-attempt-id-missing"
+    expected = (route.get("route_id"), route.get("route_hash"), node.get("id"))
+    latest = None
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = parse_registry_metadata(fields[5])
+        try:
+            identity = ROUTE_IDENTITY.registered_node_identity(metadata, node)
+        except ValueError:
+            continue
+        if identity == expected:
+            latest = metadata.get("attempt_id")
+    if latest != attempt_id:
+        return "completion-attempt-not-current"
+    return None
 
 
 def _arbitration_observation(route, group_id, error=None, *, path=None):

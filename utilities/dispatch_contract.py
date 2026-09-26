@@ -6908,6 +6908,26 @@ def completion_conflict_attempt(marker: Mapping[str, object], registry_lines: li
     return ""
 
 
+def completed_marker_verdict_contradicts(metadata: Mapping[str, object]) -> bool:
+    """Detect a ``completed-marker`` row whose own verdict was not a pass.
+
+    ``verdict_pass`` already carries the completion-deferred exception (a
+    transient-classifier row with a completion marker still passes). This is
+    the only other axis: an explicit non-pass classification on a row that
+    otherwise claims completion. A row sealed under owner-closure is exempt —
+    that closure path deliberately keeps its review verdict on the FAIL axis
+    (`capability-route.py`'s ``_complete_node_locked``) while still being the
+    terminal record of a successful owner sweep, so it is not a contradiction.
+    """
+    if metadata.get("note") != "completed-marker":
+        return False
+    if metadata.get("gate_closure") == "owner-closure":
+        return False
+    if not (metadata.get("failure_class") or "").strip("-"):
+        return False
+    return not verdict_pass(metadata)
+
+
 def completion_attempt_readiness(
     route: dict[str, object],
     node: dict[str, object],
@@ -6987,6 +7007,8 @@ def completion_attempt_readiness(
         return AttemptReadiness("unverifiable", exc.reason, attempt_id)
     if fields[1] != "done" or metadata.get("note") != "completed-marker":
         return AttemptReadiness("unverifiable", "marker-attempt-not-terminal", attempt_id)
+    if completed_marker_verdict_contradicts(metadata):
+        return AttemptReadiness("unverifiable", "marker-attempt-failure-class-not-pass", attempt_id)
     if conflicting_active:
         return AttemptReadiness("draining", "conflicting-active-retry", attempt_id)
     process = attempt_process_quiescence(metadata, terminal_receipt=True)
