@@ -549,6 +549,86 @@ class TestDuplicatesAndSequence(unittest.TestCase):
         self.assertIn("duplicate-route-composite", _codes(m.validate_lineage(doc)))
 
 
+class TestCampaignClosureFold(unittest.TestCase):
+    def _event(self, kind, sequence, event_id, **extra):
+        row = {"event_type": kind, "stream_sequence": sequence, "event_id": event_id,
+               "actor": {"kind": "producer"}, "payload": {}}
+        row.update(extra)
+        return row
+
+    def test_empty_stream_is_active(self):
+        self.assertEqual(m.fold_campaign_closure([]).state, "active")
+
+    def test_producer_can_satisfy(self):
+        folded = m.fold_campaign_closure([self._event("campaign.satisfied", 1, "e1")])
+        self.assertEqual((folded.state, folded.last_satisfied["event_id"], folded.error),
+                         ("satisfied", "e1", None))
+
+    def test_reopen_after_satisfaction_is_active(self):
+        close = self._event("campaign.satisfied", 1, "e1")
+        reopen = self._event("campaign.reopened", 2, "e2", payload={"reopens_event_id": "e1"})
+        self.assertEqual(m.fold_campaign_closure([close, reopen]).state, "active")
+
+    def test_satisfy_while_satisfied_is_invalid(self):
+        events = [self._event("campaign.satisfied", 1, "e1"),
+                  self._event("campaign.satisfied", 2, "e2")]
+        self.assertEqual(m.fold_campaign_closure(events).error[1], "satisfied-while-satisfied")
+
+    def test_reopen_while_active_is_invalid(self):
+        event = self._event("campaign.reopened", 1, "e1", payload={"reopens_event_id": "e0"})
+        self.assertEqual(m.fold_campaign_closure([event]).error[1], "reopened-while-active")
+
+    def test_reopen_must_reference_last_satisfaction_and_not_revoke(self):
+        close = self._event("campaign.satisfied", 1, "e1")
+        wrong = self._event("campaign.reopened", 2, "e2", payload={"reopens_event_id": "wrong"})
+        self.assertEqual(m.fold_campaign_closure([close, wrong]).error[1], "reopens-event-id-mismatch")
+        revoke = self._event("campaign.reopened", 2, "e2", payload={"reopens_event_id": "e1"},
+                             revokes_event_id="e1")
+        self.assertEqual(m.fold_campaign_closure([close, revoke]).error[1], "reopen-correction-field")
+
+    def test_manifest_accepts_v1_reopen_then_v2_close_and_active_projection(self):
+        doc = _valid_document()
+        campaign_id = doc["campaign"]["campaign_id"]
+        stream = doc["events"][0]["stream_id"]
+        provenance = doc["events"][0]["provenance"]
+        def closure(seq, event_id, event_type, actor, payload):
+            return {"event_id": event_id, "stream_id": stream, "stream_sequence": seq,
+                    "event_type": event_type, "target_id": campaign_id, "actor": actor,
+                    "recorded_at": f"2026-08-11T00:0{seq}:00Z", "provenance": provenance,
+                    "evidence_ids": [], "payload": payload}
+        close_v1 = closure(3, "evt_" + "a" * 32, "campaign.satisfied",
+                           {"kind": "user", "id": "legacy"}, {})
+        reopen = closure(4, "evt_" + "b" * 32, "campaign.reopened",
+                         {"kind": "producer", "id": "route:rt-1"},
+                         {"reopens_event_id": close_v1["event_id"]})
+        close_v2 = closure(5, "evt_" + "c" * 32, "campaign.satisfied",
+                           {"kind": "producer", "id": "agent:test"}, {})
+        doc["events"].extend([close_v1, reopen, close_v2])
+        doc["campaign"]["state"] = "satisfied"
+        self.assertNotIn("illegal-transition", _codes(m.validate_lineage(doc)))
+        doc["campaign"]["state"] = "active"
+        self.assertNotIn("campaign-event-transition-invalid", _codes(m.validate_lineage(doc)))
+
+    def test_manifest_rejects_satisfied_projection_after_reopen(self):
+        doc = _valid_document()
+        campaign_id = doc["campaign"]["campaign_id"]
+        stream = doc["events"][0]["stream_id"]
+        provenance = doc["events"][0]["provenance"]
+        close = {"event_id": "evt_" + "a" * 32, "stream_id": stream, "stream_sequence": 3,
+                 "event_type": "campaign.satisfied", "target_id": campaign_id,
+                 "actor": {"kind": "producer", "id": "agent:test"},
+                 "recorded_at": "2026-08-11T00:03:00Z", "provenance": provenance,
+                 "evidence_ids": [], "payload": {}}
+        reopen = {"event_id": "evt_" + "b" * 32, "stream_id": stream, "stream_sequence": 4,
+                  "event_type": "campaign.reopened", "target_id": campaign_id,
+                  "actor": {"kind": "producer", "id": "route:rt-1"},
+                  "recorded_at": "2026-08-11T00:04:00Z", "provenance": provenance,
+                  "evidence_ids": [], "payload": {"reopens_event_id": close["event_id"]}}
+        doc["events"].extend([close, reopen])
+        doc["campaign"]["state"] = "satisfied"
+        self.assertIn("campaign-satisfaction-unauthorized", _codes(m.validate_lineage(doc)))
+
+
 class TestTransitions(unittest.TestCase):
     def test_rejects_declared_state_unreachable_from_events(self):
         doc = _valid_document()
@@ -560,7 +640,7 @@ class TestTransitions(unittest.TestCase):
         doc["events"][0]["event_type"] = "not.a.real.type"
         self.assertIn("wrong-value", _codes(m.validate_shape(doc)))
 
-    def test_rejects_campaign_satisfied_without_user_actor_event(self):
+    def test_producer_satisfied_actor_is_authorized(self):
         doc = _valid_document()
         doc["campaign"]["state"] = "satisfied"
         doc["events"].append(
@@ -577,7 +657,17 @@ class TestTransitions(unittest.TestCase):
                 "payload": {},
             }
         )
-        self.assertIn("campaign-satisfaction-unauthorized", _codes(m.validate_lineage(doc)))
+        self.assertNotIn("campaign-satisfaction-unauthorized", _codes(m.validate_lineage(doc)))
+
+    def test_system_actor_satisfied_is_unauthorized(self):
+        doc = _valid_document()
+        doc["campaign"]["state"] = "satisfied"
+        row = dict(doc["events"][0])
+        row.update(event_id="evt_" + "8" * 32, stream_sequence=3,
+                   event_type="campaign.satisfied", target_id=doc["campaign"]["campaign_id"],
+                   actor={"kind": "system", "id": "system"}, payload={})
+        doc["events"].append(row)
+        self.assertIn("campaign-event-transition-invalid", _codes(m.validate_lineage(doc)))
 
     def test_rejects_transition_out_of_terminal_state(self):
         """A stream that reaches a terminal state cannot transition again.

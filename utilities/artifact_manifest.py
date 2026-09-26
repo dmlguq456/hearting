@@ -13,7 +13,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from artifact_identity import is_well_formed, kind_of
 
@@ -42,6 +42,7 @@ _MAX_PAYLOAD_BYTES = 64 * 1024
 _EVENT_TYPES = frozenset(
     {
         "campaign.satisfied",
+        "campaign.reopened",
         "campaign.abandoned",
         "campaign.superseded",
         "cycle.completed",
@@ -67,6 +68,51 @@ _CAMPAIGN_TERMINAL_EVENTS = {
     "abandoned": "campaign.abandoned",
     "superseded": "campaign.superseded",
 }
+CAMPAIGN_CLOSURE_EVENTS = ("campaign.satisfied", "campaign.reopened")
+SATISFIED_ACTOR_KINDS = frozenset({"user", "producer"})
+
+
+class CampaignClosureFold(NamedTuple):
+    state: str
+    last_satisfied: Optional[Mapping[str, Any]]
+    error: Optional[Tuple[str, str]]
+
+
+def fold_campaign_closure(events: Sequence[Mapping[str, Any]]) -> CampaignClosureFold:
+    """Fold campaign close/reopen transitions in stream order."""
+    state = "active"
+    last_satisfied = None
+    for event in events:
+        event_type = event.get("event_type")
+        actor = event.get("actor")
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, Mapping) else {}
+        if event_type == "campaign.satisfied":
+            if state == "satisfied":
+                return CampaignClosureFold(state, last_satisfied,
+                                           ("campaign-event-transition-invalid", "satisfied-while-satisfied"))
+            if not isinstance(actor, Mapping) or actor.get("kind") not in SATISFIED_ACTOR_KINDS:
+                return CampaignClosureFold(state, last_satisfied,
+                                           ("campaign-event-transition-invalid", "satisfied-actor-kind"))
+            state, last_satisfied = "satisfied", event
+        elif event_type == "campaign.reopened":
+            if state != "satisfied":
+                return CampaignClosureFold(state, last_satisfied,
+                                           ("campaign-event-transition-invalid", "reopened-while-active"))
+            if payload.get("reopens_event_id") != last_satisfied.get("event_id"):
+                return CampaignClosureFold(state, last_satisfied,
+                                           ("campaign-event-transition-invalid", "reopens-event-id-mismatch"))
+            if "supersedes_event_id" in event or "revokes_event_id" in event:
+                return CampaignClosureFold(state, last_satisfied,
+                                           ("campaign-event-transition-invalid", "reopen-correction-field"))
+            if not isinstance(actor, Mapping) or actor.get("kind") != "producer":
+                return CampaignClosureFold(state, last_satisfied,
+                                           ("campaign-event-transition-invalid", "reopened-actor-kind"))
+            state = "active"
+        else:
+            return CampaignClosureFold(state, last_satisfied,
+                                       ("campaign-event-transition-invalid", "unexpected-event-type"))
+    return CampaignClosureFold(state, last_satisfied, None)
 _CYCLE_TERMINAL_EVENTS = {
     "completed": "cycle.completed",
     "abandoned": "cycle.abandoned",
@@ -1060,6 +1106,18 @@ def validate_lineage(document: Mapping[str, Any]) -> ValidationReport:
     cycle_events = [row for row in events if row.get("target_id") == cycle_id]
 
     campaign_state = campaign.get("state")
+    closure_events = sorted(
+        (row for row in campaign_events if row.get("event_type") in CAMPAIGN_CLOSURE_EVENTS),
+        key=lambda row: row.get("stream_sequence", 0),
+    )
+    closure_fold = fold_campaign_closure(closure_events)
+    if closure_fold.error:
+        violations.append(Violation(closure_fold.error[0], "$.campaign.state", closure_fold.error[1]))
+    if campaign_state == "satisfied" and not closure_fold.error and closure_fold.state != "satisfied":
+        violations.append(Violation(
+            "campaign-satisfaction-unauthorized", "$.campaign.state",
+            "the last campaign closure transition is not campaign.satisfied",
+        ))
     if campaign_state in _CAMPAIGN_TERMINAL_EVENTS:
         needed = _CAMPAIGN_TERMINAL_EVENTS[campaign_state]
         matching = [row for row in campaign_events if row.get("event_type") == needed]
@@ -1071,19 +1129,6 @@ def validate_lineage(document: Mapping[str, Any]) -> ValidationReport:
                     "declared state {0!r} unreachable from events".format(campaign_state),
                 )
             )
-        if campaign_state == "satisfied":
-            authorized = [
-                row for row in matching if isinstance(row.get("actor"), dict)
-                and row["actor"].get("kind") == "user"
-            ]
-            if not authorized:
-                violations.append(
-                    Violation(
-                        "campaign-satisfaction-unauthorized",
-                        "$.campaign.state",
-                        "campaign.satisfied event must have actor.kind == 'user'",
-                    )
-                )
     elif campaign_state is not None and campaign_state != "active":
         violations.append(
             Violation("unknown-event-type", "$.campaign.state", "unrecognised campaign state")
@@ -1171,15 +1216,19 @@ def _check_no_transition_out_of_terminal(events, label, violations) -> None:
     for row in ordered:
         stream_id = row.get("stream_id")
         if stream_id in seen_terminal:
-            violations.append(
-                Violation(
-                    "illegal-transition",
-                    "$.events[?event_id={0!r}]".format(row.get("event_id")),
-                    "transition out of terminal state",
-                )
-            )
+            if (label == "campaign" and seen_terminal[stream_id] == "campaign.satisfied"
+                    and row.get("event_type") == "campaign.reopened"):
+                del seen_terminal[stream_id]
+                continue
+            violations.append(Violation(
+                "illegal-transition",
+                "$.events[?event_id={0!r}]".format(row.get("event_id")),
+                "transition out of terminal state",
+            ))
         if row.get("event_type") in terminal_types:
             seen_terminal[stream_id] = row.get("event_type")
+        elif label == "campaign" and row.get("event_type") == "campaign.reopened":
+            seen_terminal.pop(stream_id, None)
 
 
 # ---------------------------------------------------------------------------

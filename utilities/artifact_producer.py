@@ -801,16 +801,42 @@ def read_campaign(root: Path, campaign_id: str) -> Optional[Dict[str, Any]]:
 
 
 def find_campaign_by_key(root: Path, key: str) -> Optional[Dict[str, Any]]:
+    return next((row for row in _campaigns_by_key(root, key) if row.get("state") == "active"), None)
+
+
+def _campaigns_by_key(root: Path, key: str) -> List[Dict[str, Any]]:
     campaigns = Path(root) / "campaigns"
     if not campaigns.is_dir():
-        return None
+        return []
+    rows = []
     for entry in artifact_locator.iter_campaign_dirs(root):
         record = _read_json(entry / "campaign.json")
-        if record:
-            record = artifact_campaign.fold_campaign(root, entry / "campaign.json", record)
-        if record and record.get("key") == key and record.get("state") == "active":
-            return record
-    return None
+        if record and record.get("key") == key:
+            folded = artifact_campaign.fold_campaign(root, entry / "campaign.json", record)
+            folded["_campaign_path"] = str(entry / "campaign.json")
+            rows.append(folded)
+    return rows
+
+
+def classify_campaign_key(rows: Sequence[Mapping[str, Any]], key: str) -> Dict[str, Any]:
+    matches = [row for row in rows if row.get("key") == key]
+    invalid = [row for row in matches if row.get("state") == "invalid"]
+    if invalid:
+        return {"mode": "blocked", "code": invalid[0].get("state_error") or "campaign-state-invalid"}
+    active = [row for row in matches if row.get("state") == "active"]
+    closed = [row for row in matches if row.get("state") == "satisfied"]
+    dead = [row for row in matches if row.get("state") in {"abandoned", "superseded"}]
+    if len(closed) > 1:
+        return {"mode": "blocked", "code": "campaign-key-reopen-ambiguous"}
+    if len(active) > 1:
+        return {"mode": "blocked", "code": "campaign-key-ambiguous"}
+    if active:
+        return {"mode": "join", "campaign_id": active[0].get("campaign_id")}
+    if closed:
+        return {"mode": "reopen", "campaign_id": closed[0].get("campaign_id")}
+    if dead:
+        return {"mode": "blocked", "code": "campaign-not-active"}
+    return {"mode": "create", "campaign_id": None}
 
 
 def _write_campaign(root: Path, record: Dict[str, Any], *, exclusive: bool) -> None:
@@ -1241,9 +1267,7 @@ def list_campaign_summaries(root: Path, *, active_only: bool = True) -> List[Dic
     """Cheap, read-only listing of the root's campaigns for callers that
     must show the agent which work streams already exist (compose).
 
-    Reads each ``campaign.json`` once and treats a committed satisfaction
-    event as terminal; it never folds or validates like `read_campaign`, so
-    it is a summary surface, not admission authority.
+    Each row uses the same validated campaign event fold as admission.
     """
     root = Path(root)
     rows: List[Dict[str, Any]] = []
@@ -1251,9 +1275,11 @@ def list_campaign_summaries(root: Path, *, active_only: bool = True) -> List[Dic
         record = _read_json(entry / "campaign.json")
         if not record or not isinstance(record.get("campaign_id"), str):
             continue
-        state = str(record.get("state") or "unknown")
-        if (entry / artifact_campaign.EVENT_NAME).exists():
-            state = "satisfied"
+        try:
+            state = artifact_campaign.campaign_state(root, entry / "campaign.json", record).state
+            state_error = None
+        except artifact_campaign.CampaignError as exc:
+            state, state_error = "invalid", exc.code
         if active_only and state != "active":
             continue
         cycles = record.get("cycles")
@@ -1264,6 +1290,7 @@ def list_campaign_summaries(root: Path, *, active_only: bool = True) -> List[Dic
             "goal": record.get("goal"),
             "locator": entry.name,
             "state": state,
+            **({"state_error": state_error} if state_error else {}),
             "degraded": record.get("degraded") is True,
             "cycle_count": len(cycles) if isinstance(cycles, list) else 0,
             "created_on": str(record.get("created_on") or ""),
@@ -1394,16 +1421,20 @@ def begin(
             raise ProducerError("resplit-in-progress", json.dumps(detail or {}, sort_keys=True))
         campaign: Optional[Dict[str, Any]] = None
         parent = None
+        campaign_reopen_event_id = None
+        requested_selection = None
         if campaign_id:
             campaign = read_campaign(root, campaign_id)
             if campaign is None:
                 raise ProducerError("campaign-unknown", campaign_id)
+            requested_selection = {"by": "campaign_id", "value": campaign_id}
         elif campaign_key:
-            campaign = find_campaign_by_key(root, campaign_key)
-            if campaign is None:
-                previous = _find_campaign_by_key_any_state(root, campaign_key)
-                if previous is not None:
-                    raise ProducerError("campaign-not-active", previous["campaign_id"])
+            keyed = _campaigns_by_key(root, campaign_key)
+            choice = classify_campaign_key(keyed, campaign_key)
+            if choice["mode"] == "blocked":
+                raise ProducerError(choice["code"], campaign_key)
+            campaign = next((row for row in keyed if row.get("campaign_id") == choice.get("campaign_id")), None)
+            requested_selection = {"by": "campaign_key", "value": campaign_key}
         if parent_cycle_id:
             parent = read_cycle_record(root, parent_cycle_id)
             if parent is None or parent.get("state") not in {"open", "sealed"}:
@@ -1414,9 +1445,19 @@ def begin(
                 campaign = read_campaign(root, parent["campaign_id"])
                 if campaign is None:
                     raise ProducerError("campaign-unknown", parent["campaign_id"])
+                requested_selection = {"by": "parent_cycle", "value": parent_cycle_id}
         if campaign is not None:
-            if campaign.get("state") != "active":
-                raise ProducerError("campaign-not-active", campaign["campaign_id"])
+            if campaign.get("state") == "satisfied":
+                try:
+                    reopened = artifact_campaign._reopen_locked(
+                        root, _campaign_path(root, campaign["campaign_id"], campaign),
+                        route_id=route["route_id"], requested_selection=requested_selection)
+                except artifact_campaign.CampaignError as exc:
+                    raise ProducerError(exc.code, exc.detail) from exc
+                campaign_reopen_event_id = reopened.get("event_id")
+                campaign = read_campaign(root, campaign["campaign_id"])
+            if campaign is None or campaign.get("state") != "active":
+                raise ProducerError("campaign-not-active", campaign_id or parent_cycle_id or campaign_key)
             if campaign_key is not None and campaign.get("key") != campaign_key:
                 raise ProducerError("campaign-key-mismatch", campaign_key)
         # Idempotent per route: one open cycle per route.
@@ -1478,7 +1519,7 @@ def begin(
                 "locator": locator,
                 "locator_suffix": locator_suffix,
                 "goal": (goal or f"{route_capability} cycle output") if campaign_key else "Work stream not proposed",
-                "completion_criterion": {"statement": "every cycle sealed with a manifest"},
+                "completion_criterion": {"statement": artifact_campaign.DEFAULT_COMPLETION_CRITERION},
                 "state": "active",
                 "created_on": started_on,
                 "cycles": [],
@@ -1569,6 +1610,8 @@ def begin(
             "status": "begun", "layout": "cycle", "campaign_id": campaign["campaign_id"],
             "cycle_id": new_cycle_id, "producer_id": producer_id, "cycle_dir": str(target),
             "campaign_created": campaign_created, "env": _env_for(root, record),
+            **({"campaign_reopened": True, "campaign_reopen_event_id": campaign_reopen_event_id}
+               if campaign_reopen_event_id else {}),
             **_campaign_degradation(campaign),
         }
     finally:
@@ -4259,14 +4302,8 @@ def admit_shared(
 def _find_campaign_by_key_any_state(root: Path, key: str) -> Optional[Dict[str, Any]]:
     """Like `find_campaign_by_key`, but not restricted to `state == "active"` --
     a `related[]` row may point at a campaign that is already superseded."""
-    campaigns = Path(root) / "campaigns"
-    if not campaigns.is_dir():
-        return None
-    for entry in artifact_locator.iter_campaign_dirs(root):
-        record = _read_json(entry / "campaign.json")
-        if record and record.get("key") == key:
-            return artifact_campaign.fold_campaign(root, entry / "campaign.json", record)
-    return None
+    rows = _campaigns_by_key(root, key)
+    return rows[0] if rows else None
 
 
 def validate_related(root: Path, related: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
@@ -4680,13 +4717,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--expect-post-digest", help="refuse --apply unless the computed post-digest matches")
     p.add_argument("--restore-journal", help="restore the declaration from a prior --apply's journal")
 
-    for command in ("campaign-status", "campaign-close", "campaign-recover"):
-        p = sub.add_parser(command, help="verify, accept, or recover a campaign's administrative closure")
+    for command in ("campaign-status", "campaign-close", "campaign-reopen", "campaign-recover"):
+        p = sub.add_parser(command, help="inspect, close, reopen, or recover a campaign")
         p.add_argument("--artifact-root", required=True)
         p.add_argument("--campaign", required=True, help="campaign ID or campaign.json path")
-        if command == "campaign-close":
-            p.add_argument("--approval-harness", choices=("claude", "codex", "opencode"))
-            p.add_argument("--approval-session", help="native session where the USER approved: the exact statement, or a short consent as their first input right after the statement was shown")
+        if command in {"campaign-close", "campaign-reopen"}:
+            p.add_argument("--reason")
 
     p = sub.add_parser("begin")
     p.add_argument("--artifact-root", required=True)
@@ -4831,10 +4867,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return BLOCKED if str(result.get("status", "")).startswith("refused") else OK
         elif args.command == "campaign-status":
             result = artifact_campaign.status(root, args.campaign)
-        elif args.command in {"campaign-close", "campaign-recover"}:
-            result = artifact_campaign.close(root, args.campaign,
-                harness=getattr(args, "approval_harness", None),
-                session=getattr(args, "approval_session", None), recover=args.command == "campaign-recover")
+        elif args.command == "campaign-close":
+            result = artifact_campaign.close(root, args.campaign, reason=args.reason)
+        elif args.command == "campaign-reopen":
+            result = artifact_campaign.reopen(root, args.campaign, reason=args.reason)
+        elif args.command == "campaign-recover":
+            result = artifact_campaign.recover(root, args.campaign)
         elif args.command == "begin":
             pins: List[Dict[str, Any]] = []
             for row in args.shared_reference:

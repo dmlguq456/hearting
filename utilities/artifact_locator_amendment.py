@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence
 
 import artifact_admission
+import artifact_campaign
 import artifact_identity
 import artifact_index
 import artifact_locator
@@ -218,7 +219,12 @@ def _prepare_locked(root: Path, *, campaign_id: str, campaign_locator: str,
         raise LocatorAmendmentError(f"root-identity-invalid:{exc}") from exc
     old_campaign_dir, campaign = _find_campaign(root, campaign_id)
     old_campaign_locator = old_campaign_dir.name
-    if campaign.get("state") != "active" or campaign.get("locator") != old_campaign_locator:
+    try:
+        folded_state = artifact_campaign.campaign_state(
+            root, old_campaign_dir / "campaign.json", campaign).state
+    except artifact_campaign.CampaignError as exc:
+        raise LocatorAmendmentError(f"campaign-state-invalid:{exc.code}") from exc
+    if folded_state != "active" or campaign.get("locator") != old_campaign_locator:
         raise LocatorAmendmentError("campaign-state-locator-mismatch")
     if campaign.get("key") in {None, "_unassigned"} or not isinstance(campaign.get("goal"), str):
         raise LocatorAmendmentError("campaign-semantic-amendment-required")

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Sequence
 
 import artifact_admission
+import artifact_campaign
 import artifact_identity
 import artifact_locator
 from campaign_title_repair import canonical, digest_bytes, digest_json, write_atomic, write_atomic_bytes
@@ -223,7 +224,11 @@ def _prepare_locked(root: Path, *, campaign_id: str, key: str, goal: str,
     except artifact_identity.IdentityError as exc:
         raise AmendmentError(f"root-identity-invalid:{exc}") from exc
     campaign_json, campaign = _find_campaign(root, campaign_id)
-    if campaign.get("state") != "active" or campaign.get("key") != "_unassigned":
+    try:
+        folded_state = artifact_campaign.campaign_state(root, campaign_json, campaign).state
+    except artifact_campaign.CampaignError as exc:
+        raise AmendmentError(f"campaign-state-invalid:{exc.code}") from exc
+    if folded_state != "active" or campaign.get("key") != "_unassigned":
         raise AmendmentError("campaign-not-active-unassigned")
     if campaign.get("degraded") is not True or campaign.get("degraded_reason") != "campaign-unassigned":
         raise AmendmentError("campaign-degraded-condition-not-exact")
@@ -484,7 +489,11 @@ def _verify_live_sources(root: Path, package: Mapping[str, Any], *, pre_apply: b
     assert campaign is not None
     desired = package["desired"]
     if pre_apply:
-        if campaign.get("state") != "active" or campaign.get("key") != "_unassigned":
+        try:
+            folded_state = artifact_campaign.campaign_state(root, campaign_path, campaign).state
+        except artifact_campaign.CampaignError as exc:
+            raise AmendmentError(f"campaign-state-invalid:{exc.code}") from exc
+        if folded_state != "active" or campaign.get("key") != "_unassigned":
             raise AmendmentError("campaign-precondition-drift")
         if campaign.get("degraded") is not True or campaign.get("degraded_reason") != "campaign-unassigned":
             raise AmendmentError("campaign-degraded-precondition-drift")

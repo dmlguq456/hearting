@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -79,6 +81,12 @@ class LocatorAmendmentTests(unittest.TestCase):
             campaign_locator=self.new_campaign.name,
             cycles=self.requests,
         )
+
+    def test_prepare_uses_folded_state_for_closed_campaign_refusal(self) -> None:
+        with mock.patch.object(L.artifact_campaign, "campaign_state",
+                               return_value=SimpleNamespace(state="satisfied")):
+            with self.assertRaisesRegex(L.LocatorAmendmentError, "campaign-state-locator-mismatch"):
+                self.package()
 
     def test_apply_preserves_ids_lineage_seals_and_old_evidence_paths(self) -> None:
         package = self.package()
