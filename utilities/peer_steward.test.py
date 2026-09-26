@@ -18,6 +18,8 @@ _HERE = Path(__file__).resolve().parent
 _SPEC = importlib.util.spec_from_file_location("peer_steward", str(_HERE / "peer-steward.py"))
 peer_steward = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(peer_steward)
+sys.path.insert(0, str(_HERE.parent / "tools"))
+import fixture_processes  # noqa: E402
 
 
 class _TmpRootMixin:
@@ -620,54 +622,15 @@ print(json.dumps(info)); sys.exit(0)
 
 
 
-def _reap_fixture_processes(marker, fifo=None):
-    """Kill every watcher (session leader -> its group holds the fake herdr) and
-    every leftover fake-herdr child whose cmdline carries this fixture's path,
-    then drain the FIFO so no reader stays blocked on an unlinked pipe
-    (review M4: three tests SIGKILLed the watcher without releasing the FIFO and
-    the reparented `herdr agent wait` child survived until reboot)."""
-    import errno
-    for entry in os.listdir("/proc"):
-        if not entry.isdigit():
-            continue
-        try:
-            with open(f"/proc/{entry}/cmdline", "rb") as fh:
-                cmdline = fh.read()
-        except OSError:
-            continue
-        if marker.encode() not in cmdline:
-            continue
-        pid = int(entry)
-        if pid == os.getpid():
-            continue
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-    if fifo and os.path.exists(fifo):
-        for _ in range(64):
-            try:
-                fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
-            except OSError as exc:
-                if exc.errno == errno.ENXIO:
-                    break
-                break
-            try:
-                os.write(fd, b"go")
-            except OSError:
-                pass
-            os.close(fd)
-
 class _WatchMixin(_TmpRootMixin):
     """Real subprocesses, real files, only `herdr` faked."""
 
     def setUp(self):
         super().setUp()
-        # Registered before the tmp-dir cleanup so it runs first (LIFO).
-        self.addCleanup(lambda: _reap_fixture_processes(str(self.tmp_root), str(self.tmp_root / "release.fifo")))
+        # Registered after the tmp-dir cleanup so it runs first (LIFO): every watcher and
+        # fake-herdr child is dead before the directory it writes into is removed.
+        self.addCleanup(fixture_processes.reap, str(self.tmp_root),
+                        fifo=str(self.tmp_root / "release.fifo"))
         self.bin = self.tmp_root / "fakebin"
         self.bin.mkdir()
         fake = self.bin / "herdr"
@@ -718,8 +681,16 @@ class _WatchMixin(_TmpRootMixin):
         return {}
 
     def _release(self):
-        with open(self.fifo, "w") as fh:
-            fh.write("go")
+        # A held reader can close between our open() and write() (a watcher that just
+        # got EOF from the previous release): EPIPE means "no reader took it", retry.
+        for _ in range(100):
+            try:
+                with open(self.fifo, "w") as fh:
+                    fh.write("go")
+                return
+            except BrokenPipeError:
+                time.sleep(0.01)
+        self.fail("no reader took the FIFO release")
 
     def _wait_for_lock(self, watch_id, seconds=30):
         """Bound-wait until the watcher has actually taken its flock.

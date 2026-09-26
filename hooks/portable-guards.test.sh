@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -u
 export PYTHONDONTWRITEBYTECODE=1
+# This suite runs the real hooks with fake session ids. The caller's herdr connection
+# (an interactive pane's HERDR_*) must never reach them, or a live pane header shows a
+# test's identity (2026-09-24: "[0d] codex" from directpromptsid). Cases that exercise
+# herdr set their own fake socket and pane below.
+for herdr_var in $(env | sed -n 's/^\(HERDR_[A-Za-z0-9_]*\)=.*/\1/p'); do unset "$herdr_var"; done
+unset herdr_var
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 ART="$ROOT/hooks/artifact-guard.sh"
@@ -5278,9 +5284,15 @@ PY
 predsrv=$!
 predwait=0
 while [ ! -S "$predsock" ] && [ "$predwait" -lt 50 ]; do predwait=$((predwait + 1)); sleep 0.1; done
-pred_herdr() { # $1=pane-id ; env assignments come from the caller
-  printf '{"hook_event_name":"PreToolUse","session_id":"pred-herdr"}' \
-    | HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" HERDR_PANE_ID="$1" sh "$HERDR" working >/dev/null 2>&1 || true
+# The hook reports only the session its own Claude runtime is on: make this shell that
+# runtime (a session file for its pid in a fake CLAUDE_CONFIG_DIR, as Claude Code writes).
+predclaude="$predtmp/claude-config"
+mkdir -p "$predclaude/sessions"
+printf '{"sessionId":"pred-herdr"}' > "$predclaude/sessions/$$.json"
+pred_herdr() { # $1=pane-id [$2=session-id] ; env assignments come from the caller
+  printf '{"hook_event_name":"PreToolUse","session_id":"%s"}' "${2:-pred-herdr}" \
+    | CLAUDE_CONFIG_DIR="$predclaude" HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" HERDR_PANE_ID="$1" \
+      sh "$HERDR" working >/dev/null 2>&1 || true
 }
 : > "$predrecv"
 CLAUDE_CODE_CHILD_SESSION=1 pred_herdr pane-teammate
@@ -5292,12 +5304,30 @@ else bad "herdr pane state must not treat CLAUDE_CODE_CHILD_SESSION as worker ev
 : > "$predrecv"
 for assignment in AGENT_SESSION_ROLE=worker AGENT_DISPATCH_CHILD=1 AGENT_DISPATCH_DEPTH=2; do
   env "$assignment" sh -c 'printf "{\"hook_event_name\":\"PreToolUse\",\"session_id\":\"pred-herdr\"}" \
-    | HERDR_ENV=1 HERDR_SOCKET_PATH="$1" HERDR_PANE_ID=pane-worker sh "$2" working >/dev/null 2>&1' _ "$predsock" "$HERDR" || true
+    | CLAUDE_CONFIG_DIR="$3" HERDR_ENV=1 HERDR_SOCKET_PATH="$1" HERDR_PANE_ID=pane-worker sh "$2" working >/dev/null 2>&1' _ "$predsock" "$HERDR" "$predclaude" || true
 done
+pred_herdr pane-foreign some-test-session
 sleep 0.3
 if ! grep -q 'pane-worker' "$predrecv" 2>/dev/null; then
   ok "herdr pane state stays silent for every harness worker marker"
 else bad "herdr pane state should no-op for harness worker markers"; fi
+if ! grep -q 'pane-foreign' "$predrecv" 2>/dev/null; then
+  ok "herdr pane state stays silent for a session that is not its runtime's own"
+else bad "herdr pane state must not report a foreign session id"; fi
+# A stale tree beside the hook whose projection fails to import must not hide the good
+# AGENT_HOME copy further down the candidate list.
+mkdir -p "$predtmp/stale/hooks" "$predtmp/stale/tools/fleet"
+cp "$HERDR" "$predtmp/stale/hooks/herdr-agent-state.sh"
+: > "$predtmp/stale/tools/fleet/__init__.py"
+printf 'raise ImportError("stale tree")\n' > "$predtmp/stale/tools/fleet/herdr_projection.py"
+printf '{"hook_event_name":"PreToolUse","session_id":"pred-herdr"}' \
+  | AGENT_HOME="$ROOT" CLAUDE_CONFIG_DIR="$predclaude" HERDR_ENV=1 HERDR_SOCKET_PATH="$predsock" \
+    HERDR_PANE_ID=pane-fallback sh "$predtmp/stale/hooks/herdr-agent-state.sh" working >/dev/null 2>&1 || true
+predwait=0
+while ! grep -q 'pane-fallback' "$predrecv" 2>/dev/null && [ "$predwait" -lt 30 ]; do predwait=$((predwait + 1)); sleep 0.1; done
+if grep -q 'pane-fallback' "$predrecv" 2>/dev/null; then
+  ok "herdr pane state falls through a broken candidate tree to AGENT_HOME"
+else bad "herdr pane state must try the next candidate tree when one fails to import"; fi
 kill "$predsrv" 2>/dev/null || true
 wait "$predsrv" 2>/dev/null || true
 rm -rf "$predtmp"

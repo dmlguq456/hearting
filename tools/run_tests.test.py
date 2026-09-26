@@ -280,6 +280,25 @@ class StaleFixture(RunTestsFixtureBase):
         self.assertEqual(verdicts, {"STALE"})
 
 
+class IsolatedEnvDropsTheLivePane(unittest.TestCase):
+    """No suite process inherits the caller's herdr connection, in any profile."""
+
+    def test_herdr_variables_never_reach_a_suite(self):
+        runner = load_runner_module()
+        ambient = {"HERDR_ENV": "1", "HERDR_PANE_ID": "wB:pN", "HERDR_SOCKET_PATH": "/tmp/h.sock"}
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, ambient):
+            root = Path(td)
+            envs = {
+                "isolated": runner.build_isolated_env(root / "a"),
+                "installed-layout": runner.build_installed_layout_env(root / "b", root / "prefix"),
+                "ci-like": runner.build_ci_like_env(root / "c", ROOT),
+            }
+            for profile, env in envs.items():
+                self.assertFalse([k for k in env if k.startswith("HERDR_")], profile)
+            for key in ambient:
+                self.assertIn(key, runner._EXPLICIT_UNSET_KEYS)
+
+
 class ArtifactRootsAreNotTestCorpus(unittest.TestCase):
     def test_suites_under_an_artifact_root_are_not_collected(self):
         mod = load_runner_module()

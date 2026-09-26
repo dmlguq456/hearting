@@ -43,7 +43,7 @@ from fleet.token_budget import parse_codex_token_count
 # rollout filename tail: rollout-<ISO-ts>-<uuid>.jsonl
 _SID_RE = re.compile(r"-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
 
-_INDEX = {"ts": 0.0, "map": None}          # cwd → rollout paths (newest first)
+_INDEX = {"ts": 0.0, "map": None, "home": None}   # cwd → rollout paths (newest first)
 _INDEX_TTL = 1.5
 _START_MATCH_BEFORE_SEC = 5.0
 _START_MATCH_AFTER_SEC = 30.0
@@ -728,7 +728,8 @@ def _rollout_meta(path):
 
 def _index(home):
     now = time.time()
-    if _INDEX["map"] is not None and now - _INDEX["ts"] < _INDEX_TTL:
+    if (_INDEX["map"] is not None and now - _INDEX["ts"] < _INDEX_TTL
+            and _INDEX.get("home") == home):
         return _INDEX["map"]
     base = os.path.join(home, "sessions")
     files = []
@@ -746,7 +747,7 @@ def _index(home):
         cwd = _rollout_cwd(p)
         if cwd:
             m.setdefault(cwd, []).append(p)
-    _INDEX.update(ts=now, map=m)
+    _INDEX.update(ts=now, map=m, home=home)
     return m
 
 
@@ -840,6 +841,42 @@ def _proc_rollout(pid, cwd, home):
     return None
 
 
+def session_id_of_process(pid, live_codex=None):
+    """The thread a live Codex process is running, or None — proven the way the board proves it.
+
+    First the rollout the process holds open (`_proc_rollout`; measured 2026-09-25: a
+    managed `codex app-server` holds its thread's rollout open between turns, the
+    `codex --remote` TUI holds none). A direct Codex TUI can hold none either (2026-08-10),
+    so a process named exactly ``codex`` without that fd is then resolved by
+    `process_rollouts` — the board's own resolver — over every live Codex process
+    (`procscan.scan`, the board's process list), against the rollout home in that
+    process's OWN environment. An ambiguous start-time match stays None.
+
+    The herdr report gate (`herdr_projection.may_report`) calls this, so no payload or
+    environment value of the caller can stand in for it. ``live_codex`` is an optional
+    zero-argument callable returning that process list, so one judgement scans at most once.
+    """
+    try:
+        pid = int(pid)
+        cwd = os.readlink("/proc/%d/cwd" % pid)
+    except (OSError, ValueError):
+        return None
+    path = _proc_rollout(pid, cwd, _home())
+    if path:
+        return _sid(path)
+    from . import procscan
+    if procscan._comm_of(pid) != "codex":
+        return None                     # procscan lists only `codex` itself as a runtime
+    env = procscan.read_environ(pid)
+    home = env.get("CODEX_HOME") or (
+        os.path.join(env["HOME"], ".codex") if env.get("HOME") else None)
+    if not home:
+        return None
+    sessions = live_codex() if live_codex else procscan.scan(harness_filter={"codex"})
+    path = process_rollouts(sessions, os.path.abspath(home))[0].get(pid)
+    return _sid(path) if path else None
+
+
 def _session_created(meta):
     value = meta.get("timestamp")
     if not isinstance(value, str):
@@ -873,7 +910,32 @@ def _process_started_at(sess):
     return boot + ticks / clock_ticks
 
 
-def _reserve_start_matched_rollouts(sessions, home, paths, claimed, denied=frozenset()):
+def process_rollouts(sessions, home):
+    """Which rollout each live Codex process is running → ``(paths, claimed)``.
+
+    The one resolver shared by the board (`prepare_tick`) and the herdr report gate
+    (`session_id_of_process`): every held rollout fd first, then the mutually unique
+    process-start match for rows holding none. Moving a managed app-server's rollout onto
+    its visible TUI row is a display step and stays in `prepare_tick`. No module state is
+    read or written besides the rollout index cache.
+    """
+    paths = {}
+    claimed = set()
+    for sess in sessions:
+        if getattr(sess, "harness", None) != "codex" or not getattr(sess, "cwd", None):
+            continue
+        path = _proc_rollout(sess.pid, sess.cwd, home)
+        if not path:
+            continue
+        paths[sess.pid] = path
+        sid = _sid(path)
+        if sid:
+            claimed.add(sid)
+    _reserve_start_matched_rollouts(sessions, home, paths, claimed)
+    return paths, claimed
+
+
+def _reserve_start_matched_rollouts(sessions, home, paths, claimed):
     """Reserve only mutually unique root rollouts by exact process start.
 
     Incident 2026-08-10: two direct Codex TUIs in Eiren_invest held no rollout
@@ -888,7 +950,6 @@ def _reserve_start_matched_rollouts(sessions, home, paths, claimed, denied=froze
             getattr(sess, "harness", None) != "codex"
             or not getattr(sess, "cwd", None)
             or sess.pid in paths
-            or sess.pid in denied
             or getattr(sess, "app_server", False)
             or getattr(sess, "managed_dir", None)
             or getattr(sess, "is_child", False)
@@ -1107,24 +1168,16 @@ def prepare_tick(sessions):
     and both rows display one session id/title. Reserve every owned fd first.
     """
     home = os.path.abspath(_home())
-    paths = {}
-    claimed = set()
-    eligible = False
-    for sess in sessions:
-        if getattr(sess, "harness", None) != "codex" or not getattr(sess, "cwd", None):
-            continue
-        eligible = True
-        path = _proc_rollout(sess.pid, sess.cwd, home)
-        if not path:
-            continue
-        paths[sess.pid] = path
-        sid = _sid(path)
-        if sid:
-            claimed.add(sid)
+    eligible = any(
+        getattr(sess, "harness", None) == "codex" and getattr(sess, "cwd", None)
+        for sess in sessions
+    )
+    paths, claimed = process_rollouts(sessions, home)
     # Managed Codex: move each app-server's rollout onto its own TUI client row. The sid
     # stays in `claimed`, so no other row can pick it up through the fallback either.
+    # Running it after the start match changes nothing: that match skips every row with
+    # a managed dir, which is every row this transfer touches.
     donated = _transfer_managed_rollouts(sessions, paths)
-    _reserve_start_matched_rollouts(sessions, home, paths, claimed, donated)
     _PROC_PATHS.clear()
     _PROC_PATHS.update(paths)
     _FALLBACK_CLAIMS.update(ts=time.time(), sids=claimed)

@@ -19,6 +19,18 @@ Both halves go into `title`, because that is the only field herdr paints above t
 Display-only and fail-soft throughout: no herdr, no pane, no title, or a slow formatter
 all mean "report less", never an error. Registered workers project nothing at all — the
 pane belongs to the interactive session that owns it.
+
+Every herdr report from a hook — this projection and `hooks/herdr-agent-state.sh` — asks
+`may_report()` first. A process may report a session only when it IS that session's
+runtime, proven from the process itself, never from the payload or the environment
+(OpenCode proves the harness only — see `may_report`). Codex is proven by Fleet's own
+resolver: the rollout the process holds open, else the board's mutually unique
+process-start match; an ambiguous match proves nothing. Test suites run the real
+hooks with fake session ids while inheriting the interactive pane's `HERDR_PANE_ID` and
+often strip the worker markers, so the worker check alone let `directpromptsid` repaint a
+live pane as `[0d] codex` and take over its `agent_session_id` (2026-09-24). When the
+identity cannot be established the report is skipped: the header keeps its previous text
+until the real session's next hook (user decision, 2026-09-24 stale-title).
 """
 from __future__ import annotations
 
@@ -52,6 +64,103 @@ def is_worker() -> bool:
     if os.environ.get("AGENT_SESSION_ROLE") == "worker":
         return True
     return any(os.environ.get(name) for name in _WORKER_ENV)
+
+
+_MAX_ANCESTORS = 32
+
+
+def _parent(pid: int):
+    try:
+        with open("/proc/%d/stat" % pid, "rb") as handle:
+            return int(handle.read().rsplit(b")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _comm(pid: int) -> str:
+    try:
+        with open("/proc/%d/comm" % pid, encoding="utf-8", errors="replace") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def runtime_identity():
+    """``(harness, session_id | None)`` of the nearest runtime process above this one.
+
+    Walks this process and its ancestors and asks Fleet's own collectors which session
+    each one is — never a second copy of their resolution:
+
+    - Claude: `collectors.claude.session_id_of_process` (its `sessions/<pid>.json`, else
+      the statusline tap matched by pid + start time, for the hours a live process's
+      registry file goes missing — F-25 tier 2);
+    - Codex: a process named ``codex``/``codex-*`` is the runtime only once
+      `collectors.codex.session_id_of_process` proves its thread — the rollout it holds
+      open, else (a direct TUI holding none) the board's own `process_rollouts`
+      start-time match over the live Codex processes, scanned at most once per walk. A
+      Codex process proven neither way (the `--remote` TUI, `codex-code-mode-host`, an
+      ambiguous match) is passed over for the ancestor that is, and no proof anywhere
+      means ``("codex", None)``;
+    - OpenCode: a process named ``opencode`` — its session id is not readable from the
+      process, so it is always ``("opencode", None)``.
+
+    ``(None, None)`` when no runtime is found — CI, a detached helper, a test with a fake
+    config dir.
+    """
+    from fleet.collectors import claude as claude_collector, codex as codex_collector
+    from fleet.collectors import procscan
+    pid, codex_seen, live = os.getpid(), False, []
+
+    def live_codex():
+        if not live:
+            live.append(procscan.scan(harness_filter={"codex"}))
+        return live[0]
+
+    for _ in range(_MAX_ANCESTORS):
+        if not pid or pid <= 1:
+            break
+        try:
+            session = claude_collector.session_id_of_process(pid)
+        except Exception:
+            session = None
+        if session:
+            return "claude", session
+        comm = _comm(pid)
+        if comm == "codex" or comm.startswith("codex-"):
+            codex_seen = True
+            try:
+                thread = codex_collector.session_id_of_process(pid, live_codex)
+            except Exception:
+                thread = None
+            if thread:
+                return "codex", thread
+        elif comm == "opencode":
+            return "opencode", None
+        pid = _parent(pid)
+    return ("codex", None) if codex_seen else (None, None)
+
+
+def may_report(harness: str, session_id: str, *, worker=None) -> bool:
+    """The ONE decision whether this process may report ``session_id`` to herdr.
+
+    - never for a registered/background worker (D-42);
+    - Claude and Codex: the nearest runtime above this process must be proven to be on
+      ``session_id`` (see `runtime_identity`); the payload and the environment
+      (``CODEX_THREAD_ID`` included) are never the proof;
+    - OpenCode: only the harness is proven — the nearest runtime must be OpenCode — and
+      the session id is NOT checked, because OpenCode exposes none from the process. A
+      fake id under a real OpenCode ancestor is therefore still reported.
+    Unknown identity is a refusal, never a guess: the header keeps its previous text.
+    """
+    harness = str(harness or "").lower()
+    if harness not in HARNESSES or not isinstance(session_id, str) or not session_id:
+        return False
+    if worker if worker is not None else is_worker():
+        return False
+    runtime, own = runtime_identity()
+    if runtime != harness:
+        return False
+    return True if runtime == "opencode" else own == session_id
 
 
 def _runtime_name(harness: str, session_id: str) -> str:
@@ -225,13 +334,11 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
             report_session=True) -> bool:
     """Report this session's pane metadata to herdr. Always returns True (fail-soft)."""
     harness = str(harness or "").lower()
-    if harness not in HARNESSES or not session_id:
-        return True
-    if worker if worker is not None else is_worker():
-        return True
     pane = pane_id or os.environ.get("HERDR_PANE_ID", "")
     herdr = shutil.which("herdr")
     if not pane or not herdr:
+        return True
+    if not may_report(harness, session_id, worker=worker):
         return True
     title = session_title(harness, session_id)
     label, custom_title = _formatter_overrides(harness, session_id, title)
@@ -269,7 +376,11 @@ def main(argv=None) -> int:
                         help="skip report-agent-session (the runtime's own hook owns it)")
     parser.add_argument("--print", action="store_true",
                         help="print the composed metadata instead of reporting it")
+    parser.add_argument("--may-report", action="store_true",
+                        help="exit 0 when this process may report the session, else 1")
     args = parser.parse_args(argv)
+    if args.may_report:
+        return 0 if may_report(args.harness, args.session_id) else 1
     if args.print:
         agent, title = compose(args.harness, args.session_id)
         print(json.dumps({"display_agent": agent, "title": title}, ensure_ascii=False))

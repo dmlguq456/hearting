@@ -126,6 +126,12 @@ _EXPLICIT_UNSET_KEYS = (
     "AGENT_ROUTE_ID",
     "AGENT_ROUTE_NODE",
     "AGENT_ARTIFACT_ROOT",
+    # The interactive pane's herdr connection. A suite that runs the real hooks with a
+    # fake session id must not reach the live herdr server (2026-09-24: a pane header
+    # briefly showed a test's "[0d] codex").
+    "HERDR_ENV",
+    "HERDR_PANE_ID",
+    "HERDR_SOCKET_PATH",
 )
 
 
