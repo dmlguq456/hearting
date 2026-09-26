@@ -439,6 +439,7 @@ class DispatchJob:
     pgid: Optional[int] = None
     pid_identity_source: Optional[str] = None  # local | host | None (unverifiable)
     model: Optional[str] = None         # dispatch runtime model (own statusline if resolvable; else parent's, filled at render)
+    resolved_model: Optional[str] = None  # first concrete runtime model reported by this attempt
     elapsed_min: Optional[int] = None
     slug: str = ""
     cwd: str = ""
