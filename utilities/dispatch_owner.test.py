@@ -38,6 +38,19 @@ NEEDS_CLAUDE_CLI = "no claude binary: the selector's session-resume probe cannot
 
 
 class FrameAlternativeSelectionTest(unittest.TestCase):
+    def test_missing_first_attempt_is_pending_until_its_harness_is_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.touch()
+            route = {"route_id": "rt-frame-pending", "route_hash": "sha256:pending"}
+            self.assertIsNone(OWNER._first_frame_attempt(route, jobs)[0])
+            jobs.write_text("now\topen\t/r\t/w\tframe\t"
+                "route_id=rt-frame-pending,route_hash=sha256:pending,route_node=frame,"
+                "worker_type=frame,attempt_id=att-first\n")
+            self.assertIsNone(OWNER._first_frame_attempt(route, jobs)[0])
+            jobs.write_text(jobs.read_text().rstrip() + ",harness=codex\n")
+            self.assertEqual(OWNER._first_frame_attempt(route, jobs)[0]["harness"], "codex")
+
     def choose(self, first, selected, *, states=None, policy=None):
         policy = policy or {"primary": ["claude", "codex"], "relief": [],
                             "last_resort": [], "promote_relief_below": 0}
@@ -125,6 +138,12 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                      mock.patch.object(OWNER.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as launch, \
                      contextlib.redirect_stdout(io.StringIO()):
                     self.assertEqual(OWNER.main([]), 0)
+                    with mock.patch.object(OWNER, "_parse", return_value=(
+                            None, values, ["--start"], str(route_file), [])), \
+                         mock.patch.object(OWNER, "frame_harness_admission", return_value=["att-capacity"]), \
+                         mock.patch.object(OWNER, "record_frame_launch_degradation") as record:
+                        self.assertEqual(OWNER.main([]), 0)
+                        record.assert_called_once_with(route, jobs, ["att-capacity"], "att-first", other)
                 self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], other)
 
 class DispatchOwnerTests(unittest.TestCase):

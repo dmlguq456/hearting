@@ -32,6 +32,18 @@ def attempt_row(metadata,status="open"):
  return f"2026-08-25T00:00:00Z\t{status}\t/r\t/w\texecute\t{pipe}"
 
 class FrameLaunchGateTest(unittest.TestCase):
+ def test_launch_degradation_uses_existing_writer_and_write_failure_is_harmless(self):
+  with tempfile.TemporaryDirectory() as td:
+   base=Path(td); jobs=base/"jobs.log"; jobs.touch()
+   route={"route_id":"rt-launch-ledger","route_hash":"sha256:launch-ledger"}
+   D.record_frame_launch_degradation(route,jobs,["att-capacity"],"att-first","codex")
+   records=[json.loads(line) for line in (base/"degradations"/"rt-launch-ledger.jsonl").read_text().splitlines()]
+   self.assertEqual(len(records),1)
+   self.assertEqual(records[0]["writer"],"dispatch_contract.py")
+   self.assertEqual(records[0]["prior_attempt_ids"],["att-capacity"])
+   with mock.patch("dispatch_degradation.record_degradation",return_value=None):
+    self.assertIsNone(D.record_frame_launch_degradation(route,jobs,["att-capacity"],"att-first","codex"))
+
  def fixture(self, base, harnesses=("codex", "claude"), candidates=("codex", "claude")):
   route={"dispatch_contract_version":3,"route_id":"rt-frame-gate",
          "route_hash":"sha256:frame-gate","effective_intensity":"standard",

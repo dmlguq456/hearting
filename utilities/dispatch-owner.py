@@ -14,6 +14,7 @@ import sys
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
 from dispatch_contract import (DispatchContractError, frame_harness_admission,
+                               record_frame_launch_degradation,
                                parse_registry_metadata)
 
 
@@ -283,7 +284,7 @@ def _first_frame_attempt(route, jobs):
                 and meta.get("worker_type") == "frame"):
             matches.append(meta)
     if not matches or not matches[-1].get("attempt_id") or not matches[-1].get("harness"):
-        raise OwnerError("frame-first-attempt-unverifiable")
+        return None, lines
     return matches[-1], lines
 
 
@@ -879,6 +880,9 @@ def main(argv):
                 and values.get("--route-node") == "frame-alternative"):
             route = json.loads(Path(route_evidence).read_text(encoding="utf-8"))
             first, lines = _first_frame_attempt(route, jobs)
+            if first is None:
+                print("check=deferred\nreason=frame-first-attempt-pending\nchild_spawned=0")
+                return 75
             first_harness = first["harness"]
             preferred, alternate_band, alternate_relief = _prefer_other_frame_harness(
                 first_harness, selected, explicit, config_version, policy, states,
@@ -896,17 +900,8 @@ def main(argv):
             except DispatchContractError as exc:
                 raise OwnerError(f"{exc.reason}:{exc.detail}") from exc
             if proof_ids and "--start" in forwarded:
-                from dispatch_degradation import record_degradation
-                recorded = record_degradation(
-                    route_id=route["route_id"], route_hash=route["route_hash"],
-                    route_node="frame-alternative", dispatch_depth=1, writer="dispatch-owner.py",
-                    jobs=Path(jobs), fallback_hop="same-harness-headless",
-                    execution_surface="registered-headless", reason="frame-single-available-harness",
-                    prior_attempt_ids=proof_ids, attempt_trace=[first["attempt_id"]],
-                    harness=selected, detail=json.dumps({"proof_ids": proof_ids}),
-                )
-                if not recorded:
-                    raise OwnerError("frame-degradation-record-pending")
+                record_frame_launch_degradation(route, Path(jobs), proof_ids,
+                                                first["attempt_id"], selected)
         wrapper = ROOT / "adapters" / selected / "bin" / "dispatch-headless.py"
         if not os.access(wrapper, os.X_OK):
             print("\n".join(_audit("unavailable", selected, source, configured, explicit, states,

@@ -6431,6 +6431,21 @@ def frame_harness_admission(route: dict, jobs: Path, lines: list[str],
     return sorted(set(unavailable.values()) | quota_attempts)
 
 
+def record_frame_launch_degradation(route: dict, jobs: Path, proof_ids: list[str],
+                                    first_attempt: str, harness: str) -> None:
+    """Record launch-time frame degradation through the existing contract writer.
+
+    SD-93d makes this observation best effort; admission remains authoritative.
+    """
+    from dispatch_degradation import record_degradation
+    record_degradation(route_id=route["route_id"], route_hash=route["route_hash"],
+        route_node="frame-alternative", dispatch_depth=1, writer="dispatch_contract.py",
+        jobs=jobs, fallback_hop="same-harness-headless",
+        execution_surface="registered-headless", reason="frame-single-available-harness",
+        prior_attempt_ids=proof_ids, attempt_trace=[first_attempt], harness=harness,
+        detail=json.dumps({"proof_ids": proof_ids}))
+
+
 def _frame_pair_attempt_gate(route: dict, node: dict, markers: dict,
                              jobs: Path, registry_lines: list[str] | None) -> None:
     """Compare the exact completed attempts, never a declared diversity label."""
