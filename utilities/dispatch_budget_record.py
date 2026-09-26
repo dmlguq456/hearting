@@ -36,6 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dispatch_contract import resolve_agent_home  # noqa: E402
 from dispatch_contract import resolve_dispatch_state_root  # noqa: E402
+from dispatch_contract import verdict_pass  # noqa: E402
 
 SCHEMA_VERSION = 1
 RECORD_KINDS = frozenset({"reservation", "warning", "refusal"})
@@ -278,7 +279,7 @@ def complete_terminal_handoff(state_root, claim, *, jobs, terminal_commit_id):
             meta = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
             if meta.get("attempt_id") == owner:
                 rows.append((fields, meta))
-    if (len(rows) != 1 or rows[0][0][1] != "done" or rows[0][1].get("failure_class") != "pass"
+    if (len(rows) != 1 or rows[0][0][1] != "done" or not verdict_pass(rows[0][1])
             or not terminal_commit_id):
         raise TerminalHandoffConflict("terminal-owner-not-reconciled")
     root = terminal_handoff_root(state_root, owner, claim["continuation_ordinal"])

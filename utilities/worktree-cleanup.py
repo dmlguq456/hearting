@@ -488,7 +488,7 @@ def registered_job_worktrees(jobs: Path, repo: Path) -> list[Path]:
 
 
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     action = p.add_mutually_exclusive_group()
     action.add_argument("--check", action="store_true", help="evaluate only (default)")
     action.add_argument("--apply", action="store_true", help="remove eligible worktrees")

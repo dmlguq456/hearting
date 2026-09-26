@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter, deque
+import errno
 import hashlib
 import json
 import os
@@ -609,6 +610,91 @@ def parser() -> argparse.ArgumentParser:
     return value
 
 
+def _control_socket_connection_failed(path: Path | None) -> bool:
+    """True only for a hard connection failure -- the socket file is simply
+    gone (ENOENT) or nothing is listening (ECONNREFUSED). Any other outcome
+    (connected but the gateway answered "not ready", a slow accept, ...) is
+    an ordinary transient state a plain retry may still resolve, not proof
+    the receiver itself is gone."""
+    if path is None:
+        return True
+    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        connection.connect(str(path))
+    except OSError as exc:
+        return exc.errno in (errno.ENOENT, errno.ECONNREFUSED)
+    finally:
+        connection.close()
+    return False
+
+
+def _any_attempt_open(jobs: Path, attempts: set[str]) -> bool:
+    """Read-only registry check: is any monitored attempt still open/running?
+
+    An unreadable registry is treated as "still open" (conservative -- never
+    a reason to stop watching on missing evidence, LOOP §4).
+    """
+    try:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return True
+    latest: dict[str, str] = {}
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        metadata = dict(part.split("=", 1) for part in fields[5].split(",") if "=" in part)
+        attempt_id = metadata.get("attempt_id", "")
+        if attempt_id in attempts:
+            latest[attempt_id] = fields[1]
+    return any(latest.get(attempt_id, "open") in OPEN_STATES for attempt_id in attempts)
+
+
+def _receiver_unavailable_reason(args: argparse.Namespace, attempts: set[str]) -> str:
+    """The stop_check probe for a `wait_for_batch` watch (item 8, defect (4)).
+
+    Only a proven connection failure AND every monitored attempt already
+    terminal justifies giving up -- a live attempt still deserves the
+    delivery once the gateway comes back, and a connectable-but-not-ready
+    gateway is not "unavailable" (the ordinary join-deadline retry already
+    covers that).
+    """
+    if not _control_socket_connection_failed(args.control_socket):
+        return ""
+    if _any_attempt_open(args.jobs, attempts):
+        return ""
+    return "receiver-unavailable"
+
+
+def _await_notice_ack(
+    root: Path, recipient_key: str, delivery_records: list[dict[str, Any]], *, timeout: float
+) -> None:
+    """Give the still-running notice courier (`watcher`) a bounded chance to
+    claim and ack the watch-deadline notice `wait_for_batch` just recorded,
+    before this process exits without ever calling `deliver`."""
+    delivery_ids = [
+        record.get("delivery_id") for record in delivery_records
+        if isinstance(record, dict) and record.get("delivery_id")
+    ]
+    if not recipient_key or not delivery_ids:
+        return
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            records = [pending_delivery.read(root, recipient_key, did) for did in delivery_ids]
+        except (OSError, ValueError):
+            records = []
+        if records and all(
+            record is not None and record.get("state") in pending_delivery.TERMINAL_STATES
+            for record in records
+        ):
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(1.0, remaining))
+
+
 def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if args.control_socket is None:
         raise CompletionError("control-socket-missing")
@@ -642,9 +728,25 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         watcher.start()
     try:
         from dispatch_supervision import wait_for_batch
+        # The sidecar's own `--timeout` is its unfinishable-watch deadline
+        # (item 8, defect (3)): a completion service must not run forever
+        # just because the batch never settles. `stop_check` (defect (4))
+        # gives up sooner, without waiting out the full deadline, once the
+        # delivery gateway is provably gone and nothing is left to deliver
+        # for anyway.
         receipt = wait_for_batch(join=lambda selected: run_join(args, selected),
                                  attempts=attempts, jobs=args.jobs,
-                                 parent_attempt_id=delivery_parent_id(args))
+                                 parent_attempt_id=delivery_parent_id(args),
+                                 deadline=time.monotonic() + max(0.0, args.timeout),
+                                 stop_check=lambda: _receiver_unavailable_reason(args, attempts))
+        if receipt.get("state") == "watch-expired":
+            reason = receipt.get("reason") or "watch-deadline"
+            if reason == "watch-deadline" and args.parent_session_id:
+                _await_notice_ack(
+                    args.jobs.resolve(strict=False).parent, args.parent_session_id,
+                    receipt.get("delivery_records") or [], timeout=130.0,
+                )
+            return {"schema_version": 1, "status": "retryable", "reason": reason}, 75
     finally:
         if watcher is not None:
             watcher.close()

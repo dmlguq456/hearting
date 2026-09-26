@@ -1813,7 +1813,7 @@ class ManagedGateway:
                 or (
                     delivery_state == "attention"
                     and status == "done"
-                    and required_action != "inspect-done-failure"
+                    and required_action not in {"inspect-done-failure", "inspect-recovery"}
                 )
             ):
                 raise GatewayError("receipt-child-contract-invalid")

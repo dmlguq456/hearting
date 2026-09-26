@@ -725,7 +725,7 @@ def watchdog(args, now):
 
 
 def main(argv):
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     p.add_argument("operation", choices=("heartbeat", "inspect", "watchdog"))
     p.add_argument("--attempt-id", required=True); p.add_argument("--route-id", required=True)
     p.add_argument("--route-node", required=True); p.add_argument("--jobs", type=Path, required=True)

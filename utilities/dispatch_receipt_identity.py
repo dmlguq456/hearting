@@ -15,9 +15,16 @@ CANONICAL_CHILD_KEYS = frozenset({
     "delivery_classification",
 })
 NOTICE_KINDS = frozenset({"human-gate", "supervision"})
-COMPLETION_ACTIONS = frozenset({"complete-open", "inspect-done-failure", "advance-completed", "finish-workflow"})
+COMPLETION_ACTIONS = frozenset({"complete-open", "inspect-done-failure", "advance-completed",
+                                "finish-workflow", "inspect-recovery"})
+# The two closure-blocked:<gate reason> literals mirror
+# dispatch_terminal_commit._PROVEN_BLOCKED_GATE_REASONS exactly (item 8,
+# unfinishable-watch) -- a proven-permanent owner_completion_state("blocked")
+# gate is the only source of this reason, so the composed set stays closed.
 COMPLETION_REASONS = frozenset({"registry-closed", "registry-closed-marker", "terminal-observed",
-                                "row-advanced", "terminal-failure-or-unclosed"})
+                                "row-advanced", "terminal-failure-or-unclosed",
+                                "closure-blocked:completion-attempt-not-current",
+                                "closure-blocked:completion-evidence-hash-mismatch"})
 JOIN_REASONS = COMPLETION_REASONS | {"process-alive", "process-unverifiable",
                                      "terminal-commit-pending", "workflow-completion-pending"}
 

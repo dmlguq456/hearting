@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import contextlib, importlib.util, json, os, subprocess, tempfile, unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT=Path(__file__).resolve().parents[1]
 def load(name,path):
@@ -467,6 +468,51 @@ class ContinuationRetryLineageTest(WorkerRouteGuardTest):
    with self.assertRaises(G.WorkerRouteError) as ctx:
     G.validate_route_contract(narrowed, "execute", repo, repo)
    self.assertEqual(ctx.exception.reason, "route-source-commit-mismatch")
+
+
+class QualifyingSubsessionLineageDeferredTest(unittest.TestCase):
+ """C4 (S3a): the AND predicate's two success atoms via verdict_pass/success_note."""
+
+ def _row(self, *, route_id, node_id, attempt_id, status, extra):
+  meta = {"route_id": route_id, "route_node": node_id, "attempt_id": attempt_id}
+  meta.update(extra)
+  pipe = ",".join(f"{k}={v}" for k, v in meta.items())
+  return "\t".join(["2026-09-24T00:00:00Z", status, "repo", "worktree", "slug", pipe])
+
+ def _current_row(self, route_id, node_id, chain, count=2, index=2):
+  return self._row(route_id=route_id, node_id=node_id, attempt_id="att-current", status="open", extra={
+   "stage_authority": "0", "subsession_purpose": "planned", "subsession_mode": "serial",
+   "session_chain_id": chain, "subsession_index": str(index), "subsession_count": str(count),
+  })
+
+ def test_pending_deferred_predecessor_does_not_qualify(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs = Path(td) / "jobs.log"
+   route_id, node_id, chain = "rt-lineage-fixture", "execute", "ssc-fixture"
+   predecessor = self._row(route_id=route_id, node_id=node_id, attempt_id="att-pred", status="done", extra={
+    "stage_authority": "0", "subsession_purpose": "planned", "session_chain_id": chain,
+    "subsession_count": "2", "subsession_index": "1",
+    "note": "completion-deferred", "failure_class": "infrastructure",
+    "classifier_source": "registered-wrapper-completion-transient-v1",
+   })
+   jobs.write_text(self._current_row(route_id, node_id, chain) + "\n" + predecessor + "\n", encoding="utf-8")
+   with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+    self.assertFalse(G._qualifying_subsession_lineage(route_id, node_id, "att-current"))
+
+ def test_marker_bound_deferred_predecessor_qualifies(self):
+  with tempfile.TemporaryDirectory() as td:
+   jobs = Path(td) / "jobs.log"
+   route_id, node_id, chain = "rt-lineage-fixture", "execute", "ssc-fixture"
+   predecessor = self._row(route_id=route_id, node_id=node_id, attempt_id="att-pred", status="done", extra={
+    "stage_authority": "0", "subsession_purpose": "planned", "session_chain_id": chain,
+    "subsession_count": "2", "subsession_index": "1",
+    "note": "completed-marker", "failure_class": "infrastructure",
+    "classifier_source": "registered-wrapper-completion-transient-v1",
+    "completion_marker": "/artifacts/.runtime/completions/execute.json",
+   })
+   jobs.write_text(self._current_row(route_id, node_id, chain) + "\n" + predecessor + "\n", encoding="utf-8")
+   with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+    self.assertTrue(G._qualifying_subsession_lineage(route_id, node_id, "att-current"))
 
 
 if __name__=="__main__": unittest.main()

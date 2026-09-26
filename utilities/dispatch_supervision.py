@@ -16,10 +16,11 @@ from typing import Callable
 
 from dispatch_attempt_policy import decide_attempt, terminal_conflict_digest
 from dispatch_receipt_identity import receipt_digest
+from dispatch_registry_cache import registry_lines
 import dispatch_pending_delivery as pending_delivery
 
 KIND = "supervision"
-REASONS = frozenset({"owner-input-undelivered", "no-progress", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending"})
+REASONS = frozenset({"owner-input-undelivered", "no-progress", "process-unverifiable", "join-deadline", "supervisor-exited", "join-observer-failed", "terminal-evidence-conflict", "workflow-completion-pending", "closure-blocked", "watch-deadline", "receiver-unavailable"})
 
 
 class SupervisionError(ValueError):
@@ -42,7 +43,7 @@ def join_process_error(returncode: int, receipt: object, parent_attempt_id: str)
 def _rows(jobs: Path) -> dict:
     from dispatch_contract import parse_registry_metadata
     rows = {}
-    for line in jobs.read_text(encoding="utf-8").splitlines():
+    for line in registry_lines(jobs):
         fields = line.split("\t")
         if len(fields) != 6:
             continue
@@ -254,6 +255,28 @@ def render_text(receipt: dict) -> str:
                 "Explain the outstanding closure to the user; this notice authorizes no new execution. "
                 "Use inspect instead of finish to read the exact gates, cleanup state and checkpoint. "
                 "Existing transaction recovery: " + command)
+    if receipt["reason"] == "closure-blocked":
+        utility = Path(__file__).with_name("dispatch_terminal_commit.py")
+        command = (f"python3 {shlex.quote(str(utility))} inspect --jobs {shlex.quote(receipt['job_registry'])} "
+                   f"--attempt {shlex.quote(receipt['owner_attempt_id'])}")
+        return ("The owner result remains PASS, but its own workflow/route closure can never complete from "
+                "this exact attempt -- a proven permanent reason (a later attempt already claimed this route "
+                "node, or the route's completion marker no longer matches its recorded evidence), not an "
+                "ordinary in-flight wait. Retrying this attempt's closure will not help. Explain this to the "
+                "user and inspect the exact gate reason before deciding a recovery path (a fresh dispatch of "
+                "the same route node, or manual repair of the marker/evidence). Read-only diagnosis: " + command)
+    if receipt["reason"] in {"watch-deadline", "receiver-unavailable"}:
+        utility = Path(__file__).with_name("dispatch_terminal_commit.py")
+        command = (f"python3 {shlex.quote(str(utility))} finish --jobs {shlex.quote(receipt['job_registry'])} "
+                   f"--attempt {shlex.quote(receipt['owner_attempt_id'])}")
+        detail = ("The completion watch reached its own deadline (about a day) without the batch settling"
+                  if receipt["reason"] == "watch-deadline" else
+                  "The completion watch could not reach its delivery gateway, and every monitored attempt "
+                  "is already terminal")
+        return (f"{detail}, so it recorded this notice and stopped instead of running forever. The owner "
+                "result and workflow/route closure state are unchanged -- nothing was retried or discarded. "
+                "A human or the next launch must resume the completion watch; this notice alone does not. "
+                "Existing transaction recovery: " + command)
     utility = Path(__file__).resolve().with_name("dispatch-registry.py")
     operation = "resolve-terminal-conflict" if receipt["reason"] == "terminal-evidence-conflict" else "reconcile"
     commands = [f"python3 {shlex.quote(str(utility))} {operation} --jobs "
@@ -283,12 +306,25 @@ def context(receipt: dict, delivery_id: str) -> dict:
 
 def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
                    jobs: Path, parent_attempt_id: str = "", emit: Callable[[dict], None] | None = None,
-                   on_timeout: Callable[[set[str]], None] | None = None) -> dict:
+                   on_timeout: Callable[[set[str]], None] | None = None,
+                   deadline: float | None = None,
+                   stop_check: Callable[[], str] | None = None) -> dict:
     """One shared wait loop. Join deadlines are checkpoints, never death votes.
 
     Execution boundaries retain their finite budgets. The parent receives one
     durable notice for this exact batch while this controller retains the wait.
     A failed queue write is retried at the next bounded checkpoint, not discarded.
+
+    `deadline` and `stop_check` are both optional and, left `None`, leave this
+    loop's behavior exactly as before (every existing caller). A caller that
+    itself owns an unfinishable-watch budget -- one process that must not run
+    forever -- supplies one or both: `deadline` (a `time.monotonic()` value;
+    once reached after a join timeout, this records one `watch-deadline`
+    notice and returns `{"state": "watch-expired", ...}` instead of looping
+    again) and/or `stop_check` (called once per join timeout; a non-empty
+    REASONS token it returns halts the same way, under that reason). Neither
+    ever fires mid-join -- only at the same checkpoint an ordinary
+    `join-deadline` notice already used.
     """
     ordinal = 0
     while True:
@@ -302,6 +338,21 @@ def wait_for_batch(*, join: Callable[[set[str]], dict], attempts: set[str],
             # and transfer the diagnostic, without fabricating completion.
             observer_error = str(exc)
         ordinal += 1
+        halt_reason = ""
+        if not observer_error:
+            if stop_check is not None:
+                try:
+                    halt_reason = stop_check() or ""
+                except Exception as exc:
+                    observer_error = str(exc)
+            if not halt_reason and deadline is not None and time.monotonic() >= deadline:
+                halt_reason = "watch-deadline"
+        if halt_reason:
+            try:
+                records = materialize(jobs, attempts, reason=halt_reason)
+            except (OSError, ValueError, pending_delivery.PendingDeliveryError):
+                records = []
+            return {"state": "watch-expired", "reason": halt_reason, "delivery_records": records}
         notice_error = ""
         try:
             materialize(jobs, attempts,

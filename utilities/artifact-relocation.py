@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import functools
 import hashlib
 import importlib.util
 import json
@@ -2331,8 +2332,9 @@ def validate_e1_report(args: argparse.Namespace) -> int:
 # CLI
 # ---------------------------------------------------------------------------
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(allow_abbrev=False)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
 
     h1 = sub.add_parser("hygiene")
     for name in ("jobs", "routes-dir", "registry-enumeration", "registry-enumeration-seal",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compile, verify, and complete immutable capability routes."""
 from __future__ import annotations
-import argparse, base64, contextlib, fcntl, hashlib, importlib.util, json, os, re, shlex, shutil, subprocess, sys, tempfile, uuid
+import argparse, base64, contextlib, fcntl, functools, hashlib, importlib.util, json, os, re, shlex, shutil, subprocess, sys, tempfile, uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +26,9 @@ from dispatch_contract import (
     FALLBACK_HOPS,
     PARENT_TRANSPORT_BY_DISPATCH_DEPTH,
     SUCCESS_NOTES,
+    deferred_completion,
+    verdict_pass,
+    success_note,
     WRAPPER_PARENT_SANDBOXES,
     WRAPPER_TRANSPORTS,
     _atomic_registry_replace,
@@ -3797,7 +3800,7 @@ def _owner_terminal_observation(route,node,*,jobs=None):
         if (binding is None or binding.route_id!=route["route_id"] or binding.route_hash!=route["route_hash"]
                 or meta.get("registered_worker")!="1"):
             return absent("owner-route-identity-mismatch")
-        if fields[1]!="done" or meta.get("failure_class")!="pass":
+        if fields[1]!="done" or not verdict_pass(meta):
             return absent("owner-terminal-not-pass")
         if completion_conflict_attempt({"attempt_id":meta["attempt_id"]},["\t".join(fields)]):
             return absent("terminal-evidence-conflict")
@@ -4961,7 +4964,7 @@ def _marker_identity_row(route, node, node_id, gate, *, jobs=None, exact_termina
             if meta.get("route_id") == route["route_id"] and meta.get("route_node") == node_id:
                 matches.append((fields, meta))
         if (not matches or matches[-1][0][1] != "done"
-                or matches[-1][1].get("failure_class") != "pass"
+                or not verdict_pass(matches[-1][1])
                 or matches[-1][1].get("attempt_id") != marker.get("attempt_id")
                 or completion_attempt_readiness(route, node, marker, Path(jobs)).state != "ready"):
             return {"passed": False, "reason": "completion-attempt-not-current"}
@@ -5758,10 +5761,16 @@ def _complete_node_locked(
             # verdict (failure_class=pass) is marker-eligible: publish the marker and append
             # its evidence to THIS row only, leaving the `done` status untouched. Every other
             # terminal note, and any non-pass verdict, keeps the fail-closed refusal.
+            # 6번: a row the completion budget closed typed-deferred
+            # (note=completion-deferred, no marker yet) is the same shape --
+            # a checked writer already committed the row, only the marker
+            # publication is outstanding -- so it is marker-eligible too.
             marker_eligible=(
                 already_closed
-                and row_note=="completed-supervisor"
-                and row_metadata.get("failure_class")=="pass"
+                and (
+                    (row_note=="completed-supervisor" and row_metadata.get("failure_class")=="pass")
+                    or deferred_completion(row_metadata)=="pending"
+                )
             )
             # OPERATIONS §5.10 owner-closure extension: a review row that ended
             # `completed-review-blocking` is marker-eligible only through the
@@ -6150,8 +6159,8 @@ def complete_subsession_stage(route, node, node_id, evidence, manifest_path, job
             raise ValueError(f"subsession attempt identity mismatch:{session['attempt_id']}")
         if (
             fields[1]!="done"
-            or metadata.get("note") not in SUCCESS_NOTES
-            or metadata.get("failure_class")!="pass"
+            or not success_note(metadata)
+            or not verdict_pass(metadata)
         ):
             raise ValueError(f"subsession not semantic PASS:{session['attempt_id']}")
         process=attempt_process_quiescence(metadata)
@@ -6630,7 +6639,9 @@ def _emit_compiled_route(a,route,artifact_root,output=None):
 
 def main():
     from dispatch_parent_completion import default_parent_harness
-    p=argparse.ArgumentParser(); sub=p.add_subparsers(dest="command",required=True)
+    p=argparse.ArgumentParser(allow_abbrev=False)
+    sub=p.add_subparsers(dest="command",required=True,
+                         parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     c=sub.add_parser("compile"); c.add_argument("--capability",required=True); c.add_argument("--capability-mode",default="default")
     c.add_argument("--slug",required=True)
     c.add_argument("--campaign-key",help="explicit work stream passed to the producer owner")

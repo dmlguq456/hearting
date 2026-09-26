@@ -123,9 +123,11 @@ class ManagedCompletionTest(unittest.TestCase):
         self.jobs = self.base / "jobs.log"
         self.control_path = self.base / "control.sock"
         self.join = self.base / "fake_join.py"
+        self.join_calls = self.base / "join-calls.log"
         self.join.write_text(
             """\
-import json, sys
+import json, sys, pathlib
+pathlib.Path(__file__).with_name('join-calls.log').open('a').write('x\\n')
 mode = sys.argv[1]
 if '--parent-session-id' in sys.argv:
     identity_key = 'parent_session_id'
@@ -142,11 +144,13 @@ children = [
         'readiness': 'ready' if state == 'ready' else 'pending',
         'reason': (
             'terminal-observed' if mode == 'terminal'
+            else 'closure-blocked:completion-attempt-not-current' if mode == 'closure-blocked'
             else 'registry-closed' if state == 'ready'
             else 'process-alive'
         ),
         'required_action': (
             'complete-open' if mode in {'timeout', 'terminal'}
+            else 'inspect-recovery' if mode == 'closure-blocked'
             else 'advance-completed'
         ),
         'slug': 'child',
@@ -170,6 +174,7 @@ raise SystemExit(3 if state == 'timeout' else 0)
         *,
         mode: str = "ready",
         batch: str = "batch-1",
+        timeout: str = "0.1",
     ) -> list[str]:
         command = [
             sys.executable,
@@ -185,7 +190,7 @@ raise SystemExit(3 if state == 'timeout' else 0)
             "--interval",
             "0.01",
             "--timeout",
-            "0.1",
+            timeout,
             "--join-command",
             f"{sys.executable} {self.join} {mode}",
         ]
@@ -363,7 +368,13 @@ raise SystemExit(3 if state == 'timeout' else 0)
         self.jobs.write_text(row(attempts[0], harness="codex", status="open")
                              + row(attempts[1], harness="claude", status="open"), encoding="utf-8")
         before = self.jobs.read_bytes()
-        process = subprocess.Popen(self.command(attempts, mode="timeout"),
+        # `--timeout` also seeds the sidecar's own unfinishable-watch deadline
+        # (item 8) now, distinct from an ordinary per-join timeout the fake
+        # join script below ignores entirely (it always returns immediately)
+        # -- a large value here keeps this within-process-lifetime assertion
+        # meaningful instead of exercising the deadline this test is not
+        # about (see test_sidecar_stops_at_own_deadline for that).
+        process = subprocess.Popen(self.command(attempts, mode="timeout", timeout="30"),
                                    text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             time.sleep(0.7)
@@ -374,6 +385,70 @@ raise SystemExit(3 if state == 'timeout' else 0)
             process.terminate()
             out, err = process.communicate(timeout=5)
         self.assertNotIn('"status": "delivered"', out)
+
+    def test_sidecar_stops_at_own_deadline(self) -> None:
+        # plan.md item 8, defect (3): `--timeout` is now also the sidecar's
+        # own unfinishable-watch deadline -- a join that never settles must
+        # not keep this process running forever, unlike the ordinary
+        # "keeps retaining the completion carrier" case above.
+        attempts = ["att-a", "att-b"]
+        self.jobs.write_text(row(attempts[0], harness="codex", status="open")
+                             + row(attempts[1], harness="claude", status="open"), encoding="utf-8")
+        result = subprocess.run(
+            self.command(attempts, mode="timeout", timeout="0.05"),
+            text=True, capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "retryable")
+        self.assertEqual(payload["reason"], "watch-deadline")
+        # No gateway was ever contacted -- the deadline path returns before
+        # `normalize_receipt`/`deliver_with_retry` run at all.
+        self.assertFalse(self.control_path.exists())
+
+    def test_sidecar_stops_when_receiver_gone_and_rows_terminal(self) -> None:
+        # plan.md item 8, defect (4): the gateway is unreachable (ENOENT --
+        # no server was ever started at this control-socket path) and every
+        # monitored attempt is already terminal, so the sidecar gives up on
+        # the very first join timeout instead of waiting out its own
+        # deadline (deliberately set far larger than this test's runtime).
+        attempts = ["att-a", "att-b"]
+        self.jobs.write_text(row(attempts[0], harness="codex", status="done")
+                             + row(attempts[1], harness="claude", status="done"), encoding="utf-8")
+        result = subprocess.run(
+            self.command(attempts, mode="timeout", timeout="30"),
+            text=True, capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 75, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "retryable")
+        self.assertEqual(payload["reason"], "receiver-unavailable")
+
+    def test_sidecar_delivers_closure_blocked_receipt_once_without_relaunching_join(self) -> None:
+        # item 8, unfinishable-watch: when the join itself already returns a
+        # typed ready receipt for a proven-permanent block (closure-blocked),
+        # the sidecar must deliver it on the very first join call and exit --
+        # not wait out its own --timeout deadline (set far larger than this
+        # test's runtime) or call the join a second time.
+        attempts = ["att-a"]
+        self.jobs.write_text(row(attempts[0], harness="codex", status="done"), encoding="utf-8")
+        server = ControlServer(self.control_path)
+        self.addCleanup(server.close)
+        result = subprocess.run(
+            self.command(attempts, mode="closure-blocked", timeout="30"),
+            text=True, capture_output=True, timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertTrue(server.called.wait(2))
+        assert server.request is not None
+        child = server.request["receipt"]["children"][0]
+        self.assertEqual(child["reason"], "closure-blocked:completion-attempt-not-current")
+        self.assertEqual(child["required_action"], "inspect-recovery")
+        self.assertEqual(
+            self.join_calls.read_text(encoding="utf-8").count("x\n"), 1,
+        )
 
     def test_terminal_observed_open_child_keeps_actionable_status(self) -> None:
         self.jobs.write_text(

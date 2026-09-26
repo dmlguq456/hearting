@@ -41,6 +41,7 @@ from dispatch_completion_join import (
     materialize_after_terminal_close,
 )
 from dispatch_degradation import record_degradation
+from dispatch_supervisor_terminal import missing_result_terminal
 
 
 def attempt_record(
@@ -350,15 +351,19 @@ def watch(args: argparse.Namespace) -> int:
             ).deferred
         )
 
+    # One classifier decides what "no result" means: a plain dead-missing-
+    # result for every harness but OpenCode, or -- when the attempt's exact
+    # session binds to one session-scoped ERROR line in the OpenCode server
+    # log -- a typed capacity/auth close with capacity_log evidence attached.
+    terminal = missing_result_terminal(
+        {**metadata, "worktree": fields[3], "started_at": fields[0]}
+    )
     closed = close_attempt_row_if(
         args.jobs,
         args.attempt_id,
-        "dead-missing-result",
+        terminal.note,
         still_missing_result,
-        evidence={
-            "classifier_source": "dispatch-reap-missing-result-v1",
-            "reconcile_reason": "governed-process-group-drained",
-        },
+        evidence=terminal.evidence(),
     )
     if closed:
         materialize_after_terminal_close(args.jobs, args.attempt_id)

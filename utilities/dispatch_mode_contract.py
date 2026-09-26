@@ -19,6 +19,42 @@ _SCALAR = re.compile(r"^[a-z][a-z0-9-]*$")
 _WORKER_MODE = re.compile(r"^[a-z][a-z0-9-]*/[a-z][a-z0-9-]*$")
 RESERVED_UNITS = frozenset({"_kernel/owner", "_kernel/resource"})
 
+# Single source for the qa axis (CONVENTIONS §1.1 mapping table). `--qa` is not
+# a user-facing flag; every caller derives it from `--intensity` here, and an
+# explicit legacy value is accepted only when it already matches the derived
+# one.
+QA_LEVELS = ("quick", "light", "standard", "thorough", "adversarial")
+QA_FROM_INTENSITY = {
+    "direct": "light",
+    "quick": "quick",
+    "standard": "standard",
+    "strong": "standard",
+    "thorough": "thorough",
+    "adversarial": "adversarial",
+}
+
+
+def resolve_qa(intensity: str, explicit: str | None = None) -> str:
+    try:
+        derived = QA_FROM_INTENSITY[intensity]
+    except KeyError:
+        raise _error(
+            "invalid-dispatch-intensity",
+            intensity=intensity,
+            allowed_intensity=",".join(QA_FROM_INTENSITY),
+        ) from None
+    if explicit is None:
+        return derived
+    if explicit not in QA_LEVELS:
+        raise _error(
+            "invalid-dispatch-qa",
+            qa=explicit,
+            allowed_qa=",".join(QA_LEVELS),
+        )
+    if explicit != derived:
+        raise _error("qa-intensity-mismatch", explicit=explicit, derived=derived)
+    return derived
+
 
 @dataclass(frozen=True)
 class DispatchModeContractError(ValueError):

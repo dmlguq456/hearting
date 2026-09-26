@@ -62,6 +62,7 @@ from dispatch_supervisor_terminal import (
     SupervisorTerminal,
     classify_codex_result,
     classify_supervisor_error,
+    codex_turn_failure_terminal,
     reconcile_supervisor_terminal,
 )
 
@@ -98,6 +99,66 @@ SHARED_HARVEST_SURFACE = harvest_surface(__file__)
 
 class SupervisorError(RuntimeError):
     """The runtime completion bridge could not preserve its contract."""
+
+
+class TurnFailed(SupervisorError):
+    """A structured Codex TurnError closed the turn.
+
+    Carries the normalized `dispatch.supervisor.turn.failed` payload the
+    event loop already logged before raising, so the catch block can hand it
+    straight to `codex_turn_failure_terminal` -- the same function the
+    post-exit log reader calls on the identical logged row.
+    """
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        super().__init__("app-server-turn-failed")
+        self.payload = payload
+
+
+def _normalize_codex_error_info(raw: Any) -> Any:
+    """Normalize a raw CodexErrorInfo into the shape logged as `codex_error_info`.
+
+    The protocol carries either a bare string discriminant (`"unauthorized"`,
+    `"serverOverloaded"`, ...) or a single-key object wrapping detail,
+    `{<kind>: {httpStatusCode: N, ...}}`. Both are reduced to the vocabulary
+    `codex_turn_failure_terminal` reads back: the bare string unchanged, or
+    `{"kind": <kind>, "http_status": <N or None>}`. Any other shape is
+    unknown and normalizes to None rather than guessed.
+    """
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, dict) and len(raw) == 1:
+        ((kind, detail),) = raw.items()
+        if not isinstance(kind, str):
+            return None
+        http_status = detail.get("httpStatusCode") if isinstance(detail, dict) else None
+        return {"kind": kind, "http_status": http_status if isinstance(http_status, int) else None}
+    return None
+
+
+def _turn_failed_payload(turn_id: str, error: dict[str, Any] | None) -> dict[str, Any]:
+    """Build the bounded `dispatch.supervisor.turn.failed` log row.
+
+    `message`/`additional_details` are each capped at 400 chars with
+    newlines/commas normalized (registry-row-safe, matching
+    `classify_supervisor_error`'s existing `reason[:240]` convention); the
+    whole payload stays far under the 4 KiB bound from those two caps alone.
+    """
+    error = error if isinstance(error, dict) else {}
+    message = str(error.get("message") or "")[:400].replace("\n", " ").replace(",", ";")
+    details_raw = error.get("additionalDetails")
+    details = (
+        str(details_raw)[:400].replace("\n", " ").replace(",", ";")
+        if details_raw not in (None, "")
+        else ""
+    )
+    return {
+        "type": "dispatch.supervisor.turn.failed",
+        "turn_id": turn_id,
+        "codex_error_info": _normalize_codex_error_info(error.get("codexErrorInfo")),
+        "message": message,
+        "additional_details": details,
+    }
 
 
 def emit(value: dict[str, Any]) -> None:
@@ -663,6 +724,7 @@ def run_turn(
     emit({"type": "dispatch.supervisor.turn.started", "thread_id": thread_id, "turn_id": turn_id})
     final_text: str | None = None
     final_item: dict[str, Any] | None = None
+    turn_error: dict[str, Any] | None = None
     while True:
         event = server.next_event()
         if "id" in event and "method" in event:
@@ -670,6 +732,17 @@ def run_turn(
         method = event.get("method")
         raw_params = event.get("params")
         event_params = raw_params if isinstance(raw_params, dict) else {}
+        # The exact notification method that carries a same-turn TurnError
+        # ahead of `turn/completed` is not confirmed from observed traffic
+        # (plan.md item 4 sampling found zero structured-error rows); match
+        # on shape (this turn's id + an `error` object) rather than bet on
+        # one method name, so this still works whatever that method is
+        # called. `turn/completed.turn.error` below remains the primary,
+        # confirmed source either way.
+        if event_params.get("turnId") == turn_id and isinstance(
+            event_params.get("error"), dict
+        ):
+            turn_error = event_params["error"]
         if (method == "thread/tokenUsage/updated"
                 and event_params.get("threadId") == thread_id
                 and event_params.get("turnId") == turn_id):
@@ -702,7 +775,15 @@ def run_turn(
             emit({"type": "dispatch.supervisor.turn.completed", "thread_id": thread_id,
                   "turn_id": turn_id, "status": completed.get("status")})
             if completed.get("status") != "completed":
-                raise SupervisorError("app-server-turn-failed")
+                raw_completed_error = completed.get("error")
+                error = (
+                    raw_completed_error
+                    if isinstance(raw_completed_error, dict)
+                    else turn_error
+                )
+                payload = _turn_failed_payload(turn_id, error)
+                emit(payload)
+                raise TurnFailed(payload)
             if control is not None:
                 control.completed(turn_id)
             return final_text, final_item
@@ -1350,6 +1431,16 @@ def main(argv: list[str] | None = None) -> int:
             return 0 if terminal.failure_class == "pass" else 3
     except (DispatchContractError, JoinContractError, SupervisorError) as exc:
         lease_exit = (type(exc), exc, exc.__traceback__)
+        if isinstance(exc, TurnFailed):
+            # The structured payload (and its dispatch.supervisor.turn.failed
+            # log row) was already emitted where it was raised -- classify it
+            # with the same function the post-exit log reader will use, then
+            # emit the plain error event every other SupervisorError gets.
+            terminal = codex_turn_failure_terminal(exc.payload)
+            if not reconcile(args, terminal):
+                return 70
+            emit({"type": "dispatch.supervisor.error", "reason": str(exc)})
+            return 70
         reason = exc.reason if isinstance(exc, DispatchContractError) else str(exc)
         terminal = classify_supervisor_error("codex", reason)
         if not reconcile(args, terminal):

@@ -1079,7 +1079,6 @@ def wrapper_command(
         "--slug", args.slug,
         "--capability", route["capability"],
         "--capability-mode", route["capability_mode"],
-        "--qa", args.qa,
         "--intensity", route["effective_intensity"],
         "--dispatch-depth", "2",
         "--parent", args.parent,
@@ -1112,6 +1111,10 @@ def wrapper_command(
     retry_of = (capacity_prior or {}).get("attempt_id") or getattr(args, "automatic_retry_of", "")
     if retry_of:
         command += ["--automatic-retry-of", retry_of]
+    if args.qa:
+        # Omitted when unset: the wrapper derives it from --intensity
+        # (dispatch_mode_contract.resolve_qa, CONVENTIONS §1.1, single SoT).
+        command += ["--qa", args.qa]
     unit = node.get("unit") or ""
     if unit and not unit.startswith("_kernel/"):
         command += ["--worker-mode", unit]
@@ -1459,7 +1462,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
     p.add_argument("--capability-mode")
     p.add_argument("--worker-mode")
     p.add_argument("--mode", help="legacy scalar capability mode or family/mode worker projection")
-    p.add_argument("--qa", default="standard")
+    p.add_argument("--qa", default=None)
     p.add_argument("--worker-role")
     p.add_argument("--model-role")
     p.add_argument("--prompt-file", type=Path)

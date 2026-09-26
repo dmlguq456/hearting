@@ -250,5 +250,126 @@ class OpencodeGap1TerminalClassificationTest(unittest.TestCase):
             self.assertIn(drifted.note, {"dead-protocol", "dead-runtime-exit"})
 
 
+class RuntimeFailureClassifierTest(unittest.TestCase):
+    """plan.md item 4: one shared classify_runtime_failure, structured-code-first."""
+
+    def test_runtime_failure_structured_usage_limit_is_capacity(self):
+        capacity = SUPERVISOR.classify_runtime_failure(
+            "codex", event="turn.failed", process_exit=70,
+            structured_code="usageLimitExceeded",
+        )
+        self.assertEqual(capacity.note, "dead-capacity")
+        self.assertEqual(capacity.failure_class, "capacity")
+        bad_request = SUPERVISOR.classify_runtime_failure(
+            "codex", event="turn.failed", process_exit=70, structured_code="badRequest",
+        )
+        self.assertEqual(bad_request.note, "dead-runtime-error")
+        self.assertEqual(bad_request.failure_class, "runtime")
+        # serverOverloaded is transient overload, not a rate/usage limit --
+        # deliberately excluded from the capacity structured codes (plan.md
+        # §2 "8번" table judgment carried over to item 4).
+        overloaded = SUPERVISOR.classify_runtime_failure(
+            "codex", event="turn.failed", process_exit=70, structured_code="serverOverloaded",
+        )
+        self.assertEqual(overloaded.failure_class, "runtime")
+        via_status = SUPERVISOR.classify_runtime_failure(
+            "codex", event="turn.failed", process_exit=70, status="429",
+        )
+        self.assertEqual(via_status.note, "dead-capacity")
+        auth = SUPERVISOR.classify_runtime_failure(
+            "codex", event="turn.failed", process_exit=70, structured_code="unauthorized",
+        )
+        self.assertEqual(auth.note, "dead-auth")
+        self.assertEqual(auth.failure_class, "auth")
+
+    def test_session_result_behaviour_unchanged(self):
+        # Pinning guard: classify_session_result's claude/opencode behaviour
+        # must not move a single case after the failure branch was factored
+        # out into classify_runtime_failure.
+        capacity = SUPERVISOR.classify_session_result(
+            {"is_error": True, "result": "You've hit your usage limit"}, 1, runtime="claude",
+        )
+        self.assertEqual((capacity.note, capacity.failure_class), ("dead-capacity", "capacity"))
+        status_capacity = SUPERVISOR.classify_session_result(
+            {"is_error": True, "error": {"status": 429}}, 1, runtime="opencode",
+        )
+        self.assertEqual(status_capacity.note, "dead-capacity")
+        self.assertEqual(status_capacity.api_status, "429")
+        auth = SUPERVISOR.classify_session_result(
+            {"is_error": True, "result": "invalid api key"}, 1, runtime="claude",
+        )
+        self.assertEqual((auth.note, auth.failure_class), ("dead-auth", "auth"))
+        generic = SUPERVISOR.classify_session_result(
+            {"is_error": True, "result": "something else broke"}, 1, runtime="opencode",
+        )
+        self.assertEqual((generic.note, generic.failure_class), ("dead-runtime-error", "runtime"))
+        passed = SUPERVISOR.classify_session_result(
+            {"is_error": False, "subtype": "success",
+             "result": "artifact: -\nverdict: PASS\nblocker: none"},
+            0, runtime="claude",
+        )
+        self.assertEqual(passed.note, "completed-supervisor")
+
+    def test_supervisor_log_reader_agrees_on_codex_capacity(self):
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "att.codex.jsonl"
+            rows = [
+                {
+                    "type": "dispatch.supervisor.turn.failed",
+                    "turn_id": "turn-1",
+                    "codex_error_info": "usageLimitExceeded",
+                    "message": "You've hit your usage limit",
+                    "additional_details": "Resets in 13 days",
+                },
+                {"type": "dispatch.supervisor.error", "reason": "app-server-turn-failed"},
+            ]
+            log.write_text(
+                "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8"
+            )
+            result = SUPERVISOR.classify_supervisor_log(str(log), "codex")
+            self.assertEqual(result.note, "dead-capacity")
+            self.assertEqual(result.failure_class, "capacity")
+            # The live raiser's own answer, from the same payload dict, must
+            # be byte-identical -- the one-classifier guarantee this exists
+            # for.
+            live = SUPERVISOR.codex_turn_failure_terminal(rows[0])
+            self.assertEqual(result, live)
+
+    def test_missing_result_opencode_capacity(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            attempt_log = base / "att.opencode.jsonl"
+            attempt_log.write_text(
+                json.dumps({"type": "step_start", "sessionID": "ses_abc123"}) + "\n",
+                encoding="utf-8",
+            )
+            server_log_dir = base / ".dispatch" / "opencode-runtime" / "att-1" / "data" / "opencode" / "log"
+            server_log_dir.mkdir(parents=True)
+            server_log = server_log_dir / "opencode.log"
+            server_log.write_text(
+                "\n".join(json.dumps(row) for row in [
+                    {"level": "ERROR", "time": "2026-09-24T00:00:05Z",
+                     "session": {"id": "ses_abc123"},
+                     "error": {"error": "Monthly usage limit reached. Resets in 13 days"}},
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            metadata = {
+                "harness": "opencode", "attempt_id": "att-1", "worktree": str(base),
+                "log_file": str(attempt_log), "started_at": "2026-09-24T00:00:00Z",
+            }
+            result = SUPERVISOR.missing_result_terminal(metadata)
+            self.assertEqual(result.note, "dead-capacity")
+            self.assertEqual(result.failure_class, "capacity")
+            self.assertEqual(result.capacity_log, str(server_log))
+            # No matching evidence at all -- stays the conservative default.
+            fallback = SUPERVISOR.missing_result_terminal(
+                {"harness": "opencode", "attempt_id": "att-1", "worktree": str(base),
+                 "log_file": str(attempt_log), "started_at": "2099-01-01T00:00:00Z"}
+            )
+            self.assertEqual(fallback.note, "dead-missing-result")
+            self.assertEqual(fallback.capacity_log, "")
+
+
 if __name__ == "__main__":
     unittest.main()

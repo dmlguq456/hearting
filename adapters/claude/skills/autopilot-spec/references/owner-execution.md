@@ -1,6 +1,6 @@
 # autopilot-spec
 
-Create or update a product or technical blueprint without implementing the product itself. Store outputs under `<artifact-root>/spec/` using the three-tier output convention (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`) and plain names without numeric prefixes: `prd.md` as the always-current T1 document, plus `stack.md`, `design/`, `ship.md`, `pipeline_state.yaml`, and `_internal/`. Resolve `<artifact-root>` using the workspace assumption (`<agent-home>/core/CONVENTIONS.md#51-workspace-assumption`).
+Create or update a product or technical blueprint without implementing the product itself. While the cutover is inactive, store outputs under `<artifact-root>/spec/`; once active, every durable artifact goes under the open cycle's `<cycle_dir>/artifacts/spec/...` (`AGENT_ARTIFACT_OUTPUT_DIR`, the resolved path a worker's own prompt already carries — `capabilities/autopilot-spec.md#L113-114`). Use the three-tier output convention (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`) and plain names without numeric prefixes: `prd.md` as the always-current T1 document, plus `stack.md`, `design/`, `ship.md`, `pipeline_state.yaml`, and `_internal/`. Resolve `<artifact-root>` using the workspace assumption (`<agent-home>/core/CONVENTIONS.md#51-workspace-assumption`).
 
 ## Intake Gate
 

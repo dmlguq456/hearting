@@ -29,6 +29,8 @@ from types import MappingProxyType
 from route_identity import registered_node_identity
 from governor_identity import close_witness, create_witness
 from dispatch_attempt_policy import (decide_attempt, SUBSESSION_NOTE, SUCCESS_NOTES, committed_outcome,
+                                     deferred_completion, verdict_pass, success_note,
+                                     DEFERRED_COMPLETION_NOTE, DEFERRED_COMPLETION_SOURCE,
                                      terminal_conflict_identity, terminal_conflicts, terminal_conflict_pending)
 from dispatch_receipt_identity import receipt_digest as shared_receipt_digest, unseal_receipt
 
@@ -6329,7 +6331,7 @@ def _frame_capacity_failures(route: dict, lines: list[str], harnesses: set[str])
             latest[meta["harness"]] = (fields, meta)
     unavailable = {}
     for harness, (fields, meta) in latest.items():
-        if fields[1] != "done" or terminal_conflict_pending(meta) or meta.get("failure_class") == "pass":
+        if fields[1] != "done" or terminal_conflict_pending(meta) or verdict_pass(meta):
             continue
         if attempt_process_quiescence(meta, terminal_receipt=True).state != "quiescent":
             continue
@@ -7918,7 +7920,7 @@ def row_is_subsession(metadata: dict[str, str]) -> bool:
 
 def _marker_bound_row_verdict(metadata: dict[str, str]) -> str:
     failure_class = metadata.get("failure_class", "").lower()
-    if failure_class == "pass" or metadata.get("note") in SUCCESS_NOTES:
+    if verdict_pass(metadata) or success_note(metadata):
         return "PASS"
     if failure_class == "fail":
         return "FAIL"

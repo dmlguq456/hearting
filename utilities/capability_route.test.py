@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import contextlib, hashlib, importlib.util, io, json, os, re, shutil, subprocess, sys, tempfile, unittest
+import contextlib, hashlib, importlib.util, io, json, os, re, shutil, signal, subprocess, sys, tempfile, threading, time, unittest
 from pathlib import Path
 from unittest import mock
 
@@ -3382,6 +3382,51 @@ class TestContinuation(unittest.TestCase):
    return True
   return False
 
+ def test_complete_accepts_completion_deferred_row(self):
+  # 6번 (S3a): a row the completion budget closed typed-deferred (budget
+  # exhausted, no marker published yet) is marker-eligible the same way an
+  # already-closed `completed-supervisor` row is -- `complete` must publish
+  # the marker and append `note=completed-marker` instead of refusing
+  # `attempt-row-terminal-without-completion`.
+  with tempfile.TemporaryDirectory() as tmp:
+   previous_jobs=os.environ.get("AGENT_DISPATCH_JOBS")
+   jobs=Path(tmp)/"state"/"jobs.log"; jobs.parent.mkdir(parents=True)
+   os.environ["AGENT_DISPATCH_JOBS"]=str(jobs)
+   try:
+    artifact=Path(tmp)/"artifacts"
+    source=self._source(artifact)
+    node=next(row for row in source["nodes"] if row["id"]=="execute")
+    attempt_id="att-deferred-complete"
+    meta={
+     "attempt_id":attempt_id,"attempt_schema_version":"2",
+     "dispatch_depth":str(node["dispatch_depth"]),
+     "transport":"headless","execution_surface":"registered-headless",
+     "registered_worker":"1","fallback_hop":"same-harness-headless",
+     "route_id":source["route_id"],"route_hash":source["route_hash"],
+     "route_node":node["id"],
+     "note":"completion-deferred","failure_class":"infrastructure",
+     "classifier_source":"registered-wrapper-completion-transient-v1",
+    }
+    pipe=",".join(f"{k}={v}" for k,v in meta.items())
+    jobs.write_text("\t".join([
+     "2026-09-24T00:00:00Z","done",str(tmp),str(tmp),"slug",pipe,
+    ])+"\n",encoding="utf-8")
+    evidence=Path(tmp)/"evidence"/"execute.md"
+    evidence.parent.mkdir(parents=True,exist_ok=True)
+    evidence.write_text("execute exact output\n",encoding="utf-8")
+    marker,row=R.complete_node(source,node,node["id"],evidence,jobs=jobs,attempt_id=attempt_id)
+    self.assertIsNotNone(marker)
+    line=jobs.read_text(encoding="utf-8").strip()
+    self.assertIn(f"attempt_id={attempt_id}",line)
+    self.assertIn("note=completed-marker",line)
+    self.assertIn("completion_marker=",line)
+    # DR-1: the deferred row's failure_class was non-empty (infrastructure),
+    # so DR-1's "only when empty" rule leaves it untouched.
+    self.assertIn("failure_class=infrastructure",line)
+   finally:
+    if previous_jobs is None: os.environ.pop("AGENT_DISPATCH_JOBS",None)
+    else: os.environ["AGENT_DISPATCH_JOBS"]=previous_jobs
+
  def test_c_pin_and_grounding_must_name_one_commit(self):
   # S5: the pin (`git rev-parse HEAD`) and the grounding (`source_revision`) are
   # read by different functions at different moments -- exactly defect C's shape.
@@ -6279,6 +6324,47 @@ class RouteChainWriterTest(ComposeRouteTest):
    os.environ.pop("AGENT_DISPATCH_DEPTH",None)
    identity=R._route_chain_identity("continuation",{"source_route_id":"rt-x"})
    self.assertEqual(identity,("claude","sid-depth0",0,None))
+
+
+class CompletionLockKilledHolderTest(unittest.TestCase):
+ """6번 잠금 회귀: a killed lock holder must never require the lock file's
+ deletion. The completion lock is `open("a")` + `flock(LOCK_EX)` on a file
+ that is always 0 bytes; the kernel releases a process's flock the instant
+ it exits for any reason, SIGKILL included. This test documents that
+ premise directly -- it is expected to pass both before and after this
+ cycle's other changes, because deleting the lock file was never
+ implemented (intent explicitly forbids it)."""
+
+ def test_killed_completion_lock_holder_does_not_block_next_complete(self):
+  with tempfile.TemporaryDirectory() as td:
+   lock_path=Path(td)/".execute.completion.lock"
+   holding=os.path.join(td,"holding")
+   pid=os.fork()
+   if pid==0:
+    try:
+     with R._exclusive_lock(lock_path):
+      Path(holding).write_text("1")
+      time.sleep(30)
+    finally:
+     os._exit(0)
+   deadline=time.monotonic()+5
+   while not os.path.exists(holding) and time.monotonic()<deadline:
+    time.sleep(0.02)
+   self.assertTrue(os.path.exists(holding),"child never signalled that it held the lock")
+   os.kill(pid,signal.SIGKILL)
+   os.waitpid(pid,0)
+   result={}
+   def acquire():
+    with R._exclusive_lock(lock_path):
+     result["acquired"]=True
+   thread=threading.Thread(target=acquire,daemon=True)
+   thread.start()
+   thread.join(timeout=2.0)
+   self.assertTrue(result.get("acquired"),
+    "the lock must be immediately available once its killed holder's process exits")
+   self.assertTrue(lock_path.is_file())
+   self.assertFalse(lock_path.is_symlink())
+   self.assertEqual(lock_path.stat().st_size,0,"the lock file is never written to, only held")
 
 
 if __name__=="__main__": unittest.main()

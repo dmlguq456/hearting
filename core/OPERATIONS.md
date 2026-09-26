@@ -658,6 +658,25 @@ available, the workflow uses a checked external supervisor rather than a model
 sleep loop, a fixed delay, or an arbitrary detached shell that claims to finish
 the work.
 
+**A completion watch owns one unfinishable-watch budget, not an unbounded
+retry.** A registered completion sidecar's own `--timeout` is its watch
+deadline, not only its per-join timeout: once that deadline is reached after
+a join returns no result, the watch records one `watch-deadline` supervision
+notice, gives its notice courier a bounded window to claim and acknowledge
+it, and exits `retryable` without ever calling `deliver` — a human or the
+next launch resumes the watch. The same sidecar also gives up sooner, before
+its deadline, once its own delivery gateway is provably unreachable (a hard
+connection failure, not merely "not yet ready") and every monitored attempt
+is already terminal, recording a `receiver-unavailable` notice instead.
+Neither path deletes a completion-lock file, kills a live process, or
+retries the underlying work; both leave the committed PASS and route state
+exactly as found. A proven-permanent finishing block — a later attempt
+already claimed the same route node, or the route's own completion marker no
+longer matches its recorded evidence — is typed `blocked`, distinct from
+ordinary in-flight `pending`: the watch stops re-driving settlement for that
+one attempt (retrying cannot resolve it) while a distinct `closure-blocked`
+notice tells a human to inspect and recover it.
+
 **Visibility is a requirement, not a nicety.** Independently of capability,
 Fleet and the status surfaces expose the workflow, its current stage, its child
 resource jobs, resource class and identity, last update, next stage, and

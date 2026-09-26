@@ -5362,4 +5362,95 @@ class QuickThreeNodeRegistrationTest(_AttemptPolicyFixture):
     self.assertNotEqual(exception.reason,"frame-route-surface-invalid")
 
 
+def _deferred_pending_row_metadata():
+    return {
+        "note": "completion-deferred",
+        "failure_class": "infrastructure",
+        "classifier_source": D.DEFERRED_COMPLETION_SOURCE,
+    }
+
+
+def _deferred_completed_row_metadata():
+    metadata = _deferred_pending_row_metadata()
+    metadata.update({
+        "note": "completed-marker",
+        "completion_marker": "/artifacts/.runtime/completions/execute.json",
+    })
+    return metadata
+
+
+class MarkerBoundRowVerdictDeferredTest(unittest.TestCase):
+    """C11 (S3a): one atomic-pass predicate, `verdict_pass`/`success_note`.
+
+    The marker-append writer already stamps `note=completed-marker` on a
+    deferred row the instant its marker is published (5784-5786), so this
+    predicate's pre-existing `note in SUCCESS_NOTES` branch already reads
+    that as PASS -- there is no red state to force here. This test pins the
+    post-swap behaviour instead of proving a regression.
+    """
+
+    def test_pending_deferred_row_is_not_pass(self):
+        self.assertNotEqual(D._marker_bound_row_verdict(_deferred_pending_row_metadata()), "PASS")
+
+    def test_marker_bound_deferred_row_is_pass(self):
+        self.assertEqual(D._marker_bound_row_verdict(_deferred_completed_row_metadata()), "PASS")
+
+
+class FrameUnavailabilitySkipsCompletedDeferredLegTest(unittest.TestCase):
+    """C12 (S3a): `_frame_capacity_failures` must not re-litigate a leg whose
+    completion was only deferred by the completion-budget transport."""
+
+    def _route(self):
+        return {"route_id": "rt-frame-deferred", "route_hash": "sha256:" + "5" * 64}
+
+    def _row_line(self, harness, metadata):
+        pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
+        return f"2026-09-24T00:00:00Z\tdone\t/r\t/w\tframe\t{pipe}"
+
+    def test_completed_deferred_leg_is_not_treated_as_unavailable(self):
+        import codex_dispatch_terminal
+        route = self._route()
+        metadata = {
+            "route_id": route["route_id"], "route_hash": route["route_hash"],
+            "worker_type": "frame", "dispatch_depth": "1", "harness": "codex",
+            "attempt_id": "att-frame-deferred",
+        }
+        metadata.update(_deferred_completed_row_metadata())
+        lines = [self._row_line("codex", metadata)]
+        # `verdict_pass` must short-circuit the skip before this terminal
+        # inspection is ever reached -- stub it to look like a genuine
+        # capacity death so an un-fixed skip condition (still reading plain
+        # `failure_class == "pass"`) would fall through and misclassify this
+        # completed-deferred leg as unavailable.
+        with mock.patch.object(
+            D, "attempt_process_quiescence",
+            return_value=D.ProcessQuiescence("quiescent", "no-pid"),
+        ), mock.patch.object(
+            codex_dispatch_terminal, "inspect_terminal_attempt",
+            return_value={"failure_class": "capacity"},
+        ):
+            unavailable = D._frame_capacity_failures(route, lines, {"codex"})
+        self.assertEqual(unavailable, {})
+
+    def test_still_pending_leg_can_be_found_unavailable(self):
+        import codex_dispatch_terminal
+        route = self._route()
+        metadata = {
+            "route_id": route["route_id"], "route_hash": route["route_hash"],
+            "worker_type": "frame", "dispatch_depth": "1", "harness": "codex",
+            "attempt_id": "att-frame-capacity", "failure_class": "capacity",
+            "note": "dead-capacity",
+        }
+        lines = [self._row_line("codex", metadata)]
+        with mock.patch.object(
+            D, "attempt_process_quiescence",
+            return_value=D.ProcessQuiescence("quiescent", "no-pid"),
+        ), mock.patch.object(
+            codex_dispatch_terminal, "inspect_terminal_attempt",
+            return_value={"failure_class": "capacity"},
+        ):
+            unavailable = D._frame_capacity_failures(route, lines, {"codex"})
+        self.assertEqual(unavailable, {"codex": "att-frame-capacity"})
+
+
 if __name__=="__main__": unittest.main()

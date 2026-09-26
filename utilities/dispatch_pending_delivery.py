@@ -776,9 +776,11 @@ def _render_prune_table(result: dict) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     import argparse
+    import functools
 
-    parser = argparse.ArgumentParser(description="SD-111 pending-delivery retention prune")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(description="SD-111 pending-delivery retention prune", allow_abbrev=False)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     pr = sub.add_parser("prune", help="list (default) or delete terminal records past retention")
     pr.add_argument("--root", type=Path, default=None, help="dispatch state root (default: resolved)")
     pr.add_argument("--apply", action="store_true", help="delete; without it only the plan is printed")

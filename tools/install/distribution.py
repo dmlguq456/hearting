@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime as dt
+import functools
 import hashlib
 import json
 import os
@@ -4016,8 +4017,9 @@ def _print_result(result: dict, as_json: bool) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="hearting-distribution")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser = argparse.ArgumentParser(prog="hearting-distribution", allow_abbrev=False)
+    sub = parser.add_subparsers(dest="command", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
     bootstrap_parser = sub.add_parser("bootstrap")
     bootstrap_parser.add_argument(
         "--repository", default=os.environ.get("HARNESS_REPOSITORY", DEFAULT_REPOSITORY)

@@ -854,12 +854,11 @@ def chain_delivery_notice(result: ChainDriveResult, rows) -> str:
         chain_id = chain_id or metadata.get("session_chain_id", "")
         if metadata.get("session_chain_id") == chain_id:
             members.append(row)
-    success_notes = set(getattr(DC, "SUCCESS_NOTES", ("completed-subsession", "completed-supervisor", "completed-marker")))
     failed = [
         f"{row.attempt_id}={((getattr(row, 'metadata', {}) or {}).get('note') or 'unknown')}"
         for row in members
-        if (getattr(row, "metadata", {}) or {}).get("note") not in success_notes
-        or (getattr(row, "metadata", {}) or {}).get("failure_class") != "pass"
+        if not DC.success_note(getattr(row, "metadata", {}) or {})
+        or not DC.verdict_pass(getattr(row, "metadata", {}) or {})
     ][:16]
     if result.refusal is None and not failed:
         return ""

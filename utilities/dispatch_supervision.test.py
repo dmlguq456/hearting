@@ -339,6 +339,65 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertEqual(len(list(pending.record_directory(self.root,"parent-test").glob("delivery-*.json"))), 1)
         self.assertTrue(all(event["responsible"] == "supervision-controller" for event in events))
 
+    def test_wait_for_batch_deadline_records_once_and_returns(self):
+        # plan.md item 8: a caller that supplies its own `deadline` (the
+        # unfinishable-watch budget) stops after that deadline instead of
+        # retrying forever -- exactly one `watch-deadline` notice, no more
+        # join attempts after the deadline is reached.
+        self._notice_rows()
+        join = mock.Mock(return_value={"state": "timeout"})
+        with mock.patch.object(supervision.time, "sleep"):
+            result = supervision.wait_for_batch(
+                join=join, attempts={"att-child"}, jobs=self.jobs,
+                deadline=supervision.time.monotonic() - 1.0,
+            )
+        self.assertEqual(result["state"], "watch-expired")
+        self.assertEqual(result["reason"], "watch-deadline")
+        join.assert_called_once()
+        records = list(pending.record_directory(self.root, "parent-test").glob("delivery-*.json"))
+        self.assertEqual(len(records), 1)
+        self.assertEqual(json.loads(records[0].read_text())["receipt"]["reason"], "watch-deadline")
+
+    def test_wait_for_batch_without_deadline_keeps_retrying_like_before(self):
+        # Pinning: `deadline=None` (every existing caller) must not change --
+        # the loop keeps retrying past what would have been a deadline.
+        self._notice_rows()
+        join = mock.Mock(side_effect=[{"state": "timeout"} for _ in range(3)] + [{"state": "ready"}])
+        with mock.patch.object(supervision.time, "sleep"):
+            result = supervision.wait_for_batch(join=join, attempts={"att-child"}, jobs=self.jobs)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(join.call_count, 4)
+
+    def test_wait_for_batch_stop_check_halts_under_its_own_reason(self):
+        # The receiver-unavailable probe (codex-managed-completion.py) plugs
+        # in here: a non-empty reason halts the same way a reached deadline
+        # does, under whatever REASONS token the caller returns.
+        self._notice_rows()
+        join = mock.Mock(return_value={"state": "timeout"})
+        with mock.patch.object(supervision.time, "sleep"):
+            result = supervision.wait_for_batch(
+                join=join, attempts={"att-child"}, jobs=self.jobs,
+                stop_check=lambda: "receiver-unavailable",
+            )
+        self.assertEqual(result["state"], "watch-expired")
+        self.assertEqual(result["reason"], "receiver-unavailable")
+        join.assert_called_once()
+        records = list(pending.record_directory(self.root, "parent-test").glob("delivery-*.json"))
+        self.assertEqual(json.loads(records[0].read_text())["receipt"]["reason"], "receiver-unavailable")
+
+    def test_wait_for_batch_stop_check_only_consulted_after_a_real_timeout(self):
+        # An observer exception must not be treated as a stop signal -- the
+        # existing join-observer-failed backoff still owns that path, and
+        # `stop_check` never runs on that tick.
+        self._notice_rows()
+        join = mock.Mock(side_effect=[ValueError("boom"), {"state": "ready"}])
+        stop_check = mock.Mock(return_value="")
+        with mock.patch.object(supervision.time, "sleep"):
+            result = supervision.wait_for_batch(join=join, attempts={"att-child"}, jobs=self.jobs,
+                                                 stop_check=stop_check)
+        self.assertEqual(result["state"], "ready")
+        self.assertEqual(stop_check.call_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

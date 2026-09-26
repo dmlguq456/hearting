@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 from dispatch_contract import (
     DispatchContractError, completion_marker_gate, owner_frame_launch_gate,
-    parse_registry_metadata,
+    parse_registry_metadata, verdict_pass,
 )
 from dispatch_completion_join import (
     join_selected_attempts, current_delivery_state, delivery_classification,
@@ -386,7 +386,7 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         sys.executable, str(ROOT / "utilities/capability-route.py"), "correct",
         "--jobs", str(jobs), "--attempt-id", aid,
     ])
-    if status == "done" and metadata.get("failure_class") == "pass":
+    if status == "done" and verdict_pass(metadata):
         from dispatch_terminal_commit import owner_workflow_gaps
         missing = owner_workflow_gaps(jobs, metadata, route)
         if missing:

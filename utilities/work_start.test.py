@@ -208,6 +208,25 @@ class WorkStartTest(unittest.TestCase):
         self.assertNotIn("parent_next", result)
         self.assertEqual(len(self.calls), 3)
 
+    def test_completed_deferred_owner_still_reports_workflow_gaps(self):
+        """C15 (S3a): `verdict_pass` recognizes a marker-bound deferred owner
+        row (failure_class stays infrastructure) the same way a plain
+        failure_class=pass row already does -- the gap check must still run,
+        not be skipped because the literal failure_class isn't "pass"."""
+        import dispatch_terminal_commit as T
+        self.start(); self.ready = self.released = True; self.start()
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").replace(
+            "worker_type=owner",
+            "workflow_completion=runtime-v1,failure_class=infrastructure,"
+            "classifier_source=registered-wrapper-completion-transient-v1,"
+            "completion_marker=/artifacts/.runtime/completions/one-shot.json,"
+            "note=completed-marker,worker_type=owner"))
+        with mock.patch.object(T, "owner_workflow_gaps", return_value={"report": "completion-marker-absent"}), \
+             mock.patch.object(W, "join_selected_attempts", side_effect=AssertionError("cannot wait for an absent executor")):
+            result = self.start(wait=True)
+        self.assertEqual(result["state"], "needs-attention", result)
+        self.assertEqual(result["reason"], "workflow-executor-exited")
+
     def test_failure_conflict_or_unsealed_workflow_never_authorizes_success(self):
         self.start(); self.ready = True
         for fields in ({"verdict":"FAIL"}, {"terminal_conflict":True}, {"workflow_complete":False}):

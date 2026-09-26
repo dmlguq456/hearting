@@ -5,6 +5,7 @@ Body text is never persisted. Callers pass the body via --body-file or
 stdin; only its sha256 and a hard-truncated first-line summary are written.
 """
 import argparse
+import functools
 import fcntl
 import hashlib
 import json
@@ -757,8 +758,9 @@ def cmd_status(args):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="peer-message")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    parser = argparse.ArgumentParser(prog="peer-message", allow_abbrev=False)
+    sub = parser.add_subparsers(dest="cmd", required=True,
+                                parser_class=functools.partial(argparse.ArgumentParser, allow_abbrev=False))
 
     p_receive = sub.add_parser("receive")
     p_receive.add_argument("--to-harness", required=True)

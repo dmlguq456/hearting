@@ -32,6 +32,8 @@ sys.modules[SPEC.name] = JOIN
 SPEC.loader.exec_module(JOIN)
 sys.path.insert(0, str(HERE))
 import dispatch_contract as D  # noqa: E402
+import dispatch_terminal_commit as TERMINAL  # noqa: E402
+import dispatch_supervision  # noqa: E402
 
 # D-42 hermeticity: `classify_supervised_shell_command` and the supervisor
 # state readers consult the LIVE session's dispatch environment on purpose, so
@@ -2227,6 +2229,71 @@ class FinishedChildClosure(unittest.TestCase):
         ledger_path = self.base / "degradations" / "rt-b47-3-missing.jsonl"
         self.assertFalse(ledger_path.exists())
 
+    def test_close_finished_child_opencode_capacity(self):
+        # plan.md item 5: `missing_result_terminal` (S2) now backs the
+        # route-bound absent-envelope branch too, so an OpenCode attempt that
+        # leaves no result envelope but binds to one session-scoped usage-limit
+        # ERROR line in the server log closes typed dead-capacity instead of
+        # the generic dead-missing-result. Red-before: the prior unconditional
+        # note="dead-missing-result"/classifier_source="completion-join-missing-
+        # result-v1" call never looked at the OpenCode server log.
+        attempt_id = "att-opencode-join-capacity"
+        row = self.child(quiescent=True, attempt_id=attempt_id)
+        row.metadata["harness"] = "opencode"
+        log = Path(row.metadata["log_file"])
+        log.write_text(
+            json.dumps({"type": "step_start", "sessionID": "ses_joincap111"}) + "\n",
+            encoding="utf-8",
+        )
+        server_log_dir = (
+            self.base / ".dispatch" / "opencode-runtime" / attempt_id
+            / "data" / "opencode" / "log"
+        )
+        server_log_dir.mkdir(parents=True)
+        server_log = server_log_dir / "opencode.log"
+        server_log.write_text(
+            json.dumps({
+                "level": "ERROR", "time": "2026-08-09T00:00:05Z",
+                "session": {"id": "ses_joincap111"},
+                "error": {"error": "Monthly usage limit reached. Resets in 13 days"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        reason = JOIN.close_finished_child(row, jobs=self.jobs)
+        self.assertEqual(reason, "")
+        text = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("note=dead-capacity", text)
+        self.assertIn("failure_class=capacity", text)
+        self.assertIn(f"capacity_log={server_log}", text)
+
+    def test_close_finished_child_classification_evidence_override(self):
+        # plan.md item 5: `ExactReviewClassification.evidence`, when a typed
+        # classifier already computed it (e.g. the route-free review absent
+        # branch calling `missing_result_terminal`), is used as-is instead of
+        # the generic `review_terminal_evidence(note, reason)` derivation --
+        # which would have collapsed a capacity close back to
+        # failure_class=contract. Red-before: the classification branch always
+        # called `review_terminal_evidence`, ignoring any richer evidence.
+        row = self.child(quiescent=True, attempt_id="att-review-evidence")
+        classification = JOIN.ExactReviewClassification(
+            "terminal-handoff", "terminal-envelope-absent", "dead-capacity",
+            "typed-close",
+            {
+                "classifier_source": "supervisor-terminal-v1",
+                "reconcile_reason": "opencode-server-log",
+                "failure_class": "capacity",
+                "capacity_log": "/tmp/opencode.log",
+            },
+        )
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        reason = JOIN.close_finished_child(row, jobs=self.jobs, classification=classification)
+        self.assertEqual(reason, "")
+        text = self.jobs.read_text(encoding="utf-8")
+        self.assertIn("note=dead-capacity", text)
+        self.assertIn("failure_class=capacity", text)
+        self.assertIn("capacity_log=/tmp/opencode.log", text)
+
     def test_live_process_blocked_row_stays_open(self):
         # Quiescence precondition must not be relaxed: a still-draining
         # worker (no terminal-envelope-implied quiescence and no exited
@@ -2332,6 +2399,153 @@ class FinishedChildClosure(unittest.TestCase):
         self.assertEqual(calls, [])
         lines = self.jobs.read_text(encoding="utf-8").strip().splitlines()
         self.assertIn("dead-worker-blocked", lines[0])
+
+
+class CompleteRouteWithBudgetTest(unittest.TestCase):
+    """6번: one shared budget/backoff replaces the two former one-retry seams."""
+
+    def test_transient_retries_with_backoff_then_completes(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(kwargs.get("timeout"))
+            if len(calls) < 3:
+                return "completion-transient:TimeoutExpired"
+            return ""
+
+        sleeps = []
+        clock_values = iter([0.0, 0.0, 0.0, 1.0, 1.0, 31.0, 31.0])
+        reason = JOIN.complete_route_with_budget(
+            ["cmd"], run=fake_run, sleep=sleeps.append,
+            clock=lambda: next(clock_values),
+        )
+        self.assertEqual(reason, "")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleeps, [15.0, 30.0])
+
+    def test_transient_budget_exhausted_returns_last_reason(self):
+        calls = []
+
+        def always_transient(command, **kwargs):
+            calls.append(1)
+            return "completion-transient:OSError"
+
+        sleeps = []
+        clock = {"t": 0.0}
+
+        def fake_clock():
+            return clock["t"]
+
+        def fake_sleep(seconds):
+            sleeps.append(seconds)
+            clock["t"] += seconds
+
+        reason = JOIN.complete_route_with_budget(
+            ["cmd"], budget_s=100.0, run=always_transient,
+            sleep=fake_sleep, clock=fake_clock,
+        )
+        self.assertEqual(reason, "completion-transient:OSError")
+        self.assertLessEqual(sum(sleeps), 100.0)
+        self.assertGreater(len(calls), 1)
+
+    def test_rejected_gets_exactly_one_retry_no_sleep(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(1)
+            return "completion-rejected" if len(calls) == 1 else ""
+
+        sleeps = []
+        reason = JOIN.complete_route_with_budget(
+            ["cmd"], run=fake_run, sleep=sleeps.append, clock=lambda: 0.0,
+        )
+        self.assertEqual(reason, "")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [])
+
+
+class DeferredCompletionClosureTest(FinishedChildClosure):
+    """6번 (C13 포함): the completion budget's own typed deferral, and the
+    one place a caller may re-drive or must never re-close it."""
+
+    def test_close_wrapper_pass_closes_completion_deferred_after_budget_exhausted(self):
+        # `CompleteRouteWithBudgetTest` already proves the backoff/budget
+        # mechanics in isolation; this integration test only needs to prove
+        # what `close_wrapper_pass` does once that budget is exhausted, so
+        # the budget function itself is stubbed rather than driven for real.
+        row = self.child(quiescent=True)
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        real_budget_fn = JOIN.complete_route_with_budget
+        JOIN.complete_route_with_budget = lambda command: "completion-transient:OSError"
+        try:
+            reason = JOIN.close_wrapper_pass(row, jobs=self.jobs)
+        finally:
+            JOIN.complete_route_with_budget = real_budget_fn
+        self.assertEqual(reason, "completion-transient:OSError")
+        current = JOIN.exact_attempt_row(self.jobs, row.attempt_id)
+        self.assertEqual(current.status, "done")
+        self.assertEqual(current.metadata.get("note"), "completion-deferred")
+        self.assertEqual(current.metadata.get("failure_class"), "infrastructure")
+        self.assertEqual(
+            current.metadata.get("classifier_source"),
+            "registered-wrapper-completion-transient-v1",
+        )
+        self.assertNotIn("completed-marker", self.jobs.read_text(encoding="utf-8"))
+
+    def test_close_wrapper_pass_does_not_reclose_deferred_row(self):
+        row = self.child(quiescent=True)
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        JOIN.reconcile_attempt_terminal(
+            self.jobs, row.attempt_id, "completion-deferred",
+            evidence={
+                "failure_class": "infrastructure",
+                "classifier_source": "registered-wrapper-completion-transient-v1",
+                "reconcile_reason": "completion-transient:TimeoutExpired",
+            },
+        )
+        deferred = JOIN.exact_attempt_row(self.jobs, row.attempt_id)
+        real_run = JOIN.run_route_completion
+        JOIN.run_route_completion = lambda command, **kw: "completion-transient:TimeoutExpired"
+        try:
+            with mock.patch("time.sleep"):
+                reason = JOIN.close_wrapper_pass(deferred, jobs=self.jobs)
+        finally:
+            JOIN.run_route_completion = real_run
+        self.assertEqual(reason, "completion-transient:TimeoutExpired")
+        text = self.jobs.read_text(encoding="utf-8")
+        self.assertNotIn("terminal_conflict=1", text)
+        self.assertNotIn("dead-route-completion-rejected", text)
+        # still exactly the one deferred row -- no re-close appended a line
+        self.assertEqual(len(text.strip().splitlines()), 1)
+
+    def test_deferred_row_is_completed_by_next_settlement(self):
+        row = self.child(quiescent=True)
+        self.jobs.write_text(row.raw + "\n", encoding="utf-8")
+        JOIN.reconcile_attempt_terminal(
+            self.jobs, row.attempt_id, "completion-deferred",
+            evidence={
+                "failure_class": "infrastructure",
+                "classifier_source": "registered-wrapper-completion-transient-v1",
+                "reconcile_reason": "completion-transient:TimeoutExpired",
+            },
+        )
+        deferred = JOIN.exact_attempt_row(self.jobs, row.attempt_id)
+        calls = []
+        real_run = JOIN.run_route_completion
+        JOIN.run_route_completion = lambda command, **kw: calls.append(command) or ""
+        try:
+            outcome = JOIN.settle_finished_attempt(self.jobs, deferred)
+        finally:
+            JOIN.run_route_completion = real_run
+        # The completion command actually ran again -- proof that a `done`
+        # row closed `completion-deferred` is re-driven through the ordinary
+        # completion path rather than short-circuited by the ordinary
+        # already-closed cleanup shortcut. (Real marker publication through
+        # `capability-route.py complete` is proven end-to-end separately by
+        # `capability_route.test.py::test_complete_accepts_completion_deferred_row`;
+        # this fake stands in for that subprocess here.)
+        self.assertEqual(len(calls), 1, "a deferred done row must still be re-driven, not skipped")
+        self.assertTrue(outcome["closed"], outcome)
 
 
 class StageAdvanceReceiptNegotiationTest(unittest.TestCase):
@@ -3513,6 +3727,309 @@ class ExactReviewClassifierSignatureTest(unittest.TestCase):
             )),
             (inspect.Parameter.KEYWORD_ONLY,) * 6,
         )
+
+
+class RouteFreeReviewMissingResultTest(unittest.TestCase):
+    """plan.md item 5: the route-free review absent-envelope branch (formerly
+    a bare note="dead-missing-result") now runs the same typed classifier
+    (`missing_result_terminal`) as the route-bound branch and reap-watch, so
+    an OpenCode usage-limit death upgrades to dead-capacity there too."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name)
+        self.jobs = self.base / "jobs.log"
+
+    def _seed(self, attempt_id: str, log_file: Path) -> None:
+        metadata = {
+            "attempt_schema_version": "2", "dispatch_depth": "1", "transport": "headless",
+            "execution_surface": "registered-headless", "registered_worker": "1",
+            "fallback_hop": "same-harness-headless", "worker_type": "review",
+            "launch_lifecycle": "foreground-scoped", "attempt_id": attempt_id,
+            "pid": "123", "pid_start": "456", "pgid": "123", "pid_ns": "pid:[1]",
+            "pid_observer_ns": "pid:[1]", "harness": "opencode",
+            "log_file": str(log_file),
+        }
+        pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
+        self.jobs.write_text(
+            f"2026-08-09T00:00:00Z\topen\t{self.base}\t{self.base}\treview\t{pipe}\n",
+            encoding="utf-8",
+        )
+
+    def test_route_free_review_opencode_capacity_upgrades_from_missing_result(self):
+        attempt_id = "att-review-free-capacity"
+        log_file = self.base / "worker.jsonl"
+        log_file.write_text(
+            json.dumps({"type": "step_start", "sessionID": "ses_reviewcap111"}) + "\n",
+            encoding="utf-8",
+        )
+        self._seed(attempt_id, log_file)
+        D.seal_foreground_result(
+            self.jobs, attempt_id, 123, "456", 123,
+            exit_code=0, failure="", group_empty=True,
+        )
+        server_log_dir = (
+            self.base / ".dispatch" / "opencode-runtime" / attempt_id
+            / "data" / "opencode" / "log"
+        )
+        server_log_dir.mkdir(parents=True)
+        server_log = server_log_dir / "opencode.log"
+        server_log.write_text(
+            json.dumps({
+                "level": "ERROR", "time": "2026-08-09T00:00:05Z",
+                "session": {"id": "ses_reviewcap111"},
+                "error": {"error": "Monthly usage limit reached. Resets in 13 days"},
+            }) + "\n",
+            encoding="utf-8",
+        )
+        row = JOIN.exact_attempt_row(self.jobs, attempt_id)
+        decision = JOIN.classify_exact_route_free_review_outcome(
+            row, jobs=self.jobs, expected_attempt_id=attempt_id,
+            expected_pid=123, expected_pid_start="456", expected_pgid=123,
+            quiescence=D.ProcessQuiescence("quiescent", "group-empty"),
+        )
+        self.assertEqual(decision.note, "dead-capacity")
+        self.assertEqual(decision.close_action, "typed-close")
+        self.assertIsNotNone(decision.evidence)
+        self.assertEqual(decision.evidence["failure_class"], "capacity")
+        self.assertEqual(decision.evidence["capacity_log"], str(server_log))
+
+
+class JoinClosureBlockedTest(unittest.TestCase):
+    """plan.md item 8: a proven-permanent `owner_completion_state` block stops
+    the wasteful per-tick `settlement()` retry and fires exactly one
+    `closure-blocked` supervision notice, instead of retrying forever."""
+
+    def _blocked_owner_row(self):
+        meta = {
+            "attempt_id": "att-blocked-owner", "attempt_schema_version": "2",
+            "workflow_completion": "runtime-v1", "worker_type": "owner", "dispatch_depth": "1",
+            "failure_class": "pass", "launch_outcome": "reaped-before-publish",
+            "registered_worker": "1",
+        }
+        raw = "\t".join([
+            "2026-09-24T00:00:00Z", "done", "/w", "/w", "owner",
+            ",".join(f"{k}={v}" for k, v in meta.items()),
+        ])
+        return JOIN.ChildRow(order=0, status="done", slug="owner",
+                              attempt_id="att-blocked-owner", raw=raw, metadata=meta)
+
+    def test_blocked_owner_skips_settlement_and_fires_one_notice(self):
+        row = self._blocked_owner_row()
+        settlement_calls = []
+        notices = []
+
+        def settlement(child_row):
+            settlement_calls.append(child_row.attempt_id)
+            return {"attempt_id": child_row.attempt_id, "closed": False,
+                    "reason": "should-not-be-called"}
+
+        def fake_materialize(jobs, attempts, *, reason):
+            notices.append((set(attempts), reason))
+            return []
+
+        jobs = Path("/nonexistent/jobs.log")
+        with mock.patch.object(
+                TERMINAL, "owner_completion_state",
+                return_value=TERMINAL.CompletionState("blocked", "completion-attempt-not-current")), \
+             mock.patch.object(dispatch_supervision, "materialize", side_effect=fake_materialize):
+            receipt = JOIN._join_snapshot(
+                jobs=jobs, initial=[row], refresh=lambda _attempts: [row],
+                identity={"parent_attempt_id": "att-blocked-owner"},
+                interval=0.01, timeout=0.05, liveness_command=None,
+                liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=jobs, settlement=settlement,
+            )
+        self.assertEqual(settlement_calls, [])
+        # Every child of the join is blocked (item 8, unfinishable-watch): a
+        # proven-permanent verdict is never worth waiting out the join's own
+        # timeout for -- the join records the one closure-blocked notice and
+        # hands back a typed ready receipt on the very first tick instead.
+        self.assertEqual(receipt["state"], "ready")
+        self.assertEqual(notices, [({"att-blocked-owner"}, "closure-blocked")])
+        self.assertEqual(receipt["children"][0]["readiness"], "ready")
+        self.assertEqual(receipt["children"][0]["required_action"], "inspect-recovery")
+        self.assertEqual(receipt["children"][0]["reason"], "closure-blocked:completion-attempt-not-current")
+
+    def test_blocked_batch_returns_ready_receipt_without_waiting_out_timeout(self):
+        """Red before the fix: this used to loop until `timeout` (0.05s here,
+        but the sidecar's real deadline is about a day) instead of returning
+        promptly once the one closure-blocked notice is durably recorded."""
+        row = self._blocked_owner_row()
+        started = {"count": 0}
+
+        def refresh(_attempts):
+            started["count"] += 1
+            return [row]
+
+        jobs = Path("/nonexistent/jobs.log")
+        with mock.patch.object(
+                TERMINAL, "owner_completion_state",
+                return_value=TERMINAL.CompletionState("blocked", "completion-evidence-hash-mismatch")), \
+             mock.patch.object(dispatch_supervision, "materialize", return_value=[]):
+            receipt = JOIN._join_snapshot(
+                jobs=jobs, initial=[row], refresh=refresh,
+                identity={"parent_attempt_id": "att-blocked-owner"},
+                # A join timeout of an hour would still return instantly if
+                # the fix works -- proving this never depends on hitting the
+                # ordinary per-join timeout path at all.
+                interval=0.01, timeout=3600.0, liveness_command=None,
+                liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=None, settlement=None,
+            )
+        self.assertEqual(receipt["state"], "ready")
+        self.assertEqual(started["count"], 1)
+        self.assertEqual(
+            receipt["children"][0]["reason"], "closure-blocked:completion-evidence-hash-mismatch")
+        self.assertEqual(receipt["children"][0]["required_action"], "inspect-recovery")
+
+    def test_relaunched_join_over_already_notified_blocked_attempt_publishes_no_second_notice(self):
+        """`_join_snapshot` keeps no cross-process notice-sent flag -- a
+        relaunched join (a brand new process, brand new local state) must
+        still avoid a second notice. That guarantee lives entirely in
+        `materialize()`'s own deterministic-identity idempotency (sha256 of
+        the receipt selects the pending-delivery id; `pending_delivery.create`
+        then converges N triggers on the one file, O_EXCL). Two independent
+        `_join_snapshot` calls over the exact same still-blocked batch must
+        therefore ask `materialize()` for the exact same (attempts, reason) --
+        proving no per-process nonce enters the notice identity."""
+        row = self._blocked_owner_row()
+        notices = []
+
+        def fake_materialize(jobs, attempts, *, reason):
+            notices.append((set(attempts), reason))
+            return []
+
+        jobs = Path("/nonexistent/jobs.log")
+        with mock.patch.object(
+                TERMINAL, "owner_completion_state",
+                return_value=TERMINAL.CompletionState("blocked", "completion-attempt-not-current")), \
+             mock.patch.object(dispatch_supervision, "materialize", side_effect=fake_materialize):
+            for _ in range(2):
+                receipt = JOIN._join_snapshot(
+                    jobs=jobs, initial=[row], refresh=lambda _attempts: [row],
+                    identity={"parent_attempt_id": "att-blocked-owner"},
+                    interval=0.01, timeout=3600.0, liveness_command=None,
+                    liveness_probe_timeout=1.0, env=None, recovery=None,
+                    observation_jobs=None, settlement=None,
+                )
+                self.assertEqual(receipt["state"], "ready")
+        self.assertEqual(notices, [
+            ({"att-blocked-owner"}, "closure-blocked"),
+            ({"att-blocked-owner"}, "closure-blocked"),
+        ])
+
+
+class SettlementBackoffTest(unittest.TestCase):
+    """plan.md item 8: a repeated identical settlement outcome backs its retry
+    interval off 2 -> 4 -> ... -> 60s instead of re-driving the same
+    permanent-story settlement transaction every 2s forever; a changed
+    outcome or a changed registry resets to 2s."""
+
+    def _pending_row(self):
+        meta = {
+            "attempt_id": "att-pending-owner", "attempt_schema_version": "2",
+            "workflow_completion": "runtime-v1", "worker_type": "owner", "dispatch_depth": "1",
+            "failure_class": "pass", "launch_outcome": "reaped-before-publish",
+            "registered_worker": "1",
+        }
+        raw = "\t".join([
+            "2026-09-24T00:00:00Z", "done", "/w", "/w", "owner",
+            ",".join(f"{k}={v}" for k, v in meta.items()),
+        ])
+        return JOIN.ChildRow(order=0, status="done", slug="owner",
+                              attempt_id="att-pending-owner", raw=raw, metadata=meta)
+
+    def test_identical_outcome_backs_off(self):
+        row = self._pending_row()
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text("unrelated registry content\n", encoding="utf-8")
+            settlement_call_times = []
+            # A fake monotonic clock advancing a fixed step per call keeps this
+            # deterministic and fast: every call site inside the loop (elapsed,
+            # per-attempt throttle, outer timeout) shares the same clock, so a
+            # bigger interval genuinely skips more clock advances between calls.
+            clock = {"t": 0.0}
+
+            def fake_monotonic():
+                clock["t"] += 0.5
+                return clock["t"]
+
+            def settlement(child_row):
+                settlement_call_times.append(clock["t"])
+                return {"attempt_id": child_row.attempt_id, "closed": False,
+                        "reason": "same-every-time"}
+
+            with mock.patch.object(TERMINAL, "owner_completion_state",
+                                    return_value=TERMINAL.CompletionState("pending", "completion-marker-absent")), \
+                 mock.patch.object(dispatch_supervision, "materialize", return_value=[]), \
+                 mock.patch.object(JOIN.time, "monotonic", side_effect=fake_monotonic), \
+                 mock.patch.object(JOIN.time, "sleep"):
+                JOIN._join_snapshot(
+                    jobs=jobs, initial=[row], refresh=lambda _attempts: [row],
+                    identity={"parent_attempt_id": "att-pending-owner"},
+                    interval=0.01, timeout=200.0, liveness_command=None,
+                    liveness_probe_timeout=1.0, env=None, recovery=None,
+                    observation_jobs=jobs, settlement=settlement,
+                )
+        # Consecutive calls: gaps must be non-decreasing and eventually
+        # widen past the original fixed 2s throttle (capped at 60s).
+        # Each loop iteration burns a few extra clock ticks on bookkeeping
+        # (elapsed/notice-throttle/outer-timeout reads) beyond the interval
+        # check itself, so an observed gap runs a little over the nominal
+        # interval -- real behavior, not drift to paper over with an exact
+        # equality. The bounds below only absorb that per-iteration slack.
+        gaps = [b - a for a, b in zip(settlement_call_times, settlement_call_times[1:])]
+        self.assertGreaterEqual(len(gaps), 4, gaps)
+        self.assertTrue(all(later >= earlier for earlier, later in zip(gaps, gaps[1:])), gaps)
+        self.assertGreater(max(gaps), 2.0, gaps)
+        self.assertLessEqual(max(gaps), 65.0, gaps)
+
+    def test_registry_change_resets_backoff_to_two_seconds(self):
+        row = self._pending_row()
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text("v1\n", encoding="utf-8")
+            settlement_call_times = []
+            clock = {"t": 0.0}
+
+            def fake_monotonic():
+                clock["t"] += 0.5
+                return clock["t"]
+
+            def settlement(child_row):
+                settlement_call_times.append(clock["t"])
+                if len(settlement_call_times) == 3:
+                    # Real content/mtime change -- a fresh stat() key.
+                    jobs.write_text("v2\n", encoding="utf-8")
+                return {"attempt_id": child_row.attempt_id, "closed": False,
+                        "reason": "same-every-time"}
+
+            with mock.patch.object(TERMINAL, "owner_completion_state",
+                                    return_value=TERMINAL.CompletionState("pending", "completion-marker-absent")), \
+                 mock.patch.object(dispatch_supervision, "materialize", return_value=[]), \
+                 mock.patch.object(JOIN.time, "monotonic", side_effect=fake_monotonic), \
+                 mock.patch.object(JOIN.time, "sleep"):
+                JOIN._join_snapshot(
+                    jobs=jobs, initial=[row], refresh=lambda _attempts: [row],
+                    identity={"parent_attempt_id": "att-pending-owner"},
+                    interval=0.01, timeout=60.0, liveness_command=None,
+                    liveness_probe_timeout=1.0, env=None, recovery=None,
+                    observation_jobs=jobs, settlement=settlement,
+                )
+        gaps = [b - a for a, b in zip(settlement_call_times, settlement_call_times[1:])]
+        # gaps[0] is call1->call2 (already backed off past 2s); the registry
+        # write during call 3 (index 2) is the stat() this loop reads before
+        # deciding call 4's interval, so gaps[2] (call3->call4) is the first
+        # gap back down near 2s again -- and gaps[3] must have resumed
+        # backing off from there (not stayed reset).
+        self.assertGreaterEqual(len(gaps), 4, gaps)
+        self.assertGreater(gaps[0], 2.0, gaps)
+        self.assertLess(gaps[2], gaps[1], gaps)
+        self.assertAlmostEqual(gaps[2], 2.5, delta=1.0)
+        self.assertGreater(gaps[3], gaps[2], gaps)
 
 
 class WorkContinuationReceiptTest(unittest.TestCase):

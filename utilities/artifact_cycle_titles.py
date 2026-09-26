@@ -997,7 +997,7 @@ def _render_report(result: Mapping[str, Any]) -> str:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0], allow_abbrev=False)
     parser.add_argument("--artifact-root", required=True, type=Path)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--report", type=Path)

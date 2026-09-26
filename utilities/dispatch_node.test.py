@@ -537,6 +537,21 @@ class MainMaterializationTest(unittest.TestCase):
         self.assertIsNotNone(argv)
         self.assertNotIn("--harness-affinity", argv)
 
+    def test_stage_argv_omits_qa(self):
+        # --qa is not a user-facing axis (CONVENTIONS §1.1): the wrapper
+        # derives it from --intensity (dispatch_mode_contract.resolve_qa), so
+        # dispatch-node.py must not forward a hardcoded default anymore.
+        node = make_node()
+        route = make_route(node)
+        route["effective_intensity"] = "thorough"
+        argv = self._run_main(
+            ["--node", "execute", "--adapter", "claude", "--slug", "s7", "--parent", "owner"],
+            route,
+        )
+        self.assertIsNotNone(argv)
+        self.assertNotIn("--qa", argv)
+        self.assertEqual(argv[argv.index("--intensity") + 1], "thorough")
+
     def test_explicit_adapter_differs_from_affinity_launch_still_passes(self):
         node = make_node()
         node["harness_affinity"] = "codex"

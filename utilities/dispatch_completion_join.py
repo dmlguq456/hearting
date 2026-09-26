@@ -27,7 +27,10 @@ from typing import Callable
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
-from dispatch_attempt_policy import decide_attempt, required_action
+from dispatch_attempt_policy import (
+    decide_attempt, required_action, deferred_completion, success_note,
+    DEFERRED_COMPLETION_NOTE, DEFERRED_COMPLETION_SOURCE,
+)
 from dispatch_receipt_identity import (
     CANONICAL_RECEIPT_KEYS, CANONICAL_CHILD_KEYS, canonical_receipt, receipt_digest, unseal_receipt,
 )
@@ -67,6 +70,8 @@ from codex_dispatch_terminal import (  # noqa: E402
     terminal_envelope_observed,
 )
 from dispatch_degradation import record_degradation  # noqa: E402
+from dispatch_supervisor_terminal import missing_result_terminal  # noqa: E402
+from dispatch_registry_cache import registry_lines  # noqa: E402
 
 INVALID_ENVELOPE_CLASSIFIER_SOURCE = "completion-join-invalid-envelope-v1"
 OPEN_STATES = frozenset({"open", "running"})
@@ -500,7 +505,7 @@ def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
     result = {"materialized": 0, "expired": 0, "skipped": 0,
               "pruned_records": 0, "pruned_locks": 0, "prune_skipped": 0}
     try:
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = registry_lines(jobs)
     except OSError:
         lines = []
     rows_by_attempt: dict[str, dict[str, str]] = {}
@@ -843,6 +848,19 @@ def receipt_with_delivery_observability(
         attempt_id = raw_child.get("attempt_id")
         if not isinstance(attempt_id, str) or not attempt_id:
             raise JoinContractError("delivery-receipt-attempt-invalid")
+        if str(raw_child.get("reason", "")).startswith("closure-blocked:"):
+            # A proven-permanent owner_completion_state("blocked") gate (item
+            # 8, unfinishable-watch) never becomes "success" here -- the row's
+            # own workflow can never complete, so recomputing from
+            # current_delivery_state would fold it back into the ordinary
+            # finish-workflow loop this receipt exists to stop. Preserve the
+            # join's own typed verdict (reason/required_action) and classify
+            # it attention -- a human must inspect it, not retry it.
+            child = dict(raw_child)
+            child["delivery_classification"] = "attention"
+            children.append(child)
+            classifications.append("attention")
+            continue
         try:
             state = current_delivery_state(
                 jobs, attempt_id, parent_attempt_id=attempt_id
@@ -2645,7 +2663,7 @@ def current_children(
     if not parent_attempt_id:
         raise JoinContractError("parent-attempt-id-missing")
     try:
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = registry_lines(jobs)
     except FileNotFoundError:
         lines = []
     except OSError as exc:
@@ -2688,7 +2706,7 @@ def exact_attempt_row(jobs: Path, attempt_id: str) -> ChildRow:
     if not attempt_id:
         raise JoinContractError("attempt-id-missing")
     try:
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = registry_lines(jobs)
     except OSError as exc:
         raise JoinContractError("registry-unreadable") from exc
     matches: list[ChildRow] = []
@@ -2722,7 +2740,7 @@ def current_attempt_row(jobs: Path, attempt_id: str) -> ChildRow | None:
     if not _safe_identity(attempt_id):
         raise JoinContractError("attempt-id-invalid")
     try:
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = registry_lines(jobs)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -2821,7 +2839,7 @@ def current_session_children(
     if parent_completion_delivery not in SESSION_PARENT_DELIVERIES:
         raise JoinContractError("parent-completion-delivery-invalid")
     try:
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = registry_lines(jobs)
     except FileNotFoundError:
         lines = []
     except OSError as exc:
@@ -3068,16 +3086,22 @@ def _join_snapshot(
     started = time.monotonic()
     last_recovery: dict[str, float] = {}
     last_settlement: dict[str, float] = {}
+    settlement_backoff: dict[str, dict[str, object]] = {}
     recovery_results: dict[str, dict[str, object]] = {}
     last_observation = float("-inf")
     last_signature = ""
     observation_error = ""
     notice_published = False
     last_notice_attempt = float("-inf")
+    blocked_notice_published = False
+    last_blocked_notice_attempt = float("-inf")
 
     while True:
         rows = refresh(snapshot)
         children: list[dict[str, str]] = []
+        blocked_attempt_ids: set[str] = set()
+        blocked_reasons: dict[str, str] = {}
+        closure_eligible: dict[str, bool] = {}
         pending = False
         recovered = False
         for row in rows:
@@ -3101,28 +3125,85 @@ def _join_snapshot(
                 process_reason=observed.process_reason,
                 terminal_observed=observed.reason == "terminal-observed",
             )
-            from dispatch_terminal_commit import owner_completion_pending
-            workflow_pending = owner_completion_pending(jobs, row.status, row.metadata)
+            from dispatch_terminal_commit import owner_completion_state
+            completion_state = owner_completion_state(jobs, row.status, row.metadata)
+            workflow_pending = completion_state.state in {"pending", "unknown"}
+            # A proven-permanent block (item 8) is never worth another
+            # `settlement()` round trip -- unlike ordinary `workflow_pending`,
+            # no amount of retrying changes a `blocked` verdict. The receipt
+            # still reports this row `pending` (the shared reason vocabulary
+            # a raw join child must carry has no typed token for it), but a
+            # distinct supervision notice below tells a human it will never
+            # resolve on its own.
+            workflow_blocked = completion_state.state == "blocked"
+            if workflow_blocked:
+                blocked_attempt_ids.add(row.attempt_id)
+                blocked_reasons[row.attempt_id] = completion_state.reason
             if decision.action in {"wait", "recover"}:
                 readiness = "pending"
                 reason = "process-alive" if decision.action == "wait" else "process-unverifiable"
                 pending = True
+            elif decision.action == "complete":
+                # A `done` row closed typed-deferred (6번): the transport
+                # never confirmed the marker, so this is not yet a settled
+                # outcome -- drive the same settlement path a still-open row
+                # would take, instead of `registry-closed`'s ordinary "ready".
+                readiness = "pending"
+                reason = DEFERRED_COMPLETION_NOTE
+                pending = True
             else:
                 readiness = "ready"
                 reason = "registry-closed" if row.status == "done" else "terminal-observed"
-            if workflow_pending:
+            # Captured before the workflow override below folds every
+            # workflow_pending/workflow_blocked row into "pending": this is
+            # the one signal that tells a genuinely still-settling owner
+            # (workflow_pending) apart from a row that was already otherwise
+            # terminal-delivered, for the all-blocked-or-delivered check below.
+            closure_eligible[row.attempt_id] = workflow_blocked or (
+                readiness == "ready" and not workflow_pending
+            )
+            if workflow_pending or workflow_blocked:
                 readiness, reason, pending = "pending", "workflow-completion-pending", True
-            if (settlement is not None and (readiness == "ready" and row.status in OPEN_STATES or workflow_pending)
-                    and decision.action != "inspect-conflict"):
-                if time.monotonic() - last_settlement.get(row.attempt_id, float("-inf")) >= 2:
+            if (settlement is not None and (
+                    (readiness == "ready" and row.status in OPEN_STATES)
+                    or workflow_pending
+                    or decision.action == "complete"
+                ) and decision.action != "inspect-conflict"):
+                # A repeated identical (closed, reason) outcome, or the
+                # registry not having changed at all since the last call,
+                # backs the retry interval off 2 -> 4 -> ... -> 60s instead
+                # of re-driving the whole settlement transaction every tick
+                # forever (item 8): the same permanent story does not need
+                # re-proving every 2s. A changed outcome or a changed
+                # registry resets to 2s -- new evidence deserves a prompt
+                # recheck, not the backed-off cadence from before it arrived.
+                backoff = settlement_backoff.setdefault(
+                    row.attempt_id, {"interval": 2.0, "result": None, "registry_key": None})
+                try:
+                    registry_stat = Path(jobs).stat()
+                    registry_key = (registry_stat.st_ino, registry_stat.st_mtime_ns, registry_stat.st_size)
+                except OSError:
+                    registry_key = None
+                if registry_key != backoff["registry_key"]:
+                    backoff["interval"] = 2.0
+                if time.monotonic() - last_settlement.get(row.attempt_id, float("-inf")) >= backoff["interval"]:
                     last_settlement[row.attempt_id] = time.monotonic()
                     outcome = settlement(row)
                     recovery_results[row.attempt_id] = outcome
                     recovered = recovered or outcome.get("closed") is True
+                    result_key = (outcome.get("closed"), outcome.get("reason"))
+                    backoff["interval"] = (
+                        2.0 if result_key != backoff["result"] else min(60.0, backoff["interval"] * 2)
+                    )
+                    backoff["result"] = result_key
+                    backoff["registry_key"] = registry_key
                 # A quiescent process is not a committed outcome. Keep the
                 # recovery obligation and its bounded parent notice active.
-                readiness, reason, pending = "pending", ("workflow-completion-pending" if workflow_pending
-                                                        else "terminal-commit-pending"), True
+                readiness, reason, pending = "pending", (
+                    "workflow-completion-pending" if workflow_pending
+                    else DEFERRED_COMPLETION_NOTE if decision.action == "complete"
+                    else "terminal-commit-pending"
+                ), True
             if (recovery is not None and readiness == "pending"
                     and reason == "process-unverifiable"
                     and row.metadata.get("registered_worker") == "1"
@@ -3139,7 +3220,7 @@ def _join_snapshot(
                     "status": row.status,
                     "readiness": readiness,
                     "reason": reason,
-                    "required_action": ("finish-workflow" if workflow_pending
+                    "required_action": ("finish-workflow" if (workflow_pending or workflow_blocked)
                                         else required_action_for_attempt(row.status, row.metadata)),
                 }
             )
@@ -3147,6 +3228,41 @@ def _join_snapshot(
             # Re-read the canonical rows and all process evidence. The helper's
             # exit code or JSON alone never makes a child ready.
             continue
+        if blocked_attempt_ids and rows and all(
+            closure_eligible.get(row.attempt_id) for row in rows
+        ):
+            # unfinishable-watch (item 8): every child is either proven
+            # permanently blocked or was already otherwise terminal-delivered
+            # -- no amount of further waiting changes that. Once the one
+            # closure-blocked notice is durably recorded (idempotent: a
+            # relaunched join over an already-notified batch records no
+            # second notice), stop waiting out the deadline and hand back a
+            # typed ready receipt instead, so the sidecar delivers it once
+            # and exits.
+            try:
+                from dispatch_supervision import materialize
+                materialize(jobs, blocked_attempt_ids, reason="closure-blocked")
+            except (OSError, ValueError, pending_delivery.PendingDeliveryError):
+                pass
+            else:
+                return {
+                    "schema_version": SCHEMA_VERSION,
+                    "state": "ready",
+                    **identity,
+                    "children": [
+                        {
+                            **child,
+                            "reason": f"closure-blocked:{blocked_reasons.get(child['attempt_id'], '')}",
+                            "required_action": "inspect-recovery",
+                            "readiness": "ready",
+                        }
+                        if child["attempt_id"] in blocked_attempt_ids else child
+                        for child in children
+                    ],
+                    "delivery_timing": delivery_timing_fields(
+                        last_child_terminal_ns=time.monotonic_ns()
+                    ),
+                }
         signature = json.dumps(children, sort_keys=True)
         elapsed = time.monotonic() - started
         if observation_jobs is not None and (signature != last_signature
@@ -3167,6 +3283,15 @@ def _join_snapshot(
                 from dispatch_supervision import materialize
                 materialize(observation_jobs, snapshot, reason="process-unverifiable")
                 notice_published = True
+            except (OSError, ValueError, pending_delivery.PendingDeliveryError) as exc:
+                observation_error = "supervision-notice-unpersisted:" + str(exc)
+        if (not blocked_notice_published and observation_jobs is not None and blocked_attempt_ids
+                and time.monotonic() - last_blocked_notice_attempt >= 30):
+            last_blocked_notice_attempt = time.monotonic()
+            try:
+                from dispatch_supervision import materialize
+                materialize(observation_jobs, blocked_attempt_ids, reason="closure-blocked")
+                blocked_notice_published = True
             except (OSError, ValueError, pending_delivery.PendingDeliveryError) as exc:
                 observation_error = "supervision-notice-unpersisted:" + str(exc)
         if not pending:
@@ -3510,6 +3635,11 @@ class ExactReviewClassification:
     reason: str
     note: str | None
     close_action: str
+    # Set only when a typed classifier (e.g. `missing_result_terminal`) already
+    # computed the full close evidence -- `close_finished_child` uses it as-is
+    # instead of deriving a generic one from `note`/`reason` alone, so an
+    # OpenCode capacity/auth upgrade keeps its `failure_class`/`capacity_log`.
+    evidence: dict[str, str] | None = None
 
     def as_registry_tuple(self) -> tuple[str, str, str | None]:
         return self.state, self.reason, self.note
@@ -3604,8 +3734,14 @@ def classify_exact_route_free_review_outcome(
     if terminal.get("state") != "valid":
         state = str(terminal.get("state") or "absent")
         reason = str(terminal.get("reason") or f"terminal-{state}")
-        note = "dead-missing-result" if state == "absent" else "dead-invalid-envelope"
-        return ExactReviewClassification("terminal-handoff", reason, note, "typed-close")
+        if state == "absent":
+            result = missing_result_terminal({
+                **metadata, "worktree": _row_worktree(row), "started_at": raw_fields[0],
+            })
+            return ExactReviewClassification(
+                "terminal-handoff", reason, result.note, "typed-close", result.evidence()
+            )
+        return ExactReviewClassification("terminal-handoff", reason, "dead-invalid-envelope", "typed-close")
     verdict = str(terminal.get("verdict") or "")
     if verdict in {"FAIL", "BLOCKED"}:
         if review_blocking_handoff(terminal, metadata.get("worker_type")):
@@ -3680,10 +3816,14 @@ def close_finished_child(
     delivery or close rows. Committed results are never reclassified here.
     """
 
-    if row.status not in OPEN_STATES:
+    metadata = getattr(row, "metadata", {}) or {}
+    if row.status not in OPEN_STATES and deferred_completion(metadata) != "pending":
+        # A done row closed typed-deferred (budget exhausted, no marker yet)
+        # is not finished -- it still owes the completion command below, so
+        # only every OTHER terminal row (including a marker-bound deferred
+        # one) takes the ordinary resolved-cleanup shortcut.
         result = resolve_attempt_cleanup(Path(jobs), row.attempt_id, apply=True)
         return "" if result["settled"] else str(result["reason"])
-    metadata = getattr(row, "metadata", {}) or {}
     if classification is not None:
         if classification.close_action == "pending":
             return "pending"
@@ -3692,7 +3832,8 @@ def close_finished_child(
         try:
             closed = close_attempt_row(
                 Path(jobs), row.attempt_id, classification.note or "dead-foreground-review",
-                evidence=review_terminal_evidence(classification.note, classification.reason),
+                evidence=classification.evidence
+                or review_terminal_evidence(classification.note, classification.reason),
             )
         except (DispatchContractError, OSError) as exc:
             return getattr(exc, "reason", type(exc).__name__)
@@ -3717,18 +3858,21 @@ def close_finished_child(
         skip = "terminal-%s" % (terminal.get("state") or "absent")
         detail = terminal.get("reason")
         reason = f"{skip}:{detail}" if detail else skip
-        if (
-            str(terminal.get("state")) == "absent"
-            and _close_invalid_envelope_child(
+        if str(terminal.get("state")) == "absent":
+            missing = missing_result_terminal({
+                **metadata, "worktree": _row_worktree(row),
+                "started_at": row.raw.split("\t")[0],
+            })
+            if _close_invalid_envelope_child(
                 row,
                 jobs=jobs,
                 reason="terminal-envelope-absent",
-                note="dead-missing-result",
+                note=missing.note,
                 classifier_source="completion-join-missing-result-v1",
                 terminal_envelope=False,
-            )
-        ):
-            return ""
+                extra_evidence=missing.evidence(),
+            ):
+                return ""
         if str(terminal.get("state")) == "invalid" and _close_invalid_envelope_child(
             row, jobs=jobs, reason=reason
         ):
@@ -3834,12 +3978,9 @@ def close_finished_child(
         value = metadata.get(key)
         if value:
             command += [flag, str(value)]
-    completion = run_route_completion(command)
-    if completion:
-        # `complete` is exact-attempt idempotent.  One bounded retry recovers
-        # the marker-written/row-not-yet-closed publication window.
-        completion = run_route_completion(command)
-    return completion
+    # `complete` is exact-attempt idempotent. `complete_route_with_budget`
+    # owns the one bounded retry / transient backoff for both call sites.
+    return complete_route_with_budget(command)
 
 
 def close_wrapper_pass(
@@ -3869,11 +4010,33 @@ def close_wrapper_pass(
         current = exact_attempt_row(Path(jobs), row.attempt_id)
     except JoinContractError:
         return reason
-    if (
-        current.status == "done"
-        and current.metadata.get("note") in SUCCESS_NOTES
-    ):
+    if current.status == "done" and success_note(current.metadata):
         return ""
+    if current.status == "done" and deferred_completion(current.metadata):
+        # C13: already closed typed-deferred by an earlier budget exhaustion
+        # (this attempt's own retry above just failed transiently again).
+        # Re-closing a terminal row here would only manufacture a terminal
+        # conflict (`completion-deferred` -> `dead-route-completion-rejected`)
+        # against a row that already has a committed outcome; the caller
+        # keeps retrying via the ordinary settlement path instead.
+        return reason
+    if reason.startswith("completion-transient:"):
+        try:
+            outcome = reconcile_attempt_terminal(
+                Path(jobs),
+                row.attempt_id,
+                DEFERRED_COMPLETION_NOTE,
+                evidence={
+                    "failure_class": "infrastructure",
+                    "classifier_source": DEFERRED_COMPLETION_SOURCE,
+                    "reconcile_reason": reason,
+                },
+            )
+        except DispatchContractError:
+            return reason
+        if outcome == "closed":
+            materialize_after_terminal_close(Path(jobs), row.attempt_id)
+        return reason
     try:
         outcome = reconcile_attempt_terminal(
             Path(jobs),
@@ -3958,16 +4121,78 @@ def _close_invalid_envelope_child(
     return closed
 
 
-def run_route_completion(command: list[str]) -> str:
-    """Named seam for the completion invocation — tests replace only this."""
+def run_route_completion(command: list[str], *, timeout: float = 60.0) -> str:
+    """Named seam for the completion invocation — tests replace only this.
+
+    An ``OSError``/``TimeoutExpired`` here proves nothing about whether the
+    work committed -- the transport failed, not the verdict. That is
+    ``completion-transient:<Exc>``, never the typed contract refusal
+    ``completion-rejected`` a real non-zero exit reports.
+    """
 
     try:
         result = subprocess.run(
-            command, text=True, capture_output=True, timeout=60.0, check=False
+            command, text=True, capture_output=True, timeout=timeout, check=False
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        return "completion-%s" % type(exc).__name__
+        return "completion-transient:%s" % type(exc).__name__
     return "" if result.returncode == 0 else "completion-rejected"
+
+
+COMPLETION_BUDGET_S = 600.0
+_COMPLETION_BACKOFF_S = (15.0, 30.0, 60.0, 120.0, 240.0)
+
+
+def complete_route_with_budget(
+    command: list[str], *, budget_s: float = COMPLETION_BUDGET_S,
+    clock: Callable[[], float] | None = None,
+    sleep: Callable[[float], None] | None = None,
+    run: Callable[..., str] | None = None,
+) -> str:
+    """Retry a completion command until it settles or the budget runs out.
+
+    ``""`` is success. ``"completion-rejected"`` is a genuine typed contract
+    refusal and gets exactly one immediate retry (recovers the ordinary
+    marker-already-published race) before being returned as-is -- this is
+    the pre-existing "one bounded retry" both former call sites did.
+    ``"completion-transient:<Exc>"`` means the transport itself failed
+    (timeout/OSError) -- the work's outcome is unknown, so this backs off
+    (15/30/60/120/240s) and keeps retrying until ``budget_s`` elapses (each
+    call capped at ``min(120, remaining budget)``), then returns the last
+    transient reason for the caller to close typed-deferred.
+    """
+
+    # A bare default parameter would bind these at def-time, so a test (or
+    # caller) that monkeypatches the module/`time` attribute would be
+    # silently ignored. Resolve every seam by name at call time instead --
+    # the same pattern every existing `run_route_completion` test patches.
+    run = run or run_route_completion
+    clock = clock or time.monotonic
+    sleep = sleep or time.sleep
+    started = clock()
+    reason = run(command)
+    if not reason:
+        return ""
+    if reason == "completion-rejected":
+        return run(command)
+    if not reason.startswith("completion-transient:"):
+        return reason
+    for backoff in _COMPLETION_BACKOFF_S:
+        remaining = budget_s - (clock() - started)
+        if remaining <= 0:
+            break
+        sleep(min(backoff, remaining))
+        remaining = budget_s - (clock() - started)
+        if remaining <= 0:
+            break
+        reason = run(command, timeout=min(120.0, remaining))
+        if not reason:
+            return ""
+        if reason == "completion-rejected":
+            return run(command)
+        if not reason.startswith("completion-transient:"):
+            return reason
+    return reason
 
 
 def reconcile_finished_children(
