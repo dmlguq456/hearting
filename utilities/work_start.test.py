@@ -274,6 +274,7 @@ class WorkStartTest(unittest.TestCase):
             route_hash=self.route["route_hash"], route_node="frame", registry_digest="sha256:fixture",
             write_scope="shards/frame/**", completion_gate="code-frame")
         launched = []
+        stamp_harness = [True]
         def wrapper(command, **kwargs):
             launched.append(Path(command[0]).parents[1].name)
             return subprocess.CompletedProcess(command, 0)
@@ -283,9 +284,11 @@ class WorkStartTest(unittest.TestCase):
                 rc = owner.main(command[2:])
             if rc == 0:
                 self.admit(command)
+                if stamp_harness[0]:
+                    self.jobs.write_text(self.jobs.read_text().rstrip() + ",harness=" + launched[-1] + "\n")
             return subprocess.CompletedProcess(command, rc, output.getvalue(), "")
         import artifact_producer
-        for headroom in (3, 1):
+        for headroom in (30, 60):
             with self.subTest(headroom=headroom), contextlib.ExitStack() as stack:
                 self.jobs.unlink(missing_ok=True); self.calls.clear(); launched.clear()
                 stack.enter_context(mock.patch.dict(os.environ, {}, clear=True))
@@ -297,10 +300,21 @@ class WorkStartTest(unittest.TestCase):
                 stack.enter_context(mock.patch.object(owner, "derive_frame_route_binding", return_value=binding))
                 stack.enter_context(mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}))
                 stack.enter_context(mock.patch.object(owner.subprocess, "run", side_effect=wrapper))
+                if headroom == 30:
+                    stamp_harness[0] = False
+                    pending = W.start_work(self.route, self.path, self.jobs, run=select)
+                    self.assertEqual(pending["state"], "preparing", pending)
+                    self.assertEqual(pending["reason"], "frame-first-attempt-pending")
+                    self.assertEqual(launched, ["codex"])
+                    self.assertEqual(len(self.calls), 1)
+                    self.jobs.write_text(self.jobs.read_text().rstrip() + ",harness=codex\n")
+                    stamp_harness[0] = True
                 result = W.start_work(self.route, self.path, self.jobs, run=select)
                 self.assertEqual(result["state"], "preparing", result)
-                self.assertEqual(launched, ["codex", "codex"])
-                self.assertTrue(all("selection_source=configured-balanced" in r["receipt"] for r in result["launches"]))
+                self.assertEqual(launched, ["codex", "claude"] if headroom < 50 else ["claude", "codex"])
+                first_launch = pending["launches"][0] if headroom == 30 else result["launches"][0]
+                self.assertIn("selection_source=configured-balanced", first_launch["receipt"])
+                self.assertIn("selection_source=frame-cross-harness", result["launches"][-1]["receipt"])
                 # No authorized capacity is a refusal before any model wrapper.
                 self.jobs.unlink(); self.calls.clear(); launched.clear()
                 with mock.patch.object(owner, "_usage", return_value=dict.fromkeys(("claude", "codex", "opencode"), "limited(reset)")):

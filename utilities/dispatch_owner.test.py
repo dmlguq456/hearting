@@ -36,6 +36,116 @@ _OWNER_SPEC.loader.exec_module(OWNER)
 CLAUDE_CLI = shutil.which("claude")
 NEEDS_CLAUDE_CLI = "no claude binary: the selector's session-resume probe cannot be proven here"
 
+
+class FrameAlternativeSelectionTest(unittest.TestCase):
+    def test_missing_first_attempt_is_pending_until_its_harness_is_recorded(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            jobs.touch()
+            route = {"route_id": "rt-frame-pending", "route_hash": "sha256:pending"}
+            self.assertIsNone(OWNER._first_frame_attempt(route, jobs)[0])
+            jobs.write_text("now\topen\t/r\t/w\tframe\t"
+                "route_id=rt-frame-pending,route_hash=sha256:pending,route_node=frame,"
+                "worker_type=frame,attempt_id=att-first\n")
+            self.assertIsNone(OWNER._first_frame_attempt(route, jobs)[0])
+            jobs.write_text(jobs.read_text().rstrip() + ",harness=codex\n")
+            self.assertEqual(OWNER._first_frame_attempt(route, jobs)[0]["harness"], "codex")
+
+    def choose(self, first, selected, *, states=None, policy=None):
+        policy = policy or {"primary": ["claude", "codex"], "relief": [],
+                            "last_resort": [], "promote_relief_below": 0}
+        states = states or {"claude": "ok", "codex": "ok", "opencode": "ok"}
+        return OWNER._prefer_other_frame_harness(
+            first, selected, None, 3, policy, states,
+            {"claude": 0, "codex": 0, "opencode": 0},
+            {"strategy": "capacity-aware", "harness_order": ["claude", "codex", "opencode"]},
+            {"claude": 80, "codex": 80, "opencode": 80},
+            list(policy["primary"]), lambda rows: rows, lambda h: states[h] == "ok")
+
+    def test_both_first_harness_directions_select_the_other(self):
+        for first, other in (("claude", "codex"), ("codex", "claude")):
+            with self.subTest(first=first):
+                self.assertEqual(self.choose(first, first)[0], other)
+
+    def test_single_supported_harness_keeps_selection(self):
+        self.assertEqual(self.choose("codex", "codex", policy={
+            "primary": ["codex"], "relief": [], "last_resort": [],
+            "promote_relief_below": 0})[0], "codex")
+
+    def test_limited_other_harness_does_not_fake_diversity(self):
+        self.assertEqual(self.choose("codex", "codex", states={
+            "claude": "limited", "codex": "ok", "opencode": "ok"})[0], "codex")
+
+    def test_explicit_same_harness_refuses_when_other_is_available(self):
+        with self.assertRaises(OWNER.OwnerError):
+            OWNER._prefer_other_frame_harness(
+                "claude", "claude", "claude", 3,
+                {"primary": ["claude", "codex"], "relief": [], "last_resort": [],
+                 "promote_relief_below": 0},
+                {"claude": "ok", "codex": "ok", "opencode": "ok"},
+                {"claude": 0, "codex": 0, "opencode": 0},
+                {"strategy": "capacity-aware", "harness_order": ["claude", "codex", "opencode"]},
+                {"claude": 80, "codex": 80}, ["claude", "codex"],
+                lambda rows: rows, lambda h: True)
+
+    def test_selector_launches_opposite_harness_in_both_directions(self):
+        import artifact_producer
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            jobs = base / "jobs.log"
+            route_file = base / "route.json"
+            for first in ("claude", "codex"):
+                other = "codex" if first == "claude" else "claude"
+                route = {"route_id": "rt-frame-select", "route_hash": "sha256:frame-select",
+                         "effective_intensity": "standard",
+                         "dispatch_evidence": {"tuples": [
+                             {"status": "supported", "child_harness": h}
+                             for h in ("claude", "codex")]},
+                         "nodes": [{"id": n, "model_profile": "deep"}
+                                   for n in ("frame", "frame-alternative")]}
+                route_file.write_text(json.dumps(route))
+                jobs.write_text("2026-09-26\trunning\t/r\t/w\tframe\t"
+                    f"route_id={route['route_id']},route_hash={route['route_hash']},"
+                    f"route_node=frame,worker_type=frame,harness={first},attempt_id=att-first\n")
+                policy = {"primary": ["claude", "codex"], "relief": [],
+                          "last_resort": [], "promote_relief_below": 0}
+                allocation = {"strategy": "capacity-aware", "window": 30,
+                              "harness_order": ["claude", "codex", "opencode"]}
+                values = {"--model-profile": "deep", "--worker-type": "frame",
+                          "--route-node": "frame-alternative", "--worktree": str(base),
+                          "--capability": "autopilot-code", "--capability-mode": "dev",
+                          "--intensity": "standard"}
+                scores = {first: 90, other: 80, "opencode": 0}
+                binding = SimpleNamespace(route_file=str(route_file), route_id=route["route_id"],
+                    route_hash=route["route_hash"], route_node="frame-alternative",
+                    registry_digest="sha256:test", write_scope=str(base), completion_gate="test")
+                with mock.patch.object(OWNER, "_parse", return_value=(None, values, ["--dry-run"], str(route_file), [])), \
+                     mock.patch.object(OWNER, "_authoritative_jobs", return_value=str(jobs)), \
+                     mock.patch.object(OWNER, "_sealed_owner_context", return_value={
+                         "harnesses": {"claude", "codex"}, "policy": None,
+                         "allocation": allocation}), \
+                     mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3}), \
+                     mock.patch.object(OWNER._defaults, "query_profile_policy", return_value=policy), \
+                     mock.patch.object(OWNER, "_usage", return_value={
+                         "claude": "ok", "codex": "ok", "opencode": "ok"}), \
+                     mock.patch.object(OWNER._allocation, "attempt_counts", return_value={
+                         "claude": 0, "codex": 0, "opencode": 0}), \
+                     mock.patch.object(OWNER._capacity, "capacity_report", return_value={
+                         "scores": scores, "sources": {}}), \
+                     mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
+                     mock.patch.object(OWNER.os, "access", return_value=True), \
+                     mock.patch.object(OWNER.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as launch, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(OWNER.main([]), 0)
+                    with mock.patch.object(OWNER, "_parse", return_value=(
+                            None, values, ["--start"], str(route_file), [])), \
+                         mock.patch.object(OWNER, "frame_harness_admission", return_value=["att-capacity"]), \
+                         mock.patch.object(OWNER, "record_frame_launch_degradation") as record:
+                        self.assertEqual(OWNER.main([]), 0)
+                        record.assert_called_once_with(route, jobs, ["att-capacity"], "att-first", other)
+                self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], other)
+
 class DispatchOwnerTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

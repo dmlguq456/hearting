@@ -470,6 +470,15 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                     result["frame_attempts"] = sorted(attempts)
                     if refusal:
                         return _capacity_wait(result, aid, node["id"], refusal, resume, clock)
+                    receipt_lines = result["launches"][-1]["receipt"].splitlines()
+                    if (node["id"] == "frame-alternative" and result["launches"][-1]["exit_code"] == 75
+                            and "check=deferred" in receipt_lines
+                            and "reason=frame-first-attempt-pending" in receipt_lines
+                            and "child_spawned=0" in receipt_lines):
+                        return {**result, "state": "preparing", "reason": "frame-first-attempt-pending",
+                                "required_action": "wait-for-first-frame-attempt",
+                                "frame_attempts": sorted(attempts),
+                                **_wait_fields(attempts, rows, resume)}
                     return {**result, "state": "needs-attention", "reason": "frame-launch-not-admitted",
                             "frame_attempts": sorted(attempts),
                             **(_wait_fields(attempts, rows, resume) if attempts else {})}
