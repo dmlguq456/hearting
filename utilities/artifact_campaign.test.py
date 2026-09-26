@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Campaign closure/reopen stream tests on isolated fixture roots."""
 import concurrent.futures
+import io
 import json
 import os
 from pathlib import Path
@@ -44,6 +45,56 @@ class CampaignTest(F.ProducerTestBase):
 
     def _close(self, reason="completion criterion met"):
         return C.close(self.root, self.path, reason=reason)
+
+    def _provisional_child(self, closed):
+        route = F.compile_for("direct", self.root, slug="provisional-cycle", gate_source="provisional-input")
+        binding = F.L.admit_runtime_route(self.root, route)
+        route_file = Path(binding.route_file)
+        child = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                        intensity="direct", campaign_id=self.campaign)
+        self.write_output(child)
+        P.finalize(self.root, cycle_id=child["cycle_id"], allow_open_route=True)
+        if closed == "proven":
+            self.close(route, route_file)
+        elif closed == "unproven":
+            F.R.close_route(route, route_file, commit="a" * 40, summary="fixture")
+        return route, route_file, child
+
+    def test_runtime_session_identity_order_and_explicit_reopen(self):
+        cases = (
+            ({"CLAUDE_CODE_SESSION_ID": "claude-session"}, "claude", "claude-session"),
+            ({"CODEX_THREAD_ID": "codex-thread", "CODEX_SESSION_ID": "codex-session"},
+             "codex", "codex-thread"),
+            ({"CODEX_SESSION_ID": "codex-session"}, "codex", "codex-session"),
+            ({"OPENCODE_SESSION_ID": "opencode-session"}, "opencode", "opencode-session"),
+            ({}, None, None),
+        )
+        keys = ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "OPENCODE_SESSION_ID")
+        for index, (values, harness, session) in enumerate(cases):
+            with self.subTest(values=values), mock.patch.dict(os.environ, {"AGENT_HARNESS": ""}):
+                # Ensure the four runtime identity sources are cleared before each case.
+                for key in keys:
+                    os.environ.pop(key, None)
+                os.environ.update(values)
+                if index:
+                    C.reopen(self.root, self.path, reason="identity test")
+                actor_id, closed_by = C._agent_actor()
+                expected = "agent:unknown" if harness is None else f"agent:{harness}:{session}"
+                self.assertEqual(actor_id, expected)
+                result = self._close("identity provenance test")
+                event = json.loads((self.path.parent / C.EVENTS_DIR /
+                                    f"{C.campaign_state(self.root, self.path).last_sequence:06d}.json").read_text())
+                self.assertEqual(event["actor"]["id"], expected)
+                self.assertEqual(event["payload"]["closure"]["closed_by"],
+                                 {"harness": harness, "session_id": session})
+        # Explicit reopen uses the same derived actor and appends its own event.
+        with mock.patch.dict(os.environ, {"AGENT_HARNESS": ""}):
+            os.environ["CLAUDE_CODE_SESSION_ID"] = "explicit-reopen-session"
+            C.reopen(self.root, self.path, reason="explicit campaign-reopen")
+            event = json.loads((self.path.parent / C.EVENTS_DIR /
+                                f"{C.campaign_state(self.root, self.path).last_sequence:06d}.json").read_text())
+            self.assertEqual(event["event_type"], "campaign.reopened")
+            self.assertEqual(event["actor"]["id"], "agent:claude:explicit-reopen-session")
 
     def _write_v1_close(self, path=None):
         path = Path(path or self.path)
@@ -106,8 +157,42 @@ class CampaignTest(F.ProducerTestBase):
                              intensity="direct", campaign_id=self.campaign)
         with self.assertRaisesRegex(C.CampaignError, "campaign-cycle-not-sealed"):
             C.close(self.root, self.path, reason="done")
+        refusal = C.status(self.root, self.path)["close_refusal"]
+        self.assertEqual(refusal["reason"], "campaign-cycle-not-sealed")
+        self.assertIn(open_cycle["cycle_id"], refusal["detail"])
+        self.assertIn("seal-or-abandon-cycle-before-closing-campaign", refusal["detail"])
         self.assertEqual(C.campaign_state(self.root, self.path).state, "active")
         self.assertTrue(Path(open_cycle["cycle_dir"]).exists())
+
+    def test_a24_2_each_close_refusal_has_typed_detail_and_next_step(self):
+        # Open-route refusal carries the actionable route completion instructions.
+        self._provisional_child(None)
+        refusal = C.status(self.root, self.path)["close_refusal"]
+        self.assertEqual(refusal["reason"], "campaign-cycle-provisional-active")
+        self.assertIn("next=", refusal["detail"])
+        self.assertIn("campaign-status", refusal["detail"])
+
+        # The remaining refusal classes retain their precise integrity code and
+        # identify the cycle or state that must be repaired before closing.
+        record = json.loads(self.path.read_text())
+        record["cycles"].append("cyc_" + "f" * 32)
+        P._write_campaign(self.root, record, exclusive=False)
+        refusal = C.status(self.root, self.path)["close_refusal"]
+        self.assertEqual(refusal["reason"], "campaign-membership-drift")
+        self.assertIn("reconcile-campaign-membership-with-producer-records", refusal["detail"])
+        record["cycles"].remove("cyc_" + "f" * 32)
+        P._write_campaign(self.root, record, exclusive=False)
+
+        original = C.admission.load_index
+        def altered(root):
+            value = original(root)
+            value.cycles[self.result["cycle_id"]]["manifest_digest"] = "sha256:" + "0" * 64
+            return value
+        with mock.patch.object(C.admission, "load_index", side_effect=altered):
+            refusal = C.status(self.root, self.path)["close_refusal"]
+        self.assertEqual(refusal["reason"], "campaign-index-mismatch")
+        self.assertIn(self.result["cycle_id"], refusal["detail"])
+        self.assertIn("inspect-manifest-cycle-record-and-index-before-retry", refusal["detail"])
 
     def test_a24_3_key_id_and_parent_begin_reopen_same_campaign(self):
         selectors = ({"key": "campaign-closure"}, {"campaign": self.campaign},
@@ -224,6 +309,283 @@ class CampaignTest(F.ProducerTestBase):
         self.assertIn(close_result.returncode, (0, 65), close_result.stdout + close_result.stderr)
         self.assertEqual(begin_result.returncode, 0, begin_result.stdout + begin_result.stderr)
         self.assertEqual(C.campaign_state(self.root, self.path).state, "active")
+
+    def test_legacy_formatted_seal_and_canonical_index_are_verified_separately(self):
+        raw = json.dumps(json.loads(self.manifest_bytes), indent=4, ensure_ascii=False).encode()
+        self.manifest_path.write_bytes(raw)
+        record = P.read_cycle_record(self.root, self.result["cycle_id"])
+        record["manifest_digest"] = "sha256:" + C.hashlib.sha256(raw).hexdigest()
+        P._write_cycle_record(self.root, record, exclusive=False)
+        report = C.status(self.root, self.path)
+        self.assertNotIn("close_refusal", report)
+        self.assertNotEqual(report["cycles"][0]["manifest_digest"], report["cycles"][0]["index_digest"])
+        self._close("legacy seal remains byte-preserved")
+        self.assertEqual(self.manifest_path.read_bytes(), raw)
+
+    def test_index_disagreement_does_not_become_success(self):
+        original = C.admission.load_index
+        def altered(root):
+            value = original(root)
+            value.cycles[self.result["cycle_id"]]["manifest_digest"] = "sha256:" + "0" * 64
+            return value
+        with mock.patch.object(C.admission, "load_index", side_effect=altered):
+            report = C.status(self.root, self.path)
+        self.assertEqual(report["close_refusal"]["reason"], "campaign-index-mismatch")
+        self.assertIn("inspect-manifest-cycle-record-and-index-before-retry",
+                      report["close_refusal"]["detail"])
+
+    def test_campaign_runlog_is_digest_bound_metadata_not_a_cycle(self):
+        source_cycle = "cyc_" + "f" * 32
+        body = b"# aggregate run log\n"
+        runlog = self.path.parent / "RUNLOG.md"
+        runlog.write_bytes(body)
+        record = json.loads(self.path.read_text())
+        record["runlog"] = {"contract": "campaign-runlog/v1", "path": "RUNLOG.md",
+                            "sha256": "sha256:" + C.hashlib.sha256(body).hexdigest(),
+                            "source_cycle_id": source_cycle, "source_locator": "experiments/_RUNLOG.md"}
+        P._write_campaign(self.root, record, exclusive=False)
+        report = C.status(self.root, self.path)
+        self.assertEqual([row["cycle_id"] for row in report["cycles"]], [self.result["cycle_id"]])
+        runlog.write_bytes(b"drift\n")
+        report = C.status(self.root, self.path)
+        self.assertEqual(report["close_refusal"]["reason"], "campaign-runlog-digest-mismatch")
+
+    def test_legacy_cycle_layout_closes_without_moving_or_rewriting_sealed_bytes(self):
+        cid, old = self.result["cycle_id"], self.manifest_path.parent
+        target = old.parent / "cycles" / cid
+        target.parent.mkdir()
+        old.rename(target)
+        (target / ".cycle.json").unlink()
+        record = P.read_cycle_record(self.root, cid)
+        record.pop("locator")
+        P._write_cycle_record(self.root, record, exclusive=False)
+        index = C.admission.load_index(self.root)
+        index.cycles[cid]["cycle_path"] = str(target.relative_to(self.root))
+        C.admission._write_index(self.root, index)
+        C.locator.rebuild_indexes(self.root)
+        self._close("legacy layout close")
+        self.assertTrue(target.is_dir())
+        self.assertEqual((target / "manifest.json").read_bytes(), self.manifest_bytes)
+
+    def test_artifact_drift_open_cycle_and_unlisted_member_are_blocked(self):
+        self.output.write_bytes(b"drifted bytes")
+        self.assertEqual(C.status(self.root, self.path)["close_refusal"]["reason"],
+                         "campaign-artifact-mismatch")
+        self.output.write_bytes(b"plan body\n")
+        child = self._begin(campaign=self.campaign, slug="unsealed-member")
+        self.assertEqual(C.status(self.root, self.path)["close_refusal"]["reason"],
+                         "campaign-cycle-not-sealed")
+        record = json.loads(self.path.read_text())
+        record["cycles"].remove(child["cycle_id"])
+        P._write_campaign(self.root, record, exclusive=False)
+        self.assertEqual(C.status(self.root, self.path)["close_refusal"]["reason"],
+                         "campaign-membership-drift")
+
+    def test_abandoned_is_sealed_not_success_and_residual_is_not_a_gate(self):
+        residual = self.path.parent / "retained-notes" / "unclassified.txt"
+        residual.parent.mkdir()
+        residual.write_text("not a declared cycle")
+        child = self._begin(campaign=self.campaign, slug="abandoned-member")
+        self.write_output(child, data=b"Abandoned work; no success claimed\n")
+        P.finalize(self.root, cycle_id=child["cycle_id"], state="abandoned",
+                   abandon_reason="route-unrecoverable", allow_open_route=True)
+        report = C.status(self.root, self.path)
+        self.assertEqual(sorted(row["state"] for row in report["cycles"]), ["abandoned", "completed"])
+        self._close("abandoned work is sealed, not successful")
+        self.assertEqual(P.read_cycle_record(self.root, child["cycle_id"])["cycle_state"], "abandoned")
+        self.assertEqual(residual.read_text(), "not a declared cycle")
+
+    def test_invalid_event_is_refused_before_commit(self):
+        record = json.loads(self.path.read_text())
+        record["goal"] = "goal" * 20000
+        P._write_campaign(self.root, record, exclusive=False)
+        before = self.path.read_bytes()
+        with self.assertRaises(C.CampaignError) as caught:
+            self._close("oversized event must be rejected")
+        self.assertEqual(caught.exception.code, "campaign-event-invalid")
+        self.assertIn("oversized-payload", str(caught.exception.detail))
+        self.assertFalse((self.path.parent / C.EVENTS_DIR / "000001.json").exists())
+        self.assertEqual(before, self.path.read_bytes())
+
+    def test_committed_event_corruption_and_native_malformed_input_are_typed(self):
+        self._close("create stream event")
+        event_path = self.path.parent / C.EVENTS_DIR / "000001.json"
+        event = json.loads(event_path.read_text())
+        event["recorded_at"] = "2026-09-14T00:00:00Z"
+        raw = C.canonical(event) + b"\n"
+        event_path.write_bytes(raw)
+        with self.assertRaises(C.CampaignError) as caught:
+            C.status(self.root, self.path)
+        self.assertEqual(caught.exception.code, "campaign-event-invalid")
+        self.assertEqual(raw, event_path.read_bytes())
+
+    def test_crash_before_publish_and_concurrent_retry(self):
+        with mock.patch.object(C.os, "link", side_effect=OSError("precommit")):
+            with self.assertRaisesRegex(C.CampaignError, "campaign-close-not-committed"):
+                self._close("retry after failed publication")
+        self.assertEqual(C.campaign_state(self.root, self.path).state, "active")
+        self.assertFalse((self.path.parent / C.EVENTS_DIR / "000001.json").exists())
+        args = [sys.executable, P.__file__, "campaign-close", "--artifact-root", str(self.root),
+                "--campaign", str(self.path), "--reason", "concurrent retry"]
+        with concurrent.futures.ThreadPoolExecutor(2) as pool:
+            results = list(pool.map(lambda _n: subprocess.run(args, text=True, capture_output=True), range(2)))
+        for result in results:
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual([p.name for p in sorted((self.path.parent / C.EVENTS_DIR).glob("*.json"))],
+                         ["000001.json"])
+
+    def test_symlink_payload_and_symlink_event_are_not_followed(self):
+        data = self.output.read_bytes()
+        foreign = Path(self._tmp.name) / "foreign-payload"
+        foreign.write_bytes(data)
+        self.output.unlink()
+        self.output.symlink_to(foreign)
+        self.assertEqual(C.status(self.root, self.path)["close_refusal"]["reason"], "campaign-symlink")
+        self.output.unlink()
+        self.output.write_bytes(data)
+        self._close("stream symlink test")
+        event_dir = self.path.parent / C.EVENTS_DIR
+        event = event_dir / "000001.json"
+        event.unlink()
+        event.symlink_to(foreign)
+        with self.assertRaises(C.CampaignError) as caught:
+            C.status(self.root, self.path)
+        self.assertEqual(caught.exception.code, "campaign-symlink")
+        event.unlink()
+        event_dir.rename(self.path.parent / "campaign.events.saved")
+        (self.path.parent / C.EVENTS_DIR).symlink_to(self.path.parent / "campaign.events.saved",
+                                                       target_is_directory=True)
+        with self.assertRaises(C.CampaignError) as caught:
+            C.status(self.root, self.path)
+        self.assertEqual(caught.exception.code, "campaign-symlink")
+
+        # Legacy v1 event links are independently refused before reading targets.
+        other_route = F.compile_for("direct", self.root, slug="v1-link", gate_source="v1-link")
+        other_binding = F.L.admit_runtime_route(self.root, other_route)
+        other = P.begin(self.root, route_file=Path(other_binding.route_file), capability="autopilot-code",
+                        intensity="direct", campaign_key="v1-link")
+        self.write_output(other)
+        self.close(other_route, Path(other_binding.route_file))
+        P.finalize(self.root, cycle_id=other["cycle_id"])
+        other_path = Path(other["cycle_dir"]).parent / "campaign.json"
+        (other_path.parent / C.LEGACY_EVENT_NAME).symlink_to(foreign)
+        with self.assertRaises(C.CampaignError) as caught:
+            C.status(self.root, other_path)
+        self.assertEqual(caught.exception.code, "campaign-symlink")
+        self.assertEqual(foreign.read_bytes(), data)
+
+    def test_readiness_drift_while_waiting_for_lock_preserves_state(self):
+        original = C.admission._acquire_lock
+        def acquire(*args, **kwargs):
+            fd = original(*args, **kwargs)
+            self.output.write_bytes(b"changed while waiting")
+            return fd
+        with mock.patch.object(C.admission, "_acquire_lock", side_effect=acquire):
+            with self.assertRaisesRegex(C.CampaignError, "campaign-artifact-mismatch"):
+                self._close("close after lock")
+        self.assertFalse((self.path.parent / C.EVENTS_DIR / "000001.json").exists())
+
+    def test_proven_campaign_rows_and_digest_are_unchanged(self):
+        report = C.status(self.root, self.path)
+        row = report["cycles"][0]
+        self.assertEqual(set(row) - {"disposition"}, {"cycle_id", "state", "manifest_digest", "index_digest",
+                                                      "route_id", "manifest_id", "manifest_revision_id"})
+        self.assertEqual(row["state"], "completed")
+        snapshot = C._snapshot(self.root, self.path)
+        without_disposition = [{k: v for k, v in item.items() if k != "disposition"}
+                               for item in report["cycles"]]
+        self.assertEqual(snapshot["cycles"], without_disposition)
+        self.assertNotIn("unproven_cycles", report)
+
+    def test_route_closed_unproven_cycle_is_disclosed_and_closable(self):
+        _route, _route_file, child = self._provisional_child("unproven")
+        manifest_before = (Path(child["cycle_dir"]) / "manifest.json").read_bytes()
+        record_before = P.read_cycle_record(self.root, child["cycle_id"])
+        report = C.status(self.root, self.path)
+        row = next(row for row in report["cycles"] if row["cycle_id"] == child["cycle_id"])
+        self.assertEqual(row["disposition"], C.PROVISIONAL_DISPOSITION)
+        self.assertIs(row["terminal_gate_proven"], False)
+        self.assertTrue(row["route_outcome_digest"].startswith("sha256:"))
+        self._close("close with disclosed unproven route")
+        event = json.loads((self.path.parent / C.EVENTS_DIR / "000001.json").read_text())
+        snap_row = next(r for r in event["payload"]["snapshot"]["cycles"] if r["cycle_id"] == child["cycle_id"])
+        for key in ("route_closed", "terminal_gate_proven", "terminal_gate_reasons", "route_outcome_digest"):
+            self.assertIn(key, snap_row)
+        self.assertNotIn("disposition", snap_row)
+        self.assertEqual((Path(child["cycle_dir"]) / "manifest.json").read_bytes(), manifest_before)
+        self.assertEqual(P.read_cycle_record(self.root, child["cycle_id"]), record_before)
+
+    def test_route_closed_with_proof_stays_active_and_sealed_unproven(self):
+        _route, _route_file, child = self._provisional_child("proven")
+        report = C.status(self.root, self.path)
+        row = next(row for row in report["cycles"] if row["cycle_id"] == child["cycle_id"])
+        self.assertEqual(row["state"], "active")
+        self.assertEqual(row["disposition"], C.PROVISIONAL_DISPOSITION)
+        self.assertIs(row["terminal_gate_proven"], True)
+        self.assertEqual(row["terminal_gate_reasons"], [])
+        self.assertEqual(report["unproven_cycles"]["without_terminal_proof"], 0)
+
+    def test_open_route_provisional_cycle_is_refused_with_next_step(self):
+        route, route_file, _child = self._provisional_child(None)
+        refusal = C.status(self.root, self.path)["close_refusal"]
+        self.assertEqual(refusal["reason"], "campaign-cycle-provisional-active")
+        self.assertIn("open=1", refusal["detail"])
+        self.assertIn(f"route={route['route_id']}", refusal["detail"])
+        self.assertIn("route_state=open", refusal["detail"])
+        self.assertIn("complete", refusal["detail"])
+        self.assertIn("--allow-unproven", refusal["detail"])
+        self.assertNotIn("finalize", refusal["detail"])
+        F.R.close_route(route, route_file, commit="a" * 40, summary="fixture")
+        self.assertNotIn("close_refusal", C.status(self.root, self.path))
+
+    def test_outcome_identity_mismatch_is_typed(self):
+        route, _route_file, _child = self._provisional_child("unproven")
+        outcome_path = C.lifecycle.canonical_outcome_path(self.root, route["route_id"])
+        outcome = json.loads(outcome_path.read_text())
+        outcome["route_hash"] = "sha256:" + "0" * 64
+        outcome_path.write_text(json.dumps(outcome))
+        self.assertEqual(C.status(self.root, self.path)["close_refusal"]["reason"],
+                         "campaign-cycle-route-outcome-mismatch")
+
+    def test_integrity_errors_win_over_open_route_refusal(self):
+        self._provisional_child(None)
+        self.output.write_bytes(b"bad bytes")
+        self.assertEqual(C.status(self.root, self.path)["close_refusal"]["reason"],
+                         "campaign-artifact-mismatch")
+
+    def test_cli_and_idempotency_preserve_sealed_bytes_and_reject_new_cycle(self):
+        args = ["campaign-close", "--artifact-root", str(self.root), "--campaign", str(self.path),
+                "--reason", "CLI completion"]
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            self.assertEqual(P.main(args), 0)
+            first_result = json.loads(stdout.getvalue())
+        event = (self.path.parent / C.EVENTS_DIR / "000001.json").read_bytes()
+        self.assertEqual(self._close("second close is idempotent")["event_id"], first_result["event_id"])
+        self.assertEqual((self.path.parent / C.EVENTS_DIR / "000001.json").read_bytes(), event)
+        self.assertEqual(self.manifest_path.read_bytes(), self.manifest_bytes)
+        reopened = self._begin(key="campaign-closure", slug="new-cycle-reopens")
+        self.assertEqual(reopened["campaign_id"], self.campaign)
+        self.assertTrue(reopened["campaign_reopened"])
+
+    def test_abandoned_empty_cycle_record_is_detached_not_membership_drift(self):
+        route = F.compile_for("direct", self.root, slug="empty-abandon", gate_source="empty-abandon")
+        binding = F.L.admit_runtime_route(self.root, route)
+        empty = P.begin(self.root, route_file=Path(binding.route_file), capability="autopilot-code",
+                        intensity="direct", campaign_key="campaign-closure")
+        outcome = P.finalize(self.root, cycle_id=empty["cycle_id"], state="abandoned",
+                             abandon_reason="operator-decision")
+        self.assertEqual(outcome["status"], "no-lineage")
+        record = P.read_cycle_record(self.root, empty["cycle_id"])
+        self.assertEqual((record["state"], record["campaign_id"]), ("abandoned", self.campaign))
+        self.assertNotIn(empty["cycle_id"], json.loads(self.path.read_text())["cycles"])
+        self.assertFalse(C.is_member_record(record))
+        report = C.status(self.root, self.path)
+        self.assertEqual(report["state"], "active")
+        self.assertEqual([row["cycle_id"] for row in report["cycles"]], [self.result["cycle_id"]])
+        self.assertEqual([row["cycle_id"] for row in report["detached_cycles"]], [empty["cycle_id"]])
+        self.assertNotIn("detached", json.dumps(C._snapshot(self.root, self.path)))
+        self._close("detached attempt does not affect closure")
+        self.assertEqual(P.read_cycle_record(self.root, empty["cycle_id"]), record)
 
     def test_a24_11_no_approval_surface_remains(self):
         tokens = ("verify_" + "approval", "--approval-" + "session",

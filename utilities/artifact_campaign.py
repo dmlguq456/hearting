@@ -34,7 +34,10 @@ LEGACY_EVENT_NAME = "campaign.satisfied.json"
 EVENTS_DIR = locator.CAMPAIGN_EVENTS_DIR
 DEFAULT_COMPLETION_CRITERION = "every cycle sealed with a manifest"
 STATE_FIELDS = ("state", "satisfied_on", "satisfaction_event_id")
-_RUNTIME_SESSION_ENV = ("CLAUDE_SESSION_ID", "CODEX_THREAD_ID", "OPENCODE_SESSION_ID")
+_RUNTIME_SESSION_ENV = (("CLAUDE_CODE_SESSION_ID", "claude"),
+                        ("CODEX_THREAD_ID", "codex"),
+                        ("CODEX_SESSION_ID", "codex"),
+                        ("OPENCODE_SESSION_ID", "opencode"))
 MAX_JSON = 16 * 1024 * 1024
 
 # A cycle sealed `state: active` (route open at seal time, D-6) whose route has
@@ -443,7 +446,12 @@ def _cycle_rows(root, path, campaign):
     member_records, detached = campaign_records(root, campaign["campaign_id"])
     members = {record.get("cycle_id") for record in member_records}
     if members != set(ids):
-        raise CampaignError("campaign-membership-drift")
+        raise CampaignError("campaign-membership-drift", {
+            "campaign_id": campaign["campaign_id"],
+            "listed_cycle_ids": sorted(ids),
+            "producer_cycle_ids": sorted(members),
+            "next_step": "reconcile-campaign-membership-with-producer-records",
+        })
     directories = {}
     for entry, layout in locator.iter_cycle_dirs(path.parent):
         _safe(path.parent, entry)
@@ -475,7 +483,9 @@ def _cycle_rows(root, path, campaign):
             raise CampaignError("campaign-cycle-id-invalid", cid)
         record, _ = read_json(root, records / (cid + ".json"))
         if record.get("state") not in {"sealed", "superseded"} or not record.get("sealed_on"):
-            raise CampaignError("campaign-cycle-not-sealed", cid)
+            raise CampaignError("campaign-cycle-not-sealed", {
+                "cycle_id": cid, "next_step": "seal-or-abandon-cycle-before-closing-campaign",
+            })
         directory = directories[cid]
         _safe(path.parent, directory)
         expected_directory = (path.parent / str(record["locator"]) if record.get("locator")
@@ -504,7 +514,9 @@ def _cycle_rows(root, path, campaign):
                                       manifest_digest=manifest.manifest_digest(document), idempotency_key=cid)
         if (index.manifests.get(cid) != expected.manifests[cid]
                 or index.cycles.get(cid) != expected.cycles[cid]):
-            raise CampaignError("campaign-index-mismatch", cid)
+            raise CampaignError("campaign-index-mismatch", {
+                "cycle_id": cid, "next_step": "inspect-manifest-cycle-record-and-index-before-retry",
+            })
         for revision in document["artifact_revisions"]:
             _safe(directory, directory / revision["locator"]["path"])
         failures = lifecycle.verify_artifact_revisions(document, directory)
@@ -659,13 +671,13 @@ def _agent_actor():
     harness = os.environ.get("AGENT_HARNESS")
     session = None
     if not harness:
-        for key, name in (("CLAUDE_SESSION_ID", "claude"), ("CODEX_THREAD_ID", "codex"),
-                          ("OPENCODE_SESSION_ID", "opencode")):
+        for key, name in _RUNTIME_SESSION_ENV:
             if os.environ.get(key):
                 harness, session = name, os.environ[key]
                 break
     if session is None and harness:
-        session = next((os.environ.get(key) for key in _RUNTIME_SESSION_ENV if os.environ.get(key)), None)
+        session = next((os.environ.get(key) for key, _name in _RUNTIME_SESSION_ENV
+                        if os.environ.get(key)), None)
     if not harness or not session:
         return "agent:unknown", {"harness": None, "session_id": None}
     return "agent:%s:%s" % (harness, session), {"harness": harness, "session_id": session}
