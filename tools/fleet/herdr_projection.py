@@ -23,7 +23,9 @@ pane belongs to the interactive session that owns it.
 Every herdr report from a hook — this projection and `hooks/herdr-agent-state.sh` — asks
 `may_report()` first. A process may report a session only when it IS that session's
 runtime, proven from the process itself, never from the payload or the environment
-(OpenCode proves the harness only — see `may_report`). Test suites run the real
+(OpenCode proves the harness only — see `may_report`). Codex is proven by Fleet's own
+resolver: the rollout the process holds open, else the board's mutually unique
+process-start match; an ambiguous match proves nothing. Test suites run the real
 hooks with fake session ids while inheriting the interactive pane's `HERDR_PANE_ID` and
 often strip the worker markers, so the worker check alone let `directpromptsid` repaint a
 live pane as `[0d] codex` and take over its `agent_session_id` (2026-09-24). When the
@@ -93,9 +95,12 @@ def runtime_identity():
       the statusline tap matched by pid + start time, for the hours a live process's
       registry file goes missing — F-25 tier 2);
     - Codex: a process named ``codex``/``codex-*`` is the runtime only once
-      `collectors.codex.session_id_of_process` finds the thread's rollout open in it; a
-      Codex process holding none (the `--remote` TUI, `codex-code-mode-host`) is passed
-      over for the ancestor that does, and no proof anywhere means ``("codex", None)``;
+      `collectors.codex.session_id_of_process` proves its thread — the rollout it holds
+      open, else (a direct TUI holding none) the board's own `process_rollouts`
+      start-time match over the live Codex processes, scanned at most once per walk. A
+      Codex process proven neither way (the `--remote` TUI, `codex-code-mode-host`, an
+      ambiguous match) is passed over for the ancestor that is, and no proof anywhere
+      means ``("codex", None)``;
     - OpenCode: a process named ``opencode`` — its session id is not readable from the
       process, so it is always ``("opencode", None)``.
 
@@ -103,7 +108,14 @@ def runtime_identity():
     config dir.
     """
     from fleet.collectors import claude as claude_collector, codex as codex_collector
-    pid, codex_seen = os.getpid(), False
+    from fleet.collectors import procscan
+    pid, codex_seen, live = os.getpid(), False, []
+
+    def live_codex():
+        if not live:
+            live.append(procscan.scan(harness_filter={"codex"}))
+        return live[0]
+
     for _ in range(_MAX_ANCESTORS):
         if not pid or pid <= 1:
             break
@@ -117,7 +129,7 @@ def runtime_identity():
         if comm == "codex" or comm.startswith("codex-"):
             codex_seen = True
             try:
-                thread = codex_collector.session_id_of_process(pid)
+                thread = codex_collector.session_id_of_process(pid, live_codex)
             except Exception:
                 thread = None
             if thread:

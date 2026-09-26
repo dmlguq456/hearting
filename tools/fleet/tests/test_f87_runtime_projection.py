@@ -332,6 +332,109 @@ class RuntimeProjectionTest(unittest.TestCase):
                 else:
                     self.assertEqual(log.read_text(), "", case)
 
+    def direct_codex(self, root, bindir, sids):
+        """A direct Codex TUI holding NO rollout fd (2026-08-10): a process named ``codex``
+        whose prelude writes each root rollout, stamped with the current time, just after
+        it starts — as Codex does at thread start — and closes it again. Only the board's
+        process-start match can prove it. The fd-held fixture (`own_codex_thread`) writes
+        no ``timestamp``, so the start match can never flip the table test's cases."""
+        interpreter = bindir / "codex"
+        if not os.path.lexists(interpreter):
+            os.symlink(sys.executable, interpreter)
+        base = root / "codex" / "sessions" / "2026" / "09" / "26"
+        base.mkdir(parents=True, exist_ok=True)
+        rollouts = [(str(base / ("rollout-2026-09-26T00-00-00-%s.jsonl" % sid)),
+                     json.dumps({"type": "session_meta", "payload": {
+                         "id": sid, "cwd": os.path.realpath(root), "timestamp": "@NOW@"}}))
+                    for sid in sids]
+        prelude = ("import datetime as _d;_now=_d.datetime.now(_d.timezone.utc).isoformat()\n"
+                   "for _p,_m in %r:\n    open(_p,'w').write(_m.replace('@NOW@',_now)+'\\n')\n"
+                   % (rollouts,))
+        return str(interpreter), prelude
+
+    def direct_codex_reports(self, root, sids, payload_sid, sibling=False):
+        """Run the Codex prompt hook under `direct_codex`; True when herdr was reached."""
+        hook = ROOT / "adapters/codex/hooks/userprompt-lifecycle.py"
+        bindir, log = self.stub(root)
+        interpreter, prelude = self.direct_codex(root, bindir, sids)
+        env = self.env(root)
+        env.update({"PATH": str(bindir) + os.pathsep + env["PATH"],
+                    "HERDR_ENV": "1", "HERDR_PANE_ID": "wB:pN",
+                    "HERDR_SOCKET_PATH": str(root / "live.sock"),
+                    "HERDR_LOG": str(log), "HERDR_MODE": "ok", "HERDR_EXIT": "0"})
+        runner = prelude + ("import subprocess,sys;subprocess.run([%r,%r],input=sys.argv[1],"
+                            "text=True,capture_output=True,timeout=60)"
+                            % (sys.executable, str(hook)))
+        payload = json.dumps({"prompt": "deterministic recall", "session_id": payload_sid,
+                              "turn_id": "directturnid", "cwd": ""})
+        other = None
+        try:
+            if sibling:
+                # A second direct TUI in the same cwd, started inside the match window.
+                other = subprocess.Popen([interpreter, "-c", "import time;time.sleep(90)"],
+                                         cwd=str(root), env=env)
+                for _ in range(100):
+                    if Path("/proc/%d/comm" % other.pid).read_text().strip() == "codex":
+                        break
+                    time.sleep(0.02)
+            log.write_text("")
+            subprocess.run([interpreter, "-c", runner, payload], cwd=str(root), env=env,
+                           capture_output=True, timeout=90, check=True)
+        finally:
+            if other is not None:
+                other.kill()
+                other.wait()
+        return "report-agent-session" in log.read_text()
+
+    def test_a_direct_codex_tui_without_a_rollout_fd_reports_by_its_start_time(self):
+        """F5: a Codex TUI started outside the managed launcher holds no rollout fd. The
+        board names it by the mutually unique process-start match, and so does the gate —
+        the same `process_rollouts` — so its own thread reports and a foreign one does not."""
+        sid = "0f5d1a7e-5b1c-4d2e-9f3a-2b6c8d0e1f47"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.assertTrue(self.direct_codex_reports(root, [sid], sid))
+            self.assertFalse(self.direct_codex_reports(root, [sid], "directpromptsid"))
+
+    def test_an_ambiguous_start_time_match_proves_nothing(self):
+        """Two root rollouts for one process, or one rollout for two processes: no unique
+        pair, so no identity and no report — the header keeps its previous text."""
+        sid, other = "0f5d1a7e-5b1c-4d2e-9f3a-2b6c8d0e1f47", "1e6c2b8f-6a2d-4e3f-8a4b-3c7d9e1f2a58"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.assertFalse(self.direct_codex_reports(root, [sid, other], sid))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            self.assertFalse(self.direct_codex_reports(root, [sid], sid, sibling=True))
+
+    def test_the_gate_and_the_board_name_a_direct_tui_with_one_resolver(self):
+        """The board's `prepare_tick` and the gate's `session_id_of_process` must give a
+        fd-less direct TUI the same thread; a second copy of the match would drift."""
+        from fleet.collectors import codex, procscan
+        sid = "0f5d1a7e-5b1c-4d2e-9f3a-2b6c8d0e1f47"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            bindir, _log = self.stub(root)
+            interpreter, prelude = self.direct_codex(root, bindir, [sid])
+            proc = subprocess.Popen([interpreter, "-c", prelude + "import time;time.sleep(90)"],
+                                    cwd=str(root), env=self.env(root))
+            try:
+                rollout = next((root / "codex" / "sessions").rglob("*.jsonl"), None)
+                for _ in range(200):
+                    if rollout is not None and rollout.stat().st_size:
+                        break
+                    time.sleep(0.02)
+                    rollout = next((root / "codex" / "sessions").rglob("*.jsonl"), None)
+                with unittest.mock.patch.dict(os.environ, {"CODEX_HOME": str(root / "codex")}):
+                    codex._INDEX.update(ts=0.0, map=None)
+                    tick = codex.prepare_tick(procscan.scan(harness_filter={"codex"}))
+                    self.assertEqual(codex._sid(tick.proc_paths.get(proc.pid, "")), sid)
+                    self.assertEqual(codex.session_id_of_process(proc.pid), sid)
+            finally:
+                proc.kill()
+                proc.wait()
+                codex._INDEX.update(ts=0.0, map=None)
+
     def test_identity_guard_rejects_a_foreign_session_and_reports_the_own_one(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
