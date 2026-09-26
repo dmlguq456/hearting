@@ -4684,6 +4684,10 @@ class InlineStageCompletionRecipeTest(unittest.TestCase):
   self.assertIs(marker["registered_worker"],False)
   # `registered_worker=0` is what makes readiness answerable without a process.
   self.assertEqual(D.completion_attempt_readiness(route,node,marker,self.jobs).state,"ready")
+  exact=R._marker_identity_row(route,node,node["id"],node["completion_gate"],
+                               jobs=self.jobs,exact_terminal=True)
+  self.assertTrue(exact["passed"],exact)
+  self.assertEqual(exact["attempt_id"],"att-inline-execute")
 
  def test_inline_surface_at_depth_requires_the_inline_hop(self):
   # The combination is contract-checked, so a run cannot record a surface it
@@ -5664,9 +5668,41 @@ class OwnerRegisteredCompletionTest(unittest.TestCase):
     with mock.patch.object(D,"attempt_process_quiescence",return_value=process) as probe:
      self.assertEqual(D.completion_attempt_readiness(route,node,marker,self.jobs).state,state)
      probe.assert_called_once()
+  with mock.patch.object(D,"attempt_process_quiescence",
+                        return_value=D.ProcessQuiescence("quiescent","fixture")):
+   exact=R.terminal_gate_observation(route,jobs=self.jobs,exact_terminal=True)[node["id"]]
+  self.assertTrue(exact["passed"],exact)
+  self.assertEqual(exact["attempt_id"],"att-terminal-owner")
   metadata=D.parse_registry_metadata(self.jobs.read_text().split("\t")[5])
   self.assertNotIn("route_id",metadata,"읽는 쪽 수정이며 등록 신원 재작성은 금지")
   self.assertEqual(metadata["owner_route_id"],route["route_id"])
+
+ def test_exact_owner_gate_is_not_a_proven_block(self):
+  # F1: a depth-1 owner row (owner_route_id/owner_route_hash only, no plain
+  # route_id/route_node) must not fall through the exact-terminal gate to
+  # `completion-attempt-not-current` -- that reason is reserved for a proven
+  # later-attempt fence, and an owner row never matches the old child-only
+  # route_id/route_node scan (plan §2 row for `_marker_identity_row`).
+  route,node,path,evidence=self.fixture()
+  command=[str(P),"complete","--route",str(path),"--node",node["id"],
+   "--evidence",str(evidence),"--jobs",str(self.jobs),"--attempt-id","att-terminal-owner"]
+  output=io.StringIO()
+  with mock.patch.object(sys,"argv",command),contextlib.redirect_stdout(output):
+   R.main()
+  with mock.patch.object(D,"attempt_process_quiescence",
+                        return_value=D.ProcessQuiescence("quiescent","fixture")):
+   exact=R.terminal_gate_observation(route,jobs=self.jobs,exact_terminal=True)[node["id"]]
+  self.assertTrue(exact["passed"],exact)
+  self.assertNotEqual(exact.get("reason"),"completion-attempt-not-current")
+  metadata=D.parse_registry_metadata(self.jobs.read_text().split("\t")[5])
+  metadata=dict(metadata,workflow_completion="runtime-v1")
+  request=R.dispatch_terminal_commit.TerminalCommitRequest(
+   path,"att-terminal-owner",self.jobs,Path(route["artifact_root"]))
+  with mock.patch.object(R.dispatch_terminal_commit,"_completion_request",return_value=request), \
+       mock.patch.object(D,"attempt_process_quiescence",
+                         return_value=D.ProcessQuiescence("quiescent","fixture")):
+   state=R.dispatch_terminal_commit.owner_completion_state(self.jobs,"done",metadata)
+  self.assertNotEqual(state.state,"blocked",state)
 
  def test_foreign_owner_identity_cannot_publish_or_close(self):
   route,node,path,evidence=self.fixture(owner_route_hash="sha256:"+"f"*64)
@@ -5675,6 +5711,47 @@ class OwnerRegisteredCompletionTest(unittest.TestCase):
    R.complete_node(route,node,node["id"],evidence,jobs=self.jobs,attempt_id="att-terminal-owner")
   self.assertEqual(self.jobs.read_bytes(),before)
   self.assertFalse((R.completion_dir(route["route_id"])/"prd-transaction.json").exists())
+
+
+class ExactFenceFailureModeTest(unittest.TestCase):
+ """F3: a transient read failure on the exact fence must never be reported
+ as the proven-permanent `completion-attempt-not-current` reason, and the
+ attempt-less fence input has its own distinct reason."""
+ setUp=InlineStageCompletionRecipeTest.setUp
+ _restore=InlineStageCompletionRecipeTest._restore
+ _route=InlineStageCompletionRecipeTest._route
+ _axes=InlineStageCompletionRecipeTest._axes
+
+ def test_exact_fence_registry_failure_is_not_a_proven_block(self):
+  artifact=self.base/"artifacts"
+  route=self._route(artifact)
+  node=next(n for n in route["nodes"] if n["id"]=="execute")
+  out=artifact/"evidence"/"execute.md"
+  out.parent.mkdir(parents=True,exist_ok=True); out.write_text("ran inline\n",encoding="utf-8")
+  # `jobs=None` is the documented unregistered/inline recipe (defect H): it
+  # publishes the marker under the `AGENT_DISPATCH_JOBS`-resolved state root
+  # without ever touching the registry file itself.
+  R.complete_node(route,node,"execute",out,
+   attempt_id="att-inline-execute",explicit_attempt_metadata=self._axes())
+  real_read_text=Path.read_text
+  def flaky_read_text(path_self,*a,**kw):
+   if path_self==self.jobs:
+    raise OSError("simulated registry read failure")
+   return real_read_text(path_self,*a,**kw)
+  with mock.patch.object(Path,"read_text",flaky_read_text):
+   result=R._marker_identity_row(route,node,node["id"],node.get("completion_gate"),
+                                 jobs=self.jobs,exact_terminal=True)
+  self.assertFalse(result["passed"])
+  self.assertEqual(result["reason"],"registry-unreadable")
+  self.assertNotEqual(result["reason"],"completion-attempt-not-current")
+
+ def test_fence_without_an_attempt_id_has_its_own_reason(self):
+  route={"route_id":"rt-fence-fixture","route_hash":"sha256:"+"7"*64,
+         "nodes":[{"id":"execute","terminal":True}]}
+  node=route["nodes"][0]
+  self.assertEqual(
+   R._registered_marker_fence(route,node,{"registered_worker":True},[]),
+   "marker-attempt-id-missing")
 
 
 

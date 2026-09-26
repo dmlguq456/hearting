@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -83,6 +84,21 @@ class ProducerBindingTests(unittest.TestCase):
         evidence.write_text('{"exit_code":1}')
         self.assertEqual(ROUTE.owner_terminal_prerequisites(route,terminal,self.jobs),
                          {"run":"completion-evidence-hash-mismatch"})
+
+    def test_route_children_consumes_exact_owner_and_inline_gate_proofs(self):
+        route = {"route_id": "rt-gate-proof", "route_hash": "sha256:" + "a" * 64,
+                 "nodes": [{"id": "execute", "terminal": True}],
+                 "workflow_contract": {"terminal_nodes": ["execute"]}}
+        inline_jobs = self.root / "inline-jobs.log"
+        inline_jobs.write_text("", encoding="utf-8")
+        request = T.TerminalCommitRequest(self.route_file, "att-owner", inline_jobs, self.root)
+        inline_gate = {"execute": {"passed": True, "current": True,
+                                    "attempt_id": "att-inline", "attempt_readiness": "ready"}}
+        self.assertEqual(T._prove_route_children(request, route, inline_gate).status, "proved")
+        owner_gate = {"execute": {"passed": True, "source": "owner-terminal",
+                                   "attempt_id": "att-owner", "current": True,
+                                   "attempt_readiness": "quiescent"}}
+        self.assertEqual(T._prove_route_children(request, route, owner_gate).status, "proved")
 
     def test_terminal_reasons_are_the_prd_closed_set(self):
         self.assertEqual(T.TERMINAL_REASONS, {
@@ -168,6 +184,347 @@ class ProducerBindingTests(unittest.TestCase):
         after = sorted((str(path.relative_to(self.root)), path.read_bytes())
                        for path in self.root.rglob("*") if path.is_file())
         self.assertEqual(before, after)
+
+
+class RelatedOwnerDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.route_file = self.root / "route.json"
+        self.jobs = self.root / "jobs.log"
+        self.route = {
+            "route_id": "rt-related-owner",
+            "route_hash": "sha256:" + "c" * 64,
+            "nodes": [{"id": "owner-terminal", "kind": "capability-owner",
+                        "unit": "_kernel/owner", "dispatch_depth": 1, "terminal": True}],
+            "workflow_contract": {"terminal_nodes": ["owner-terminal"]},
+        }
+        self.route_file.write_text(json.dumps(self.route), encoding="utf-8")
+        self.jobs.write_text("", encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def row(self, status, attempt, *, owner_route_id=None, owner_route_hash=None,
+            note="dead-launch-error", failure_class="runtime-error",
+            launch_outcome="reaped-before-publish", **values):
+        fields = {
+            "attempt_schema_version": "2", "dispatch_depth": "1",
+            "transport": "headless", "execution_surface": "registered-headless",
+            "registered_worker": "1", "fallback_hop": "same-harness-headless",
+            "worker_type": "owner", "unit": "_kernel/owner", "attempt_id": attempt,
+            "note": note, "failure_class": failure_class,
+            "launch_outcome": launch_outcome,
+        }
+        if owner_route_id is not None:
+            fields["owner_route_id"] = owner_route_id
+        if owner_route_hash is not None:
+            fields["owner_route_hash"] = owner_route_hash
+        fields.update(values)
+        return "2026-09-21T00:00:00Z\t{}\t{}\t{}\towner\t{}".format(
+            status, self.root, self.root,
+            ",".join(f"{key}={value}" for key, value in fields.items()))
+
+    def request(self):
+        return T.TerminalCommitRequest(self.route_file, "att-latest", self.jobs, self.root)
+
+    def owner_gate(self, **values):
+        return {"owner-terminal": {"passed": True, "current": True,
+                                    "source": "owner-terminal", "attempt_id": "att-latest",
+                                    "attempt_readiness": "quiescent", **values}}
+
+    def test_earlier_owner_with_live_process_blocks_latest_quiescent_owner(self):
+        process = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            identity = T.dispatch_contract.process_launch_identity(process.pid)
+            live = {"pid": identity["pid"], "pid_start": identity["pid_start"],
+                    "pgid": identity["pgid"], **identity}
+            earlier = self.row("done", "att-earlier", owner_route_id=self.route["route_id"],
+                               owner_route_hash=self.route["route_hash"], **live,
+                               launch_outcome="running")
+            latest = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                              owner_route_hash=self.route["route_hash"],
+                              note="completed-marker", failure_class="pass",
+                              launch_outcome="never-launched")
+            self.jobs.write_text(earlier + "\n" + latest + "\n", encoding="utf-8")
+            proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
+            self.assertEqual((proof.status, proof.reason), ("rejected", "child-not-quiescent"))
+            calls = []
+            owner = owner_route_binding.OwnerRouteBinding(
+                str(self.route_file), self.route["route_id"], self.route["route_hash"])
+            services = T.TerminalCommitServices(
+                close_route=lambda *args, **kwargs: calls.append("close"),
+                finalize_exact_cycle=lambda *args, **kwargs: calls.append("finalize"),
+                seal_envelope=lambda **kwargs: calls.append("envelope"),
+            )
+            with mock.patch.object(T, "verify_request_identity"), \
+                 mock.patch.object(T, "validate_owner_route", return_value=owner), \
+                 mock.patch.object(T, "producer_lifecycle_applies", return_value=False), \
+                 mock.patch.object(T, "_route_module") as route_module:
+                route_module.return_value.terminal_gate_observation.return_value = self.owner_gate()
+                transaction = T.settle_terminal_commit(self.request(), services)
+            self.assertEqual((transaction.result, transaction.reason),
+                             ("ineligible", "child-not-quiescent"))
+            self.assertEqual(calls, [])
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_owner_conflict_is_not_hidden_by_owner_alias_binding(self):
+        conflict = self.row("done", "att-conflict", owner_route_id=self.route["route_id"],
+                            owner_route_hash=self.route["route_hash"],
+                            terminal_conflict="1", conflicting_terminal_note="completed-marker",
+                            conflicting_failure_class="runtime-error")
+        latest = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                          owner_route_hash=self.route["route_hash"],
+                          note="completed-marker", failure_class="pass",
+                          launch_outcome="never-launched")
+        self.jobs.write_text(conflict + "\n" + latest + "\n", encoding="utf-8")
+        proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
+        self.assertEqual((proof.status, proof.reason, proof.detail),
+                         ("rejected", "transaction-conflict", "child-terminal-conflict"))
+
+    def test_latest_owner_is_quiescent_and_unrelated_owner_is_non_blocking(self):
+        latest = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                          owner_route_hash=self.route["route_hash"],
+                          note="completed-marker", failure_class="pass",
+                          launch_outcome="never-launched")
+        unrelated = self.row("done", "att-unrelated", owner_route_id="rt-unrelated",
+                             owner_route_hash="sha256:" + "d" * 64,
+                             note="dead-launch-error", failure_class="runtime-error")
+        self.jobs.write_text(latest + "\n" + unrelated + "\n", encoding="utf-8")
+        proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
+        self.assertEqual((proof.status, proof.reason), ("proved", None))
+
+    def test_reaped_failed_owner_allows_valid_inline_fallback(self):
+        failed = self.row("done", "att-reaped", owner_route_id=self.route["route_id"],
+                          owner_route_hash=self.route["route_hash"])
+        self.jobs.write_text(failed + "\n", encoding="utf-8")
+        inline_gate = {"owner-terminal": {"passed": True, "current": True,
+                                           "attempt_id": "att-inline", "attempt_readiness": "ready"}}
+        proof = T._prove_route_children(self.request(), self.route, inline_gate)
+        self.assertEqual((proof.status, proof.reason), ("proved", None))
+
+    def test_mismatched_owner_aliases_fail_closed(self):
+        for values in (
+            {"owner_route_id": self.route["route_id"], "owner_route_hash": "sha256:" + "e" * 64},
+            {"owner_route_id": "rt-other", "owner_route_hash": self.route["route_hash"]},
+        ):
+            with self.subTest(values=values):
+                self.jobs.write_text(self.row("done", "att-bad", **values) + "\n", encoding="utf-8")
+                proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
+                self.assertEqual((proof.status, proof.reason),
+                                 ("rejected", "route-identity-unverified"))
+
+    def test_unrelated_incomplete_owner_tuple_does_not_block_current_owner(self):
+        latest = self.row("done", "att-latest", owner_route_id=self.route["route_id"],
+                          owner_route_hash=self.route["route_hash"],
+                          note="completed-marker", failure_class="pass",
+                          launch_outcome="never-launched")
+        unrelated = self.row("done", "att-unrelated",
+                             owner_route_id="rt-unrelated",
+                             note="dead-launch-error", failure_class="runtime-error")
+        self.jobs.write_text(latest + "\n" + unrelated + "\n", encoding="utf-8")
+        proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
+        self.assertEqual((proof.status, proof.reason), ("proved", None))
+
+    def test_related_incomplete_owner_tuple_still_fails_closed(self):
+        malformed = self.row("done", "att-malformed",
+                             owner_route_id=self.route["route_id"])
+        self.jobs.write_text(malformed + "\n", encoding="utf-8")
+        proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
+        self.assertEqual((proof.status, proof.reason),
+                         ("rejected", "route-identity-unverified"))
+
+    def _report_terminal_route(self):
+        route = dict(self.route)
+        route["nodes"] = [{"id": "report", "kind": "pipeline-stage",
+                           "unit": "editorial/report", "dispatch_depth": 2,
+                           "terminal": True}]
+        route["workflow_contract"] = {"terminal_nodes": ["report"]}
+        self.route_file.write_text(json.dumps(route), encoding="utf-8")
+        return route
+
+    def _depth2_report_row(self, status, attempt, **values):
+        return self.row(
+            status, attempt,
+            owner_route_id="rt-inherited-owner",
+            owner_route_hash="sha256:" + "9" * 64,
+            dispatch_depth="2", worker_type="stage", unit="editorial/report",
+            route_id=self.route["route_id"], route_hash=self.route["route_hash"],
+            route_node="report", parent_attempt_id="att-old-parent", **values,
+        )
+
+    def test_depth2_uses_own_route_tuple_despite_inherited_owner_context(self):
+        route = self._report_terminal_route()
+        process = subprocess.Popen(["sleep", "30"], start_new_session=True)
+        try:
+            identity = T.dispatch_contract.process_launch_identity(process.pid)
+            live = {"pid": identity["pid"], "pid_start": identity["pid_start"],
+                    "pgid": identity["pgid"], **identity}
+            row = self._depth2_report_row(
+                "done", "att-report-live", launch_outcome="running", **live)
+            self.jobs.write_text(row + "\n", encoding="utf-8")
+            request = T.TerminalCommitRequest(
+                self.route_file, "att-current-owner", self.jobs, self.root)
+            gates = {"report": {"passed": True, "current": True,
+                                "attempt_id": "att-report-live",
+                                "attempt_readiness": "quiescent"}}
+            proof = T._prove_route_children(request, route, gates)
+            self.assertEqual((proof.status, proof.reason),
+                             ("rejected", "child-not-quiescent"))
+        finally:
+            process.terminate()
+            process.wait(timeout=5)
+
+    def test_reaped_depth2_with_inherited_owner_context_keeps_existing_policy(self):
+        route = self._report_terminal_route()
+        row = self._depth2_report_row("done", "att-report-reaped")
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        request = T.TerminalCommitRequest(
+            self.route_file, "att-current-owner", self.jobs, self.root)
+        gates = {"report": {"passed": True, "current": True,
+                            "attempt_id": "att-report-reaped",
+                            "attempt_readiness": "quiescent"}}
+        self.assertTrue(T._related_route_identity(
+            T.dispatch_contract.parse_registry_metadata(row.split("\t")[5]), route))
+        proof = T._prove_route_children(request, route, gates)
+        self.assertEqual((proof.status, proof.reason), ("proved", None))
+
+    def test_owner_closure_review_row_does_not_block_terminal_proof(self):
+        # F4: a depth-2 review row an owner sealed under `gate_closure:
+        # owner-closure` keeps its verdict axis on FAIL (plan §2 row for
+        # `_complete_node_locked`) while being the terminal record of a
+        # successful owner sweep. The related-row full scan (fb0d43ad) must
+        # not reject it the way a literal failure_class comparison would.
+        route = self._report_terminal_route()
+        row = self._depth2_report_row(
+            "done", "att-review-closed", note="completed-marker",
+            failure_class="fail", gate_closure="owner-closure",
+        )
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        request = T.TerminalCommitRequest(
+            self.route_file, "att-current-owner", self.jobs, self.root)
+        gates = {"report": {"passed": True, "current": True,
+                            "attempt_id": "att-review-closed",
+                            "attempt_readiness": "quiescent"}}
+        proof = T._prove_route_children(request, route, gates)
+        self.assertEqual((proof.status, proof.reason), ("proved", None))
+
+    def test_hashless_route_does_not_relate_every_row(self):
+        # F5: a route with no route_hash must not treat a row with neither
+        # owner nor route aliases as related merely because `None in
+        # (None, None)` is True. Without the empty-alias exclusion this
+        # raises ValueError (int(None)) instead of classifying the row as
+        # simply unrelated.
+        route = {"route_id": "rt-hashless", "nodes": [{"id": "owner-terminal",
+                 "kind": "capability-owner", "unit": "_kernel/owner",
+                 "dispatch_depth": 1, "terminal": True}]}
+        metadata = {"attempt_id": "att-unrelated", "note": "dead-launch-error",
+                    "failure_class": "runtime-error"}
+        self.assertFalse(T._related_route_identity(metadata, route))
+
+
+class ExactPassClassificationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.route_file = self.root / "route.json"
+        self.jobs = self.root / "jobs.log"
+        self.route = {"route_id": "rt-exact-pass", "route_hash": "sha256:" + "f" * 64,
+                      "nodes": [{"id": "child", "dispatch_depth": 2, "terminal": True}],
+                      "workflow_contract": {"terminal_nodes": ["child"]}}
+        self.route_file.write_text(json.dumps(self.route), encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def metadata(self):
+        return ("attempt_schema_version=2,dispatch_depth=2,transport=headless,"
+                "execution_surface=registered-headless,registered_worker=1,"
+                "fallback_hop=same-harness-headless,route_id=rt-exact-pass,"
+                "route_hash=sha256:" + "f" * 64 + ",route_node=child,"
+                "attempt_id=att-contradiction,note=completed-marker,"
+                "failure_class=runtime-error,launch_outcome=never-launched")
+
+    def test_completed_marker_with_runtime_error_is_rejected_downstream(self):
+        self.jobs.write_text(f"2026-09-21T00:00:00Z\tdone\t{self.root}\t{self.root}\tchild\t{self.metadata()}\n",
+                             encoding="utf-8")
+        request = T.TerminalCommitRequest(self.route_file, "att-owner", self.jobs, self.root)
+        gates = {"child": {"passed": True, "current": True,
+                            "attempt_id": "att-contradiction", "attempt_readiness": "quiescent"}}
+        with mock.patch("dispatch_attempt_policy.decide_attempt",
+                         side_effect=AssertionError("contradictory marker reached decision")):
+            proof = T._prove_route_children(request, self.route, gates)
+        self.assertEqual((proof.status, proof.reason, proof.detail),
+                         ("rejected", "terminal-marker-not-current", "terminal-attempt-not-pass"))
+
+    def test_readiness_rejects_completed_marker_without_exact_pass_class(self):
+        self.jobs.write_text(f"2026-09-21T00:00:00Z\tdone\t{self.root}\t{self.root}\tchild\t{self.metadata()}\n",
+                             encoding="utf-8")
+        marker = {"attempt_id": "att-contradiction", "registered_worker": True}
+        readiness = T.dispatch_contract.completion_attempt_readiness(
+            self.route, self.route["nodes"][0], marker, self.jobs)
+        self.assertEqual((readiness.state, readiness.reason),
+                         ("unverifiable", "marker-attempt-failure-class-not-pass"))
+
+
+class DeferredAndOwnerClosureVerdictTest(unittest.TestCase):
+    """F2: completion-deferred success stays a pass (backlog #6), a still-
+    pending deferred row stays not-terminal, independent of the new
+    contradiction check."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.route_file = self.root / "route.json"
+        self.jobs = self.root / "jobs.log"
+        self.route = {"route_id": "rt-deferred-verdict", "route_hash": "sha256:" + "1" * 64,
+                      "nodes": [{"id": "execute", "terminal": True}],
+                      "workflow_contract": {"terminal_nodes": ["execute"]}}
+        self.route_file.write_text(json.dumps(self.route), encoding="utf-8")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _row(self, attempt_id, **overrides):
+        fields = {
+            "attempt_schema_version": "2", "dispatch_depth": "2",
+            "transport": "headless", "execution_surface": "registered-headless",
+            "registered_worker": "1", "fallback_hop": "same-harness-headless",
+            "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+            "route_node": "execute", "attempt_id": attempt_id,
+            "classifier_source": "registered-wrapper-completion-transient-v1",
+            "launch_outcome": "reaped-before-publish",
+        }
+        fields.update(overrides)
+        return "2026-09-21T00:00:00Z\tdone\t{}\t{}\texecute\t{}".format(
+            self.root, self.root, ",".join(f"{k}={v}" for k, v in fields.items()))
+
+    def test_completed_deferral_is_ready_and_proved(self):
+        row = self._row("att-deferred-done", note="completed-marker",
+                        failure_class="infrastructure",
+                        completion_marker="/artifacts/.runtime/completions/execute.json")
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        marker = {"attempt_id": "att-deferred-done", "registered_worker": True}
+        readiness = T.dispatch_contract.completion_attempt_readiness(
+            self.route, self.route["nodes"][0], marker, self.jobs)
+        self.assertEqual((readiness.state, readiness.reason[:0]), ("ready", ""))
+        request = T.TerminalCommitRequest(self.route_file, "att-owner", self.jobs, self.root)
+        gates = {"execute": {"passed": True, "current": True,
+                             "attempt_id": "att-deferred-done", "attempt_readiness": "ready"}}
+        proof = T._prove_route_children(request, self.route, gates)
+        self.assertEqual((proof.status, proof.reason), ("proved", None))
+
+    def test_pending_deferral_is_not_terminal(self):
+        row = self._row("att-deferred-pending", note="completion-deferred",
+                        failure_class="infrastructure")
+        self.jobs.write_text(row + "\n", encoding="utf-8")
+        marker = {"attempt_id": "att-deferred-pending", "registered_worker": True}
+        readiness = T.dispatch_contract.completion_attempt_readiness(
+            self.route, self.route["nodes"][0], marker, self.jobs)
+        self.assertEqual((readiness.state, readiness.reason),
+                         ("unverifiable", "marker-attempt-not-terminal"))
 
 
 class _TerminalCommitFixture(unittest.TestCase):
@@ -665,6 +1022,24 @@ class OwnerCompletionStateTest(_TerminalCommitFixture):
         )
         self.assertEqual(state.state, "not-applicable")
 
+    def test_not_yet_proven_gate_reasons_stay_pending(self):
+        # F3b: the readiness/fence vocabulary added by this change
+        # (registry-unreadable, marker-attempt-not-terminal,
+        # marker-attempt-failure-class-not-pass) must never be a member of
+        # `_PROVEN_BLOCKED_GATE_REASONS` -- only a later-attempt fence or an
+        # evidence-hash mismatch may prove a permanent block (plan §4).
+        for reason in ("registry-unreadable", "marker-attempt-not-terminal",
+                       "marker-attempt-failure-class-not-pass"):
+            with self.subTest(reason=reason):
+                gates = {"execute": {"passed": False, "reason": reason}}
+                with mock.patch.object(T, "_route_module") as route_module:
+                    route_module.return_value.terminal_gate_observation.return_value = gates
+                    state = T.owner_completion_state(self.jobs, "done", self._metadata())
+                self.assertEqual(state.state, "pending")
+                self.assertEqual(state.reason, reason)
+        self.assertEqual(T._PROVEN_BLOCKED_GATE_REASONS,
+                         {"completion-attempt-not-current", "completion-evidence-hash-mismatch"})
+
 
 class CompletionRequestDeferredGuardTest(unittest.TestCase):
     """C10 (S3a): `_completion_request`'s atomic pass check via `verdict_pass`."""
@@ -714,29 +1089,53 @@ class ProveRouteChildrenDeferredTest(unittest.TestCase):
     def test_completed_deferred_child_satisfies_terminal_proof(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"
-            route = {"route_id": "rt-children-deferred",
+            route_hash = "sha256:" + "e" * 64
+            route = {"route_id": "rt-children-deferred", "route_hash": route_hash,
                      "nodes": [{"id": "execute", "terminal": True}]}
             self._child_row(jobs, route["route_id"], "execute", "att-execute-deferred", {
+                "route_hash": route_hash,
+                "attempt_schema_version": "2", "dispatch_depth": "2", "transport": "headless",
+                "execution_surface": "registered-headless", "registered_worker": "1",
+                "fallback_hop": "same-harness-headless", "parent_attempt_id": "att-owner",
                 "note": "completed-marker", "failure_class": "infrastructure",
                 "classifier_source": "registered-wrapper-completion-transient-v1",
                 "completion_marker": "/artifacts/.runtime/completions/execute.json",
                 "launch_outcome": "reaped-before-publish",
             })
-            gates = {"execute": {"attempt_id": "att-execute-deferred"}}
+            # Canonicalized to the real exact-terminal gate shape (plan §3
+            # Step 4.1): the terminal node loop now trusts `gate["passed"]`
+            # instead of reimplementing a route_id/route_node scan.
+            gates = {"execute": {"passed": True, "current": True,
+                                 "attempt_id": "att-execute-deferred",
+                                 "attempt_readiness": "quiescent"}}
             proof = T._prove_route_children(self._request(jobs), route, gates)
         self.assertEqual(proof.status, "proved")
 
     def test_pending_deferred_child_is_not_terminal_pass(self):
         with tempfile.TemporaryDirectory() as td:
             jobs = Path(td) / "jobs.log"
-            route = {"route_id": "rt-children-pending",
+            route_hash = "sha256:" + "e" * 64
+            route = {"route_id": "rt-children-pending", "route_hash": route_hash,
                      "nodes": [{"id": "execute", "terminal": True}]}
             self._child_row(jobs, route["route_id"], "execute", "att-execute-pending", {
+                "route_hash": route_hash,
+                "attempt_schema_version": "2", "dispatch_depth": "2", "transport": "headless",
+                "execution_surface": "registered-headless", "registered_worker": "1",
+                "fallback_hop": "same-harness-headless", "parent_attempt_id": "att-owner",
                 "note": "completion-deferred", "failure_class": "infrastructure",
                 "classifier_source": "registered-wrapper-completion-transient-v1",
                 "launch_outcome": "reaped-before-publish",
             })
-            gates = {"execute": {"attempt_id": "att-execute-pending"}}
+            # The pending gate shape is derived from readiness itself, not
+            # invented, so the fixture cannot silently drift from the real
+            # exact-terminal gate contract.
+            marker = {"attempt_id": "att-execute-pending", "registered_worker": True}
+            readiness = T.dispatch_contract.completion_attempt_readiness(
+                route, route["nodes"][0], marker, jobs)
+            self.assertEqual((readiness.state, readiness.reason),
+                             ("unverifiable", "marker-attempt-not-terminal"))
+            gates = {"execute": {"passed": False, "reason": readiness.reason,
+                                 "attempt_id": "att-execute-pending"}}
             proof = T._prove_route_children(self._request(jobs), route, gates)
         self.assertEqual(proof.status, "rejected")
         self.assertEqual(proof.detail, "terminal-attempt-not-pass")
