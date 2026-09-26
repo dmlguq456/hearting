@@ -638,13 +638,6 @@ def _model_key(model, dim=False):
 # say WHICH opus the harness resolved).
 _ROLE_MODEL_NAME = {"opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku", "fable": "Fable"}
 
-# Bare dispatch roles are resolved by the current runtimes but preserved raw by collectors.
-# Centralize their human-facing names here; unknown values remain byte-for-byte unchanged.
-# Checked 2026-09-24 against the owners' transcripts: `--model opus` resolved to
-# `claude-opus-5-5` (the table said "Opus 5" and read as an outdated owner model).
-_DISPATCH_MODEL_NAMES = {"opus": "Opus 5.5", "sonnet": "Sonnet 5", "haiku": "Haiku 4.5"}
-
-
 def _clean_model(name):
     """'Opus 4.8 (1M context)' → 'Opus 4.8' (drop the trailing parenthetical — redundant, ugly
     when truncated); bare role tokens 'opus'/'sonnet' → 'Opus'/'Sonnet' (user 2026-07-20);
@@ -693,7 +686,11 @@ def _short_model_id(name):
 def _dispatch_display_model(name):
     if not name:
         return name
-    return _DISPATCH_MODEL_NAMES.get(str(name).strip().lower(), _short_model_id(name))
+    return _short_model_id(_ROLE_MODEL_NAME.get(str(name).strip().lower(), name))
+
+
+def _job_display_model(job, parent_model=None):
+    return _dispatch_display_model(getattr(job, "resolved_model", None) or job.model or parent_model)
 
 
 # mid-height bar (━ filled / ─ empty): the glyphs sit at the cell's vertical centre, so gauges on
@@ -2785,7 +2782,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     segs = [("  ", None), (prefix, "dim"), (gch, gkey), (" ", None)]
     segs += _harness_model_cell(j.harness,
                                 None if j.liveness == "dead" else
-                                _dispatch_display_model(j.model or parent_model),
+                                _job_display_model(j, parent_model),
                                 eff, max(1, _HMW - len(prefix)),
                                 _BADGE_KEY.get(j.harness, "dim"), dim=True, unknown="—")
     avail = max(3, name_width or _NW_S)
@@ -3113,13 +3110,13 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
         # elapsed cell, so no depth needs it repeated (F-64a).
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
-        l2 += _model_cell(_dispatch_display_model(j.model or parent_model), eff, _MW, dim=True)
+        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True)
         l2.append(("    ", None))
         l2 += _stage_zone_segs([("done %s" % _LIVE_GLYPH["done"], "dim")])
     else:
         eff = j.effort or parent_effort or None
         l2 = [("    ", None), (_pad(fmt_min(j.elapsed_min), _HW), "dim")]
-        l2 += _model_cell(_dispatch_display_model(j.model or parent_model), eff, _MW, dim=True)
+        l2 += _model_cell(_job_display_model(j, parent_model), eff, _MW, dim=True)
         l2.append(("    ", None))
         opt_segs, optw = _opts_segs(j)
         l2 += opt_segs
@@ -5198,7 +5195,7 @@ def _route_job_row(job, max_width=None):
     the one field with no fixed budget elsewhere, so it yields first — same "the variable-width
     field clips, the fixed-shape fields never do" idiom as `_compact_dispatch_name`."""
     hn = _BADGE_TEXT.get(job.harness, "—") if job.harness else "—"
-    model_txt = _clean_model(dash(_dispatch_display_model(job.model))) or "—"
+    model_txt = _clean_model(dash(_job_display_model(job))) or "—"
     eff = ("(%s)" % job.effort) if job.effort else ""
     tail = _ELAPSED_GLYPH + fmt_min(job.elapsed_min) if job.elapsed_min is not None else ""
     prefix = "     └▸🚀 "

@@ -51,6 +51,34 @@ class DispatchSummaryTest(unittest.TestCase):
         os.environ.update(self.old_env)
         self.tmp.cleanup()
 
+    def test_first_concrete_claude_model_is_recorded_once(self):
+        attempt = "att-resolved-model"
+        log = Path(self.tmp.name) / f"owner.{attempt}.claude.jsonl"
+        jobs = Path(self.tmp.name) / "jobs.log"
+        jobs.write_text(
+            "2026-08-04T00:00:00Z\topen\t/repo\t/wt\towner\t"
+            "attempt_schema_version=2,dispatch_depth=1,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            "fallback_hop=same-harness-headless,worker_type=owner,"
+            f"attempt_id={attempt},harness=claude,model=opus,log_file={log}\n",
+            encoding="utf-8",
+        )
+        log.write_text(
+            json.dumps({"type": "system", "subtype": "init", "model": "opus"}) + "\n"
+            + json.dumps({"type": "assistant", "message": {"model": "claude-opus-5-5"}}) + "\n",
+            encoding="utf-8",
+        )
+        cursor = {}
+        self.assertTrue(S._record_resolved_model(log, jobs, attempt, cursor))
+        self.assertEqual(D.parse_registry_metadata(jobs.read_text().split("\t")[5])["model"], "opus")
+        self.assertEqual(D.parse_registry_metadata(jobs.read_text().strip().split("\t")[5])["resolved_model"],
+                         "claude-opus-5-5")
+        with log.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps({"type": "assistant", "message": {"model": "claude-opus-6"}}) + "\n")
+        self.assertFalse(S._record_resolved_model(log, jobs, attempt, cursor))
+        self.assertEqual(D.parse_registry_metadata(jobs.read_text().strip().split("\t")[5])["resolved_model"],
+                         "claude-opus-5-5")
+
     def test_prompt_validator_accepts_exact_sibling_and_rejects_neighbor(self):
         attempt = "att-prompt-validator"
         directory = Path(self.tmp.name)

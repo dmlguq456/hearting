@@ -269,6 +269,7 @@ FALLBACK_HOPS = {
     "inline",
 }
 ATTEMPT_MUTABLE_METADATA = {
+    "resolved_model",
     "launch_claimed",
     "pid",
     "pid_start",

@@ -56,6 +56,56 @@ DEFAULT_PERIODIC_DEBOUNCE = 600
 DEFAULT_FINAL_GRACE = 75.0
 DEFAULT_LOG_QUIET = 1.0
 SESSION_ANNOUNCE_SCAN = 1 << 16
+_CLAUDE_MODEL_ID = re.compile(r"^claude-(?:opus|sonnet|haiku|fable)-\d+(?:-\d+)*(?:-\d{8})?$")
+
+
+def _reported_claude_model(event: dict[str, Any]) -> str | None:
+    """Accept a concrete runtime id, never the requested family alias."""
+    kind = event.get("type")
+    if kind == "system" and event.get("subtype") == "init":
+        candidate = event.get("model")
+    elif kind == "assistant" and isinstance(event.get("message"), dict):
+        candidate = event["message"].get("model")
+    elif kind == "assistant":
+        candidate = event.get("model")
+    else:
+        return None
+    return candidate if isinstance(candidate, str) and _CLAUDE_MODEL_ID.fullmatch(candidate) else None
+
+
+def _record_resolved_model(source: Path, jobs: Path, attempt_id: str,
+                           cursor: dict[str, Any]) -> bool:
+    """Scan new complete stream rows and stamp the first reported model once."""
+    if cursor.get("source") != source:
+        cursor.clear()
+        cursor.update(source=source, offset=0)
+    try:
+        with source.open("rb") as stream:
+            stream.seek(cursor["offset"])
+            while True:
+                start = stream.tell()
+                raw = stream.readline()
+                if not raw or not raw.endswith(b"\n"):
+                    cursor["offset"] = start
+                    return False
+                cursor["offset"] = stream.tell()
+                try:
+                    event = json.loads(raw)
+                except (UnicodeDecodeError, ValueError):
+                    continue
+                model = _reported_claude_model(event) if isinstance(event, dict) else None
+                if model:
+                    # Terminal rows may already have sealed delivery revisions.
+                    # Leave a late model unresolved rather than changing that receipt.
+                    recorded = annotate_attempt_row_if(
+                        jobs, attempt_id, {"resolved_model": model},
+                        lambda fields: not parse_registry_metadata(fields[5]).get("resolved_model"),
+                    )
+                    if not recorded:
+                        cursor["offset"] = start
+                    return recorded
+    except OSError:
+        return False
 
 
 def summary_sid(attempt_id: str) -> str:
@@ -511,6 +561,10 @@ def supervise(
         first_eligible = time.monotonic() + max(0.0, initial_delay)
         initial_requested = False
         source_cache: dict[str, Any] = {}
+        model_cursor: dict[str, Any] = {}
+        jobs_env = os.environ.get("AGENT_DISPATCH_JOBS")
+        jobs_path = Path(jobs_env).expanduser().resolve() if jobs_env else None
+        model_recorded = False
         source = log_path
         while True:
             live, terminal_reason = _proc_live(target_pid, target_start)
@@ -519,6 +573,8 @@ def supervise(
                 source = resolved
                 state.update(summary_source=str(source))
                 _atomic_write(state_path, state)
+            if harness == "claude" and jobs_path and resolved is not None and not model_recorded:
+                model_recorded = _record_resolved_model(source, jobs_path, attempt_id, model_cursor)
             size = _log_signature(source)[0] if resolved is not None else 0
             if size and time.monotonic() >= first_eligible:
                 previous = _read_sidecar(harness, sid)
@@ -554,6 +610,8 @@ def supervise(
                 quiet_since = time.monotonic()
             if time.monotonic() - quiet_since >= max(0.0, log_quiet):
                 break
+        if harness == "claude" and jobs_path and not model_recorded:
+            _record_resolved_model(source, jobs_path, attempt_id, model_cursor)
 
         final_size = _log_signature(source)[0]
         final_deadline = time.monotonic() + max(0.0, final_grace)
