@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -111,6 +113,12 @@ class AmendmentTests(unittest.TestCase):
         revisions = [row["manifest_revision_id"] for row in campaign_sidecar["entries"][0]["manifest_bindings"]]
         self.assertEqual(revisions, sorted(set(revisions)))
         self.assertEqual(A.apply(package, expected_package_digest=A.package_digest(package))["status"], "already-applied")
+
+    def test_prepare_uses_folded_state_for_closed_campaign_refusal(self) -> None:
+        with mock.patch.object(A.artifact_campaign, "campaign_state",
+                               return_value=SimpleNamespace(state="satisfied")):
+            with self.assertRaisesRegex(A.AmendmentError, "campaign-not-active-unassigned"):
+                self.package()
 
     def test_preimage_drift_and_key_collision_refuse_without_target_writes(self) -> None:
         package = self.package()

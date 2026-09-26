@@ -257,29 +257,19 @@ remaining file; an explicit `--primary` is kept as given.
 | `user_profile/` | the evidence and report behind a cross-project user-preference profile (`analyze-user`) | `C-DUR` |
 | `reviews/` | audit and review reports (`audit`, stage reviews); a root-level `reviews/` stays support material | `C-DUR` |
 
-**Campaign closure.** `artifact_producer.py campaign-status|campaign-close|campaign-recover`
-owns administrative satisfaction. Status verifies the campaign's exact cycle
-membership, sealed manifests and their payloads and prints a reviewable goal,
-criterion and approval statement bound to that snapshot. Membership is the
-set of member records: an output-less cycle that `finalize` removed from
-`campaign.cycles` keeps its `abandoned`/`no-lineage` record for audit and is
-reported under `detached_cycles` instead of drift
-(`artifact_campaign.is_member_record` is the one definition both sides use).
-Sealed abandoned cycles remain abandoned; this operation neither repairs route
-failure markers nor adds a residual-zero criterion. All cycles being sealed never substitutes
-for the user's acceptance of the goal and criterion. Close accepts the exact
-statement, or a short consent that is the user's first input after an assistant
-turn showed it, only from a native human turn in the named session that the
-peer ledger does not attribute to another session; it derives the user actor
-from that evidence, and rechecks
-the snapshot under the producer's admission lock. Caller-authored actor/approval JSON is not authority.
-An immutable campaign event is the commit point; campaign.json is its
-recoverable projection. Readers and begin honor a committed close even after
-a crash before projection. Same-event replay is idempotent, conflicting state
-is preserved, and campaign-recover completes only that committed projection.
-Cycle manifests and route evidence remain immutable. Unavailable native
-evidence leaves closure pending and reports the explicit approval statement;
-an agent never submits that statement on the user's behalf.
+**Campaign closure.** `artifact_producer.py campaign-status|campaign-close|campaign-reopen|campaign-recover`
+reports, closes, reopens, and repairs a campaign. An agent that judges the
+recorded completion condition met runs `campaign-close` (`--reason` when the
+criterion is the fixed default); a sealed cycle alone does not close the stream.
+The next cycle selected by key, ID, or parent reopens it with an appended
+`campaign.reopened` event. One validated fold over `campaign.events/` (legacy
+`campaign.satisfied.json` is sequence 1) decides state for begin, compose, list,
+locator scan, and manifest checks. The event stream is append-only; campaign.json
+holds a recoverable state projection. Metadata writers preserve folded state,
+and cycle manifests and route evidence remain immutable. Membership uses member
+records: an output-less cycle removed from `campaign.cycles` remains auditable
+as detached rather than causing membership drift. Abandoned cycles remain
+abandoned; closure adds neither route repair nor a residual-zero condition.
 
 **Campaign metadata amendment.** `artifact_metadata_amendment.py
 prepare|apply|verify` is the sole supported correction surface for an active

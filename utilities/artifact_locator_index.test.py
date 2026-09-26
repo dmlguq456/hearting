@@ -80,25 +80,10 @@ def _seed_legacy_admission_campaign(root, *, title="legacy admission folder"):
 
 
 def _close_campaign(root, tmp_dir, path, *, recover=False):
-    """Minimal codex-native approval flow, mirroring
-    `artifact_campaign.test.py`'s `CampaignTest.approve`/`finish` -- kept
-    self-contained here rather than imported, since this file has no other
-    reason to depend on that test module."""
-    home = Path(tmp_dir) / f"codex-home-{os.urandom(4).hex()}"
-    sessions = home / "sessions" / "2026" / "09" / "24"
-    sessions.mkdir(parents=True, exist_ok=True)
-    native = sessions / f"rollout-2026-09-24T00-00-00-{SID}.jsonl"
-    ledger = Path(tmp_dir) / f"peer-ledger-{os.urandom(4).hex()}"
-    env = {"CODEX_HOME": str(home), "AGENT_PEER_LEDGER_ROOT": str(ledger)}
-    with mock.patch.dict(os.environ, env):
-        if not recover:
-            statement = C.status(root, path)["approval_statement"]
-            rows = [{"type": "session_meta", "payload": {"id": SID}},
-                    {"type": "response_item", "payload": {"type": "message", "role": "user",
-                      "content": [{"type": "input_text", "text": statement}]}}]
-            native.write_text("".join(json.dumps(row) + "\n" for row in rows))
-            return C.close(root, path, harness="codex", session=SID)
-        return C.close(root, path, recover=True)
+    """Close or repair a fixture campaign with no external approval state."""
+    if recover:
+        return C.recover(root, path)
+    return C.close(root, path, reason="fixture completion")
 
 
 class IncrementalEquivalenceTest(F.ProducerTestBase, IndexEquivalenceMixin):
@@ -944,9 +929,8 @@ _EXPECTED_WRITER_CENSUS = {
     ("artifact_producer.py", "_recover_locked"): "no-row-effect",  # the dropped-record write
     ("artifact_producer.py", "recover_cycle_times"): "full",
     ("artifact_producer.py", "backfill_cycle_bindings"): "full",
-    ("artifact_campaign.py", "close"): "incremental",
+    ("artifact_campaign.py", "_commit_event"): "incremental",
     ("artifact_campaign.py", "_materialize"): "incremental",
-    ("artifact_campaign.py", "_publish_event"): "incremental",
     ("artifact_cutover.py", "seal_legacy_cycle"): "out-of-band-legacy",
     ("artifact_cutover.py", "adopt_campaign"): "out-of-band-legacy",
 }

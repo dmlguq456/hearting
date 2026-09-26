@@ -2746,7 +2746,7 @@ def compose_campaign_summaries(artifact_root):
     "unavailable" rather than mislabelling a join as a creation."""
     try:
         import artifact_producer
-        return artifact_producer.list_campaign_summaries(Path(artifact_root))
+        return artifact_producer.list_campaign_summaries(Path(artifact_root), active_only=False)
     except (OSError, ImportError, ValueError):
         return None
 
@@ -2771,15 +2771,18 @@ def compose_campaign_selection(route):
     rows = compose_campaign_summaries(route["artifact_root"])
     unavailable = rows is None
     rows = rows or []
-    active = [r for r in rows if r.get("key") not in (None, "_unassigned")]
+    active = [r for r in rows if r.get("state") == "active" and r.get("key") not in (None, "_unassigned")]
     selection = {"key": key, "active_count": len(active),
                  "active_keys": [r["key"] for r in active[:COMPOSE_CAMPAIGN_LIST_CAP]],
                  "active_keys_unavailable": unavailable}
     if key is not None:
-        match = next((r for r in rows if r.get("key") == key), None)
-        selection.update(mode="unresolved" if unavailable else ("join" if match else "create"),
-                         campaign_id=match["campaign_id"] if match else None,
-                         title=match["title"] if match else None)
+        import artifact_producer
+        choice = artifact_producer.classify_campaign_key(rows, key)
+        match = next((r for r in rows if r.get("campaign_id") == choice.get("campaign_id")), None)
+        mode = "unresolved" if unavailable else choice["mode"]
+        selection.update(mode=mode, campaign_id=match["campaign_id"] if match else None,
+                         title=match["title"] if match else None,
+                         **({"blocked_reason": choice["code"]} if choice["mode"] == "blocked" else {}))
     elif parent is not None:
         selection.update(mode="parent", parent_cycle_id=parent)
     else:
@@ -2793,6 +2796,10 @@ def _compose_campaign_line(selection):
         text = f"캠페인 {selection['key']} (기존 합류)"
     elif mode == "create":
         text = f"캠페인 {selection['key']} (신규 생성)"
+    elif mode == "reopen":
+        text = f"캠페인 {selection['key']} (닫힌 캠페인 재개)"
+    elif mode == "blocked":
+        text = f"캠페인 {selection['key']} (begin 거부 예정: {selection['blocked_reason']})"
     elif mode == "parent":
         text = f"캠페인 parent {selection['parent_cycle_id']} 상속"
     elif mode == "unresolved":
