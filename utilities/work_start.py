@@ -13,6 +13,7 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 from dispatch_contract import (
@@ -28,6 +29,15 @@ from codex_managed_dispatch import ManagedDispatchError, probe_managed_codex_par
 from parent_next_directive import parent_next
 
 ROOT = Path(__file__).resolve().parents[1]
+START_WINDOW_SECONDS = 600
+# A concurrency-cap refusal (class-cap/global-cap) carries no timestamp
+# evidence to size a wait from -- this is the one bounded guess `--wait`
+# spends on it, matching the join timeout's own bound.
+CAPACITY_PROBE_SECONDS = 60
+_REFUSAL_RECEIPT_KEYS = {
+    "reason", "child_spawned", "retryable", "refusal", "worker_class",
+    "retry_after_seconds", "frees_at",
+}
 
 
 def _store_once(path, value):
@@ -289,6 +299,125 @@ def _wait_expired(result):
                 "This deadline neither fails the workers nor authorizes replacement attempts."}
 
 
+def _capacity_refusal(launch):
+    """A typed, retryable governor admission refusal from one launch's receipt.
+
+    `dispatch-owner.py` inherits the adapter wrapper's stdout without
+    capturing it (the wrapper's `check=failed` block flows straight through),
+    but also prints its own `check=failed` blocks for failures that never
+    reach the wrapper at all (e.g. `wrapper-unavailable`) -- so a receipt can
+    carry more than one such block. Only the *last* one reflects this
+    launch's actual terminal outcome. Only known keys are read, and only
+    their first appearance in that block is kept, so an embedded newline
+    inside `detail=`'s own text can never forge a later field; the caller's
+    registry check (row absent), not this parse, remains the classification
+    authority.
+    """
+    lines = (launch.get("receipt") or "").splitlines()
+    starts = [index for index, line in enumerate(lines) if line == "check=failed"]
+    if not starts:
+        return None
+    fields: dict[str, str] = {}
+    for line in lines[starts[-1] + 1:]:
+        key, sep, value = line.partition("=")
+        if sep and key in _REFUSAL_RECEIPT_KEYS and key not in fields:
+            fields[key] = value
+    if (fields.get("reason") != "model-worker-governor-denied"
+            or fields.get("child_spawned") != "0"
+            or fields.get("retryable") != "1"):
+        return None
+
+    def optional_int(value):
+        if value in (None, "-"):
+            return None
+        try:
+            return int(value)
+        except ValueError:
+            return None
+
+    return {
+        "refusal": fields.get("refusal", "-"),
+        "worker_class": fields.get("worker_class", "-"),
+        "retry_after_seconds": optional_int(fields.get("retry_after_seconds")),
+        "frees_at": optional_int(fields.get("frees_at")),
+    }
+
+
+def _launch_admitted(route, path, jobs, node, harness, run, result, *, wait, sleep, clock):
+    """Start one node, retrying a capacity refusal exactly once inside one wait.
+
+    A registered row is the sole authority that a launch was admitted (plan
+    §3.0 e); a typed, retryable governor refusal with no row is not a failed
+    attempt. `wait` sleeps out one bounded delay and relaunches the same
+    attempt id exactly once, re-checking the registry immediately before that
+    retry so a capacity-freeing event another resume already used never
+    causes a duplicate launch.
+    """
+    launch = _start(route, path, jobs, node, harness, run)
+    result["launches"].append(launch)
+    rows = _rows(jobs)
+    aid = launch["attempt_id"]
+    if aid in rows:
+        return rows, None
+    refusal = _capacity_refusal(launch)
+    if not refusal or not wait or result.get("capacity_waited_seconds", 0) != 0:
+        return rows, refusal
+    delay = min(START_WINDOW_SECONDS, refusal["retry_after_seconds"] or CAPACITY_PROBE_SECONDS)
+    sleep(delay)
+    result["capacity_waited_seconds"] = delay
+    rows = _rows(jobs)
+    if aid in rows:
+        return rows, None
+    launch = _start(route, path, jobs, node, harness, run)
+    result["launches"].append(launch)
+    rows = _rows(jobs)
+    if aid in rows:
+        return rows, None
+    return rows, _capacity_refusal(launch) or refusal
+
+
+def _capacity_wait(result, aid, node, refusal, resume, clock):
+    """§3.0(e): a typed, retryable capacity refusal with no admitted row.
+
+    This attempt was never created and never failed -- the registry holds no
+    row for it -- so it must never be reported or treated as a failed launch.
+    A second refusal after the one bounded wait hands back without arming
+    another automatic wait (no infinite retry loop).
+    """
+    frees_at = refusal.get("frees_at")
+    retry_epoch = frees_at if frees_at is not None else (
+        clock() + (refusal.get("retry_after_seconds") or CAPACITY_PROBE_SECONDS))
+    retry_at = datetime.fromtimestamp(retry_epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    already_waited = result.get("capacity_waited_seconds", 0) > 0
+    waiting = {
+        **result,
+        "state": "waiting-capacity",
+        "reason": "launch-capacity-wait",
+        "refused_attempt_id": aid,
+        "refused_node": node,
+        "spawned": False,
+        "refusal": refusal.get("refusal", "-"),
+        "worker_class": refusal.get("worker_class", "-"),
+        "retry_after_seconds": refusal.get("retry_after_seconds"),
+        "retry_at": retry_at,
+        "capacity_waited_seconds": result.get("capacity_waited_seconds", 0),
+    }
+    waiting.pop("parent_next", None)
+    waiting.pop("parent_next_command", None)
+    if already_waited:
+        waiting.update(required_action="report-capacity-wait",
+            next_step="A second capacity refusal followed the one bounded wait for this attempt. "
+                "No attempt was created or failed here; report the pending capacity to the user "
+                "instead of waiting again or starting a replacement.")
+    else:
+        waiting.update(required_action="resume-after-capacity",
+            parent_next="bounded-wait", parent_next_command=resume + " --wait",
+            next_step="No attempt was created or failed: the rolling per-class start budget refused "
+                "admission. resume_command --wait waits until retry_at (at most one start window) and "
+                "launches the same attempt id once; a second refusal returns without another wait.")
+    return waiting
+
+
 def _outcome(jobs, aid):
     state = current_delivery_state(jobs, aid, parent_attempt_id=aid, advance=False)
     action = delivery_required_action(state)
@@ -305,7 +434,7 @@ def _outcome(jobs, aid):
 
 
 def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=None,
-             decision="proceed", run=subprocess.run):
+             decision="proceed", run=subprocess.run, sleep=time.sleep, clock=time.time):
     """Advance preparation once; repeating this call creates no duplicate job."""
     request = validate_request(route.get("work_request"))
     path, jobs = Path(path).resolve(), Path(jobs).resolve()
@@ -335,17 +464,22 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 # choice into a user override and bypassed the capacity gate.
                 # The selector rechecks live usage inside the sealed pool for
                 # each frame, just as it does for an automatic owner.
-                launch = _start(route, path, jobs, node["id"], None, run)
-                result["launches"].append(launch)
-                rows = _rows(jobs)
+                rows, refusal = _launch_admitted(route, path, jobs, node["id"], None, run, result,
+                                                  wait=wait, sleep=sleep, clock=clock)
                 if aid not in rows:
+                    result["frame_attempts"] = sorted(attempts)
+                    if refusal:
+                        return _capacity_wait(result, aid, node["id"], refusal, resume, clock)
                     return {**result, "state": "needs-attention", "reason": "frame-launch-not-admitted",
                             "frame_attempts": sorted(attempts),
                             **(_wait_fields(attempts, rows, resume) if attempts else {})}
             attempts.add(aid)
             result["frame_attempts"] = sorted(attempts)
             result.update(_wait_fields(attempts, rows, resume))
-        joined = join_selected_attempts(jobs=jobs, expected_attempts=attempts, timeout=600 if wait else 0, recover=True)
+        joined = join_selected_attempts(
+            jobs=jobs, expected_attempts=attempts,
+            timeout=max(0, START_WINDOW_SECONDS - result.get("capacity_waited_seconds", 0)) if wait else 0,
+            recover=True)
         result["observation"] = joined
         if joined["state"] != "ready":
             if wait:
@@ -375,10 +509,13 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
             owner_frame_launch_gate(SimpleNamespace(route_file=str(path)), "start", ROOT, jobs)
     rows = _rows(jobs)
     aid = _slot(route, "owner", rows)
+    refusal = None
     if aid not in rows:
-        result["launches"].append(_start(route, path, jobs, "owner", request["owner_harness"], run))
-        rows = _rows(jobs)
+        rows, refusal = _launch_admitted(route, path, jobs, "owner", request["owner_harness"], run, result,
+                                          wait=wait, sleep=sleep, clock=clock)
     if aid not in rows:
+        if refusal:
+            return _capacity_wait(result, aid, "owner", refusal, resume, clock)
         return {**result, "state": "needs-attention", "reason": "owner-launch-not-admitted"}
     status, metadata = rows[aid]
     result.update(owner_attempt_id=aid, owner_started=metadata.get("launch_started") == "1")
@@ -395,7 +532,10 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                     "next_step": "The owner exited before the declared stages completed. Preserve its report "
                         "and committed result, and report these missing stages. Waiting or repeating finalization "
                         "cannot execute them. No automatic retry or replacement is authorized by this observation."}
-    joined = join_selected_attempts(jobs=jobs, expected_attempts={aid}, timeout=600 if wait else 0, recover=True)
+    joined = join_selected_attempts(
+        jobs=jobs, expected_attempts={aid},
+        timeout=max(0, START_WINDOW_SECONDS - result.get("capacity_waited_seconds", 0)) if wait else 0,
+        recover=True)
     if joined["state"] == "ready":
         outcome = _outcome(jobs, aid)
         return {**result, "state": "completed" if outcome["classification"] == "success" else "needs-attention",
@@ -420,14 +560,14 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
 
 
 def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
-               decision="proceed", run=subprocess.run):
+               decision="proceed", run=subprocess.run, sleep=time.sleep, clock=time.time):
     result = {"route_file": str(Path(path).resolve()), "route_id": route["route_id"],
               "launches": [], "owner_started": False,
               "resume_command": shlex.join([sys.executable, str(ROOT / "utilities/capability-route.py"),
                   "start", "--route", str(Path(path).resolve()), "--jobs", str(Path(jobs).resolve())])}
     try:
         result = _advance(route, path, jobs, result, wait=wait, interview=interview,
-                          answers=answers, decision=decision, run=run)
+                          answers=answers, decision=decision, run=run, sleep=sleep, clock=clock)
     except (OSError, ValueError) as exc:
         result = {**result, "state": "needs-attention",
                   "reason": getattr(exc, "reason", type(exc).__name__), "detail": str(exc)}

@@ -56,7 +56,7 @@ MAX_SCAN = 1 << 20
 WORKER_TIMEOUT = 60
 DEBOUNCE_SEC = 600
 WORKING_DEBOUNCE_SEC = 120
-CHILD_DEBOUNCE_SEC = 90
+CHILD_DEBOUNCE_SEC = 600
 SUMMARY_RETRY_DELAYS = (30, 60, 120)
 DEFAULT_CONCURRENCY = 3
 MAX_CONCURRENCY = 4
@@ -1170,7 +1170,7 @@ def _resolve_command(prompt, model=None):
     return commands[0] if commands else ([], None, None)
 
 
-def run_worker(prompt, model=None, timeout=WORKER_TIMEOUT, capacity_held=False):
+def run_worker(prompt, model=None, timeout=WORKER_TIMEOUT, capacity_held=False, label=""):
     """Run the title-provider cascade with no shell; all failures degrade to ``''``."""
     if refresh_disabled():
         return ""
@@ -1211,7 +1211,7 @@ def run_worker(prompt, model=None, timeout=WORKER_TIMEOUT, capacity_held=False):
             return ""
         governor_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(governor_module)
         governor_root = governor_module.default_root()
-        governor_token = governor_module.acquire(governor_root, "title")
+        governor_token = governor_module.acquire(governor_root, "title", label=label)
         # `timeout` remains one total bound. Divide the remaining wall-clock budget across
         # remaining candidates so a stuck leader cannot consume the fallback's entire turn.
         deadline = time.monotonic() + max(0.0, float(timeout))
@@ -1583,7 +1583,10 @@ def main(argv=None):
             titles.sweep()
             return 0
 
-        output = run_worker(_prompt(delta, prior_title=previous_title, anchor=anchor), capacity_held=True)
+        output = run_worker(
+            _prompt(delta, prior_title=previous_title, anchor=anchor),
+            capacity_held=True, label=args.sid,
+        )
         title = validate_title(output)
         if title and title.lower() == "untitled":
             title = None

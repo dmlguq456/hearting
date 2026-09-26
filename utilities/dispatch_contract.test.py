@@ -223,6 +223,36 @@ class DispatchContractTest(unittest.TestCase):
     self.assertTrue(h._closed);self.assertNotIn(key,D._GOVERNOR_WITNESS_HANDLES)
    finally:D.close_witness(h);D._GOVERNOR_WITNESS_HANDLES.pop(key,None)
 
+ def test_governor_refusal_fields_from_refused_payload(self):
+  with tempfile.TemporaryDirectory() as td:
+   refusal={"state":"refused","refusal":"start-budget","class":"dispatch",
+            "used":20,"limit":20,"retryable":True,"retry_after_seconds":41,"frees_at":1790000600}
+   script=Path(td)/"fake_governor_refused.py"
+   script.write_text(
+    "import json,sys\n"
+    "print(json.dumps("+repr(refusal)+"))\n"
+    "print('model-worker-governor: rolling model-worker start budget reached: "
+    "class=dispatch used=20 limit=20 retry_after_seconds=41',file=sys.stderr)\n"
+    "sys.exit(75)\n")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D._governor_json([sys.executable,str(script)])
+   self.assertEqual(caught.exception.reason,"model-worker-governor-denied")
+   self.assertEqual(D.governor_refusal_fields(caught.exception),{
+    "retryable":"1","refusal":"start-budget","worker_class":"dispatch",
+    "retry_after_seconds":"41","frees_at":"1790000600",
+   })
+
+ def test_governor_refusal_fields_empty_for_kill_switch(self):
+  with tempfile.TemporaryDirectory() as td:
+   script=Path(td)/"fake_governor_kill_switch.py"
+   script.write_text(
+    "import sys\n"
+    "print('model-worker-governor: model-worker kill switch active',file=sys.stderr)\n"
+    "sys.exit(75)\n")
+   with self.assertRaises(D.DispatchContractError) as caught:
+    D._governor_json([sys.executable,str(script)])
+   self.assertEqual(D.governor_refusal_fields(caught.exception),{})
+
  def test_versioned_source_registry_fallback_matrix(self):
   with tempfile.TemporaryDirectory() as td:
    base=Path(td)

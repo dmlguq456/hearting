@@ -61,6 +61,7 @@ from dispatch_contract import (
     resolve_live_parent_attempt,
     resolve_model_governor_root,
     review_governed_lease_is_held,
+    governor_refusal_fields,
     replica_batch_expectation,
     reserve_governor_token,
     runtime_ancestry_binding,
@@ -1801,7 +1802,8 @@ def main(argv: list[str]) -> int:
                     expected_reservation=args.replica_batch_expectation,
                 )
             except DispatchContractError as exc:
-                return fail(exc.reason, 75, detail=exc.detail, child_spawned="0")
+                return fail(exc.reason, 75, detail=exc.detail, child_spawned="0",
+                            **governor_refusal_fields(exc))
         try:
             args.attempt_claimed = append_job(jobs, args)
             if action == "start" and not args.attempt_claimed:

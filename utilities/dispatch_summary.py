@@ -52,7 +52,7 @@ OWNER_SCHEMA = 1
 OWNER_KIND = "dispatch-v1"
 DEFAULT_POLL = 2.0
 DEFAULT_INITIAL_DELAY = 3.0
-DEFAULT_PERIODIC_DEBOUNCE = 90
+DEFAULT_PERIODIC_DEBOUNCE = 600
 DEFAULT_FINAL_GRACE = 75.0
 DEFAULT_LOG_QUIET = 1.0
 SESSION_ANNOUNCE_SCAN = 1 << 16
@@ -531,7 +531,7 @@ def supervise(
                 else:
                     if _refresh(
                         harness, sid, source, phase="periodic",
-                        debounce=periodic_debounce, priority=not previous.get("summary"), prompt_path=prompt,
+                        debounce=periodic_debounce, priority=False, prompt_path=prompt,
                     ):
                         state.update(last_refresh_phase="periodic", last_refresh_at=time.time())
                         _atomic_write(state_path, state)

@@ -490,9 +490,13 @@ class StormGuardTest(_ConfigHomeMixin, unittest.TestCase):
         self.assertEqual(seen[0], ("child", rt.CHILD_DEBOUNCE_SEC, True))
 
     def test_child_sessions_use_shorter_debounce(self):
-        # 사용자 확정 2026-07-19: dispatched children move faster than main sessions,
-        # so their title/subtitle debounce is much shorter (90s vs 600s) while the
-        # shared storm-guard budget (concurrency/start limits) stays one pool for both.
+        # 사용자 확정 2026-07-19 (updated by intent decision `child-title-interval`,
+        # 2026-09-25): a dispatched child's title/subtitle refresh now shares the
+        # same 10-minute debounce as an ordinary periodic refresh -- the 90s
+        # cadence was the direct cause of periodic title updates alone filling
+        # the (then-shared) rolling start budget and starving new dispatch
+        # admissions. The storm-guard budget (concurrency/start limits) stays
+        # one pool for both.
         sessions = [self._session("normal"), self._session("child", is_child=True)]
         seen = {}
         original = rt.maybe_spawn
@@ -504,7 +508,7 @@ class StormGuardTest(_ConfigHomeMixin, unittest.TestCase):
             rt.maybe_spawn = original
         self.assertEqual(seen["normal"], (rt.WORKING_DEBOUNCE_SEC, True))
         self.assertEqual(seen["child"], (rt.CHILD_DEBOUNCE_SEC, True))
-        self.assertLess(rt.CHILD_DEBOUNCE_SEC, rt.WORKING_DEBOUNCE_SEC)
+        self.assertEqual(rt.CHILD_DEBOUNCE_SEC, 600)
 
     def test_working_main_without_summary_uses_priority_lane_and_120s_debounce(self):
         session = self._session("working-main")
