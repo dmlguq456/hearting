@@ -50,6 +50,10 @@ trap 'rm -rf "${CLEANUP[@]}"; rm -f "${SENTINEL_B:-}"' EXIT
 export MEM_STORE="$STORE" MEM_PROJECTS="$PROJ"
 # Isolate shared model-worker admission from live sessions and other tests.
 export AGENT_MODEL_GOVERNOR_ROOT="$STORE/.test-model-governor"
+# This file runs far more distills than the rolling distill start budget
+# (4 per 10 min) allows within one governor root; the budget has its own
+# suite, so lift it here and keep every other admission rule.
+export AGENT_MODEL_WORKER_START_BUDGET_DISTILL=1000
 
 # RP-M4 decision: stubs kept INLINE (not extracted to hooks/test-helpers/dispatch-stub.sh).
 # Rationale — each stub is 2 lines; the two test files' isolation setups differ (this file uses

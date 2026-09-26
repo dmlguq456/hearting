@@ -1197,8 +1197,20 @@ class StartBudgetClassPoolTest(unittest.TestCase):
     and typed refusals -- a background class must never spend the dispatch
     pool, and a full dispatch pool must never block a background class."""
 
+    def _uncapped(self):
+        # These tests cycle more starts than the concurrent caps allow and only
+        # measure the rolling start budget. `release` returns a lease only with
+        # a drained process group; under tools/run-tests.py the suite leads its
+        # own group, so a return can stay "blocked" and the leftover leases hit
+        # the class cap before the budget. Lift the concurrent caps here so the
+        # budget is the only limit exercised.
+        caps = {"AGENT_MODEL_WORKER_TOTAL": "1000"}
+        caps.update({"AGENT_MODEL_WORKER_CLASS_LIMIT_" + name.upper(): "1000"
+                     for name in GOVERNOR.CLASS_LIMITS})
+        return mock.patch.dict(os.environ, caps, clear=False)
+
     def test_title_budget_full_does_not_refuse_dispatch(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with self._uncapped(), tempfile.TemporaryDirectory() as temp_dir:
             for _ in range(GOVERNOR.CLASS_START_BUDGETS["title"]):
                 token = GOVERNOR.acquire(temp_dir, "title")
                 GOVERNOR.release(temp_dir, token)
@@ -1208,7 +1220,7 @@ class StartBudgetClassPoolTest(unittest.TestCase):
             GOVERNOR.release(temp_dir, dispatch_token)
 
     def test_dispatch_budget_full_refuses_dispatch_only(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with self._uncapped(), tempfile.TemporaryDirectory() as temp_dir:
             for _ in range(GOVERNOR.CLASS_START_BUDGETS["dispatch"]):
                 token = GOVERNOR.acquire(temp_dir, "dispatch")
                 GOVERNOR.release(temp_dir, token)
@@ -1222,7 +1234,7 @@ class StartBudgetClassPoolTest(unittest.TestCase):
             GOVERNOR.CLASS_START_BUDGETS,
             {"dispatch": 20, "title": 12, "distill": 4, "loop": 4},
         )
-        with tempfile.TemporaryDirectory() as temp_dir:
+        with self._uncapped(), tempfile.TemporaryDirectory() as temp_dir:
             for worker_class in ("distill", "loop"):
                 for _ in range(GOVERNOR.CLASS_START_BUDGETS[worker_class]):
                     token = GOVERNOR.acquire(temp_dir, worker_class)
