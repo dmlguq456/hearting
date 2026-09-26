@@ -6374,6 +6374,62 @@ def _frame_capacity_failures(route: dict, lines: list[str], harnesses: set[str])
     return unavailable
 
 
+def frame_harness_admission(route: dict, jobs: Path, lines: list[str],
+                            harnesses: list[str], profiles: list[str | None]) -> list[str]:
+    """Return accepted capacity proof IDs for a frame pair, or refuse it.
+
+    Called both before the alternative is launched and at its completion gate.
+    The caller records a degradation only when this returns proof IDs.
+    """
+    if route.get("effective_intensity") == "quick":
+        candidates, field = route.get("registered_headless_candidates") or [], "harness"
+    else:
+        candidates = (route.get("dispatch_evidence") or {}).get("tuples") or []
+        field = "child_harness"
+    supported = {r.get(field) for r in candidates
+                 if isinstance(r, dict) and r.get("status") == "supported"}
+    supported &= {"codex", "claude", "opencode"}
+    if not supported or not set(harnesses).issubset(supported):
+        raise DispatchContractError("frame-harness-unsupported", str(harnesses))
+    if len(supported) <= 1 or len(set(harnesses)) == 2:
+        return []
+    missing = supported - set(harnesses)
+    unavailable = _frame_capacity_failures(route, lines, missing)
+    # Global quota evidence is valid only when both frame profiles are covered
+    # and its exact attempts are terminal and quiescent.
+    from dispatch_capacity_evidence import active_limits
+    quota_by_frame = [active_limits(jobs, profile=profile, registry_lines=lines)
+                      for profile in profiles]
+    quota_attempts = set()
+    for harness in missing - set(unavailable):
+        proofs = [limits.get(harness) for limits in quota_by_frame]
+        if not all(proofs):
+            continue
+        ids = {proof["attempt_id"] for proof in proofs}
+        exact = []
+        active_here = False
+        for line in lines:
+            fields = line.split("\t")
+            if len(fields) != 6:
+                continue
+            meta = parse_registry_metadata(fields[5])
+            if (meta.get("route_id") == route["route_id"] and meta.get("harness") == harness
+                    and fields[1] in {"open", "running"}):
+                active_here = True
+            if meta.get("attempt_id") in ids:
+                exact.append((fields, meta))
+        if active_here or len(exact) != len(ids) or any(
+                fields[1] != "done" or terminal_conflict_pending(meta)
+                or attempt_process_quiescence(meta, terminal_receipt=True).state != "quiescent"
+                for fields, meta in exact):
+            continue
+        unavailable[harness] = sorted(ids)[0]
+        quota_attempts.update(ids)
+    if set(unavailable) != missing:
+        raise DispatchContractError("frame-cross-harness-required", str(harnesses))
+    return sorted(set(unavailable.values()) | quota_attempts)
+
+
 def _frame_pair_attempt_gate(route: dict, node: dict, markers: dict,
                              jobs: Path, registry_lines: list[str] | None) -> None:
     """Compare the exact completed attempts, never a declared diversity label."""
@@ -6415,58 +6471,15 @@ def _frame_pair_attempt_gate(route: dict, node: dict, markers: dict,
         harnesses.append(metadata["harness"])
     if len(set(attempts)) != 2:
         raise DispatchContractError("frame-attempt-duplicate", str(attempts))
-    if route.get("effective_intensity") == "quick":
-        candidates, field = route.get("registered_headless_candidates") or [], "harness"
-    else:
-        candidates = (route.get("dispatch_evidence") or {}).get("tuples") or []
-        field = "child_harness"
-    supported = {r.get(field) for r in candidates
-                 if isinstance(r, dict) and r.get("status") == "supported"}
-    supported &= {"codex", "claude", "opencode"}
-    if not supported or not set(harnesses).issubset(supported):
-        raise DispatchContractError("frame-harness-unsupported", str(harnesses))
-    if len(supported) > 1 and len(set(harnesses)) != 2:
-        missing = supported - set(harnesses)
-        unavailable = _frame_capacity_failures(route, lines, missing)
-        # Selection may already have skipped quota on a different route.
-        # Reuse that scoped evidence; do not require another doomed launch to
-        # manufacture a local failure. Positive gate admission additionally
-        # requires exact cleanup, unlike a negative selection exclusion.
-        from dispatch_capacity_evidence import active_limits
-        quota_by_frame = [active_limits(jobs, profile=f.get("model_profile"), registry_lines=lines) for f in frames]
-        quota_attempts = set()
-        for harness in missing - set(unavailable):
-            proofs = [limits.get(harness) for limits in quota_by_frame]
-            if not all(proofs):
-                continue
-            ids = {proof["attempt_id"] for proof in proofs}
-            exact = []
-            active_here = False
-            for line in lines:
-                fields = line.split("\t")
-                if len(fields) != 6:
-                    continue
-                meta = parse_registry_metadata(fields[5])
-                if (meta.get("route_id") == route["route_id"] and meta.get("harness") == harness
-                        and fields[1] in {"open", "running"}):
-                    active_here = True
-                if meta.get("attempt_id") in ids:
-                    exact.append((fields, meta))
-            if active_here or len(exact) != len(ids) or any(
-                    fields[1] != "done" or terminal_conflict_pending(meta)
-                    or attempt_process_quiescence(meta, terminal_receipt=True).state != "quiescent"
-                    for fields, meta in exact):
-                continue
-            unavailable[harness] = sorted(ids)[0]
-            quota_attempts.update(ids)
-        if set(unavailable) != missing:
-            raise DispatchContractError("frame-cross-harness-required", str(harnesses))
+    proof_ids = frame_harness_admission(route, jobs, lines, harnesses,
+                                        [f.get("model_profile") for f in frames])
+    if proof_ids:
         from dispatch_degradation import record_degradation
         recorded = record_degradation(route_id=route["route_id"], route_hash=route["route_hash"],
             route_node=node["id"], dispatch_depth=1, writer="dispatch_contract.py", jobs=jobs,
             fallback_hop="same-harness-headless", execution_surface="registered-headless",
-            reason="frame-single-available-harness", prior_attempt_ids=sorted(set(unavailable.values()) | quota_attempts),
-            attempt_trace=attempts, harness=harnesses[0], detail=json.dumps(unavailable, sort_keys=True))
+            reason="frame-single-available-harness", prior_attempt_ids=proof_ids,
+            attempt_trace=attempts, harness=harnesses[0], detail=json.dumps({"proof_ids": proof_ids}))
         if not recorded:
             raise DispatchContractError("frame-degradation-record-pending", "retry the same gate after restoring state storage")
 

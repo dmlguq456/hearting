@@ -13,6 +13,8 @@ import subprocess
 import sys
 from owner_route_binding import OwnerRouteBindingError, validate_owner_route_binding, derive_quick_owner_binding, derive_frame_route_binding
 from dispatch_mode_contract import DispatchModeContractError, resolve_qa
+from dispatch_contract import (DispatchContractError, frame_harness_admission,
+                               parse_registry_metadata)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -260,6 +262,58 @@ def _sealed_owner_context(path, *, worker_type="owner"):
 def _sealed_owner_harnesses(path):
     """Compatibility/query view used by diagnostics and tests."""
     return _sealed_owner_context(path)["harnesses"]
+
+
+def _first_frame_attempt(route, jobs):
+    """Find the exact first leg claimed by this route before selecting leg two."""
+    try:
+        lines = Path(jobs).read_text().splitlines()
+    except OSError as exc:
+        raise OwnerError(f"frame-first-attempt-unverifiable:{exc}") from exc
+    matches = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        meta = parse_registry_metadata(fields[5])
+        if (fields[1] in {"open", "running"} or meta.get("note") == "completed-marker") and (
+                meta.get("route_id") == route.get("route_id")
+                and meta.get("route_hash") == route.get("route_hash")
+                and meta.get("route_node") == "frame"
+                and meta.get("worker_type") == "frame"):
+            matches.append(meta)
+    if not matches or not matches[-1].get("attempt_id") or not matches[-1].get("harness"):
+        raise OwnerError("frame-first-attempt-unverifiable")
+    return matches[-1], lines
+
+
+def _prefer_other_frame_harness(first_harness, selected, explicit, config_version,
+                                policy, states, counts, allocation, capacity,
+                                configured, ranked, automatically_available):
+    """Keep normal selection unless the second frame would repeat the first."""
+    if selected != first_harness:
+        return selected, None, False
+    alternate_policy = {
+        **policy,
+        **{band: [h for h in policy[band] if h != first_harness]
+           for band in _defaults.QUALITY_BANDS},
+    }
+    if config_version == 3:
+        alternate, band, _, relief = _capacity.select(
+            alternate_policy, states, counts, allocation["harness_order"], capacity,
+            strategy=allocation["strategy"],
+            usage_gate_used_percent=allocation.get("usage_gate_used_percent", 90),
+            preferred=_capacity.preferred_for_depth(allocation, 1),
+            affinity_weight=allocation.get("depth_affinity_weight", 0.5),
+            headroom_exponent=allocation.get("usage_headroom_exponent", 1),
+        )
+    else:
+        alternate = next((h for h in ranked(configured)
+                          if h != first_harness and automatically_available(h)), None)
+        band, relief = "primary", False
+    if alternate and explicit:
+        raise OwnerError("frame-cross-harness-required:explicit-same-harness")
+    return (alternate, band, relief) if alternate else (selected, None, False)
 
 
 def export_owner_route_env(child_env, binding):
@@ -821,6 +875,38 @@ def main(argv):
                 detail = hint_for(reason)
             print(f"check=failed\nreason={reason}\nchild_spawned=0\nhint={detail}")
             return 65
+        if (route_evidence and values["--worker-type"] == "frame"
+                and values.get("--route-node") == "frame-alternative"):
+            route = json.loads(Path(route_evidence).read_text(encoding="utf-8"))
+            first, lines = _first_frame_attempt(route, jobs)
+            first_harness = first["harness"]
+            preferred, alternate_band, alternate_relief = _prefer_other_frame_harness(
+                first_harness, selected, explicit, config_version, policy, states,
+                counts, allocation, capacity, configured, ranked, automatically_available)
+            if preferred != selected:
+                selected, quality_band = preferred, alternate_band
+                relief_promoted = alternate_relief
+                source = "frame-cross-harness"
+            try:
+                proof_ids = frame_harness_admission(
+                    route, Path(jobs), lines, [first_harness, selected],
+                    [next((n.get("model_profile") for n in route["nodes"] if n.get("id") == name), None)
+                     for name in ("frame", "frame-alternative")],
+                )
+            except DispatchContractError as exc:
+                raise OwnerError(f"{exc.reason}:{exc.detail}") from exc
+            if proof_ids and "--start" in forwarded:
+                from dispatch_degradation import record_degradation
+                recorded = record_degradation(
+                    route_id=route["route_id"], route_hash=route["route_hash"],
+                    route_node="frame-alternative", dispatch_depth=1, writer="dispatch-owner.py",
+                    jobs=Path(jobs), fallback_hop="same-harness-headless",
+                    execution_surface="registered-headless", reason="frame-single-available-harness",
+                    prior_attempt_ids=proof_ids, attempt_trace=[first["attempt_id"]],
+                    harness=selected, detail=json.dumps({"proof_ids": proof_ids}),
+                )
+                if not recorded:
+                    raise OwnerError("frame-degradation-record-pending")
         wrapper = ROOT / "adapters" / selected / "bin" / "dispatch-headless.py"
         if not os.access(wrapper, os.X_OK):
             print("\n".join(_audit("unavailable", selected, source, configured, explicit, states,

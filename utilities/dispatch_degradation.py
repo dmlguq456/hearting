@@ -20,6 +20,7 @@ _SURFACES = {"registered-headless", "codex-native-subagent", "claude-subagent", 
 # it to `_unattributed.jsonl` with kind="writer-unregistered" instead.
 _WRITERS = {
     "dispatch_contract.py",
+    "dispatch-owner.py",
     "stage-dispatch-fallback.py",
     "dispatch-batch.py",
     "capability-route.py",

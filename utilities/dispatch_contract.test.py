@@ -111,6 +111,8 @@ class FrameLaunchGateTest(unittest.TestCase):
       f"dispatch_depth=1,harness=claude,route_id={route['route_id']},route_hash={route['route_hash']},"
       f"log_file={log},artifact_root={root},launch_outcome=reaped-before-publish")
    lines=[failed,*rows]
+   self.assertEqual(D.frame_harness_admission(route,jobs,lines,["codex","codex"],
+                    [None,None]),["att-capacity"])
    D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,lines)
    records=[json.loads(line) for p in (base/"degradations").glob("*.jsonl") for line in p.read_text().splitlines()]
    self.assertTrue(any(r.get("reason")=="frame-single-available-harness" and r.get("prior_attempt_ids")==["att-capacity"] for r in records),records)
@@ -119,6 +121,8 @@ class FrameLaunchGateTest(unittest.TestCase):
                        failed+",failure_class=pass"):
     with self.assertRaises(D.DispatchContractError):
      D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,[replacement,*rows])
+    with self.assertRaises(D.DispatchContractError):
+     D.frame_harness_admission(route,jobs,[replacement,*rows],["codex","codex"],[None,None])
    log.write_text(json.dumps({"type":"result","is_error":True,"subtype":"error","result":"generic runtime failure"})+"\n")
    with self.assertRaises(D.DispatchContractError):
     D._frame_pair_attempt_gate(route,route["nodes"][-1],markers,jobs,lines)
