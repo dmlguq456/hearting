@@ -34,6 +34,13 @@ which returns the child's exit status, returns 124 on expiry, and tears down the
 process group; otherwise register it as a dispatch-depth-2 attempt. Never end a
 turn while unregistered background work is still running.
 
+Do not use background Bash (`&`) or detached local helpers for tests or other
+work. Run long tests in the foreground and wait for the command and every
+reported process result to finish before emitting the final handoff envelope.
+If work cannot finish in the current turn, use the declared registered
+dispatch/supervision contract; never report a pending background command as
+completed or return an earlier turn's text as its result.
+
 Consume the supervisor receipt's `required_action` literally. Complete an open
 PASS row, inspect a terminal failure row, or advance an already-completed row with
 the exact status named by the receipt; never retry a default `status=open`

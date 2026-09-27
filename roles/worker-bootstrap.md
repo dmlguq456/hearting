@@ -25,6 +25,12 @@ You are a bounded worker, not the user-facing main session.
 - Put changed files, commands, results, warnings, reasoning, and unsupported
   runtime-contract details in the canonical artifact. File handoff must be
   sufficient for the next stage without conversation history.
+- Do not use background Bash (`&`) or detached local helpers for tests or other
+  work. Run long tests in the foreground and wait for the command and every
+  reported process result to finish before emitting the final handoff envelope.
+  If the work cannot finish in the current turn, use the declared registered
+  dispatch/supervision contract; never label a pending command complete or
+  return an earlier turn's text as the result.
 - **Auxiliary-leg worker contract.** When the assigned leg is `leg_class:
   auxiliary`, you run one closed narrow check and your verdict is structurally
   non-blocking: your unit's `io.verdict` enum carries no blocking token, so
