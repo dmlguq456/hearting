@@ -959,6 +959,31 @@ class UnifiedReviewTest(ReviewBase):
         campaign = self.meta_doc(self.a1)["campaign"]
         self.assertEqual((campaign["title"], campaign["source"]["title"]["by"]), ("쉬운 제목", "model"))
 
+    def test_a_cycle_whose_folder_is_gone_is_neither_a_target_nor_a_member_candidate(self):
+        gone = self.seal(slug="gone")
+        record = P.read_cycle_record(self.root, gone["cycle_id"])
+        shutil.rmtree(P.cycle_dir(self.root, record["campaign_id"], gone["cycle_id"], record))
+        invoke = Recorder()
+        result = R.sweep(self.root, campaign_ids=[gone["campaign_id"]], invoke=invoke)
+        self.assertIn({"cycle_id": gone["cycle_id"], "reason": "cycle-folder-missing"}, result["skipped"])
+        for prompt in invoke.prompts:
+            data = data_of(prompt)
+            offered = {row["cycle_id"] for row in data["targets"]} | {
+                row["cycle_id"] for row in data["ungrouped_context"]}
+            self.assertNotIn(gone["cycle_id"], offered)
+
+    def test_the_project_language_follows_the_titles_it_already_shows(self):
+        path = self.root / repair.DISPLAY_TITLE_REL
+        path.write_text(json.dumps({"schema": repair.DECLARATION_SCHEMA, "artifact_root_id": fixture.ROOT_ID, "entries": [{
+            "campaign_id": self.camp, "campaign_locator": "x", "display_title": "한국어 제목",
+            "manifest_bindings": [], "manifest_revision_ids": [], "manifest_digests": []}]}, ensure_ascii=False),
+            encoding="utf-8")
+        R._project_language.cache_clear()
+        self.addCleanup(R._project_language.cache_clear)
+        invoke = Recorder()
+        R.sweep(self.root, cycles=[self.a1["cycle_id"]], invoke=invoke)
+        self.assertEqual(data_of(invoke.prompts[0])["project_meta"]["language"], "Korean")
+
     def test_the_backfill_options_are_refused_on_an_automatic_run(self):
         for extra in (["--replace-legacy-titles"], ["--campaign", self.camp]):
             with self.subTest(extra):

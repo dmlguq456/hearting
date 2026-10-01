@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import importlib.util
+import functools
 import json
 import os
 import re
@@ -136,8 +137,9 @@ RULES (the same criteria used for the 2026-09-29 full backfill):
    even as the only member; do not fold it into an existing group just to avoid a
    one-cycle group. Targets that are not group targets already belong to a group:
    give them no decision.
-6. Write group titles, stage labels, reasons, and rationales in the language already
-   used by this campaign's existing group titles, or otherwise by its documents.
+6. Write group titles, stage labels, reasons, and rationales, and all metadata text, in
+   project_meta.language when it is given (even when the documents are in English);
+   otherwise in the language already used by this campaign's titles or its documents.
    Title <= 120 chars, stage label <= 40, reason / rationale <= 280, one line each.
 7. METADATA: for the campaign and for EVERY id in metadata_target_ids write title,
    summary, branches, kinds. Title: plain words that a person who did not do the work
@@ -147,15 +149,18 @@ RULES (the same criteria used for the 2026-09-29 full backfill):
    title, keeping the facts it names (versions, counts).
    Summary: ONE short sentence of about 80 characters (never over 400): what was done and
    how it turned out (the campaign summary describes the whole campaign now, starting from
-   campaign_meta.summary and the newest targets). Use the language of the campaign's documents.
-8. branches: one or more codes, the FIRST is the representative; use the codes listed
-   in project_meta.branches. Use the closest existing code; a survey, note, chore, or
+   campaign_meta.summary and the newest targets). Use the language named in rule 6.
+8. branches: one or more codes, the FIRST is the representative: the model, dataset, or
+   deliverable the work mainly produces (a plan/spec branch only for work that mainly writes
+   specifications or plans); use the codes listed in project_meta.branches. Use the
+   closest existing code; a survey, note, chore, or
    one-off task takes the branch of the work it serves. A new branch is only for a lasting
    line of work (its own model, dataset, or deliverable) that no listed branch covers; then put up to
    project_meta.new_branch_allowance new entries {"code": 2-5 uppercase ASCII letters,
    "label", "note"} in new_branches and use that code; if the project has no branches
-   yet, propose a short starter list from the documents. kinds: zero or more of
-   project_meta.kinds. Never invent ids, short ids, aliases, sources, or times.
+   yet, propose a short starter list from the documents. kinds: the one to three of
+   project_meta.kinds that describe most of the work (not every activity that appears).
+   Never invent ids, short ids, aliases, sources, or times.
 9. Fields named in protected_fields were set by a person; still fill every key, the
    protected value is kept as it is.
 
@@ -504,6 +509,16 @@ def _auto_eligible(entry: Optional[Mapping[str, Any]], sealed_on: str, enrolled_
     return entry.get("verdict") == "unassigned" and entry.get("cycle_state") == "open"
 
 
+def _cycle_present(root: Path, row: Mapping[str, Any]) -> bool:
+    """A cycle whose folder (and its `.cycle.json`) is gone cannot be a target or a group member;
+    its record alone stays for the lifecycle reconciliation that notices the removal."""
+    try:
+        directory = producer.cycle_dir(root, row["campaign_id"], row["cycle_id"], row)
+    except Exception:  # noqa: BLE001 -- an unresolvable folder is simply absent here
+        return False
+    return (directory / ".cycle.json").is_file()
+
+
 def select_targets(root: Path, doc: Optional[Mapping[str, Any]], *, cycles: Sequence[str] = (),
                    since: Optional[str] = None, include_open: bool = False, auto: bool = False,
                    pending: Sequence[str] = (), limit: Optional[int] = None,
@@ -541,6 +556,10 @@ def select_targets(root: Path, doc: Optional[Mapping[str, Any]], *, cycles: Sequ
             result.considered.append(cycle_id)
             return
         if wanted and row["campaign_id"] not in wanted:
+            return
+        if not _cycle_present(root, row):
+            result.skipped.append({"cycle_id": cycle_id, "reason": "cycle-folder-missing"})
+            result.considered.append(cycle_id)
             return
         if not members.usable(row["campaign_id"]):
             read = members.meta(row["campaign_id"])
@@ -710,6 +729,33 @@ def _view(root: Path, campaign_id: str, record: Mapping[str, Any], titles_by_id:
     return view
 
 
+CAMPAIGN_TITLE_SCAN = 400
+
+
+@functools.lru_cache(maxsize=16)
+def _project_language(root: Path) -> Optional[str]:
+    """The language people title this project's campaigns in, from the titles people see (the old
+    display declaration and meta.json campaign titles, not folder keys): a deterministic script
+    count, not a judgement.  None when no such title is readable."""
+    titles: List[str] = []
+    try:
+        raw = M._read_raw(Path(root).resolve(), M.DISPLAY_TITLES_REL)
+        doc = json.loads(raw.decode("utf-8")) if raw is not None else {}
+        titles += [row.get("display_title") for row in doc.get("entries", []) if isinstance(row, dict)]
+    except Exception:  # noqa: BLE001 -- a hint only
+        pass
+    for path in sorted(Path(root).glob("campaigns/*/meta.json"))[:CAMPAIGN_TITLE_SCAN]:
+        try:
+            titles.append((json.loads(path.read_text(encoding="utf-8")).get("campaign") or {}).get("title"))
+        except (OSError, ValueError, AttributeError):
+            continue
+    titles = [title for title in titles if isinstance(title, str) and title.strip()]
+    if not titles:
+        return None
+    hangul = sum(1 for title in titles if any("\uac00" <= char <= "\ud7a3" for char in title))
+    return "Korean" if hangul * 2 >= len(titles) else None
+
+
 def _meta_snapshot(root: Path, campaign_id: str, target_ids: Sequence[str], *, protect_title: bool,
                    replace_legacy_titles: bool = False):
     """(project_meta, campaign_meta, cycle_meta, protected_fields) as the model sees them."""
@@ -740,6 +786,9 @@ def _meta_snapshot(root: Path, campaign_id: str, target_ids: Sequence[str], *, p
     project_meta = {"display_name": (project.doc or {}).get("display_name"), "branches": branches,
                     "kinds": list(M.KINDS), "general_branch_limit": M.GENERAL_BRANCH_MAX,
                     "new_branch_allowance": allowance}
+    language = _project_language(root)
+    if language:
+        project_meta["language"] = language
     campaign_view = view(campaign_entry)
     if renew:
         campaign_view.pop("title", None)
@@ -772,7 +821,8 @@ def build_input(root: Path, campaign_id: str, target_ids: Sequence[str],
                if records.get(cid)]
     context_rows = sorted(
         (row for cid, row in records.items()
-         if row and row.get("state") == "sealed" and cid not in members_of and cid not in target_ids),
+         if row and row.get("state") == "sealed" and cid not in members_of and cid not in target_ids
+         and _cycle_present(root, row)),
         key=lambda row: (str(row.get("sealed_on")), row["cycle_id"]), reverse=True)[:CONTEXT_MAX]
     context = [_view(root, campaign_id, row, titles_by_id) for row in context_rows]
     member_views = {}
