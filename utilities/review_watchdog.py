@@ -9,6 +9,7 @@ cannot close registry rows. It seals only its exact process result for the reape
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
@@ -128,6 +129,34 @@ def _group_empty(pgid: int) -> bool:
     return process_group_observation(pgid).state == "empty"
 
 
+_NR_PIDFD_OPEN = 434  # identical on every Linux architecture except alpha
+
+
+def _pidfd_open(pid: int) -> int:
+    """``os.pidfd_open`` or the raw syscall when this CPython build lacks it.
+
+    CPython omits ``os.pidfd_open`` when it was compiled against pre-5.3 kernel
+    headers (conda's cos6/cos7 sysroot, for example) even on a kernel that has
+    the syscall, while ``signal.pidfd_send_signal`` is still present.
+    """
+    opener = getattr(os, "pidfd_open", None)
+    if opener is not None:
+        return opener(pid)
+    if not sys.platform.startswith("linux"):
+        raise AttributeError("pidfd_open")
+    import ctypes
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.syscall.restype = ctypes.c_long
+    fd = libc.syscall(ctypes.c_long(_NR_PIDFD_OPEN), ctypes.c_int(pid), ctypes.c_uint(0))
+    if fd < 0:
+        err = ctypes.get_errno()
+        if err == errno.ESRCH:
+            raise ProcessLookupError(err, os.strerror(err))
+        raise OSError(err, os.strerror(err))
+    return int(fd)
+
+
 def _drain_owned_residue(child_meta: Mapping[str, str], attempt_id: str, grace: float) -> bool:
     """Drain exact group members and attempt-tagged setsid descendants by pidfd."""
     def observed():
@@ -148,7 +177,7 @@ def _drain_owned_residue(child_meta: Mapping[str, str], attempt_id: str, grace: 
             return True
         for pid, start in sorted(members, reverse=True):
             try:
-                fd = os.pidfd_open(pid)
+                fd = _pidfd_open(pid)
                 try:
                     if process_start_ticks(pid) != start:
                         return False
