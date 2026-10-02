@@ -9,6 +9,7 @@ Server ``--writable-root``).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import errno
 import hashlib
 import ipaddress
 import json
@@ -323,6 +324,22 @@ def _broad_root(path: Path, context: AccessContext) -> bool:
     return any(_proper_ancestor(candidate, target) for target in sensitive)
 
 
+def _resolve_request_path(path: Path) -> Path:
+    """``Path.resolve(strict=False)`` that still fails on a symlink loop.
+
+    Python 3.13 stopped raising ``RuntimeError`` for a loop in non-strict mode
+    and returns the unresolved path instead, so a loop would pass as an exact
+    future leaf.  A fully resolved path can never fail with ``ELOOP``.
+    """
+    resolved = path.resolve(strict=False)
+    try:
+        os.stat(resolved)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RuntimeError(f"symlink loop from {str(path)!r}") from exc
+    return resolved
+
+
 def _resolve_paths(raw: list[Path]) -> list[tuple[Path, Path]]:
     resolved_by_literal: list[tuple[Path, Path]] = []
     for literal in raw:
@@ -331,7 +348,7 @@ def _resolve_paths(raw: list[Path]) -> list[tuple[Path, Path]]:
         # through existing prefixes while permitting an exact future leaf.
         _validate_path_text(str(literal))
         try:
-            resolved = literal.resolve(strict=False)
+            resolved = _resolve_request_path(literal)
         except (OSError, RuntimeError, ValueError) as exc:
             _reject(
                 "execution-access-path-invalid",
@@ -499,7 +516,7 @@ def load_request(path: str | Path, *, context: AccessContext) -> ExecutionAccess
     justification: dict[str, str] = {}
     for raw_path, text in justification_raw:
         try:
-            resolved = raw_path.resolve(strict=False)
+            resolved = _resolve_request_path(raw_path)
         except (OSError, RuntimeError, ValueError) as exc:
             _reject(
                 "execution-access-path-invalid",
