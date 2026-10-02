@@ -116,6 +116,28 @@ class RunTestsFixtureBase(unittest.TestCase):
         return result, rows
 
 
+class TmuxSocketIsolationFixture(RunTestsFixtureBase):
+    def test_isolated_suite_gets_a_private_tmux_socket_dir_and_no_client(self):
+        # The suite fails unless tmux would resolve its socket inside the
+        # suite's own temp root (HOME's parent) and no attached-client
+        # variables leak from the caller.
+        write_suite(self.root, "tmux_env.test.py", """\
+            import os, sys
+            from pathlib import Path
+            root = Path(os.environ["HOME"]).parent
+            socket_dir = Path(os.environ.get("TMUX_TMPDIR", "/tmp"))
+            leaked = [k for k in ("TMUX", "TMUX_PANE") if k in os.environ]
+            ok = socket_dir.is_dir() and root in socket_dir.parents and not leaked
+            print(f"TMUX_TMPDIR={socket_dir} root={root} leaked={leaked}")
+            sys.exit(0 if ok else 1)
+        """)
+        ambient = {"TMUX": "/tmp/tmux-0/default,1,0", "TMUX_PANE": "%1"}
+        with mock.patch.dict(os.environ, ambient):
+            result, rows = self.run_fixture([])
+        verdicts = {r["verdict"] for r in rows if r["suite_path"] == "tmux_env.test.py"}
+        self.assertEqual(verdicts, {"PASS"}, result.stdout + result.stderr)
+
+
 class KnownFailFixture(RunTestsFixtureBase):
     def test_known_fail_passes_runner_with_exit_zero(self):
         write_suite(self.root, "known_fail.test.py", "import sys\nsys.exit(1)\n")
