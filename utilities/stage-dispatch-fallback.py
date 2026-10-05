@@ -102,6 +102,14 @@ if _CAPACITY_SPEC is None or _CAPACITY_SPEC.loader is None:
 CAPACITY = importlib.util.module_from_spec(_CAPACITY_SPEC)
 _CAPACITY_SPEC.loader.exec_module(CAPACITY)
 
+_EXCLUSION_SPEC = importlib.util.spec_from_file_location(
+    "dispatch_harness_exclusion", ROOT / "utilities" / "dispatch_harness_exclusion.py"
+)
+if _EXCLUSION_SPEC is None or _EXCLUSION_SPEC.loader is None:
+    raise RuntimeError("cannot load dispatch_harness_exclusion.py")
+EXCLUSION = importlib.util.module_from_spec(_EXCLUSION_SPEC)
+_EXCLUSION_SPEC.loader.exec_module(EXCLUSION)
+
 ORDER = ["same-harness-headless", "cross-harness-headless", "native-subagent", "inline"]
 
 
@@ -763,6 +771,7 @@ def _report_launched(args, route, node, allocation_context, row, hop, ordinal, a
     print(f"selected_hop={hop['fallback_hop']}")
     print(f"fallback_ordinal={ordinal}")
     print(f"child_harness={row['child_harness']}")
+    print(f"excluded_harnesses={EXCLUSION.format_excluded(getattr(args, 'excluded_harnesses', frozenset()))}")
     print("launch_authority=conductor")
     print("broker_lifecycle=retired")
     print(f"attempt_id={attempt_id}")
@@ -1787,6 +1796,21 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         reason = exc.reason
         return fail(reason, 73, child_spawned="0")
 
+    # Launch-time hard exclusion for a user prohibition (no-Claude, ...).
+    # Sealed `user-disabled` unsupported rows already exclude a harness when
+    # the route was composed after the prohibition; this covers a prohibition
+    # that arrived after sealing. It applies identically to --dry-run,
+    # --register and --start, so the dry-run receipt predicts the start
+    # fallback chain instead of promising a head the start would abandon
+    # for a prohibited fallback (2026-10-04 owner-handoff: dry-run Codex
+    # exit 0, start Codex exit 1 -> fresh Claude worker).
+    try:
+        args.excluded_harnesses = EXCLUSION.excluded_harnesses(os.environ)
+    except ValueError as exc:
+        detail = str(exc)
+        return fail("excluded-harness-unknown", 65, detail=detail, child_spawned="0",
+                    excluded_harnesses="unknown")
+
     if args.action == "start":
         # A provably dead claimed row is closed first, so neither the round
         # admission nor the retry below reads it as a running attempt.
@@ -1944,6 +1968,25 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     attempts.append(f"{ordinal}:{key}:skipped-worker-pin")
                     pin_skipped = True
                     continue
+                if row.get("child_harness") in args.excluded_harnesses:
+                    # Launch-time hard exclusion: a post-seal user prohibition
+                    # (no-Claude, ...) skips the prohibited harness on every
+                    # fallback hop, in dry-run as in start. The attempt trace
+                    # keeps the skip visible so a dry-run receipt predicts the
+                    # start chain instead of hiding the prohibited fallback.
+                    # Reuses the closed candidate-unsupported discriminator
+                    # (evidence names the prohibition) so the launch-tuple
+                    # ledger stays spent without a schema change.
+                    attempts.append(f"{ordinal}:{key}:skipped-excluded-harness")
+                    p_excl = LAUNCH_TUPLE.record_rejection(
+                        state_root, route=route, node=node, tuple_key=key,
+                        rejection_class="candidate-unsupported",
+                        evidence_ref=f"excluded-harness:{row.get('child_harness')}",
+                        owner_attempt_id=args.parent_attempt_id,
+                    )
+                    if isinstance(p_excl, tuple):
+                        observation.note_unrecorded(p_excl[1])
+                    continue
                 # Re-read after an early failure too: a whole-account quota
                 # cannot be cured by changing models later in this same chain.
                 from dispatch_capacity_evidence import active_limits
@@ -2040,6 +2083,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
+                        print(f"excluded_harnesses={EXCLUSION.format_excluded(args.excluded_harnesses)}")
                         print("capacity_retry=1")
                         print(f"cooled_model={pending_capacity[-1].get('model', 'unknown')}")
                         print(f"selected_model={retry_fields.get('model', args.capacity_model or 'existing')}")
@@ -2200,6 +2244,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                         print(f"selected_hop={hop['fallback_hop']}")
                         print(f"fallback_ordinal={ordinal}")
                         print(f"child_harness={row['child_harness']}")
+                        print(f"excluded_harnesses={EXCLUSION.format_excluded(args.excluded_harnesses)}")
                         print("capacity_retry=1")
                         print(f"cooled_model={failed['model']}")
                         print(f"selected_model={retry_fields.get('model', args.capacity_model or 'existing')}")
@@ -2217,6 +2262,9 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     # Exactly one retry. A second capacity death descends through SD-50.
         elif hop["fallback_hop"] == "native-subagent":
             candidate = next((row for row in hop.get("candidates", []) if row.get("status") == "supported"), None)
+            if candidate and candidate.get("harness") in args.excluded_harnesses:
+                attempts.append(f"{ordinal}:native-subagent:skipped-excluded-harness")
+                candidate = None
             if candidate:
                 proof = native_child_proof(args, route, node)
                 if proof:
@@ -2314,6 +2362,7 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
         route_file=str(args.route), completion_gate=node.get("completion_gate"), parent=args.parent,
     )
     return fail("fallback-chain-exhausted", 79, attempt_trace="|".join(attempts),
+                excluded_harnesses=EXCLUSION.format_excluded(args.excluded_harnesses),
                 degradation_ledger=str(ledger) if ledger else "-")
 
 

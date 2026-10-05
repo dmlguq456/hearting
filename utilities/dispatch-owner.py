@@ -46,6 +46,13 @@ if _capacity_spec is None or _capacity_spec.loader is None:
     raise RuntimeError("cannot load harness-capacity.py")
 _capacity = importlib.util.module_from_spec(_capacity_spec)
 _capacity_spec.loader.exec_module(_capacity)
+_exclusion_spec = importlib.util.spec_from_file_location(
+    "dispatch_harness_exclusion", ROOT / "utilities" / "dispatch_harness_exclusion.py"
+)
+if _exclusion_spec is None or _exclusion_spec.loader is None:
+    raise RuntimeError("cannot load dispatch_harness_exclusion.py")
+_exclusion = importlib.util.module_from_spec(_exclusion_spec)
+_exclusion_spec.loader.exec_module(_exclusion)
 
 _FORBIDDEN = {
     "--worker-mode", "--model", "--reasoning", "--effort", "--variant",
@@ -121,6 +128,16 @@ _HINTS = {
                                  "left out). Declare it for a harness the route sealed, or name a harness with --pin frame=<harness>",
     "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive capacity score "
                              "(see eligibility.* and capacity_headroom.* above; utilities/usage-check.sh --harness all)",
+    "excluded-harness-unknown": "AGENT_DISPATCH_EXCLUDED_HARNESSES names an unknown harness (known: claude,codex,opencode); "
+                                "fix the value so the prohibition cannot silently miss",
+    "explicit-adapter-excluded-by-user": "that harness is excluded by AGENT_DISPATCH_EXCLUDED_HARNESSES (a user prohibition "
+                                        "is stronger than any signal); drop --adapter or clear the exclusion to use it",
+    "route-evidence-candidates-excluded-by-user": "every harness the route sealed is excluded by AGENT_DISPATCH_EXCLUDED_HARNESSES "
+                                                 "(excluded_harnesses= above); recompose without the prohibition or for a non-excluded "
+                                                 "harness (solo/quick: --children <harness>; staged: --parent-harness <harness>)",
+    "no-eligible-candidate-excluded-by-user": "every configured owner harness is excluded by AGENT_DISPATCH_EXCLUDED_HARNESSES "
+                                             "(excluded_harnesses= above); clear the exclusion or enable a non-excluded harness "
+                                             "for this model profile first",
     "exactly-one-action-required": "pass exactly one of --dry-run | --register | --start",
     "owner-tuple-required": "the launchable tuple is --dispatch-depth 1 --worker-type owner|review|frame",
     "invalid-model-profile": "--model-profile deep|balanced-deep|balanced|light (top only from a route that seals it)",
@@ -669,11 +686,13 @@ def _audit(
     status, adapter, source, configured, explicit, states, *, allocation=None,
     counts=None, rejected=(), fallback=None, reason="none", capacity=None,
     quality_band=None, relief_promoted=False, capacity_sources=None, top_excluded=(),
+    excluded=(),
 ):
     lines = [
         f"status={status}", f"adapter={adapter or '-'}", f"selection_source={source}",
         f"configured_candidates={','.join(configured)}",
         f"explicit_adapter={explicit or 'none'}",
+        f"excluded_harnesses={','.join(sorted(excluded)) if excluded else 'none'}",
     ]
     for harness in sorted(states):
         lines.append(f"eligibility.{harness}={states[harness]}")
@@ -741,8 +760,8 @@ def _explicit_capacity_warning(source, adapter, capacity, allocation):
     return None
 
 
-def _error(reason, configured=(), explicit=None, states=None):
-    lines = _audit("unavailable", None, "none", configured, explicit, states or {})
+def _error(reason, configured=(), explicit=None, states=None, excluded=()):
+    lines = _audit("unavailable", None, "none", configured, explicit, states or {}, excluded=excluded)
     lines += [f"check=failed", f"reason={reason}", "child_spawned=0"]
     hint = hint_for(reason)
     if hint:
@@ -774,8 +793,13 @@ def run_owner_wrapper(argv: list[str], env: dict[str, str]) -> int:
     return 128 + int(run.received_signal)
 
 def main(argv):
+    excluded: frozenset = frozenset()
     try:
         explicit, values, forwarded, route_evidence, derived = _parse(argv)
+        try:
+            excluded = _exclusion.excluded_harnesses(os.environ)
+        except ValueError:
+            return _error("excluded-harness-unknown")
         jobs = _authoritative_jobs(values, os.environ)
         profile = values["--model-profile"]
         sealed_context = (
@@ -798,6 +822,8 @@ def main(argv):
         # schema-v3 authorization comes from the enabled set and quality bands.
         if explicit is not None and explicit not in _defaults.DISPATCHABLE_HARNESSES:
             raise OwnerError("explicit-adapter-unauthorized")
+        if explicit is not None and explicit in excluded:
+            raise OwnerError("explicit-adapter-excluded-by-user-policy")
         explicit_policy = None
         if (
             explicit is not None
@@ -821,24 +847,40 @@ def main(argv):
         # available (CONVENTIONS §2.1). The swap is made here, before the sealed-candidate check, so a
         # request outside the route evidence is replaced rather than refused; the usage state is known
         # only below, where a limited pin gives the request back to the checks it always had.
+        # A user prohibition is stronger than any signal: a pin naming an
+        # excluded harness never applies, so a post-seal no-Claude instruction
+        # cannot be reintroduced by an older sealed pin.
         requested, pin_doc = explicit, None
         if route_evidence and values["--worker-type"] == "owner":
             pin_doc = json.loads(Path(route_evidence).read_text(encoding="utf-8"))
             pinned = sealed_pin_harness(pin_doc, worker_type="owner")
-            if pinned and pinned != explicit and (sealed is None or pinned in sealed):
+            if (pinned and pinned != explicit and pinned not in excluded
+                    and (sealed is None or pinned in sealed)):
                 explicit = pinned
         policy_harnesses = list(configured)
+        configured_no_exclusion = list(configured)
         if sealed is not None:
             if explicit is not None and explicit not in sealed:
                 raise OwnerError("explicit-adapter-outside-route-evidence")
-            configured = [h for h in configured if h in sealed]
+            configured_no_exclusion = [h for h in configured_no_exclusion if h in sealed]
+            configured = [h for h in configured_no_exclusion if h not in excluded]
             policy = {
                 **policy,
                 **{
-                    band: [h for h in policy[band] if h in sealed]
+                    band: [h for h in policy[band] if h in sealed and h not in excluded]
                     for band in _defaults.QUALITY_BANDS
                 },
             }
+        else:
+            configured = [h for h in configured if h not in excluded]
+            if excluded:
+                policy = {
+                    **policy,
+                    **{
+                        band: [h for h in policy[band] if h not in excluded]
+                        for band in _defaults.QUALITY_BANDS
+                    },
+                }
         top_excluded = []
         if profile == "top" and values["--worker-type"] == "frame" and explicit is None:
             top_excluded = sorted(h for h in _defaults.DISPATCHABLE_HARNESSES if not _declares_top(h))
@@ -858,10 +900,13 @@ def main(argv):
         if pin_doc is not None:
             choice, overridden = pinned_launch_harness(
                 pin_doc, worker_type="owner", requested=requested,
-                available=lambda h: (sealed is None or h in sealed) and _eligible(states.get(h, "unknown")))
+                available=lambda h: (h not in excluded and (sealed is None or h in sealed)
+                                     and _eligible(states.get(h, "unknown"))))
             pin_chosen = choice is not None and choice != requested
             if choice != explicit:  # the pinned harness is limited: the request, with today's checks
                 explicit = choice
+                if explicit is not None and explicit in excluded:
+                    raise OwnerError("explicit-adapter-excluded-by-user-policy")
                 if explicit is not None and sealed is not None and explicit not in sealed:
                     raise OwnerError("explicit-adapter-outside-route-evidence")
         allocation = (
@@ -892,7 +937,8 @@ def main(argv):
 
         def automatically_available(harness):
             score = capacity.get(harness)
-            return (harness not in top_excluded and _eligible(states[harness])
+            return (harness not in top_excluded and harness not in excluded
+                    and _eligible(states[harness])
                     and score is not None and score > 0)
 
         selected = None
@@ -900,7 +946,7 @@ def main(argv):
         reason = "none"
         quality_band = None
         relief_promoted = False
-        if explicit and _eligible(states[explicit]):
+        if explicit and explicit not in excluded and _eligible(states[explicit]):
             selected, source, quality_band = explicit, ("route-pin" if pin_chosen else "explicit"), "explicit"
         if selected is None and config_version in {3, 4}:
             selected, quality_band, _ranks, relief_promoted = _capacity.select(
@@ -914,7 +960,9 @@ def main(argv):
                 preference_order=(allocation.get("owner_order")
                                   if values["--worker-type"] == "owner" else None),
             )
-            if selected:
+            if selected in excluded:
+                selected, quality_band, relief_promoted = None, None, False
+            elif selected:
                 source = "configured-" + allocation["strategy"]
         if selected is None and config_version not in {3, 4}:
             for harness in ranked(configured):
@@ -934,11 +982,11 @@ def main(argv):
             if config_version == 3:
                 fallback_pool = ()
             elif sealed is not None:
-                fallback_pool = sealed
+                fallback_pool = {h for h in sealed if h not in excluded}
             elif config_version == 2:
-                fallback_pool = _defaults.DISPATCHABLE_HARNESSES
+                fallback_pool = {h for h in _defaults.DISPATCHABLE_HARNESSES if h not in excluded}
             else:
-                fallback_pool = _defaults.LEGACY_NORMAL_HARNESSES
+                fallback_pool = {h for h in _defaults.LEGACY_NORMAL_HARNESSES if h not in excluded}
             for harness in ranked(fallback_pool):
                 if automatically_available(harness):
                     selected, source, reason = harness, "eligibility-fallback", "configured-candidates-ineligible"
@@ -949,8 +997,21 @@ def main(argv):
                 "unavailable", None, "none", configured, requested, states,
                 allocation=allocation, counts=counts, rejected=rejected,
                 capacity=capacity, relief_promoted=relief_promoted, top_excluded=top_excluded,
+                excluded=excluded,
             )))
-            if dropped and not configured:
+            if (excluded and configured_no_exclusion
+                    and all(h in excluded for h in configured_no_exclusion)
+                    and not dropped):
+                # A post-seal user prohibition removed every candidate the
+                # route sealed (home-os 2026-10-04: no-Claude after sealing).
+                # Fail closed with the prohibition named, never fall through
+                # to the prohibited harness.
+                if sealed is not None:
+                    reason = "route-evidence-candidates-excluded-by-user"
+                else:
+                    reason = "no-eligible-candidate-excluded-by-user"
+                detail = hint_for(reason)
+            elif dropped and not configured:
                 # Every candidate was left out for not declaring `top`; say that
                 # rather than blaming usage or capacity.
                 reason = "frame-harness-unavailable"
@@ -998,7 +1059,8 @@ def main(argv):
                                       fallback=selected if source == "eligibility-fallback" else None,
                                       reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                       quality_band=quality_band,
-                                      relief_promoted=relief_promoted, top_excluded=top_excluded)))
+                                      relief_promoted=relief_promoted, top_excluded=top_excluded,
+                                      excluded=excluded)))
             print("check=failed\nreason=wrapper-unavailable\nchild_spawned=0")
             return 65
         print("\n".join(_audit("eligible", selected, source, configured, requested, states,
@@ -1007,7 +1069,8 @@ def main(argv):
                                   fallback=selected if source == "eligibility-fallback" else None,
                                   reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                   quality_band=quality_band,
-                                  relief_promoted=relief_promoted, top_excluded=top_excluded)), flush=True)
+                                  relief_promoted=relief_promoted, top_excluded=top_excluded,
+                                  excluded=excluded)), flush=True)
         if explicit_policy and source == "explicit":
             print(f"explicit_policy={explicit_policy}", flush=True)
         print(f"route_defaults={','.join(derived) or 'none'}", flush=True)
@@ -1083,7 +1146,8 @@ def main(argv):
             forwarded += ["--explicit-adapter", overridden]
         return run_owner_wrapper([str(wrapper), *forwarded], child_env)
     except (OwnerError, OwnerRouteBindingError, OSError) as exc:
-        return _error(str(exc))
+        # Preserve the full typed reason; _error splits hints on the prefix.
+        return _error(str(exc), excluded=excluded)
 
 
 if __name__ == "__main__":
