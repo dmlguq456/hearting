@@ -119,6 +119,9 @@ class ParentGrant:
     read_roots: tuple[Path, ...] = ()
     network_allowed: bool = False
     boundary: str = "parent-effective-grant"
+    sandbox: str = "unknown"
+    file_enforcement: str = "unknown"
+    network_enforcement: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -950,6 +953,7 @@ def build_grant(
     network_available: bool = False,
     effective_sandbox: str = "workspace-write",
     gpu_resource_scope: bool = False,
+    parent: ParentGrant | None = None,
 ) -> ExecutionAccessGrant:
     """Compute the effective explicit grant; never create runtime argv."""
 
@@ -975,8 +979,31 @@ def build_grant(
     gpu_logical = (gpu_resource_scope and runtime.startswith("codex")
                    and effective_sandbox == "danger-full-access"
                    and request.enforcement_required == "any")
+    # Nested foreground Codex children inside a workspace-write owner run with
+    # danger-full-access to avoid nesting the mount sandbox; their writes remain
+    # enforced by the outer parent sandbox. When the parent record carries
+    # os-sandbox and the request is already proven within it, honor that outer
+    # enforcement instead of refusing. GPU resource policy keeps its own
+    # logical-request path (file_enforcement none); general scaffold children
+    # must not inherit that policy.
+    parent_inherited = (
+        parent is not None
+        and not gpu_resource_scope
+        and runtime.startswith("codex")
+        and effective_sandbox == "danger-full-access"
+        and request.enforcement_required == "any"
+        and parent.sandbox == "workspace-write"
+        and parent.file_enforcement == "os-sandbox"
+        and all(_covered(root, parent.writable_roots) for root in request.writable_roots)
+        and all(
+            _covered(root, (*parent.read_roots, *parent.writable_roots))
+            for root in request.read_roots
+        )
+    )
+    if parent_inherited:
+        file_grade = "os-sandbox"
     if (request.writable_roots and runtime.startswith("codex") and file_grade == "none"
-            and not gpu_logical):
+            and not gpu_logical and not parent_inherited):
         sandbox_subject = (
             "codex-read-only"
             if effective_sandbox == "read-only"
@@ -1078,6 +1105,7 @@ def bind_request(
         network_available=network_available,
         effective_sandbox=effective_sandbox,
         gpu_resource_scope=gpu_resource_scope,
+        parent=parent,
     )
 
 
@@ -1247,6 +1275,9 @@ def load_parent_effective_grant(
         writable_roots=tuple(Path(root) for root in record["writable_roots"]),
         read_roots=tuple(Path(root) for root in record["read_roots"]),
         network_allowed=record["network_allowed"],
+        sandbox=str(record.get("sandbox") or "unknown"),
+        file_enforcement=str(record.get("file_enforcement") or "unknown"),
+        network_enforcement=str(record.get("network_enforcement") or "unknown"),
     )
 
 

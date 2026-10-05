@@ -326,6 +326,78 @@ class GpuSandboxTest(unittest.TestCase):
         with self.assertRaisesRegex(E.ExecutionAccessError, "execution-access-exceeds-parent:network"):
             E.assert_within_parent(request, E.ParentGrant(writable_roots=(self.data,), network_allowed=False), is_child=True)
 
+    def test_nested_scaffold_inherits_parent_os_sandbox_without_gpu_policy(self):
+        # Nested Codex lab scaffold: workspace-write owner with run_root request,
+        # normal scaffold child in namespace foreground (danger-full-access to
+        # avoid nesting) with gpu_scope False must inherit the outer OS sandbox
+        # instead of refusing, and must not acquire GPU logical policy.
+        run_root = self.data / "compute-runs"
+        run_root.mkdir(parents=True, exist_ok=True)
+        data = {"schema_version": 1, "writable_roots": [str(run_root)], "read_roots": [],
+                "network": {"required": False, "reason": "", "hosts": []},
+                "enforcement_required": "any",
+                "justification": {str(run_root): "Compute-hosts inventory run_root for lab resource work"}}
+        self.request_file.write_text(json.dumps(data))
+        request = E.load_request(self.request_file, context=self.context)
+        parent = E.ParentGrant(
+            writable_roots=(run_root, self.worktree, self.artifact),
+            network_allowed=True, sandbox="workspace-write",
+            file_enforcement="os-sandbox", network_enforcement="os-sandbox",
+        )
+        scaffold = E.build_grant(request, runtime="codex-exec",
+            effective_sandbox="danger-full-access", gpu_resource_scope=False, parent=parent)
+        self.assertEqual(scaffold.file_enforcement, "os-sandbox")
+        self.assertNotIn("file-enforcement-none", scaffold.unmet)
+        self.assertNotIn("network-enforcement-none", scaffold.unmet)
+        # Same request via GPU resource policy stays logical with no enforcement.
+        gpu = E.build_grant(request, runtime="codex-exec",
+            effective_sandbox="danger-full-access", gpu_resource_scope=True)
+        self.assertEqual((gpu.file_enforcement, gpu.network_enforcement), ("none", "none"))
+        self.assertIn("file-enforcement-none", gpu.unmet)
+        self.assertIn("network-enforcement-none", gpu.unmet)
+        # Without the parent record the general scaffold still refuses.
+        with self.assertRaises(E.ExecutionAccessError) as refused:
+            E.build_grant(request, runtime="codex-exec",
+                effective_sandbox="danger-full-access", gpu_resource_scope=False)
+        self.assertEqual(
+            "execution-access-enforcement-unavailable:codex-file-sandbox",
+            refused.exception.reason,
+        )
+        # Explicit strict requests are never lowered by parent inheritance.
+        strict_data = dict(data, enforcement_required="os-sandbox")
+        self.request_file.write_text(json.dumps(strict_data))
+        strict = E.load_request(self.request_file, context=self.context)
+        with self.assertRaises(E.ExecutionAccessError):
+            E.build_grant(strict, runtime="codex-exec",
+                effective_sandbox="danger-full-access", gpu_resource_scope=False, parent=parent)
+        # A root outside the parent still fails closed at the parent boundary.
+        outside_parent = E.ParentGrant(writable_roots=(self.worktree,),
+            sandbox="workspace-write", file_enforcement="os-sandbox",
+            network_enforcement="os-sandbox")
+        with self.assertRaisesRegex(E.ExecutionAccessError, "execution-access-exceeds-parent"):
+            E.bind_request(str(self.request_file), environ=self.env, context=self.context,
+                is_child=True, parent=outside_parent, runtime="codex-exec",
+                effective_sandbox="danger-full-access", gpu_resource_scope=False)
+        # Canonical records stay distinct: scaffold inherits OS enforcement with
+        # no logical boundary or GPU selection; GPU keeps logical-request.
+        scaffold_path, _ = E.publish_effective_grant(jobs=self.state / "jobs.log",
+            attempt_id="att-scaffold", route_id="rt-scaffold", route_hash="sha256:" + "c" * 64,
+            runtime="codex-exec", sandbox="danger-full-access", grant=scaffold,
+            default_writable_roots=[self.worktree], network_allowed=False)
+        scaffold_record = json.loads(scaffold_path.read_text())
+        self.assertEqual(scaffold_record["file_enforcement"], "os-sandbox")
+        self.assertNotIn("boundary", scaffold_record)
+        self.assertNotIn("execution_sandbox_selection", scaffold_record)
+        self.assertIn(str(run_root), scaffold_record["writable_roots"])
+        gpu_path, _ = E.publish_effective_grant(jobs=self.state / "jobs.log",
+            attempt_id="att-gpu2", route_id="rt-gpu2", route_hash="sha256:" + "d" * 64,
+            runtime="codex-exec", sandbox="danger-full-access", grant=gpu,
+            default_writable_roots=[self.worktree], network_allowed=False)
+        gpu_record = json.loads(gpu_path.read_text())
+        self.assertEqual(gpu_record["boundary"], "logical-request")
+        self.assertFalse(gpu_record["os_filesystem_enforced"])
+        self.assertEqual(gpu_record["file_enforcement"], "none")
+
     def test_compose_and_applied_receipts_disclose_enforcement(self):
         self.route["work_request"] = {"owner_harness": "codex"}
         for applied in (False, True):

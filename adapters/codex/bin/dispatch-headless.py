@@ -2652,7 +2652,14 @@ def main(argv: list[str]) -> int:
         return fail(e.reason, 78 if e.reason in PRELAUNCH_PROCESS_BLOCK_REASONS else 65,
                     **completion_gate_fail_fields(e, args.route_file, args.route_node))
     args.parent_binding = None
-    if args.dispatch_depth == 2 and action in ("register", "start"):
+    if args.dispatch_depth == 2 and (
+        action in ("register", "start")
+        or (
+            action == "dry-run"
+            and execution_access_request_path(args.execution_access_file, os.environ)
+            is not None
+        )
+    ):
         try:
             repo = subprocess.check_output(
                 ["git", "-C", args.worktree, "rev-parse", "--show-toplevel"],
