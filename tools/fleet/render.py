@@ -5018,9 +5018,6 @@ def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False):
     return [fit([resource]) for resource in resources]
 
 
-_GPU_WORK_NAME_W = 48
-
-
 def _gpu_work_row(entry, term_width=None):
     """F-104 card row for a live GPU process no run registry or session line shows."""
     indent = _conn_indent(0, False)
@@ -5032,16 +5029,15 @@ def _gpu_work_row(entry, term_width=None):
             name = _gpu_display_command(command)
     else:
         name = os.path.basename(_gpu_safe_text(entry.get("process_name"))) or "process"
-    name = _clip_w(name, _GPU_WORK_NAME_W)
     indexes = ",".join(str(i) for i in entry.get("gpu_indexes") or ())
     identity = "GPU %s:%s" % (_gpu_safe_text(entry.get("host") or "?"), indexes)
     elapsed = entry.get("elapsed_s")
     tag = _gpu_safe_text(entry.get("owner_label")) or "미등록"
 
-    def build(show_time, show_tag):
+    def build(show_time, show_tag, label=name):
         pulse_key = "g_work" if _BLINK_ON else "g_work_off"
         segs = [(indent, None), ("●", pulse_key), (" ", None), (identity, "name_dim"),
-                (" · ", "dim"), (name, "name_dim")]
+                (" · ", "dim"), (label, "name_dim")]
         if entry.get("used_memory_mib") is not None:
             segs += [(" · " + _gpu_gib(entry["used_memory_mib"]) + " GB", "dim")]
         if show_time and isinstance(elapsed, int) and not isinstance(elapsed, bool):
@@ -5050,8 +5046,17 @@ def _gpu_work_row(entry, term_width=None):
             segs += [(" · ", "dim"), (tag, "lvl_y")]
         return segs
 
-    return _fit_strip([lambda: build(True, True), lambda: build(True, False),
-                       lambda: build(False, False)], width)
+    # The name earns whatever the barest variant leaves: optional time/tag
+    # yield first through the existing levels, so a long argv tail is cut
+    # only by the real terminal width (with an ellipsis mark), never by a
+    # fixed clamp. Labels that already fit stay byte-identical.
+    for show_time, show_tag in ((True, True), (True, False), (False, False)):
+        segs = build(show_time, show_tag)
+        if sum(_dw(text) for text, _key in segs) <= width:
+            return segs
+    bare = build(False, False, "")
+    room = width - sum(_dw(text) for text, _key in bare)
+    return _clip_segs(build(False, False, _clip_w(name, max(1, room))), width)[0]
 
 
 def _gpu_process_label(command):

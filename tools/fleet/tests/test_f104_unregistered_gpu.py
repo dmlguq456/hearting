@@ -171,6 +171,35 @@ class UnregisteredGpuRowTest(UnregisteredGpuTestBase):
         self.assertIn(" · M6 · ", quoted_row)
         self.assertEqual(json.dumps(quoted, sort_keys=True), original_quoted)
 
+    def test_long_argv_tail_survives_available_width(self):
+        # Original case (C-PR176 live observation on cnn): a long env python
+        # plus a long script path with no --run-id/--name/--config identifier.
+        # The old fixed 48-cell clamp cut the tail to `TF-Rehance…` even on a
+        # wide terminal; the name now earns the real available width instead.
+        entry = compute_hosts.unregistered_gpu(_snapshot((0, [_process(
+            command="/home/nas/user/Uihyeop/NN_Zoo/TF-Rehancer_artifacts/envs/"
+                     "private_cnn_cu128_20261006/bin/python "
+                     "/home/nas/user/Uihyeop/NN_Zoo/TF-Rehancer_artifacts/envs/"
+                     "private_cnn_train.py",
+            used_memory_mib=4915, elapsed_s=8 * 3600 + 47 * 60,
+        )])))[0]
+        original = json.dumps(entry, sort_keys=True)
+        wide = render._plain(render._gpu_work_row(entry, 168))
+        self.assertLessEqual(render._dw(wide), 168)
+        self.assertIn("python /home/nas/user/Uihyeop/NN_Zoo/TF-Rehancer_artifacts/"
+                      "envs/private_cnn_train.py", wide)
+        self.assertNotIn("…", wide)
+        # Identifier-based labels (M6/config) keep their existing short form.
+        m6 = render._plain(render._gpu_work_row(
+            compute_hosts.unregistered_gpu(_snapshot((0, [_process()])))[0], 168))
+        self.assertIn("M6 학습", m6)
+        # A genuinely narrow terminal still clips honestly with a marker.
+        narrow = render._plain(render._gpu_work_row(entry, 60))
+        self.assertLessEqual(render._dw(narrow), 60)
+        self.assertIn("GPU moving4:0", narrow)
+        self.assertIn("…", narrow)
+        self.assertEqual(json.dumps(entry, sort_keys=True), original)
+
     def test_multi_gpu_process_is_one_row_and_dispatch_section_only(self):
         shared = _process(used_memory_mib=9604)
         snapshot = _snapshot((0, [shared]), (1, [dict(shared)]), host="cnn", is_self=False)
