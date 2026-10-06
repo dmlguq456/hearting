@@ -89,29 +89,39 @@ _CODEX_SUBCOMMANDS = {
     "update", "doctor", "sandbox", "queue", "archive", "delete",
     "migrate-rollouts", "unarchive", "help", "review", "exec-server", "plugin",
 }
-
-
-def _codex_embedded_opt_out():
-    """True when the caller disabled Embedded steward starts for Codex."""
-    return os.environ.get("AGENT_CODEX_EMBEDDED_TUI", "").strip().lower() in {
-        "0", "false", "no", "off"}
+# Native single-letter aliases (`codex --help`: exec→e, apply→a). A bare `e` is far
+# more likely the exec alias than a one-letter prompt, so aliases fail closed too.
+_CODEX_SUBCOMMAND_ALIASES = {"e", "a"}
+# Informational commands never launch a TUI; reshaping them is always wrong.
+_CODEX_INFORMATIONAL_OPTIONS = {"--help", "-h", "--version", "-V"}
 
 
 def _codex_fresh_tui_args(agent_args):
-    """True when ``agent_args`` is a fresh interactive TUI invocation (no subcommand).
+    """True when ``agent_args`` is a fresh interactive TUI invocation.
 
-    A bare positional is an initial prompt, not a subcommand, so it stays fresh;
-    anything unrecognized fails closed (not fresh) rather than risk reshaping a
-    command this scan does not understand."""
+    The scan never stops at the first positional: official 0.160 parses
+    ``codex hello resume`` with ``resume`` as the subcommand (``hello`` sits in
+    the PROMPT slot), so a later positional can still be a subcommand that must
+    keep its existing execution path. Only these stay fresh: no positional at
+    all, prompt text (bare words — a subcommand name never contains a space, and
+    ``hello`` alone really is a prompt per ``codex --help``'s
+    ``codex [OPTIONS] [PROMPT]``), or a literal prompt after an explicit native
+    ``--``. Anything unrecognized — an unknown option, a dangling value, an
+    informational command, a subcommand in any positional slot — fails closed
+    (not fresh) rather than risk reshaping a command this scan does not
+    understand."""
     index = 0
     while index < len(agent_args):
         token = agent_args[index]
         if token == "--":
             return True
-        if token in _CODEX_SUBCOMMANDS:
+        if token in _CODEX_INFORMATIONAL_OPTIONS:
+            return False
+        if token in _CODEX_SUBCOMMANDS or token in _CODEX_SUBCOMMAND_ALIASES:
             return False
         if not token.startswith("-") or token == "-":
-            return True
+            index += 1
+            continue
         if token in _CODEX_FRESH_VALUE_OPTIONS:
             if index + 1 >= len(agent_args):
                 return False
@@ -155,15 +165,15 @@ def _codex_supports_no_daemon():
 def _codex_embedded_args(agent_args):
     """`["--no-daemon"]` for a fresh steward-started Codex TUI, else `[]`.
 
-    Embedded is skipped (previous behavior) when the caller opted out, when the
-    managed launcher ingress is installed (its `--remote` client would conflict
-    with the flag, and the managed path already attributes via its registry and
-    rollout transfer), when the caller stated a daemon/connection stance of its
-    own, when the invocation is not a fresh TUI (resume/fork must keep reaching
-    their existing thread, including shared-daemon ones), or when local `codex`
-    support cannot be confirmed. Never fails a start: every refusal returns `[]`."""
-    if _codex_embedded_opt_out():
-        return []
+    Embedded is skipped (previous behavior) when the managed launcher ingress is
+    installed (its `--remote` client would conflict with the flag, and the managed
+    path already attributes via its registry and rollout transfer), when the caller
+    stated a daemon/connection stance of its own, when the invocation is not a fresh
+    TUI (resume/fork and any subcommand must keep reaching their existing thread,
+    including shared-daemon ones), or when local `codex` support cannot be confirmed.
+    A caller stance in `agent_args` and the support probe are already the opt-outs;
+    no separate environment switch exists. Never fails a start: every refusal
+    returns `[]`."""
     for token in agent_args:
         if token in _CODEX_DAEMON_STANCE_OPTIONS or token.startswith("--remote="):
             return []
@@ -849,12 +859,6 @@ def cmd_start(args):
               f"pane={args.pane}" + (f" cwd={pane_cwd}" if pane_cwd else ""))
         return 1
 
-    bind_home = bind_before = None
-    launched_at = time.time()
-    if args.kind == "codex":
-        bind_home = _codex_home_dir()
-        bind_before = _rollout_paths(bind_home)
-
     mode = args.permission_mode or _default_permission_mode()
     agent_args = list(getattr(args, "agent_args", None) or [])
     prefix = list(_PERMISSION_FLAGS.get(args.kind, [])) if mode == "bypass" else []
@@ -864,6 +868,17 @@ def cmd_start(args):
     embedded = _codex_embedded_args(agent_args) if args.kind == "codex" else []
     project_arg = [pane_cwd] if args.kind == "opencode" and pane_cwd else []
     full_agent_args = embedded + prefix + cwd_flag + project_arg + agent_args
+
+    # An Embedded TUI is attributed only by its own rollout fd (or the exact
+    # resolver), never by a launch-time time candidate: while its own thread does
+    # not exist yet the before/after binder could take another same-cwd execution's
+    # new root rollout for this PID, and a tier-1 record outranks the later own fd.
+    # Until the fd exists the session stays unknown and nothing is written.
+    bind_home = bind_before = None
+    launched_at = time.time()
+    if args.kind == "codex" and not embedded:
+        bind_home = _codex_home_dir()
+        bind_before = _rollout_paths(bind_home)
 
     # herdr `agent start <NAME> --kind --pane` — the display name is a required
     # positional (herdr 0.8+ prints `unknown option: <kind>` and starts nothing when
@@ -908,9 +923,11 @@ def cmd_start(args):
                           else "herdr-start-error" if payload_error else "herdr-start-failed")
     trust_wait = _native_trust_reason(args.kind, _read_screen(args.pane)) if started else None
     # herdr names no Codex thread for a daemon-attached TUI; the launcher proves it from the
-    # one new root rollout (see the block comment above `_BIND_SECONDS`).
+    # one new root rollout (see the block comment above `_BIND_SECONDS`). Embedded
+    # starts never enter here (see above): no time candidate becomes a tier-1 record.
     session_bind = None
-    if started and isinstance(agent_block, dict) and args.kind == "codex" and not started_sid:
+    if (started and isinstance(agent_block, dict) and args.kind == "codex"
+            and not started_sid and not embedded):
         session_bind, bound_sid, tui_pid, tui_cwd = _bind_codex_session(
             args.pane, pane_cwd, bind_home, bind_before, launched_at)
         if session_bind == "bound":

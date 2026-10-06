@@ -1080,7 +1080,11 @@ observed final visible shell prompt, including Powerline, within the existing bo
 (seconds converted to native milliseconds). Readiness includes the native foreground
 shell; past screen prompts are not readiness. Unknown, busy, occupied, form, and native
 trust screens receive no typed input; native trust remains a human decision and is
-reported as a wait reason, separate from whether the process was started.
+reported as a wait reason, separate from whether the process was started. A fresh
+Codex start the steward launches runs Embedded (`--no-daemon`) unless the caller
+stated otherwise, so the new TUI owns its rollout fd and same-cwd simultaneous
+starts stay exactly attributable; time-candidate threads stay out of Embedded
+attribution (unknown until its own fd proves it), and resume/fork keep theirs.
 
 **S1** no execution authority — a steward never edits the target root's source, artifact,
 registry, or spec, and never asks the target session to do what its own session refused
