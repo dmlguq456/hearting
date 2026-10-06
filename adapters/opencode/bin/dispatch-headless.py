@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 from review_input import preview_request_nodes
 from dispatch_contract import (
     _atomic_registry_replace,
+    ensure_terminal_claim_absent,
     STANDARD_PLUS_INTENSITIES,  # noqa: E402
     workflow_completion_receipt,
     DispatchContractError,
@@ -1246,6 +1247,11 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
             attempt_id=args.attempt_id,
         )
     args.launch_preclaim = preclaim
+    # The same terminal-claim fence the other wrappers apply: no new child row
+    # once the owner's route has published its terminal claim.
+    mutation_precheck = lambda lines: ensure_terminal_claim_absent(
+        jobs, args.route_id, args.parent_attempt_id or args.attempt_id
+    )
     return claim_attempt_row(
         jobs, args.attempt_id, row, launch=False,
         exclusive_metadata=exclusive,
@@ -1253,6 +1259,7 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
         terminal_attempt_limit=getattr(args, "quick_attempt_limit", None),
         replacement_attempt_limit=getattr(args, "replacement_attempt_limit", 0),
         replacement_notes=getattr(args, "replacement_notes", frozenset()),
+        mutation_precheck=mutation_precheck,
         preclaim=None,
     )
 

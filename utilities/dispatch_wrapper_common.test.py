@@ -112,5 +112,19 @@ class WrapperCommonTest(unittest.TestCase):
                                    side_effect=C.DispatchContractError("registry-ambiguous", "x")):
                 C.write_reset_cache(Path(tmp), "claude", "usage-limit", "12:00")  # no raise
 
+
+class RegistrationFenceTest(unittest.TestCase):
+    def test_every_wrapper_registers_behind_the_terminal_claim_fence(self):
+        import ast
+        for harness in ("claude", "codex", "opencode"):
+            tree = ast.parse((ROOT / "adapters" / harness / "bin" / "dispatch-headless.py").read_text(encoding="utf-8"))
+            append_job = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "append_job")
+            claims = [n for n in ast.walk(append_job) if isinstance(n, ast.Call)
+                      and getattr(n.func, "id", None) == "claim_attempt_row"]
+            with self.subTest(harness=harness):
+                self.assertEqual(len(claims), 1)
+                self.assertIn("mutation_precheck", {k.arg for k in claims[0].keywords})
+                self.assertIn("ensure_terminal_claim_absent", ast.unparse(append_job))
+
 if __name__ == "__main__":
     unittest.main()
