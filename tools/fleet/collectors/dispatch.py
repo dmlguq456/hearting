@@ -1204,7 +1204,7 @@ def _attempt_summary_sid(job):
     return "dispatch-" + attempt_id
 
 
-def _enrich_attempt_summary(job):
+def _enrich_attempt_summary(job, fast_first=False):
     """Attach an attempt-owned summary sidecar produced by dispatch.
 
     A registered job does not always materialize as a separately collectible
@@ -1212,6 +1212,11 @@ def _enrich_attempt_summary(job):
     expose its exact path for attribution and read the dispatch owner's sidecar
     under an attempt-scoped key. Fleet never starts the producer. This never
     guesses by cwd or pid and therefore cannot borrow another child's NOW.
+
+    ``fast_first`` (first live publication only) still exposes the exact path
+    and sid but skips the sidecar title/summary reads; render already shows
+    those rows the same way it shows attempts with no sidecar yet, and the
+    next full snapshot fills them.
     """
     path = _owned_attempt_log_path(job)
     sid = _attempt_summary_sid(job)
@@ -1219,6 +1224,8 @@ def _enrich_attempt_summary(job):
         return
     job._transcript_path = path
     job._summary_sid = sid
+    if fast_first:
+        return
     try:
         from .. import titles
         if not getattr(job, "title", None):
@@ -1428,8 +1435,14 @@ def _parse_claude_stream_tail(path):
     return parsed
 
 
-def _enrich_claude_stream_session(job):
-    """Attach exact child identity, context/exec, and native sub-agents."""
+def _enrich_claude_stream_session(job, fast_first=False):
+    """Attach exact child identity, context/exec, and native sub-agents.
+
+    ``fast_first`` keeps the exact session association (the field the single
+    classifier reads) but skips the native sub-agent tail scan; those child
+    details ride the next full snapshot like any attempt whose log has not
+    been scanned yet.
+    """
     path = _owned_claude_stream_path(job)
     if path is None:
         return
@@ -1494,12 +1507,15 @@ def _enrich_claude_stream_session(job):
     # the runtime pid (and even when no persistent Claude transcript was created).
     # Reuse the parent-thread Agent lifecycle parser instead of inventing a second
     # launch/completion state machine. Keep the scan bounded for the 2s Fleet tick.
-    try:
-        from . import claude as claude_collector
-        subagents = claude_collector._tail_subagents(
-            telemetry_path, max_scan=_CLAUDE_SUBAGENT_SCAN_BYTES)
-    except Exception:
-        subagents = None
+    # First publication skips it: child detail, not classification evidence.
+    subagents = None
+    if not fast_first:
+        try:
+            from . import claude as claude_collector
+            subagents = claude_collector._tail_subagents(
+                telemetry_path, max_scan=_CLAUDE_SUBAGENT_SCAN_BYTES)
+        except Exception:
+            subagents = None
     if subagents is not None:
         for subagent in subagents:
             subagent.source = (
@@ -1663,7 +1679,14 @@ def _codex_attempt_rollout(job, thread_id):
     return codex_collector.exact_rollout_for_session_id(thread_id, homes=homes)
 
 
-def _enrich_codex_attempt_session(job):
+def _enrich_codex_attempt_session(job, fast_first=False):
+    """Attach exact thread identity, live activity, and context telemetry.
+
+    ``fast_first`` keeps the exact thread/activity association (the fields the
+    single classifier reads) but skips the rollout-file fallback discovery;
+    the attempt-log telemetry already attached stays authoritative, and the
+    next full snapshot re-resolves the fallback like any unscanned attempt.
+    """
     job._runtime_activity = None
     path = _owned_attempt_log_path(job)
     if getattr(job, "harness", None) != "codex" or path is None:
@@ -1706,7 +1729,7 @@ def _enrich_codex_attempt_session(job):
         session_total_tokens=total.get("total_tokens"))
     evidence_path = path
     evidence_source = "codex-attempt-app-server"
-    if telemetry.context_used_pct is None and thread_id:
+    if telemetry.context_used_pct is None and thread_id and not fast_first:
         rollout = _codex_attempt_rollout(job, thread_id)
         if rollout:
             try:
@@ -1823,7 +1846,13 @@ def _opencode_job_context_window(job):
         return None
 
 
-def _enrich_opencode_attempt_session(job):
+def _enrich_opencode_attempt_session(job, fast_first=False):
+    """Attach exact session identity and prompt telemetry.
+
+    ``fast_first`` is accepted for a uniform fast-first call site but defers
+    nothing here: the tail parse is mtime-cached and already yields the exact
+    session association the single classifier reads.
+    """
     path = _owned_attempt_log_path(job)
     if getattr(job, "harness", None) != "opencode" or path is None:
         return
@@ -3462,9 +3491,17 @@ def _attach_execution_evidence(jobs, session_rows):
             job.exec_child = candidates[0]
 
 
-def collect(jobs_path=None, harness_filter=None, session_rows=()):
+def collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=False):
     """Return merged [DispatchJob]. harness_filter does not restrict dispatch — the section
-    is cross-harness by design (jobs, not sessions)."""
+    is cross-harness by design (jobs, not sessions).
+
+    ``fast_first`` serves the first live publication only: exact PID/start,
+    registry tuples, and every field the single classifier reads are attached
+    exactly as in a full pass, but display-only detail fills (sidecar
+    titles/summaries, rollout fallback, native sub-agent scans) stay empty the
+    way unscanned attempts already look — the next full snapshot fills them.
+    ``--once``/JSON and every later tick use the full pass, so their final
+    output is unchanged."""
     proc_jobs = _scan_processes()
     paths = _candidate_jobs_paths(jobs_path)
     split_registries = _validated_split_registry_paths(paths)
@@ -3631,10 +3668,10 @@ def collect(jobs_path=None, harness_filter=None, session_rows=()):
     with process_table_scan_scope():
         jobs = _reconcile_drill_rows(jobs, now, codex_index=codex_index)
         for j in jobs:
-            _enrich_claude_stream_session(j)
-            _enrich_codex_attempt_session(j)
-            _enrich_opencode_attempt_session(j)
-            _enrich_attempt_summary(j)
+            _enrich_claude_stream_session(j, fast_first=fast_first)
+            _enrich_codex_attempt_session(j, fast_first=fast_first)
+            _enrich_opencode_attempt_session(j, fast_first=fast_first)
+            _enrich_attempt_summary(j, fast_first=fast_first)
         # Attach execution before the single classifier pass. The governed
         # leader and the tool's app-server can be different processes.
         _attach_execution_evidence(jobs, session_rows)

@@ -2929,5 +2929,124 @@ class TickReuseTest(unittest.TestCase):
         self.assertEqual(dispatch._parse_pipe_meta(pipe)["mode"], "dev")
 
 
+class FastFirstPublicationTest(unittest.TestCase):
+    """First live snapshot: classification inputs attached, display details deferred.
+
+    ``fast_first`` keeps exact PID/start, registry tuples, and every field the
+    single classifier reads (runtime session/activity association), while
+    display-only fills (sidecar titles/summaries, rollout fallback, sub-agent
+    scans) stay empty the way unscanned attempts already look. The next full
+    snapshot fills them; ``--once``/JSON always takes the full pass.
+    """
+
+    ATTEMPT = "att-fastfirst-1"
+    THREAD = "THREAD-1"
+
+    def _write_registry(self, root):
+        jobs = os.path.join(root, "jobs.log")
+        logs = os.path.join(root, "logs")
+        os.makedirs(logs)
+        log = os.path.join(logs, "worker.%s.codex.jsonl" % self.ATTEMPT)
+        with open(log, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "thread.started",
+                                     "thread_id": self.THREAD}) + "\n")
+            handle.write(json.dumps({
+                "type": "dispatch.supervisor.token_usage",
+                "thread_id": self.THREAD, "turn_id": "TURN-1",
+                "timestamp": "2026-10-06T00:00:00Z",
+                # No model_context_window: attempt telemetry alone cannot pin
+                # a percentage, so the full pass takes the rollout fallback
+                # while the fast pass honestly leaves context unknown.
+                "token_usage": {
+                    "last": {"total_tokens": 4000},
+                    "total": {"input_tokens": 1000, "cached_input_tokens": 2000,
+                              "output_tokens": 3000, "reasoning_output_tokens": 400,
+                              "total_tokens": 5000},
+                }}) + "\n")
+        metadata = (
+            "attempt_schema_version=2,transport=headless,"
+            "execution_surface=registered-headless,registered_worker=1,"
+            "fallback_hop=same-harness-headless,harness=codex,"
+            "dispatch_depth=1,worker_type=worker,attempt_id=%s,"
+            "pid=99999991,pid_start=1,pgid=99999991,"
+            "launch_lifecycle=foreground-scoped,"
+            "log_file=%s" % (self.ATTEMPT, log)
+        )
+        with open(jobs, "w", encoding="utf-8") as handle:
+            handle.write("2026-10-06T00:00:00Z\topen\t%s\t%s\tfast-1\t%s\n"
+                         % (root, root, metadata))
+        titles_dir = os.path.join(root, "titles", "codex")
+        os.makedirs(titles_dir)
+        with open(os.path.join(titles_dir, "dispatch-%s.json" % self.ATTEMPT),
+                  "w", encoding="utf-8") as handle:
+            json.dump({"title": "Fixture Title", "ts": 2000000000,
+                       "source": "fixture", "offset": 0,
+                       "summary": "Fixture Summary",
+                       "summary_ts": 2000000000}, handle)
+        return jobs
+
+    def _collect(self, jobs, fast_first):
+        with mock.patch.object(dispatch, "_scan_processes", return_value=[]), \
+             mock.patch.object(dispatch, "_live_attempt_ids", return_value=set()), \
+             mock.patch.object(dispatch, "_dispatch_liveness", return_value="working"), \
+             mock.patch.object(dispatch, "_codex_attempt_rollout",
+                               return_value=None) as rollout:
+            found = dispatch.collect(jobs_path=jobs, fast_first=fast_first)
+        by_attempt = {job.attempt_id: job for job in found}
+        return by_attempt[self.ATTEMPT], rollout
+
+    def test_fast_first_keeps_classification_inputs_and_defers_display(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = self._write_registry(tmp)
+            before = Path(jobs).read_bytes()
+            env = {"HOME": tmp, "AGENT_HOME": tmp,
+                   "AGENT_DISPATCH_JOBS": jobs,
+                   "FLEET_TITLE_STATE_DIR": os.path.join(tmp, "titles"),
+                   "CODEX_HOME": os.path.join(tmp, "codex-home"),
+                   "CLAUDE_CONFIG_DIR": os.path.join(tmp, "claude-home")}
+            with mock.patch.dict(os.environ, env, clear=True):
+                fast, fast_rollout = self._collect(jobs, True)
+                full, full_rollout = self._collect(jobs, False)
+            # No rows gained or lost; exact registry identity identical.
+            self.assertEqual(fast.attempt_id, self.ATTEMPT)
+            self.assertEqual((fast.pid, full.pid), (99999991, 99999991))
+            self.assertEqual(fast.liveness, full.liveness)
+            # Classification inputs the single classifier reads are attached
+            # in both passes; nothing is estimated.
+            self.assertEqual(fast._runtime_session_id, self.THREAD)
+            self.assertEqual(full._runtime_session_id, self.THREAD)
+            self.assertEqual(fast._runtime_activity["thread_id"], self.THREAD)
+            self.assertEqual(full._runtime_activity["thread_id"], self.THREAD)
+            self.assertEqual(fast._transcript_path, full._transcript_path)
+            self.assertIsNotNone(fast._transcript_path)
+            # Display-only fills stay empty on the fast pass and arrive full.
+            self.assertIsNone(fast.title)
+            self.assertEqual(full.title, "Fixture Title")
+            self.assertIsNone(fast.summary)
+            self.assertEqual(full.summary, "Fixture Summary")
+            # Attempt-log telemetry is free math: identical in both passes.
+            self.assertEqual((fast.active_context_tokens,
+                              full.active_context_tokens), (4000, 4000))
+            self.assertIsNone(fast.ctx_pct)
+            self.assertIsNone(full.ctx_pct)
+            # The rollout fallback (extra file discovery) runs only full.
+            self.assertEqual(fast_rollout.call_count, 0)
+            self.assertEqual(full_rollout.call_count, 1)
+            # Collection itself writes nothing back.
+            self.assertEqual(Path(jobs).read_bytes(), before)
+
+    def test_collect_all_threads_fast_first_to_dispatch(self):
+        # The internal hint reaches dispatch only; every existing caller
+        # without it keeps the full pass (--once/JSON output unchanged).
+        with mock.patch.object(dispatch, "collect", return_value=[]), \
+             mock.patch("fleet.collectors.procscan.scan", return_value=[]):
+            fleet_collectors.collect_all(fast_first=True)
+            self.assertTrue(dispatch.collect.call_args.kwargs.get("fast_first", False))
+        with mock.patch.object(dispatch, "collect", return_value=[]), \
+             mock.patch("fleet.collectors.procscan.scan", return_value=[]):
+            fleet_collectors.collect_all()
+            self.assertFalse(dispatch.collect.call_args.kwargs.get("fast_first", True))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

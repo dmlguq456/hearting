@@ -273,13 +273,17 @@ def apply_peer_rows(sessions, by_key):
                 setattr(s, attr, min(entries, key=_age))
 
 
-def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
+def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_first=False):
     """Return (sessions, jobs).
 
     harness_filter: optional iterable of harness names (fleet + dispatch both honor it).
     jobs_path:      override for .dispatch/jobs.log (else env / default).
     usage:          only exact ``refresh`` may schedule a background usage fetch;
                     all other values are cache-only.
+    fast_first:     internal first-live-publication hint, threaded to dispatch
+                    only (exact classification inputs stay attached; display
+                    details fill on the next full tick). ``--once``/JSON and
+                    every other caller keep the full pass.
     """
     sessions = procscan.scan(harness_filter=harness_filter)
 
@@ -463,7 +467,7 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only"):
     try:
         from . import dispatch
         jobs = dispatch.collect(jobs_path=jobs_path, harness_filter=harness_filter,
-                                session_rows=sessions)
+                                session_rows=sessions, fast_first=fast_first)
     except Exception:
         jobs = []
 
