@@ -468,7 +468,7 @@ class ComputeHostRenderTest(unittest.TestCase):
         release = threading.Event()
         getch_called = threading.Event()
 
-        def collector(harness_filter=None):
+        def collector(harness_filter=None, fast_first=False):
             return [], []
 
         def gpu_refresh():

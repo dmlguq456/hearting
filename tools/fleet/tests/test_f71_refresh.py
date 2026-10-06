@@ -161,9 +161,11 @@ class RefreshPumpTest(unittest.TestCase):
         release = threading.Event()
         getch_called = threading.Event()
         collector_threads = []
+        collector_calls = []
 
-        def collector(harness_filter=None):
+        def collector(harness_filter=None, fast_first=False):
             collector_threads.append(threading.get_ident())
+            collector_calls.append(fast_first)
             collector_entered.set()
             release.wait()
             return [], []
@@ -209,6 +211,11 @@ class RefreshPumpTest(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertEqual(result, [0])
         self.assertNotEqual(collector_threads, [thread.ident])
+        # The first live publication takes the fast pass; the flag reaches
+        # whatever collector _loop was given (a TypeError here used to fail
+        # every tick and wedge the screen on its empty first frame).
+        self.assertTrue(collector_calls)
+        self.assertTrue(collector_calls[0])
 
     def test_live_line_build_uses_snapshot_git_and_governor_only(self):
         session = Session(harness="codex", pid=1, cwd="/nas/project", slug="project",
