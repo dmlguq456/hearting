@@ -103,6 +103,39 @@ class CodexRolloutAttributionTest(unittest.TestCase):
             tick = codex.prepare_tick(sessions)
         self.assertEqual(tick.proc_paths, {})
 
+    def test_two_same_cwd_tuis_started_moments_apart_stay_unknown(self):
+        """2026-10-04 hearting incident (PID 3023216/3023356): neither TUI holds a
+        rollout fd (shared-daemon clients), process starts 3 ticks (0.03 s) apart,
+        and the two same-cwd root rollout timestamps are 1 ms apart. Both rollouts
+        fit both processes inside the match window, so the mutually-unique start
+        match has no pair and both rows stay anonymous — F-26 (misattribution is
+        worse than absence). Order/recency must never break this tie."""
+        first = Session(harness="codex", pid=3023216, cwd="/work/hearting",
+                        proc_start="552526499")
+        second = Session(harness="codex", pid=3023356, cwd="/work/hearting",
+                         proc_start="552526502")
+        one = ("/r/rollout-2026-10-04T14-24-17-"
+               "01a1055e-bd7b-7481-a5f9-7b33bb080745.jsonl")
+        two = ("/r/rollout-2026-10-04T14-24-17-"
+               "01a1055e-bd7b-7481-a5f9-7b2cc1bee230.jsonl")
+        meta = {
+            one: {"cwd": "/work/hearting", "timestamp": "2026-10-04T05:24:17.416Z",
+                  "source": "vscode"},
+            two: {"cwd": "/work/hearting", "timestamp": "2026-10-04T05:24:17.417Z",
+                  "source": "vscode"},
+        }
+        started = {3023216: 1791091456.0, 3023356: 1791091456.03}
+        with mock.patch.object(codex, "_proc_rollout", return_value=None), \
+             mock.patch.object(codex, "_index",
+                               return_value={"/work/hearting": [two, one]}), \
+             mock.patch.object(codex, "_rollout_meta",
+                               side_effect=lambda path: meta[path]), \
+             mock.patch.object(codex, "_process_started_at",
+                               side_effect=lambda sess: started[sess.pid]), \
+             mock.patch.object(codex, "_tick_subagents", return_value={}):
+            tick = codex.prepare_tick([first, second])
+        self.assertEqual(tick.proc_paths, {})
+
     def test_two_same_cwd_sessions_remain_unknown_when_fallback_is_ambiguous(self):
         sessions = [Session(harness="codex", pid=1, cwd="/work/repo", elapsed_min=1),
                     Session(harness="codex", pid=2, cwd="/work/repo", elapsed_min=1)]
