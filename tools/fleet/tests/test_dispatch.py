@@ -3036,8 +3036,9 @@ class FastFirstPublicationTest(unittest.TestCase):
             self.assertEqual(Path(jobs).read_bytes(), before)
 
     def test_collect_all_threads_fast_first_to_dispatch(self):
-        # The internal hint reaches dispatch only; every existing caller
-        # without it keeps the full pass (--once/JSON output unchanged).
+        # The internal hint reaches dispatch only on the fast path; every
+        # existing caller without it keeps the old call shape (--once/JSON
+        # output unchanged), so old test doubles keep working.
         with mock.patch.object(dispatch, "collect", return_value=[]), \
              mock.patch("fleet.collectors.procscan.scan", return_value=[]):
             fleet_collectors.collect_all(fast_first=True)
@@ -3045,7 +3046,7 @@ class FastFirstPublicationTest(unittest.TestCase):
         with mock.patch.object(dispatch, "collect", return_value=[]), \
              mock.patch("fleet.collectors.procscan.scan", return_value=[]):
             fleet_collectors.collect_all()
-            self.assertFalse(dispatch.collect.call_args.kwargs.get("fast_first", True))
+            self.assertNotIn("fast_first", dispatch.collect.call_args.kwargs)
 
 
 if __name__ == "__main__":

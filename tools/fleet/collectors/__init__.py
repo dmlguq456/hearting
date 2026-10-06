@@ -467,7 +467,8 @@ def collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_fi
     try:
         from . import dispatch
         jobs = dispatch.collect(jobs_path=jobs_path, harness_filter=harness_filter,
-                                session_rows=sessions, fast_first=fast_first)
+                                session_rows=sessions,
+                                **({"fast_first": True} if fast_first else {}))
     except Exception:
         jobs = []
 

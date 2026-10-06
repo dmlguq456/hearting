@@ -8256,7 +8256,8 @@ def _loop(stdscr, collect_all, hfilter, section, interval):
 
     def collect_snapshot():
         nonlocal first_snapshot
-        sessions, jobs = collect_all(harness_filter=hfilter, fast_first=first_snapshot)
+        sessions, jobs = collect_all(harness_filter=hfilter,
+                                     **({"fast_first": True} if first_snapshot else {}))
         # Only the first publication is fast: every later tick (the existing
         # background refresh) runs the full pass, filling the details the
         # first snapshot honestly left empty. --once/JSON never sets the flag.

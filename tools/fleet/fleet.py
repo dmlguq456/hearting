@@ -238,7 +238,7 @@ def main(argv=None):
 
         def collector(harness_filter=None, usage="cache-only", fast_first=False):      # LIVE real data + injected demo fixtures (merged)
             rs, rj = collect_all(harness_filter=harness_filter, usage="cache-only",
-                                 fast_first=fast_first)
+                                 **({"fast_first": True} if fast_first else {}))
             ds, dj = demo.collect(harness_filter=harness_filter)
             # Real rows are projected by collect_all. Only the injected rows
             # still need projection; never reread the live routes/artifact tree.
@@ -250,11 +250,12 @@ def main(argv=None):
             return rs + ds, rj + dj
 
     def projected_collector(harness_filter=None, usage="cache-only", fast_first=False):
+        fast_kw = {"fast_first": True} if fast_first else {}
         if usage == "cache-only":
-            sessions, jobs = collector(harness_filter=harness_filter, fast_first=fast_first)
+            sessions, jobs = collector(harness_filter=harness_filter, **fast_kw)
         else:
             sessions, jobs = collector(harness_filter=harness_filter, usage=usage,
-                                       fast_first=fast_first)
+                                       **fast_kw)
         projected_collector.last_resource_jobs = list(
             getattr(collect_all, "last_resource_jobs", []))
         projected_collector.last_resource_malformed = getattr(
@@ -324,7 +325,7 @@ def main(argv=None):
             live = render.live_harnesses(previous_sessions) & effective & {"claude", "codex"}
         usage = "refresh" if live else "cache-only"
         sessions, jobs = base_collector(harness_filter=harness_filter, usage=usage,
-                                        fast_first=fast_first)
+                                        **({"fast_first": True} if fast_first else {}))
         live_collector.last_resource_jobs = list(
             getattr(base_collector, "last_resource_jobs", []))
         live_collector.last_resource_malformed = getattr(

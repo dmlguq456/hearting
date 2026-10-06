@@ -3667,11 +3667,14 @@ def collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fal
     # scope ends with the tick.
     with process_table_scan_scope():
         jobs = _reconcile_drill_rows(jobs, now, codex_index=codex_index)
+        # The new keyword travels only on the fast path: every existing
+        # single-argument caller and test double keeps working on the full pass.
+        fast_kw = {"fast_first": True} if fast_first else {}
         for j in jobs:
-            _enrich_claude_stream_session(j, fast_first=fast_first)
-            _enrich_codex_attempt_session(j, fast_first=fast_first)
-            _enrich_opencode_attempt_session(j, fast_first=fast_first)
-            _enrich_attempt_summary(j, fast_first=fast_first)
+            _enrich_claude_stream_session(j, **fast_kw)
+            _enrich_codex_attempt_session(j, **fast_kw)
+            _enrich_opencode_attempt_session(j, **fast_kw)
+            _enrich_attempt_summary(j, **fast_kw)
         # Attach execution before the single classifier pass. The governed
         # leader and the tool's app-server can be different processes.
         _attach_execution_evidence(jobs, session_rows)
