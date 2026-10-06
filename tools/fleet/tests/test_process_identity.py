@@ -68,6 +68,18 @@ class OpenCodeProcessTest(unittest.TestCase):
         self.assertEqual((found.harness, found.session_id, found.confidence), ("codex", "", P.HARNESS_ONLY))
 
 
+class StartedOnIsNotProofTest(unittest.TestCase):
+    def test_a_start_time_session_argument_is_reported_but_never_proof(self):
+        # A pane started on X can switch to Y inside the TUI; only the selection record follows.
+        with unittest.mock.patch.object(opencode, "session_of_process", return_value=(SID, "opencode-argv")):
+            found = P.process_identity(os.getpid(), "opencode")
+            self.assertEqual((found.session_id, found.confidence), (SID, P.STARTED_ON))
+            with unittest.mock.patch.object(hp, "_comm", return_value="opencode"), \
+                    unittest.mock.patch("fleet.collectors.claude.session_id_of_process", return_value=None):
+                self.assertEqual(hp.runtime_identity(), ("opencode", None))
+                self.assertTrue(hp.may_report("opencode", "ses_switched", worker=False))
+
+
 class OpenCodeReportTest(unittest.TestCase):
     def test_a_proven_opencode_session_must_match_and_an_unproven_one_keeps_the_harness_check(self):
         with unittest.mock.patch.object(hp, "runtime_identity", return_value=("opencode", SID)):

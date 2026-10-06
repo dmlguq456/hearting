@@ -283,7 +283,7 @@ def prepare_tick(sessions):
 
 def _keeper_key(sess):
     """Sort key for one member of a shared session id: a row its own process proved
-    (TUI selection or `--session`) first, then window-bound rows that created the
+    (its TUI selection record) first, then window-bound rows that created the
     session (exact ownership), then earliest process start (the creator
     started before any attacher or helper), then lowest pid. Missing evidence
     sorts last — never used as a fact."""
@@ -494,8 +494,8 @@ def enrich(sess, tick=None):
         cur = con.cursor()
         start_ms = _process_started_ms(sess)
         row, sess._opencode_bind_kind = None, None
-        proven = session_id_of_process(sess.pid) if getattr(sess, "pid", None) else None
-        if proven:
+        proven, source = session_of_process(sess.pid) if getattr(sess, "pid", None) else (None, "")
+        if proven and source == "opencode-tui-selection":
             row = cur.execute("SELECT %s FROM session WHERE id=? LIMIT 1" % _COLS, (proven,)).fetchone()
             if row:
                 sess._opencode_bind_kind = "process"

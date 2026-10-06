@@ -7,8 +7,10 @@ translation stays in its collector:
   pid and start time (`collectors.claude.session_id_of_process`);
 - Codex: the rollout the process holds open, the managed registry, or the
   start-time match (`collectors.codex.session_id_of_process`);
-- OpenCode: the pane's own TUI selection record, else its `--session`
-  (`collectors.opencode.session_of_process`).
+- OpenCode: the pane's own TUI selection record
+  (`collectors.opencode.session_of_process`). The `--session` a pane was
+  started with is reported as `started-on`, not proof: the TUI can switch
+  sessions after start, and only the selection record follows that.
 
 The answer is a `session_identity.SessionIdentity` -- the same record the
 environment reading gives -- with `confidence="proven"` when the process
@@ -24,7 +26,9 @@ from pathlib import Path
 import sys
 
 PROVEN = "proven"
+STARTED_ON = "started-on"
 HARNESS_ONLY = "harness-only"
+_UNPROVEN_SOURCES = {"opencode-argv": STARTED_ON}
 
 
 def _record():
@@ -52,5 +56,5 @@ def process_identity(pid, harness, *, live_codex=None):
     except Exception:
         session_id = None
     if session_id:
-        return record(harness, session_id, source, PROVEN)
+        return record(harness, session_id, source, _UNPROVEN_SOURCES.get(source, PROVEN))
     return record(harness, "", "", HARNESS_ONLY)

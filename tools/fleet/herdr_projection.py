@@ -105,7 +105,8 @@ def runtime_identity():
       ambiguous match) is passed over for the ancestor that is, and no proof anywhere
       means ``("codex", None)``;
     - OpenCode: a process named ``opencode`` — its session id is the one its own TUI
-      selection record or ``--session`` proves, else ``("opencode", None)``.
+      selection record proves, else ``("opencode", None)`` (a start-time ``--session``
+      is not proof: the TUI may have switched since).
 
     Every harness is read through `fleet.process_identity`, the one record shape.
 
@@ -134,7 +135,8 @@ def runtime_identity():
             if found.confidence == PROVEN:
                 return "codex", found.session_id
         elif comm == "opencode":
-            return "opencode", process_identity(pid, "opencode").session_id or None
+            found = process_identity(pid, "opencode")
+            return "opencode", found.session_id if found.confidence == PROVEN else None
         pid = _parent(pid)
     return ("codex", None) if codex_seen else (None, None)
 
@@ -147,7 +149,7 @@ def may_report(harness: str, session_id: str, *, worker=None) -> bool:
       ``session_id`` (see `runtime_identity`); the payload and the environment
       (``CODEX_THREAD_ID`` included) are never the proof;
     - OpenCode: the nearest runtime must be OpenCode, and when that process proves its
-      session (its TUI selection record or ``--session``) the id must match it. A process
+      session (its TUI selection record) the id must match it. A process
       that proves none — an older TUI without the selection record — keeps the
       harness-only check, so its id is reported as before.
     Unknown identity is a refusal, never a guess: the header keeps its previous text.

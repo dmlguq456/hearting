@@ -2830,7 +2830,7 @@ def _process_session(pane, harness):
 
     Read from the process the way the Fleet board does (`fleet.process_identity`:
     Claude's `sessions/<pid>.json`, rewritten on `/clear`; Codex's open rollout;
-    OpenCode's TUI selection record or `--session`). herdr's own `agent_session`
+    OpenCode's TUI selection record). herdr's own `agent_session`
     follows a `/clear` only when its integration reports it, and has been seen to keep
     the previous session for good (live panes 2026-10-01), so a second tidy in the same
     window would otherwise never clear it."""
