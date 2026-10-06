@@ -965,6 +965,46 @@ class StartSessionBindTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(len(starts), 1)
         self.assertIn("--no-daemon", starts[0])
 
+    def test_a_caller_stated_no_daemon_start_never_binds_a_time_candidate(self):
+        """F2 residual: a caller-stated `--no-daemon` really is Embedded execution
+        (the helper returns ``[]`` only to avoid injecting a duplicate flag), so it
+        must skip the binder like an injected one. Reproduced against 4543a6ec with
+        `_start(--, --no-daemon)`: the foreign root bound and would have been
+        written tier-1. No duplicate flag is injected on top of the caller's own."""
+        import io
+        import contextlib
+        foreign = "01a0fa57-0000-7000-8000-0000000000f2"
+        self.late.append(lambda: self._rollout(foreign))
+        out = io.StringIO()
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run", side_effect=self._fake_herdr), \
+             mock.patch.object(peer_steward, "_pane_is_managed", return_value=False), \
+             mock.patch.object(peer_steward, "_bind_codex_session") as bind_mock, \
+             mock.patch.object(peer_steward, "_BIND_SECONDS", 1.0), \
+             mock.patch.object(peer_steward, "_BIND_POLL_SECONDS", 0.05), \
+             contextlib.redirect_stdout(out):
+            rc = peer_steward.main(["start", "bl-c1", "--kind", "codex", "--pane", "w1:pM",
+                                    "--cwd", str(self.project), "--", "--no-daemon"])
+        self.assertEqual(rc, 0)
+        text = out.getvalue()
+        self.assertIn("started=true", text)
+        self.assertIn("session_id=-", text)
+        self.assertNotIn("session_bind=", text)
+        self.assertEqual(bind_mock.call_count, 0)
+        self.assertIsNone(self._registry_record())
+        starts = [c for c in self.calls if c[:3] == ["herdr", "agent", "start"]]
+        self.assertEqual(len(starts), 1)
+        typed = starts[0][starts[0].index("--") + 1:]
+        self.assertEqual(typed.count("--no-daemon"), 1)
+
+    def test_stated_no_daemon_ignores_option_values_and_native_literal_boundary(self):
+        self.assertTrue(peer_steward._codex_stated_no_daemon(["--no-daemon"]))
+        self.assertTrue(peer_steward._codex_stated_no_daemon(["resume", "--no-daemon"]))
+        self.assertFalse(peer_steward._codex_stated_no_daemon([]))
+        self.assertFalse(peer_steward._codex_stated_no_daemon(["--remote", "unix:///x.sock"]))
+        self.assertFalse(peer_steward._codex_stated_no_daemon(["-m", "--no-daemon"]))
+        self.assertFalse(peer_steward._codex_stated_no_daemon(["--", "--no-daemon"]))
+
     def test_no_new_rollout_within_the_bound_times_out_without_failing(self):
         started = time.time()
         out = self._start()

@@ -186,6 +186,35 @@ def _codex_embedded_args(agent_args):
     return [_CODEX_NO_DAEMON_FLAG]
 
 
+def _codex_stated_no_daemon(agent_args):
+    """True when the caller itself selected Embedded execution (root-level ``--no-daemon``).
+
+    Injection (`_codex_embedded_args`) returns ``[]`` for this shape only to avoid a
+    duplicate flag — but the launch really is Embedded, so it must skip the time
+    binder exactly like an injected one. Parsed strictly: option values are skipped
+    (a model literally named ``--no-daemon`` is not a stance) and ``--`` ends flag
+    parsing (a prompt typing ``--no-daemon`` runs on the shared daemon)."""
+    index = 0
+    while index < len(agent_args):
+        token = agent_args[index]
+        if token == "--":
+            return False
+        if token == _CODEX_NO_DAEMON_FLAG:
+            return True
+        if token in _CODEX_FRESH_VALUE_OPTIONS:
+            index += 2
+            continue
+        if token in _CODEX_FRESH_KNOWN_FLAGS:
+            index += 1
+            continue
+        if token.startswith("--") and "=" in token:
+            if token.partition("=")[0] in _CODEX_FRESH_VALUE_OPTIONS | _CODEX_FRESH_KNOWN_FLAGS:
+                index += 1
+                continue
+        index += 1
+    return False
+
+
 def _current_session_identity():
     """`(session_id, harness)` — delegates to `dispatch_parent_completion
     .interactive_parent_identity`, the one resolver every identity consumer shares, so the
@@ -873,10 +902,14 @@ def cmd_start(args):
     # resolver), never by a launch-time time candidate: while its own thread does
     # not exist yet the before/after binder could take another same-cwd execution's
     # new root rollout for this PID, and a tier-1 record outranks the later own fd.
-    # Until the fd exists the session stays unknown and nothing is written.
+    # Until the fd exists the session stays unknown and nothing is written. This
+    # covers injected and caller-stated Embedded alike (`--no-daemon` in `agent_args`
+    # means no injection, but the execution still is Embedded).
+    embedded_execution = bool(embedded) or (
+        args.kind == "codex" and _codex_stated_no_daemon(agent_args))
     bind_home = bind_before = None
     launched_at = time.time()
-    if args.kind == "codex" and not embedded:
+    if args.kind == "codex" and not embedded_execution:
         bind_home = _codex_home_dir()
         bind_before = _rollout_paths(bind_home)
 
@@ -927,7 +960,7 @@ def cmd_start(args):
     # starts never enter here (see above): no time candidate becomes a tier-1 record.
     session_bind = None
     if (started and isinstance(agent_block, dict) and args.kind == "codex"
-            and not started_sid and not embedded):
+            and not started_sid and not embedded_execution):
         session_bind, bound_sid, tui_pid, tui_cwd = _bind_codex_session(
             args.pane, pane_cwd, bind_home, bind_before, launched_at)
         if session_bind == "bound":
