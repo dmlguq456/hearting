@@ -1101,8 +1101,24 @@ class ProbeProgressTest(unittest.TestCase):
         pread.assert_called_once()
         self.assertEqual(progress["line"], raw[:200])
         self.assertEqual(progress["summary"],
-                         "training-updates · baseline · successful 17808")
+                         "training-updates · baseline · attempt 17808 · successful 17808")
         self.assertNotIn("epoch", progress)
+
+    def test_json_progress_keeps_attempt_and_successful_as_separate_units(self):
+        summarize = self.ns["progress_json_summary"]
+        self.assertEqual(summarize(b'{"attempt":9}'), "attempt 9")
+        self.assertEqual(summarize(b'{"successful":8}'), "successful 8")
+        self.assertEqual(
+            summarize(b'{"phase":"training-updates","arm":"baseline",'
+                      b'"attempt":17808,"successful":17808}'),
+            "training-updates · baseline · attempt 17808 · successful 17808")
+        self.assertEqual(
+            summarize(b'{"attempt":100,"successful":95}'),
+            "attempt 100 · successful 95")
+        for raw in (b'{"attempt":true}', b'{"attempt":-1}', b'{"attempt":1.5}',
+                    b'{"attempt":"3"}', b'{"attempt":1000000000000}'):
+            with self.subTest(raw=raw):
+                self.assertIsNone(summarize(raw))
 
     def test_json_progress_unknown_and_partial_records_keep_raw_fallback(self):
         for raw in (b'{"phase":"train","step":', b'{"step":true}',

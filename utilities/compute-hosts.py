@@ -960,7 +960,8 @@ def progress_json_summary(raw):
     if not isinstance(record, dict):
         return None
     counters = []
-    for key in ("epoch", "step", "global_step", "iteration", "update", "successful"):
+    for key in ("epoch", "step", "global_step", "iteration", "update",
+                "attempt", "successful"):
         value = record.get(key)
         if isinstance(value, int) and not isinstance(value, bool) and 0 <= value < 10**12:
             counters.append("%s %d" % (key, value))
