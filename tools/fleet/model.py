@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import tempfile
 from dataclasses import dataclass, field, asdict, fields, is_dataclass
 from typing import Optional
 
@@ -225,7 +226,8 @@ def project_of(cwd):
     grouping_cwd = repo or cwd
     parts = [p for p in grouping_cwd.rstrip("/").split("/") if p]
     # Group each temporary drill repository and its worktrees as one drill:<case> card.
-    if grouping_cwd.startswith("/tmp/"):
+    temp_root = os.path.realpath(tempfile.gettempdir()).rstrip("/") + "/"
+    if grouping_cwd.startswith(("/tmp/", temp_root)):
         for comp in parts:
             m = re.match(r"^drill-(.+)-[^-/]+$", comp)
             if m:
