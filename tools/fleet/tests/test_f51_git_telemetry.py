@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from fleet import gitinfo, render
 from fleet import fleet as fleet_mod
 from fleet.collectors import procscan
-from fleet.model import Session
+from fleet.model import DispatchJob, Session, project_of
 
 
 class F51GitTelemetryTest(unittest.TestCase):
@@ -344,6 +344,55 @@ class F51GitTelemetryTest(unittest.TestCase):
             self.assertEqual(gitinfo.branch(linked), "topic")
             with tempfile.TemporaryDirectory() as outside:
                 self.assertIsNone(gitinfo.branch(outside))
+
+    def test_project_groups_linked_worktrees_by_their_common_repository(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "home-os")
+            os.mkdir(root)
+            self._make_repo(root, configure_upstream=False)
+            for index, relative in enumerate(("home-os/.worktrees/foo", "home-os-wt/foo",
+                                               "home-os_worktrees/foo", "other-wt/foo")):
+                with self.subTest(layout=relative):
+                    linked = os.path.join(tmp, relative)
+                    self._run_git(root, "worktree", "add", "-q", "-b", "topic-%d" % index, linked)
+                    child = os.path.join(linked, "nested")
+                    os.mkdir(child)
+                    with mock.patch.object(gitinfo.subprocess, "run", side_effect=AssertionError):
+                        self.assertEqual(project_of(root), "home-os")
+                        self.assertEqual(project_of(linked), "home-os")
+                        self.assertEqual(project_of(child), "home-os")
+                        for harness in ("claude", "codex", "opencode"):
+                            session = Session(harness=harness, pid=1, cwd=child)
+                            job = DispatchJob(key="code", cwd=child, harness=harness)
+                            self.assertEqual(render._group_key_session(session), "home-os")
+                            self.assertEqual(render._group_key_job(job), "home-os")
+
+    def test_project_path_fallback_keeps_worktree_precedence(self):
+        cases = (("/x/home-os/.worktrees/foo", "home-os"),
+                 ("/x/home-os-wt/foo", "home-os"),
+                 ("/x/home-os_worktrees/foo", "home-os"),
+                 ("/a/foo_worktrees/bar-wt/leaf", "bar"),
+                 ("/x/.claude/worklog-board-wt/studio-c2", "worklog-board"),
+                 ("/x/.claude-wt/definitions-manifest", ".claude"),
+                 ("/x/worklog-board.broken-20260629-151852", "worklog-board"),
+                 ("/tmp/drill-g9-Ab3d/repo", "drill:g9"),
+                 ("/x/plain", "plain"), ("/", "(root)"), ("", "(unknown)"))
+        with mock.patch.object(gitinfo, "resolve_gitdir", return_value=(None, None)):
+            for cwd, expected in cases:
+                with self.subTest(cwd=cwd):
+                    self.assertEqual(project_of(cwd), expected)
+        with mock.patch.object(gitinfo, "resolve_gitdir", side_effect=OSError("unreadable")):
+            self.assertEqual(project_of("/x/home-os-wt/foo"), "home-os")
+
+    def test_real_drill_repository_keeps_its_case_group(self):
+        with tempfile.TemporaryDirectory(prefix="drill-g9-") as tmp:
+            root = os.path.join(tmp, "repo")
+            os.mkdir(root)
+            self._make_repo(root, configure_upstream=False)
+            linked = os.path.join(tmp, "linked")
+            self._run_git(root, "worktree", "add", "-q", "-b", "topic", linked)
+            self.assertEqual(project_of(root), "drill:g9")
+            self.assertEqual(project_of(linked), "drill:g9")
 
     def test_real_repo_ahead_behind_counts_and_zero_suppresses_suffix(self):
         with tempfile.TemporaryDirectory() as root:

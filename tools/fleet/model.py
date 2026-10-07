@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass, field, asdict, fields, is_dataclass
 from typing import Optional
 
+from . import gitinfo
+
 
 # --- shared time helpers (ps etime parsing + human format) ---
 def etime_to_min(et):
@@ -203,40 +205,33 @@ class WorkProjection:
 def project_of(cwd):
     """Grouping key for the render v2 cwd-project groups — one group per parent repo.
 
-    Rule precedence (documented, not accidental): `-wt` OUTRANKS `_worktrees`, and both
-    passes are OUTERMOST-COMPONENT-FIRST (left→right). This is a TWO-PASS scan (all
-    components checked for `-wt` before ANY component is checked for `_worktrees`) —
-    a single interleaved pass would let an outer `_worktrees` component win over an
-    inner `-wt` component, which is the wrong precedence (see the mixed 7th test case
-    below). Edge cases verified — see plan Verification §1 / dev_logs/step_01_model.md:
-      /x/hearting-wt/fleet-dashboard                   -> hearting
-      /x/.claude/worklog-board-wt/studio-c2            -> worklog-board
-      /x/.claude-wt/definitions-manifest               -> .claude
-      /x/Stream_Diar_Baselines_worktrees/m5b_ls_eend_engine -> Stream_Diar_Baselines
-      /x/worklog-board.broken-20260629-151852          -> worklog-board
-      ''                                                -> (unknown)
-      /a/foo_worktrees/bar-wt/leaf                     -> bar   (outer `_worktrees` component
-                                                                   loses to inner `-wt` component
-                                                                   because of the two-pass order)
+    Git's common directory identifies the parent repository regardless of where
+    a linked worktree lives (including `<repo>/.worktrees/<name>`). Git metadata
+    is read by the same resolver as the branch/location telemetry; no subprocess.
+    Temporary drill repositories retain their `drill:<case>` display label.
 
-    Known accepted edge: basename-only merge means `/home/alice` and
-    `/home/nas/user/alice` both project to `alice` (same human, different mount —
-    treated as one group; acceptable, not a bug).
-
-    Quirk (not a bug, a consequence of rule 1 being unable to distinguish a worktree
-    PARENT from a leaf literally named `<x>-wt`): a non-worktree directory named
-    e.g. `/x/my-cool-wt` (no children, not actually a worktree root) still truncates
-    to `my-cool` — rule 1 has no way to tell the two apart from the path alone.
+    When Git metadata is unavailable, path rules remain two-pass, outermost-first:
+    `-wt` outranks `_worktrees`, then `.worktrees` names its enclosing folder,
+    else use the basename with a trailing `.broken*` marker stripped.
     """
     if not cwd:
         return "(unknown)"
-    parts = [p for p in cwd.rstrip("/").split("/") if p]
+    cwd = os.fspath(cwd)
+    try:
+        _linked, common = gitinfo.resolve_gitdir(cwd)
+    except (OSError, ValueError):
+        common = None
+    repo = os.path.dirname(common) if common and os.path.basename(common) == ".git" else None
+    grouping_cwd = repo or cwd
+    parts = [p for p in grouping_cwd.rstrip("/").split("/") if p]
     # Group each temporary drill repository and its worktrees as one drill:<case> card.
-    if cwd.startswith("/tmp/"):
+    if grouping_cwd.startswith("/tmp/"):
         for comp in parts:
             m = re.match(r"^drill-(.+)-[^-/]+$", comp)
             if m:
                 return "drill:" + m.group(1)
+    if repo:
+        return os.path.basename(repo) or "(root)"
     # pass 1 (outermost-first): `-wt` suffix — takes precedence over `_worktrees`.
     for comp in parts:
         if len(comp) > 3 and comp.endswith("-wt"):
@@ -245,6 +240,9 @@ def project_of(cwd):
     for comp in parts:
         if len(comp) > len("_worktrees") and comp.endswith("_worktrees"):
             return comp[: -len("_worktrees")]
+    for index, comp in enumerate(parts):
+        if comp == ".worktrees" and index:
+            return parts[index - 1]
     # fallback: basename, with a trailing `.broken*` marker stripped.
     base = parts[-1] if parts else ""
     base = re.sub(r"\.broken.*$", "", base)
