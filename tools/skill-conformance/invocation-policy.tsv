@@ -27,6 +27,5 @@ design-review	parent-invoked	Use only when autopilot-design dispatches design qu
 design-tokens	parent-invoked	Use only when autopilot-design dispatches design-token definition or revision. Not for top-level user requests or primary capability routing.
 draft-refine	parent-invoked	Use only when autopilot-draft or autopilot-refine dispatches an internal strategy or draft refinement stage. Not for top-level user requests or primary capability routing.
 draft-strategy	parent-invoked	Use only when autopilot-draft dispatches document strategy and evidence-plan creation. Not for top-level user requests or primary capability routing.
-post-it	model-support	Use when the acting agent needs to store, retrieve, resolve, hand off, or promote a scoped working-memory item in support of current work. Not for primary task routing, broad artifact triage, or replacing the capability that owns the current work.
 route-frame	compiler-internal	Use only as the route compiler's own framed shape (compose --shape framed); no person or model invokes it by name. Not for direct invocation, a user-facing Skill, a native command, or any owner persona.
 session-tidy	model-support	Use when context fills, before compact, on handoff to another session, after a large task, or on request. Not for primary routing or memory writes.

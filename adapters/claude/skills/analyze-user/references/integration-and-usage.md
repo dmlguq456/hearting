@@ -12,7 +12,7 @@ Each role runs the relevant `mem profile <stem>` commands at work start. The DB 
 | `dev/*` units | `04_analysis_methodology`, `05_domain_expertise`, `07_coding_convention` | Metrics, verification, identifier terminology, structure, config, prefixes, and layers; project-local `experiment_conventions.md` wins |
 | main agent | `04_analysis_methodology`, `05_domain_expertise`, `07_coding_convention` | Analytical replies, user terminology, and code defaults for lab, spec, and code pipelines |
 
-Aspect 06, conversational meta rules, is main-agent-only because subagents do not speak directly to the user. Its profile record remains the default `/post-it --scope user` collaboration target. Aspect 07 applies only to implementation, planning, and main-agent code work. Each role normally reads three to five relevant profiles. These lookups are encoded in the unit definitions.
+Aspect 06, conversational meta rules, is main-agent-only because subagents do not speak directly to the user. Its profile record remains the default `mem profile-append` collaboration target. Aspect 07 applies only to implementation, planning, and main-agent code work. Each role normally reads three to five relevant profiles. These lookups are encoded in the unit definitions.
 
 ## Relationship to Project Memory
 
@@ -20,7 +20,7 @@ Aspect 06, conversational meta rules, is main-agent-only because subagents do no
 |---|---|---|
 | Store | Unified DB working or durable project scope | DB records with `type=profile`, global scope |
 | Scope | Per project | Cross-project user defaults |
-| Accumulation | Agent- or user-directed as context warrants | Explicit `/analyze-user` or `/post-it --scope user` |
+| Accumulation | Agent- or user-directed as context warrants | Explicit `/analyze-user` or `mem profile-append` |
 | Shape | Short feedback, preferences, facts, and handoffs | Structured pattern catalog |
 | Update cadence | As needed | Profile cycles |
 | QA | Raw or workflow-specific | Multi-reviewer refined |

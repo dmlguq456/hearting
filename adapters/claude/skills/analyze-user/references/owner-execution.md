@@ -27,8 +27,8 @@ The main agent may route here when a request clearly asks to derive or update a 
 
 ### Direct-Edit Boundary
 
-- For a single short note, call `/post-it --scope user <aspect> add <text>` and splice it into the manual user-notes section, whose exact legacy DB heading is `## 사용자 수동 메모`.
-- For a localized update to one aspect, update the DB record through `/post-it --scope user <aspect>`; never edit a profile file because the DB is the source of truth.
+- For a single short note, call `mem profile-append <aspect> "<text>"`, which splices it into the manual user-notes section, whose exact legacy DB heading is `## 사용자 수동 메모`.
+- For a localized update to one aspect, update the DB record through `mem profile-append <aspect>` for single items or a full-body `mem add` for rewrites; never edit a profile file because the DB is the source of truth.
 - An explicit `/analyze-user <args>` invocation supplies the routing choice directly; proceed without an additional routing confirmation.
 
 ## Language Rule
@@ -41,7 +41,7 @@ The main agent may route here when a request clearly asks to derive or update a 
 
 - **Fixed adversarial QA** — expose no separate rigor flag. Phase 4 always uses four independent review axes: source coverage, pattern accuracy, fact-checking, and external adversarial review. Profiles propagate into later agent behavior, so this verification budget is mandatory.
 - **Output is a DB `type=profile` record** — write with `mem add durable profile <body> --scope global --source user-profile:<stem>` (source-keyed UPSERT that preserves identity) and read with `mem profile <stem>` (rowid-descending, newest-wins tie-break).
-- **Two-writer contract for the manual user-notes section** — `analyze-user update` and `/post-it --scope user` both write the exact legacy `## 사용자 수동 메모` section in the same `user-profile:<stem>` record. Read through `mem profile <stem>` before splicing. Do not use a raw query, which can select a stale duplicate and orphan promoted notes.
+- **Two-writer contract for the manual user-notes section** — `analyze-user update` and `mem profile-append` both write the exact legacy `## 사용자 수동 메모` section in the same `user-profile:<stem>` record. Read through `mem profile <stem>` before splicing. Do not use a raw query, which can select a stale duplicate and orphan appended notes.
 - **Read back each stem after writing** — immediately run `mem profile <stem>` and verify the merged result; fail loudly on mismatch.
 - **No hardcoded source paths** — analyze locations supplied by the user through `--source`. If none are supplied or otherwise in scope, produce no inferred data and give one line of guidance.
 

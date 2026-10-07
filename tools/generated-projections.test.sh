@@ -20,7 +20,7 @@ trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 checkout_copy "$ROOT" "$TMP/repo" || { rm -rf "$TMP"; echo "not ok - checkout copy" >&2; exit 1; }
 ROOT="$TMP/repo"
 MANIFEST="$ROOT/harness-manifest.json"
-TARGET="$ROOT/adapters/codex/skills/post-it/SKILL.md"
+TARGET="$ROOT/adapters/codex/skills/session-tidy/SKILL.md"
 PLUGIN_HOOKS_JSON="$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/hooks/hooks.json"
 cp "$MANIFEST" "$TMP/harness-manifest.json"
 
@@ -36,18 +36,18 @@ python3 - "$MANIFEST" <<'PY'
 import json, sys
 path=sys.argv[1]
 data=json.load(open(path))
-data["capabilities"]["post-it"]["summary"] = "GENERATOR_SENTINEL portable metadata"
+data["capabilities"]["session-tidy"]["summary"] = "GENERATOR_SENTINEL portable metadata"
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(data, handle, ensure_ascii=False, indent=2)
     handle.write("\n")
 PY
 
 python3 "$ROOT/tools/generate.py" >/dev/null
-grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/claude/skills/post-it/SKILL.md"
-grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/post-it/SKILL.md"
-grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/codex/skills/post-it/SKILL.md"
-grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/codex/plugins/hearting-codex/skills/post-it/SKILL.md"
-grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/opencode/skills/post-it/SKILL.md"
+grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/claude/skills/session-tidy/SKILL.md"
+grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/session-tidy/SKILL.md"
+grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/codex/skills/session-tidy/SKILL.md"
+grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/codex/plugins/hearting-codex/skills/session-tidy/SKILL.md"
+grep -q "GENERATOR_SENTINEL" "$ROOT/adapters/opencode/skills/session-tidy/SKILL.md"
 
 python3 - "$MANIFEST" <<'PY'
 import json, sys

@@ -126,6 +126,11 @@ def main() -> int:
     # Mirror EVERY capability tree, not only entry routers: sub-skill projections went
     # stale during the 2026-07-22 재홈 because only the 13 entry trees were owned here.
     mirrors = [name for name in manifest["capabilities"] if (ROOT / "skills" / name).is_dir()]
+    mirror_root = ROOT / "adapters" / "claude" / "skills"
+    orphans = sorted(
+        path for path in mirror_root.iterdir()
+        if path.is_dir() and not path.is_symlink() and path.name not in mirrors
+    ) if mirror_root.is_dir() else []
     for identifier in mirrors:
         source = ROOT / "skills" / identifier
         dest = ROOT / "adapters" / "claude" / "skills" / identifier
@@ -136,6 +141,7 @@ def main() -> int:
             for path in source.rglob("*") if path.is_file()
         ):
             stale.append(dest)
+    stale.extend(orphans)
     if args.check:
         if stale:
             print("entry Skill layer is stale:", file=sys.stderr)
@@ -148,6 +154,8 @@ def main() -> int:
         path.write_text(text, encoding="utf-8")
     for identifier in mirrors:
         copy_tree(ROOT / "skills" / identifier, ROOT / "adapters" / "claude" / "skills" / identifier)
+    for orphan in orphans:
+        shutil.rmtree(orphan)
     print(f"generated compact routers and owner references for {len(entries)} entry Skills; mirrored {len(mirrors)} Skill trees")
     return 0
 

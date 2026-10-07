@@ -6,6 +6,6 @@ model_role: fast implementer
 fragments:
   - profiles/fragments/code-execute.md
 expose:
-  skills: [code-execute, autopilot-code, post-it]
+  skills: [code-execute, autopilot-code]
   agents: []
   triggers: []

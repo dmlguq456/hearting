@@ -6,6 +6,6 @@ model_role: deep maker
 fragments:
   - profiles/fragments/code-plan.md
 expose:
-  skills: [code-plan, autopilot-code, post-it]
+  skills: [code-plan, autopilot-code]
   agents: []
   triggers: []

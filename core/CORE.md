@@ -472,7 +472,7 @@ Each artifact should be changed through the capability that owns it:
 | `plans/` | code capability |
 | `documents/` | draft/refine capability |
 | `experiments/` | lab capability |
-| user profile records | analyze-user / post-it capability |
+| user profile records | analyze-user / mem profile-append |
 
 Where work runs is a separate axis from who owns its output. The installed
 `compute-hosts` command is the common PATH operator surface; the session host

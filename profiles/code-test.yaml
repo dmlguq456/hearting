@@ -6,6 +6,6 @@ model_role: fast reviewer
 fragments:
   - profiles/fragments/code-test.md
 expose:
-  skills: [code-test, autopilot-code, post-it]
+  skills: [code-test, autopilot-code]
   agents: []
   triggers: []

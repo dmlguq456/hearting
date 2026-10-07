@@ -7,6 +7,6 @@ effort: medium
 fragments:
   - profiles/fragments/lab-runner.md
 expose:
-  skills: [autopilot-lab, analyze-project, post-it]
+  skills: [autopilot-lab, analyze-project]
   agents: []
   triggers: []

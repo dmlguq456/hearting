@@ -107,7 +107,7 @@ Outputs:
 
 ### Phase 3: Cross-Aspect Validation
 
-Read every aspect draft and compare palette, typography, domain terminology, metric sets, and the relationship between preferred layers and domain expertise. Prefer the pattern supported by more sources, then newer material. An explicit user-authored `/post-it --scope user` record is ground truth. Write `_internal/cross_aspect_consistency.md` with resolved contradictions and open questions.
+Read every aspect draft and compare palette, typography, domain terminology, metric sets, and the relationship between preferred layers and domain expertise. Prefer the pattern supported by more sources, then newer material. An explicit user-authored `mem profile-append` record is ground truth. Write `_internal/cross_aspect_consistency.md` with resolved contradictions and open questions.
 
 ### Phase 3.5: Prior-Version Reconciliation — update mode only
 
@@ -152,7 +152,7 @@ Procedure:
    - `update`: read the newest tie-broken body only through `python3 <agent-home>/tools/memory/mem.py profile <stem>`. Splice verified changes while preserving `## 사용자 수동 메모`; append a dated `## Changelog` line.
    - Write the complete body with `python3 <agent-home>/tools/memory/mem.py add durable profile <body> --scope global --source user-profile:<stem>`.
    - `mem add` uses source-keyed upsert by `(tier, scope, source)`, preserving identity and preventing duplicate rows.
-   - analyze-user and `/post-it promote --scope user` are two writers of the same record. Always read through `mem profile <stem>` before splicing. A raw query can read a stale duplicate and orphan a promoted memo.
+   - analyze-user and `mem profile-append` are two writers of the same record. Always read through `mem profile <stem>` before splicing. A raw query can read a stale duplicate and orphan an appended memo.
 3. Read back each stem through `mem profile <stem>` and compare it with the just-written body. A mismatch may indicate source-blind deduplication across stems; fail loudly for manual inspection.
 
 ### Phase 5b: Extract PPTX Objects — figure aspect only

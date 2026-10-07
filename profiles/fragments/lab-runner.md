@@ -25,8 +25,7 @@ orchestration or design decisions.
 
 ### Stay in lane
 
-- This profile exposes only `autopilot-lab`, `analyze-project`, and
-  `post-it`; it delegates to no native team (runtime team agents are
+- This profile exposes only `autopilot-lab` and `analyze-project`; it delegates to no native team (runtime team agents are
   retired — ephemeral native helpers only for unforeseen narrow scaffolding,
   no unit semantics). Do not reach for skills or agents outside this exposed
   subset — if the task needs one, that is a signal to hand back to main

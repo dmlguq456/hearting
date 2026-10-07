@@ -219,7 +219,7 @@ Project memory distinguishes explicit user-directed notes from agent-learned rec
 
 | Layer | Location | Owner | Purpose |
 |---|---|---|---|
-| Explicit user note | DB working tier through `/post-it` and `mem note` or `mem add`; the former five categories remain as type taxonomy | User-directed `/post-it` | Conventions, resources, open threads, decisions, and next-session hints the user wants retained |
+| Explicit user note | DB working tier through `mem note` or `mem add`; the former five categories remain as type taxonomy | User-directed `mem note` | Conventions, resources, open threads, decisions, and next-session hints the user wants retained |
 | Agent learning | DB working or durable tier populated by the main session in the current turn | Main session, in the moment it decides something is worth keeping | Reusable procedures, corrections, conventions, and lessons selected contextually by the agent |
 
 - Main or a manual cleanup pass owns semantic decisions. Scripts expose candidates and mechanical safety rather than keyword rules or automatic prompt classification.
@@ -306,6 +306,6 @@ Cross-adapter completion and active-context budgets live only in `ADAPTATION §2
 | §4 | Early output conventions moved into `CONVENTIONS §5`; `56708c4` added minor/major tracking and dual-perspective audit |
 | §5 | `bf8d565` rejected pasting a rebuttal table into paper prose after the ICML camera-ready incident; the four-step cohesion check followed |
 | §6 | `3f5a48c` created the translation role; `cfb0e12` renamed and expanded it into editorial ownership |
-| §7 | `60f141a` created the notes flow, now `/post-it`, separating explicit retention from agent learning |
+| §7 | `60f141a` created the notes flow, now `mem note`, separating explicit retention from agent learning |
 | §8 | A 2026-07-06 single-owner design was reversed on 2026-07-10 into stage dispatch with file-only dispatch-depth-2 handoff |
 | §10 | The 2026-07-13 Skill-design refactor placed Pocock's four levers plus predictability here and scan-ready quantitative rules in `CONVENTIONS §5.6a` |

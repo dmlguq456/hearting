@@ -108,7 +108,7 @@ deciding that reanalysis is needed.
 | code work under `plans/` | `autopilot-code` | `plans/<date>_<slug>/` |
 | documents | `autopilot-draft` or `autopilot-refine` | `_internal/versions/v{N}/` for major refinement; minor history in `pipeline_summary.md` |
 | experiments | `autopilot-lab` | `_RUNLOG.md` |
-| DB records with `type=profile` | `analyze-user` or `post-it --scope user` | changelog inside the record body |
+| DB records with `type=profile` | `analyze-user` or `mem profile-append` | changelog inside the record body |
 
 This document plus the runtime adapter bootstrap is the routing source of truth. Violation signals include ad-hoc artifact edits, code before its gates, or updating an artifact through a capability that does not own it.
 
@@ -930,7 +930,7 @@ projection mechanics; `CONVENTIONS §3` carries the cross-document invariants.
 [apps]                    autopilot-spec ↻ → autopilot-design → autopilot-code ↻ → autopilot-ship ↻
 ```
 
-`↻` marks an iteration point. Common post-work capabilities are read-only `audit` and Markdown correction through `autopilot-refine`. Cross-project capabilities are `analyze-user` and `post-it --scope user`.
+`↻` marks an iteration point. Common post-work capabilities are read-only `audit` and Markdown correction through `autopilot-refine`. Cross-project profile updates go through `analyze-user` and `mem profile-append`.
 
 ## 1.1. Pipeline Intensity Routing
 

@@ -20,5 +20,5 @@ python3 <agent-home>/tools/memory/mem.py profile <aspect>
   that in the return and proceed without it — never guess or invent profile
   content.
 - **Updates:** profile bodies change only through `/analyze-user` or
-  `/post-it --scope user` (see `core/MEMORY.md §7.6`); units never write
+  `mem profile-append` (see `core/MEMORY.md §7.6`); units never write
   profiles.

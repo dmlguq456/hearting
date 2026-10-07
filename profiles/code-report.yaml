@@ -6,6 +6,6 @@ model_role: fast writer
 fragments:
   - profiles/fragments/code-report.md
 expose:
-  skills: [code-report, autopilot-code, post-it, analyze-project]
+  skills: [code-report, autopilot-code, analyze-project]
   agents: []
   triggers: []

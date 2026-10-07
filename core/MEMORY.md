@@ -13,7 +13,7 @@
 
   | Channel | Store tier/scope | Synchronization |
   |---|---|---|
-  | `post-it`, a DB working-tier alias authored by the `/post-it` Skill | working/project | `/post-it` → `mem note` or `mem add` → background exchange after the write |
+  | `mem note` / `mem add` working-tier records | working/project | `mem note` or `mem add` → background exchange after the write |
   | `projects/<cwd>/memory/`, built-in file memory (disabled per adapter where the runtime supports it, e.g. Claude's top-level `autoMemoryEnabled: false`) | durable/project | not absorbed by routine `mem sync` (D-79); an explicit `mem migrate --all-projects` remains the one-time recovery/import path for files left by a prior enabled period |
   | DB records with `type=profile`, the cross-project profile source of truth | durable/global | `analyze-user` → `mem add` → background exchange after the write; `user_profile/*.md` is an on-demand `mem export` cache for human reading, not a source of truth |
 
@@ -51,7 +51,7 @@ There is no deterministic promote/skip classifier. The acting agent judges wheth
 
 ### §7.3. Agent-Backed Mutation Boundary
 
-Purely deterministic monitors may surface candidates but cannot promote, skip, merge, or prune based on semantic rules. A user-directed post-it flow or an agent-backed curator pass may perform the mutation. The script then enforces only the mechanical action contract and recovery boundary.
+Purely deterministic monitors may surface candidates but cannot promote, skip, merge, or prune based on semantic rules. A user-directed `mem note` / `mem profile-append` flow or an agent-backed curator pass may perform the mutation. The script then enforces only the mechanical action contract and recovery boundary.
 
 #### D-43 — On-call incident-to-proposal bridge
 
@@ -119,7 +119,7 @@ Deterministic code may detect mechanical conditions and expose candidates around
 
 - `delivery_state` is `ordinary`, `pending`, or `consumed`. New `type=handoff` records and explicit `--requires-consume` threads are pending. Only `mem consume <id>` performs the normal pending-to-consumed transition. Source upsert and body dedup preserve pending monotonically rather than lowering it through an ordinary rewrite. `show`, recall/full, and inject are non-consuming. When retrieval exposes `[pending:<id>]`, read the full obligation, apply and verify it, then call `mem consume <id>`. A working pending record does not expire before consumption; its 21-day TTL starts over when consumed.
 - `curate-snapshot` shows pending records under `PROTECTED PENDING` but excludes them from destructive `IDS:`. `prune`, `delete`, `merge`, and `lifecycle --apply` recheck DB state immediately before execution and fail closed on pending records. A merge containing any pending record aborts entirely without changing strength or deleting anything.
-- Deleted records remain in the graveyard with action and canonical metadata and can be restored one at a time through `mem restore <id>`. Automatic consumption is allowed only in narrow pipeline or post-it paths that name the handoff ID and prove successful application through artifacts.
+- Deleted records remain in the graveyard with action and canonical metadata and can be restored one at a time through `mem restore <id>`. Automatic consumption is allowed only in narrow pipeline paths that name the handoff ID and prove successful application through artifacts.
 
 ### §7.6. User Profiles — Aspect-to-Consumer Matrix
 
@@ -134,10 +134,11 @@ Deterministic code may detect mechanical conditions and expose candidates around
 | `05_domain_expertise` | Domain background such as speech, TF DNN, and signal processing, plus terminology preferences | research, material, design, editorial, planning for abbreviations, implementation for identifiers, and the main agent for recognizing user terminology |
 | `07_coding_convention` | Project layout, config, prefixes, preferred layers and frameworks, metric sets, logs and checkpoints, seeds and reproducibility, and naming | implementation, planning for code plans, and the main agent during `autopilot-lab` Step 0, `autopilot-spec` Phases 0 and 2, and the four `autopilot-code` principles |
 
-Aspect 06, conversational meta rules, is excluded because the runtime adapter response discipline is its single source and applies only to the main agent; subagents do not speak directly to the user. The `06_collaboration_style` record remains the default collaboration target for `/post-it --scope user`. Aspect 07 applies only to implementation, planning, and main-agent code work, not editorial wording. Each agent normally consults three to five relevant aspects.
+Aspect 06, conversational meta rules, is excluded because the runtime adapter response discipline is its single source and applies only to the main agent; subagents do not speak directly to the user. The `06_collaboration_style` record remains the default collaboration target for `mem profile-append`. Aspect 07 applies only to implementation, planning, and main-agent code work, not editorial wording. Each agent normally consults three to five relevant aspects.
 
-**Update protocol:** profile bodies live in durable/global DB records. Two flows may update them. `/analyze-user <aspect>` scans prior artifacts such as papers, presentations, code, and reports, extracts patterns, and accumulates them with `mem add durable profile --source user-profile:<stem>` during setup, new-material ingestion, or incremental `--mode update`. `/post-it --scope user <aspect>` adds a generally useful pattern discovered in conversation.
+**Update protocol:** profile bodies live in durable/global DB records. Two flows may update them. `/analyze-user <aspect>` scans prior artifacts such as papers, presentations, code, and reports, extracts patterns, and accumulates them with `mem add durable profile --source user-profile:<stem>` during setup, new-material ingestion, or incremental `--mode update`. `mem profile-append <aspect> "<text>"` adds a generally useful pattern discovered in conversation.
 
-**Source-keyed upsert hazard (data loss):** `mem add ... --source user-profile:<stem>` upserts by `(tier, scope, source)` and REPLACES the entire profile body with the payload. Never pass a partial body through raw `mem add` to "append" one item to a profile — everything not in the payload is destroyed. Interactive single-item additions go through `/post-it --scope user <aspect>` or, identically, `mem profile-append <aspect> "<text>"` (the only safe partial write: it splices under `## 사용자 수동 메모` and upserts the whole body); body rewrites go through `/analyze-user`, which reads the current body via `mem profile <stem>`, splices while preserving `## 사용자 수동 메모`, and only then writes the complete replacement. A replaced body is kept: `mem history <id>` lists it and `--restore N` puts it back.
+**Source-keyed upsert hazard (data loss):** `mem add ... --source user-profile:<stem>` upserts by `(tier, scope, source)` and REPLACES the entire profile body with the payload. Never pass a partial body through raw `mem add` to "append" one item to a profile — everything not in the payload is destroyed. Interactive single-item additions go through `mem profile-append <aspect> "<text>"` (the only safe partial write: it splices under `## 사용자 수동 메모` and upserts the whole body); body rewrites go through `/analyze-user`, which reads the current body via `mem profile <stem>`, splices while preserving `## 사용자 수동 메모`, and only then writes the complete replacement. A replaced body is kept: `mem history <id>` lists it and `--restore N` puts it back.
+
 
 **Consumption pattern:** at the start of relevant work, an agent reads each aspect through `mem profile <stem>` and treats the body as a default unless the user says otherwise in the current turn. Per-project conventions in `analysis_project/code/experiment_conventions.md` take priority; profiles are the cross-project fallback. For example, a material figure task reads aspects 01, 03, 04, and 05, while a new-library implementation reads project conventions first and then aspects 07, 04, and 05.

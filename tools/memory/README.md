@@ -6,7 +6,7 @@ Portable storage and retrieval layer. The specification lives at
 
 ## Boundary
 
-Short-lived post-its, durable learned memory, and the global profile share one
+Short-lived working notes, durable learned memory, and the global profile share one
 SQLite store per server. Each local WAL database is that server's serving
 truth; no SQLite, WAL, SHM, lock, or derived-index file is shared. The acting
 agent decides contextually what to store, retrieve,
@@ -106,7 +106,7 @@ python3 <agent-home>/tools/memory/mem.py <command>
 | `activate <id>` | Guardedly reactivate a historical row only when its successor is no longer active and no canonical ambiguity exists. |
 | `tidy-apply <actions.json> [--input <input_v1.json>] [--cwd DIR]` | Apply a session-tidy action list through a closed set (add, supersede, reinforce; no delete, graveyard unchanged), after recording answered-question decisions. Prints a final `[tidy] 묶음 <id>: …` line with the undo command. Exit 0 applied, 1 partial, 2 input/state error. |
 | `tidy-undo <batch-id>` | Reverse one tidy batch from its journal; refuses without changing anything if a touched record changed after the batch. |
-| `register-postit <path>` | Deprecated legacy-migration-only registry command. Current post-its write DB working records directly. |
+| `register-postit <path>` | Deprecated legacy-migration-only registry command. Working notes write DB working records directly. |
 
 ## Existing-store migration
 

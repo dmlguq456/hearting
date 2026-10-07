@@ -87,7 +87,7 @@ outside sessions: loops/ ──inspect and maintain──┘
 ```
 
 - **Capabilities** are verbs: work entrypoints and pipelines such as
-  `autopilot-code`, `autopilot-research`, `audit`, and `post-it`.
+  `autopilot-code`, `autopilot-research`, and `audit`.
 - **Roles** define portable responsibilities such as planning, development,
   QA, research, material gathering, design, and editing. Adapters map them to
   runtime-native agent surfaces where supported.

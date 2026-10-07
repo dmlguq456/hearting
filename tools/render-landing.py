@@ -1666,7 +1666,7 @@ MAP_GROUP_ORDER = [
      ["autopilot-design", "design-init", "design-refs", "design-tokens",
       "design-components", "design-review", "design-handoff"]),
     ("ops", "Cross-project &amp; operations", "Continuity, inspection, and the user profile.",
-     ["analyze-user", "audit", "post-it"]),
+     ["analyze-user", "audit", "session-tidy"]),
 ]
 
 def render_map(d: dict) -> str:

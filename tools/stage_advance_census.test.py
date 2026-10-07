@@ -68,7 +68,7 @@ class CensusFixture(unittest.TestCase):
             {"capability": "autopilot-spec", "standard_plus": {"nodes": [
                 node("draft", "runtime-eligible", "human-gate"),
             ]}},
-            {"capability": "post-it"},  # no staged graph at all
+            {"capability": "audit"},  # no staged graph at all
         ])
 
     def json_census(self, topologies=None):

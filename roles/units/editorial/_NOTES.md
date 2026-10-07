@@ -24,7 +24,7 @@ the units/_voice or were resolved with a judgment call.
    `mem profile` reading list from `:106` WAS placed → `_voice.md` Knowledge sources.)
 
 4. **Memory-upsert hazard is surface-specific.**
-   `editorial-team.md:114`: recommended channel `/post-it --scope user
+   `editorial-team.md:114`: recommended channel `mem profile-append
    02_paper_writing_style`; never pass a partial profile body to raw
    `mem add ... --source user-profile:02_paper_writing_style` because the source-keyed
    upsert would REPLACE the full profile body. `_voice.md` keeps only the portable form
