@@ -205,6 +205,14 @@ printf 'headless_open_jobs=%s\n' "$headless_open"
 if [ -n "$headless_slugs" ]; then
   printf 'headless_open_slugs=%s\n' "$headless_slugs"
 fi
+# Counts above name registry rows. This view observes process and result
+# evidence without changing any row or running work.
+if [ -n "$jobs_log" ] && [ -f "$jobs_log" ]; then
+  python3 "$self_dir/dispatch-registry.py" observed-status --jobs "$jobs_log" --agent-home "$status_home" 2>/dev/null \
+    || printf 'headless_evidence=unknown\n'
+else
+  printf 'headless_evidence=none\n'
+fi
 
 # SD-64/71: orphaned-conductor visibility (dead owner, incomplete route, open
 # child or ready un-started successor). Fail-open to 0 with no registry.

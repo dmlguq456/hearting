@@ -32,6 +32,10 @@ class StatusParityTest(unittest.TestCase):
             }))
             registry.register_registry(runs, index)
             env = {**os.environ, "AGENT_RESOURCE_RUN_INDEX": str(index)}
+            jobs = base / "jobs.log"
+            jobs.write_text("2026-10-07T00:00:00Z\tqueued\t/r\t/w\tunknown\tattempt_id=att-" + "a"*32 +
+                            ",owner_route_id=rt-" + "b"*16 + ",worker_type=owner\n")
+            env["AGENT_DISPATCH_JOBS"] = str(jobs)
             commands = {
                 "claude": [str(ROOT / "utilities" / "harness-status.sh"), str(ROOT), "test"],
                 "codex": [str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"),
@@ -44,6 +48,11 @@ class StatusParityTest(unittest.TestCase):
                 result = subprocess.run(
                     command, text=True, capture_output=True, env=current_env, check=False)
                 self.assertEqual(result.returncode, 0, result.stderr)
+                line = next(line for line in result.stdout.splitlines() if line.startswith("headless_evidence="))
+                evidence = json.loads(line.split("=", 1)[1])
+                self.assertEqual(evidence["shown"], 1)
+                self.assertEqual(evidence["rows"][0]["state"], "unknown")
+                self.assertEqual(evidence["rows"][0]["completion"], "unverified")
                 for expected in (
                     "resource_run_live=1",
                     "resource_run_stale=1",

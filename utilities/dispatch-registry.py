@@ -1043,6 +1043,61 @@ def emit_liveness(rows, args):
     return 0
 
 
+def observed_status_rows(rows, args):
+    """Read-only bounded status projection using the existing exact classifier."""
+    # Normalize owner identity only here, before filtering and classification.
+    # Other registry operations keep their existing scope.
+    projected = []
+    for row in rows:
+        meta = row["meta"]
+        if not meta.get("route_id") and meta.get("owner_route_id"):
+            row = {**row, "meta": {**meta, "route_id": meta["owner_route_id"], "route_node": "_owner"}}
+        projected.append(row)
+    selected = current([row for row in projected if matches(row, args)])
+    filtered = any((args.session, args.route, args.node, args.attempt, args.job))
+    if not filtered:
+        pending = [row for row in selected if row["status"] not in PARENT_EXTINCTION_TERMINAL_STATUSES]
+        terminal = [row for row in selected if row["status"] in PARENT_EXTINCTION_TERMINAL_STATUSES]
+        shown = pending[-8:] + terminal[-8:]
+    else:
+        shown = selected
+    result = []
+    with process_table_scan_scope():
+        for row in shown:
+            meta = row["meta"]
+            inputs = proc_inputs(row, args.agent_home, args.jobs, rows, args)
+            terminal = inspect_terminal_attempt(meta.get("log_file"), worktree=row.get("worktree"),
+                                                artifact_root_metadata=meta.get("artifact_root"))
+            observed = observed_attempt_liveness(row["status"], meta,
+                terminal_envelope=terminal.get("state") == "valid")
+            inputs["observed_liveness"] = {"state": observed.state, "reason": observed.reason}
+            verdict = classify_attempt_evidence(inputs, time.time()) or {"state": "unknown", "rule": "exact identity unavailable"}
+            completed = _marker_backed_repair(row, args.agent_home, args.jobs)
+            state = verdict["state"]
+            if state == "done" and not completed:
+                state = "exited"
+            try:
+                log = Path(meta.get("log_file") or "")
+                log_mtime = log.stat().st_mtime if log.is_file() else None
+            except OSError:
+                log_mtime = None
+            result.append({"attempt_id": meta.get("attempt_id"),
+                "route_id": meta.get("route_id") or meta.get("owner_route_id"),
+                "registry_status": row["status"], "state": state, "reason": verdict["rule"],
+                "pid_identity": {k: inputs.get(k) for k in ("pid", "proc_start", "actual_proc_start", "proc_start_match", "pid_authoritative")},
+                "process": observed.process_state, "process_reason": observed.process_reason,
+                "sentinel": inputs.get("terminal_observation"), "terminal_event": terminal.get("terminal_event"),
+                "log_mtime": log_mtime, "artifact_state": terminal.get("artifact_state", "unknown"),
+                "completion": "verified-marker" if completed else "unverified"})
+    return {"total": len(selected), "shown": len(result), "sampled": len(result) != len(selected),
+            "classifier_source": ATTEMPT_CLASSIFIER_SOURCE, "rows": result}
+
+
+def emit_observed_status(rows, args):
+    print("headless_evidence=" + json.dumps(observed_status_rows(rows, args), ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
 def repair_stale_row(rows, args):
     """SD-70 follow-up: close one exact stale open/running row by marker
     evidence alone, bypassing the liveness classifier entirely -- for rows a
@@ -2995,7 +3050,7 @@ def emit_inventory(state_root, args):
 
 
 def main(argv):
-    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False); p.add_argument("operation", choices=("current", "liveness", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row", "resolve-terminal-conflict", "archive-import", "inventory"))
+    p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False); p.add_argument("operation", choices=("current", "liveness", "observed-status", "reconcile", "attempt-state", "orphan-status", "orphan-scan", "repair-stale-row", "resolve-terminal-conflict", "archive-import", "inventory"))
     p.add_argument("--jobs", type=Path); p.add_argument("--global-jobs", type=Path); p.add_argument("--local-jobs", type=Path)
     p.add_argument("--session"); p.add_argument("--route")
     p.add_argument("--node"); p.add_argument("--attempt"); p.add_argument("--job"); p.add_argument("--all", action="store_true")
@@ -3103,7 +3158,7 @@ def main(argv):
                 "--expected-row-sha256", result["row_sha256"], "--apply"]) + " --review-evidence <review report>"
         print("check=ok\n" + json.dumps(result, sort_keys=True))
         return 0
-    if args.operation not in ("liveness", "orphan-scan") and not any((args.session, args.route, args.node, args.attempt, args.job)):
+    if args.operation not in ("liveness", "orphan-scan", "observed-status") and not any((args.session, args.route, args.node, args.attempt, args.job)):
         print("check=failed\nreason=current-filter-required"); return 64
     recovery_modes = sum(bool(value) for value in (
         args.only_exact_dead,
@@ -3146,6 +3201,8 @@ def main(argv):
         return emit_current(rows, args)
     if args.operation == "liveness":
         return emit_liveness(rows, args)
+    if args.operation == "observed-status":
+        return emit_observed_status(rows, args)
     if args.operation == "orphan-status":
         return emit_orphan_status(rows, args)
     if args.operation == "orphan-scan":

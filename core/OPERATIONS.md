@@ -139,6 +139,14 @@ fence and cannot hide session-root drift.
 
 ### §5.10. Work Isolation and Parallel Dispatch
 
+The shared `status` snapshot displays exact-attempt observations alongside
+registry words: PID/start identity, exit/sentinel evidence, log modification
+time, and the declared result artifact. It reuses the Fleet classifier and
+does not reconcile or mutate work. An exited process without verified
+completion is `exited`, not workflow success; missing evidence is unknown.
+Large snapshots name their sampled scope, so a bounded display never implies
+that omitted jobs have ended.
+
 Dispatch same-work identity gates are opt-in: only `HEARTING_GATES=on`
 enforces sealed-versus-current route, parent, lineage, runtime and review
 bindings. Otherwise `utilities/hearting_gates.py` emits `hearting: gate-off`

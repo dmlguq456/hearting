@@ -49,6 +49,55 @@ class RegistryTest(unittest.TestCase):
  def test_current_filters_before_totals(self):
   r=self.invoke("current","--route","r1");self.assertEqual(r.returncode,0,r.stdout+r.stderr);data=json.loads(r.stdout)
   self.assertEqual(data["total"],2);self.assertEqual({x["slug"] for x in data["rows"]},{"active","dead"})
+ def test_observed_status_crosses_actual_process_and_keeps_terminal_words_from_success(self):
+  self.jobs.write_text(self.jobs.read_text().replace("\topen\t/r\t/w\tactive\t","\tdone\t/r\t/w\tactive\t"))
+  before=self.jobs.read_bytes();r=self.invoke("observed-status","--route","r1")
+  self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+  data=json.loads(r.stdout.split("=",1)[1]);by={row["attempt_id"]:row for row in data["rows"]}
+  active=by["att-active0001"]
+  self.assertEqual(active["registry_status"],"done")
+  self.assertEqual(active["state"],"working")
+  self.assertEqual(active["process"],"live")
+  self.assertTrue(active["pid_identity"]["proc_start_match"])
+  self.assertEqual(active["completion"],"unverified")
+  dead=by["att-dead000001"]
+  self.assertNotEqual(dead["state"],"working")
+  self.assertNotEqual(dead["state"],"done")
+  self.assertIsNone(dead["log_mtime"])
+  self.assertIn("artifact_state",dead)
+  self.assertIn("sentinel",dead)
+  self.assertEqual(self.jobs.read_bytes(),before)
+ def test_observed_status_names_a_bounded_sample_and_includes_owner_route_identity(self):
+  rows=[]
+  for n in range(30):
+   rows.append(f"2026-10-07T00:00:00Z\tqueued\t/r\t/w\tjob{n}\tattempt_id=att-{n:032x},owner_route_id=rt-{n:016x},worker_type=owner")
+  self.jobs.write_text("\n".join(rows)+"\n")
+  r=self.invoke("observed-status");self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+  data=json.loads(r.stdout.split("=",1)[1]);self.assertEqual(data["total"],30)
+  self.assertEqual(data["shown"],8);self.assertTrue(data["sampled"])
+  self.assertTrue(all(row["state"]=="unknown" and row["route_id"] for row in data["rows"]))
+ def test_observed_owner_route_filter_uses_the_displayed_identity_and_keeps_other_operations(self):
+  self.jobs.write_text("2026-10-07T00:00:00Z\tqueued\t/r\t/w\towner\tattempt_id=att-owner,owner_route_id=rt-owner,worker_type=owner\n")
+  currentize_registry(self.jobs)
+  before=self.jobs.read_bytes()
+  unfiltered=json.loads(self.invoke("observed-status").stdout.split("=",1)[1])
+  filtered=json.loads(self.invoke("observed-status","--route","rt-owner").stdout.split("=",1)[1])
+  self.assertEqual(filtered["total"],1)
+  self.assertEqual(filtered["rows"],unfiltered["rows"])
+  self.assertEqual(json.loads(self.invoke("current","--route","rt-owner").stdout)["total"],0)
+  self.assertEqual(self.jobs.read_bytes(),before)
+ def test_observed_owner_namespace_keeps_shared_positive_liveness_without_a_node_row(self):
+  module=self.load_registry_module("observed_owner")
+  row={"meta":{"attempt_id":"att-owner", "owner_route_id":"rt-owner"},"status":"open", "order":1, "slug":"owner"}
+  args=types.SimpleNamespace(session=None,route=None,node=None,attempt=None,job=None,agent_home=self.base,jobs=self.jobs)
+  observed=types.SimpleNamespace(state="alive",reason="exact namespace process",process_state="live",process_reason="tagged")
+  with mock.patch.object(module,"proc_inputs",return_value={"attempt_id":"att-owner","route_id":"rt-owner","route_node":"_owner"}), \
+       mock.patch.object(module,"inspect_terminal_attempt",return_value={"state":"absent"}), \
+       mock.patch.object(module,"observed_attempt_liveness",return_value=observed), \
+       mock.patch.object(module,"_marker_backed_repair",return_value=False):
+   result=module.observed_status_rows([row],args)
+  self.assertEqual(result["rows"][0]["state"],"working")
+  self.assertEqual(result["rows"][0]["route_id"],"rt-owner")
  def test_reconcile_closes_only_selected_exact_dead(self):
   before=self.jobs.read_text();dry=self.invoke("reconcile","--attempt","att-dead000001");self.assertEqual(json.loads(dry.stdout)["closed"],0);self.assertEqual(self.jobs.read_text(),before)
   applied=self.invoke("reconcile","--attempt","att-dead000001","--apply");self.assertEqual(json.loads(applied.stdout)["closed"],1)
