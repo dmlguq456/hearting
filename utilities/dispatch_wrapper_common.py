@@ -26,9 +26,15 @@ from pathlib import Path
 
 from artifact_producer import ProducerError, prepare_review_output_binding
 from dispatch_contract import (
-    DispatchContractError, diff_attribution_lines, dispatch_state_root, dispatch_state_roots,
-    resolve_dispatch_state_root,
+    REPLICA_RESERVATION_ROW_KEYS, SUPERVISOR_LEASE_KIND, DispatchContractError, diff_attribution_lines,
+    dispatch_state_root, dispatch_state_roots, resolve_dispatch_state_root, runtime_ancestry_binding,
+    sealed_launch_home, source_lineage_row_fields, supervisor_lease_path, workflow_completion_receipt,
+    ensure_terminal_claim_absent,
 )
+import commit_policy
+import dispatch_parent_completion as parent_completion
+from execution_access import receipt_fragment as execution_access_receipt_fragment
+from stage_session_runtime import metadata as stage_session_metadata
 from model_config import ModelConfigError, resolve_config
 from route_authority import scan_anchored_death
 
@@ -407,3 +413,225 @@ def diff_attribution_prompt(args: argparse.Namespace) -> str:
         return ""
     lines = diff_attribution_lines(route, node, jobs)
     return "".join(f"- {line}\n" for line in lines)
+
+
+# The completion deliveries whose owner a runtime supervisor holds under a lease.
+SUPERVISED_DELIVERIES = frozenset({"session-resume-supervised", "app-server-supervised"})
+
+
+def completion_lease_path(jobs: Path, args: argparse.Namespace) -> Path:
+    if not getattr(args, "attempt_id", None):
+        return dispatch_state_root(jobs) / "supervisor-state" / "preview-only.lease"
+    return supervisor_lease_path(jobs, args.attempt_id)
+
+
+def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sandbox: str,
+               effort_key: str, claim, marker_gate, adapter_fields: str = "",
+               replacement_sandbox: str | None = None) -> bool:
+    """Register one attempt row; the same fields, order and claim for every harness.
+
+    The wrapper passes what is its own: the harness name, how it names its
+    sandbox and effort, any fields only it records, and -- looked up in its
+    own module at call time -- the claim and completion-gate functions.
+    """
+    jobs.parent.mkdir(parents=True, exist_ok=True)
+    repo = subprocess.check_output(["git", "-C", args.worktree, "rev-parse", "--show-toplevel"], text=True).strip()
+    pipe = (
+        f"capability={args.capability},capability_mode={args.capability_mode},qa={args.qa},"
+        f"intensity={args.intensity},attempt_schema_version=2,"
+        f"dispatch_depth={args.dispatch_depth},transport=headless,"
+        f"execution_surface={args.execution_surface},"
+        f"registered_worker={int(bool(args.registered_worker))},"
+        f"fallback_hop={args.fallback_hop},harness={harness}"
+    )
+    if args.parent_slug:
+        pipe += f",parent={args.parent_slug}"
+    if getattr(args, "parent_binding", None) is not None:
+        binding = args.parent_binding
+        pipe += (
+            f",parent_attempt_id={binding.attempt_id}"
+            f",parent_pid={binding.pid},parent_pid_start={binding.pid_start}"
+            f",parent_pid_scope={binding.pid_scope}"
+            f",parent_liveness_source={binding.liveness_source}"
+        )
+        if binding.pid_host is not None:
+            pipe += (
+                f",parent_pid_host={binding.pid_host}"
+                f",parent_pid_host_start={binding.pid_host_start}"
+            )
+    if args.parent_session_id:
+        pipe += f",parent_sid={args.parent_session_id}"
+    if args.parent_slug or args.parent_session_id:
+        # OPERATIONS §5.10 pipe contract lists parent_cwd; without it a cross-harness
+        # child whose parent_sid is synthetic can never nest in Fleet (2026-07-15).
+        pipe += f",parent_cwd={parent_completion.effective_parent_cwd(args)}"
+    if args.worker_role:
+        pipe += f",worker_role={args.worker_role}"
+    if args.worker_mode:
+        pipe += f",worker_mode={args.worker_mode}"
+    pipe += f",worker_type={args.worker_type},runtime_sandbox={runtime_sandbox}"
+    pipe += execution_access_receipt_fragment(
+        getattr(args, "execution_access_grant", None)
+    )
+    for key, value in sorted(args.launch_lifecycle_resolution.metadata().items()):
+        pipe += f",{key}={value}"
+    pipe += f",assigned_contract={args.assigned_contract}"
+    if args.unit:
+        pipe += f",unit={args.unit}"
+    if args.review_output:
+        binding = args.review_output_binding
+        pipe += (
+            f",review_cycle_id={binding['cycle_id']}"
+            f",review_producer_id={binding['producer_id']}"
+            f",review_output_locator_b64={binding['locator_b64']}"
+            f",review_output_digest={binding['digest']}"
+        )
+
+    if args.capability_owner:
+        pipe += f",owner={args.capability_owner}"
+    if args.owner_harness:
+        pipe += f",owner_harness={args.owner_harness}"
+    if args.dispatch_depth >= 2:
+        pipe += (
+            f",parent_harness={args.parent_harness},parent_transport={args.parent_transport}"
+            f",parent_sandbox={args.parent_sandbox},child_harness={harness}"
+            f",nested_eligibility={args.nested_eligibility},eligibility_source={args.eligibility_source}"
+            f",eligibility_failure_class={args.eligibility_failure_class or '-'}"
+            f",eligibility_probe={getattr(args, 'eligibility_probe', None) or '-'}"
+        )
+    for key in ("route_file", "route_id", "route_hash", "route_node", "registry_digest", "write_scope", "completion_gate", "harness_affinity", "explicit_adapter"):
+        value = getattr(args, key)
+        if value:
+            pipe += f",{key}={value}"
+    if getattr(args, "route_validation", None):
+        # SD-156: `route_validation` is worker-route-guard's own JSON, already
+        # captured in `validate_route_record`. One helper merges its
+        # `source_lineage` fields the same way for every registered launch.
+        try:
+            validation_json = json.loads(args.route_validation)
+        except (TypeError, ValueError):
+            validation_json = {}
+        for key, value in sorted(source_lineage_row_fields(validation_json).items()):
+            pipe += f",{key}={value}"
+    if getattr(args, "owner_route_binding", None):
+        pipe += (
+            f",owner_route_file={args.owner_route_binding.route_file}"
+            f",owner_route_id={args.owner_route_binding.route_id}"
+            f",owner_route_hash={args.owner_route_binding.route_hash}"
+        )
+    pipe += workflow_completion_receipt(args)
+    settings = args.resolved_model_settings
+    for key, value in sorted(getattr(args, "profile_selection_receipt", {}).items()):
+        pipe += f",{key}={value}"
+    pipe += (
+        f",model_source={settings['source']},model_role={settings['role']}"
+        f",model_profile={settings['profile']},model_tier={settings['tier']}"
+        f",profile_granularity={settings['granularity']}"
+        f",model={settings['model']},{effort_key}={settings[effort_key]}"
+        f",model_pin_status={settings.get('pin_status', 'none')}"
+        + (f",model_pin={settings['pin_model']}" if settings.get("pin_model") else "")
+    )
+    pipe += adapter_fields
+    pipe += (
+        f",completion_delivery={getattr(args, 'resolved_completion_delivery', None) or '-'}"
+        f",completion_delivery_reason={getattr(args, 'completion_delivery_reason', None) or 'not-applicable'}"
+    )
+    if getattr(args, "resolved_completion_delivery", None) in SUPERVISED_DELIVERIES:
+        pipe += (
+            f",supervisor_lease={SUPERVISOR_LEASE_KIND}"
+            f",supervisor_lease_file={completion_lease_path(jobs, args)}"
+            f",supervisor_lease_nonce={secrets.token_hex(32)}"
+        )
+    pipe += (
+        f",parent_completion_delivery={args.parent_completion_delivery}"
+        f",parent_completion_reason={getattr(args, 'parent_completion_reason', None) or 'unspecified'}"
+    )
+    if args.parent_completion_delivery == "claude-parent-runtime":
+        # SD-111 P2 round 2 C-3 (2-a-5): the carrier-1 claim gate needs proof
+        # that the hook process it eventually runs in descends from the same
+        # runtime session this row's owner launched under. Ancestor-resolution
+        # failure writes none of the three fields (partial recording would let
+        # a hook falsely treat "unresolved" as "matches") -- carrier 1 then
+        # fails closed on this row and completion still reaches the user via
+        # exact harvest (§3.2.1 second fork).
+        ancestry = runtime_ancestry_binding(os.getpid())
+        if ancestry is not None:
+            ancestry_pid, ancestry_start, ancestry_ns = ancestry
+            pipe += (
+                f",parent_runtime_pid={ancestry_pid}"
+                f",parent_runtime_pid_start={ancestry_start}"
+                f",parent_runtime_ns={ancestry_ns}"
+            )
+    if getattr(args, "profile", None):
+        pipe += f",profile={args.profile}"
+    # launch_home seals the resolved AGENT_HOME this wrapper launched under, so a
+    # reader (fleet) can locate the default log dir without guessing the install
+    # layout — the registry row may live in a different runtime home than the logs.
+    pipe += (
+        f",artifact_root={args.artifact_root},log_file={args.log_path}"
+        f",launch_home={sealed_launch_home(args.agent_home)}"
+    )
+    pipe += stage_session_metadata(args)
+    if args.attempt_id:
+        pipe += (
+            f",attempt_id={args.attempt_id},launch_authority={args.launch_authority}"
+            f",fallback_ordinal={args.fallback_ordinal},launch_fence=registry-v1"
+        )
+    replica_reservation = getattr(args, "replica_batch_reservation", {})
+    if replica_reservation:
+        pipe += (
+            f",parallel_group={replica_reservation['batch_group']}"
+            f",replica_group={replica_reservation['batch_group']}"
+        )
+        for key in REPLICA_RESERVATION_ROW_KEYS:
+            if key in replica_reservation:
+                pipe += f",{key}={replica_reservation[key]}"
+    leg_class, auxiliary_check = route_node_leg_fields(args)
+    pipe += f",leg_class={leg_class},auxiliary_check={auxiliary_check}"
+    if getattr(args, "automatic_retry_of", None):
+        pipe += f",automatic_retry_of={args.automatic_retry_of}"
+    if args.capacity_retry:
+        pipe += (
+            f",capacity_retry=1,prior_attempt_id={args.prior_attempt_id}"
+            f",cooled_model={args.cooled_model},selection_source={args.selection_source}"
+        )
+    if args.broker_request_id:
+        pipe += f",broker_request_id={args.broker_request_id}"
+    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    from review_input import registration_fragment
+    pipe += commit_policy.registry_fragment(args)
+    pipe += registration_fragment(args)
+    from dispatch_replacement import seal_launch_input
+    if replacement_sandbox is not None:
+        args.replacement_runtime_sandbox = replacement_sandbox
+    pipe += seal_launch_input(args, harness, getattr(args, "replacement_raw_task", ""))
+    row = f"{ts}\topen\t{repo}\t{args.worktree}\t{args.slug}\t{pipe}"
+    exclusive = ({"route_id": args.route_id, "route_node": args.route_node,
+                  "capacity_retry": "1"} if args.capacity_retry else None)
+    quick_exclusive = ({"route_id": args.route_id, "route_node": args.route_node}
+                       if getattr(args, "quick_attempt", False) else None)
+    preclaim = None
+    if args.action == "start" and args.route_file:
+        preclaim = lambda lines: marker_gate(
+            args.route_file,
+            args.route_node,
+            args.action,
+            args.agent_home,
+            jobs,
+            registry_lines=lines,
+            attempt_id=args.attempt_id,
+        )
+    args.launch_preclaim = preclaim
+    mutation_precheck = lambda lines: ensure_terminal_claim_absent(
+        jobs, args.route_id, args.parent_attempt_id or args.attempt_id
+    )
+    return claim(
+        jobs, args.attempt_id, row, launch=False,
+        exclusive_metadata=exclusive,
+        exclusive_live_metadata=quick_exclusive,
+        terminal_attempt_limit=getattr(args, "quick_attempt_limit", None),
+        replacement_attempt_limit=getattr(args, "replacement_attempt_limit", 0),
+        replacement_notes=getattr(args, "replacement_notes", frozenset()),
+        mutation_precheck=mutation_precheck,
+        preclaim=preclaim,
+    )

@@ -361,17 +361,18 @@ class SD63OpenCodeParityLock(unittest.TestCase):
     """Only a bound or quick depth-1 owner may stamp supervised delivery."""
 
     def test_opencode_supervised_delivery_requires_a_supervised_owner(self):
+        # The row writes the supervised delivery and its lease from
+        # `resolved_completion_delivery` (dispatch_wrapper_common.append_job);
+        # OpenCode sets that value from `_supervised_owner(args)` before the row.
         opencode_path = ROOT / "adapters/opencode/bin/dispatch-headless.py"
         tree = ast.parse(opencode_path.read_text())
-        stamps = [node for node in ast.walk(tree)
-                  if isinstance(node, ast.Constant) and isinstance(node.value, str)
-                  and "completion_delivery_reason=" in node.value]
-        self.assertEqual(len(stamps), 1)
-        self.assertEqual(stamps[0].value,
-                         ",completion_delivery=session-resume-supervised,completion_delivery_reason=ok,supervisor_lease=")
-        guards = [node for node in ast.walk(tree) if isinstance(node, ast.If)
-                  and stamps[0] in set(ast.walk(ast.Module(body=node.body, type_ignores=[])))]
-        self.assertTrue(any(ast.unparse(node.test) == "_supervised_owner(args)" for node in guards))
+        assigns = [ast.unparse(node.value) for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                   and any(ast.unparse(target) == "args.resolved_completion_delivery" for target in node.targets)]
+        self.assertIn("'session-resume-supervised' if _supervised_owner(args) else 'one-shot'", assigns)
+        common = ast.parse((ROOT / "utilities/dispatch_wrapper_common.py").read_text())
+        supervised = next(node for node in common.body if isinstance(node, ast.Assign)
+                          and ast.unparse(node.targets[0]) == "SUPERVISED_DELIVERIES")
+        self.assertIn("session-resume-supervised", ast.unparse(supervised.value))
 
 
 if __name__ == "__main__":

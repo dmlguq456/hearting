@@ -116,15 +116,89 @@ class WrapperCommonTest(unittest.TestCase):
 class RegistrationFenceTest(unittest.TestCase):
     def test_every_wrapper_registers_behind_the_terminal_claim_fence(self):
         import ast
+        shared = next(n for n in ast.parse((ROOT / "utilities" / "dispatch_wrapper_common.py").read_text(encoding="utf-8")).body
+                      if isinstance(n, ast.FunctionDef) and n.name == "append_job")
+        claims = [n for n in ast.walk(shared) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "claim"]
+        self.assertEqual(len(claims), 1)
+        self.assertIn("mutation_precheck", {k.arg for k in claims[0].keywords})
+        self.assertIn("ensure_terminal_claim_absent", ast.unparse(shared))
         for harness in ("claude", "codex", "opencode"):
             tree = ast.parse((ROOT / "adapters" / harness / "bin" / "dispatch-headless.py").read_text(encoding="utf-8"))
             append_job = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "append_job")
-            claims = [n for n in ast.walk(append_job) if isinstance(n, ast.Call)
-                      and getattr(n.func, "id", None) == "claim_attempt_row"]
             with self.subTest(harness=harness):
-                self.assertEqual(len(claims), 1)
-                self.assertIn("mutation_precheck", {k.arg for k in claims[0].keywords})
-                self.assertIn("ensure_terminal_claim_absent", ast.unparse(append_job))
+                self.assertIn("WRAPPER_COMMON.append_job(", ast.unparse(append_job))
+
+
+class SameRowTest(unittest.TestCase):
+    """The same launch writes the same row on every harness, apart from the
+    values each adapter declares as its own."""
+
+    def args(self, tmp: Path):
+        from types import SimpleNamespace
+        settings = {"source": "role", "role": "deep maker", "profile": "unsealed", "tier": "deep",
+                    "granularity": "legacy", "model": "m", "effort": "high", "reasoning": "high",
+                    "variant": "high"}
+        return argparse.Namespace(
+            worktree=str(tmp), capability="autopilot-code", capability_mode="dev", qa="standard",
+            intensity="standard", dispatch_depth=1, execution_surface="registered-headless",
+            registered_worker=1, fallback_hop="same-harness-headless", parent_slug=None,
+            parent_binding=None, parent_session_id=None, worker_role=None, worker_mode=None,
+            worker_type="owner", launch_lifecycle_resolution=SimpleNamespace(metadata=lambda: {}),
+            assigned_contract="autopilot-code", unit=None, review_output=None, capability_owner=None,
+            owner_harness=None, route_file=None, route_id=None, route_hash=None, route_node=None,
+            registry_digest=None, write_scope=None, completion_gate=None, harness_affinity=None,
+            explicit_adapter=None, resolved_model_settings=settings,
+            resolved_completion_delivery="session-resume-supervised", completion_delivery_reason="ok",
+            parent_completion_delivery="poll-fallback", parent_completion_reason="fixture",
+            artifact_root=str(tmp), log_path=str(tmp / "log"), agent_home=str(tmp), attempt_id="att-1",
+            launch_authority="conductor", fallback_ordinal=0, capacity_retry=0, broker_request_id=None,
+            action="register", slug="fixture",
+        )
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.tmp = self._tmp.name
+
+    def row(self, harness, **kwargs):
+        from unittest import mock
+        claimed = []
+        tmp = self.tmp
+        with \
+             mock.patch.object(C.subprocess, "check_output", return_value="/repo\n"), \
+             mock.patch.object(C, "sealed_launch_home", return_value="/home"), \
+             mock.patch.object(C, "workflow_completion_receipt", return_value=""), \
+             mock.patch.object(C, "stage_session_metadata", return_value=""), \
+             mock.patch.object(C, "route_node_leg_fields", return_value=("-", "-")), \
+             mock.patch.object(C, "secrets") as secrets_, \
+             mock.patch("review_input.registration_fragment", return_value=""), \
+             mock.patch("dispatch_replacement.seal_launch_input", return_value=""):
+            secrets_.token_hex.return_value = "nonce"
+            args = self.args(Path(tmp))
+            C.append_job(Path(tmp) / "jobs.log", args, harness=harness,
+                         claim=lambda jobs, attempt, row, **kw: claimed.append((row, kw)) or True,
+                         marker_gate=None, **kwargs)
+        row, kw = claimed[0]
+        self.assertIn("mutation_precheck", kw)
+        fields = dict(part.split("=", 1) for part in row.split("\t")[5].split(","))
+        return fields
+
+    def test_only_the_declared_translation_differs(self):
+        rows = {
+            "claude": self.row("claude", runtime_sandbox="adapter-default", effort_key="effort",
+                               adapter_fields=",permission_mode=bypass"),
+            "codex": self.row("codex", runtime_sandbox="workspace-write", effort_key="reasoning",
+                              adapter_fields=",approval=never"),
+            "opencode": self.row("opencode", runtime_sandbox="adapter-default", effort_key="variant"),
+        }
+        own = {"harness", "runtime_sandbox", "effort", "reasoning", "variant", "permission_mode",
+               "approval", "supervisor_lease_file"}
+        common = [{k: v for k, v in fields.items() if k not in own} for fields in rows.values()]
+        self.assertEqual(common[0], common[1])
+        self.assertEqual(common[0], common[2])
+        self.assertEqual(rows["opencode"]["completion_delivery"], "session-resume-supervised")
+        self.assertEqual(rows["codex"]["reasoning"], "high")
+        self.assertEqual(rows["claude"]["supervisor_lease_nonce"], "nonce")
 
 if __name__ == "__main__":
     unittest.main()
