@@ -1,70 +1,21 @@
 {
   "schema_version": 1,
-  "description": "Static Fleet training and exact-attempt usage preview; no runtime collection.",
+  "description": "Static Fleet GPU commands and exact-attempt usage preview; no runtime collection.",
   "processes": [
     {
       "pid": 1101,
       "process_name": "python",
-      "command": "python train.py --model multilingual",
-      "progress": {
-        "line": "train multilingual: 63%|██████▎   | 126/200 [00:42<00:25, 2.87it/s, loss=0.34, acc=0.91]",
-        "age_s": 8,
-        "epoch": {"n": "3", "of": 8}
-      }
+      "command": "/home/user/envs/training/bin/python /home/user/project/train.py --config /home/user/project/configs/x.yaml"
     },
     {
       "pid": 1102,
       "process_name": "python",
-      "command": "python train.py --epoch-finish",
-      "progress": {
-        "line": "validation: 100%|██████████| 200/200 [01:10<00:00, 2.85it/s, loss=0.21]",
-        "age_s": 301,
-        "epoch": {"n": "4", "of": 8, "done": true}
-      }
+      "command": "python /home/user/project/train.py --description deliberately-long-command-argument-to-exercise-middle-ellipsis --config=/home/user/configs/x.yaml"
     },
     {
       "pid": 1103,
       "process_name": "python",
-      "command": "python train.py --wait",
-      "progress": {"line": "waiting: data shard 2/4", "age_s": 0}
-    },
-    {
-      "pid": 1104,
-      "process_name": "python",
-      "command": "python train.py --failure",
-      "progress": {"line": "ERROR: checkpoint write failed", "age_s": 42}
-    },
-    {
-      "pid": 1105,
-      "process_name": "python",
-      "command": "python train.py --error-metric",
-      "progress": {"line": "eval: 0%|          | 0/100 [00:00<?, ?it/s, error_rate=0.00]", "age_s": 300}
-    },
-    {
-      "pid": 1106,
-      "process_name": "python",
-      "command": "python train.py --unknown-left",
-      "progress": {"line": " 3%|▎         | 3/100 [00:01<?, ?it/s]", "age_s": 900}
-    },
-    {
-      "pid": 1107,
-      "process_name": "python",
-      "command": "python train.py --cjk",
-      "progress": {
-        "line": "학습 긴 설명 multilingual: 28%|██▊       | 280/1000 [00:38<01:36, 7.5it/s, loss=0.54, bleu=31.2]",
-        "age_s": 301,
-        "epoch": {"n": "12", "of": 40}
-      }
-    },
-    {
-      "pid": 1108,
-      "process_name": "python",
-      "command": "python train.py --long-description",
-      "progress": {
-        "line": "a deliberately long progress description: 88%|████████▊ | 880/1000 [10:00<01:22, 1.4it/s, loss=0.07]",
-        "age_s": 301,
-        "epoch": {"n": "7", "of": 8}
-      }
+      "command": "python '/home/user/학습 코드/train.py' --config='/home/user/설정/실험.yaml'"
     }
   ],
   "codex_usage": {

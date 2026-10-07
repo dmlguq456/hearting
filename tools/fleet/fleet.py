@@ -144,8 +144,6 @@ def _snapshot_json(sessions, jobs, resource_jobs=None, usage=None, disabled=None
     if hearting is not None:
         out["hearting"] = dict(hearting)
     if compute_host_snapshot is not None:
-        compute_host_snapshot = compute_hosts.with_training_progress(
-            compute_host_snapshot, resource_jobs)
         out["compute_hosts"] = compute_host_snapshot
         # F-104: live GPU processes no registered run owns; session_owner tells
         # a consumer which of them a session line also shows.

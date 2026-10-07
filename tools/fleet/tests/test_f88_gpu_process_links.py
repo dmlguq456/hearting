@@ -236,7 +236,7 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
             self.assertNotIn("MiB", process_text)
             self.assertNotIn("/home/test/envs/xxx/bin/python", process_text)
             if width == 168:
-                self.assertIn("↳ python train.py  --epochs 10 --output /keep/full-path", process_text)
+                self.assertIn("↳ python train.py --epochs 10 --output full-path", process_text)
             self.assertEqual(json.dumps(self.snapshot, sort_keys=True), original)
 
     def test_exact_relation_aggregates_multi_gpu_in_stable_order(self):
@@ -560,234 +560,57 @@ class GpuProcessAndResourceRenderTest(unittest.TestCase):
         self.assertNotIn(render._SUBAGENT_IND + "● GPU", text)
 
 
-class GpuProgressLineRenderTest(unittest.TestCase):
-    TQDM = ("TRAIN: 76%|\u2588\u2588\u2588\u2588\u2588\u2588\u2588\u258c | 15135/20000 "
-            "[1:52:10<39:00, 2.08batch/s] , L_se=1.18e-02, L_loc=2.67e-03, L_vad=3.20e-01")
+class GpuCommandDisplayTest(unittest.TestCase):
+    def rows(self, commands, width=120, progress=None):
+        return render._gpu_process_rows({"processes": [
+            {"pid": 400 + index, "command": command, "progress": progress}
+            for index, command in enumerate(commands)]}, "", width)
 
-    def setUp(self):
-        render._PROGRESS_BODY_CACHE.clear()
-        self.addCleanup(render._PROGRESS_BODY_CACHE.clear)
-
-    def gpu(self, *progress):
-        processes = []
-        for offset, value in enumerate(progress):
-            row = {"pid": 400 + offset, "used_memory_mib": 100 - offset,
-                   "command": "python run.py --train"}
-            if value is not None:
-                row["progress"] = value
-            processes.append(row)
-        return {"index": 0, "processes": processes}
-
-    def test_tqdm_line_is_compacted_under_its_process(self):
-        rows = render._gpu_process_rows(
-            self.gpu({"line": self.TQDM, "age_s": 8}), "  ", 168)
+    def test_script_and_path_options_are_visible_without_changing_the_snapshot(self):
+        process = {"command": "/home/user/env/bin/python /home/user/project/train.py "
+                   "--config=/home/user/configs/x.yaml --output ./runs/latest/",
+                   "progress": {"line": "TRAIN: 99% loss=0.5", "training": {"attempt": 99}}}
+        before = copy.deepcopy(process)
+        rows = render._gpu_process_rows({"processes": [process]}, "", 120)
         self.assertEqual([render._plain(row).strip() for row in rows], [
-            "\u21b3 python run.py --train",
-            "\u21b3 TRAIN 76% 15135/20000 \u00b7 39:00 left \u00b7 "
-            "L_se=1.18e-02 L_loc=2.67e-03",
-        ])
-        styles = {part: key for part, key in rows[1] if part}
-        self.assertEqual(styles["TRAIN"], "resource_active")
-        self.assertEqual(styles["76%"], "lvl_g")
-        self.assertEqual(styles["15135/20000"], "dim")
-        self.assertEqual(styles["L_se="], "dim")
-        self.assertEqual(styles["1.18e-02"], "resource_active")
+            "↳ python train.py --config=x.yaml --output latest"])
+        self.assertEqual(process, before)
 
-    def test_actual_tf_and_sr_fixed_rows_use_the_same_primary_grammar(self):
-        # Distinct captured generations from B-GPU-ROW-STYLE-READ-BASELINE-1004:
-        # TF installed JSON and SR original ANSI are not one synchronized sample.
-        training = {"phase": "training-updates", "arm": "baseline",
-                    "attempt": 79113, "attempt_total": 400000,
-                    "successful": 79086, "skipped": 27,
-                    "loss": .006077222546123789, "loss_kind": "last-batch",
-                    "percent": 19.77825, "progress_age_s": .12752628326416016,
-                    "schedule_epoch": {"current": 4, "total": 20, "attempts_per_epoch": 20000,
-                                       "completed": 3, "attempt_in_epoch": 19113, "state": "partial"}}
-        before = copy.deepcopy(training)
-        tf = render._gpu_process_rows(self.gpu({"training": training}), "", 180)
-        sr = render._gpu_process_rows(self.gpu({
-            "line": "TRAIN: 38%|###| 7603/20000 [00:00<1:38:19, 2batch/s, L_se=9.18e-03, L_se_aux=4.91e-03]",
-            "epoch": {"n": "23", "of": 200}, "age_s": 0}), "", 180)
-        self.assertEqual(len(tf), 2)  # command + exactly one progress row
-        self.assertEqual(len(sr), 2)
-        self.assertEqual(render._plain(tf[1]).strip(),
-                         "↳ Epoch 4/20 · TRAIN 96% 19113/20000 · loss=6.08e-03")
-        self.assertEqual(render._plain(sr[1]).strip(),
-                         "↳ Epoch 23/200 · TRAIN 38% 7603/20000 · 1:38:19 left · L_se=9.18e-03 L_se_aux=4.91e-03")
-        self.assertEqual(tf[1], [
-            ("      ", None), ("↳ ", "dim"), ("Epoch ", "dim"), ("4", "resource_active"),
-            ("/", "dim"), ("20", "dim"), (" · ", "dim"), ("TRAIN", "resource_active"),
-            (" ", "dim"), ("96%", "lvl_g"), (" ", "dim"), ("19113/20000", "dim"),
-            (" · ", "dim"), ("loss=", "dim"), ("6.08e-03", "resource_active"),
-        ])
-        self.assertEqual(sr[1], [
-            ("      ", None), ("↳ ", "dim"), ("Epoch ", "dim"), ("23", "resource_active"),
-            ("/", "dim"), ("200", "dim"), (" · ", "dim"), ("TRAIN", "resource_active"),
-            (" ", "dim"), ("38%", "lvl_g"), (" ", "dim"), ("7603/20000", "dim"),
-            (" · ", "dim"), ("1:38:19 left", "dim"), (" · ", "dim"),
-            ("L_se=", "dim"), ("9.18e-03", "resource_active"), (" ", "dim"),
-            ("L_se_aux=", "dim"), ("4.91e-03", "resource_active"),
-        ])
-        self.assertEqual(training, before)
+    def test_duplicate_filenames_keep_their_parent_folder(self):
+        commands = ["python /work/alpha/train.py --config /cfg/a/x.yaml",
+                    "python /work/beta/train.py --config /cfg/b/x.yaml"]
+        rows = [render._plain(row).strip() for row in self.rows(commands)]
+        self.assertEqual(rows, ["↳ python alpha/train.py --config a/x.yaml",
+                                "↳ python beta/train.py --config b/x.yaml"])
+        same = [render._plain(row).strip() for row in self.rows([commands[0]] * 2)]
+        self.assertEqual(same, ["↳ python train.py --config x.yaml"] * 2)
 
-    def test_identical_observed_facts_have_literal_wide_narrow_and_color_equivalence(self):
-        training = {"phase": "training-updates", "attempt": 79113, "attempt_total": 400000,
-                    "successful": 79086, "skipped": 27, "loss": .006077222546123789,
-                    "progress_age_s": 900,
-                    "schedule_epoch": {"current": 4, "total": 20, "attempts_per_epoch": 20000}}
-        structured = {"training": training, "age_s": 0}  # heartbeat age cannot hide a stall
-        raw = {"line": "training-updates: 96%|###| 19113/20000 [00:00<?, ?it/s, loss=0.006077222546123789]",
-               "epoch": {"n": "4", "of": 20}, "age_s": 900}
-        # Expected text is literal, not generated by the row/helper under test.
-        cases = (
-            (180, "      ↳ Epoch 4/20 · TRAIN 96% 19113/20000 · loss=6.08e-03 · stalled 15m"),
-            (60, "      ↳ Epoch 4/20 · TRAIN 96% 19113/20000 · … · stalled 15m"),
-            (40, "      ↳ Epoch 4/20 · TRAI… · stalled 15m"),
-            (23, "      ↳ stalled 15m"),
-        )
-        for width, expected in cases:
+    def test_quoted_paths_and_nonpath_arguments_remain_legible(self):
+        command = ('python "/work/my project/train model.py" '
+                   '--config="/cfg/my config.yaml" --url https://host/a/b --ratio 1/2 '
+                   '-c "print(\'/work/data\')"')
+        words = render._gpu_command_words(render._gpu_display_command(command))
+        self.assertEqual(words, ["python", "train model.py", "--config=my config.yaml",
+                                "--url", "https://host/a/b", "--ratio", "1/2",
+                                "-c", "print('/work/data')"])
+
+    def test_middle_ellipsis_preserves_script_and_final_config(self):
+        command = "python /long/project/train.py --description " + "x" * 120 + " --config /cfg/x.yaml"
+        for width in (40, 60, 100):
             with self.subTest(width=width):
-                tf_row = render._gpu_process_rows(self.gpu(structured), "", width)[1]
-                raw_row = render._gpu_process_rows(self.gpu(raw), "", width)[1]
-                self.assertEqual(render._plain(tf_row), expected)
-                self.assertEqual(render._plain(raw_row), expected)
-                self.assertEqual(tf_row, raw_row)
-                self.assertLessEqual(render._dw(expected), width)
-        training["progress_age_s"] = .1
-        raw["age_s"] = .1
-        for facts in (structured, raw):
-            row = render._gpu_process_rows(self.gpu(facts), "", 60)[1]
-            self.assertEqual(render._plain(row),
-                             "      ↳ Epoch 4/20 · TRAIN 96% 19113/20000 · loss=6.08e-03")
+                shown = render._plain(self.rows([command], width)[0])
+                self.assertIn("python train.py", shown)
+                self.assertIn("…", shown)
+                self.assertTrue(shown.endswith("x.yaml"), shown)
+                self.assertLess(render._dw(shown), width)
 
-    def test_epoch_leads_the_progress_line(self):
-        rows = render._gpu_process_rows(self.gpu(
-            {"line": self.TQDM, "age_s": 0, "epoch": {"n": "3", "of": 200}},
-            {"line": self.TQDM, "age_s": 0, "epoch": {"n": "2", "done": True}},
-            {"line": "Epoch(train) [3][100/1250] loss: 0.5", "age_s": 5,
-             "epoch": {"n": "1.25", "of": 3}}), "  ", 168)
-        text = [render._plain(row).strip() for row in rows]
-        self.assertEqual(text[1], "\u21b3 Epoch 3/200 \u00b7 TRAIN 76% 15135/20000 \u00b7 39:00 left "
-                                  "\u00b7 L_se=1.18e-02 L_loc=2.67e-03")
-        self.assertTrue(text[3].startswith("\u21b3 Epoch 2 done \u00b7 TRAIN 76%"), text[3])
-        self.assertEqual(text[5], "\u21b3 Epoch 1.25/3 \u00b7 Epoch(train) [3][100/1250] loss: 0.5")
-
-    def test_json_summary_replaces_metadata_without_inventing_progress(self):
-        rows = render._gpu_process_rows(self.gpu({
-            "line": '{"utc":"2026-10-04","pid":2280280,"successful":17808}',
-            "summary": "training-updates · baseline · successful 17808",
-            "age_s": 0, "epoch": {"n": "3", "of": 200}}), "", 120)
-        self.assertEqual(render._plain(rows[1]).strip(),
-                         "↳ training-updates · baseline · successful 17808")
-        for width in (60, 40):
-            rows = render._gpu_process_rows(self.gpu({
-                "line": "raw JSON", "summary": "training-updates · baseline · successful 17808",
-                "age_s": 900}), "", width)
-            self.assertLessEqual(render._dw(render._plain(rows[1])), width)
-            self.assertTrue(render._plain(rows[1]).endswith("stalled 15m"))
-
-    def test_empty_json_summary_keeps_existing_raw_line(self):
-        rows = render._gpu_process_rows(self.gpu({
-            "line": "step 9", "summary": "", "age_s": 0}), "", 120)
-        self.assertEqual(render._plain(rows[1]).strip(), "↳ step 9")
-
-    def test_malformed_epoch_is_ignored(self):
-        for epoch in ({"n": 3}, {"n": "3; rm -rf"}, {"n": ""}, "ep 3", None, {"of": 5},
-                      {"n": "\x1b[31m3"}):
-            with self.subTest(epoch=epoch):
-                (_command, progress) = render._gpu_process_rows(
-                    self.gpu({"line": "step 9", "age_s": 1, "epoch": epoch}), "", 120)
-                self.assertEqual(render._plain(progress).strip(), "\u21b3 step 9")
-        self.assertEqual(render._progress_epoch({"n": "4", "of": True}), "Epoch 4")
-        self.assertEqual(render._progress_epoch({"n": "4", "of": 0, "done": "yes"}), "Epoch 4")
-
-    def test_epoch_keeps_its_place_and_the_age_at_narrow_width(self):
-        for width in (60, 40):
-            (_command, progress) = render._gpu_process_rows(self.gpu(
-                {"line": self.TQDM, "age_s": 900, "epoch": {"n": "12", "of": 100}}), "    ", width)
-            text = render._plain(progress)
-            self.assertLessEqual(render._dw(text), width)
-            self.assertIn("Epoch 12/100", text)
-            self.assertTrue(text.endswith("stalled 15m"), text)
-
-    def test_epoch_done_and_tqdm_percent_color_only_their_own_evidence(self):
-        rows = render._gpu_process_rows(self.gpu(
-            {"line": "validation: 100%|##########| 200/200 [00:10<00:00, 20it/s]",
-             "age_s": 0, "epoch": {"n": "4", "of": 8, "done": True}},
-            {"line": "eval: 0%|          | 0/100 [00:00<?, ?it/s, error_rate=0.00]",
-             "age_s": 300}), "", 120)
-        done, metric = rows[1], rows[3]
-        self.assertIn(("done", "lvl_g"), done)
-        self.assertIn(("100%", "lvl_g"), done)
-        self.assertNotIn(("complete", "lvl_g"), done)
-        self.assertIn(("0%", "lvl_g"), metric)
-        self.assertIn(("error_rate=", "dim"), metric)
-        self.assertNotIn(("error_rate=", "lvl_r"), metric)
-
-    def test_only_explicit_leading_waiting_or_error_text_gets_status_color(self):
-        rows = render._gpu_process_rows(self.gpu(
-            {"line": "waiting: remote worker slot", "age_s": 0},
-            {"line": "ERROR: checkpoint write failed", "age_s": 0},
-            {"line": "error_rate=0.00 in validation output", "age_s": 0}), "", 120)
-        self.assertIn(("waiting:", "lvl_y"), rows[1])
-        self.assertIn(("ERROR:", "lvl_r"), rows[3])
-        self.assertTrue(all(key in (None, "dim") for _text, key in rows[5]))
-
-    def test_stock_tqdm_postfix_and_unknown_remaining_time(self):
-        self.assertEqual(
-            render._progress_body("eval: 100%|##########| 1.2k/1.2k "
-                                  "[00:10<00:00, 120it/s, loss=0.12, acc=0.9, f1=0.8]"),
-            "eval 100% 1.2k/1.2k \u00b7 00:00 left \u00b7 loss=1.20e-01 acc=0.9")
-        self.assertEqual(render._progress_body(" 3%|#| 3/100 [00:01<?, ?it/s]"),
-                         "3% 3/100")
-
-    def test_other_lines_are_shown_raw_and_absent_progress_adds_no_row(self):
-        rows = render._gpu_process_rows(self.gpu(
-            {"line": "Epoch 3 validation\x1b done", "age_s": 75},
-            None, {"line": "   ", "age_s": 1}, {"age_s": 3}, "bad"), "", 120)
-        text = [render._plain(row).strip() for row in rows]
-        self.assertEqual(len(text), 6)
-        self.assertEqual(text[1], "\u21b3 Epoch 3 validation? done")
-
-    def test_stalled_output_is_marked_in_warning_colour(self):
-        (_command, progress) = render._gpu_process_rows(
-            self.gpu({"line": self.TQDM, "age_s": 361}), "", 168)
-        self.assertEqual(progress[-1], ("stalled 6m", "lvl_y"))
-        self.assertEqual(render._progress_age(300), (None, None))
-        self.assertEqual(render._progress_age(0), (None, None))
-        self.assertEqual(render._progress_age(7300), ("stalled 2h", "lvl_y"))
-        self.assertEqual(render._progress_age(None), (None, None))
-        self.assertEqual(render._progress_age(float("nan")), (None, None))
-        self.assertEqual(render._progress_age(float("inf")), (None, None))
-
-    def test_narrow_width_clips_the_body_before_the_age(self):
-        for width in (60, 40, 23):
-            (_command, progress) = render._gpu_process_rows(
-                self.gpu({"line": self.TQDM, "age_s": 900}), "    ", width)
-            text = render._plain(progress)
-            self.assertLessEqual(render._dw(text), width)
-            self.assertTrue(text.endswith("stalled 15m"), text)
-
-    def test_compaction_is_cached_per_pid_and_line(self):
-        gpu = self.gpu({"line": self.TQDM, "age_s": 8})
-        with mock.patch.object(render, "_progress_body_segments",
-                               wraps=render._progress_body_segments) as body:
-            for _frame in range(3):
-                render._gpu_process_rows(gpu, "", 120)
-            gpu["processes"][0]["progress"] = {"line": self.TQDM + " ", "age_s": 9}
-            render._gpu_process_rows(gpu, "", 120)
-        self.assertEqual(body.call_count, 1)
-        gpu["processes"][0]["progress"] = {"line": "TRAIN: 77%|#| 15136/20000", "age_s": 0}
-        with mock.patch.object(render, "_progress_body_segments",
-                               wraps=render._progress_body_segments) as body:
-            render._gpu_process_rows(gpu, "", 120)
-        self.assertEqual(body.call_count, 1)
-
-    def test_compaction_cache_remains_bounded(self):
-        for pid in range(257):
-            render._gpu_progress_row(
-                {"pid": pid, "progress": {"line": "step %d" % pid}}, "", 120)
-        self.assertLessEqual(len(render._PROGRESS_BODY_CACHE), 256)
+    def test_unicode_and_malformed_commands_stay_bounded(self):
+        commands = ["python /work/학습.py --설명 " + "가" * 80 + " --config /cfg/실험.yaml",
+                    "python '/unclosed/train.py --config /cfg/x.yaml", ""]
+        for width in (0, 1, 6, 23, 60):
+            with self.subTest(width=width):
+                for row in self.rows(commands, width):
+                    self.assertLessEqual(render._dw(render._plain(row)), width)
 
 
 if __name__ == "__main__":

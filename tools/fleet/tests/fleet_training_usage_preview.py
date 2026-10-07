@@ -1,4 +1,4 @@
-"""Fixture-only Fleet display capture for the training/usage backlog.
+"""Fixture-only Fleet GPU-command and usage display capture.
 
 This harness never invokes collectors, Fleet's live loop, the user's HOME, or the
 dispatch registry.  It feeds one committed preview snapshot directly into the
@@ -33,7 +33,7 @@ from tools.fleet.model import DispatchJob  # noqa: E402
 
 def _segments(process, width):
     rows = render._gpu_process_rows({"processes": [process]}, "    ", width)
-    return rows[-1] if len(rows) > 1 else []
+    return rows[0] if rows else []
 
 
 def _ansi(segs, mode):
@@ -100,7 +100,7 @@ def _capture(widths, head):
         "environment": {"TERM": os.environ.get("TERM", ""), "clock_epoch": now,
                         "animation": "not called; single deterministic snapshot"},
         "widths": widths,
-        "training": captures,
+        "gpu_processes": captures,
         "codex_usage": {
             "producer_envelope": _producer_envelope(data["codex_usage"]),
             "context_used_pct": getattr(getattr(job, "context", None), "used_pct", None),

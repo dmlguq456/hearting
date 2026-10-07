@@ -79,7 +79,7 @@ class ResourceRunFleetTest(unittest.TestCase):
                                 self.assertNotIn("LAB RESOURCES", flatten(actual))
         self.assertEqual(len(rows), 7)
 
-    def test_gpu_process_progress_remains_visible_without_lab_summary(self):
+    def test_gpu_commands_remain_visible_without_training_or_lab_summary(self):
         snapshot = {"configured": True, "hosts": [{
             "host": "cnn", "reachable": True, "gpus": [{
                 "index": 0, "name": "NVIDIA RTX 4090", "util_pct": 42,
@@ -100,10 +100,25 @@ class ResourceRunFleetTest(unittest.TestCase):
                         [], [], "both", False, 0, term_width=120,
                         resources=[self.row("gpu-0")]))
                     self.assertIn("python run.py --train", text)
-                    self.assertIn("training-updates · baseline · successful 17808", text)
+                    self.assertNotIn("training-updates", text)
                     self.assertNotIn("LAB RESOURCES", text)
                     self.assertNotIn("raw JSON", text)
         self.assertEqual(json.dumps(snapshot), before)
+
+    def test_json_preserves_raw_command_and_resource_progress_without_gpu_join(self):
+        job = self.row("gpu-0")
+        job.training_progress = {"phase": "training-updates", "attempt": 9,
+                                 "loss": 0.5, "pid": 42, "starttime": "11"}
+        snapshot = {"configured": True, "hosts": [{"host": "here", "self": True,
+                    "reachable": True, "gpus": [{"index": 0, "processes": [{
+                        "pid": 42, "proc_start": 11, "pgid": 42,
+                        "command": "/usr/bin/python /work/scripts/train.py --config /work/x.yaml",
+                    }]}]}]}
+        before = json.loads(json.dumps(snapshot))
+        output = json.loads(fleet._snapshot_json([], [], [job], compute_host_snapshot=snapshot))
+        self.assertEqual(output["compute_hosts"], before)
+        self.assertEqual(snapshot, before)
+        self.assertEqual(output["resource_jobs"][0]["training_progress"], job.training_progress)
 
     def test_collector_keeps_multiple_runs_in_one_project(self):
         with tempfile.TemporaryDirectory() as td:

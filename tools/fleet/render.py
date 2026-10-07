@@ -4650,10 +4650,78 @@ def _gpu_model_key(model, active=False):
     return key + "_active" if active else key
 
 
-def _gpu_display_command(command):
-    """Shorten the first command token only; retain the argument text verbatim."""
-    return re.sub(r"^(\s*)(\S+)",
-                  lambda match: match[1] + os.path.basename(match[2]), command, count=1)
+def _gpu_command_words(command):
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def _gpu_path_argument(word):
+    """Display-only path value; exclude URLs, ratios and expression-shaped text."""
+    prefix, separator, value = word.partition("=")
+    if not separator:
+        prefix, value = "", word
+    if ("/" not in value or "://" in value
+            or re.fullmatch(r"\d+/\d+", value)
+            or any(char in value for char in "(){};|")):
+        return None
+    return prefix + separator, value
+
+
+def _gpu_path_collisions(commands):
+    paths = {}
+    for command in commands:
+        for word in _gpu_command_words(command)[1:]:
+            argument = _gpu_path_argument(word)
+            if argument:
+                value = argument[1].rstrip("/")
+                paths.setdefault(os.path.basename(value), set()).add(value)
+    return {name for name, values in paths.items() if len(values) > 1}
+
+
+def _gpu_display_command(command, ambiguous=()):
+    """Compact argv paths for the terminal only; structured command stays raw."""
+    words = _gpu_command_words(command)
+    if not words:
+        return ""
+    collisions = set(ambiguous) | _gpu_path_collisions([command])
+    words[0] = os.path.basename(words[0]) or words[0]
+    for index, word in enumerate(words[1:], 1):
+        argument = _gpu_path_argument(word)
+        if argument:
+            prefix, value = argument
+            path = value.rstrip("/")
+            name = os.path.basename(path)
+            if name in collisions:
+                parent = os.path.basename(os.path.dirname(path))
+                name = parent + "/" + name if parent else name
+            words[index] = prefix + (name or value)
+    return shlex.join(words)
+
+
+def _gpu_clip_command(command, width):
+    """Cell-bounded middle ellipsis keeps the script prefix and final argv."""
+    if _dw(command) <= width:
+        return command
+    if width <= 1:
+        return "…" if width > 0 else ""
+    room = width - 1
+    head_width = (room + 1) // 2
+    words = _gpu_command_words(command)
+    for index, word in enumerate(words[1:], 1):
+        if word.endswith((".py", ".sh")) and not word.startswith("-"):
+            script_width = _dw(shlex.join(words[:index + 1]))
+            if index == len(words) - 1:
+                # When only interpreter + script remain, the complete filename
+                # matters more than the interpreter's last few characters.
+                head_width = min(head_width, max(0, room - _dw(shlex.quote(word))))
+            else:
+                head_width = max(head_width, min(script_width, room - room // 3))
+            break
+    head = _clip_w(command, head_width, ellipsis="")
+    tail = _clip_w(command[::-1], room - _dw(head), ellipsis="")[::-1]
+    return head + "…" + tail
 
 
 def _gpu_process_rows(gpu, indent, width):
@@ -4666,227 +4734,19 @@ def _gpu_process_rows(gpu, indent, width):
         if isinstance(process.get("used_memory_mib"), (int, float)) else 0,
         process.get("pid") if isinstance(process.get("pid"), int) else 2**63,
     ))
+    ambiguous = _gpu_path_collisions(
+        _gpu_safe_text(process.get("command")) for process in processes)
     for process in processes:
-        command = _gpu_display_command(_gpu_safe_text(process.get("command")))
+        command = _gpu_display_command(_gpu_safe_text(process.get("command")), ambiguous)
         if not command:
             command = os.path.basename(_gpu_safe_text(process.get("process_name"))) or "process"
-        row = [(indent + "    ", None), ("↳ ", "dim"), (command, "dim")]
+        prefix = [(indent + "    ", None), ("↳ ", "dim")]
+        # Curses' _addline reserves the rightmost cell; do not let its final
+        # clipping remove the suffix we deliberately kept here.
+        room = max(0, width - 1 - sum(_dw(text) for text, _key in prefix))
+        row = prefix + [(_gpu_clip_command(command, room), "dim")]
         rows.append(_clip_segs(row, width)[0])
-        progress = _gpu_progress_row(process, indent, width)
-        if progress:
-            rows.append(progress)
     return rows
-
-
-# A tqdm-shaped line (`desc: NN%|bar| n/total [elapsed<left, rate, k=v]`, metrics may also
-# follow the bracket) is compacted by shape alone; any other line is shown clipped as is.
-_PROGRESS_TQDM_RE = re.compile(
-    r"^(?P<desc>.*?)\s*(?P<pct>\d{1,3}(?:\.\d+)?)%\s*\|[^|]*\|\s*"
-    r"(?P<count>[\d.]+[kMGTPE]?/[\d.]+[kMGTPE]?)(?P<rest>.*)$")
-_PROGRESS_LEFT_RE = re.compile(r"\s*\[[^<\]]*<\s*(?P<left>\d[\d:]*)")
-_PROGRESS_METRIC_RE = re.compile(r"(?<![\w.])[A-Za-z_][\w.]*=[^\s,;\[\]]+")
-_PROGRESS_LEADING_STATE_RE = re.compile(r"^(?P<state>waiting:|ERROR:|error:)(?:\s*)(?P<detail>.*)$")
-_PROGRESS_STALLED_S = 300
-_PROGRESS_BODY_CACHE = {}   # {(pid, line): immutable compact segments}; bounded below
-
-
-def _progress_fields_segments(phase, percent, count, left=None, metrics=()):
-    """One body grammar for observed tqdm fields and verified structured facts."""
-    if phase == "training-updates":
-        phase = "TRAIN"
-    parts = []
-    fields = [(phase, "resource_active") if phase else None,
-              ("%.0f%%" % percent, "lvl_g"), (count, "dim")]
-    for field in fields:
-        if field is not None:
-            if parts:
-                parts.append((" ", "dim"))
-            parts.append(field)
-    if left:
-        parts.extend(((" · ", "dim"), (left + " left", "dim")))
-    for index, (label, value) in enumerate(metrics):
-        value = str(value)
-        # Format loss presentation, leaving model names and non-loss metrics intact.
-        if label.lower() == "loss" or label.startswith("L_"):
-            try:
-                number = float(value)
-                if math.isfinite(number):
-                    value = "%.2e" % number
-            except (ValueError, OverflowError):
-                pass
-        parts.extend(((" · " if index == 0 else " ", "dim"),
-                      (label + "=", "dim"), (value, "resource_active")))
-    return tuple(parts)
-
-
-def _progress_body_segments(line):
-    match = _PROGRESS_TQDM_RE.match(line)
-    if not match:
-        state = _PROGRESS_LEADING_STATE_RE.match(line)
-        if state:
-            key = "lvl_y" if state.group("state") == "waiting:" else "lvl_r"
-            parts = [(state.group("state"), key)]
-            if state.group("detail"):
-                parts.extend([(" ", "dim"), (state.group("detail"), "dim")])
-            return tuple(parts)
-        return ((line, "dim"),)
-    desc = match.group("desc").strip().rstrip(":").strip()[:24]
-    rest = match.group("rest")
-    left = _PROGRESS_LEFT_RE.match(rest)
-    metrics = [metric.split("=", 1) for metric in _PROGRESS_METRIC_RE.findall(rest)[:2]]
-    return _progress_fields_segments(desc, float(match.group("pct")), match.group("count"),
-                                     left.group("left") if left else None, metrics)
-
-
-def _progress_body(line):
-    """The historical compact plain-text form of one training line."""
-    return "".join(text for text, _key in _progress_body_segments(line))
-
-
-_PROGRESS_EPOCH_RE = re.compile(r"\d{1,7}(?:\.\d{1,4})?\Z")
-
-
-def _progress_epoch(epoch):
-    """`Epoch 3/200`, or `Epoch 2 done` once an epoch's finishing lines were seen; else None."""
-    if not isinstance(epoch, dict):
-        return None
-    number = epoch.get("n")
-    if not isinstance(number, str) or not _PROGRESS_EPOCH_RE.match(number):
-        return None
-    text = "Epoch " + number
-    total = epoch.get("of")
-    if isinstance(total, int) and not isinstance(total, bool) and 0 < total < 10**7:
-        text += "/%d" % total
-    return text + " done" if epoch.get("done") is True else text
-
-
-def _progress_epoch_segments(epoch):
-    text = _progress_epoch(epoch)
-    if text is None:
-        return ()
-    total = epoch.get("of")
-    if not (isinstance(total, int) and not isinstance(total, bool) and 0 < total < 10**7):
-        total = None
-    return _progress_epoch_fields(epoch["n"], total, epoch.get("done") is True)
-
-
-def _progress_epoch_fields(number, total=None, done=False):
-    parts = [("Epoch ", "dim"), (str(number), "resource_active")]
-    if total is not None:
-        parts.extend((("/", "dim"), (str(total), "dim")))
-    if done:
-        parts.extend(((" ", "dim"), ("done", "lvl_g")))
-    return tuple(parts)
-
-
-def _progress_age(age_s):
-    # Only a stall is worth a suffix: a live run rewrites its log every few seconds,
-    # so a fresh age read "0s ago" on every frame and said nothing.
-    if not isinstance(age_s, (int, float)) or isinstance(age_s, bool) \
-            or not math.isfinite(age_s) or age_s < 0:
-        return None, None
-    age_s = int(age_s)
-    if age_s > _PROGRESS_STALLED_S:
-        minutes = age_s // 60
-        return ("stalled %dm" % minutes if minutes < 120
-                else "stalled %dh" % (minutes // 60)), "lvl_y"
-    return None, None
-
-
-def _clip_progress_segments(segs, width):
-    """Clip role segments to the same text, including ellipsis, as the old plain row."""
-    if sum(_dw(text) for text, _key in segs) <= width:
-        return list(segs)
-    room = max(0, width - 1)  # reserve the historical one-cell ellipsis
-    out = []
-    used = 0
-    for text, key in segs:
-        if used >= room:
-            break
-        piece = _clip_w(text, room - used, ellipsis="")
-        if piece:
-            out.append((piece, key))
-            used += _dw(piece)
-        if _dw(piece) < _dw(text):
-            break
-    if width > 0:
-        out.append(("…", "dim"))
-    return out
-
-
-def _structured_progress_segments(training):
-    """Project only display facts; the full training observation stays unchanged."""
-    if not isinstance(training, dict):
-        return None
-    attempt, total, successful, skipped = (training.get(key) for key in
-        ("attempt", "attempt_total", "successful", "skipped"))
-    if not all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
-               for value in (attempt, total, successful, skipped)) \
-            or total <= 0 or attempt > total or attempt != successful + skipped:
-        return None
-    count, denominator = attempt, total
-    epoch = training.get("schedule_epoch")
-    epoch_segs = []
-    if isinstance(epoch, dict):
-        current, epochs, span = (epoch.get(key) for key in
-                                 ("current", "total", "attempts_per_epoch"))
-        if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0
-               for value in (current, epochs, span)) and epochs > 0 and span > 0 \
-                and epochs * span == total and current == (attempt + span - 1) // span:
-            epoch_segs = _progress_epoch_fields(current, epochs)
-            # At a boundary, show the interval just completed, not the next zero.
-            count = (attempt - 1) % span + 1 if attempt else 0
-            denominator = span
-    metrics = []
-    loss = training.get("loss")
-    if isinstance(loss, (int, float)) and not isinstance(loss, bool) and math.isfinite(loss):
-        metrics = [("loss", loss)]
-    phase = _gpu_safe_text(training.get("phase")).strip()[:24]
-    body = _progress_fields_segments(phase, count * 100.0 / denominator,
-                                     "%d/%d" % (count, denominator), metrics=metrics)
-    return body, epoch_segs
-
-
-def _gpu_progress_row(process, indent, width):
-    """One compact, role-colored line from the process snapshot, or None."""
-    progress = process.get("progress")
-    if not isinstance(progress, dict):
-        return None
-    structured = _structured_progress_segments(progress.get("training"))
-    if structured is not None:
-        body, epoch = structured
-        age = progress["training"].get("progress_age_s")
-    else:
-        summary = _gpu_safe_text(progress.get("summary")).strip()
-        line = summary or _gpu_safe_text(progress.get("line")).strip()
-        if not line:
-            return None
-        key = (process.get("pid"), line)
-        body = _PROGRESS_BODY_CACHE.get(key)
-        if body is None:
-            if len(_PROGRESS_BODY_CACHE) >= 256:
-                _PROGRESS_BODY_CACHE.clear()
-            body = _PROGRESS_BODY_CACHE[key] = _progress_body_segments(line)
-        epoch = () if summary else _progress_epoch_segments(progress.get("epoch"))
-        age = progress.get("age_s")
-    return _render_progress_row(body, epoch, age, indent, width)
-
-
-def _render_progress_row(body, epoch, age, indent, width):
-    """Shared row layout, color roles, age reservation and clipping in both views."""
-    body = list(body)
-    if epoch:
-        body = list(epoch) + [(" · ", "dim")] + body
-    prefix = [(indent + "      ", None), ("↳ ", "dim")]
-    age_text, age_key = _progress_age(age)
-    suffix = [(" · ", "dim"), (age_text, age_key)] if age_text else []
-    # The age is the stall signal, so the body yields width before it does.
-    room = width - sum(_dw(text) for text, _key in prefix + suffix)
-    if room >= 2:
-        segs = prefix + _clip_progress_segments(body, room) + suffix
-    else:
-        segs = prefix + ([(age_text, age_key)] if age_text else body)
-    return _clip_segs(segs, width)[0]
 
 
 def _fresh_compute_hosts():
@@ -5021,11 +4881,13 @@ def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False):
 def _gpu_work_row(entry, term_width=None):
     """F-104 card row for a live GPU process no run registry or session line shows."""
     indent = _conn_indent(0, False)
-    width = max(20, int(term_width or 200))
+    width = max(20, int(term_width or 200)) - 1
     command = _gpu_safe_text(entry.get("command"))
+    command_label = False
     if command:
         name = _gpu_process_label(command)
         if name == command:
+            command_label = True
             name = _gpu_display_command(command)
     else:
         name = os.path.basename(_gpu_safe_text(entry.get("process_name"))) or "process"
@@ -5046,17 +4908,17 @@ def _gpu_work_row(entry, term_width=None):
             segs += [(" · ", "dim"), (tag, "lvl_y")]
         return segs
 
-    # The name earns whatever the barest variant leaves: optional time/tag
-    # yield first through the existing levels, so a long argv tail is cut
-    # only by the real terminal width (with an ellipsis mark), never by a
-    # fixed clamp. Labels that already fit stay byte-identical.
+    # Optional time/tag yield first. A command then loses its middle instead
+    # of its script suffix; identifier-based labels keep their existing clip.
     for show_time, show_tag in ((True, True), (True, False), (False, False)):
         segs = build(show_time, show_tag)
         if sum(_dw(text) for text, _key in segs) <= width:
             return segs
     bare = build(False, False, "")
     room = width - sum(_dw(text) for text, _key in bare)
-    return _clip_segs(build(False, False, _clip_w(name, max(1, room))), width)[0]
+    label = (_gpu_clip_command(name, max(1, room)) if command_label
+             else _clip_w(name, max(1, room)))
+    return _clip_segs(build(False, False, label), width)[0]
 
 
 def _gpu_process_label(command):
@@ -5280,7 +5142,7 @@ def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1,
 
 
 def _compute_host_rows(term_width=None, sessions=None, resources=None):
-    snapshot = _compute_hosts.with_training_progress(_COMPUTE_HOSTS, resources)
+    snapshot = _COMPUTE_HOSTS
     if not isinstance(snapshot, dict):
         return []
     width = max(20, int(term_width or 200))

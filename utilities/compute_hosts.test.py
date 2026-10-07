@@ -222,10 +222,6 @@ class ComputeHostsTest(unittest.TestCase):
             "    ssh_port: 2222\n"
             "    ssh_user: someone\n",
             encoding="utf-8")
-        # The probe's epoch cache lives under TMPDIR; keep it inside this fixture.
-        environ = mock.patch.dict(os.environ, {"TMPDIR": str(self.root)})
-        environ.start()
-        self.addCleanup(environ.stop)
         # A run's completion watch notifies through the dispatch state root; keep it here.
         self.env = {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
                     "HARNESS_STATE_ROOT": str(self.root / "state")}
@@ -694,11 +690,15 @@ class ComputeHostsTest(unittest.TestCase):
         clean = {key: value for key, value in os.environ.items() if key not in identity_keys}
         processes = []
         try:
-            run_proc = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(10)"],
-                env={**clean, "HEARTING_COMPUTE_RUN_ID": "cnn-run-7",
-                     "HEARTING_COMPUTE_HOST": "cnn"},
-            )
+            log = self.root / "train.log"
+            log.write_text("Epoch 3/200\nTRAIN: 50% loss=0.5\n")
+            with log.open("ab") as output:
+                run_proc = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(10)"],
+                    env={**clean, "HEARTING_COMPUTE_RUN_ID": "cnn-run-7",
+                         "HEARTING_COMPUTE_HOST": "cnn"},
+                    stdout=output, stderr=output,
+                )
             ambiguous_proc = subprocess.Popen(
                 [sys.executable, "-c", "import time; time.sleep(10)"],
                 env={**clean, "CODEX_THREAD_ID": "same-session-token",
@@ -739,6 +739,9 @@ class ComputeHostsTest(unittest.TestCase):
 
         self.assertEqual([gpu["index"] for gpu in payload["gpus"]], [0, 1])
         first, second = payload["gpus"]
+        for gpu in payload["gpus"]:
+            for process in gpu["processes"]:
+                self.assertNotIn("progress", process)
         self.assertEqual(len(first["processes"]), 2)
         by_pid = {row["pid"]: row for row in first["processes"]}
         self.assertEqual(by_pid[run_proc.pid]["owner"]["kind"], "run")
@@ -830,7 +833,7 @@ class ComputeHostsTest(unittest.TestCase):
             self.assertIsInstance(other["pgid"], int)
             self.assertIsInstance(other["proc_start"], int)
 
-    def test_gpu_probe_reports_progress_only_for_file_redirected_output(self):
+    def test_gpu_probe_omits_training_logs_and_does_not_create_epoch_cache(self):
         log = self.root / "train.log"
         with log.open("wb") as handle:
             handle.write(b"Epoch 3/10\n"
@@ -844,25 +847,20 @@ class ComputeHostsTest(unittest.TestCase):
             [sys.executable, "-c", "import time; time.sleep(10)"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         try:
-            payload = self._probe_with_fake_smi(
-                [["GPU-A", to_file.pid, "python", 512],
-                 ["GPU-A", to_pipe.pid, "python", 256]], "progress-bin")
+            with mock.patch.dict(os.environ, {"TMPDIR": str(self.root)}):
+                payload = self._probe_with_fake_smi(
+                    [["GPU-A", to_file.pid, "python", 512],
+                     ["GPU-A", to_pipe.pid, "python", 256]], "progress-bin")
         finally:
             for child in (to_file, to_pipe):
                 child.terminate()
                 child.wait(timeout=2)
             to_pipe.stdout.close()
         by_pid = {row["pid"]: row for row in payload["gpus"][0]["processes"]}
-        progress = by_pid[to_file.pid]["progress"]
-        self.assertEqual(progress["line"], "TRAIN: 11%|# | 11/100 [00:01<00:09]")
-        self.assertIsInstance(progress["age_s"], int)
-        self.assertEqual(progress["epoch"], {"n": "3", "of": 10})
+        self.assertNotIn("progress", by_pid[to_file.pid])
         self.assertNotIn("progress", by_pid[to_pipe.pid])
         cache_dir = self.root / ("hearting-%d" % os.geteuid())
-        self.assertEqual(cache_dir.stat().st_mode & 0o777, 0o700)
-        (cache_file,) = cache_dir.glob("progress-epochs-v1-*.json")
-        self.assertEqual(cache_file.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(len(json.loads(cache_file.read_text())["files"]), 1)
+        self.assertFalse(cache_dir.exists())
 
     def test_persistent_claim_reconnects_a_detached_root_to_its_session(self):
         module = load_module()
@@ -1547,9 +1545,8 @@ class CompletionWatchTest(unittest.TestCase):
 class ProbeCommandHashTest(unittest.TestCase):
     """Per-GPU process command hash: stable same-EUID read, else None.
 
-    Narrow identity exposure for the host-qualified remote training join.
-    Unreadable, dead, or recycled pids fail soft so the join keeps the raw
-    probe line instead of mismatching.
+    Keep structured command identity even when the terminal shortens argv.
+    Unreadable, dead, or recycled pids fail soft.
     """
 
     def setUp(self):
@@ -1582,567 +1579,6 @@ class ProbeCommandHashTest(unittest.TestCase):
         live_start = self.ns["proc_stat"](live.pid)["start"]
         self.assertIsNone(self.ns["process_command_hash"](live.pid, live_start + 1))
 
-
-class ProbeProgressTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        self.ns = probe_namespace()
-
-    def spawn(self, stdout, stderr):
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"],
-                                 stdout=stdout, stderr=stderr)
-        if child.stdout is not None:
-            self.addCleanup(child.stdout.close)
-        self.addCleanup(child.wait, 2)
-        self.addCleanup(child.terminate)
-        return child
-
-    def progress(self, child):
-        return self.ns["process_progress"](child.pid, self.ns["proc_stat"](child.pid)["start"])
-
-    def test_latest_regular_file_wins_and_tqdm_line_is_clean(self):
-        older = self.root / "out.log"
-        newer = self.root / "err.log"
-        older.write_bytes(b"epoch 1 done\n")
-        newer.write_bytes(
-            b"loading\n"
-            b"TRAIN:  51%|\x1b[33m\xe2\x96\x88\x1b[0m| 10458/20000 [46:49<47:30, 3.3batch/s]\r"
-            b"TRAIN:  52%|\x1b[33m\xe2\x96\x88\x1b[0m| 10459/20000 [46:50<47:21,  3.36batch/s]"
-            b" , L_se=6.77e-03\x1b]0;title\x07\r\r")
-        os.utime(older, (time.time() - 600, time.time() - 600))
-        with older.open("ab") as out, newer.open("ab") as err:
-            child = self.spawn(out, err)
-        progress = self.progress(child)
-        self.assertEqual(progress["line"],
-                         "TRAIN: 52%|\u2588| 10459/20000 [46:50<47:21, 3.36batch/s] , L_se=6.77e-03")
-        self.assertTrue(0 <= progress["age_s"] < 60, progress)
-
-    def test_only_the_tail_of_a_large_file_is_read(self):
-        log = self.root / "big.log"
-        with log.open("wb") as handle:
-            handle.write((b"x" * 1023 + b"\n") * 2048)
-            handle.write(b"step 9/10 loss=0.5\n")
-        size = log.stat().st_size
-        with log.open("ab") as out:
-            child = self.spawn(out, subprocess.DEVNULL)
-        fdinfo = Path("/proc/%d/fdinfo/1" % child.pid)
-        position = fdinfo.read_text().splitlines()[0]
-        with mock.patch.object(os, "pread", wraps=os.pread) as pread:
-            progress = self.progress(child)
-        self.assertEqual(progress["line"], "step 9/10 loss=0.5")
-        pread.assert_called_once()
-        self.assertEqual(pread.call_args.args[1:], (4096, size - 4096))
-        # The trainer's own file offset is never moved by the probe.
-        self.assertEqual(fdinfo.read_text().splitlines()[0], position)
-
-    def test_long_line_is_display_bounded(self):
-        log = self.root / "long.log"
-        log.write_bytes(b"a" * 3000 + b"\n")
-        with log.open("ab") as out:
-            child = self.spawn(out, out)
-        self.assertEqual(self.progress(child)["line"], "a" * 200)
-
-    def test_json_progress_is_parsed_before_display_clipping_without_more_io(self):
-        record = {"utc": "2026-10-04T04:46:16Z", "metadata": "x" * 400,
-                  "phase": "training-updates", "arm": "baseline",
-                  "pid": 123, "attempt": 17808, "successful": 17808}
-        raw = json.dumps(record)
-        log = self.root / "json.log"
-        log.write_text(raw + "\n")
-        with log.open("ab") as out:
-            child = self.spawn(out, out)
-        with mock.patch.object(os, "pread", wraps=os.pread) as pread:
-            progress = self.progress(child)
-        pread.assert_called_once()
-        self.assertEqual(progress["line"], raw[:200])
-        self.assertEqual(progress["summary"],
-                         "training-updates · baseline · attempt 17808 · successful 17808")
-        self.assertNotIn("epoch", progress)
-
-    def test_json_progress_keeps_attempt_and_successful_as_separate_units(self):
-        summarize = self.ns["progress_json_summary"]
-        self.assertEqual(summarize(b'{"attempt":9}'), "attempt 9")
-        self.assertEqual(summarize(b'{"successful":8}'), "successful 8")
-        self.assertEqual(
-            summarize(b'{"phase":"training-updates","arm":"baseline",'
-                      b'"attempt":17808,"successful":17808}'),
-            "training-updates · baseline · attempt 17808 · successful 17808")
-        self.assertEqual(
-            summarize(b'{"attempt":100,"successful":95}'),
-            "attempt 100 · successful 95")
-        for raw in (b'{"attempt":true}', b'{"attempt":-1}', b'{"attempt":1.5}',
-                    b'{"attempt":"3"}', b'{"attempt":1000000000000}'):
-            with self.subTest(raw=raw):
-                self.assertIsNone(summarize(raw))
-
-    def test_json_progress_unknown_and_partial_records_keep_raw_fallback(self):
-        for raw in (b'{"phase":"train","step":', b'{"step":true}',
-                    b'{"step":-1}', b'{"step":1.5}', b'{"step":"3"}',
-                    b'{"step":1000000000000}', b'{"loss":0.4}',
-                    b'{"successful":1}\nnot a progress record', b'[]'):
-            with self.subTest(raw=raw):
-                self.assertIsNone(self.ns["progress_json_summary"](raw))
-        self.assertEqual(self.ns["progress_json_summary"](
-            b'{"phase":"train","epoch":0,"global_step":17}'),
-            "train · epoch 0 · global_step 17")
-
-    def test_json_progress_control_only_labels_do_not_break_collection(self):
-        log = self.root / "control-labels.log"
-        log.write_text(json.dumps({"phase": "\x00", "arm": "\u200b",
-                                   "successful": 17808}) + "\n")
-        with log.open("ab") as out:
-            child = self.spawn(out, out)
-        self.assertEqual(self.progress(child)["summary"], "successful 17808")
-        self.assertEqual(self.ns["progress_json_summary"](
-            b'{"phase":"\\u0000","arm":"baseline","step":9}'),
-            "baseline · step 9")
-
-    def test_pipe_tty_and_device_outputs_have_no_progress(self):
-        piped = self.spawn(subprocess.PIPE, subprocess.DEVNULL)
-        self.assertIsNone(self.progress(piped))
-        master, slave = os.openpty()
-        self.addCleanup(os.close, master)
-        try:
-            tty = self.spawn(slave, slave)
-        finally:
-            os.close(slave)
-        self.assertIsNone(self.progress(tty))
-
-    def test_stale_output_reports_its_age(self):
-        log = self.root / "stale.log"
-        log.write_bytes(b"TRAIN: 5%|#| 1/20 [00:01<00:19]\n")
-        os.utime(log, (time.time() - 900, time.time() - 900))
-        with log.open("ab") as out:
-            child = self.spawn(out, out)
-        self.assertGreaterEqual(self.progress(child)["age_s"], 899)
-
-    def test_read_failures_and_identity_changes_are_fail_soft(self):
-        log = self.root / "train.log"
-        log.write_bytes(b"step 1\n")
-        other = self.root / "other.log"
-        other.write_bytes(b"step 2\n")
-        with log.open("ab") as out:
-            child = self.spawn(out, out)
-        start = self.ns["proc_stat"](child.pid)["start"]
-        with mock.patch.object(os, "open", side_effect=PermissionError("denied")):
-            self.assertIsNone(self.ns["process_progress"](child.pid, start))
-        with mock.patch.object(os, "pread", side_effect=OSError("io")):
-            self.assertIsNone(self.ns["process_progress"](child.pid, start))
-        with mock.patch.object(os, "fstat", return_value=other.stat()):
-            self.assertIsNone(self.ns["process_progress"](child.pid, start))
-        self.assertIsNone(self.ns["process_progress"](child.pid, start + 1))
-        self.ns["same_euid"] = mock.Mock(return_value=False)
-        self.assertIsNone(self.ns["process_progress"](child.pid, start))
-
-
-
-def bar(desc, done, total, colour=b"33"):
-    """One tqdm update as it lands in a redirected log: coloured bar, `\r`-separated."""
-    pct = done * 100 // total
-    head = (desc + b": ") if desc else b""
-    return (head + b"%3d%%|\x1b[" % pct + colour + b"m" + b"\xe2\x96\x88" * (pct // 10)
-            + b"\x1b[0m| %d/%d [00:01<00:09, 3.2batch/s] , L_se=4.4e-03\r" % (done, total))
-
-
-def bars(desc, total, upto=None, colour=b"33"):
-    return b"".join(bar(desc, done, total, colour)
-                    for done in (0, 1, (upto or total) // 2, upto or total))
-
-
-class ProbeEpochTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
-        self.cache_dir = self.root / "cache"
-        self.cache_dir.mkdir(mode=0o700)
-        self.ns = probe_namespace()
-
-    def write(self, name, *parts, mode="wb"):
-        path = self.root / name
-        with path.open(mode) as handle:
-            handle.write(b"".join(parts))
-        return path
-
-    def probe(self, log, cache_dir=None):
-        """One probe of `log` through a freshly loaded cache: the published epoch."""
-        cache = self.ns["epoch_cache_open"](
-            str(self.cache_dir) if cache_dir is None else cache_dir or None)
-        handle = os.open(log, os.O_RDONLY)
-        try:
-            opened = os.fstat(handle)
-            line = self.ns["progress_last_line"](
-                os.pread(handle, 4096, max(0, opened.st_size - 4096)))
-            view = self.ns["file_epoch"](handle, opened, line, cache)
-        finally:
-            os.close(handle)
-        self.ns["epoch_cache_save"](cache)
-        return view
-
-    def cached(self):
-        (path,) = self.cache_dir.glob("progress-epochs-v1-*.json")
-        return json.loads(path.read_text())["files"]
-
-    def test_end_of_epoch_lines_count_the_next_epoch_once_its_bar_restarts(self):
-        log = self.write(
-            "sr.log",
-            b"{'config': {'max_epoch': 200, 'num_per_epoch': 20000}}\n",
-            bars(b"VALID", 2000, colour=b"31"), b"\n",
-            b"[Epoch 0] INIT-valid (156.1s)L_se=9.63e-02 | L_loc=5.73e-01\n",
-            bars(b"TRAIN", 20000), b"\n",
-            b"2026-10-02 12:16:28.981 | INFO | engine:run:333 - [cfg.yaml]\n",
-            b"[Epoch 1] TRAIN (6254.3s)L_se=6.56e-03 | L_loc=1.94e-01\n",
-            bars(b"VALID", 2000, colour=b"31"), b"\n",
-            b"[Epoch 1] VALID-valid (151.2s)L_se=4.83e-03 | L_loc=3.73e-02\n",
-            b"2026-10-02 12:19:00.231 | INFO | engine:run:345 - [cfg.yaml][Epoch   1] LR=2.00e-04\n",
-            b"2026-10-02 12:19:02.202 | INFO | util:save_checkpoint:194 - "
-            b"New best model at epoch 1 (metric=4.8307e-03)\n",
-            b"2026-10-02 12:19:02.300 | DEBUG | util:prune:143 - Pruned old checkpoint: epoch.0019.pth\n",
-            bars(b"TRAIN", 20000, upto=12888))
-        self.assertEqual(self.probe(log), {"n": "2", "of": 200})
-        # Training of epoch 2 ends; its validation runs: the honest reading is "2 done".
-        self.write("sr.log", bar(b"TRAIN", 20000, 20000), b"\n",
-                   b"[Epoch 2] TRAIN (6307.4s)L_se=4.41e-03 | L_loc=2.68e-02\n",
-                   bars(b"VALID", 2000, upto=700, colour=b"31"), mode="ab")
-        self.assertEqual(self.probe(log), {"n": "2", "of": 200, "done": True})
-        self.write("sr.log", bar(b"VALID", 2000, 2000, b"31"), b"\n",
-                   b"[Epoch 2] VALID-valid (149.8s)L_se=4.01e-03\n",
-                   b"New best model at epoch 2 (metric=4.0083e-03)\n",
-                   bars(b"TRAIN", 20000, upto=40), mode="ab")
-        self.assertEqual(self.probe(log), {"n": "3", "of": 200})
-
-    def test_validation_summary_first_still_finds_the_training_bar(self):
-        log = self.write(
-            "m7.log",
-            bars(b"TRAIN", 20000), b"\n", bars(b"VALID", 2000, colour=b"31"), b"\n",
-            b"[Epoch 25] VALID-valid (268.0s)L_se=3.26e-03\n",
-            b"[Epoch 25] TRAIN (7325.2s)L_se=3.28e-03\n",
-            b"[m7.yaml][Epoch  25] LR=9.57e-05\n",
-            bars(b"TRAIN", 20000, upto=2456))
-        self.assertEqual(self.probe(log), {"n": "26"})
-
-    def test_start_of_epoch_and_in_progress_notations(self):
-        cases = {
-            "keras": ((b"Epoch 3/100\n", b"  12/625 [>....] - ETA: 1:02 - loss: 0.51\r",
-                       b"  13/625 [>....] - ETA: 1:01 - loss: 0.50"), {"n": "3", "of": 100}),
-            "tutorial": ((b"Epoch 2/24\n", b"----------\n", b"train Loss: 0.31 Acc: 0.90\n",
-                          b"val Loss: 0.20 Acc: 0.93\n", bars(b"", 120, upto=30)),
-                         {"n": "2", "of": 24}),
-            "postfix": ((b"train: 50%|##| 50/100 [00:01<00:01, epoch=3, loss=0.2]\n",
-                         b"UserWarning: something\n"), {"n": "3"}),
-            "hf": ((b"  Num Epochs = 3\n",
-                    b"{'loss': 0.51, 'grad_norm': 1.2, 'learning_rate': 5e-05, 'epoch': 1.23}\n",
-                    bars(b"", 3000, upto=1234)), {"n": "1.23", "of": 3}),
-            "mmengine": ((b"Epoch(train)  [3][ 100/1250]  lr: 1.0e-03  eta: 1:00:00  loss: 0.5\n",
-                          b"UserWarning: something\n"), {"n": "3"}),
-            "lightning-not-last": ((b"Epoch 3/99:  45%|####| 100/220 [00:10<00:12, loss=0.3]\n",
-                                    b"UserWarning: something\n"), {"n": "3", "of": 99}),
-            "start-word": ((b"[trainer] starting epoch 7, best so far 0.3\n",
-                            bars(b"train", 50, upto=10)), {"n": "7"}),
-            "fairseq-done": ((b"epoch 004 | loss 4.3 | done\n", bars(b"", 10, upto=2)),
-                             {"n": "4", "done": True}),
-        }
-        for name, (parts, expected) in cases.items():
-            with self.subTest(name):
-                self.assertEqual(self.probe(self.write(name + ".log", *parts)), expected)
-
-    def test_an_epoch_already_in_the_last_line_is_left_to_the_line(self):
-        log = self.write("pl.log", b"Epoch 2: 100%|####| 220/220 [00:20<00:00]\n",
-                         b"Epoch 3:  45%|####| 100/220 [00:10<00:12, loss=0.3]")
-        self.assertIsNone(self.probe(log))
-
-    def test_non_epoch_words_and_look_back_mentions(self):
-        log = self.write(
-            "noise.log",
-            b"steps per epoch: 625, num_per_epoch=20000, epoch_loss=0.3, warmup_epochs: 5\n",
-            b"saved epoch.0019.pth; every epoch 9 a checkpoint\n",
-            bars(b"train", 50, upto=10))
-        self.assertIsNone(self.probe(log))
-        self.write("noise.log", b"\nepochs: 50\n", bars(b"train", 50), b"\n",
-                   b"[Epoch 3] train (10.0s) loss=0.12\n",
-                   b"Best so far: epoch 1 (loss=0.2)\n",
-                   bars(b"train", 50, upto=10), mode="ab")
-        self.assertEqual(self.probe(log), {"n": "4", "of": 50})
-
-    def test_large_log_is_read_incrementally_after_its_first_scan(self):
-        self.ns.update(EPOCH_CHUNK_BYTES=4096, EPOCH_PROBE_BYTES=8192,
-                       EPOCH_FIRST_SCAN_BYTES=64 * 1024)
-        noise = b"".join(b"step %06d loss=0.5\n" % i for i in range(5000))   # ~100 KiB
-        log = self.write("big.log", b"[Epoch 1] train (9.0s) loss=0.9\n", noise,
-                         bars(b"train", 50), b"\n", b"[Epoch 7] train (9.0s) loss=0.2\n",
-                         noise[:30000], bars(b"train", 50, upto=20))
-        size = log.stat().st_size
-        with mock.patch.object(os, "pread", wraps=os.pread) as pread:
-            self.assertIsNone(self.probe(log))       # budget spent: not current yet
-        # A single bounded header read supplements, rather than widens, the tail scan.
-        reads = [(call.args[1], call.args[2]) for call in pread.call_args_list]
-        self.assertEqual([length for length, offset in reads if offset == 0], [64 * 1024])
-        self.assertEqual(min(offset for _length, offset in reads if offset), size - 64 * 1024)
-        self.assertLessEqual(sum(length for length, offset in reads if offset and offset != size - 4096),
-                             8192 + 64)
-        views = [self.probe(log) for _ in range(12)]
-        self.assertEqual(views[-1], {"n": "8"})
-        (entry,) = self.cached().values()
-        self.assertEqual(entry["off"], size)
-        self.write("big.log", bar(b"train", 21, 50), bar(b"train", 22, 50), mode="ab")
-        with mock.patch.object(os, "pread", wraps=os.pread) as pread:
-            self.assertEqual(self.probe(log), {"n": "8"})
-        size = log.stat().st_size
-        reads = [(call.args[1], call.args[2]) for call in pread.call_args_list]
-        # Besides the existing 4 KiB tail: a 64-byte anchor before the saved offset,
-        # then only the newly written bytes.
-        self.assertEqual(reads[0], (4096, size - 4096))
-        self.assertEqual(reads[1], (64, entry["off"] - 64))
-        self.assertEqual(sum(length for length, _offset in reads[2:]), size - entry["off"])
-
-    def test_missing_or_broken_cache_rescans_and_rewrites(self):
-        log = self.write("t.log", b"Epoch 4/9\n", bars(b"", 10, upto=3))
-        self.assertEqual(self.probe(log), {"n": "4", "of": 9})
-        (path,) = self.cache_dir.glob("progress-epochs-v1-*.json")
-        for broken in (b"{not json", b"[]", b'{"files": []}',
-                       json.dumps({"files": {k: dict(v, off="x") for k, v in self.cached().items()}}).encode(),
-                       json.dumps({"files": {k: dict(v, state={"n": "4; rm"}) for k, v in self.cached().items()}}).encode()):
-            with self.subTest(broken[:20]):
-                path.write_bytes(broken)
-                self.assertEqual(self.probe(log), {"n": "4", "of": 9})
-                (entry,) = self.cached().values()
-                self.assertEqual(entry["state"]["n"], "4")
-        path.unlink()
-        self.assertEqual(self.probe(log), {"n": "4", "of": 9})
-
-    def head_log(self, name, header, tail=b"Epoch 7\n", upto=10):
-        self.ns.update(EPOCH_FIRST_SCAN_BYTES=2048, EPOCH_CHUNK_BYTES=2048)
-        return self.write(name, header, b"noise\n" * 12000, tail,
-                          bars(b"train", 50, upto=upto))
-
-    def measured_probe(self, log, **kwargs):
-        reads = []
-        pread = os.pread
-        def measured(fd, count, offset):
-            raw = pread(fd, count, offset)
-            reads.append((offset, count, len(raw)))
-            return raw
-        with mock.patch.object(os, "pread", side_effect=measured):
-            view = self.probe(log, **kwargs)
-        return view, reads
-
-    def test_bounded_header_total_does_not_supply_the_current_epoch(self):
-        log = self.head_log("head.log", b"Epoch 99\n{'max_epoch': 200}\n")
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "7", "of": 200})
-        head = [row for row in reads if row[0] == 0]
-        self.assertEqual(head, [(0, 65536, 65536)])
-        self.assertLessEqual(sum(row[2] for row in reads), 65536 + 4096 + 2048)
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "7", "of": 200})
-        self.assertEqual([row for row in reads if row[0] == 0], [])
-        self.assertEqual(sum(row[2] for row in reads), 4096 + 64)
-
-    def test_old_cache_without_header_result_is_backfilled_once(self):
-        log = self.head_log("old.log", b"max_epoch: 200\n")
-        self.assertEqual(self.probe(log), {"n": "7", "of": 200})
-        (path,) = self.cache_dir.glob("progress-epochs-v1-*.json")
-        old = self.cached()
-        (entry,) = old.values()
-        entry.pop("head_total")
-        entry["state"]["of"] = None
-        path.write_text(json.dumps({"files": old}))
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "7", "of": 200})
-        self.assertEqual([row for row in reads if row[0] == 0], [(0, 65536, 65536)])
-        again, reads = self.measured_probe(log)
-        self.assertEqual(again, view)
-        self.assertEqual([row for row in reads if row[0] == 0], [])
-
-    def test_transient_header_read_failure_recovers_on_the_next_normal_probe(self):
-        log = self.head_log("transient.log", b"max_epoch: 200\n")
-        pread = os.pread
-        heads = []
-        def fail_header(fd, count, offset):
-            if offset == 0 and count == 65536:
-                heads.append((offset, count))
-                raise OSError("one transient header read failure")
-            return pread(fd, count, offset)
-        with mock.patch.object(os, "pread", side_effect=fail_header):
-            self.assertEqual(self.probe(log), {"n": "7"})
-        self.assertEqual(heads, [(0, 65536)])
-        (entry,) = self.cached().values()
-        self.assertNotIn("head_total", entry)
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "7", "of": 200})
-        self.assertEqual([row for row in reads if row[0] == 0], [(0, 65536, 65536)])
-        (entry,) = self.cached().values()
-        self.assertEqual(entry["head_total"], 200)
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "7", "of": 200})
-        self.assertEqual([row for row in reads if row[0] == 0], [])
-        self.assertEqual(sum(row[2] for row in reads), 4096 + 64)
-
-    def test_no_total_header_is_cached_across_incremental_and_large_gap_reads(self):
-        log = self.head_log("negative.log", b"num_per_epoch=20000\nwarmup_epochs: 5\n")
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "7"})
-        self.assertEqual([row for row in reads if row[0] == 0], [(0, 65536, 65536)])
-        (entry,) = self.cached().values()
-        self.assertIn("head_total", entry)
-        self.assertIsNone(entry["head_total"])
-        appended = b"\nEpoch 8\n" + bars(b"train", 50, upto=20)
-        self.write("negative.log", appended, mode="ab")
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "8"})
-        self.assertEqual([row for row in reads if row[0] == 0], [])
-        self.assertEqual(sum(row[2] for row in reads), 4096 + 64 + len(appended))
-        self.ns["EPOCH_GAP_BYTES"] = 1024
-        self.write("negative.log", b"noise\n" * 1000, b"Epoch 9\n",
-                   bars(b"train", 50, upto=30), mode="ab")
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "9"})
-        self.assertEqual([row for row in reads if row[0] == 0], [])
-
-    def test_tail_total_wins_and_invalid_or_ambiguous_header_totals_stay_unknown(self):
-        log = self.head_log("tail.log", b"max_epoch: 200\n", b"Epoch 7/300\n")
-        self.assertEqual(self.probe(log), {"n": "7", "of": 300})
-        self.ns["EPOCH_GAP_BYTES"] = 1024
-        self.write("tail.log", b"noise\n" * 1000, b"Epoch 8\n",
-                   bars(b"train", 50, upto=20), mode="ab")
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "8", "of": 300})
-        self.assertEqual([row for row in reads if row[0] == 0], [])
-        cases = (b"max_epoch: false\n", b"max_epoch: 0\n", b"max_epoch: 200.5\n",
-                 b"max_epoch: 200e3\n", b"max_epoch: '200'\n",
-                 b"max_epoch: 200\nnum_epochs: 300\n",
-                 b"num_per_epoch=20000\nwarmup_epochs: 5\nevery epochs: 8\n")
-        for index, header in enumerate(cases):
-            with self.subTest(header=header):
-                log = self.head_log("invalid%d.log" % index, header)
-                self.assertEqual(self.probe(log), {"n": "7"})
-                self.assertEqual([row for row in self.measured_probe(log)[1] if row[0] == 0], [])
-
-    def test_bounded_header_never_accepts_a_cut_integer(self):
-        log = self.head_log("cut.log", b"x\n" * (65536 // 2 - 7) + b"max_epoch: 200\n")
-        self.assertEqual(self.probe(log), {"n": "7"})
-
-    def test_header_result_is_rechecked_after_rotation_truncation_or_anchor_mismatch(self):
-        log = self.head_log("generation.log", b"max_epoch: 200\n")
-        self.assertEqual(self.probe(log), {"n": "7", "of": 200})
-        log = self.head_log("generation.log", b"max_epoch: 300\n", b"Epoch 6\n", upto=11)
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "6", "of": 300})
-        self.assertEqual([row for row in reads if row[0] == 0], [(0, 65536, 65536)])
-        self.write("generation.log", b"max_epoch: 400\nEpoch 1\n", bars(b"train", 50, upto=10))
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "1", "of": 400})
-        self.assertEqual(len([row for row in reads if row[0] == 0 and row[1] == log.stat().st_size]), 2)
-        log.rename(self.root / "generation.log.old")
-        log = self.head_log("generation.log", b"max_epoch: 500\n")
-        view, reads = self.measured_probe(log)
-        self.assertEqual(view, {"n": "7", "of": 500})
-        self.assertEqual([row for row in reads if row[0] == 0], [(0, 65536, 65536)])
-
-    def test_cache_unavailable_does_not_add_header_reads_to_its_existing_tail_budget(self):
-        log = self.head_log("uncached.log", b"max_epoch: 200\n")
-        self.ns["EPOCH_NOCACHE_BYTES"] = 2048
-        for _probe in range(2):
-            view, reads = self.measured_probe(log, cache_dir=False)
-            self.assertEqual(view, {"n": "7"})
-            self.assertEqual([row for row in reads if row[0] == 0], [])
-            self.assertEqual(sum(row[2] for row in reads), 4096 + 2048)
-
-    def test_unsafe_or_missing_cache_dir_reads_only_a_small_tail(self):
-        self.ns["EPOCH_NOCACHE_BYTES"] = 2048
-        log = self.write("t.log", b"Epoch 5/9\n", b"x" * 4096 + b"\n", b"Epoch 6/9\n",
-                         bars(b"", 10, upto=3))
-        with mock.patch.object(os, "pread", wraps=os.pread) as pread:
-            self.assertEqual(self.probe(log, cache_dir=False), {"n": "6", "of": 9})
-        self.assertGreaterEqual(min(call.args[2] for call in pread.call_args_list),
-                                log.stat().st_size - 4096)
-        self.assertEqual(list(self.cache_dir.iterdir()), [])
-        shared = self.root / ("hearting-%d" % os.geteuid())
-        shared.mkdir(mode=0o700)
-        shared.chmod(0o777)
-        with mock.patch.dict(os.environ, {"TMPDIR": str(self.root)}):
-            self.assertIsNone(self.ns["epoch_cache_dir"]())
-            shared.rmdir()
-            shared.symlink_to(self.cache_dir)
-            self.assertIsNone(self.ns["epoch_cache_dir"]())
-            shared.unlink()
-            self.assertEqual(self.ns["epoch_cache_dir"](), str(shared))
-            self.assertEqual(shared.stat().st_mode & 0o777, 0o700)
-
-    def test_rotated_or_rewritten_files_never_reuse_old_state(self):
-        log = self.write("r.log", bars(b"train", 50), b"\n",
-                         b"[Epoch 7] train (9.0s) loss=0.2\n", bars(b"train", 50, upto=10))
-        self.assertEqual(self.probe(log), {"n": "8"})
-        # Rotation: a new file (new inode) at the same path starts from its own content.
-        log.rename(self.root / "r.log.1")
-        log = self.write("r.log", b"resumed\n", bars(b"train", 50, upto=10))
-        self.assertIsNone(self.probe(log))
-        self.assertEqual(len(self.cached()), 2)
-        # Same inode rewritten past the old offset: the content anchor no longer matches.
-        self.write("r.log", b"Epoch 2/5\n", b"y" * 600 + b"\n", bars(b"train", 50, upto=10))
-        self.assertEqual(self.probe(log), {"n": "2", "of": 5})
-        self.write("r.log", b"Epoch 1/5\n", mode="wb")
-        self.write("r.log", bars(b"train", 50, upto=3), mode="ab")
-        self.assertEqual(self.probe(log), {"n": "1", "of": 5})
-
-    def spawn(self, log):
-        with log.open("ab") as out:
-            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(10)"],
-                                     stdout=out, stderr=out)
-        self.addCleanup(child.wait, 2)
-        self.addCleanup(child.terminate)
-        return child
-
-    def test_epoch_belongs_to_the_output_file_not_the_pid(self):
-        first, second = self.root / "a.log", self.root / "b.log"
-        first.write_bytes(b"Epoch 3/10\n" + bars(b"", 10, upto=4))
-        second.write_bytes(b"Epoch 8/10\n" + bars(b"", 10, upto=4))
-        cache = self.ns["epoch_cache_open"](str(self.cache_dir))
-        old = self.spawn(first)
-        self.assertEqual(self.ns["process_progress"](
-            old.pid, self.ns["proc_stat"](old.pid)["start"], cache)["epoch"],
-            {"n": "3", "of": 10})
-        old.terminate()
-        old.wait(2)
-        new = self.spawn(second)
-        progress = self.ns["process_progress"](
-            new.pid, self.ns["proc_stat"](new.pid)["start"], cache)
-        self.assertEqual(progress["epoch"], {"n": "8", "of": 10})
-        # A start time that no longer matches its pid yields nothing at all.
-        self.assertIsNone(self.ns["process_progress"](
-            new.pid, self.ns["proc_stat"](new.pid)["start"] + 1, cache))
-
-    def test_processes_sharing_one_log_scan_it_once_per_probe(self):
-        log = self.root / "ddp.log"
-        log.write_bytes(b"Epoch 2/4\n" + bars(b"", 10, upto=4))
-        ranks = [self.spawn(log), self.spawn(log)]
-        cache = self.ns["epoch_cache_open"](str(self.cache_dir))
-        scan = self.ns["epoch_scan_file"]
-        self.ns["epoch_scan_file"] = mock.Mock(wraps=scan)
-        views = [self.ns["process_progress"](
-            child.pid, self.ns["proc_stat"](child.pid)["start"], cache)["epoch"]
-            for child in ranks]
-        self.assertEqual(views, [{"n": "2", "of": 4}] * 2)
-        self.ns["epoch_scan_file"].assert_called_once()
-
-    def test_epoch_failures_never_cost_the_progress_line(self):
-        log = self.root / "f.log"
-        log.write_bytes(b"Epoch 2/4\n" + bars(b"", 10, upto=4))
-        child = self.spawn(log)
-        start = self.ns["proc_stat"](child.pid)["start"]
-        cache = self.ns["epoch_cache_open"](str(self.cache_dir))
-        self.ns["epoch_scan_file"] = mock.Mock(side_effect=RuntimeError("bug"))
-        progress = self.ns["process_progress"](child.pid, start, cache)
-        self.assertNotIn("epoch", progress)
-        self.assertTrue(progress["line"].endswith("L_se=4.4e-03"))
-        # A failing cache write is skipped silently.
-        cache = self.ns["epoch_cache_open"](str(self.cache_dir))
-        cache["dirty"] = True
-        with mock.patch.object(os, "replace", side_effect=OSError("read-only")):
-            self.ns["epoch_cache_save"](cache)
-        self.assertEqual([path.name for path in self.cache_dir.iterdir()], [])
 
 if __name__ == "__main__":
     unittest.main()
