@@ -86,6 +86,11 @@ memory, preserving D-42.
 
 There are two retrieval surfaces. First, curated memory in durable and working tiers is searched by `mem recall` through SQLite FTS5 with BM25 ranking, falling back to LIKE or `rg`. A shortened or ellipsized snippet is never final evidence: if a hit is truncated or insufficient for the judgment, immediately read its full body by record ID with `show <id>` or use `recall --full --limit N`. Direct SQLite or `dump.jsonl` queries are not a normal retrieval path. Second, `--sessions` searches raw historical transcripts that have not been distilled into memory. Raw sessions are noisy and should supplement curated memory only when useful.
 
+Database-backed conversation readers keep one read-only transaction across a
+chunk's queries. Concurrent appends preserve that view without copying the whole
+database. A failed read retains the card and watermarks and reports its cause in
+one bounded line.
+
 **Agent-owned adoption:** deterministic candidate exposure prevents the search step from being silently omitted, but the agent alone decides whether prior context may materially improve the current judgment. No fixed signal words, mandatory topic list, prompt classifier, category-to-recall rule, or score threshold may adopt a candidate. Ignore unrelated candidates. Before using a candidate, read its full record; widen to historical, cross-project, body, or raw-session data only when useful, and cross-check retrieved claims against current code or artifacts because memory can be stale.
 
 - **Pointer follow-through:** when a recall result names a project file or

@@ -38,6 +38,7 @@ or unreadable record):
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -111,13 +112,32 @@ def opencode_db_path() -> Path:
     return _sst._opencode_db()
 
 
-OPENCODE_READ_TRIES = 4        # a snapshot of a database other windows keep writing fails now and then
+OPENCODE_READ_TRIES = 4        # bounded recovery from transient SQLite access failures
+
+
+@contextlib.contextmanager
+def _opencode_view(db_path: Path) -> Iterator[sqlite3.Connection]:
+    """One native read-only view for the chunk, including rows still in the WAL.
+
+    SQLite holds a consistent snapshot across these queries while other windows
+    append. Copying the live database and WAL separately instead refused every
+    copy whose file signatures changed during the copy, starving a busy session.
+    """
+    con = sqlite3.connect(db_path.absolute().as_uri() + "?mode=ro&cache=private", uri=True, timeout=1)
+    try:
+        con.execute("BEGIN")
+        yield con
+    finally:
+        con.close()
+
+
+def _read_error(exc: Exception) -> str:
+    detail = " ".join(str(exc).split())[:180]
+    return f"unreadable: {exc.__class__.__name__}" + (f": {detail}" if detail else "")
 
 
 def _opencode_retry(read, pause: float = 0.5) -> "Chunk":
-    """``read()`` again while its snapshot was unreadable: every OpenCode window writes the same database,
-    so the private copy is refused whenever a write lands during the copy (about one read in two on a
-    busy 1 GB database, measured 2026-10-01).  A real failure still comes back as the last error."""
+    """Retry transient access failures a bounded number of times; retain the last cause."""
     chunk = read()
     for _ in range(OPENCODE_READ_TRIES - 1):
         if not chunk.error:
@@ -467,7 +487,7 @@ def _read_opencode(db_path: Path, session_id: str, cursor: int, limit: int) -> C
         chunk.error = "no session id"
         return chunk
     try:
-        with _rt._opencode_snapshot(str(db_path)) as con:
+        with _opencode_view(db_path) as con:
             rows = con.execute(
                 "SELECT p.rowid, p.data, p.time_updated, m.data FROM part p "
                 "LEFT JOIN message m ON m.id = p.message_id "
@@ -504,7 +524,7 @@ def _read_opencode(db_path: Path, session_id: str, cursor: int, limit: int) -> C
                     texts.append(_dialogue_line(role, text))
             chunk.cursor_to, chunk.eof, chunk.text = last, exhausted, "\n".join(texts)
     except (OSError, sqlite3.Error) as exc:
-        chunk.error = f"unreadable: {exc.__class__.__name__}"
+        chunk.error = _read_error(exc)
     return chunk
 
 
@@ -717,7 +737,7 @@ def _read_opencode_tail(db_path: Path, sid: str, mark: dict, limit: int) -> Chun
         chunk.error = "no session id"
         return chunk
     try:
-        with _rt._opencode_snapshot(str(db_path)) as con:
+        with _opencode_view(db_path) as con:
             plan = _plan_opencode(con, sid, mark)
             chunk.plan, chunk.total = plan, plan["end"]
             ranges = plan["ranges"]
@@ -764,7 +784,7 @@ def _read_opencode_tail(db_path: Path, sid: str, mark: dict, limit: int) -> Chun
             chunk.pending_after = _subtract(ranges, low, hi)
             chunk.eof = not chunk.pending_after
     except (OSError, sqlite3.Error) as exc:
-        chunk.error = f"unreadable: {exc.__class__.__name__}"
+        chunk.error = _read_error(exc)
     return chunk
 
 
@@ -893,7 +913,7 @@ def _discover(harness: str, horizon: float) -> Iterator[dict]:
         if not db.is_file():
             return
         try:
-            with _rt._opencode_snapshot(str(db)) as con:
+            with _opencode_view(db) as con:
                 rows = con.execute(
                     "SELECT id, directory, time_updated FROM session WHERE time_updated >= ? "
                     "AND parent_id IS NULL ORDER BY time_updated DESC LIMIT ?",

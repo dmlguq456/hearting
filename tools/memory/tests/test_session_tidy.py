@@ -1336,6 +1336,62 @@ class ClearBookingTest(TidyCase):
             self.assertEqual(clear.validate_request(path), (None, "new-input"))
 
 
+class OpenCodeTransactionReadTest(TidyCase):
+
+    SID = "ses_fixture0000000000000001"
+
+    def writer(self):
+        load_opencode_fixture(self.iso.opencode_db)
+        con = sqlite3.connect(self.iso.opencode_db)
+        self.addCleanup(con.close)
+        self.assertEqual(con.execute("PRAGMA journal_mode=WAL").fetchone()[0], "wal")
+        return con
+
+    def append(self, con):
+        con.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)",
+                    ("prt_wal", "msg_fix01", self.SID, 1, 1,
+                     json.dumps({"type": "text", "text": "WAL append marker"})))
+        con.commit()
+
+    def test_one_read_only_view_stays_consistent_while_a_wal_writer_appends(self):
+        writer = self.writer()
+        with tt._opencode_view(self.iso.opencode_db) as reader:
+            before = reader.execute("SELECT COUNT(*) FROM part").fetchone()[0]
+            self.append(writer)
+            self.assertEqual(reader.execute("SELECT COUNT(*) FROM part").fetchone()[0], before)
+            with self.assertRaisesRegex(sqlite3.OperationalError, "readonly"):
+                reader.execute("DELETE FROM part")
+        with tt._opencode_view(self.iso.opencode_db) as reader:
+            self.assertEqual(reader.execute("SELECT COUNT(*) FROM part").fetchone()[0], before + 1)
+
+    def test_chunks_tail_and_discovery_read_live_wal_without_copying_the_database(self):
+        writer = self.writer()
+        self.append(writer)
+        self.assertGreater(Path(str(self.iso.opencode_db) + "-wal").stat().st_size, 0)
+        with self.library(), mock.patch.object(tt._rt, "_opencode_snapshot", side_effect=OSError("copy changed")), \
+                mock.patch.object(tt, "opencode_db_path", return_value=self.iso.opencode_db), \
+                mock.patch.object(tt, "now_epoch", return_value=FIXTURE_NOW + 2 * tt.OPEN_QUESTION_STALE_SEC):
+            before = tt.read_watermark("opencode", self.SID)
+            chunk = tt.read_chunk("opencode", self.iso.opencode_db, sid=self.SID)
+            tail = tt.read_pending("opencode", self.SID, self.iso.opencode_db)
+            sessions = list(tt._discover("opencode", 0))
+            self.assertEqual((chunk.error, tail.error), ("", ""))
+            self.assertIn("[user] WAL append marker", chunk.text)
+            self.assertIn("[user] WAL append marker", tail.text)
+            self.assertIn(self.SID, [item["sid"] for item in sessions])
+            self.assertEqual(tt.read_watermark("opencode", self.SID), before)
+
+    def test_an_unreadable_database_keeps_its_cause_on_one_line_and_does_not_advance(self):
+        self.iso.opencode_db.write_text("not a SQLite database")
+        with self.library(), mock.patch.object(tt.time, "sleep"):
+            before = tt.read_watermark("opencode", self.SID)
+            chunk = tt.read_pending("opencode", self.SID, self.iso.opencode_db)
+            self.assertIn("DatabaseError: file is not a database", chunk.error)
+            self.assertNotIn("\n", chunk.error)
+            self.assertLessEqual(len(chunk.error), 220)
+            self.assertEqual(tt.read_watermark("opencode", self.SID), before)
+
+
 class OpenCodeReadRetryTest(unittest.TestCase):
     """A snapshot of the shared OpenCode database is refused now and then; the read is tried again."""
 
