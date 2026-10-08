@@ -244,15 +244,19 @@ def prepare(repo: Path, head: str, *, api, version: str | None = None) -> dict:
         # Checkout and earlier plans may predate another publisher's tag.
         git(repo, "fetch", "--tags", "origin")
         tags = stable_tags(repo)
+        resume_tag = None
         for tag in stable_tags(repo, "--contains", head):
             release = api(f"releases/tags/{tag}")
             if release is not None and not release.get("draft") and not release.get("prerelease"):
                 return dict(release=False, base_tag=tag, head=head, bump="none",
                             version="", reason="already-published", mode="auto")
-            if git(repo, "rev-parse", f"{tag}^{{commit}}").strip() == head:
-                # A previous run may have reserved the tag but not published.
-                return dict(release=True, base_tag=tag, head=head, bump="none",
-                            version=tag, reason="resume-existing-tag", mode="auto")
+            if resume_tag is None and git(repo, "rev-parse", f"{tag}^{{commit}}").strip() == head:
+                resume_tag = tag
+        if resume_tag is not None:
+            # An orphan reservation cannot hide a published containing commit
+            # with a lower version. Check all publications before resuming.
+            return dict(release=True, base_tag=resume_tag, head=head, bump="none",
+                        version=resume_tag, reason="resume-existing-tag", mode="auto")
 
         value = dict(plan(repo, head), mode="auto")
         if not value["release"]:

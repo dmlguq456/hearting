@@ -127,6 +127,42 @@ class TagRaceTests(unittest.TestCase):
         self.assertEqual(second["reason"], "resume-existing-tag")
         self.assertEqual(self.created_refs, ["v1.0.1"])
 
+    def test_two_interrupted_publications_retry_newer_commit_before_older_commit(self):
+        self.assertEqual(self.prepare(0, self.b)["version"], "v1.0.1")
+        self.assertEqual(self.prepare(1, self.a)["version"], "v1.0.2")
+        resumed_b = self.prepare(0, self.b)
+        self.published.add(resumed_b["version"])
+        result = self.prepare(1, self.a)
+        self.assertFalse(result["release"])
+        self.assertEqual(result["reason"], "already-published")
+        self.assertEqual(self.created_refs, ["v1.0.1", "v1.0.2"])
+
+    def test_higher_orphan_for_same_commit_does_not_hide_published_version(self):
+        self.ref("v1.0.1", self.a)
+        self.ref("v1.0.2", self.a, publish=False)
+        self.assertFalse(self.prepare(0, self.a)["release"])
+        self.assertEqual(self.created_refs, [])
+
+    def test_unpublished_descendant_does_not_skip_exact_orphan_resume(self):
+        self.ref("v1.0.1", self.b, publish=False)
+        self.ref("v1.0.2", self.a, publish=False)
+        result = self.prepare(0, self.a)
+        self.assertTrue(result["release"])
+        self.assertEqual(result["version"], "v1.0.2")
+        self.assertEqual(result["reason"], "resume-existing-tag")
+
+    def test_publication_lookup_failure_after_orphan_is_not_hidden_by_resume(self):
+        self.ref("v1.0.1", self.b)
+        self.ref("v1.0.2", self.a, publish=False)
+        for status in (401, 403, 500):
+            with self.subTest(status=status):
+                def failed(endpoint, **fields):
+                    if endpoint == "releases/tags/v1.0.1":
+                        raise PLAN.GitHubError("lookup failed", status)
+                    return self.api(endpoint, **fields)
+                with self.assertRaises(PLAN.GitHubError):
+                    PLAN.prepare(self.jobs[0], self.a, api=failed)
+
     def test_tag_created_by_other_commit_between_lookup_and_create_replans(self):
         self.collision = lambda version: self.ref(version, self.a)
         result = self.prepare(0, self.b)
