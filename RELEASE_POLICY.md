@@ -28,11 +28,19 @@ silently skipped.
 
 Every push to `main` runs `Checks`. Only a successful, completed `Checks` run
 from this repository's `main` push admits an automatic release. The serialized
-release workflow runs the deterministic planner, builds the four release assets,
-creates an annotated SemVer tag, and publishes using that run's exact commit
+release workflow refreshes tags and reserves an annotated SemVer tag before
+building the four release assets, then publishes using that run's exact commit
 SHA. Failed, cancelled, pull-request, and foreign-repository runs cannot admit
 a release. A later default-branch tip never replaces the tested commit. The
 workflow does not rely on the generated tag starting a second workflow.
+
+Repeated checks for a published commit, or delayed checks for a commit already
+included in a newer published stable release, finish successfully without
+publishing again. An existing tag for the exact commit is reused so an
+interrupted publication can finish. If another commit occupies the planned
+version, publication refreshes the tags and replans above the current stable
+version. The reserved version is the one embedded in every asset and used for
+release notes; tags and existing assets are never replaced.
 
 Public Markdown documentation and the project's root `AGENTS.md` / `CLAUDE.md`
 run the generated-surface and contract checks, without the full runtime,

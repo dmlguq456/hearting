@@ -689,6 +689,13 @@ for a second entry approval. Older sealed quick routes retain their
 
 ### §5.11. Commit and Push Policy for `<agent-home>`
 
+Release publication uses immutable tags and the tested commit. Repeated or
+out-of-order successful checks are ordinary observations: refresh tags before
+reserving a version, reuse a tag for the same commit, and skip a commit already
+included in a published stable release. A version occupied by another commit
+is replanned from the current version without moving tags or asking the caller
+to repair the release queue. The release policy owns the version rules.
+
 After validating changes to instructions, rules, hooks, preflight, or runtime status surfaces under `<agent-home>`, commit and push them in the same turn without a separate user signal. A work repository's push is separate and remains subject to its deployment gate.
 
 ### §5.12. Continuation Supervisor and Tracked-Workflow Completion

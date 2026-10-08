@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -48,6 +49,12 @@ SEVERITY = {"none": 0, "patch": 1, "minor": 2, "major": 3}
 
 class PlanError(RuntimeError):
     pass
+
+
+class GitHubError(PlanError):
+    def __init__(self, detail: str, status: int | None = None):
+        super().__init__(detail)
+        self.status = status
 
 
 def git(repo: Path, *args: str) -> str:
@@ -184,6 +191,100 @@ def plan(repo: Path, head: str, base_tag: str | None = None) -> dict:
     }
 
 
+def github_api(repository: str, endpoint: str, *, method: str = "GET", **fields):
+    command = ["gh", "api", "--method", method, f"repos/{repository}/{endpoint}"]
+    for key, value in fields.items():
+        command.extend(("-f", f"{key}={value}"))
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode:
+        match = re.search(r"HTTP (\d{3})", result.stderr)
+        status = int(match[1]) if match else None
+        if method == "GET" and status == 404:
+            return None
+        raise GitHubError(result.stderr.strip() or "GitHub API failed", status)
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise GitHubError("GitHub API returned invalid JSON") from exc
+
+
+def tag_commit(api, version: str) -> str | None:
+    reference = api(f"git/ref/tags/{version}")
+    if reference is None:
+        return None
+    obj = reference["object"]
+    for _ in range(8):
+        if obj["type"] == "commit":
+            return obj["sha"]
+        if obj["type"] != "tag":
+            break
+        obj = api(f"git/tags/{obj['sha']}")["object"]
+    raise PlanError(f"release tag does not resolve to a commit: {version}")
+
+
+def stable_tags(repo: Path, *selection: str) -> list[str]:
+    tags = git(repo, "tag", *selection, "--list", "v*").splitlines()
+    return sorted((tag for tag in tags if STABLE_RE.fullmatch(tag)),
+                  key=lambda tag: parse_version(tag, stable_only=True), reverse=True)
+
+
+def prepare(repo: Path, head: str, *, api, version: str | None = None) -> dict:
+    """Refresh and reserve before assets embed the version; never move a tag."""
+    head = git(repo, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
+    if version:
+        parse_version(version)
+        if tag_commit(api, version) != head:
+            raise PlanError(f"selected tag does not match the tested commit: {version}")
+        release = api(f"releases/tags/{version}")
+        return dict(release=release is None, base_tag="", head=head, bump="manual",
+                    version=version, reason="validated-tag" if release is None else "already-published",
+                    mode="tag")
+
+    for _ in range(8):
+        # Checkout and earlier plans may predate another publisher's tag.
+        git(repo, "fetch", "--tags", "origin")
+        tags = stable_tags(repo)
+        for tag in stable_tags(repo, "--contains", head):
+            release = api(f"releases/tags/{tag}")
+            if release is not None and not release.get("draft") and not release.get("prerelease"):
+                return dict(release=False, base_tag=tag, head=head, bump="none",
+                            version="", reason="already-published", mode="auto")
+            if git(repo, "rev-parse", f"{tag}^{{commit}}").strip() == head:
+                # A previous run may have reserved the tag but not published.
+                return dict(release=True, base_tag=tag, head=head, bump="none",
+                            version=tag, reason="resume-existing-tag", mode="auto")
+
+        value = dict(plan(repo, head), mode="auto")
+        if not value["release"]:
+            return value
+        if tags:
+            floor = parse_version(tags[0], stable_only=True)
+            if parse_version(value["version"], stable_only=True) <= floor:
+                value["version"] = bump(floor, value["bump"])
+        version = value["version"]
+        existing = tag_commit(api, version)
+        if existing == head:
+            release = api(f"releases/tags/{version}")
+            value["release"] = release is None
+            value["reason"] = "resume-existing-tag" if release is None else "already-published"
+            return value
+        if existing is not None:
+            # Re-read publication state and the version floor after a collision.
+            continue
+        obj = api("git/tags", method="POST", tag=version,
+                  message=f"Hearting {version}", object=head, type="commit")
+        try:
+            api("git/refs", method="POST", ref=f"refs/tags/{version}", sha=obj["sha"])
+        except GitHubError as exc:
+            # Only an observed tag collision is retryable. Auth/network errors
+            # remain failures, and no existing ref or asset is overwritten.
+            if exc.status != 422 or tag_commit(api, version) is None:
+                raise
+            continue
+        return value
+    raise PlanError("release tags kept changing during version reservation")
+
+
 def emit(value: dict, output_format: str) -> None:
     if output_format == "json":
         print(json.dumps(value, ensure_ascii=False, sort_keys=True))
@@ -203,6 +304,10 @@ def main() -> int:
     plan_parser.add_argument("--head", default="HEAD")
     plan_parser.add_argument("--base-tag")
     plan_parser.add_argument("--format", choices=("json", "github"), default="json")
+    prepare_parser = sub.add_parser("prepare")
+    prepare_parser.add_argument("--repo", default=".")
+    prepare_parser.add_argument("--head", default="HEAD")
+    prepare_parser.add_argument("--format", choices=("json", "github"), default="json")
     validate_parser = sub.add_parser("validate-version")
     validate_parser.add_argument("version")
     args = parser.parse_args()
@@ -210,6 +315,15 @@ def main() -> int:
         if args.command == "validate-version":
             parse_version(args.version)
             print(args.version)
+        elif args.command == "prepare":
+            repository = os.environ["GITHUB_REPOSITORY"]
+            version = os.environ.get("REF_NAME") if os.environ.get("REF_TYPE") == "tag" else None
+            value = prepare(Path(args.repo).resolve(), args.head,
+                            api=lambda endpoint, **fields: github_api(repository, endpoint, **fields),
+                            version=version)
+            emit(value, args.format)
+            if args.format == "github":
+                print(f"mode={value['mode']}")
         else:
             emit(plan(Path(args.repo).resolve(), args.head, args.base_tag), args.format)
         return 0

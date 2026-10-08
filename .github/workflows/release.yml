@@ -79,26 +79,12 @@ jobs:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
           RELEASE_HEAD: ${{ needs.admission.outputs.head }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "$REF_TYPE" = tag ]; then
-            python3 tools/release/plan.py validate-version "$REF_NAME"
-            test "$(git rev-parse "refs/tags/$REF_NAME^{commit}")" = "$RELEASE_HEAD"
-            {
-              echo "release=true"
-              echo "mode=tag"
-              echo "base_tag="
-              echo "head=$RELEASE_HEAD"
-              echo "bump=manual"
-              echo "version=$REF_NAME"
-              echo "reason=validated-tag"
-            } >> "$GITHUB_OUTPUT"
-          else
-            python3 tools/release/plan.py plan \
-              --repo . \
-              --head "$RELEASE_HEAD" \
-              --format github >> "$GITHUB_OUTPUT"
-            echo "mode=auto" >> "$GITHUB_OUTPUT"
-          fi
+          python3 tools/release/plan.py prepare \
+            --repo . \
+            --head "$RELEASE_HEAD" \
+            --format github >> "$GITHUB_OUTPUT"
 
       - name: Report skipped release
         if: steps.plan.outputs.release != 'true'
@@ -109,7 +95,7 @@ jobs:
           {
             echo "## Release skipped"
             echo
-            echo "No release-relevant changes exist after \`$BASE_TAG\` (\`$REASON\`)."
+            echo "Baseline: \`$BASE_TAG\`; reason: \`$REASON\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       # Checks already validated this exact commit. Build and test the published
@@ -126,29 +112,6 @@ jobs:
             --repository "$RELEASE_REPOSITORY" \
             --ref "$RELEASE_REF" \
             --output dist
-
-      - name: Create the planned tag
-        if: steps.plan.outputs.release == 'true' && steps.plan.outputs.mode == 'auto'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.plan.outputs.version }}
-          RELEASE_HEAD: ${{ needs.admission.outputs.head }}
-        run: |
-          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "release tag already exists: $RELEASE_TAG" >&2
-            exit 1
-          fi
-          tag_object=$(
-            gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
-              -f tag="$RELEASE_TAG" \
-              -f message="Hearting $RELEASE_TAG" \
-              -f object="$RELEASE_HEAD" \
-              -f type=commit \
-              --jq .sha
-          )
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-            -f ref="refs/tags/$RELEASE_TAG" \
-            -f sha="$tag_object"
 
       - name: Publish the verified release
         if: steps.plan.outputs.release == 'true'
