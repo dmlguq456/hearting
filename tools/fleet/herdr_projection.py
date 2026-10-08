@@ -232,22 +232,17 @@ def session_title(harness: str, session_id: str) -> str:
 def is_steward(harness: str, session_id: str) -> bool:
     """True when this session's marker holds steward ROLE evidence.
 
-    Asks the ledger tool itself which entries count, exactly as Fleet's collector does —
-    a second copy of that rule here is how the badge and the board start disagreeing.
+    Uses Fleet's role lookup and its confirmed native-clear aliases, so a new
+    conversation keeps the same role on both displays without copying a marker.
     """
     if not session_id:
         return False
     try:
-        import importlib.util
-        for candidate in Path(__file__).resolve().parents:
-            tool = candidate / "utilities" / "peer-message.py"
-            if not tool.is_file():
-                continue
-            spec = importlib.util.spec_from_file_location("_peer_message_ro", str(tool))
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            marker = (module.read_steward_markers() or {}).get((harness, session_id))
-            return bool(marker and module.steward_evidence_targets(marker))
+        from fleet.collectors.herdr import _clear_gpu_session_aliases
+        from fleet.collectors.steward import role_targets
+        aliases = _clear_gpu_session_aliases(harness, session_id,
+                                             os.environ.get("HERDR_PANE_ID"))
+        return bool(role_targets(harness, session_id, aliases=aliases))
     except Exception:
         pass
     return False

@@ -21,6 +21,7 @@ if _TOOLS_DIR not in sys.path:
     sys.path.insert(0, _TOOLS_DIR)
 
 from fleet import render                                          # noqa: E402
+from fleet import herdr_projection                                # noqa: E402
 from fleet.model import Session                                   # noqa: E402
 from fleet.collectors import steward                              # noqa: E402
 
@@ -185,6 +186,25 @@ class StewardOrderTest(unittest.TestCase):
 
 
 class StewardCollectorTest(unittest.TestCase):
+    def test_confirmed_clear_keeps_the_same_role_in_fleet_and_herdr(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                session = Session(harness=harness, pid=1, session_id="new")
+                session._gpu_session_aliases = ["old"]
+                markers = {(harness, "old"): {"session_id": "old", "targets": {
+                    "ended-target": {"harness": "codex", "session_id": "ended-target",
+                                     "kind": "watch", "source": "watch"}}}}
+                with mock.patch.object(steward, "read_markers", return_value=markers), \
+                     mock.patch("fleet.collectors.herdr._clear_gpu_session_aliases",
+                                return_value=["old"]):
+                    steward.enrich([session])
+                    self.assertTrue(session.steward)
+                    self.assertEqual(herdr_projection.is_steward(harness, "new"), session.steward)
+                # Without proven history, an unrelated marker never grants the role.
+                with mock.patch.object(steward, "read_markers", return_value=markers), \
+                     mock.patch("fleet.collectors.herdr._clear_gpu_session_aliases", return_value=[]):
+                    self.assertFalse(herdr_projection.is_steward(harness, "unrelated"))
+
     def test_join_is_exact_on_harness_and_session_id(self):
         sessions = [Session(harness="claude", pid=1, session_id="sid-a"),
                     Session(harness="codex", pid=2, session_id="sid-a"),

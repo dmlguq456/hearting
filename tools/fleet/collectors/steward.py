@@ -14,24 +14,9 @@ handoff-only leftover) is treated as absent, so `steward_targets` holds evidence
 entries only. Nothing here writes, and a missing or unreadable marker root (or an
 unavailable ledger module) leaves every session's default (`steward=False`).
 """
-import importlib.util
-import sys
-from pathlib import Path
-
-
 def _peer_message_module():
-    here = Path(__file__).resolve()
-    for candidate in here.parents:
-        tool = candidate / "utilities" / "peer-message.py"
-        if tool.is_file():
-            try:
-                spec = importlib.util.spec_from_file_location("_peer_message_ro", str(tool))
-                mod = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(mod)
-                return mod
-            except Exception:
-                return None
-    return None
+    from . import peer_messages
+    return peer_messages._load_peer_message()
 
 
 def read_markers():
@@ -58,28 +43,41 @@ def _session_keys(sess):
     return session_registry.session_join_keys(sess)
 
 
-def enrich(sessions, markers=None):
+def role_targets(harness, session_id, *, aliases=(), markers=None):
+    """One role lookup for Fleet and herdr, including proven prior session ids."""
     if markers is None:
         markers = read_markers()
-    if not markers:
-        return
     mod = _peer_message_module()
     evidence = getattr(mod, "steward_evidence_targets", None) if mod is not None else None
     if evidence is None:
-        return  # no rule available → no steward claims (fail-soft, never a guess)
-    # target key → the stewards that named it. Built from the SAME evidence entries the
-    # forward projection uses, so "who watches me" can never claim a relation that the
-    # steward's own row does not also show.
-    parents_by_key = {}
-    for s in sessions:
-        keys = _session_keys(s)
-        marker = next((markers[k] for k in keys if k in markers), None)
+        return []
+    for sid in dict.fromkeys([session_id, *aliases]):
+        marker = markers.get((str(harness or "").lower(), sid)) if sid else None
         if not marker:
             continue
         try:
             targets = evidence(marker)
         except Exception:
             targets = []
+        if targets:
+            return list(targets)
+    return []
+
+
+def enrich(sessions, markers=None):
+    if markers is None:
+        markers = read_markers()
+    if not markers:
+        return
+    # target key → the stewards that named it. Built from the SAME evidence entries the
+    # forward projection uses, so "who watches me" can never claim a relation that the
+    # steward's own row does not also show.
+    parents_by_key = {}
+    for s in sessions:
+        keys = _session_keys(s)
+        targets = role_targets(s.harness, s.session_id, markers=markers,
+                               aliases=[sid for _harness, sid in keys[1:]]
+                               + list(getattr(s, "_gpu_session_aliases", ()) or ()))
         if not targets:
             continue
         s.steward = True
