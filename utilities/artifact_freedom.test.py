@@ -25,6 +25,8 @@ P = FX.P
 
 class ArtifactFreedomTest(FX.ProducerTestBase):
     def setUp(self):
+        inherited = {key: os.environ.pop(key) for key in list(os.environ) if key.startswith("AGENT_")}
+        self.addCleanup(os.environ.update, inherited)
         super().setUp()
         patcher = mock.patch.dict(os.environ, {
             "XDG_CONFIG_HOME": str(Path(self._tmp.name) / "config"),
@@ -99,6 +101,29 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         self.assertTrue(result["refreshed"], result)
         self.assertFalse((folder / ".cycle.json").exists())
         self.assertTrue(any(row["kind"] == "artifact" and row["operation"] == "update" for row in self.events()))
+
+    def test_deleted_binding_and_payload_can_then_be_moved_once(self):
+        for cross_campaign in (False, True):
+            with self.subTest(cross_campaign=cross_campaign):
+                first = self.finished(slug=f"binding-move-{cross_campaign}")
+                other = self.finished("destination", f"other-{cross_campaign}")
+                old = Path(first["cycle_dir"])
+                (old / ".cycle.json").unlink()
+                (old / "artifacts/plans/cycle/REPORT.md").unlink()
+                parent = Path(other["cycle_dir"]).parent if cross_campaign else old.parent
+                moved = parent / f"renamed-{old.name}"
+                old.rename(moved)
+                P.list_campaign_summaries(self.root)
+                record = P.read_cycle_record(self.root, first["cycle_id"])
+                self.assertEqual(record["locator"], moved.name)
+                self.assertEqual(record["campaign_id"], other["campaign_id"] if cross_campaign else first["campaign_id"])
+                moves = lambda: [row for row in self.events() if row["field"] == ("campaign" if cross_campaign else "path")
+                                 and row["target"]["id"] == first["cycle_id"]]
+                self.assertEqual(len(moves()), 1)
+                P.list_campaign_summaries(self.root)
+                self.assertEqual(len(moves()), 1)
+                self.assertFalse((moved / "artifacts/plans/cycle/REPORT.md").exists())
+                self.assertTrue(P.finalize(self.root, cycle_id=first["cycle_id"])["refreshed"])
 
 
 if __name__ == "__main__":

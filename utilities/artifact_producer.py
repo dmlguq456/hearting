@@ -8696,6 +8696,12 @@ def _adopt_location_locked(root: Path, record: Mapping[str, Any], new_directory:
             after={"value": new_campaign_id}, reason=reason, now=now, by=by))
         changed += [old_campaign_id, new_campaign_id]
     if updated.get("locator") != new_directory.name:
+        if old_campaign_id == new_campaign_id:
+            before_path = _cycle_rel(root, new_directory.parent / str(record.get("locator") or cycle_id))
+            lines.append(_command_line(
+                command=command, stamp=stamp, target_type="cycle", target_id=cycle_id, target_path=where,
+                operation="move", field="path", before={"value": before_path}, after={"value": where},
+                reason=reason, now=now, by=by))
         base = artifact_locator.locator_base(started, record.get("slug") or "") if started else ""
         updated["locator"] = new_directory.name
         updated["locator_suffix"] = _locator_suffix(base, new_directory.name)
@@ -9097,6 +9103,19 @@ class _LayoutScan:
         return found
 
 
+def _folder_cycle_id(folder: Path, manifest: Optional[Mapping[str, Any]] = None) -> Optional[str]:
+    """The surviving identity, shared by the scan and its locked confirmation."""
+    try:
+        binding = artifact_locator.read_cycle_binding(folder)
+    except artifact_locator.LocatorError:
+        binding = None
+    if binding is not None:
+        return binding["cycle_id"]
+    document = manifest if manifest is not None else (_read_json(folder / "manifest.json") or {})
+    cycle_id = (document.get("cycle") or {}).get("cycle_id")
+    return cycle_id if artifact_identity.is_well_formed(cycle_id, "cycle") else None
+
+
 def _scan_layout(root: Path) -> _LayoutScan:
     """Where every campaign and cycle ID sits, read from the folders alone (a `lstat` and a few small files each).
 
@@ -9157,18 +9176,10 @@ def _scan_layout(root: Path) -> _LayoutScan:
             if child == "cycles":
                 scan.complete = False  # an old layout: moves are not judged from it
                 continue
-            try:
-                binding = artifact_locator.read_cycle_binding(path)
-            except artifact_locator.LocatorError:
-                binding = None
-            if binding is None:
-                manifest = _read_json(path / "manifest.json") or {}
-                cycle_id = (manifest.get("cycle") or {}).get("cycle_id")
-                if not artifact_identity.is_well_formed(cycle_id, "cycle"):
-                    scan.complete = False
-                    continue
-            else:
-                cycle_id = binding["cycle_id"]
+            cycle_id = _folder_cycle_id(path)
+            if cycle_id is None:
+                scan.complete = False
+                continue
             if cycle_id in scan.cycles or cycle_id in scan.duplicates:
                 scan.duplicates.add(cycle_id)
                 scan.cycles.pop(cycle_id, None)
@@ -9234,11 +9245,11 @@ def _manifest_fingerprint(folder: Path) -> Optional[Tuple[int, int, int]]:
 
 
 def _preread_manifests(root: Path, changes: Mapping[str, Any]) -> Dict[str, _PreManifest]:
-    """Read, with no lock held, the manifest of each closed cycle a reconcile is about to adopt or revive."""
+    """Read, with no lock held, each moved cycle's surviving manifest and identity."""
     out: Dict[str, _PreManifest] = {}
     for cycle_id, folder in list(changes["cycle_moves"]) + list(changes["cycle_revive"]):
         record = read_cycle_record(root, cycle_id)
-        if record is None or not _closed_record(record):
+        if record is None:
             continue
         fingerprint = _manifest_fingerprint(folder)
         found = _read_manifest_raw(folder)
@@ -9347,7 +9358,8 @@ def _look_again_before_gone(root: Path, changes: Mapping[str, Any]) -> Tuple[Dic
                        if item not in again.campaigns and item not in again.duplicates]), seen
 
 
-def _hand_changes_hold(root: Path, changes: Mapping[str, Any], published: Mapping[str, str]) -> bool:
+def _hand_changes_hold(root: Path, changes: Mapping[str, Any], published: Mapping[str, str],
+                       manifests: Optional[Mapping[str, _PreManifest]] = None) -> bool:
     """Under the lock, with `lstat` and the small files that name an ID: is each change the scan found still there?"""
     def gone(relative: str) -> bool:
         try:
@@ -9367,11 +9379,10 @@ def _hand_changes_hold(root: Path, changes: Mapping[str, Any], published: Mappin
         if not campaign or campaign.get("campaign_id") != campaign_id or campaign.get("locator") == folder.name:
             return False
     for cycle_id, folder in list(changes["cycle_moves"]) + list(changes["cycle_revive"]):
-        try:
-            binding = artifact_locator.read_cycle_binding(folder) if folder_is(folder) else None
-        except artifact_locator.LocatorError:
-            binding = None
-        if binding is None or binding.get("cycle_id") != cycle_id:
+        pre = (manifests or {}).get(cycle_id)
+        document = (pre.found[1] if pre is not None and pre.found is not None else {}) \
+            if manifests is not None else None
+        if not folder_is(folder) or _folder_cycle_id(folder, document) != cycle_id:
             return False
     for identifier in list(changes["cycle_gone"]) + list(changes["campaign_gone"]):
         if identifier not in published or not gone(published[identifier]):
@@ -9391,12 +9402,12 @@ def _reconcile_locked_run(root: Path, now: Optional[float], scan: _LayoutScan, p
     try:
         current_index = artifact_locator._load_index(root)
         if ((current_index is not None and current_index != published)
-                or not _hand_changes_hold(root, changes, published)):
+                or not _hand_changes_hold(root, changes, published, manifests)):
             return None
         if manifests is not None:
             for cycle_id, folder in list(changes["cycle_moves"]) + list(changes["cycle_revive"]):
                 current = read_cycle_record(root, cycle_id)
-                if current is None or not _closed_record(current):
+                if current is None:
                     continue
                 pre = manifests.get(cycle_id)
                 if pre is None or pre.fingerprint != _manifest_fingerprint(folder):
