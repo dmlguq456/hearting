@@ -273,6 +273,23 @@ The `[경로]` card of `framed` adds the compiler's two lines: "frame이 방향�
 조립해 제안합니다" and the cost line, "비용: frame 한 갈래 · 방향 확인 질문 1회" or,
 with both legs, "비용: 최상위 모델 두 갈래 · 방향 확인 질문 1회".
 
+**Staged assembly guidance.** New non-direct work defaults to `framed`; assemble
+`staged` directly when the whole route is already decided under the cases above.
+These advisory points add no prerequisite or required stage:
+
+- Name `--capability` and `--capability-mode`, and select only the needed parts.
+  Reuse sufficient existing results. For a new measurement, include a node whose
+  inputs and sealed `write_scope` cover it; the lab `metrics` node writes only
+  `metrics.jsonl` and `summary-stats.json`, so it cannot create new raw results.
+- Choose `--intensity` for the work's purpose and, when needed,
+  `--explicit-profiles` for judgment or verification nodes. Check the selection
+  reasons and actual node/leg profiles in the compose output.
+- Use `compose --explain` to check the displayed stage/worker/resource scale.
+  At `strong` or higher, default to the eligible declared groups on retained
+  anchors, with two-way as the baseline unless the registry widens it. Check
+  realized legs and omission notices, including `terminal-anchor`; the label
+  alone does not retain a group. Group selection stays registry-only.
+
 **Frame procedure at depth-0 (`framed`).** `start` launches the frame legs
 (separate launches, no owner) and returns `needs-interview` with
 `route_proposal_review`: each brief's validated proposal or

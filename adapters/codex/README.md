@@ -426,6 +426,9 @@ artifact scope. Claude reaches both through `adapters/claude/bin/capability-rout
 Codex and OpenCode through `preflight.sh compose|stages`; every surface forwards
 the arguments unmodified and prints the same output.
 
+When assembling `staged` routes, follow the shared
+[WORKFLOW §0.2.1 guidance](../../core/WORKFLOW.md#021-shape-before-preset-sd-135).
+
 The five portable profiles are deep, balanced-deep, balanced, light and mini.
 Concrete defaults and generated native agents come from this adapter's
 `config/models.conf`; runtime loading selects the user's whole file first.
