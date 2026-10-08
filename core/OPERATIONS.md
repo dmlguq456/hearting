@@ -1271,6 +1271,13 @@ Late redelivery sends its delay notice and the sealed message in one prompt.
 The notice is transport context: receivers may remove only that recognized
 prefix with the matching transfer ref before checking the unchanged body digest.
 The same recipient binding and idempotent receive record apply.
+Existing receiver callbacks also carry deferred messages while the recipient
+is working: Claude uses hook context, Codex its native queue, and OpenCode its
+native context API. They never type into a form or user draft. Hook context
+emission is queued delivery, not confirmed receipt; it retains the private body
+until the ordinary exact-ref receive path observes it. Existing callbacks warn
+the original sender once when a transfer remains without confirmed receipt for an
+hour. No additional watcher, model turn, approval or operator input is required.
 
 Peer-only native history reads keep the exact client ID and body checks while
 reducing oversized pages. A summary miss is not absence: the checked turn range

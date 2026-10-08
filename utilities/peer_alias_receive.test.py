@@ -122,6 +122,120 @@ class AliasReceive(unittest.TestCase):
         self.assertIn("[?]", unknown)
         self.assertIsNone(self.parse(unknown))
 
+    def deferred(self, recipient=None, sender=None, old=False):
+        text, ref = pm.prepare_peer_message("deferred full body", sender or self.sender,
+                                            recipient or self.recipient, defer=True)
+        if old:
+            with pm.pending_lock(ref):
+                row = pm._read_pending(ref)
+                pm._save_pending(dict(row, created=row["created"] - 7200))
+        return text, ref
+
+    def test_busy_claude_hook_delivers_body_without_pane_input_then_exact_receive(self):
+        recipient = dict(self.recipient, harness="claude")
+        text, ref = self.deferred(recipient)
+        env = dict(os.environ, HERDR_PANE_ID="foreign-pane")
+        payload = {"session_id": recipient["session_id"], "tool_name": "Bash", "tool_input": {}}
+        def hook():
+            return subprocess.run([sys.executable, str(ROOT / "hooks/peer-message-record.py"), "post-tool"],
+                input=json.dumps(payload), env=env, capture_output=True, text=True, timeout=10)
+        first = hook()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        context = json.loads(first.stdout)["hookSpecificOutput"]
+        self.assertEqual(context["hookEventName"], "PostToolUse")
+        self.assertEqual(context["additionalContext"], text)
+        row = pm._read_pending(ref)
+        self.assertEqual((row["state"], row["receipt"], row["text"]), ("queued", "hook-context-emitted", text))
+        self.assertFalse(self.rows(), "emitted context is not confirmed receipt")
+        self.assertEqual(hook().stdout, "", "an accepted context must not be emitted twice")
+        self.assertEqual(pm.receive_peer_message(text, recipient), 0)
+        self.assertEqual(pm._read_pending(ref)["state"], "received")
+        self.assertIsNone(pm._read_pending(ref)["text"])
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_hook_output_failure_preserves_ambiguous_body_without_resend(self):
+        recipient = dict(self.recipient, harness="claude")
+        text, ref = self.deferred(recipient)
+        stream = mock.Mock()
+        stream.flush.side_effect = BrokenPipeError()
+        with self.assertRaises(BrokenPipeError):
+            pm.emit_peer_context(recipient, "PostToolUse", stream=stream)
+        row = pm._read_pending(ref)
+        self.assertEqual(row["state"], "unverified")
+        self.assertEqual(row["text"], text)
+        output = io.StringIO()
+        pm.emit_peer_context(recipient, "PostToolUse", stream=output)
+        self.assertEqual(output.getvalue(), "")
+
+    def test_foreign_and_worker_hooks_never_consume_pending_context(self):
+        recipient = dict(self.recipient, harness="claude")
+        text, ref = self.deferred(recipient)
+        for sid, worker in (("foreign", False), (recipient["session_id"], True)):
+            env = dict(os.environ)
+            if worker:
+                env["AGENT_SESSION_ROLE"] = "worker"
+            result = subprocess.run([sys.executable, str(ROOT / "hooks/peer-message-record.py"), "post-tool"],
+                input=json.dumps({"session_id": sid, "tool_name": "Bash"}), env=env,
+                capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.stdout, "")
+            self.assertEqual(pm._read_pending(ref)["state"], "pending")
+
+    def test_codex_receiver_keeps_native_queue_on_existing_tool_boundary(self):
+        text, ref = self.deferred()
+        output = io.StringIO()
+        with mock.patch.object(pm, "deliver_pending_codex", return_value={"status": "queued"}) as send:
+            pm.emit_peer_context(self.recipient, "PostToolUse", stream=output)
+        send.assert_called_once_with(ref, timeout=0.25)
+        self.assertEqual(output.getvalue(), "", "no second body delivery transport")
+
+    def test_original_sender_stuck_notice_on_all_existing_tool_callbacks(self):
+        for harness in ("claude", "codex", "opencode"):
+            sender = dict(self.sender, harness=harness, session_id=f"sender-{harness}")
+            text, ref = self.deferred(sender=sender, old=True)
+            if harness == "opencode":
+                js = r'''import {pathToFileURL} from "node:url";
+const {AgentHarnessGuards} = await import(pathToFileURL(process.env.AGENT_HOME + "/adapters/opencode/plugins/hearting-guards.js"));
+const hooks = await AgentHarnessGuards({client: {}});
+const output = {output: "ordinary tool output"};
+await hooks["tool.execute.after"]({sessionID: "sender-opencode", tool: "fixture-noop", args: {}}, output);
+console.log(JSON.stringify(output));'''
+                result = subprocess.run(["node", "--input-type=module", "-e", js], env=dict(os.environ, HERDR_PANE_ID=""),
+                                        capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                context = json.loads(result.stdout)["output"]
+                self.assertTrue(context.startswith("ordinary tool output"))
+            else:
+                command = ([sys.executable, str(ROOT / "hooks/peer-message-record.py"), "post-tool"] if harness == "claude"
+                           else [sys.executable, str(ROOT / "adapters/codex/hooks/posttooluse-interaction-clear.py")])
+                result = subprocess.run(command, input=json.dumps({"session_id": sender["session_id"], "tool_name": "Bash"}),
+                                        env=dict(os.environ), capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+            self.assertIn(ref[:8], context)
+            self.assertIn("1시간", context)
+            row = pm._read_pending(ref)
+            self.assertEqual(row["state"], "pending")
+            self.assertEqual(row["text"], text)
+            self.assertTrue(row["sender_notice_at"])
+            stream = io.StringIO()
+            pm.emit_peer_context(sender, "PostToolUse", stream=stream)
+            self.assertEqual(stream.getvalue(), "")
+
+    def test_sender_notice_includes_accepted_but_unreceived_and_ambiguous_transfers(self):
+        for state in ("queued", "unverified"):
+            sender = dict(self.sender, session_id="sender-" + state)
+            text, ref = self.deferred(sender=sender, old=True)
+            with pm.pending_lock(ref):
+                pm._save_pending(dict(pm._read_pending(ref), state=state))
+            output = io.StringIO()
+            pm.emit_peer_context(sender, "PostToolUse", stream=output)
+            self.assertIn(ref[:8], output.getvalue())
+            self.assertEqual(pm._read_pending(ref)["state"], state)
+            self.assertEqual(pm._read_pending(ref)["text"], text)
+            output = io.StringIO()
+            pm.emit_peer_context(sender, "PostToolUse", stream=output)
+            self.assertEqual(output.getvalue(), "")
+
     def test_delay_prefix_preserves_exact_body_recipient_and_receive_dedup(self):
         for harness in ("claude", "codex", "opencode"):
             recipient = dict(self.recipient, harness=harness)

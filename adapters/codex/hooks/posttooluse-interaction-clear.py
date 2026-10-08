@@ -52,6 +52,11 @@ def main():
             from fleet import interaction
 
             interaction.clear_wait(session_id, "codex")
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("_peer_context", ROOT / "utilities/peer-message.py")
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            mod.emit_peer_context({"harness": "codex", "session_id": session_id}, "PostToolUse")
     except Exception:
         pass
     return 0

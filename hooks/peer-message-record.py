@@ -279,7 +279,13 @@ def main():
         return
     payload = _read_stdin_json()
     if mode == "post-tool":
-        handle_post_tool(payload)
+        try:
+            handle_post_tool(payload)
+        finally:
+            mod = _peer_message_module()
+            if mod:
+                mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
+                                      "PostToolUse")
     elif mode == "prompt":
         # The cross-session `notice` record path runs first and unconditionally:
         # the sweep must never be able to swallow it.
@@ -288,17 +294,23 @@ def main():
         except Exception:
             pass
         rows = sweep_undelivered(payload)
+        extra = ""
         if rows:
             # The only stdout this path ever writes, and only when something is
             # actually pending. Written and flushed BEFORE the acks (review M2).
-            print(json.dumps({"hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": "\n".join(
+            extra = "\n".join(
                     ["[peer-steward] undelivered watch receipts:"]
                     + [_typed_watch_line(row) for row in rows]
-                ),
-            }}, ensure_ascii=False))
+                )
+        mod = _peer_message_module()
+        if mod:
+            mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
+                                  "UserPromptSubmit", extra_context=extra)
+        elif extra:
+            print(json.dumps({"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit", "additionalContext": extra}}, ensure_ascii=False))
             sys.stdout.flush()
+        if rows:
             ack_rows(payload, rows)
 
 

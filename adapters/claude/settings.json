@@ -184,7 +184,7 @@
         ]
       },
       {
-        "matcher": "SendMessage",
+        "matcher": "*",
         "hooks": [
           {
             "type": "command",

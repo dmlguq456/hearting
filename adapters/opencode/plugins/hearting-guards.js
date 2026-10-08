@@ -1205,6 +1205,19 @@ export const AgentHarnessGuards = async (ctx) => {
     }
     await projectPane(input.sessionID || "", ctx, true)
     await pendingPeerDelivery(ctx, input.sessionID || "")
+    if (!isWorkerSession() && input.sessionID && typeof output?.output === "string") {
+      // The shared sender notice uses this existing model-context boundary.
+      // OpenCode's body delivery remains on the native API above.
+      const notice = spawnSync("python3", [path.join(root, "utilities", "peer-message.py"),
+        "context", "--to-harness", "opencode", "--to-session-id", input.sessionID], {
+        cwd: root, env: { ...process.env, AGENT_HOME: root },
+        encoding: "utf8", timeout: 1500,
+      })
+      try {
+        const text = JSON.parse(notice.stdout || "{}").context
+        if (notice.status === 0 && typeof text === "string" && text) output.output += "\n" + text
+      } catch { /* No new turn, prompt input, or callback retry. */ }
+    }
     // Record actual spec reads for workflow and display evidence.
     // Non-blocking: a marker failure must never abort a successful read.
     const toolName = typeof input.tool === "string" ? input.tool : input.tool?.name || ""

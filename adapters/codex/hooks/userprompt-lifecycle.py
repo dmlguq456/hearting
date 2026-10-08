@@ -398,8 +398,7 @@ def retry_pending_peer(sid: str) -> None:
         spec = importlib.util.spec_from_file_location("_pending_peer", ROOT / "utilities" / "peer-message.py")
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
-        for row in mod.pending_messages({"harness": "codex", "session_id": sid})[:3]:
-            mod.deliver_pending_codex(row["ref"], timeout=0.25)
+        mod.retry_pending_codex({"harness": "codex", "session_id": sid})
     except Exception:
         pass
 

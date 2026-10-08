@@ -350,7 +350,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         return text, ref
 
 
-def claim_pending_herdr(ref, recipient):
+def claim_pending_herdr(ref, recipient, *, receipt="herdr-delivery-inflight"):
     """Reserve one exact deferred row before any pane input, using the existing claim state.
 
     Other senders and native callbacks cannot submit it again once it is
@@ -367,7 +367,7 @@ def claim_pending_herdr(ref, recipient):
             return None
         claim = {"token": secrets.token_hex(16), "pid": os.getpid(),
                  "start": process_start_ticks(os.getpid())}
-        _save_pending(dict(row, state="unverified", receipt="herdr-delivery-inflight", rpc_claim=claim))
+        _save_pending(dict(row, state="unverified", receipt=receipt, rpc_claim=claim))
         return dict(row, rpc_claim=claim)
 
 
@@ -604,6 +604,83 @@ def retry_receiver_idle(recipient, *, peer=True):
         steward.receiver_idle(recipient, pane, peer=peer)
     except Exception:
         pass
+
+
+def retry_pending_codex(recipient):
+    """One native receiver callback; accepted/ambiguous transfers are not resent."""
+    for row in pending_messages(recipient)[:3]:
+        deliver_pending_codex(row["ref"], timeout=0.25)
+
+
+def emit_peer_context(recipient, event=None, *, extra_context="", stream=None):
+    """Use an existing native context boundary, preserving emission vs receipt.
+
+    Only Claude needs body delivery here; the other runtimes retain their native
+    queues. Claims serialize this with pane/native sends. A failed output remains
+    ambiguous, while a successful flush records queued, never received.
+    """
+    if not _valid_transfer_endpoint(recipient):
+        return
+    stream = sys.stdout if stream is None else stream
+    claims, warnings, context = [], [], []
+    if recipient["harness"] == "codex":
+        retry_pending_codex(recipient)
+    rows = list(_pending_rows())
+    if recipient["harness"] == "claude":
+        for row in rows:
+            if len(claims) >= 3:
+                break
+            if any(row["to"].get(k) != recipient[k] for k in ("harness", "session_id")):
+                continue
+            # Validate the immutable seal and recipient before publishing context.
+            parsed = parse_peer_trailer(row.get("text"), recipient, include_ref=True)
+            if not parsed or parsed.get("transfer_ref") != row["ref"]:
+                continue
+            claimed = claim_pending_herdr(row["ref"], recipient, receipt="hook-context-inflight")
+            if claimed:
+                claims.append(claimed)
+                context.append(claimed["text"])
+    now = time.time()
+    for row in rows:
+        try:
+            age = now - float(row.get("created") or now)
+        except (TypeError, ValueError):
+            continue
+        if (row["state"] not in {"pending", "queued", "unverified"} or row.get("sender_notice_at")
+                or any(row["from"].get(k) != recipient[k] for k in ("harness", "session_id"))
+                or not math.isfinite(age) or age < 3600):
+            continue
+        target = row["to"].get("name") or row["to"].get("session_id") or "unknown"
+        context.append("[peer-message] ref %s → %s: 1시간 이상 전달 미확인 (%s); 원문은 보존되어 있습니다."
+                       % (row["ref"][:8], target, row.get("receipt") or row["state"]))
+        warnings.append(row["ref"])
+        if len(warnings) >= 3:
+            break
+    if extra_context:
+        context.append(extra_context)
+    if not context:
+        return
+    text = "\n\n".join(context)
+    output = ({"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
+              if event else {"context": text})
+    print(json.dumps(output, ensure_ascii=False), file=stream)
+    stream.flush()
+    for row in claims:
+        with pending_lock(row["ref"]):
+            current = _read_pending(row["ref"])
+            if (current and current["state"] == "unverified"
+                    and current.get("rpc_claim") == row["rpc_claim"]):
+                _save_pending(dict(current, state="queued", rpc_claim=None, receipt="hook-context-emitted"))
+    for ref in warnings:
+        with pending_lock(ref):
+            current = _read_pending(ref)
+            if current and current["state"] in {"pending", "queued", "unverified"}:
+                _save_pending(dict(current, sender_notice_at=now))
+
+
+def cmd_context(args):
+    emit_peer_context({"harness": args.to_harness, "session_id": args.to_session_id})
+    return 0
 
 
 def cmd_pending(args):
@@ -1142,6 +1219,11 @@ def main(argv=None):
     p_receive.add_argument("--to-session-id", required=True)
     p_receive.add_argument("--from-project", default="")
     p_receive.set_defaults(func=cmd_receive)
+
+    p_context = sub.add_parser("context")
+    p_context.add_argument("--to-harness", required=True)
+    p_context.add_argument("--to-session-id", required=True)
+    p_context.set_defaults(func=cmd_context)
 
     p_pending = sub.add_parser("pending")
     p_pending.add_argument("--to-harness", required=True)
