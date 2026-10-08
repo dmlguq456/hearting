@@ -42,6 +42,9 @@ import sys
 # the symlink path, resolving REPO_ROOT to repo/adapters/claude (double-path bug);
 # realpath follows the link to the canonical tools/, giving the true repo root either way.
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(0, os.path.join(REPO_ROOT, "tools", "web-bundle"))
+from font_css import d2coding_font_css
+
 MANIFEST_PATH = os.path.join(REPO_ROOT, "manifest.json")
 HUB_PATH = os.path.join(REPO_ROOT, "hub.html")
 
@@ -165,6 +168,7 @@ PAGE_TEMPLATE = """<!doctype html>
   Verify:     python3 tools/render-hub.py --check
 -->
 <style>
+__HUB_FONT_CSS__
   /* ════ Design tokens — ported from the companion worklog app app/globals.css (:root, .hub-root)
      light values default in :root; dark values re-defined under prefers-color-scheme.
      No raw hex/rgba outside this block — the rest of the file reads var(--…) only. ════ */
@@ -174,7 +178,7 @@ PAGE_TEMPLATE = """<!doctype html>
     /* type */
     --font-ui:   "Pretendard Variable", "Pretendard", -apple-system, BlinkMacSystemFont,
                  "SF Pro Text", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
-    --font-mono: "JetBrains Mono", "Pretendard Variable", Pretendard, ui-monospace,
+    --font-mono: "D2Coding", "JetBrains Mono", ui-monospace,
                  "SF Mono", SFMono-Regular, Menlo, monospace;
     /* hub-scope typography (the companion worklog app .hub-root bumps the app scale by ~+1px) */
     --text-micro:      12px;
@@ -279,7 +283,7 @@ PAGE_TEMPLATE = """<!doctype html>
   }
   button, input { font-family: inherit; color: inherit; }
   button { cursor: pointer; }
-  .mono { font-family: var(--font-mono); font-feature-settings: "tnum" 1, "ss01" 1; }
+  code, .mono { font-family: var(--font-mono); font-variant-ligatures: none; }
 
   /* ── header / sub-nav (ported from ViewHeader eyebrow+title + HubSubNav segmented tabs) ── */
   header.hub-header {
@@ -993,6 +997,7 @@ def render(manifest):
     payload = _embed_json(build_view(manifest))
     text = PAGE_TEMPLATE.replace(DATA_PLACEHOLDER, payload)
     text = text.replace(GOVERNANCE_PLACEHOLDER, build_governance_html())
+    text = text.replace("__HUB_FONT_CSS__", d2coding_font_css())
     return text
 
 

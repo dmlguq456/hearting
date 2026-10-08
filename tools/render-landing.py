@@ -25,6 +25,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "tools" / "web-bundle"))
+from font_css import d2coding_font_css
+
 DOCS = ROOT / "docs"
 REPO_URL = "https://github.com/dmlguq456/hearting"
 INSTALL_CMD = (
@@ -66,12 +69,12 @@ def load_data() -> dict:
 
 # ---------------------------------------------------------------- design system
 
-CSS = r"""
+CSS = d2coding_font_css() + r"""
   :root {
     color-scheme: dark light;
     --font-ui: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont,
                "SF Pro Text", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
+    --font-mono: "D2Coding", "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, monospace;
 
     --bg: #08080B;
     --bg-2: #0B0B10;
