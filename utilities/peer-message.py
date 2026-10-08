@@ -636,7 +636,10 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None):
             parsed = parse_peer_trailer(row.get("text"), recipient, include_ref=True)
             if not parsed or parsed.get("transfer_ref") != row["ref"]:
                 continue
-            claimed = claim_pending_herdr(row["ref"], recipient, receipt="hook-context-inflight")
+            try:
+                claimed = claim_pending_herdr(row["ref"], recipient, receipt="hook-context-inflight")
+            except BlockingIOError:
+                continue
             if claimed:
                 claims.append(claimed)
                 context.append(claimed["text"])
@@ -649,6 +652,17 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None):
         if (row["state"] not in {"pending", "queued", "unverified"} or row.get("sender_notice_at")
                 or any(row["from"].get(k) != recipient[k] for k in ("harness", "session_id"))
                 or not math.isfinite(age) or age < 3600):
+            continue
+        # The timestamp claims the one notice attempt before any output. A lost
+        # flush stays unverified; it must not be repeated by a parallel callback.
+        try:
+            with pending_lock(row["ref"]):
+                current = _read_pending(row["ref"])
+                if (not current or current["state"] == "received" or current.get("sender_notice_at")
+                        or any(current["from"].get(k) != recipient[k] for k in ("harness", "session_id"))):
+                    continue
+                _save_pending(dict(current, sender_notice_at=now, sender_notice_receipt="context-unverified"))
+        except BlockingIOError:
             continue
         target = row["to"].get("name") or row["to"].get("session_id") or "unknown"
         context.append("[peer-message] ref %s → %s: 1시간 이상 전달 미확인 (%s); 원문은 보존되어 있습니다."
@@ -675,7 +689,7 @@ def emit_peer_context(recipient, event=None, *, extra_context="", stream=None):
         with pending_lock(ref):
             current = _read_pending(ref)
             if current and current["state"] in {"pending", "queued", "unverified"}:
-                _save_pending(dict(current, sender_notice_at=now))
+                _save_pending(dict(current, sender_notice_receipt="context-emitted"))
 
 
 def cmd_context(args):

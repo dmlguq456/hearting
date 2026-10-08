@@ -236,6 +236,39 @@ console.log(JSON.stringify(output));'''
             pm.emit_peer_context(sender, "PostToolUse", stream=output)
             self.assertEqual(output.getvalue(), "")
 
+    def test_parallel_sender_callbacks_claim_one_notice_before_output(self):
+        import concurrent.futures
+        import threading
+        sender = dict(self.sender, harness="claude")
+        text, ref = self.deferred(sender=sender, old=True)
+        rows = list(pm._pending_rows())
+        barrier = threading.Barrier(2)
+        def same_snapshot():
+            barrier.wait(timeout=5)
+            return iter(rows)
+        streams = [io.StringIO(), io.StringIO()]
+        with mock.patch.object(pm, "_pending_rows", side_effect=same_snapshot):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(pm.emit_peer_context, sender, "PostToolUse", stream=s) for s in streams]
+                for future in futures:
+                    future.result(timeout=5)
+        self.assertEqual(sum(ref[:8] in s.getvalue() for s in streams), 1)
+        self.assertEqual(pm._read_pending(ref)["sender_notice_receipt"], "context-emitted")
+        self.assertEqual(pm._read_pending(ref)["text"], text)
+
+    def test_sender_notice_failed_flush_is_not_repeated(self):
+        sender = dict(self.sender, harness="claude")
+        text, ref = self.deferred(sender=sender, old=True)
+        stream = mock.Mock()
+        stream.flush.side_effect = BrokenPipeError()
+        with self.assertRaises(BrokenPipeError):
+            pm.emit_peer_context(sender, "PostToolUse", stream=stream)
+        self.assertEqual(pm._read_pending(ref)["sender_notice_receipt"], "context-unverified")
+        self.assertEqual(pm._read_pending(ref)["text"], text)
+        output = io.StringIO()
+        pm.emit_peer_context(sender, "PostToolUse", stream=output)
+        self.assertEqual(output.getvalue(), "")
+
     def test_delay_prefix_preserves_exact_body_recipient_and_receive_dedup(self):
         for harness in ("claude", "codex", "opencode"):
             recipient = dict(self.recipient, harness=harness)
