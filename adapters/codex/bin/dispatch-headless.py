@@ -1870,7 +1870,7 @@ def main(argv: list[str]) -> int:
     default_roots = adapter_default_roots(
         args, default_roots, nested_owner_writable_dirs(args), route_bound_worker_writable_dirs(args),
     )
-    command = shell_command(args, prompt_path, log_path)
+    command = None if action == 'start' else shell_command(args, prompt_path, log_path)
 
     governor = ROOT / "utilities" / "model-worker-governor.py"
     try:
@@ -2541,6 +2541,8 @@ def main(argv: list[str]) -> int:
     print(f"prompt_source={prompt_source}")
     print(f"prompt_file={prompt_path}")
     print(f"log_file={log_path}")
+    if command is None:
+        command = shell_command(args, prompt_path, log_path)
     print(f"command={command}")
     return (
         75

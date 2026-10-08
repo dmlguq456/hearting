@@ -1641,7 +1641,7 @@ def main(argv: list[str]) -> int:
     )
     log_path = log_dir / log_name
     args.log_path = log_path
-    command = shell_command(args, prompt_path, log_path)
+    command = None if action == 'start' else shell_command(args, prompt_path, log_path)
 
     if action in ("register", "start"):
         prompt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2294,6 +2294,8 @@ def main(argv: list[str]) -> int:
     print(f"prompt_source={prompt_source}")
     print(f"prompt_file={prompt_path}")
     print(f"log_file={log_path}")
+    if command is None:
+        command = shell_command(args, prompt_path, log_path)
     print(f"command={command}")
     return (
         75

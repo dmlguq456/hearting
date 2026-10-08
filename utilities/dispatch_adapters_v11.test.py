@@ -513,7 +513,7 @@ class AdapterV11Test(unittest.TestCase):
    self.assertEqual(wrapper.child_runtime_homes(SimpleNamespace(nested_codex_home=None),None),{})
    def check(agent_home):
     return subprocess.run([str(ROOT/"adapters/codex/bin/check-runtime-projection.sh")],
-     env={**env,"AGENT_HOME":agent_home,"CODEX_HOME":child["CODEX_HOME"],
+     env={**env,"AGENT_HOME":agent_home,"CODEX_HOME":child["CODEX_HOME"],"AGENT_SESSION_ROLE":"worker",
           "CODEX_RUNTIME_PROJECTION_FAST":"1","CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY":"1"},
      capture_output=True,text=True,check=False)
    kept=check(child["AGENT_HOME"])
@@ -617,7 +617,7 @@ class AdapterV11Test(unittest.TestCase):
                            "attempt_id":attempt,"pid":os.getpid()}})+"\n",encoding="utf-8")
     dirs=module.sessions_dirs_for("", "worker", ROOT, default, str(repo),jobs=jobs)
     self.assertEqual(dirs[0],selected/"sessions")
-    self.assertEqual(dirs[1],repo/".dispatch"/"codex-home"/"sessions")
+    self.assertIn(repo/".dispatch"/"codex-home"/"sessions",dirs)
     self.assertEqual(module.locate_latest_for_worktree_dirs(dirs,str(repo)),transcript)
     observed=json.loads(transcript.read_text().splitlines()[0])["payload"]
     self.assertEqual(transcript.stem,sid)

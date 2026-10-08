@@ -278,10 +278,14 @@ def sessions_dirs_for(
         return [state_root / "homes" / f"{slug}.{prof}" / "sessions"]
 
     homes = resolve_dispatch_state_root(agent_home, explicit_jobs=jobs) / "homes" / "codex"
-    key = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:32]
+    worktree_path = str(Path(worktree).resolve())
+    key = hashlib.sha256(worktree_path.encode()).hexdigest()[:32]
+    worker_key = hashlib.sha256((worktree_path + '\0worker-v1').encode()).hexdigest()[:32]
     # One home per release launched in this worktree (`<key>.<release>`), and the older
     # worktree-only home.
     candidates = [
+        *sorted(home / "sessions" for home in homes.glob(f"{worker_key}.*")),
+        homes / worker_key / "sessions",
         *sorted(home / "sessions" for home in homes.glob(f"{key}.*")),
         homes / key / "sessions",
         Path(worktree) / ".dispatch" / "codex-home" / "sessions",  # legacy read-only observation

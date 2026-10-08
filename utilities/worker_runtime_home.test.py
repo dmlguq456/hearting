@@ -56,6 +56,8 @@ class WorkerHomes(unittest.TestCase):
                     'enabledPlugins': {'plugin@market': True}, 'autoMemoryEnabled': True}
         (self.source / 'settings.json').write_text(json.dumps(settings))
         (self.source / '.credentials.json').write_text('{}')
+        account = {'accountUuid': 'user-account', 'organizationUuid': 'user-org'}
+        (self.source / '.claude.json').write_text(json.dumps({'oauthAccount': account, 'mcpServers': {'main': {}}}))
         self.env['CLAUDE_CONFIG_DIR'] = str(self.source)
         env = prepare_worker_home(ROOT, 'claude', 'support', 'tidy', env=self.env)
         home = Path(env['CLAUDE_CONFIG_DIR'])
@@ -66,6 +68,7 @@ class WorkerHomes(unittest.TestCase):
         self.assertFalse(actual['autoMemoryEnabled'])
         self.assertEqual((home / '.credentials.json').resolve(), (self.source / '.credentials.json').resolve())
         self.assertEqual((home / 'hooks/user-guard.py').resolve(), (self.source / 'hooks/user-guard.py').resolve())
+        self.assertEqual(json.loads((home / '.claude.json').read_text()), {'oauthAccount': account})
         self.assertIn('--strict-mcp-config', claude_worker_arguments(env))
         self.assertNotIn('--bare', claude_worker_arguments(env))
 
@@ -94,6 +97,15 @@ class WorkerHomes(unittest.TestCase):
         home = Path(env['CLAUDE_CONFIG_DIR'])
         self.assertIn('profiles/code-report.yaml', (home / 'CLAUDE.md').read_text())
         self.assertEqual(json.loads((home / 'settings.json').read_text())['permissions']['deny'], ['Read(secret)'])
+
+    def test_codex_without_optional_user_hook_file_still_builds_minimal_home(self):
+        minimal = self.base / 'minimal-source'
+        (minimal / 'profiles/templates').mkdir(parents=True)
+        (minimal / 'profiles/templates/bootstrap-codex.md').write_text('minimal worker attach')
+        self.env['CODEX_HOME'] = str(self.source)
+        env = prepare_worker_home(minimal, 'codex', 'review', 'no-user-hooks', env=self.env)
+        self.assertEqual((Path(env['CODEX_HOME']) / 'AGENTS.md').read_text(), 'minimal worker attach')
+        self.assertFalse((Path(env['CODEX_HOME']) / 'hooks.json').exists())
 
     def test_liveness_uses_exact_worker_store_before_legacy_profile_or_default(self):
         path = ROOT / 'adapters/codex/bin/dispatch-liveness.py'

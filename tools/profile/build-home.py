@@ -321,7 +321,6 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
     through build_instance; both paths use the same runtime attach templates.
     """
     from copy import deepcopy
-    import tomllib
     agent_home = Path(agent_home).resolve()
     env = dict(os.environ if env is None else env)
     if harness not in VALID_HARNESSES or worker_type not in VALID_WORKER_TYPES:
@@ -334,6 +333,8 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
     values = {'HEARTING_WORKER_HOME': str(home)}
 
     def symlink(source, target):
+        if source is None:
+            return
         source, target = Path(source), Path(target)
         if not source.exists():
             return
@@ -376,6 +377,17 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         bootstrap.write_text(assemble_bootstrap(agent_home, profile, harness, worker_type, fragments))
     symlink(agent_home, home / 'hearting')
     if harness == 'codex':
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            # The bundled pure-Python backport keeps Python 3.10 launchable
+            # without installing another dependency or affecting other CLIs.
+            import importlib.util
+            parser_path = Path(__file__).resolve().parent / '_tomli/__init__.py'
+            spec = importlib.util.spec_from_file_location('hearting_worker_tomli', parser_path)
+            tomllib = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = tomllib
+            spec.loader.exec_module(tomllib)
         source = Path(env.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
         symlink(source / 'hooks', home / 'hooks')
         for name in ('auth.json', 'config.toml'):
@@ -385,7 +397,10 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
             symlink(target, home / name)
         hooks = first_existing(source / 'hooks.json', agent_home / 'adapters/codex/hooks/hooks.json')
         symlink(hooks, home / 'hooks.json')
-        symlink(source / 'agent-config', home / 'agent-config')
+        if (source / 'agent-config/models.conf').is_file():
+            symlink(source / 'agent-config', home / 'agent-config')
+        else:
+            symlink(agent_home / 'adapters/codex/config/models.conf', home / 'agent-config/models.conf')
         # These are lookup pointers, not native auto-discovered skill/agent dirs.
         for name, target in {'agent-core': 'core', 'agent-capabilities': 'capabilities',
                              'agent-roles': 'roles', 'agent-bin': 'adapters/codex/bin',
@@ -435,6 +450,11 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         values.update(CODEX_HOME=str(home), HEARTING_CODEX_WORKER_OVERRIDES=json.dumps(overrides))
     elif harness == 'claude':
         source = Path(env.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude').expanduser()
+        # Capacity identity lives separately from credentials/settings. Keep
+        # its account metadata without inheriting global MCP/onboarding state.
+        account = read_json(source / '.claude.json').get('oauthAccount')
+        if account:
+            write_json(home / '.claude.json', {'oauthAccount': account})
         symlink(source / 'hooks', home / 'hooks')
         settings = read_json(source / 'settings.json')
         settings['enabledPlugins'] = {name: False for name in settings.get('enabledPlugins', {})}
