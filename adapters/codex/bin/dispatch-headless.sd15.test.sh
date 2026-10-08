@@ -159,13 +159,14 @@ hit = lv.log_shows_limit(AH, "limit1")
 miss = lv.log_shows_limit(AH, "clean1")
 worktree = AH / "nested-worktree"
 external = AH / ".dispatch" / "homes" / "codex" / __import__("hashlib").sha256(str(worktree.resolve()).encode()).hexdigest()[:32] / "sessions"
+worker_sessions = AH / ".dispatch" / "homes" / "codex" / __import__("hashlib").sha256((str(worktree.resolve()) + '\0worker-v1').encode()).hexdigest()[:32] / "sessions"
 legacy_sessions = worktree / ".dispatch" / "codex-home" / "sessions"
 jobs = AH / ".dispatch" / "jobs.log"
 stores = lv.sessions_dirs_for("", "nested", AH, AH / "default-sessions", str(worktree), jobs=jobs)
 profile_stores = lv.sessions_dirs_for(
     "profile=lab", "nested", AH, AH / "default-sessions", str(worktree), jobs=jobs
 )
-paths_ok = stores == [external, legacy_sessions, AH / "default-sessions"]
+paths_ok = stores == [worker_sessions, external, legacy_sessions, AH / "default-sessions"]
 profile_ok = profile_stores == [AH / ".dispatch" / "homes" / "nested.lab" / "sessions"]
 print(
     "LIVE_OK"
