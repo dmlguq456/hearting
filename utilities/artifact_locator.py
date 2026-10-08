@@ -372,11 +372,9 @@ def _cycle_id_for_open_dir(root: Path, campaign: Mapping[str, Any], path: Path, 
 def _campaign_view(root: Path, campaign_path: Path) -> Optional[Dict[str, Any]]:
     """Fold ``campaign.json`` (or recover a manifest-only view) into one dict.
 
-    Returns ``None`` when the directory carries no usable campaign record --
-    not an error, just nothing to scan. Raises when the two possible sources
-    (a real ``campaign.json`` and the manifests underneath) name different
-    campaign ids for the same directory: that is always a defect, never a
-    display choice.
+    Returns ``None`` when the directory carries no usable campaign record.
+    A present campaign record owns the containing folder; a cycle moved into
+    it may still name its earlier campaign in the historical manifest.
     """
 
     campaign = _read_json(campaign_path / "campaign.json")
@@ -386,16 +384,13 @@ def _campaign_view(root: Path, campaign_path: Path) -> Optional[Dict[str, Any]]:
             campaign = fold_campaign(root, campaign_path / "campaign.json", campaign)
         except CampaignError as exc:
             raise LocatorError(exc.code, exc.detail) from exc
-    manifest_campaign = _campaign_from_manifests(campaign_path)
     if campaign is None:
-        campaign = manifest_campaign
+        campaign = _campaign_from_manifests(campaign_path)
     if campaign is None:
         return None
     campaign_id = campaign.get("campaign_id")
     if not isinstance(campaign_id, str) or _CAMPAIGN_ID.fullmatch(campaign_id) is None:
         return None
-    if manifest_campaign is not None and manifest_campaign.get("campaign_id") != campaign_id:
-        raise LocatorError("locator-campaign-id-conflict", campaign_path.as_posix())
     return campaign
 
 
@@ -403,26 +398,28 @@ def _cycle_entry_id(root: Path, campaign: Mapping[str, Any], campaign_id: str,
                      cycle_path: Path, layout: str) -> Optional[str]:
     """The verified id for one cycle directory, or ``None`` if unresolved.
 
-    Binding, manifest and record must all agree; any disagreement is a typed
-    defect (never a silent pick), matching what a full scan has always done.
+    Binding and manifest agree on the cycle ID. Campaign membership follows
+    the containing folder, including before a hand move is reconciled.
     """
 
     binding = read_cycle_binding(cycle_path) if layout == "readable" else None
-    if binding is not None and binding.get("campaign_id") != campaign_id:
-        raise LocatorError("locator-cycle-binding-campaign-mismatch", cycle_path.as_posix())
+    # An ordinary cross-campaign rename leaves the old campaign in the
+    # binding/manifest until the runtime observes it. The containing campaign
+    # is the current location; the stable cycle ID still has to agree.
     campaign_path = cycle_path.parent.parent if cycle_path.parent.name == "cycles" else cycle_path.parent
     cycle_id = _manifest_cycle_id(root, campaign_path, cycle_path)
+    if binding is not None and binding.get("campaign_id") != campaign_id:
+        record = read_cycle_record(root, binding["cycle_id"]) or {}
+        manifest = _exact_cycle_manifest(root, campaign_path, cycle_path) or {}
+        old_campaign = (manifest.get("campaign") or {}).get("campaign_id")
+        if binding["campaign_id"] not in (record.get("campaign_id"), old_campaign):
+            raise LocatorError("locator-cycle-binding-campaign-mismatch", cycle_path.as_posix())
     if cycle_id is not None and binding is not None and binding.get("cycle_id") != cycle_id:
         raise LocatorError("locator-cycle-binding-id-mismatch", cycle_path.as_posix())
     if cycle_id is None and binding is not None:
         bound_id = binding["cycle_id"]
         bound_record = read_cycle_record(root, bound_id)
-        cycle_ids = campaign.get("cycles", []) if isinstance(campaign.get("cycles"), list) else []
-        if (
-            bound_record is None
-            or bound_record.get("campaign_id") != campaign_id
-            or bound_id not in cycle_ids
-        ):
+        if bound_record is None:
             raise LocatorError("locator-cycle-binding-unverified", cycle_path.as_posix())
         cycle_id = bound_id
     if cycle_id is None:

@@ -2319,9 +2319,12 @@ def _begin_cycle_record(
             parent = read_cycle_record(root, parent_cycle_id)
             if parent is None:
                 raise ProducerError("parent-cycle-not-joinable", parent_cycle_id)
+            if parent.get("deleted_at") and read_campaign(root, parent["campaign_id"]) is None:
+                parent = None
+                parent_cycle_id = None
             # §45 D-123: a parent is a reference to any cycle of this root, in any
             # state and any campaign; it selects a campaign only when none was named.
-            if campaign is None:
+            if campaign is None and parent is not None:
                 campaign = read_campaign(root, parent["campaign_id"])
                 if campaign is None:
                     raise ProducerError("campaign-unknown", parent["campaign_id"])
@@ -4509,11 +4512,6 @@ def _record_cycle_manifest_path(root: Path, record: Mapping[str, Any]) -> Path:
         if locator:
             cycle_path = artifact_locator.safe_child(root, parent, locator)
             binding = artifact_locator.read_cycle_binding(cycle_path)
-            if binding is None:
-                raise ProducerError(
-                    "sealed-cycle-state-unknown",
-                    f"{cycle_id}: cycle-binding=missing",
-                )
         else:
             cycle_path = artifact_locator.safe_child(
                 root, artifact_locator.safe_child(root, parent, "cycles"), cycle_id
@@ -9164,9 +9162,13 @@ def _scan_layout(root: Path) -> _LayoutScan:
             except artifact_locator.LocatorError:
                 binding = None
             if binding is None:
-                scan.complete = False
-                continue
-            cycle_id = binding["cycle_id"]
+                manifest = _read_json(path / "manifest.json") or {}
+                cycle_id = (manifest.get("cycle") or {}).get("cycle_id")
+                if not artifact_identity.is_well_formed(cycle_id, "cycle"):
+                    scan.complete = False
+                    continue
+            else:
+                cycle_id = binding["cycle_id"]
             if cycle_id in scan.cycles or cycle_id in scan.duplicates:
                 scan.duplicates.add(cycle_id)
                 scan.cycles.pop(cycle_id, None)
@@ -9255,14 +9257,23 @@ def reconcile_root(root: Path, *, now: Optional[float] = None) -> Dict[str, Any]
     copy, a link or a folder with no ID is left alone.  Best effort: it never fails its caller."""
     try:
         root = Path(root).resolve()
-        if not is_active(root) or not (root / "campaigns").is_dir():
+        if not is_active(root):
             return {"status": "inactive"}
         # The folders are read with no lock held (§45 D-124); the lock only confirms what was found.
         # A change that no longer holds when the lock is taken is looked for once more.
         for _attempt in range(2):
             published = artifact_locator._load_index(root)
             if published is None:
-                return {"status": "unchanged"}
+                # INDEX is a disposable cache. The admission rows retain
+                # last locations even when the entire campaigns tree is gone.
+                index = artifact_admission.load_index(root)
+                published = {}
+                for cycle_id, row in index.cycles.items():
+                    where = row.get("cycle_path") if isinstance(row, dict) else None
+                    record = read_cycle_record(root, cycle_id)
+                    if isinstance(where, str) and record is not None:
+                        published[cycle_id] = where
+                        published[record["campaign_id"]] = str(Path(where).parent)
             scan = _scan_layout(root)
             if scan.mapping(root) == published:
                 return {"status": "unchanged"}
@@ -9378,7 +9389,9 @@ def _reconcile_locked_run(root: Path, now: Optional[float], scan: _LayoutScan, p
     held = artifact_admission.holds_lock(root)
     lock_fd = None if held else artifact_admission._acquire_lock(root, REFRESH_ADMISSION_WAIT_SECONDS, now=now)
     try:
-        if artifact_locator._load_index(root) != published or not _hand_changes_hold(root, changes, published):
+        current_index = artifact_locator._load_index(root)
+        if ((current_index is not None and current_index != published)
+                or not _hand_changes_hold(root, changes, published)):
             return None
         if manifests is not None:
             for cycle_id, folder in list(changes["cycle_moves"]) + list(changes["cycle_revive"]):

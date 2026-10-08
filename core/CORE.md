@@ -106,6 +106,16 @@ unless it is intentionally describing a specific adapter runtime home.
 
 ## 3. Artifact Root
 
+**Ordinary file cleanup.** A person or agent may edit, move, or delete artifacts,
+cycles, campaigns and their generated records with ordinary filesystem tools.
+No cleanup command, approval, recovery step or intact cache is required. Normal
+runtime operations observe changes and append a history line automatically;
+readers use surviving identity records and omit absent material. A deleted
+campaign or parent does not prevent the next work from starting. Generated
+locator and producer records are bookkeeping, not locks on the files. Recorded
+completion remains a past result, distinct from new completion or execution
+authority. Cleanup leaves running work and deleted payloads alone.
+
 The canonical project artifact directory is:
 
 ```text
