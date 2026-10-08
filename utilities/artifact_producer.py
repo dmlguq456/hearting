@@ -9478,7 +9478,8 @@ def _reconcile_locked_run(root: Path, now: Optional[float], scan: _LayoutScan, p
             last_path = published.get(campaign_id, "") or f"campaigns/{campaign_id}"
             members = [r for r in list_cycle_records(root) if r.get("campaign_id") == campaign_id]
             for member in members:
-                if member.get("deleted_at") or not _closed_record(member) or member["cycle_id"] in seen:
+                if (member.get("deleted_at") or not _closed_record(member) or member["cycle_id"] in seen
+                        or (member.get("relocation") or {}).get("artifact_root")):
                     continue
                 _tombstone_cycle_locked(root, member, where=_last_known_path(root, member, published.get(member["cycle_id"], "")),
                                         command="reconcile", stamp=stamp, reason="reconcile", now=now, by=by,

@@ -132,8 +132,12 @@ class CrossRootMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
         self.assertEqual([snapshot(self.source), snapshot(self.target)], before)
         with self.assertRaises(P.ProducerError):
             P.cycle_move(self.source, self.src["cycle_id"], no_parent=True)
-        with self.assertRaises(P.ProducerError):
-            P.finalize(self.source, cycle_id=self.src["cycle_id"])
+        # Replaying a finished result after a move is harmless local work;
+        # it grants no write to the destination and recreates no source payload.
+        replay = P.finalize(self.source, cycle_id=self.src["cycle_id"])
+        self.assertEqual(replay["status"], "already-sealed")
+        self.assertFalse(Path(self.src["cycle_dir"]).exists())
+        self.assertNotIn("deleted_at", P.read_cycle_record(self.source, self.src["cycle_id"]))
         self.assertEqual(snapshot(self.target), before[1])
 
     def test_retry_after_every_publication_phase_preserves_new_membership(self):
