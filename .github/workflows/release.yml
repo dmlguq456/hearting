@@ -81,7 +81,11 @@ jobs:
           RELEASE_HEAD: ${{ needs.admission.outputs.head }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          python3 tools/release/plan.py prepare \
+          # A delayed tested commit can predate this policy. Read the planner
+          # from the workflow's pinned revision without changing asset source.
+          task_release_plan="$RUNNER_TEMP/hearting-release-plan.py"
+          git show "$GITHUB_WORKFLOW_SHA:tools/release/plan.py" > "$task_release_plan"
+          python3 "$task_release_plan" prepare \
             --repo . \
             --head "$RELEASE_HEAD" \
             --format github >> "$GITHUB_OUTPUT"

@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -173,13 +174,42 @@ class TagRaceTests(unittest.TestCase):
 
     def test_workflow_builds_and_publishes_the_reserved_version(self):
         workflow = (HERE.parents[1] / ".github/workflows/release.yml").read_text()
-        self.assertLess(workflow.index("plan.py prepare"), workflow.index("Build deterministic release assets"))
+        self.assertLess(workflow.index('"$task_release_plan" prepare'), workflow.index("Build deterministic release assets"))
         self.assertNotIn("release tag already exists", workflow)
         self.assertNotIn("Create the planned tag", workflow)
         self.assertEqual(workflow.count("RELEASE_TAG: ${{ steps.plan.outputs.version }}"), 4)
         self.assertIn('--version "$RELEASE_TAG"', workflow)
         self.assertIn('--verify-tag', workflow)
         self.assertIn('--generate-notes', workflow)
+
+    def test_delayed_candidate_uses_workflow_policy_without_replacing_asset_source(self):
+        # The old tested source has no prepare command or planner file at all.
+        target = self.source / "tools/release/plan.py"
+        target.parent.mkdir(parents=True)
+        target.write_bytes((HERE / "plan.py").read_bytes())
+        self.run_git(self.source, "add", ".")
+        self.run_git(self.source, "commit", "-qm", "fix: release policy")
+        policy = self.run_git(self.source, "rev-parse", "HEAD")
+        self.run_git(self.source, "push", "-q", "origin", "HEAD")
+        job = self.jobs[0]
+        self.run_git(job, "fetch", "origin")
+        self.run_git(job, "checkout", "-q", self.a)
+        self.assertFalse((job / "tools/release/plan.py").exists())
+        workflow = (HERE.parents[1] / ".github/workflows/release.yml").read_text()
+        block = workflow.split('- name: Plan release\n', 1)[1].split('\n      - name:', 1)[0]
+        script = block.split('        run: |\n', 1)[1].split('          python3 ', 1)[0]
+        script = '\n'.join(line[10:] for line in script.splitlines())
+        subprocess.run(['bash', '-e', '-c', script], cwd=job, check=True,
+                       env=dict(self.env, RUNNER_TEMP=str(self.root), GITHUB_WORKFLOW_SHA=policy))
+        copied = self.root / 'hearting-release-plan.py'
+        spec = importlib.util.spec_from_file_location('pinned_policy', copied)
+        pinned = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(pinned)
+        result = pinned.prepare(job, self.a, api=self.api)
+        self.assertTrue(result['release'])
+        self.assertEqual(result['head'], self.a)
+        self.assertEqual(self.run_git(job, 'rev-parse', 'HEAD'), self.a)
+        self.assertEqual(PLAN.tag_commit(self.api, result['version']), self.a)
 
 
 if __name__ == "__main__":
