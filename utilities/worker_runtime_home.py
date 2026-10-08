@@ -14,7 +14,13 @@ prepare_worker_home = _builder.build_worker_home
 
 def codex_worker_arguments(env=None):
     env = os.environ if env is None else env
-    return [item for value in json.loads(env.get('HEARTING_CODEX_WORKER_OVERRIDES', '[]'))
+    overrides = json.loads(env.get('HEARTING_CODEX_WORKER_OVERRIDES', '[]'))
+    if env.get('HEARTING_WORKER_HOME'):
+        state = _builder.worker_hook_state_override(env['CODEX_HOME'],
+                         json.loads(env.get('HEARTING_CODEX_HOOK_SOURCES', '[]')))
+        if state:
+            overrides.append(state)
+    return [item for value in overrides
             for item in ('-c', value)]
 
 

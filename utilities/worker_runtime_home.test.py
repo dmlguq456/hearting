@@ -72,6 +72,27 @@ class WorkerHomes(unittest.TestCase):
         self.assertIn('--strict-mcp-config', claude_worker_arguments(env))
         self.assertNotIn('--bare', claude_worker_arguments(env))
 
+    def test_codex_hook_alias_preserves_user_decisions_and_rereads_them_on_resume(self):
+        hooks = self.source / 'hooks.json'
+        hooks.write_text('{"hooks":{}}')
+        config = self.source / 'config.toml'
+        key = str(hooks) + ':pre_tool_use:0:0'
+        config.write_text('[hooks.state.' + json.dumps(key) + ']\ntrusted_hash="sha256:user-approved"\nenabled=false\n')
+        self.env['CODEX_HOME'] = str(self.source)
+        env = prepare_worker_home(ROOT, 'codex', 'owner', 'trusted-guards', env=self.env)
+        before = config.read_bytes()
+        state = next(s for s in codex_worker_arguments(env) if s.startswith('hooks.state='))
+        self.assertIn(str(Path(env['CODEX_HOME']) / 'hooks.json') + ':pre_tool_use:0:0', state)
+        self.assertIn('sha256:user-approved', state)
+        self.assertIn('"enabled"=false', state)
+        self.assertEqual(config.read_bytes(), before)
+        # A resumed supervisor constructs its command again: revocation must
+        # not be restored from a previously computed launch environment.
+        config.write_text('[hooks.state.' + json.dumps(key) + ']\nenabled=false\n')
+        state = next(s for s in codex_worker_arguments(env) if s.startswith('hooks.state='))
+        self.assertNotIn('trusted_hash', state)
+        self.assertIn('"enabled"=false', state)
+
     def test_opencode_keeps_deny_and_guard_plugins_excludes_main_and_skills(self):
         config = {'permission': {'bash': {'danger *': 'deny'}},
                   'instructions': [str(ROOT / 'adapters/opencode/AGENTS.md')],

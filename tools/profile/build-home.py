@@ -312,6 +312,47 @@ def build_instance(agent_home, name, harness, worker_type, fragments, expose, sl
     return instance_dir, link_count
 
 
+def read_worker_toml(path):
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import importlib.util
+        parser_path = Path(__file__).resolve().parent / '_tomli/__init__.py'
+        spec = importlib.util.spec_from_file_location('hearting_worker_tomli', parser_path)
+        tomllib = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = tomllib
+        spec.loader.exec_module(tomllib)
+    return tomllib.loads(Path(path).read_text()) if Path(path).is_file() else {}
+
+
+def worker_hook_state_override(home, origins):
+    """Read existing user decisions for the same relocated hook definitions.
+
+    Native Codex hashes the definition but keys its decisions by source path.
+    Supply path aliases only for this invocation. Native hash comparison still
+    rejects changed/unapproved definitions; disabled hooks stay disabled. Read
+    again at each command build so a resumed worker sees current user decisions.
+    """
+    home = Path(home)
+    state = read_worker_toml(home / 'config.toml').get('hooks', {}).get('state', {})
+    aliases = {}
+    for key, value in state.items():
+        parts = key.rsplit(':', 3)
+        if len(parts) != 4 or parts[0] not in origins:
+            continue
+        target = str(home / Path(parts[0]).name) + ':' + ':'.join(parts[1:])
+        aliases[target] = value
+    if not aliases:
+        return None
+    def scalar(value):
+        return ('true' if value else 'false') if isinstance(value, bool) else json.dumps(value)
+    # This schema contains only enabled and trusted_hash, never credentials.
+    inline = '{' + ','.join(json.dumps(key) + '={' + ','.join(
+        json.dumps(field) + '=' + scalar(value) for field, value in item.items()
+        if field in ('enabled', 'trusted_hash')) + '}' for key, item in aliases.items()) + '}'
+    return 'hooks.state=' + inline
+
+
 def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, destination=None, profile=None):
     """Default typed profile for every launch; never changes the caller's home.
 
@@ -377,17 +418,6 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         bootstrap.write_text(assemble_bootstrap(agent_home, profile, harness, worker_type, fragments))
     symlink(agent_home, home / 'hearting')
     if harness == 'codex':
-        try:
-            import tomllib
-        except ModuleNotFoundError:
-            # The bundled pure-Python backport keeps Python 3.10 launchable
-            # without installing another dependency or affecting other CLIs.
-            import importlib.util
-            parser_path = Path(__file__).resolve().parent / '_tomli/__init__.py'
-            spec = importlib.util.spec_from_file_location('hearting_worker_tomli', parser_path)
-            tomllib = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = tomllib
-            spec.loader.exec_module(tomllib)
         source = Path(env.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
         symlink(source / 'hooks', home / 'hooks')
         for name in ('auth.json', 'config.toml'):
@@ -410,7 +440,11 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
                              'agent-modes': 'adapters/codex/modes', 'agent-plugin-marketplace': 'adapters/codex/plugin-marketplace',
                              'hearting-readme.md': 'adapters/codex/README.md'}.items():
             symlink(agent_home / target, home / name)
-        config = tomllib.loads((source / 'config.toml').read_text()) if (source / 'config.toml').is_file() else {}
+        config = read_worker_toml(source / 'config.toml')
+        original_config_dir = (source / 'config.toml').resolve().parent
+        origins = sorted({str(folder / name) for folder in (source, original_config_dir)
+                          for name in ('hooks.json', 'config.toml')})
+        values['HEARTING_CODEX_HOOK_SOURCES'] = json.dumps(origins)
         overrides = ['features.apps=false', 'features.multi_agent=false', 'agents.enabled=false']
         def toml_value(value):
             if isinstance(value, bool):
