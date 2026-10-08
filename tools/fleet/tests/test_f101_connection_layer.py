@@ -349,7 +349,9 @@ class RelationLineBudgetTest(unittest.TestCase):
                                  elapsed_min=1, session_tag=tag))
         rows = _lines_text(render._build_lines(peers, [], "fleet", False, 0,
                                                layout="wide", term_width=width))
-        return [t for t in rows if render._ICON_PEER in t or render._ICON_STEWARD in t]
+        return [t for t in rows if any(icon + " " + direction in t
+                                      for icon in (render._ICON_PEER, render._ICON_STEWARD)
+                                      for direction in ("→", "←"))]
 
     def test_a_session_with_every_relation_spends_exactly_two_rows(self):
         rows = self._relation_rows()

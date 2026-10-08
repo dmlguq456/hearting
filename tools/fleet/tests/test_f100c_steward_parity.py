@@ -85,6 +85,58 @@ class StewardChipTest(unittest.TestCase):
                                         dim=True)
         self.assertEqual(segs[1], ("46", "tag_dim"))
 
+    def test_model_flag_follows_effort_for_all_harnesses_and_layouts(self):
+        for harness, model in (("claude", "claude-opus-5.5"),
+                               ("codex", "gpt-6.1-sol"),
+                               ("opencode", "openai/gpt-6.1-sol")):
+            s = self._s(harness=harness, model=model, effort="xhigh",
+                        session_tag="46", steward=True)
+            for layout in ("wide", "narrow", "stack"):
+                with self.subTest(harness=harness, layout=layout):
+                    if layout == "wide":
+                        row = render._session_row(s, narrow=False)
+                    elif layout == "narrow":
+                        row = render._session_row_2line(s, term_width=100)[1]
+                    else:
+                        row = render._session_row_stack(s, term_width=60)[1]
+                    self.assertIn(") ⚑", _text(row))
+                    self.assertEqual(_text(row).count("⚑"), 1)
+                    self.assertIn((" ⚑", "tag_steward"), row)
+
+    def test_model_flag_keeps_the_following_columns_fixed(self):
+        for harness, model in (("claude", "claude-opus-5.5"),
+                               ("codex", "gpt-6.1-sol"),
+                               ("opencode", "provider/a-very-long-model-name")):
+            for width in (70, 100, 137, 168):
+                with self.subTest(harness=harness, width=width):
+                    s = self._s(harness=harness, model=model, effort="xhigh",
+                                session_tag="46", title="column-marker")
+                    plain = render._session_row(s, narrow=False)
+                    plain_l2 = render._session_row_2line(s, term_width=width)[1]
+                    s.steward = True
+                    marked = render._session_row(s, narrow=False)
+                    marked_l2 = render._session_row_2line(s, term_width=width)[1]
+                    self.assertEqual(_text(plain).index("column-marker"),
+                                     _text(marked).index("column-marker"))
+                    self.assertEqual(sum(render._dw(t) for t, _ in plain_l2),
+                                     sum(render._dw(t) for t, _ in marked_l2))
+                    stage_col = render._NARROW_L2_STAGE_COL
+                    self.assertEqual(_text(plain_l2)[stage_col:], _text(marked_l2)[stage_col:])
+                    self.assertIn("⚑", _text(marked_l2)[:stage_col])
+
+    def test_model_flag_uses_the_existing_dim_role_color(self):
+        s = self._s(model="claude-opus-5.5", effort="xhigh", steward=True,
+                    session_tag="46", liveness="stale")
+        for row in (render._session_row(s, narrow=False),
+                    render._session_row_2line(s, term_width=100)[1]):
+            self.assertIn((" ⚑", "tag_dim"), row)
+
+    def test_regular_session_model_has_no_role_flag(self):
+        s = self._s(model="claude-opus-5.5", effort="xhigh", session_tag="46")
+        for row in (render._session_row(s, narrow=False),
+                    render._session_row_2line(s, term_width=100)[1]):
+            self.assertNotIn("⚑", _text(row))
+
     def test_legend_entry_appears_only_when_a_steward_is_on_screen(self):
         def legend(**over):
             base = dict(harness="claude", pid=1, cwd="/x", slug="s", liveness="idle",

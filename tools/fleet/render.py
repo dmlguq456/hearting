@@ -1066,20 +1066,25 @@ def _eff_key(effort, dim):
 _EFF_SHORT = {"low": "lo", "medium": "md", "high": "hi", "xhigh": "xh", "max": "mx"}
 
 
-def _model_cell(model, effort, width, dim=False):
+def _model_cell(model, effort, width, dim=False, steward=False):
     """Render model and effort together as one flowing phrase, padded to width."""
+    flag = [(" " + _ICON_STEWARD, "tag_dim" if dim else "tag_steward")] if steward else []
+    width -= sum(_dw(t) for t, _k in flag)
     name = _clean_model(dash(model)) or "—"
     sfx = _effort_text(effort)
     lkey = _model_key(model, dim=dim)
     if sfx:
         name = name[: max(1, width - len(sfx) - 4)]
         pad = max(0, width - len(name) - len(sfx) - 3)
-        return [(name, lkey), (" (" + sfx + ")", _eff_key(sfx, dim)), (" " * pad, None)]
+        return [(name, lkey), (" (" + sfx + ")", _eff_key(sfx, dim))] + flag + [(" " * pad, None)]
+    if flag:
+        name = name[: width - 1]
+        return [(name, lkey)] + flag + [(" " * (width - len(name)), None)]
     return [(_pad(name[: width - 1], width), lkey)]
 
 
 def _harness_model_cell(harness, model, effort, width, hkey, dim=False, unknown="?",
-                       effort_default=False):
+                       effort_default=False, steward=False):
     """F-33 (v11, 사용자 확정 2026-07-16) — WIDE-layout harness field with model/effort folded
     in as a parenthetical: 'claude code (Fable 5·xhigh)'. The harness text keeps its
     existing hb_*/h_* badge color (`hkey`); the parenthetical reuses `_model_cell`'s
@@ -1095,6 +1100,9 @@ def _harness_model_cell(harness, model, effort, width, hkey, dim=False, unknown=
     uninformative default". That is not an effort level, so it never claims a real one —
     it renders a small dim '(default)' instead, distinguishing it from a session that
     reported no effort at all (both would otherwise be the same blank)."""
+    flag = [(" " + _ICON_STEWARD, "tag_dim" if dim else "tag_steward")] if steward else []
+    flag_width = sum(_dw(t) for t, _k in flag)
+    width -= flag_width
     hn = _BADGE_TEXT.get(harness, unknown) if harness else unknown
     segs = [(hn, hkey)]
     used = len(hn)
@@ -1123,6 +1131,7 @@ def _harness_model_cell(harness, model, effort, width, hkey, dim=False, unknown=
             nm = name[: max(1, room)]
             segs += [(" (", "dim"), (nm, _model_key(model, dim=dim)), (")", "dim")]
             used += 2 + len(nm) + 1
+    segs += flag
     if used < width:
         segs.append((" " * (width - used), None))
     return segs
@@ -1964,9 +1973,10 @@ def _session_row(s, narrow, is_parent=False, child_count=0, name_width=None,
     segs += _session_tag_chip(s, dim=dim_tel)          # F-100a — inside the _HMW field
     segs += _harness_model_cell(s.harness, None if dead_stale else s.model,
                                 None if dead_stale else s.effort, _HMW - _TAG_W, hkey,
-                                dim=dim_tel,
-                                effort_default=(not dead_stale
-                                                and bool(getattr(s, "effort_default", False))))
+                                 dim=dim_tel,
+                                 effort_default=(not dead_stale
+                                                 and bool(getattr(s, "effort_default", False))),
+                                 steward=bool(getattr(s, "steward", False)))
 
     # F-22: reserve identity suffixes first, then let the title consume the
     # responsive name column. Calls without a terminal-derived width retain the
@@ -3065,7 +3075,8 @@ def _session_row_2line(s, is_parent=False, child_count=0, _split=False, term_wid
     # Put time under the harness, model under the name, and gauge immediately after.
     # indent / no far-right flush).
     l2 = [("    ", None), (_pad(fmt_min(s.elapsed_min), _HW), "dim")]
-    l2 += _model_cell(s.model, s.effort, _MW, dim=dim_tel)
+    l2 += _model_cell(s.model, s.effort, _MW, dim=dim_tel,
+                      steward=bool(getattr(s, "steward", False)))
     # Same cell as the wide row (capability tag, route chain, spec breadcrumb): this card
     # used to call the bare projection text and showed `-` for inline work the wide row named.
     l2 += [("  ", None)]
