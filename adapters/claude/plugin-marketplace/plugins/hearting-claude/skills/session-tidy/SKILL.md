@@ -27,10 +27,17 @@ For a new successor at this seat, replace the clear sequence below with `peer-st
 
 ## Steps
 
-1. **Card.** Write four short fields in the user's language and pipe them in:
-   what is in progress, the decisions still waiting, what to do next, and the related
+1. **Card.** Write six fields yourself from the conversation you already hold, in
+   the user's language, and pipe them in (about 90 lines at most). Keep these four
+   continuation fields first: what is in progress, the decisions still waiting,
+   what to do next, and the related
    paths, PRs and sessions (Fleet tag·pane, role in parentheses; herdr name·pane
-   when untagged). Point to artifacts; do not summarize them again.
+   when untagged). Then add a few lines for today's work, pointing to its PR,
+   installed version or result file, and short quotations of user instructions
+   marked finished, remaining or deferred. Point to artifacts rather than copying
+   their reports. The start preview still shows the bounded beginning; the rest
+   is in the card file. The memory worker's `일부만 읽음(범위)` describes its own
+   input, not the card you wrote.
 
    ```bash
    python3 "$AGENT_HOME/utilities/session_tidy.py" card <<'CARD'
@@ -38,6 +45,8 @@ For a new successor at this seat, replace the clear sequence below with `peer-st
    기다리는 결정: …
    다음 할 일: …
    관련: …
+   오늘 한 일: … (PR·설치 버전·결과 파일)
+   사용자 지시: "…" — 끝남 / 남음 / 보류
    CARD
    ```
 

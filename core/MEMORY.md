@@ -31,6 +31,14 @@
 
 Sections §7.1–§7.3 define the semantic/mechanical mutation boundary; §7.4 defines agent-initiated retrieval.
 
+The main session authors its own card from the conversation it already holds.
+Keep the four continuation fields first, then add a few lines for today's work
+(with PR, installed version or result path) and short user instructions with
+their finished, remaining or deferred status. Aim for at most about 90 lines;
+the existing bounded start preview and full-card path remain the read surfaces.
+The tidy worker's partial-read coverage describes its memory input, not the
+main-authored card.
+
 ### §7.1. Semantic Decisions Belong to the Agent
 
 There is no deterministic promote/skip classifier. The acting agent judges whether a memory operation is useful in context, including whether information is durable, non-obvious, recoverable elsewhere, stale, or merely ephemeral. The four storage-purpose labels are a bounded ingress contract after that semantic judgment, not a keyword classifier: code validates the declared purpose but never infers it from content. Manual user-directed memory remains governed by its owning capability.
