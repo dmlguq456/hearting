@@ -241,7 +241,9 @@ else
   expect_link "$CODEX_HOME/agent-plugin-marketplace" "$S/codex-plugin-marketplace" agent-plugin-marketplace
 fi
 
-if [ -f "$CODEX_HOME/agent-config/models.conf" ] && [ ! -L "$CODEX_HOME/agent-config" ] && [ ! -L "$CODEX_HOME/agent-config/models.conf" ]; then
+if [ "$worker_home" -eq 1 ] && [ -f "$CODEX_HOME/agent-config/models.conf" ]; then
+  printf 'check=agent-config:ok reason=worker-user-config-reference\n'
+elif [ -f "$CODEX_HOME/agent-config/models.conf" ] && [ ! -L "$CODEX_HOME/agent-config" ] && [ ! -L "$CODEX_HOME/agent-config/models.conf" ]; then
   printf 'check=agent-config:ok reason=user-owned-model-config\n'
 else
   printf 'check=agent-config:failed reason=expected-regular-user-model-config\n'

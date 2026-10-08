@@ -384,6 +384,7 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
             symlink(target, home / name)
         hooks = first_existing(source / 'hooks.json', agent_home / 'adapters/codex/hooks/hooks.json')
         symlink(hooks, home / 'hooks.json')
+        symlink(source / 'agent-config', home / 'agent-config')
         # These are lookup pointers, not native auto-discovered skill/agent dirs.
         for name, target in {'agent-core': 'core', 'agent-capabilities': 'capabilities',
                              'agent-roles': 'roles', 'agent-bin': 'adapters/codex/bin',
