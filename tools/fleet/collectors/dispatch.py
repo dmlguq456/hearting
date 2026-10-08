@@ -564,6 +564,9 @@ def _codex_sessions_dirs_for_profile(profile, slug, job=None):
 
 
 def _codex_sessions_dir(profile=None, slug=None, job=None):
+    actual_home = (getattr(job, "_registry_metadata", None) or {}).get("runtime_home") if job is not None else None
+    if actual_home:
+        return os.path.join(actual_home, "sessions")
     if profile and slug:
         return _codex_sessions_dirs_for_profile(profile, slug, job=job)[0]
     return os.path.join(_codex_home(), "sessions")
@@ -577,6 +580,9 @@ def _codex_sessions_dirs(cwd, profile=None, slug=None, job=None):
     so inspect the deterministic local projection before the Fleet process' own home.
     Profile jobs remain isolated to their explicit profile home.
     """
+    actual_home = (getattr(job, "_registry_metadata", None) or {}).get("runtime_home") if job is not None else None
+    if actual_home:
+        return [os.path.join(actual_home, "sessions")]
     if profile and slug:
         return _codex_sessions_dirs_for_profile(profile, slug, job=job)
 
@@ -717,6 +723,9 @@ def _opencode_job_liveness(cwd, now, stale_min=15, slug=None, job=None):
     if not cwd:
         return "unknown"
     db = _opencode_db()
+    runtime_dir = (getattr(job, "_registry_metadata", None) or {}).get("opencode_runtime_dir") if job is not None else None
+    if runtime_dir:
+        db = os.path.join(runtime_dir, "data", "opencode", "opencode.db")
     if not os.path.exists(db):
         return "unknown"
     con = None
@@ -1962,7 +1971,10 @@ def _job_liveness(path, now, stale_min=15, profile=None, slug=None, job=None):
     profile-less job case) → unchanged runtime-home path."""
     if not path:
         return "unknown"
-    if profile and slug:
+    actual_home = (getattr(job, "_registry_metadata", None) or {}).get("runtime_home") if job is not None else None
+    if actual_home:
+        candidates = [os.path.join(actual_home, "projects", _enc(path))]
+    elif profile and slug:
         candidates = [
             os.path.join(root, "homes", "%s.%s" % (slug, profile), "projects", _enc(path))
             for root in _row_state_roots(job)

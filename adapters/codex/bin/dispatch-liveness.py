@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "utilities"))
 from route_authority import scan_anchored_death  # noqa: E402
-from dispatch_contract import (  # noqa: E402
+from dispatch_contract import (
+    parse_registry_metadata,  # noqa: E402
     authoritative_process_identities,
     observed_attempt_liveness,
     process_start_ticks,
@@ -249,6 +250,9 @@ def sessions_dir_for(pipe: str, slug: str, agent_home: Path, default_sessions: P
     sh helper's ``projects/<enc>`` is Claude-shaped). Non-profile jobs keep the
     default store (byte-behavior for existing callers).
     """
+    actual_home = parse_registry_metadata(pipe).get("runtime_home")
+    if actual_home:
+        return Path(actual_home) / "sessions"
     prof = parse_profile(pipe)
     if prof:
         return resolve_dispatch_state_root(agent_home) / "homes" / f"{slug}.{prof}" / "sessions"
@@ -265,6 +269,9 @@ def sessions_dirs_for(
     jobs: Path | None = None,
 ) -> list[Path]:
     """Resolve all possible session stores without weakening profile isolation."""
+    actual_home = parse_registry_metadata(pipe).get("runtime_home")
+    if actual_home:
+        return [Path(actual_home) / "sessions"]
     prof = parse_profile(pipe)
     if prof:
         state_root = resolve_dispatch_state_root(agent_home, explicit_jobs=jobs)

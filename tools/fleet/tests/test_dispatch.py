@@ -1602,6 +1602,24 @@ class CwdFallbackEnrichmentTest(unittest.TestCase):
 # --- D4: _job_liveness profile-path assembly (string check, no real filesystem) ---
 class JobLivenessPathAssemblyTest(unittest.TestCase):
 
+    def test_registered_worker_home_wins_over_legacy_profile_and_main_store(self):
+        job = type('Job', (), {'_registry_metadata': {'runtime_home': '/WORKER'}})()
+        self.assertEqual(dispatch._codex_sessions_dir('legacy', 'job', job=job), '/WORKER/sessions')
+        self.assertEqual(dispatch._codex_sessions_dirs('/cwd', 'legacy', 'job', job=job), ['/WORKER/sessions'])
+        calls = []
+        def no_store(path):
+            calls.append(path)
+            raise OSError
+        with mock.patch('fleet.collectors.dispatch.os.listdir', side_effect=no_store):
+            dispatch._job_liveness('/cwd', 0, profile='legacy', slug='job', job=job)
+        self.assertEqual(calls, [os.path.join('/WORKER', 'projects', dispatch._enc('/cwd'))])
+
+    def test_opencode_registered_worker_uses_its_own_database(self):
+        job = type('Job', (), {'_registry_metadata': {'opencode_runtime_dir': '/WORKER/runtime'}})()
+        with mock.patch('fleet.collectors.dispatch.os.path.exists', return_value=False) as exists:
+            self.assertEqual(dispatch._opencode_job_liveness('/cwd', 0, job=job), 'unknown')
+        exists.assert_called_once_with('/WORKER/runtime/data/opencode/opencode.db')
+
     def test_profile_branch_composes_under_registry_home(self):
         calls = []
 

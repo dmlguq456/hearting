@@ -1,5 +1,6 @@
 """Launch isolation must preserve user guards/login and the assigned input."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import tempfile
@@ -24,6 +25,8 @@ class WorkerHomes(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_codex_every_type_isolates_global_input_keeps_auth_config_and_hooks(self):
+        (self.source / 'agent-config').mkdir()
+        (self.source / 'agent-config/models.conf').write_text('user-model-policy')
         for name, content in [('auth.json', '{}'), ('config.toml', '[features]\nhooks=true\n[mcp_servers.external]\ncommand="external"\n'), ('hooks.json', '{"user_guard":true}')]:
             (self.source / name).write_text(content)
         (self.source / 'skills/.system/test-skill').mkdir(parents=True)
@@ -38,6 +41,7 @@ class WorkerHomes(unittest.TestCase):
                 self.assertEqual((home / name).resolve(), (self.source / name).resolve())
             self.assertFalse((home / 'agents').exists())
             self.assertFalse((home / 'plugins').exists())
+            self.assertEqual((home / 'agent-config/models.conf').read_text(), 'user-model-policy')
             args = codex_worker_arguments(env)
             self.assertIn('features.multi_agent=false', args)
             self.assertIn('mcp_servers={"external"={"command"="true","enabled"=false}}', args)
@@ -87,6 +91,17 @@ class WorkerHomes(unittest.TestCase):
         home = Path(env['CLAUDE_CONFIG_DIR'])
         self.assertIn('profiles/code-report.yaml', (home / 'CLAUDE.md').read_text())
         self.assertEqual(json.loads((home / 'settings.json').read_text())['permissions']['deny'], ['Read(secret)'])
+
+    def test_liveness_uses_exact_worker_store_before_legacy_profile_or_default(self):
+        path = ROOT / 'adapters/codex/bin/dispatch-liveness.py'
+        spec = importlib.util.spec_from_file_location('worker_home_liveness', path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        actual = self.base / 'actual-worker'
+        pipe = 'profile=legacy-profile,runtime_home=' + str(actual)
+        default = self.base / 'other-session/sessions'
+        self.assertEqual(mod.sessions_dir_for(pipe, 'job', ROOT, default), actual / 'sessions')
+        self.assertEqual(mod.sessions_dirs_for(pipe, 'job', ROOT, default, str(ROOT)), [actual / 'sessions'])
 
 
 if __name__ == '__main__':

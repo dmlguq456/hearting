@@ -285,7 +285,11 @@ while IFS=$'\t' read -r ts status repo wt slug pipe || [ -n "${ts:-}" ]; do
       enc=$(python3 "$SCRIPT_DIR/claude_project_dir.py" "${wt:-}")
       name=""
       case "$pipe" in *profile=*) name=${pipe##*profile=}; name=${name%%,*};; esac
-      if [ -n "$name" ]; then
+      actual_home=""
+      case "$pipe" in *runtime_home=*) actual_home=${pipe##*runtime_home=}; actual_home=${actual_home%%,*};; esac
+      if [ -n "$actual_home" ]; then
+        dir="$actual_home/projects/$enc"
+      elif [ -n "$name" ]; then
         dir="$STATE_ROOT/homes/${slug}.${name}/projects/$enc"
       else
         dir="$PROJ/$enc"

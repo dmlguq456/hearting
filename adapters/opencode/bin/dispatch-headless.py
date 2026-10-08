@@ -1772,9 +1772,9 @@ def main(argv: list[str]) -> int:
             )
             launch_metadata["execution_access_effective_file"] = str(effective_path)
             launch_metadata["execution_access_effective_sha256"] = effective_sha256
-        if getattr(args, "nested_runtime_env", None):
-            launch_metadata["opencode_runtime_dir"] = str(
-                Path(args.nested_runtime_env["XDG_DATA_HOME"]).parent)
+        launch_metadata["opencode_runtime_dir"] = str(
+            Path(dispatch_env["XDG_DATA_HOME"]).parent)
+        launch_metadata["runtime_home"] = dispatch_env["OPENCODE_CONFIG_DIR"]
         if args.dispatch_depth >= 2 and os.environ.get("AGENT_DISPATCH_CHILD") == "1":
             launch_metadata["pid_scope"] = "namespace-local"
         try:

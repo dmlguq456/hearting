@@ -1662,20 +1662,6 @@ def main(argv: list[str]) -> int:
                 if check_result.stderr:
                     print(check_result.stderr, end="", file=sys.stderr)
                 return fail("invalid-dispatch-profile", 3, profile=args.profile)
-            build_result = subprocess.run(
-                ["python3", str(build_home), args.profile, "--instance", args.slug, "--home-root", str(home_root)],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
-            )
-            if build_result.returncode != 0:
-                if build_result.stdout:
-                    print(build_result.stdout, end="")
-                if build_result.stderr:
-                    print(build_result.stderr, end="", file=sys.stderr)
-                return fail("profile-build-failed", 3, profile=args.profile)
-            profile_home = home_root / f"{args.slug}.{args.profile}"
 
     runtime_home_projection = None
     if args.start and profile_home is None:
@@ -2148,6 +2134,7 @@ def main(argv: list[str]) -> int:
         launch_metadata = {
             **args.launch_lifecycle_resolution.metadata(),
             "runtime_sandbox": effective_runtime_sandbox(args),
+            "runtime_home": dispatch_env["CODEX_HOME"],
         }
         from dispatch_capacity_evidence import launch_scope
         launch_metadata.update(launch_scope("codex", dispatch_env))

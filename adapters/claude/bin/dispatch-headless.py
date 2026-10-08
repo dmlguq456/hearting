@@ -1653,14 +1653,6 @@ def main(argv: list[str]) -> int:
         rc = build_home_gate(agent_home, args.profile, ["--check"], "profile-check-failed")
         if rc != 0:
             return rc
-        rc = build_home_gate(
-            agent_home,
-            args.profile,
-            ["--instance", args.slug, "--home-root", str(home_root)],
-            "profile-build-failed",
-        )
-        if rc != 0:
-            return rc
 
     governor = ROOT / "utilities" / "model-worker-governor.py"
     try:
@@ -1823,6 +1815,7 @@ def main(argv: list[str]) -> int:
         args.worker_runtime_env = prepare_worker_home(args.agent_home, 'claude', args.worker_type,
                                                        args.attempt_id, env=env, profile=args.profile)
         env.update(args.worker_runtime_env)
+        instance_dir = Path(env["CLAUDE_CONFIG_DIR"])
         command = shell_command(args, prompt_path, log_path)
         if args.resolved_completion_delivery == "session-resume-supervised":
             env["AGENT_DISPATCH_COMPLETION_STATE_FILE"] = str(
@@ -1920,6 +1913,7 @@ def main(argv: list[str]) -> int:
         launch_metadata = {
             **args.launch_lifecycle_resolution.metadata(),
             "runtime_sandbox": "adapter-default",
+            "runtime_home": env["CLAUDE_CONFIG_DIR"],
         }
         from dispatch_capacity_evidence import launch_scope
         launch_metadata.update(launch_scope("claude", env))
