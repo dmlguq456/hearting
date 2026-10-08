@@ -2700,11 +2700,11 @@ _FLUSH_STUCK_HOURS = 1.0
 
 
 def _flush_delay_banner(ref, created):
-    """The one line prefixed (as its own prompt) to a late redelivery.
+    """The transport prefix included with a late redelivery in one prompt.
 
     A stranded row's sealed text can never be edited in place: the transfer
     record pins its digest, and any changed byte unattaches the receipt.
-    So an old row goes out intact, preceded by this banner prompt carrying
+    So an old row goes out intact, preceded by this transport prefix carrying
     the original send time and the delay. Returns None for fresh rows.
     """
     try:
@@ -2740,8 +2740,8 @@ def _flush_pending_for_target(target, t_harness, t_sid, entry_state, skip=None):
     row is claimed before input, never deleted, and an observed send closes
     it without waiting for a receiver hook. An ambiguous send stays inflight
     for the hook to acknowledge and is not blindly resubmitted.
-    Rows older than _FLUSH_STUCK_HOURS go out intact preceded by a delay
-    banner prompt (the seal pins the row text, so the banner is separate).
+    Rows older than _FLUSH_STUCK_HOURS go out intact with a delay prefix in
+    the same prompt; receivers check the unchanged sealed inner message.
     Never raises; failures print to stderr and leave rows for a later prompt.
     """
     stuck = []
@@ -2800,16 +2800,7 @@ def _flush_pending_for_target(target, t_harness, t_sid, entry_state, skip=None):
                 peer_message.release_unsent_herdr_claim(row, receipt=reason)
                 break
             if banner:
-                banner_rc, _banner_payload = _herdr_prompt(
-                    target, banner, wait=False, timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
-                if banner_rc != 0:
-                    peer_message.release_unsent_herdr_claim(row)
-                    continue
-                state, _pane = _agent_state(target)
-                reason = _prompt_input_reason(target, t_harness, state)
-                if reason:
-                    peer_message.release_unsent_herdr_claim(row, receipt=reason)
-                    break
+                text = banner + "\n" + text
             sent_at = time.time()
             rc, payload = _herdr_prompt(target, text, wait=state != "working",
                                         timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)

@@ -2491,27 +2491,31 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         peer_steward.peer_message.receive_peer_message(wrapped, {"harness": "claude", "session_id": "sid-child"})
         self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "received")
 
-    def test_form_opening_after_delay_banner_keeps_unsent_body_pending(self):
-        text, ref = self._deferred_claude_row("body not submitted")
+    def test_late_flush_never_leaves_a_separate_banner_in_the_draft(self):
+        text, ref = self._deferred_claude_row("body submitted together")
         row = peer_steward.peer_message._read_pending(ref)
         with peer_steward.peer_message.pending_lock(ref):
             peer_steward.peer_message._save_pending(dict(row, created=row["created"] - 7200))
-        with mock.patch.object(peer_steward, "_agent_state", side_effect=[("idle", "w1:pX"), ("blocked", "w1:pX")]), \
+        sent = []
+        def input_reason(*args):
+            return "target-draft" if sent else None
+        def send(*args, **kwargs):
+            sent.append(args[1])
+            return 0, {}
+        with mock.patch.object(peer_steward, "_agent_state", return_value=("idle", "w1:pX")), \
              mock.patch.object(peer_steward, "_resolve_target", return_value=("claude", "sid-child", "child")), \
-             mock.patch.object(peer_steward, "_bottom_form_tokens", return_value=False), \
-             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send, \
+             mock.patch.object(peer_steward, "_prompt_input_reason", side_effect=input_reason), \
+             mock.patch.object(peer_steward, "_herdr_prompt", side_effect=send), \
              mock.patch("builtins.print"):
-            self.assertEqual(peer_steward._flush_pending_for_target("child", "claude", "sid-child", "idle")[0], 0)
-        self.assertEqual(send.call_count, 1)
-        self.assertTrue(send.call_args.args[1].startswith("[지연 전달"))
-        row = peer_steward.peer_message._read_pending(ref)
-        self.assertEqual(row["state"], "pending")
-        self.assertEqual(row["text"], text)
-        self.assertIsNone(row["rpc_claim"])
+            self.assertEqual(peer_steward._flush_pending_for_target("child", "claude", "sid-child", "idle")[0], 1)
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(sent[0].startswith("[지연 전달"))
+        self.assertTrue(sent[0].endswith(text))
+        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "received")
 
-    def test_late_flush_sends_delay_banner_before_row_text(self):
+    def test_late_flush_sends_delay_banner_with_row_text(self):
         """A row stranded over an hour goes out intact preceded by a delay
-        banner prompt, so the recipient sees its age first."""
+        notice in the same prompt, so the recipient sees its age first."""
         os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
         form = "Probe: pick one?\n❯ 1. A\n  2. B\nEnter to select · Esc to cancel\n"
         with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
@@ -2535,7 +2539,8 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(len(banners), 1)
         self.assertIn(ref[:8], banners[0])
         stranded = next(text for text in sent_texts if "old body" in text)
-        self.assertLess(sent_texts.index(banners[0]), sent_texts.index(stranded))
+        self.assertEqual(banners[0], stranded)
+        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "received")
 
     def test_long_stuck_rows_warn_with_senders(self):
         """Rows stranded over an hour name their senders on the next prompt

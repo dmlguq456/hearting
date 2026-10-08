@@ -478,7 +478,7 @@ def usable_session_id(value):
     return text
 
 
-def _arrived_body_digests(text):
+def _arrived_body_digests(text, transfer_ref=None):
     """Digests the sealed body may have once it arrives: a runtime's input surface can add or
     trim whitespace or wrap a Claude paste; the inner message must remain exact."""
     variants = [text, text.rstrip(), text.strip()]
@@ -488,6 +488,17 @@ def _arrived_body_digests(text):
     if wrapped:
         body = wrapped.group("body")
         variants.extend((body, body.rstrip(), body.strip()))
+    if transfer_ref:
+        # Delivery metadata is outside the seal. Accept only the one known
+        # prefix for this ref, also inside a runtime paste wrapper.
+        prefix = re.compile(
+            r"\A\[지연 전달 — 원래 보낸 시각 \d{4}-\d{2}-\d{2} \d{2}:\d{2}, "
+            r"약 [1-9]\d*시간 지연\] \(ref " + re.escape(transfer_ref[:8]) + r"\)\n")
+        for value in list(variants):
+            match = prefix.match(value)
+            if match:
+                body = value[match.end():]
+                variants.extend((body, body.rstrip(), body.strip()))
     return {hashlib.sha256(v.encode("utf-8")).hexdigest() for v in variants}
 
 
@@ -524,7 +535,7 @@ def parse_peer_trailer(text, recipient=None, *, include_ref=False):
             if (not _valid_transfer_endpoint(sender) or not _valid_transfer_endpoint(target)
                     or type(record.get("schema_version")) is not int or record["schema_version"] != 1
                     or record.get("message_id") != ref
-                    or record.get("body_sha256") not in _arrived_body_digests(text)
+                    or record.get("body_sha256") not in _arrived_body_digests(text, ref)
                     or sender.get("harness") != result["harness"]
                     or any(target.get(k) != recipient.get(k) for k in ("harness", "session_id"))):
                 return result

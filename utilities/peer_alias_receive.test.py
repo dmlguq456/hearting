@@ -122,6 +122,23 @@ class AliasReceive(unittest.TestCase):
         self.assertIn("[?]", unknown)
         self.assertIsNone(self.parse(unknown))
 
+    def test_delay_prefix_preserves_exact_body_recipient_and_receive_dedup(self):
+        for harness in ("claude", "codex", "opencode"):
+            recipient = dict(self.recipient, harness=harness)
+            text, ref = self.prepare(recipient=recipient)
+            prefix = f"[지연 전달 — 원래 보낸 시각 2026-10-07 18:47, 약 2시간 지연] (ref {ref[:8]})\n"
+            delayed = prefix + text
+            wrapped = '<pasted_content id="late">\n' + delayed + '\n</pasted_content id="late">'
+            for value in (delayed, wrapped):
+                self.assertEqual(self.parse(value, recipient), self.sender["session_id"])
+                self.assertIsNone(self.parse(value.replace("검증할", "변조할"), recipient))
+                self.assertIsNone(self.parse(value, dict(recipient, session_id="foreign")))
+            self.assertIsNone(self.parse(delayed.replace(ref[:8] + ")", "00000000)"), recipient))
+            self.assertEqual(pm.receive_peer_message(delayed, recipient), 0)
+            self.assertEqual(pm.receive_peer_message(wrapped, recipient), 0)
+            notices = [r for r in pm._iter_records() if r.get("transfer_ref") == ref]
+            self.assertEqual(len(notices), 1)
+
     def test_legacy_last_trailer_and_pinned_old_receiver(self):
         legacy = "기존 본문\n(peer-from: claude full-legacy-id old-name)"
         self.assertEqual(self.parse(legacy), "full-legacy-id")
