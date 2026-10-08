@@ -49,6 +49,8 @@ class WorkerHomes(unittest.TestCase):
         self.assertEqual(before, {p.name: p.read_bytes() for p in self.source.iterdir() if p.is_file()})
 
     def test_claude_guards_permissions_and_credentials_survive_catalog_removal(self):
+        (self.source / 'hooks').mkdir()
+        (self.source / 'hooks/user-guard.py').write_text('guard')
         settings = {'hooks': {'PreToolUse': [{'hooks': [{'command': 'user-guard'}]}]},
                     'permissions': {'deny': ['Read(secret)']}, 'env': {'USER_GUARD': '1'},
                     'enabledPlugins': {'plugin@market': True}, 'autoMemoryEnabled': True}
@@ -63,6 +65,7 @@ class WorkerHomes(unittest.TestCase):
         self.assertEqual(actual['enabledPlugins'], {'plugin@market': False})
         self.assertFalse(actual['autoMemoryEnabled'])
         self.assertEqual((home / '.credentials.json').resolve(), (self.source / '.credentials.json').resolve())
+        self.assertEqual((home / 'hooks/user-guard.py').resolve(), (self.source / 'hooks/user-guard.py').resolve())
         self.assertIn('--strict-mcp-config', claude_worker_arguments(env))
         self.assertNotIn('--bare', claude_worker_arguments(env))
 

@@ -377,6 +377,7 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
     symlink(agent_home, home / 'hearting')
     if harness == 'codex':
         source = Path(env.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+        symlink(source / 'hooks', home / 'hooks')
         for name in ('auth.json', 'config.toml'):
             target = source / name
             if name == 'auth.json' and not target.is_file():
@@ -434,6 +435,7 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         values.update(CODEX_HOME=str(home), HEARTING_CODEX_WORKER_OVERRIDES=json.dumps(overrides))
     elif harness == 'claude':
         source = Path(env.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude').expanduser()
+        symlink(source / 'hooks', home / 'hooks')
         settings = read_json(source / 'settings.json')
         settings['enabledPlugins'] = {name: False for name in settings.get('enabledPlugins', {})}
         settings['autoMemoryEnabled'] = False
