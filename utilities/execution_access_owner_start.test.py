@@ -120,14 +120,14 @@ class OwnerGrantStartTest(unittest.TestCase):
         }))
         return path
 
-    def route(self, adapter):
+    def route(self, adapter, child_adapter="codex"):
         gate = {"spec_read": {"satisfied": True, "source": "isolated-fixture"},
                 "drift_verdict": "within-spec", "workflow_mode": "tracked",
                 "artifact_guard": {"satisfied": True, "source": "isolated-fixture"}}
         dispatch = {"tuples": [{
             "parent_harness": adapter, "parent_transport": "headless",
             "parent_sandbox": "workspace-write" if adapter == "codex" else "adapter-default",
-            "child_harness": "codex", "launch_authority": "conductor",
+            "child_harness": child_adapter, "launch_authority": "conductor",
             "status": "supported", "probe_source": "isolated-fixture",
             "probe_time": "2026-10-04T00:00:00Z", "failure_class": "",
             "checked_worktree": str(self.worktree), "failure_scope": "none",
@@ -153,13 +153,14 @@ class OwnerGrantStartTest(unittest.TestCase):
                 return fields, metadata
         self.fail("attempt has no row: " + attempt)
 
-    def start(self, adapter, attempt, request, *, route=None, owner=None):
+    def start(self, adapter, attempt, request, *, route=None, owner=None,
+              action="start", parent_adapter="codex"):
         wrapper = self.wrappers[adapter]
         marker = self.root / (attempt + ".started")
         release = self.root / (attempt + ".release")
         command = shlex.join([sys.executable, str(self.worker), str(marker), str(release)])
         env = dict(self.env)
-        argv = ["dispatch-headless.py", "--start", "--worktree", str(self.worktree),
+        argv = ["dispatch-headless.py", "--" + action, "--worktree", str(self.worktree),
                 "--jobs", str(self.jobs), "--log-dir", str(self.state / "logs"),
                 "--slug", attempt, "--attempt-id", attempt, "--capability", "autopilot-code",
                 "--capability-mode", "debug", "--intensity", "standard", "--qa", "standard",
@@ -176,9 +177,10 @@ class OwnerGrantStartTest(unittest.TestCase):
                        AGENT_OWNER_ROUTE_HASH=record["route_hash"])
         else:
             node = next(node for node in record["nodes"] if node["id"] == "plan")
+            parent_sandbox = "workspace-write" if parent_adapter == "codex" else "adapter-default"
             argv += ["--dispatch-depth", "2", "--worker-type", "stage", "--parent", owner,
-                     "--parent-attempt-id", owner, "--parent-harness", "codex",
-                     "--parent-transport", "headless", "--parent-sandbox", "workspace-write",
+                     "--parent-attempt-id", owner, "--parent-harness", parent_adapter,
+                     "--parent-transport", "headless", "--parent-sandbox", parent_sandbox,
                      "--nested-eligibility", "supported", "--eligibility-source", "isolated-fixture",
                      "--route-file", str(path), "--route-id", record["route_id"],
                      "--route-hash", record["route_hash"], "--route-node", node["id"],
@@ -188,15 +190,22 @@ class OwnerGrantStartTest(unittest.TestCase):
                      "--completion-gate", node["completion_gate"]]
             argv += ["--model-role", node["role"], "--model-profile", node["model_profile"]]
             env.update(AGENT_DISPATCH_ATTEMPT_ID=owner,
-                       AGENT_DISPATCH_CURRENT_HARNESS="codex",
-                       AGENT_DISPATCH_CALLER_HARNESS="codex",
-                       AGENT_DISPATCH_CURRENT_SANDBOX="workspace-write",
+                       AGENT_DISPATCH_CURRENT_HARNESS=parent_adapter,
+                       AGENT_DISPATCH_CALLER_HARNESS=parent_adapter,
+                       AGENT_DISPATCH_CURRENT_SANDBOX=parent_sandbox,
                        AGENT_NESTED_HEADLESS_NETWORK="1")
         stdout, stderr = io.StringIO(), io.StringIO()
         with ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
             stack.enter_context(redirect_stdout(stdout))
             stack.enter_context(redirect_stderr(stderr))
+            # The grant fixture needs a live parent after start returns. Keep
+            # its fake payload detached even when the test runner is sandboxed;
+            # lifecycle selection is covered by dispatch_lifecycle.test.py.
+            stack.enter_context(mock.patch("dispatch_lifecycle.pid_namespace_evidence", return_value={
+                "lifecycle_selector_source": "host-like", "lifecycle_nspid_width": "1",
+                "lifecycle_pid1_class": "system-init",
+            }))
             if hasattr(wrapper, "check_runtime_projection"):
                 stack.enter_context(mock.patch.object(wrapper, "check_runtime_projection", return_value=0))
             if hasattr(wrapper, "prepare_nested_codex_home"):
@@ -220,7 +229,11 @@ class OwnerGrantStartTest(unittest.TestCase):
                 args.managed_sidecar_reason = "-"
                 args.managed_sidecar_pid = args.managed_sealed_batch_id = args.managed_sidecar_log = "-"
             stack.enter_context(mock.patch.object(wrapper, "launch_parent_completion_sidecar", side_effect=sidecar))
+            access = stack.enter_context(mock.patch.object(
+                wrapper.route_authority, "bind_launch_access",
+                wraps=wrapper.route_authority.bind_launch_access))
             result = wrapper.main(argv)
+            self.last_access_args = access.call_args.args[0] if access.call_args else None
         try:
             _, metadata = self.row(attempt)
             if metadata.get("pid"):
@@ -234,6 +247,41 @@ class OwnerGrantStartTest(unittest.TestCase):
                 time.sleep(.01)
             self.assertTrue(marker.exists(), output)
         return result, output
+
+    def test_child_dry_run_uses_the_same_live_parent_grant_without_launching(self):
+        for adapter in ("codex", "claude", "opencode"):
+            with self.subTest(adapter=adapter):
+                route = self.route("claude", child_adapter=adapter)
+                owner = "att-" + hashlib.sha256(("parent-" + adapter).encode()).hexdigest()[:32]
+                child = "att-" + hashlib.sha256(("preview-" + adapter).encode()).hexdigest()[:32]
+                result, output = self.start("claude", owner, self.request(owner), route=route)
+                self.assertEqual(0, result, output)
+                request = self.request(child, self.data / adapter)
+                before = self.jobs.read_bytes()
+                result, output = self.start(adapter, child, request, route=route, owner=owner,
+                                            action="dry-run", parent_adapter="claude")
+                self.assertEqual(0, result, output)
+                self.assertNotIn("parent-grant-unknown", output)
+                self.assertEqual(before, self.jobs.read_bytes())
+                self.assertFalse((self.root / (child + ".started")).exists())
+                self.assertFalse((self.state / "execution-access/attempts" / child).exists())
+                preview = self.last_access_args.execution_access_grant
+                self.assertEqual(owner, self.last_access_args.parent_binding.attempt_id)
+                result, output = self.start(adapter, child, request, route=route, owner=owner,
+                                            parent_adapter="claude")
+                self.assertEqual(0, result, output)
+                actual = self.last_access_args.execution_access_grant
+                self.assertEqual(preview.writable_roots, actual.writable_roots)
+                self.assertEqual(preview.network, actual.network)
+                for name, root, network in (("expanded", self.root / "foreign/output", False),
+                                             ("network", self.data / adapter, True)):
+                    expanded = self.request(child + "-" + name, root, network)
+                    before = self.jobs.read_bytes()
+                    result, output = self.start(adapter, "att-" + "d" * 32, expanded,
+                        route=route, owner=owner, action="dry-run", parent_adapter="claude")
+                    self.assertNotEqual(0, result, output)
+                    self.assertIn("execution-access-exceeds-parent", output)
+                    self.assertEqual(before, self.jobs.read_bytes())
 
     def test_codex_owner_to_child_actual_start_and_parent_boundary(self):
         route = self.route("codex")

@@ -889,7 +889,11 @@ def bind_launch_access(args, *, runtime: str, default_roots, network_available: 
     """One launch's execution access, for every adapter: the request, the exact live
     parent's effective grant for a dispatch-depth-2 child, and the graded grant (None
     without a request). The adapter passes only what its own launch realizes."""
-    from dispatch_contract import dispatch_state_root
+    import subprocess
+    from dispatch_contract import (
+        DispatchContractError, dispatch_state_root, parent_lookup_worktree,
+        resolve_live_parent_attempt,
+    )
     from execution_access import (AccessContext, ExecutionAccessError, bind_request,
                                   load_parent_effective_grant, request_path)
     context = AccessContext.build(worktree=args.worktree, artifact_root=args.artifact_root,
@@ -898,7 +902,31 @@ def bind_launch_access(args, *, runtime: str, default_roots, network_available: 
     parent = None
     if args.dispatch_depth >= 2 and request_path(args.execution_access_file, os.environ) is not None:
         if args.parent_binding is None:
-            raise ExecutionAccessError("execution-access-exceeds-parent:parent-grant-unknown")
+            # Prospective probes without an access request need no live owner.
+            # A requested grant, including in dry-run, uses start's exact lookup.
+            try:
+                repo = subprocess.check_output(
+                    ["git", "-C", str(args.worktree), "rev-parse", "--show-toplevel"],
+                    text=True, stderr=subprocess.DEVNULL,
+                ).strip()
+                args.parent_binding = resolve_live_parent_attempt(
+                    args.jobs_path, parent_slug=getattr(args, "parent_slug", None) or "",
+                    repo=repo,
+                    worktree=parent_lookup_worktree(
+                        args.worktree, getattr(args, "route_file", None),
+                        subsession=bool(getattr(args, "subsession_id", None)),
+                        parent_attempt_id=getattr(args, "parent_attempt_id", None)),
+                    expected_attempt_id=getattr(args, "parent_attempt_id", None),
+                    expected_harness=getattr(args, "parent_harness", None),
+                    expected_transport=getattr(args, "parent_transport", None),
+                    expected_sandbox=getattr(args, "parent_sandbox", None),
+                )
+                args.parent_attempt_id = args.parent_binding.attempt_id
+            except (DispatchContractError, subprocess.CalledProcessError, OSError) as exc:
+                raise ExecutionAccessError(
+                    "execution-access-exceeds-parent:parent-grant-unknown",
+                    getattr(exc, "detail", str(exc)),
+                ) from exc
         parent = load_parent_effective_grant(jobs=args.jobs_path, parent_attempt_id=args.parent_binding.attempt_id,
                                              context=context)
     return bind_request(

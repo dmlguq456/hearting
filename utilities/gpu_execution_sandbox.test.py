@@ -91,13 +91,41 @@ class GpuSandboxTest(unittest.TestCase):
         for cap in ("autopilot-code", "route-frame"):
             route = {**self.route, "capability": cap}
             self.assertEqual(G.select(route)["sandbox"], "workspace-write")
-        route = {**self.route, "selection": {}, "work_request": {"text": "GPU NVIDIA training"}}
+        route = {**self.route, "nodes": [self.route["nodes"][0]], "selection": {},
+                 "work_request": {"text": "GPU NVIDIA training"}}
         self.assertFalse(G.select(route)["gpu_scope"])
         self.route["nodes"][0]["resource_class"] = "gpu"
         self.assertTrue(G.select(self.route, owner=False, node="scaffold")["gpu_scope"])
         args = self.args(dispatch_depth=2, worker_type="stage", route_node="full-run")
         C.apply_gpu_execution_sandbox(args)
         self.assertEqual(C.effective_runtime_sandbox(args), "danger-full-access")
+
+    def test_signal_free_lab_execution_and_validation_workers_use_gpu_sandbox(self):
+        self.route["selection"] = {}
+        self.route["nodes"] = [
+            {"id": name, "kind": "review-worker", "resource_class": "normal"}
+            for name in ("smoke", "run-verify", "plan", "report", "handoff")
+        ] + [{"id": "full-run", "kind": "resource-runner", "resource_class": "long-running"},
+             {"id": "smoke-alternative", "parallel_anchor": "smoke", "kind": "review-worker"},
+             {"id": "frame-gpu", "parallel_anchor": "smoke", "kind": "frame-worker"}]
+        choice = G.select(self.route)
+        self.assertEqual(choice["gpu_resource_nodes"],
+                         ["smoke", "run-verify", "full-run", "smoke-alternative"])
+        for node in self.route["nodes"]:
+            with self.subTest(node=node["id"]):
+                gpu = node["id"] in choice["gpu_resource_nodes"]
+                args = self.args(dispatch_depth=2, worker_type="review", route_node=node["id"],
+                                 parent_harness="claude", parent_sandbox="adapter-default")
+                C.apply_gpu_execution_sandbox(args)
+                self.assertEqual(C.effective_runtime_sandbox(args),
+                                 "danger-full-access" if gpu else "workspace-write")
+                for delivery in ("one-shot", "app-server-supervised"):
+                    args.resolved_completion_delivery = delivery
+                    self.assertIn("--sandbox " + args.sandbox,
+                                  C.shell_command(args, self.root / "prompt", self.root / "log"))
+                policy = S.sandbox_policy(argparse.Namespace(sandbox=args.sandbox, network_access=False,
+                    worktree=str(self.worktree), writable_root=[]))
+                self.assertEqual(policy["type"], "dangerFullAccess" if gpu else "workspaceWrite")
 
     def test_same_cycle_suffix_keeps_sealed_owner_but_normal_child_default(self):
         choice = G.select(self.route)
@@ -185,7 +213,7 @@ class GpuSandboxTest(unittest.TestCase):
              mock.patch.object(R, "_compose_readiness", side_effect=readiness):
             route = R.compose_route(capability="autopilot-lab", capability_mode="setup",
                 shape="staged", graph=None, slug="gpu-fixture", cwd=str(self.worktree),
-                artifact_root=str(self.artifact), signals=["gpu"], spec_read="fixture",
+                artifact_root=str(self.artifact), signals=[], spec_read="fixture",
                 campaign_key="gpu-fixture", parent_harness="codex", children=["codex"], jobs=self.state / "jobs.log")
         self.assertEqual(len(observed), 1)
         self.assertEqual(route["codex_execution_sandbox"], observed[0])

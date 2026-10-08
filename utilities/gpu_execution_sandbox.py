@@ -5,6 +5,7 @@ import os
 
 MODES = {"workspace-write", "read-only", "danger-full-access"}
 RECEIPT_CODE = "codex-gpu-execution-sandbox"
+LAB_EXECUTION_NODES = {"smoke", "full-run", "run-verify"}
 
 
 def gpu_resource_nodes(route):
@@ -17,7 +18,8 @@ def gpu_resource_nodes(route):
             if isinstance(node, dict) and node.get("id")
             and node.get("kind") != "frame-worker"
             and not str(node.get("unit") or "").startswith("plan/frame")
-            and (node.get("resource_class") == "gpu"
+            and ((node.get("parallel_anchor") or node["id"]) in LAB_EXECUTION_NODES
+                 or node.get("resource_class") == "gpu"
                  or ("gpu" in signals and node.get("kind") == "resource-runner"))]
 
 
@@ -61,7 +63,7 @@ def advisory(route, *, owner_harness=None, selection=None, applied=False):
     if owner not in {"auto", "codex"}:
         return []
     mode = choice["sandbox"]
-    message = (f"Codex GPU lab: {mode} ({choice['source']}); 대상 owner 및 GPU resource "
+    message = (f"Codex GPU lab: {mode} ({choice['source']}); 대상 owner 및 GPU 실행·검증 노드 "
                + ", ".join(choice["gpu_resource_nodes"]) + ". ")
     if mode == "danger-full-access":
         message += ("filesystem/network OS enforcement 없음; 요청 root와 child≤parent는 논리 경계입니다. ")

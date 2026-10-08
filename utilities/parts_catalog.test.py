@@ -35,7 +35,7 @@ import dispatch_stage_advance as ADVANCE  # noqa: E402
 
 GOLDEN = HERE / "fixtures" / "sd165-route-golden.json"
 GPU_EVAL_ADVISORY = (
-    "  Codex GPU lab: danger-full-access (gpu-lab-resource); 대상 owner 및 GPU resource eval-run. "
+    "  Codex GPU lab: danger-full-access (gpu-lab-resource); 대상 owner 및 GPU 실행·검증 노드 eval-run. "
     "filesystem/network OS enforcement 없음; 요청 root와 child≤parent는 논리 경계입니다. "
     "외부 sandbox·관리된 runtime 제약은 유지되며 GPU 조회 성공을 보증하지 않습니다."
 )
@@ -144,6 +144,16 @@ def _historical_gpu_card(route, card, case):
         case.assertEqual(typed_gpu_nodes, ["eval-run"])
         case.assertEqual(lines.count(GPU_EVAL_ADVISORY), 1)
         lines.remove(GPU_EVAL_ADVISORY)
+    elif route["capability"] == "autopilot-lab":
+        # This pre-catalog snapshot also predates signal-free lab execution
+        # sandboxing. Its graph bytes stay pinned; GPU policy is tested separately.
+        execution_nodes = [n["id"] for n in route["nodes"]
+                           if (n.get("parallel_anchor") or n["id"])
+                           in {"smoke", "full-run", "run-verify"}]
+        if execution_nodes:
+            advisory = GPU_EVAL_ADVISORY.replace("eval-run", ", ".join(execution_nodes))
+            case.assertEqual(lines.count(advisory), 1)
+            lines.remove(advisory)
     # The later confirmation display is independent of the pre-catalog graph.
     confirmation = [i for i, line in enumerate(lines) if line.startswith("  확인 방식 ")]
     if confirmation:
@@ -273,10 +283,11 @@ class HistoricalGpuExceptionTest(unittest.TestCase):
         self.assertEqual(card, self.OLD_CARD + "\n" + GPU_EVAL_ADVISORY)
         for old, new in (("danger-full-access", "workspace-write"),
                 ("gpu-lab-resource", "caller-cli"), ("gpu-lab-resource", "forced-env"),
-                ("resource eval-run", "resource full-run"),
+                ("노드 eval-run", "노드 full-run"),
                 ("OS enforcement 없음", "OS enforcement enforced"),
                 ("논리 경계입니다", "OS 경계입니다")):
             changed = card.replace(old, new)
+            self.assertNotEqual(changed, card, (old, new))
             with self.subTest(old=old, new=new), self.assertRaises(AssertionError):
                 _historical_gpu_card(self.route(), changed, self)
         with self.assertRaises(AssertionError):
