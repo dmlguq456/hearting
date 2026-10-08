@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from codex_permission_profile import commit_profile_config, config_arguments
+from worker_runtime_home import codex_worker_arguments
 import json
 import queue
 import threading
@@ -754,6 +755,7 @@ def run_one_turn(args: argparse.Namespace) -> int:
     if args.native_permission_profile is not None:
         command += config_arguments(args.native_permission_profile)
 
+    command += codex_worker_arguments()
     server: AppServer | None = None
     completed_thread: str | None = None
     result_code = 70
@@ -857,6 +859,7 @@ def main(argv: list[str] | None = None) -> int:
     args.resource_launch_command = lambda row: resource_sandbox_command(args, row)
     if args.native_permission_profile is not None:
         command += config_arguments(args.native_permission_profile)
+    command += codex_worker_arguments()
     state_path = Path(args.state_file) if args.state_file else None
     lease_path = Path(args.lease_file)
     runtime_env = dict(os.environ)

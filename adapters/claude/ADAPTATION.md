@@ -21,10 +21,16 @@ The wrapper renders `roles/worker-bootstrap.md` plus one deterministic worker
 type before the assignment. A masked profile adds only its attach layer and
 selected specialization. Changed files, commands, logs, and findings remain in
 the canonical artifact; the child returns only artifact path, verdict, and a
-one-line blocker. Official Claude Code behavior loads the `CLAUDE.md` memory
-hierarchy into ordinary custom subagents and provides no per-agent switch for
-that input, so the adapter claims masked profile projection, not universal
-physical instruction masking.
+one-line blocker. Registered print-mode workers and session-tidy support use a
+fresh `CLAUDE_CONFIG_DIR` with the attach template, linked login and copied user
+guard hooks/permissions. `--disable-slash-commands` removes skills and commands;
+`--strict-mcp-config` with an empty MCP configuration excludes connectors.
+The normal project/local and managed settings remain, as does the native system
+prompt. The resumed owner uses the same options on every turn. This headless
+surface differs from Claude's internal custom subagent instruction inheritance.
+
+Official surfaces: [CLI flags](https://code.claude.com/docs/en/cli-reference),
+[configuration home and settings](https://code.claude.com/docs/en/settings).
 
 ## Native Claude Surfaces
 

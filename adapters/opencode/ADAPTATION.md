@@ -26,8 +26,14 @@ wholesale.
 The OpenCode wrapper now renders the portable minimal kernel plus one worker
 type around both generated and custom assignments. It does not add the full
 main bootstrap or return a prose report; details stay in the artifact and the
-terminal envelope is three lines. Project instruction auto-load is not treated
-as physically masked until an official, locally verified disable surface exists.
+terminal envelope is three lines. New launches use a role home with the small
+global attach template and retained provider settings, login, guard plugins and
+permission rules. Hearting main-bootstrap instruction entries are removed from
+the copied config, and unrelated skills are hidden with native skill permission
+rules. Claude global prompt/skill compatibility is disabled. Project instructions
+and managed policy remain runtime-owned input, rather than a universal masking
+claim. [Native rules](https://opencode.ai/docs/rules/),
+[skill permissions](https://opencode.ai/docs/skills/).
 
 ## Design Principle
 

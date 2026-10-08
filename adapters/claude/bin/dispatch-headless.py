@@ -27,6 +27,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from review_input import preview_request_nodes
+from worker_runtime_home import prepare_worker_home, claude_worker_arguments
 from dispatch_contract import (
     _atomic_registry_replace,
     workflow_completion_receipt,  # noqa: E402
@@ -1136,6 +1137,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         "--output-format", "stream-json", "--verbose",
         "--no-session-persistence",
     ]
+    cmd += claude_worker_arguments(getattr(args, "worker_runtime_env", None))
     if getattr(args, "report_bundle_root", None) is not None:
         cmd += ["--add-dir", str(args.report_bundle_root)]
     if getattr(args, "execution_access_grant", None) is not None:
@@ -1818,8 +1820,10 @@ def main(argv: list[str]) -> int:
             env["AGENT_DISPATCH_UNIT"] = args.unit
         else:
             env.pop("AGENT_DISPATCH_UNIT", None)
-        if args.profile:
-            env["CLAUDE_CONFIG_DIR"] = str(instance_dir)
+        args.worker_runtime_env = prepare_worker_home(args.agent_home, 'claude', args.worker_type,
+                                                       args.attempt_id, env=env, profile=args.profile)
+        env.update(args.worker_runtime_env)
+        command = shell_command(args, prompt_path, log_path)
         if args.resolved_completion_delivery == "session-resume-supervised":
             env["AGENT_DISPATCH_COMPLETION_STATE_FILE"] = str(
                 completion_state_path(args)

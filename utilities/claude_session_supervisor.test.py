@@ -2597,6 +2597,16 @@ class PermissionPosturePassthrough(unittest.TestCase):
         self.assertNotIn("--permission-mode", command)
         self.assertNotIn("--allowedTools", command)
 
+    def test_worker_catalog_masking_survives_first_and_resumed_owner_turns(self):
+        with mock.patch.dict(os.environ, {"HEARTING_WORKER_HOME": "/worker"}):
+            for resume in (False, True):
+                command = supervisor.claude_command(self._args(permission_mode="auto"), "sid-1", resume)
+                self.assertIn("--disable-slash-commands", command)
+                self.assertIn("--strict-mcp-config", command)
+                self.assertEqual(command[command.index("--mcp-config") + 1], '{"mcpServers":{}}')
+                self.assertIn("--settings", command)  # existing parent parking guard
+                self.assertIn("--permission-mode", command)
+
 
 class TerminalReconcileRefusalRecordTest(unittest.TestCase):
     """SD-115 axis 4 (짝), C47-14 (호출부): `reconcile()`'s `except Exception`

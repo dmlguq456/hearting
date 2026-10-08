@@ -7,6 +7,15 @@ specialization fragment, and an exposed subset of skills/agents/triggers. The ho
 `tools/profile/build-home.py` from a single repo source via symlink
 partial-projection — there is no content fork.
 
+The shared builder now also supplies the default role home for every registered
+owner, stage, review, frame and support launch in all three harnesses. Callers do
+not need `--profile` to exclude the main global bootstrap. The stage dispatcher
+connects matching Claude code-stage declarations for specialization; the default
+typed profile handles the rest. Runtime catalogs are excluded because the
+dispatcher already supplies the assigned contract. Login, user guard hooks and
+permission rules are retained. Actual native first-request usage and input
+records, rather than template presence, establish the observed boundary.
+
 ## Catalog
 
 | Profile | Description |

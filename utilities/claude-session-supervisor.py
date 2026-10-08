@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from worker_runtime_home import claude_worker_arguments
 import hashlib
 import json
 import os
@@ -695,6 +696,7 @@ def claude_command(
     else:
         command = ["claude"]
     command += ["-p"]
+    command += claude_worker_arguments()
     command += ["--resume" if resume else "--session-id", session_id]
     hook_command = " ".join(
         shlex.quote(value)

@@ -233,6 +233,7 @@ utility-deferred	worker-route-guard.py
 utility-deferred	worker-state-hook.py
 utility-deferred	worker-state-ledger.py
 utility-deferred	worker_bootstrap.test.py
+utility-deferred	worker_runtime_home.py
 utility-deferred	worker_dispatch_prompt.test.py
 utility-deferred	worker_route_guard.test.py
 utility-deferred	workflow-supervisor.py

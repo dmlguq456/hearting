@@ -16,7 +16,10 @@ Exit codes: 0 ok / 1 declaration or template error / 2 --check drift.
 Never exit 3 — that code is dispatch-wrapper-owned (preflight gate).
 """
 import argparse
+import hashlib
+import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -30,7 +33,7 @@ except ImportError:
 
 VALID_HARNESSES = {"claude", "codex", "opencode"}
 VALID_WORKER_TYPES = {"owner", "stage", "review", "support", "frame"}
-BOOTSTRAP_FILENAME = {"claude": "CLAUDE.md", "codex": "AGENTS.md"}
+BOOTSTRAP_FILENAME = {"claude": "CLAUDE.md", "codex": "AGENTS.md", "opencode": "AGENTS.md"}
 
 
 def resolve_agent_home():
@@ -307,6 +310,169 @@ def build_instance(agent_home, name, harness, worker_type, fragments, expose, sl
     (instance_dir / bootstrap_filename).write_text(bootstrap_text, encoding="utf-8")
 
     return instance_dir, link_count
+
+
+def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, destination=None, profile=None):
+    """Default typed profile for every launch; never changes the caller's home.
+
+    Runtime-owned credentials stay linked. User permissions and hooks retain
+    their original bytes; only automatic main/catalog discovery is narrowed.
+    The existing declaration profiles still add their selected specialization
+    through build_instance; both paths use the same runtime attach templates.
+    """
+    from copy import deepcopy
+    import tomllib
+    agent_home = Path(agent_home).resolve()
+    env = dict(os.environ if env is None else env)
+    if harness not in VALID_HARNESSES or worker_type not in VALID_WORKER_TYPES:
+        raise ValueError('invalid worker home type')
+    jobs = Path(env.get('AGENT_DISPATCH_JOBS') or resolve_dispatch_state_root(agent_home) / 'jobs.log')
+    key = hashlib.sha256((str(agent_home) + '\0' + harness + '\0' + worker_type + '\0' + identity).encode()).hexdigest()[:32]
+    home = Path(destination) if destination is not None else jobs.parent / 'homes/workers' / key
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    home.chmod(0o700)
+    values = {'HEARTING_WORKER_HOME': str(home)}
+
+    def symlink(source, target):
+        source, target = Path(source), Path(target)
+        if not source.exists():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink():
+            if target.resolve() == source.resolve():
+                return
+            target.unlink()
+        elif target.exists():
+            raise ValueError(f'worker home collision: {target}')
+        target.symlink_to(source.resolve(), target_is_directory=source.is_dir())
+
+    def read_json(path):
+        path = Path(path)
+        if not path.is_file():
+            return {}
+        text = path.read_text()
+        if path.suffix == '.jsonc':
+            text = re.sub(r'("(?:\\.|[^"\\])*")|/\*.*?\*/|//[^\n]*',
+                          lambda m: m.group(1) or '', text, flags=re.S)
+            text = re.sub(r'("(?:\\.|[^"\\])*")|,\s*([}\]])',
+                          lambda m: m.group(1) or m.group(2), text)
+        return json.loads(text)
+
+    def write_json(path, value):
+        Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n')
+        Path(path).chmod(0o600)
+
+    filename = BOOTSTRAP_FILENAME[harness]
+    symlink(agent_home / 'profiles/templates' / f'bootstrap-{harness}.md', home / filename)
+    if profile:
+        decl_path, data = load_declaration(agent_home, profile)
+        declared_harness, declared_type, fragments, expose = validate_declaration(agent_home, decl_path, data)
+        if (declared_harness, declared_type) != (harness, worker_type):
+            raise ValueError('profile worker home type mismatch')
+        # The declaration's body is specialization; its full skill catalog is
+        # not needed because the dispatcher supplies the assigned contract.
+        bootstrap = home / filename
+        bootstrap.unlink()
+        bootstrap.write_text(assemble_bootstrap(agent_home, profile, harness, worker_type, fragments))
+    symlink(agent_home, home / 'hearting')
+    if harness == 'codex':
+        source = Path(env.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+        for name in ('auth.json', 'config.toml'):
+            target = source / name
+            if name == 'auth.json' and not target.is_file():
+                target = Path.home() / '.codex/auth.json'
+            symlink(target, home / name)
+        hooks = first_existing(source / 'hooks.json', agent_home / 'adapters/codex/hooks/hooks.json')
+        symlink(hooks, home / 'hooks.json')
+        # These are lookup pointers, not native auto-discovered skill/agent dirs.
+        for name, target in {'agent-core': 'core', 'agent-capabilities': 'capabilities',
+                             'agent-roles': 'roles', 'agent-bin': 'adapters/codex/bin',
+                             'agent-hooks': 'adapters/codex/hooks', 'agent-tools': 'adapters/codex/tools',
+                             'agent-utilities': 'adapters/codex/utilities', 'agent-scaffolds': 'adapters/codex/scaffolds',
+                             'agent-skills': 'adapters/codex/skills', 'agent-agents': 'adapters/codex/agents',
+                             'agent-modes': 'adapters/codex/modes', 'agent-plugin-marketplace': 'adapters/codex/plugin-marketplace',
+                             'hearting-readme.md': 'adapters/codex/README.md'}.items():
+            symlink(agent_home / target, home / name)
+        config = tomllib.loads((source / 'config.toml').read_text()) if (source / 'config.toml').is_file() else {}
+        overrides = ['features.apps=false', 'features.multi_agent=false', 'agents.enabled=false']
+        def toml_value(value):
+            if isinstance(value, bool):
+                return 'true' if value else 'false'
+            if isinstance(value, str):
+                return json.dumps(value)
+            if isinstance(value, (int, float)):
+                return str(value)
+            if isinstance(value, list):
+                return '[' + ','.join(toml_value(item) for item in value) + ']'
+            if isinstance(value, dict):
+                return '{' + ','.join(json.dumps(key) + '=' + toml_value(item) for key, item in value.items()) + '}'
+            raise ValueError('unsupported worker config value')
+        # CLI dotted-key overrides do not parse quoted path components. Replace
+        # the whole table so IDs containing dots/@ retain their exact identity.
+        for field in ('mcp_servers', 'plugins'):
+            narrowed = {name: {**value, 'enabled': False} for name, value in config.get(field, {}).items()}
+            if field == 'mcp_servers':
+                # Disabled servers need only a valid transport descriptor. Do
+                # not copy auth headers/env secrets into command arguments.
+                narrowed = {name: {**({'url': 'https://localhost.invalid'} if 'url' in value else {'command': 'true'}),
+                                   'enabled': False} for name, value in config.get(field, {}).items()}
+            overrides.append(field + '=' + toml_value(narrowed))
+        # Native built-in skills are seeded in a fresh home. Disable their actual
+        # paths using the documented per-path control, without a private flag.
+        disabled = set()
+        for base in (source / 'skills', home / 'skills', source / 'plugins/cache',
+                     Path.home() / '.codex/plugins/cache', Path.home() / '.agents/skills'):
+            if base.is_dir():
+                for skill in base.rglob('SKILL.md'):
+                    disabled.add(str(skill.parent))
+                    disabled.add(str(skill))
+                    if skill.is_relative_to(source / 'skills'):
+                        disabled.add(str(home / 'skills' / skill.parent.relative_to(source / 'skills')))
+                        disabled.add(str(home / 'skills' / skill.relative_to(source / 'skills')))
+        overrides.append('skills.config=[' + ','.join('{path=' + json.dumps(path) + ',enabled=false}' for path in sorted(disabled)) + ']')
+        values.update(CODEX_HOME=str(home), HEARTING_CODEX_WORKER_OVERRIDES=json.dumps(overrides))
+    elif harness == 'claude':
+        source = Path(env.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude').expanduser()
+        settings = read_json(source / 'settings.json')
+        settings['enabledPlugins'] = {name: False for name in settings.get('enabledPlugins', {})}
+        settings['autoMemoryEnabled'] = False
+        settings.pop('extraKnownMarketplaces', None)
+        settings.pop('statusLine', None)
+        write_json(home / 'settings.json', settings)
+        symlink(first_existing(source / '.credentials.json', Path.home() / '.claude/.credentials.json') or source / '.credentials.json', home / '.credentials.json')
+        # Project/local settings and managed policy still load normally. The
+        # copied user settings retain all user guard hooks and permission rules.
+        values['CLAUDE_CONFIG_DIR'] = str(home)
+    else:
+        source = Path(env.get('OPENCODE_CONFIG_DIR') or Path(env.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode')
+        config = read_json(first_existing(source / 'opencode.jsonc', source / 'opencode.json') or source / 'opencode.json')
+        config = deepcopy(config)
+        config['instructions'] = [path for path in config.get('instructions', [])
+                                  if not (Path(path).name in ('AGENTS.md', 'CLAUDE.md') and
+                                          Path(path).is_file() and 'Adapter Bootstrap' in Path(path).read_text())]
+        config['skills'] = {'paths': []}
+        config['mcp'] = {name: {**value, 'enabled': False} for name, value in config.get('mcp', {}).items()}
+        permission = config.get('permission', {})
+        if isinstance(permission, str):
+            permission = {'*': permission}
+        permission['skill'] = {'*': 'deny'}
+        config['permission'] = permission
+        for name in ('plugins', 'plugin'):
+            symlink(source / name, home / name)
+        write_json(home / 'opencode.json', config)
+        runtime = home / 'runtime'
+        for kind in ('data', 'cache', 'state', 'config'):
+            target = runtime / kind
+            target.mkdir(parents=True, exist_ok=True, mode=0o700)
+            values['XDG_' + kind.upper() + '_HOME'] = str(target)
+        data = Path(env.get('XDG_DATA_HOME') or Path.home() / '.local/share')
+        symlink(data / 'opencode/auth.json', runtime / 'data/opencode/auth.json')
+        symlink(home, runtime / 'config/opencode')
+        values.update(OPENCODE_CONFIG_DIR=str(home), OPENCODE_DISABLE_CLAUDE_CODE_PROMPT='1',
+                      OPENCODE_DISABLE_CLAUDE_CODE_SKILLS='1')
+    write_json(home / 'worker-home.json', {'harness': harness, 'worker_type': worker_type,
+                                         'source': str(agent_home), 'profile': profile})
+    return values
 
 
 def do_check(agent_home, name):

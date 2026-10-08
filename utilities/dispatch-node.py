@@ -948,6 +948,10 @@ def main():
  if round_budget.correction_round: print(f"correction_round={round_budget.correction_round}")
  argv=[sys.executable,str(wrapper),"--"+a.action,"--worktree",launch_worktree,"--slug",a.slug,"--capability",route["capability"],"--capability-mode",route["capability_mode"],"--intensity",route["effective_intensity"],"--dispatch-depth",str(node.get("dispatch_depth",1)),"--worker-type",worker_type,"--unit",node.get("unit",""),"--assigned-contract",contract,"--owner",route["capability"],"--route-file",str(Path(a.route).resolve()),"--route-id",route["route_id"],"--route-hash",route["route_hash"],"--route-node",node["id"],"--registry-digest",route["registry_digest"],"--write-scope",";".join(node["write_scope"]),"--completion-gate",node["completion_gate"],"--jobs",str(registry.path),"--prompt-text",prompt_text]
  if a.reviewed_evidence: argv += ["--reviewed-evidence",a.reviewed_evidence]
+ # Reuse existing stage specialization declarations when they match this
+ # harness/type; every other launch still gets the default typed worker home.
+ if a.adapter=="claude" and worker_type=="stage" and (ROOT/"profiles"/(contract+".yaml")).is_file():
+  argv += ["--profile",contract]
  unit=node.get("unit","")
  if unit and not unit.startswith("_kernel/"):
   argv += ["--worker-mode",unit]

@@ -75,7 +75,8 @@ class StageTelemetryTransportTest(unittest.TestCase):
         self.assertNotIn("codex-exec", command)
 
     def test_raw_unavailable_fallback_remains_exec_json_and_review_uses_same_probe(self):
-        args = args_for(worker_type="review", resolved_model_settings={"source": "inherit"})
+        args = args_for(worker_type="review", resolved_model_settings={"source": "inherit"},
+                        worker_runtime_env={"HEARTING_CODEX_WORKER_OVERRIDES": '["features.apps=false","features.multi_agent=false"]'})
         with mock.patch.object(WH, "codex_app_server_available", return_value=False) as probe:
             self.assertEqual(WH.resolve_completion_delivery(args), "one-shot")
         probe.assert_called_once_with()
@@ -93,6 +94,8 @@ class StageTelemetryTransportTest(unittest.TestCase):
         tokens = shlex.split(command)
         self.assertEqual(tokens[tokens.index("exec") + 1], "--ephemeral")
         self.assertIn("--json", tokens)
+        self.assertIn("features.apps=false", tokens)
+        self.assertIn("features.multi_agent=false", tokens)
         self.assertNotIn("--one-turn", tokens)
 
     def test_stage_cannot_select_supervised_completion(self):

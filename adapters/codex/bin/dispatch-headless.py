@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from review_input import preview_request_nodes
 from codex_permission_profile import commit_profile_config, config_arguments
+from worker_runtime_home import prepare_worker_home, codex_worker_arguments
 import gpu_execution_sandbox as GPU_SANDBOX
 from dispatch_contract import (
     _atomic_registry_replace,
@@ -1103,6 +1104,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
         "--add-dir",
         args.artifact_root,
     ]
+    cmd += codex_worker_arguments(getattr(args, "worker_runtime_env", None))
     if getattr(args, "report_bundle_root", None) is not None:
         cmd += ["--add-dir", str(args.report_bundle_root)]
     if registry_writable_launch(args):
@@ -1234,7 +1236,7 @@ def nested_codex_home_path(worktree: Path, jobs: Path | None = None,
     canonical_jobs = Path(jobs or os.environ.get("AGENT_DISPATCH_JOBS", ""))
     if canonical_jobs.is_absolute():
         state_root = dispatch_state_root(canonical_jobs)
-        key = hashlib.sha256(str(worktree).encode()).hexdigest()[:32]
+        key = hashlib.sha256((str(worktree) + "\0worker-v1").encode()).hexdigest()[:32]
         if release_root is not None:
             key += "." + hashlib.sha256(str(Path(release_root).resolve()).encode()).hexdigest()[:12]
         fallback = state_root / "homes" / "codex" / key
@@ -1267,23 +1269,6 @@ def prepare_nested_codex_home(worktree: Path, source_home: Path | None = None,
     destination.mkdir(parents=True, exist_ok=True)
     destination.chmod(0o700)
 
-    installer = projection_root / "adapters" / "codex" / "bin" / "install-runtime-projection.sh"
-    env = {**os.environ, "AGENT_HOME": str(projection_root), "CODEX_HOME": str(destination)}
-    result = subprocess.run(
-        [str(installer), "--skills-mode", "native"],
-        cwd=ROOT,
-        env=env,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise DispatchContractError(
-            "nested-codex-home-projection-failed",
-            (result.stderr or result.stdout).strip() or f"exit-{result.returncode}",
-        )
-
     auth = source / "auth.json"
     if not auth.is_file():
         fallback = Path.home() / ".codex" / "auth.json"
@@ -1291,15 +1276,10 @@ def prepare_nested_codex_home(worktree: Path, source_home: Path | None = None,
     if not auth.is_file():
         raise DispatchContractError("nested-codex-auth-missing", str(auth))
 
-    for name, target in (("auth.json", auth), ("config.toml", source / "config.toml")):
-        if not target.is_file():
-            continue
-        link = destination / name
-        if link.is_symlink():
-            link.unlink()
-        elif link.exists():
-            raise DispatchContractError("nested-codex-home-collision", str(link))
-        link.symlink_to(target)
+    prepare_worker_home(projection_root, 'codex', 'owner', 'nested-owner',
+                        env={**os.environ, 'CODEX_HOME': str(source),
+                             'AGENT_DISPATCH_JOBS': str(jobs or resolve_dispatch_state_root(projection_root) / 'jobs.log')},
+                        destination=destination)
     return destination
 
 
@@ -2075,7 +2055,13 @@ def main(argv: list[str]) -> int:
         else:
             dispatch_env.pop("AGENT_DISPATCH_COMPLETION_STATE_FILE", None)
             dispatch_env.pop("AGENT_DISPATCH_SUPERVISOR_LEASE_FILE", None)
-        dispatch_env.update(child_runtime_homes(args, profile_home))
+        # All types receive a minimal home, including first-level reviews and
+        # support callers. The nested owner remains inside its declared scope.
+        args.worker_runtime_env = prepare_worker_home(
+            args.agent_home, 'codex', args.worker_type, args.attempt_id,
+            env=dispatch_env, destination=args.nested_codex_home, profile=args.profile)
+        dispatch_env.update(args.worker_runtime_env)
+        command = shell_command(args, prompt_path, log_path)
         launch_parent_completion_sidecar(args, jobs)
         if args.managed_sidecar_state == "launch-failed":
             annotate_attempt_row(

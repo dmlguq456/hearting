@@ -25,6 +25,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from review_input import preview_request_nodes
+from worker_runtime_home import prepare_worker_home
 from dispatch_contract import (
     _atomic_registry_replace,
     ensure_terminal_claim_absent,
@@ -1649,6 +1650,9 @@ def main(argv: list[str]) -> int:
             # secondary alive signal independent of the OpenCode SQLite mtime.
             "OPENCODE_DISPATCH_SLUG": args.slug,
         }
+        dispatch_env.update(prepare_worker_home(args.agent_home, 'opencode',
+                                                args.worker_type, args.attempt_id,
+                                                env=dispatch_env))
         if _supervised_owner(args):
             lease = supervisor_lease_path(jobs, args.attempt_id)
             dispatch_env["AGENT_DISPATCH_COMPLETION_STATE_FILE"] = str(lease.with_suffix(".json"))

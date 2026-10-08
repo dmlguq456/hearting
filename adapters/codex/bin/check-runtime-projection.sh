@@ -29,6 +29,10 @@ printf 'runtime_surface=codex-runtime-projection-check\n'
 printf 'codex_home=%s\n' "$CODEX_HOME"
 
 real() { readlink -f "$1" 2>/dev/null || true; }
+worker_home=0
+if [ "${AGENT_SESSION_ROLE:-}" = worker ] && [ -f "$CODEX_HOME/worker-home.json" ]; then
+  worker_home=1
+fi
 
 # The portable runtime activator projects the full capability set per-file. Its
 # activation record is authoritative for per-file Skills, agents, and modes;
@@ -94,7 +98,21 @@ expect_link() {  # <linkpath> <expected-target> <checkname>
 }
 
 expect_link "$CODEX_HOME/hearting"            "$AGENT_HOME"                  hearting
-expect_link "$CODEX_HOME/AGENTS.md"                "$agents_source"                agents-md
+if [ "$worker_home" -eq 1 ]; then
+  if python3 - "$CODEX_HOME" "$AGENT_HOME" <<'PY'
+import json, pathlib, sys
+home, root = map(pathlib.Path, sys.argv[1:])
+meta = json.loads((home / 'worker-home.json').read_text())
+assert meta['harness'] == 'codex' and pathlib.Path(meta['source']).resolve() == root.resolve()
+assert meta['worker_type'] in ('owner', 'stage', 'review', 'support', 'frame')
+text = (home / 'AGENTS.md').read_text()
+assert 'Codex masked-profile attach layer' in text and 'AGENTS.md — Codex Adapter Bootstrap' not in text
+PY
+  then printf 'check=agents-md:ok reason=worker-profile\n'
+  else printf 'check=agents-md:failed reason=worker-profile\n'; fails=$((fails + 1)); fi
+else
+  expect_link "$CODEX_HOME/AGENTS.md" "$agents_source" agents-md
+fi
 expect_link "$CODEX_HOME/agent-core"               "$core_source"                  agent-core
 expect_link "$CODEX_HOME/agent-capabilities"       "$capabilities_source"          agent-capabilities
 expect_link "$CODEX_HOME/agent-roles"              "$roles_source"                 agent-roles
@@ -346,12 +364,15 @@ print_plugin_check() {
 plugin_state=unknown
 plugin_rc=
 skill_discovery=unknown
-detect_plugin_state
+if [ "$worker_home" -eq 1 ]; then plugin_state=skipped_cli; else detect_plugin_state; fi
 
 # Codex skill discovery may be native symlinks or the installable plugin. A
 # count-only check can miss stale or wrong targets, so every projected skill is
 # classified before selecting the active discovery surface.
-if [ "$native_managed" -eq 1 ]; then
+if [ "$worker_home" -eq 1 ]; then
+  skill_discovery=worker-contract
+  printf 'check=skill-discovery:worker-contract\ncheck=skills-linked:ok reason=worker-profile\n'
+elif [ "$native_managed" -eq 1 ]; then
   linked_skills=$(find "$CODEX_HOME/skills" -mindepth 1 -maxdepth 1 -type l 2>/dev/null | wc -l | tr -d ' ')
   printf 'skills_linked=%s plugin_state=%s\n' "$linked_skills" "$plugin_state"
   skill_discovery=native
@@ -421,7 +442,9 @@ fi
 
 # Native agent links: every projected custom-agent TOML must be linked to the
 # matching adapter-owned file.
-if [ "$native_managed" -eq 1 ]; then
+if [ "$worker_home" -eq 1 ]; then
+  printf 'check=agents-linked:ok reason=worker-profile\n'
+elif [ "$native_managed" -eq 1 ]; then
   linked_agents=$(find "$CODEX_HOME/agents" -mindepth 1 -maxdepth 1 -type l 2>/dev/null | wc -l | tr -d ' ')
   printf 'agents_linked=%s\n' "$linked_agents"
   printf 'check=agents-linked:ok reason=runtime-activation-verified\n'
@@ -455,7 +478,9 @@ printf 'check=managed-launcher:retired required=0\n'
 
 # Bootstrap discovery (soft): requires the codex CLI. Headless preflight may
 # intentionally skip this when `codex` is stubbed for launch testing.
-if [ "${CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY:-0}" = "1" ]; then
+if [ "$worker_home" -eq 1 ]; then
+  printf 'check=bootstrap:ok reason=worker-attach-validated\n'
+elif [ "${CODEX_RUNTIME_PROJECTION_SKIP_CLI_DISCOVERY:-0}" = "1" ]; then
   printf 'check=bootstrap:skipped reason=codex-cli-discovery-skipped\n'
 elif command -v codex >/dev/null 2>&1; then
   bootstrap_out=""
