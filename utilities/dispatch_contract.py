@@ -7801,6 +7801,15 @@ def _marker_provenance_currency(route, node, marker_path, marker, base, *, obser
         return GateCurrency("integrity-broken:identity-mismatch", "revision-predecessor-identity-invalid")
     if (marker.get("state") == "superseded-by-upstream-revision"
             and base.state in {"current", "revised-unrecorded", "superseded"}):
+        # Older tombstones retained the original history sequence. Their
+        # exact attempt link still proves that row, so retain the existing
+        # gates-off/current and observational/superseded contract.
+        try:
+            original_link = _marker_link_current(route, node, marker, marker_path)
+        except (DispatchContractError, KeyError, OSError, TypeError, ValueError):
+            original_link = False
+        if not marker.get("superseded_by") and original_link:
+            return base
         # Revise writes a new history row for the supersession, without
         # changing the original worker's attempt link. Prove that exact
         # predecessor rather than expecting its link to name the new row.
