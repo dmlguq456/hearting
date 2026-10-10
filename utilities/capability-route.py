@@ -8651,6 +8651,14 @@ def _owner_closure_eligibility(route, node, node_id, evidence, row_metadata, lin
         # they stay current here and still refuse.
         superseded=(_registered_marker_fence(route,node,existing,lines)=="completion-attempt-not-current"
                     and _registered_marker_fence(route,node,{"attempt_id":own},lines) is None)
+        if existing.get("state")=="superseded-by-upstream-revision":
+            from dispatch_contract import gate_currency
+            currency=gate_currency(route,node,canonical,existing,observe=True)
+            if currency.state!="superseded":
+                refuse("canonical-marker-unproven",currency.reason)
+            latest_blocking=next((metadata.get("attempt_id") for status,metadata in reversed(terminated)
+                                  if status=="done" and metadata.get("note")==REVIEW_BLOCKING_NOTE),None)
+            superseded=superseded or own==latest_blocking
         if existing.get("attempt_id")!=own and not superseded:
             refuse("node-already-complete",f"attempt={existing.get('attempt_id') or '-'}")
     terminal=inspect_terminal_attempt(
