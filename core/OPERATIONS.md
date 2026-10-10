@@ -1054,6 +1054,11 @@ the same resource output reconciliation without payload replay.
 Registration and supervisor arming share the terminal-execution judgment for
 same-route/node retries. They retain the old row and predecessor binding;
 only that resource's failed/retryable state returns to running.
+Queued input validation, including stale smoke attestations and configuration
+provenance, uses the same failure judgment. The leased launcher settles its
+unchanged pre-claim request through the existing owner result path, preserving
+input binding and diagnostic. Changed inputs use ordinary smoke verification
+and a distinct retry without locking another session's edits.
 The runner's failure before its private payload fence is released is a finished
 failure, including legacy direct-launch `resource-launch-incomplete` rows with
 no process identity, controller claim or sentinel. One shared judgment settles

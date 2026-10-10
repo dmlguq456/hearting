@@ -292,6 +292,102 @@ class TestRunner(unittest.TestCase):
                 self.assertEqual(marker.read_text(), "once")
                 self.assertEqual(R.read_sentinel(runs[args.run_id]["sentinel"]), 0)
 
+    def test_stale_smoke_input_before_claim_preserves_request_and_releases_no_payload(self):
+        import dispatch_resource_wait as RESOURCE
+        from workflow_state import WorkflowLedger
+        jobs = self.base / "smoke-jobs.log"
+        jobs.write_text("")
+        route = json.loads(self.route.read_text())
+        ledger = WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
+        row = {"run_id": "stale", "cwd": str(self.repo), "log": str(self.log),
+            "command": [sys.executable, "-c", f"open({str(self.launch)!r},'w').write('wrong')"],
+            "route": str(self.route), "node": "full-run", "jobs": str(jobs),
+            "status": "launching", "workflow_state": "READY", "launch_state": "queued",
+            "resource_policy": "supervised-owner", "parent_attempt_id": "att-parent",
+            "sentinel": str(self.log) + ".exit", "owner_wait": {"session_id": "same-native"},
+            "launch_request": {"smoke_attestation": str(self.attestation),
+                "smoke_attestation_sha256": hashlib.sha256(self.attestation.read_bytes()).hexdigest(),
+                "config_manifest": None, "config_manifest_sha256": None}}
+        armed = {"predecessor_id": row["run_id"], "node": row["node"],
+            "resource_registry": str(self.registry), "resource_binding": RESOURCE.resource_body_digest(row)}
+        sup = RESOURCE.supervisor()
+        identity = {**R.proc_identity(os.getpid()), "pid_namespace": os.readlink("/proc/self/ns/pid")}
+        controller = SimpleNamespace(expected=row, registry=str(self.registry), identity=identity,
+            guard=contextlib.nullcontext)
+        # A legitimate edit after queued registration invalidates the real verifier.
+        (self.repo / "config").write_text("changed by another session\n")
+        attestation_bytes = self.attestation.read_bytes()
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness), mock.patch.dict(os.environ, CLEAN_ENV), \
+                 mock.patch.object(sup, "load_route", return_value=route), \
+                 mock.patch.object(sup, "ledger_for", return_value=ledger), \
+                 mock.patch.object(sup, "read_armed", return_value={"full-run": armed}), \
+                 mock.patch.object(sup, "resource_continuation_cancelled", return_value=False), \
+                 mock.patch.object(sup, "_evaluate") as settle_stage, \
+                 mock.patch.object(R, "start_verified") as launch, \
+                 mock.patch.object(R.subprocess, "Popen", wraps=subprocess.Popen) as processes, \
+                 mock.patch("sys.stderr"):
+                self.registry.write_text(json.dumps({"schema_version": 1, "runs": {row["run_id"]: row}}))
+                with self.assertRaises(subprocess.CalledProcessError):
+                    R.main(["--registry", str(self.registry), "start", "--run-id", row["run_id"],
+                        "--cwd", str(self.repo), "--log", str(self.log), "--route", str(self.route),
+                        "--node", "full-run", "--smoke-attestation", str(self.attestation),
+                        "--", *row["command"]], controller=controller if harness == "codex" else None)
+                launch.assert_not_called()
+                # These subprocesses are route/smoke verification only; no payload/watch.
+                self.assertEqual(len(processes.call_args_list), 2)
+                actual = json.loads(self.registry.read_text())["runs"][row["run_id"]]
+                if harness == "codex":
+                    self.assertTrue(R.resource_never_started(actual))
+                    self.assertEqual(actual["launch_controller"], identity)
+                    self.assertIn("stale smoke input: " + str(self.repo / "config"), actual["launch_error"]["message"])
+                    self.assertEqual(actual["launch_request"], row["launch_request"])
+                    self.assertEqual(RESOURCE.resource_body_digest(actual), armed["resource_binding"])
+                    settle_stage.assert_called_once_with(route, ledger, armed, [])
+                else:
+                    self.assertEqual(actual, row)  # the native tool returns its refusal directly
+                    settle_stage.assert_not_called()
+                self.assertEqual(self.attestation.read_bytes(), attestation_bytes)
+                self.assertFalse(self.launch.exists())
+                self.assertFalse(Path(row["sentinel"]).exists())
+
+    def test_queued_validation_failure_preserves_foreign_claim_cancel_and_pending_correction(self):
+        import dispatch_resource_wait as RESOURCE
+        sup = RESOURCE.supervisor()
+        expected = {"run_id": "queued", "route": str(self.route), "node": "full-run",
+            "jobs": str(self.base / "jobs.log"), "status": "launching", "launch_state": "queued",
+            "resource_policy": "supervised-owner", "workflow_state": "READY",
+            "sentinel": str(self.log) + ".exit"}
+        armed = {"predecessor_id": "queued", "resource_registry": str(self.registry),
+            "resource_binding": RESOURCE.resource_body_digest(expected)}
+        ledger = SimpleNamespace(lock=contextlib.nullcontext)
+        controller = SimpleNamespace(expected=expected, registry=str(self.registry),
+            identity={"pid": os.getpid()}, guard=contextlib.nullcontext)
+        for changes in ({"command": ["foreign"]}, {"launch_state": "claimed"},
+                        {"launch_state": "started", "pid": os.getpid()},
+                        {"cancel_requested": True}, {"parent_close_requested": True}):
+            with self.subTest(changes=changes), mock.patch.object(sup, "load_route", return_value={}), \
+                 mock.patch.object(sup, "ledger_for", return_value=ledger), \
+                 mock.patch.object(sup, "read_armed", return_value={"full-run": armed}), \
+                 mock.patch.object(sup, "_evaluate") as settle_stage:
+                self.registry.write_text(json.dumps({"runs": {"queued": {**expected, **changes}}}))
+                before = self.registry.read_bytes()
+                R.settle_queued_validation_failure(controller, ValueError("invalid input"))
+                self.assertEqual(self.registry.read_bytes(), before)
+                settle_stage.assert_not_called()
+        self.registry.write_text(json.dumps({"runs": {"queued": expected}}))
+        with mock.patch.object(sup, "load_route", return_value={}), \
+             mock.patch.object(sup, "ledger_for", return_value=ledger), \
+             mock.patch.object(sup, "read_armed", return_value={"full-run": armed}), \
+             mock.patch.object(sup, "resource_continuation_cancelled", return_value=False), \
+             mock.patch.object(sup, "_evaluate") as settle_stage:
+            before = self.registry.read_bytes()
+            with mock.patch.object(controller, "guard", side_effect=R.LaunchDeferred("resource-owner-correction-pending")):
+                with self.assertRaises(R.LaunchDeferred):
+                    R.settle_queued_validation_failure(controller, ValueError("invalid input"))
+            self.assertEqual(self.registry.read_bytes(), before)
+            settle_stage.assert_not_called()
+
     def test_controller_correction_before_release_preserves_queued_body_and_payload_zero(self):
         import artifact_producer
         jobs=self.base/"correction-jobs.log"; jobs.write_text("")
