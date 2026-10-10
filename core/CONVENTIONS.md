@@ -371,7 +371,16 @@ most 1,048,576 bytes; `files` and `media` are each capped at 10,000 rows.
 
 Publication copies into a sibling staging directory, hashes each regular
 single-link file through one descriptor, verifies the closed staged inventory,
-and uses an atomic same-filesystem no-replace rename. Existing identical
+and uses an atomic same-filesystem no-replace rename. Shared directory
+publication uses `utilities/atomic_publish.py`: prefer `RENAME_NOREPLACE`;
+on `EINVAL`, `ENOSYS`, or `EOPNOTSUPP`, recheck destination absence and use
+ordinary atomic rename while holding the publication lock. Bundle publishers
+share a persistent parent lock; producer operations retain their existing root
+admission locks. Locks serialize cooperating writers, including empty-directory
+collisions; concurrent mutation by an unrelated writer is outside this fallback's
+exclusivity guarantee. Other syscall errors remain failures. Regular-file
+publication retains its exclusive create or no-replace hard link.
+Existing identical
 versions are unchanged; collisions fail closed. Consumers mount the bundle root
 read-only. A periodic full verifier records per-bundle state only on a health
 transition (`healthy|broken|checking` with machine reason codes); unchanged

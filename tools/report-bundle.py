@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import ctypes
 from datetime import datetime, timezone
 import errno
 import hashlib
@@ -18,6 +17,8 @@ import sys
 sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "utilities"))
+import atomic_publish  # noqa: E402
 sys.path.insert(0, str(ROOT / "tools" / "install"))
 import report_bundle_config  # noqa: E402
 sys.path.insert(0, str(ROOT / "utilities"))
@@ -79,19 +80,12 @@ def _safe_container(root, parts):
 
 def _rename_noreplace(source, target):
     """Atomically publish a directory only while the destination is absent."""
-    libc = ctypes.CDLL(None, use_errno=True)
-    renameat2 = getattr(libc, "renameat2", None)
-    if renameat2 is None:
-        raise BundleError("atomic no-replace rename is unavailable")
-    renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
-    renameat2.restype = ctypes.c_int
-    result = renameat2(-100, os.fsencode(source), -100, os.fsencode(target), 1)
-    if result == 0:
-        return
-    error = ctypes.get_errno()
-    if error == errno.EEXIST:
+    try:
+        atomic_publish.rename_directory(source, target)
+    except FileExistsError:
         raise BundleError("bundle version collision: destination appeared during publication")
-    raise BundleError("atomic no-replace rename failed: " + os.strerror(error))
+    except OSError as exc:
+        raise BundleError("atomic no-replace rename failed: " + str(exc)) from exc
 
 
 def _atomic_json(path, value):
