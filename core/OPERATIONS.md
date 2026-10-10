@@ -902,6 +902,17 @@ After validating changes to instructions, rules, hooks, preflight, or runtime st
 
 ### §5.12. Continuation Supervisor and Tracked-Workflow Completion
 
+Attention messages follow the stored receipt type and required action.
+Rendered wording grants no gate state. Closure-pending supervision is runtime
+recovery, not a human gate. Only an actual human-gate record carries decision
+and release instructions, including when several kinds share one wake.
+Read-only workflow status and survey prefer a matching closed outcome with
+current terminal gates over historical successor reservations. Such a claim
+is scheduling history, not proof of a live execution; it remains visible in
+the raw claims and journal fields. Current running or failed node evidence
+still prevents a completed projection. These observations rewrite no ledger,
+registry, claim, route or payload.
+
 **Parent close.** The existing `capability-route close --route <route>` also
 ends that parent's unfinished current owner, without waiting for another model
 turn. Before signalling, the shared controller records `cancelled-by-parent`

@@ -2559,6 +2559,24 @@ class GateCarrierTest(unittest.TestCase):
     before, which is exactly why the missing `now_ns` in `_gate_notices`'
     `reclaim` call shipped: nothing here ever executed that branch."""
 
+    def test_supervision_wake_type_does_not_depend_on_rendered_words(self):
+        from dispatch_session_sweep import is_human_gate_record
+        for reason in ("workflow-completion-pending", "closure-blocked", "watch-deadline",
+                       "receiver-unavailable", "terminal-evidence-conflict"):
+            record = {"receipt": {"kind": "supervision", "reason": reason,
+                                  "required_action": "inspect-recovery"}}
+            notice = "A closure diagnostic whose wording may change."
+            text = rewake.gate_wake_message(self._launch(), [notice],
+                                             human_gate=is_human_gate_record(record))
+            self.assertEqual(text, notice)
+            self.assertNotIn("human-gate", text)
+            self.assertNotIn("AskUserQuestion", text)
+        gate = {"receipt": {"children": [{"required_action": "human-gate:frame-review"}]}}
+        text = rewake.gate_wake_message(self._launch(), [notice, "actual gate"],
+                                         human_gate=is_human_gate_record(gate))
+        self.assertIn("AskUserQuestion", text)
+        self.assertIn(notice, text)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
