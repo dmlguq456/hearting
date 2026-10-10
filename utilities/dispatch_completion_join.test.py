@@ -1358,6 +1358,21 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             path.write_text(json.dumps(bad))
             self.assertIsNone(JOIN.read_supervisor_phase_state(path,"att-parent"))
 
+        failed = {**receipt, "state": "needs-attention", "exit_code": None,
+                  "reason": "FAILED_RETRYABLE", "successors": [],
+                  "launch_error": {"type": "GPUUnavailable", "message": "Local GPU admission on controller: in use"}}
+        def diagnostic_state(error, state="needs-attention"):
+            message = {**failed, "state": state, "launch_error": error}
+            digest = RESOURCE.RESUME.row_digest(message)
+            return {"session_id": "same-native", "delivered": [], "outbox": {
+                "receipt_id": "resource-" + digest[:32], "digest": digest, "key": "a" * 64, "receipt": message}}
+        self.assertTrue(JOIN.valid_resource_state(diagnostic_state(failed["launch_error"])))
+        for error in ({}, {"type": "GPUUnavailable", "message": "x", "extra": True},
+                      {"type": "GPUUnavailable", "message": "x" * 2049},
+                      {"type": "GPUUnavailable", "message": None}):
+            self.assertFalse(JOIN.valid_resource_state(diagnostic_state(error)))
+        self.assertFalse(JOIN.valid_resource_state(diagnostic_state(failed["launch_error"], state="cancelled")))
+
     def test_supervisor_phase_state_is_atomic_bounded_and_parent_scoped(self):
         state = self.root / "runtime" / "parent.json"
         JOIN.write_supervisor_state(state, "att-parent", {"att-b", "att-a"})

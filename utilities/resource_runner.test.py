@@ -210,6 +210,88 @@ class TestRunner(unittest.TestCase):
             self.assertEqual(R.classify_identity(foreign)[0],"stale")
             self.assertEqual(R.classify_identity(foreign)[2],"process-namespace-mismatch")
 
+    def test_gpu_launch_refusal_preserves_failure_and_cpu_bridge_retry_starts_once(self):
+        import artifact_producer
+        for harness in ("codex", "claude", "opencode"):
+            with self.subTest(harness=harness):
+                jobs = self.base / (harness + "-jobs.log")
+                jobs.write_text("")
+                registry = self.base / (harness + "-runs.json")
+                route_file = self.base / (harness + "-route.json")
+                route = {"route_id": "rt-gpu-refusal-" + harness, "route_hash": "sha256:" + harness,
+                         "nodes": [{"id": "full-run", "resource_class": "gpu"}]}
+                args = SimpleNamespace(jobs=str(jobs), run_id="bridge", node="full-run")
+                log = self.base / (harness + "-failed.log")
+                marker = self.base / (harness + "-payload")
+                command = [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_text('once')"]
+                owner = {"session_id": "same-native"}
+                if harness == "codex":
+                    owner["launch_scope"] = "codex-owner-controller"
+                body = {"run_id": "bridge", "cwd": str(self.repo), "log": str(log), "command": command,
+                        "route": str(route_file), "node": "full-run", "status": "launching",
+                        "sentinel": str(log) + ".exit", "parent_attempt_id": "att-parent", "owner_wait": owner}
+                if harness == "codex":
+                    body["launch_request"] = {}
+                def controller(expected):
+                    return SimpleNamespace(expected=expected, identity={**R.proc_identity(os.getpid()),
+                        "pid_namespace": os.readlink("/proc/self/ns/pid")},
+                        command=expected["command"], sandbox={}, guard=contextlib.nullcontext)
+                with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env",
+                                       return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
+                     mock.patch.object(R, "register_registry"), mock.patch.object(R.subprocess, "run"), \
+                     mock.patch("sys.stdout"), mock.patch.object(R.subprocess, "Popen") as spawn:
+                    admission = None
+                    if harness == "codex":
+                        R.start_verified(registry, args, route, route_file, dict(body))
+                        queued = json.loads(registry.read_text())["runs"]["bridge"]
+                        admission = controller(queued)
+                    with mock.patch.object(R.gpu_leases, "resource_admission",
+                                           side_effect=R.gpu_leases.GPUUnavailable("Local GPU admission: in use")):
+                        with self.assertRaises(R.gpu_leases.GPUUnavailable):
+                            R.start_verified(registry, args, route, route_file, dict(body), controller=admission)
+                    spawn.assert_not_called()
+                failed = json.loads(registry.read_text())["runs"]["bridge"]
+                self.assertEqual(failed["launch_state"], "not-started")
+                self.assertEqual(failed["launch_error"], {"type": "GPUUnavailable", "message": "Local GPU admission: in use"})
+                self.assertTrue(R.resource_never_started(failed))
+                self.assertFalse(marker.exists())
+                # The existing empty CUDA spelling describes a CPU control
+                # bridge; target-host compute admission remains its own step.
+                args.run_id = "bridge__a1"
+                retry_log = self.base / (harness + "-retry.log")
+                retry = {**body, "run_id": args.run_id, "log": str(retry_log),
+                    "sentinel": str(retry_log) + ".exit", "command": ["env", "CUDA_VISIBLE_DEVICES=", *command]}
+                real_popen = subprocess.Popen
+                watch = mock.Mock(pid=os.getpid())
+                watch.poll.return_value = None
+                payloads = []
+                def launch(argv, **kwargs):
+                    if "watch" in argv:
+                        os.write(kwargs["pass_fds"][0], b"ready\n")
+                        return watch
+                    proc = real_popen(argv, **kwargs)
+                    payloads.append(proc)
+                    return proc
+                with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}), \
+                     mock.patch.object(artifact_producer, "prepare_route_artifact_env",
+                                       return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
+                     mock.patch.object(R, "register_registry"), mock.patch.object(R.subprocess, "run"), \
+                     mock.patch("sys.stdout"), mock.patch.object(R.subprocess, "Popen", side_effect=launch), \
+                     mock.patch.object(R.gpu_leases, "local_observation") as probe:
+                    R.start_verified(registry, args, route, route_file, dict(retry))
+                    if harness == "codex":
+                        queued = json.loads(registry.read_text())["runs"][args.run_id]
+                        R.start_verified(registry, args, route, route_file, dict(retry), controller=controller(queued))
+                    payloads[0].wait(timeout=5)
+                    R.start_verified(registry, args, route, route_file, dict(retry))
+                    probe.assert_not_called()
+                runs = json.loads(registry.read_text())["runs"]
+                self.assertEqual(runs["bridge"], failed)
+                self.assertEqual(len(payloads), 1)
+                self.assertEqual(marker.read_text(), "once")
+                self.assertEqual(R.read_sentinel(runs[args.run_id]["sentinel"]), 0)
+
     def test_controller_correction_before_release_preserves_queued_body_and_payload_zero(self):
         import artifact_producer
         jobs=self.base/"correction-jobs.log"; jobs.write_text("")

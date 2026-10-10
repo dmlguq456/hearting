@@ -1072,7 +1072,7 @@ def valid_resource_state(value: object) -> bool:
             or box["receipt"].get("type") != "resource-completion"):
         return False
     receipt = box["receipt"]
-    if (set(receipt) != {"type", "parent_attempt_id", "session_id", "route_id", "route_hash",
+    if (set(receipt).difference({"launch_error"}) != {"type", "parent_attempt_id", "session_id", "route_id", "route_hash",
             "jobs", "node", "run_id", "resource_key", "resource_sha256", "state", "exit_code",
             "reason", "verification_pass", "workflow_complete", "successors"}
             or any(not isinstance(receipt[k], str) or not _safe_identity(receipt[k])
@@ -1089,6 +1089,13 @@ def valid_resource_state(value: object) -> bool:
             or (receipt["state"] != "succeeded" and receipt["successors"])
             or (receipt["state"] == "succeeded" and receipt["exit_code"] != 0)):
         return False
+    if "launch_error" in receipt:
+        error = receipt["launch_error"]
+        if (not isinstance(error, dict) or set(error) != {"type", "message"}
+                or not isinstance(error["type"], str) or not _safe_identity(error["type"])
+                or not isinstance(error["message"], str) or len(error["message"]) > 2048
+                or receipt["state"] != "needs-attention"):
+            return False
     return hashlib.sha256(json.dumps(box["receipt"], sort_keys=True,
         separators=(",", ":")).encode()).hexdigest() == box["digest"]
 
