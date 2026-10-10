@@ -248,7 +248,13 @@ locator check, and finalization and every later refresh share one inclusion rule
 `*.pyc`, editor temporaries (`*.swp`, `*~`, `.#*`), `*.tmp`/`*.part` and symbolic
 links are not output: a link is only `lstat`-ed and its target is not followed or read, and each
 such path is left out of the manifest and listed as excluded instead of failing
-the close. `_internal/` and other non-hidden support paths, binary and large
+the close. The browser review workspace also reserves
+`artifacts/reviews/**/browser/profile/` and `profile-*/` for Chromium runtime
+profiles. These directories and their descendants are excluded before locator
+validation and payload reads, on both first close and later refreshes; existing
+profiles remain in place. Screenshots, browser logs and review reports beside
+them remain output. New browser work uses a process-owned temporary profile
+outside the cycle payload. `_internal/` and other non-hidden support paths, binary and large
 files are output. Absolute/escaping paths and out-of-payload files remain
 invalid. Cycle controls and legacy relocation/exclusion retain their contracts.
 Invalid paths identify the locator and reason before payload reads or manifest

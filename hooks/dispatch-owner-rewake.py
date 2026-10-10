@@ -1307,6 +1307,7 @@ def _gate_notices(
     launch: Launch, *, attempt_only: bool = False, settle: str = "ack",
     announced: list[str] | None = None,
     supervision_claims: list[tuple[Path, str, str, str]] | None = None,
+    announced_records: list[dict] | None = None,
 ) -> list[str]:
     """SD-123 (8)(b) carrier 1: fold every open gate record for this recipient
     into the wake this hook is about to emit.
@@ -1366,6 +1367,8 @@ def _gate_notices(
         continued = continue_for_parent(record, session_id=launch.session_id,
                                         recipient_kind="claude-parent-runtime")
         notices.append(_bounded_receipt_text({**record, CONTINUED_KEY: continued} if continued else record))
+        if announced_records is not None:
+            announced_records.append(record)
         if announced is not None:
             announced.append(delivery_id)
         if supervision_claims is not None and record.get("receipt", {}).get("kind") == "supervision":
@@ -1384,12 +1387,12 @@ def _gate_notices(
     return notices
 
 
-def gate_wake_message(launch: Launch, notices: list[str]) -> str:
+def gate_wake_message(launch: Launch, notices: list[str], *, human_gate: bool) -> str:
     """The in-wait gate wake: bounded, typed, and explicit that the gate is
     answered, not harvested; the owner may still be waiting or may have paused
     at the gate."""
 
-    if any("Hearting supervision needs attention." in notice for notice in notices):
+    if not human_gate:
         return " ".join(notices)
     return (
         "Hearting human gate awaiting your decision (SD-123/129). Runtime gate receipt "
@@ -1629,13 +1632,17 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
             # tight loop (review round 1, B3).
             announced: list[str] = []
             supervision_claims: list[tuple[Path, str, str, str]] = []
+            announced_records: list[dict] = []
             notices = _gate_notices(
                 launch, attempt_only=True, settle="sent-ambiguous", announced=announced,
                 supervision_claims=supervision_claims,
+                announced_records=announced_records,
             )
             if notices:
                 observation.update(wait_state="gate", reason="human-gate-open")
-                code = emit_receipt("attention", gate_wake_message(launch, notices), block=False)
+                code = emit_receipt("attention", gate_wake_message(
+                    launch, notices, human_gate=any(is_human_gate_record(record)
+                                                  for record in announced_records)), block=False)
                 settle_arm(claim, "gate-wake-sent", gate_delivery_id=announced[0])
                 # The native wake immediately runs UserPromptSubmit. Keeping
                 # this exited carrier's 30s lease prevents that synchronous
