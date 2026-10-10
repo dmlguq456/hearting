@@ -794,6 +794,9 @@ The retained courier binds its peer transfer to that exact notice before sending
 actual peer receipt can settle a still-live notice lease. A queued transfer stays
 owned by the existing message courier. Receipt of an earlier gate does not settle
 the owner's later completion notice.
+If another normal carrier consumes that notice first, the same bound peer payload
+is omitted from later sends and its existing message duty settles without a false
+peer-receipt claim.
 
 A replay that verifies the exact closed outcome, finalized cycle, sealed owner
 handoff and quiescent children reports completed work. A missing or stale progress

@@ -137,9 +137,9 @@ def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holde
         ensure_runner(Path(jobs).parent)
 
 
-def acknowledge_registered_delivery(message, *, roots=None):
-    """Consume only the dispatch notice bound before this exact peer transfer was sent."""
-    if message.get("state") != "received":
+def _registered_delivery_bindings(message, roots=None):
+    refs = [ref for ref in message.get("refs") or [] if ref.startswith("registered-batch-")]
+    if not refs:
         return
     from dispatch_contract import dispatch_state_roots, resolve_agent_home
     from dispatch_completion_join import current_attempt_row
@@ -150,9 +150,7 @@ def acknowledge_registered_delivery(message, *, roots=None):
         roots = dispatch_state_roots(resolve_agent_home())
     for root in dict.fromkeys(Path(r) for r in roots):
         store = ObligationStore(root)
-        for duty_id in message.get("refs") or []:
-            if not duty_id.startswith("registered-batch-"):
-                continue
+        for duty_id in refs:
             duty = store.get(duty_id)
             intent = (duty or {}).get("intent") or {}
             identity = intent.get("identity") or {}
@@ -170,16 +168,33 @@ def acknowledge_registered_delivery(message, *, roots=None):
             storage, delivery_id = observation["storage_recipient"], observation["delivery_id"]
             record = pending.read(root, storage, delivery_id)
             if (not record or row.attempt_id not in record.get("attempt_ids", [])
-                    or record.get("recipient_kind") != intent.get("carrier")
-                    or record.get("claim_owner") != observation.get("claim_owner")):
+                    or record.get("recipient_kind") != intent.get("carrier")):
                 continue
-            if record["state"] in {"claimed", "sent-ambiguous"}:
-                pending.ack(root, storage, delivery_id, acked_by="peer-received:" + message["ref"])
-            elif record["state"] != "acked":
-                continue
-            terminal = row.status == "done" and row.metadata.get("delivery_id") == delivery_id
-            store.update(duty_id, state="complete" if terminal else "pending",
-                         delivery="acknowledged", cleanup="complete" if terminal else "pending")
+            yield store, duty, row, record, root, storage, delivery_id
+
+
+def registered_delivery_settled(message, *, roots=None):
+    """A consumed exact notice makes its deferred peer payload unnecessary."""
+    return any(record["state"] in {"acked", "rejected", "expired"}
+               for _store, _duty, _row, record, _root, _storage, _delivery_id
+               in _registered_delivery_bindings(message, roots))
+
+
+def acknowledge_registered_delivery(message, *, roots=None):
+    """Consume only the dispatch notice bound before this exact peer transfer was sent."""
+    if message.get("state") != "received":
+        return
+    import dispatch_pending_delivery as pending
+    for store, duty, row, record, root, storage, delivery_id in _registered_delivery_bindings(message, roots):
+        if record.get("claim_owner") != (duty.get("observation") or {}).get("claim_owner"):
+            continue
+        if record["state"] in {"claimed", "sent-ambiguous"}:
+            pending.ack(root, storage, delivery_id, acked_by="peer-received:" + message["ref"])
+        elif record["state"] != "acked":
+            continue
+        terminal = row.status == "done" and row.metadata.get("delivery_id") == delivery_id
+        store.update(duty["id"], state="complete" if terminal else "pending",
+                     delivery="acknowledged", cleanup="complete" if terminal else "pending")
 
 
 class ObligationStore:

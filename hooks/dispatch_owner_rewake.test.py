@@ -1654,7 +1654,10 @@ class CarrierOneClaimGateTest(unittest.TestCase):
     def test_queued_restored_wake_waits_for_exact_receipt_without_another_send(self):
         self._check_restored_courier(immediate=False)
 
-    def _check_restored_courier(self, *, immediate):
+    def test_a_notice_consumed_by_another_carrier_suppresses_its_deferred_peer_payload(self):
+        self._check_restored_courier(immediate=False, other_carrier=True)
+
+    def _check_restored_courier(self, *, immediate, other_carrier=False):
         spec = importlib.util.spec_from_file_location("restored_steward_test", ROOT / "utilities/peer-steward.py")
         steward = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steward)
@@ -1731,6 +1734,24 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                         steward.peer_message.receive_peer_message(text, {"harness": harness, "session_id": "stranger"})
                         steward.peer_message.receive_peer_message("altered " + text, {"harness": harness, "session_id": "session-1"})
                         self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
+                        if other_carrier:
+                            rewake.pending_delivery.ack(self.root, "session-1", transfer_id := queued["observation"]["delivery_id"],
+                                                         acked_by="other-native-carrier")
+                            self.assertEqual(steward.peer_message.pending_messages({
+                                "harness": harness, "session_id": "session-1"}), [])
+                            self.assertIsNone(steward.peer_message.claim_pending_herdr(transfer["ref"], transfer["to"]))
+                            self.assertEqual(steward.peer_message.deliver_pending_codex(transfer["ref"])["status"], "not-required")
+                            msg = store.create("message-" + transfer["ref"], "message", {}, {"ref": transfer["ref"]})
+                            with mock.patch.object(steward, "_flush_pending_for_target") as resend:
+                                steward._resume_message_obligation(msg, store)
+                                resend.assert_not_called()
+                            self.assertEqual(store.get(msg["id"])["state"], "complete")
+                            self.assertEqual(steward.peer_message._read_pending(transfer["ref"])["state"], "pending")
+                            steward._resume_registered_obligation(queued, store)
+                            self.assertEqual(prompt_call.call_count, 1)
+                            self.assertEqual(store.get(duty["id"])["state"], "complete")
+                            self.jobs.write_text("")
+                            continue
                         self.assertEqual(steward.peer_message.receive_peer_message(text, {
                             "harness": harness, "session_id": "session-1"}), 0)
                     else:

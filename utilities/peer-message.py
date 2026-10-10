@@ -346,8 +346,16 @@ def _pending_rows():
                 ref = path.stem if re.fullmatch(r"[0-9a-f]{32}", path.stem) else "invalid-ref"
                 print(f"peer-pending-invalid ref={ref}", file=sys.stderr)
             continue
-        if row and row["state"] != "received":
+        if row and row["state"] != "received" and not _registered_delivery_settled(row):
             yield row
+
+
+def _registered_delivery_settled(row):
+    try:
+        from peer_obligations import registered_delivery_settled
+        return registered_delivery_settled(row)
+    except (OSError, ValueError, KeyError):
+        return False
 
 
 def pending_messages(recipient):
@@ -416,6 +424,8 @@ def claim_pending_herdr(ref, recipient, *, receipt="herdr-delivery-inflight"):
         if (not row or row["state"] != "pending" or row.get("rpc_claim")
                 or any(row["to"].get(k) != recipient.get(k) for k in ("harness", "session_id"))):
             return None
+        if _registered_delivery_settled(row):
+            return None
         claim = {"token": secrets.token_hex(16), "pid": os.getpid(),
                  "start": process_start_ticks(os.getpid())}
         _save_pending(dict(row, state="unverified", receipt=receipt, rpc_claim=claim))
@@ -445,6 +455,8 @@ def deliver_pending_codex(ref, *, timeout=1.0):
             return {"status": "unsupported", "reason": "peer-pending-missing"}
         if row["state"] == "received":
             return {"status": "received", "reason": "exact-peer-ref"}
+        if _registered_delivery_settled(row):
+            return {"status": "not-required", "reason": "dispatch-notice-consumed"}
         if not _valid_transfer_sender(row["from"]) or not _valid_transfer_endpoint(row["to"]):
             return {"status": "unverified", "reason": "peer-endpoint-unverified"}
         if row["to"]["harness"] != "codex":

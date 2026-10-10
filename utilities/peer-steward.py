@@ -3811,6 +3811,10 @@ def _resume_message_obligation(duty, store):
         store.update(duty["id"], state="unknown",
                      observation={"ref": ref, "reason": "pending-row-missing"})
         return
+    if peer_obligations.registered_delivery_settled(row):
+        store.update(duty["id"], state="complete", delivery="not-required", cleanup="complete",
+                     observation={"ref": ref, "reason": "dispatch-notice-consumed"})
+        return
     if row.get("state") == "received":
         store.update(duty["id"], state="complete", result="received",
                      delivery="acknowledged", cleanup="complete",
