@@ -1655,9 +1655,9 @@ predecessor's open depth-1 routes pass to the successor, on any harness: it may
 `start` and `correct` them, and their stored completion records reach it
 (`retire ... handover=<n>`). Registry rows, their registered parent and worker
 identities stay as they are; cards and notices are not moved.
-Deferred retirement uses the request's recorded requester session and pane,
-never the observer's pane. The original successor mark must precede acceptance
-and match that requester and predecessor. Proven loss of the booked predecessor
+Deferred retirement resolves succession from the recorded requester session and
+pane, with the original successor mark predating acceptance and matching both
+requester and predecessor. Proven loss of the booked predecessor
 lifetime can finish this same handover even when its pane has disappeared; it
 grants nothing to a later occupant. A completed retirement whose handover was
 missed is consumed by the requester's ordinary lifecycle callback or the same
