@@ -1660,7 +1660,7 @@ pane, with the original successor mark predating acceptance and matching both
 requester and predecessor. Proven loss of the booked predecessor
 lifetime can finish this same handover even when its pane has disappeared; it
 grants nothing to a later occupant. A completed retirement whose handover was
-missed is consumed by the requester's ordinary lifecycle callback or the same
+missed is consumed by the ordinary lifecycle callback or the same
 `retire <predecessor>` call, without another exit action, pane closure, manual
 ledger edit or new recovery command. Cancelled and unverifiable requests grant
 no handover, and an existing transfer to another successor stays authoritative.

@@ -1191,7 +1191,8 @@ def _retire_handover(duty):
     """Consume only the accepted retirement's original succession, on any observer."""
     intent = duty.get("intent") or {}
     requester = intent.get("requester") or {}
-    if (not _retire_booked_foreground(duty)
+    foreground = _retire_booked_foreground(duty)
+    if (not isinstance(foreground, dict) or not foreground.get("pid") or not foreground.get("start")
             or (intent.get("identity") or {}).get("session_id") in {None, "", "-"}):
         return None
     return _seat_handover(intent.get("identity") or {}, requester.get("session_id"),
@@ -4011,15 +4012,12 @@ def cmd_ensure_obligations(_args):
                 except Exception:
                     store.update(duty["id"], observer_error="observer-unavailable")
         # Older observers could close a retire without consuming its successor
-        # mark. Only that requester's existing lifecycle repairs the omission.
-        sid, harness = _current_session_identity()
-        pane = _caller_pane()
-        if sid and pane and _seat_successor_path(pane).is_file():
-            for duty in store.list(states={"complete"}):
-                requester = duty.get("intent", {}).get("requester") or {}
-                if (duty.get("intent", {}).get("kind") == "retire"
-                        and requester == {"session_id": sid, "harness": harness,
-                                          "pane": pane, "server": _HERDR_SESSION or "default"}):
+        # mark. Lifecycle observers are detached, just like the task runner;
+        # the accepted request and original mark carry the authority.
+        for duty in store.list(states={"complete"}):
+            if duty.get("intent", {}).get("kind") == "retire":
+                pane = (duty["intent"].get("requester") or {}).get("pane")
+                if pane and _seat_successor_path(pane).is_file():
                     _resume_retire_obligation(duty, store)
         peer_obligations.ensure_runner()
         dispatch_batch_obligations.ensure_observers()

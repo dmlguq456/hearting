@@ -5990,11 +5990,11 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
         self.assert_authority()
         self.assertEqual(store.get(duty["id"]), completed)
 
-    def test_requester_lifecycle_repairs_a_completed_legacy_retire(self):
+    def test_detached_lifecycle_repairs_only_the_booked_successor(self):
         store, duty = self.booking()
         store.update(duty["id"], state="complete", result="normal-exit")
-        with mock.patch.object(peer_steward, "_current_session_identity", return_value=("new-sid", "opencode")), \
-             mock.patch.object(peer_steward, "_caller_pane", return_value="w1:pNew"), \
+        with mock.patch.object(peer_steward, "_current_session_identity", return_value=("observer", "claude")), \
+             mock.patch.object(peer_steward, "_caller_pane", return_value=""), \
              mock.patch.object(peer_steward, "_ensure_watch_observers"), \
              mock.patch.object(peer_steward.dispatch_batch_obligations, "ensure_observers"):
             self.assertEqual(peer_steward.cmd_ensure_obligations(None), 0)
@@ -6031,6 +6031,16 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(peer_steward._retire_handover(duty), "skipped:successor-unverified")
                 self.assert_authority("old-sid")
                 self.assertTrue(marker.exists())
+
+    def test_completed_retirement_without_original_birth_evidence_grants_nothing(self):
+        store, duty = self.booking()
+        completed = store.update(duty["id"], state="complete", result="normal-exit")
+        for foreground in (None, {"pid": 4242}, {"start": "800"}):
+            with self.subTest(foreground=foreground):
+                value = json.loads(json.dumps(completed))
+                value["intent"]["identity"]["foreground"] = foreground
+                peer_steward._resume_retire_obligation(value, store)
+                self.assert_authority("old-sid")
 
     def test_existing_transfer_to_another_successor_is_preserved(self):
         import session_tidy
