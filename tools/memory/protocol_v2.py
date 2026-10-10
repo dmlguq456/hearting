@@ -1649,29 +1649,35 @@ def resolved_blocked_by(
         record_ids = {
             mutation["record_id"] for mutation in blocked_op.payload["mutations"]
         }
-        head_sets = [result.frontiers.get(rid, ()) for rid in record_ids]
-        if not head_sets or any(len(heads) != 1 for heads in head_sets):
-            continue
-        candidate_ids = {heads[0] for heads in head_sets}
-        if len(candidate_ids) != 1:
-            continue
-        candidate_id = next(iter(candidate_ids))
-        if candidate_id in blocked_ids or candidate_id not in operations:
-            continue
-        candidate_records = {
-            mutation["record_id"]
-            for mutation in operations[candidate_id].payload["mutations"]
-        }
-        if not record_ids <= candidate_records:
+        # Each affected record must have one sole head: an accepted, unblocked
+        # later decision on that record that observed the blocked operation.
+        # One shared head covering every record is the special case; a
+        # multi-record operation whose records were decided one by one is
+        # resolved too.
+        heads: dict[str, str] = {}
+        for rid in sorted(record_ids):
+            record_heads = result.frontiers.get(rid, ())
+            if len(record_heads) != 1:
+                break
+            head = record_heads[0]
+            if head in blocked_ids or head not in operations:
+                break
+            if rid not in {m["record_id"] for m in operations[head].payload["mutations"]}:
+                break
+            heads[rid] = head
+        if not heads or len(heads) != len(record_ids):
             continue
         try:
-            descends = ancestry.is_ancestor(blocked_op_id, candidate_id)
+            descends = all(
+                ancestry.is_ancestor(blocked_op_id, head)
+                for head in set(heads.values())
+            )
         except ProtocolError as error:
             if error.code == "fold-work-limit":
                 break
             raise
         if descends:
-            resolved[blocked_op_id] = candidate_id
+            resolved[blocked_op_id] = min(heads.values())
     return resolved
 
 

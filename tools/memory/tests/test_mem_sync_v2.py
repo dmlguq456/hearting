@@ -318,6 +318,74 @@ class MemTwoServerSyncTest(unittest.TestCase):
         self.assertGreaterEqual(resolved, 1)
         self.assertEqual(unresolved, 0)
 
+    def test_per_record_decisions_clear_a_blocked_multi_record_operation(self):
+        first = self._mem("a", "add", "durable", "lesson", "first lesson body")
+        second = self._mem("a", "add", "durable", "lesson", "second lesson body")
+        self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+        first_id, second_id = self._written_id(first), self._written_id(second)
+        self._sync("a")
+        self._sync("b")
+
+        # a edits the first record while b supersedes it by the second one:
+        # b's operation touches two records and is blocked.
+        reinforced = self._mem("a", "reinforce", first_id)
+        superseded = self._mem("b", "supersede", first_id, "--by", second_id)
+        self.assertEqual(reinforced.returncode, 0, reinforced.stderr + reinforced.stdout)
+        self.assertEqual(superseded.returncode, 0, superseded.stderr + superseded.stdout)
+        self._sync("a")
+        blocked_sync = self._mem("b", "sync", "--json", remote=True)
+        self.assertEqual(json.loads(blocked_sync.stdout)["reason"], "blocked-operations")
+
+        # An explicit later decision on each record, one record at a time.
+        for record_id in (first_id, second_id):
+            decision = self._mem("b", "reinforce", record_id)
+            self.assertEqual(decision.returncode, 0, decision.stderr + decision.stdout)
+        final = self._mem("b", "sync", "--json", remote=True)
+        self.assertEqual(final.returncode, 0, final.stderr + final.stdout)
+        connection = sqlite3.connect(self.stores["b"] / "memory.db")
+        try:
+            unresolved = connection.execute(
+                "SELECT COUNT(*) FROM sync_applied WHERE result LIKE 'blocked:%'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(unresolved, 0)
+
+    def test_blocked_multi_record_resolution_takes_one_decision_per_record(self):
+        mem = load_module("mem")
+
+        def operation(parents, *records):
+            return SimpleNamespace(
+                parents=tuple(parents),
+                payload={"mutations": [{"record_id": record} for record in records]},
+            )
+
+        operations = {
+            "base": operation((), "record-r", "record-s"),
+            "edit": operation(("base",), "record-r"),
+            "supersede": operation(("base",), "record-r", "record-s"),
+            "decide-r": operation(("edit", "supersede"), "record-r"),
+            "decide-s": operation(("supersede",), "record-s"),
+            "unaware-s": operation(("base",), "record-s"),
+        }
+        classification = SimpleNamespace(operations=operations)
+        decided = SimpleNamespace(
+            classification=classification,
+            accepted=tuple(operations),
+            blocked={"supersede": object()},
+            frontiers={"record-r": ("decide-r",), "record-s": ("decide-s",)},
+        )
+        self.assertEqual(mem._resolved_blocked_map(decided), {"supersede": "decide-r"})
+        # A record whose head never observed the blocked operation keeps it blocked.
+        unaware = SimpleNamespace(
+            classification=classification,
+            accepted=tuple(operations),
+            blocked={"supersede": object()},
+            frontiers={"record-r": ("decide-r",), "record-s": ("unaware-s",)},
+        )
+        self.assertEqual(mem._resolved_blocked_map(unaware), {})
+
     def test_blocked_resolution_requires_every_final_maximal_head(self):
         mem = load_module("mem")
 
