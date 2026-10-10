@@ -286,6 +286,7 @@ def pending_prompt(path, parent, args=None, control=None):
     box = (state.resource or {}).get("outbox") if state else None
     if not box:
         return None
+    row = None
     if args is not None and control is not None:
         receipt = box["receipt"]
         expected = {"parent_attempt_id": parent, "session_id": control.thread_id,
@@ -313,10 +314,14 @@ def pending_prompt(path, parent, args=None, control=None):
         if (any(receipt.get(k) != v for k, v in expected.items()) or row is None
                 or RESUME.row_digest(row) != receipt.get("resource_sha256")):
             raise JOIN.JoinContractError("resource-outbox-binding-changed")
+    from resource_run_registry import resource_never_started
+    next_work = ("The payload never started. Preserve this failed run, address its launch diagnostic, "
+        "and use the normal distinct __a<N> resource retry for unfinished authorized work. "
+        "Do not rerun completed stages." if row is not None and resource_never_started(row) else
+        "Continue only the already authorized next work; do not restart the resource.")
     return ("Runtime resource receipt (not a model child or verification PASS): "
         + json.dumps(box["receipt"], sort_keys=True, separators=(",", ":"))
-        + "\nUse pending user corrections first. Continue only the already authorized next work; "
-        "do not restart the resource. Exit is not workflow completion.")
+        + "\nUse pending user corrections first. " + next_work + " Exit is not workflow completion.")
 
 
 def acknowledge(path, parent, receipt_id):

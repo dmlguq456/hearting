@@ -564,6 +564,8 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             self.assertIn(error["message"], prompt)
             self.assertIn('"state":"needs-attention"', prompt)
             self.assertIn('"workflow_complete":false', prompt)
+            self.assertIn("normal distinct __a<N> resource retry", prompt)
+            self.assertNotIn("do not restart the resource", prompt)
             box = RESOURCE.JOIN.read_supervisor_phase_state(self.state, PARENT).resource["outbox"]
             self.assertEqual(box["receipt"]["launch_error"], error)
             self.assertEqual(box["receipt"]["successors"], [])
