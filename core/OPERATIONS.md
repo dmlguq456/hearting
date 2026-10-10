@@ -1396,10 +1396,29 @@ command or additional required input is involved. An explicit empty
 `CUDA_VISIBLE_DEVICES`/`--gpus` retains CPU-only execution. GPU measurement failure
 cannot establish availability. Receipts retain the observed memory/utilization.
 
+NVML failure does not erase known running work. The bounded, read-only probe
+uses NVIDIA's proc device information and stable same-EUID PID/start evidence,
+open `/dev/nvidiaN` descriptors, physical `/proc/<pid>/maps` device mappings
+or an unambiguous CUDA visibility/order mapping to place managed runs. A default
+numeric CUDA ordinal is not a device minor; ambiguous placement retains only
+device-access evidence. The probe collapses descendants
+of the same managed run already represented on those devices, preserves exact
+session attribution, and leaves NVML-only utilization and memory unknown.
+Device access without a resolvable visibility mask remains access evidence,
+not a claim that computation uses every opened device. Fleet and admission
+consume the probe's shared Korean diagnostic: an observed NVML mismatch,
+library and loaded module versions when readable, and the host's existing
+reboot-required signal. Missing signals remain unknown; no driver-update cause
+is inferred. GPU admission remains closed while measurement is unavailable,
+including `--share`, and names observed occupancy without reporting free GPUs.
+Fallback GPU indexes identify physical device minors. Existing reservations
+whose NVML index cannot be mapped stay visible at host level with unknown
+device placement; they are not attached to a guessed GPU.
+
 Reservation lifetime follows the exact wrapper PID, start time and PID namespace,
-not its launching session. Normal exit releases it; the next launch or status
-observation removes proven-dead/reused-PID reservations, preserving unknown
-identity. Existing work is not adopted or interrupted: its probe processes mark
+not its launching session. Normal exit releases it; the next launch removes
+proven-dead/reused-PID reservations, and read-only status omits them from its
+view, preserving unknown identity. Existing work is not adopted or interrupted: its probe processes mark
 the GPU occupied. `compute-hosts list` and Fleet's top compute panel show GPU
 reservations, including the session tag, task and start time, before CUDA has
 allocated memory. Host-local storage lets callers on different machines converge
