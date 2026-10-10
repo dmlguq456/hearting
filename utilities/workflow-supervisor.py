@@ -2482,7 +2482,7 @@ def _stage_projection(route, node_states):
 
 def _closed_terminal_projection(route, route_file, gates, node_states, claims):
     """Read-only proof that a closed route's exact terminal gate is current."""
-    if not route_file or not gates or claims:
+    if not route_file or not gates:
         return False
     if any(str(row.get("state", "")).startswith("FAILED")
            or row.get("state") == "RUNNING" for row in node_states.values()):
