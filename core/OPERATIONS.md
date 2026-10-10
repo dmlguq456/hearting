@@ -1655,6 +1655,15 @@ predecessor's open depth-1 routes pass to the successor, on any harness: it may
 `start` and `correct` them, and their stored completion records reach it
 (`retire ... handover=<n>`). Registry rows, their registered parent and worker
 identities stay as they are; cards and notices are not moved.
+Deferred retirement resolves succession from the recorded requester session and
+pane, with the original successor mark predating acceptance and matching both
+requester and predecessor. Proven loss of the booked predecessor
+lifetime can finish this same handover even when its pane has disappeared; it
+grants nothing to a later occupant. A completed retirement whose handover was
+missed is consumed by the ordinary lifecycle callback or the same
+`retire <predecessor>` call, without another exit action, pane closure, manual
+ledger edit or new recovery command. Cancelled and unverifiable requests grant
+no handover, and an existing transfer to another successor stays authoritative.
 Replacement admission and lineage use that same parent judgment: a depth-1
 replacement may be launched by the registered parent or its ledger-confirmed
 successor. Parent attempt bindings remain exact, as do route, node, depth,
