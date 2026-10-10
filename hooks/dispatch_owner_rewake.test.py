@@ -1645,6 +1645,9 @@ class CarrierOneClaimGateTest(unittest.TestCase):
     def test_changed_pane_does_not_receive_or_complete_retained_duty(self):
         self._check_lost_carrier_completion(changed_pane=True)
 
+    def test_a_live_native_holder_cannot_suppress_wake_after_its_parent_died(self):
+        self._check_lost_carrier_completion(live_holder=True)
+
     def test_restored_parent_uses_existing_courier_without_user_prompt_all_harnesses(self):
         spec = importlib.util.spec_from_file_location("restored_steward_test", ROOT / "utilities/peer-steward.py")
         steward = importlib.util.module_from_spec(spec)
@@ -1690,7 +1693,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 self.jobs.write_text("")
 
     def _check_lost_carrier_completion(self, crash_sid="session-1", recipient_sid="session-1",
-                                       changed_pane=False):
+                                       changed_pane=False, live_holder=False):
         self._open_row()
         spec = importlib.util.spec_from_file_location("retained_steward_test", ROOT / "utilities/peer-steward.py")
         steward = importlib.util.module_from_spec(spec)
@@ -1722,7 +1725,10 @@ class CarrierOneClaimGateTest(unittest.TestCase):
             return 0
         agents = {"result": {"agents": [{"agent": "claude", "pane_id": "w1:p9",
                                         "agent_session": {"value": recipient_sid}}]}}
-        with mock.patch.object(steward.subprocess, "run", return_value=type("Reply", (), {
+        holder_alive = (lambda holder: holder == list(DEAD_HOLDER)) if live_holder else rewake._holder_alive
+        with mock.patch.dict(sys.modules, {"_retained_rewake": rewake}), \
+                mock.patch.object(rewake, "_holder_alive", side_effect=holder_alive), \
+                mock.patch.object(steward.subprocess, "run", return_value=type("Reply", (), {
                     "stdout": json.dumps(agents), "returncode": 0})()), \
                 mock.patch.object(rewake.seat_handover, "effective_parent", return_value=recipient_sid), \
                 mock.patch.object(steward, "_resolve_target", return_value=("claude", recipient_sid, None)), \
