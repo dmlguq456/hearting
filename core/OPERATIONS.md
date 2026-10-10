@@ -1367,8 +1367,10 @@ cannot establish availability. Receipts retain the observed memory/utilization.
 
 NVML failure does not erase known running work. The bounded, read-only probe
 uses NVIDIA's proc device information and stable same-EUID PID/start evidence,
-open `/dev/nvidiaN` descriptors and `CUDA_VISIBLE_DEVICES` to place managed
-runs; a visibility mask needs observed device access to show GPU use. It collapses descendants
+open `/dev/nvidiaN` descriptors, physical `/proc/<pid>/maps` device mappings
+or an unambiguous CUDA visibility/order mapping to place managed runs. A default
+numeric CUDA ordinal is not a device minor; ambiguous placement retains only
+device-access evidence. The probe collapses descendants
 of the same managed run already represented on those devices, preserves exact
 session attribution, and leaves NVML-only utilization and memory unknown.
 Device access without a resolvable visibility mask remains access evidence,
@@ -1378,6 +1380,9 @@ library and loaded module versions when readable, and the host's existing
 reboot-required signal. Missing signals remain unknown; no driver-update cause
 is inferred. GPU admission remains closed while measurement is unavailable,
 including `--share`, and names observed occupancy without reporting free GPUs.
+Fallback GPU indexes identify physical device minors. Existing reservations
+whose NVML index cannot be mapped stay visible at host level with unknown
+device placement; they are not attached to a guessed GPU.
 
 Reservation lifetime follows the exact wrapper PID, start time and PID namespace,
 not its launching session. Normal exit releases it; the next launch removes

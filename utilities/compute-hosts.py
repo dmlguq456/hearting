@@ -1101,7 +1101,7 @@ ENV_KEYS = {
     "HEARTING_COMPUTE_RUN_ID", "HEARTING_COMPUTE_HOST",
     "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
     "OPENCODE_SESSION_ID", "SSH_CONNECTION",
-    "CUDA_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
 }
 
 
@@ -1325,7 +1325,8 @@ def gpu_proc_fallback():
         if index < 0:
             continue
         devices[index] = {"index": index, "uuid": fields.get("GPU UUID", "").strip() or None,
-                          "name": fields.get("Model", "").strip() or None}
+                          "name": fields.get("Model", "").strip() or None,
+                          "pci_bus_id": fields.get("Bus Location", path.parent.name).strip()}
     for path in Path("/dev").glob("nvidia[0-9]*"):
         match = re.fullmatch(r"nvidia([0-9]+)", path.name)
         if match:
@@ -1368,14 +1369,33 @@ def gpu_proc_fallback():
                 continue
             env = identity_env(pid)
             mask = env.get("CUDA_VISIBLE_DEVICES")
+            mapped = set()
+            try:
+                with (path / "maps").open() as handle:
+                    mappings = handle.read(1024 * 1024 + 1)
+                if len(mappings) <= 1024 * 1024:
+                    for line in mappings.splitlines():
+                        match = re.search(r"\s/dev/nvidia([0-9]+)$", line)
+                        if match and int(match.group(1)) in opened:
+                            mapped.add(int(match.group(1)))
+                else:
+                    detail = "mapping scan limit reached"
+            except OSError:
+                pass
+            pci_order = []
+            if env.get("CUDA_DEVICE_ORDER") == "PCI_BUS_ID" and all(
+                    re.fullmatch(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]",
+                                 gpu.get("pci_bus_id") or "") for gpu in devices.values()) and (
+                    len({gpu["pci_bus_id"].lower() for gpu in devices.values()}) == len(devices)):
+                pci_order = sorted(devices, key=lambda i: devices[i]["pci_bus_id"].lower())
             selected = set()
             if mask is not None:
                 for value in mask.split(","):
                     value = value.strip()
                     index = None
-                    if re.fullmatch(r"[0-9]+", value) and int(value) in devices:
-                        index = int(value)
-                    elif value.startswith("GPU-"):
+                    if re.fullmatch(r"[0-9]+", value) and int(value) < len(pci_order):
+                        index = pci_order[int(value)]
+                    elif value.startswith("GPU-") and all(gpu.get("uuid") for gpu in devices.values()):
                         matches = [i for i, gpu in devices.items()
                                    if gpu["uuid"] and gpu["uuid"].startswith(value)]
                         if len(matches) == 1:
@@ -1386,8 +1406,9 @@ def gpu_proc_fallback():
                         break
                     if index in opened:
                         selected.add(index)
-            # Unknown masks retain device-access evidence, clearly labelled.
-            indexes = selected or opened
+            # Default numeric CUDA ordinals need not equal device minors. Physical
+            # memory mappings identify the actual device without guessing order.
+            indexes = mapped or selected or opened
             owner, reason, session_owner = process_owner(pid, before["start"])
             process = {"pid": pid, "proc_start": before["start"], "gpu_uuid": None,
                        "process_name": None, "used_memory_mib": None,
@@ -1396,9 +1417,12 @@ def gpu_proc_fallback():
                        "cwd": process_cwd(pid, before["start"]), "pgid": before["pgid"],
                        "elapsed_s": process_elapsed_s(before["start"], uptime),
                        "owner": owner, "attribution_reason": reason,
-                       "observation_source": "proc-device-fd+cuda-visible" if selected else "proc-device-fd",
-                       "gpu_placement": "visible-device-access" if selected else "device-access-only",
-                       "opened_gpu_indexes": sorted(opened), "cuda_visible_devices": mask}
+                       "observation_source": ("proc-device-fd+maps" if mapped else
+                                              "proc-device-fd+cuda-visible" if selected else "proc-device-fd"),
+                       "gpu_placement": ("mapped-device-access" if mapped else
+                                         "visible-device-access" if selected else "device-access-only"),
+                       "opened_gpu_indexes": sorted(opened), "mapped_gpu_indexes": sorted(mapped),
+                       "cuda_visible_devices": mask, "cuda_device_order": env.get("CUDA_DEVICE_ORDER")}
             if session_owner is not None:
                 process["session_owner"] = session_owner
             after = proc_stat(pid)
@@ -1427,7 +1451,7 @@ def gpu_proc_fallback():
             parent = stat["ppid"]
         if represented:
             continue
-        if process["gpu_placement"] == "visible-device-access":
+        if process["gpu_placement"] != "device-access-only":
             count += 1
         for index in indexes:
             gpu = devices.setdefault(index, {"index": index, "uuid": None, "name": None,
@@ -1582,8 +1606,13 @@ def probe_host(name, host, owner_claims=None, ssh_session_bridges=None):
         gpu["free_mib"] = total - used if isinstance(total, int) and isinstance(used, int) else None
         if not isinstance(gpu.get("processes"), list):
             gpu["processes"] = []
-        gpu["reservations"] = [lease for lease in payload.get("gpu_leases", [])
+        # Old leases name NVML indexes. A fallback device minor cannot establish
+        # that mapping; preserve those known reservations at host level instead.
+        gpu["reservations"] = ([lease for lease in payload.get("gpu_leases", [])
                                if str(gpu["index"]) in lease.get("gpus", [])]
+                               if not gpu.get("observation_source") else [])
+        if gpu.get("observation_source"):
+            gpu["index_basis"] = "device-minor"
         gpus.append(gpu)
     row = {"host": name, "reachable": True,
            "hostname": payload.get("hostname"), "load": payload.get("load"),
@@ -1602,6 +1631,7 @@ def probe_host(name, host, owner_claims=None, ssh_session_bridges=None):
         row["detail"] = str(payload["gpu_error"])[:120]
     if isinstance(payload.get("gpu_status"), dict):
         row["gpu_status"] = payload["gpu_status"]
+        row["unplaced_gpu_reservations"] = payload.get("gpu_leases") or []
     if payload.get("process_error"):
         row["process_detail"] = str(payload["process_error"])[:120]
     return row
@@ -1688,6 +1718,8 @@ def cmd_list(args):
                           f"pid {process.get('pid', '?')}")
         if row.get("reservation_detail"):
             print(f"    reservations unknown: {row['reservation_detail']}")
+        for lease in row.get("unplaced_gpu_reservations", []):
+            print("    GPU 예약 · 장치 위치 모름: " + gpu_leases.description(lease))
     return 0
 
 
@@ -1845,6 +1877,7 @@ def _run_gpu_observation(name, host):
     return {"observed_at": row.get("observed_at"),
             "reachable": row.get("reachable"), "detail": row.get("detail"),
             "gpu_status": row.get("gpu_status"),
+            "unplaced_gpu_reservations": row.get("unplaced_gpu_reservations") or [],
             "process_detail": row.get("process_detail"), "gpus": gpus,
             "reservation_detail": row.get("reservation_detail"),
             "suggested_gpu": suggested["index"] if suggested is not None else None}

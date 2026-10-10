@@ -5640,7 +5640,7 @@ def _gpu_process_label(command):
 def _gpu_state(gpu):
     """GPU liveness from exact current process evidence, never utilization heuristics."""
     if gpu.get("observation_source"):
-        return ("working" if any(p.get("gpu_placement") == "visible-device-access"
+        return ("working" if any(p.get("gpu_placement") in {"visible-device-access", "mapped-device-access"}
                                  for p in gpu.get("processes") or ()) else "unknown")
     return ("working" if any(isinstance(process, dict)
                              for process in (gpu.get("processes") or ()))
@@ -5836,6 +5836,21 @@ def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1,
     return segs
 
 
+def _gpu_reservation_rows(leases, indent, width, unplaced=False):
+    rows = []
+    for lease in leases:
+        owner = lease.get("owner") or {}
+        label = owner.get("label") or "%s:%s" % (owner.get("harness", "?"), str(owner.get("id", "unknown"))[:8])
+        started = lease.get("started_at")
+        when = time.strftime("%m-%d %H:%M", time.localtime(started)) if isinstance(started, (int, float)) else "?"
+        task = _gpu_safe_text(lease.get("task") or lease.get("run_id") or "?")
+        prefix = "GPU 예약 · 장치 위치 모름 · " if unplaced else "  reserved "
+        row = [(indent + prefix, "lvl_y"), (_gpu_safe_text(label), "tag"),
+               (" · " + when + " · " + task, "dim")]
+        rows.append(_clip_segs(row, width)[0])
+    return rows
+
+
 def _compute_host_rows(term_width=None, sessions=None, resources=None):
     _compute_host_rows.fold_rows = []
     snapshot = _COMPUTE_HOSTS
@@ -5948,6 +5963,8 @@ def _compute_host_rows(term_width=None, sessions=None, resources=None):
                     break
                 rows.append([(indent, None), (part, "lvl_y")])
                 text = text[len(part):].lstrip()
+        rows.extend(_gpu_reservation_rows(host.get("unplaced_gpu_reservations") or (),
+                                         " " * prefix_width, width, unplaced=True))
         if not gpus:
             if isinstance(status, dict) and status.get("summary"):
                 continue
@@ -5971,15 +5988,7 @@ def _compute_host_rows(term_width=None, sessions=None, resources=None):
                 _compute_host_rows.fold_rows.append({"line": len(rows),
                     "card_key": _gpu_fold_key(host.get("host"), gpu.get("index")), "folded": folded})
             rows.append(_clip_segs([(indent, None)] + token + chip, width)[0])
-            for lease in gpu.get("reservations") or ():
-                owner = lease.get("owner") or {}
-                label = owner.get("label") or "%s:%s" % (owner.get("harness", "?"), str(owner.get("id", "unknown"))[:8])
-                started = lease.get("started_at")
-                when = time.strftime("%m-%d %H:%M", time.localtime(started)) if isinstance(started, (int, float)) else "?"
-                task = _gpu_safe_text(lease.get("task") or lease.get("run_id") or "?")
-                reserved = [(indent + "  reserved ", "lvl_y"), (_gpu_safe_text(label), "tag"),
-                            (" · " + when + " · " + task, "dim")]
-                rows.append(_clip_segs(reserved, width)[0])
+            rows.extend(_gpu_reservation_rows(gpu.get("reservations") or (), indent, width))
             if not folded:
                 rows.extend(_gpu_process_rows(gpu, indent, width))
     return rows

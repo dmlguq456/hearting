@@ -38,7 +38,7 @@ class NVMLFallbackTest(unittest.TestCase):
         }.items():
             self.write(name, content)
         for index in (0, 1):
-            self.write("proc/driver/nvidia/gpus/0000:%d/information" % index,
+            self.write("proc/driver/nvidia/gpus/0000:%02x:00.0/information" % index,
                        "Model: NVIDIA GeForce RTX 5090\nGPU UUID: GPU-%d\nDevice Minor: %d\n" % (index, index))
             self.write("dev/nvidia%d" % index, "")
         self.process(71, "fix", "0")
@@ -51,7 +51,7 @@ class NVMLFallbackTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content)
 
-    def process(self, pid, run, mask, parent=0, devices=(0, 1), harness="claude"):
+    def process(self, pid, run, mask, parent=0, devices=(0, 1), harness="claude", mapped=None):
         self.write("proc/%d/stat" % pid,
                    "%d (python) S %d %d " % (pid, parent, pid) + "0 " * 16 + "99 0\n")
         self.write("proc/%d/status" % pid, "Uid:\t%d\t%d\t%d\t%d\n" % ((os.geteuid(),) * 4))
@@ -62,6 +62,10 @@ class NVMLFallbackTest(unittest.TestCase):
         self.write("proc/%d/cmdline" % pid,
                    "python\0run.py\0--engine_mode\0train\0--config\0%s.yaml\0" % run)
         self.write("proc/%d/comm" % pid, "python\n")
+        if mapped is None:
+            mapped = (int(mask),) if mask.isdigit() and int(mask) in devices else ()
+        self.write("proc/%d/maps" % pid,
+                   "".join("100-200 rw-s 0 00:00 0 /dev/nvidia%d\n" % i for i in mapped))
         base = self.root / "proc" / str(pid)
         (base / "cwd").symlink_to("/work/SR_CorrNet")
         (base / "fd").mkdir(exist_ok=True)
@@ -73,7 +77,7 @@ class NVMLFallbackTest(unittest.TestCase):
 
         def mapped_path(value, *args):
             value = str(value)
-            if value == "/proc" or value.startswith(("/proc/", "/dev/", "/var/run/")):
+            if value in {"/proc", "/dev", "/var/run"} or value.startswith(("/proc/", "/dev/", "/var/run/")):
                 return real_path(self.root / value.lstrip("/"), *args)
             return real_path(value, *args)
 
@@ -146,6 +150,8 @@ class NVMLFallbackTest(unittest.TestCase):
         self.assertEqual([p["pid"] for p in host["gpus"][1]["processes"]], [72])
         self.write("proc/71/environ", "HEARTING_COMPUTE_RUN_ID=fix\0CUDA_VISIBLE_DEVICES=unresolved\0")
         self.write("proc/73/environ", "HEARTING_COMPUTE_RUN_ID=fix\0CUDA_VISIBLE_DEVICES=unresolved\0")
+        self.write("proc/71/maps", "")
+        self.write("proc/73/maps", "")
         host = self.probe()
         self.assertEqual(host["gpu_status"]["running_count"], 1)
         accessed = next(p for p in host["gpus"][0]["processes"] if p["pid"] == 71)
@@ -229,7 +235,12 @@ class NVMLFallbackTest(unittest.TestCase):
             CH.probe_host("cnn", {"ssh_host": "local"}, ssh_session_bridges=[])
         # Execute the actual composed script, including its embedded lease API.
         host = self.probe(script=remote.call_args.args[1])
-        self.assertEqual(host["gpus"][0]["reservations"][0]["owner"]["label"], "확인된 예약")
+        self.assertTrue(all(not g["reservations"] for g in host["gpus"]))
+        self.assertEqual(host["unplaced_gpu_reservations"][0]["owner"]["label"], "확인된 예약")
+        render.set_compute_hosts({"configured": True, "hosts": [host]})
+        self.addCleanup(render.set_compute_hosts, None)
+        text = "\n".join(render._plain(r) for r in render._compute_host_rows(168))
+        self.assertIn("GPU 예약 · 장치 위치 모름 · 확인된 예약", text)
         self.assertEqual(host["gpu_status"]["running_count"], 2)
         self.assertEqual(state.read_bytes(), original)
         self.assertEqual(state.stat().st_mtime_ns, mtime)
@@ -238,7 +249,8 @@ class NVMLFallbackTest(unittest.TestCase):
     def test_invalid_cuda_identifier_stops_mask_and_uuid_prefix_is_host_unique(self):
         for pid in (71, 73):
             self.write("proc/%d/environ" % pid,
-                       "HEARTING_COMPUTE_RUN_ID=fix\0CUDA_VISIBLE_DEVICES=0,-1,1\0")
+                       "HEARTING_COMPUTE_RUN_ID=fix\0CUDA_DEVICE_ORDER=PCI_BUS_ID\0CUDA_VISIBLE_DEVICES=0,-1,1\0")
+            self.write("proc/%d/maps" % pid, "")
         host = self.probe()
         self.assertEqual([p["pid"] for p in host["gpus"][0]["processes"]], [71])
         self.assertEqual([p["pid"] for p in host["gpus"][1]["processes"]], [72])
@@ -247,6 +259,26 @@ class NVMLFallbackTest(unittest.TestCase):
         process = next(p for p in host["gpus"][0]["processes"] if p["pid"] == 75)
         self.assertEqual(process["gpu_placement"], "device-access-only")
         self.assertEqual(host["gpu_status"]["running_count"], 2)
+
+    def test_numeric_cuda_ordinal_is_not_assumed_to_be_device_minor(self):
+        self.process(75, "order", "0", mapped=())
+        host = self.probe()
+        for gpu in host["gpus"]:
+            process = next(p for p in gpu["processes"] if p["pid"] == 75)
+            self.assertEqual(process["gpu_placement"], "device-access-only")
+        # CUDA PCI ordinal 0 is physical minor 1 on this fixture host.
+        for index, bus in ((0, "0000:90:00.0"), (1, "0000:10:00.0")):
+            self.write("proc/driver/nvidia/gpus/0000:%02x:00.0/information" % index,
+                       "GPU UUID: GPU-%d\nDevice Minor: %d\nBus Location: %s\n" % (index, index, bus))
+        self.write("proc/75/environ", "HEARTING_COMPUTE_RUN_ID=order\0CUDA_DEVICE_ORDER=PCI_BUS_ID\0CUDA_VISIBLE_DEVICES=0\0")
+        host = self.probe()
+        self.assertNotIn(75, [p["pid"] for p in host["gpus"][0]["processes"]])
+        process = next(p for p in host["gpus"][1]["processes"] if p["pid"] == 75)
+        self.assertEqual(process["gpu_placement"], "visible-device-access")
+        self.write("proc/75/maps", "100-200 rw-s 0 00:00 0 /dev/nvidia0\n")
+        host = self.probe()
+        process = next(p for p in host["gpus"][0]["processes"] if p["pid"] == 75)
+        self.assertEqual(process["gpu_placement"], "mapped-device-access")
 
 
 if __name__ == "__main__":
