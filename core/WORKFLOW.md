@@ -755,10 +755,11 @@ closure without a model turn and sends a recovery notice while closure remains
 pending. The owner and parent have no separate close/finalize procedure.
 
 The runtime closes a route once nobody works on it; no session has to
-remember to. `compose` (within the composed route's own campaign) and `campaign-status` (across the
-artifact root) close an open route whose Claude
+remember to. `compose` (within the composed route's own campaign) closes an
+open route whose Claude
 session this host saw end and that then stayed quiet for an hour, or that saw
-no writes for a week; `campaign-close` also closes its campaign's member routes
+no writes for a week; `campaign-close` first sweeps the same way and then also
+closes its campaign's member routes
 that belong to the closing session or stayed quiet for an hour. Routes of the
 calling session, routes a dispatch attempt, a pending owner settlement or an
 unended resource run still holds, routes waiting on a human gate and routes
@@ -768,6 +769,9 @@ completion markers show, seals the cycle completed only when that proof holds
 and abandoned otherwise, and names its reason in `autoclose`. A session that
 returns to such a route is not refused: `finish` reports it closed, and
 `start` returns the compose command that begins the work again.
+`campaign-status` is a pure read: it reports folded state, pending projections,
+and close refusals without sweeping routes, reconciling the root, healing the
+index, or flushing history.
 
 A session finishes its own `direct` inline route to record real evidence.
 Supply a readable, nonempty artifact from the route's exact open cycle and the

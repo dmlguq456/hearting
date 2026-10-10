@@ -70,7 +70,14 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         command = [sys.executable, str(Path(__file__).resolve().parents[1] / "tools/memory/mem.py"), "curate-artifacts"]
         result = subprocess.run(command, cwd=self.root, env=env, capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 0, result.stderr)
+        record_before = P.cycle_record_path(self.root, first["cycle_id"]).read_bytes()
+        events_before = self.events()
         P.list_campaign_summaries(self.root)
+        self.assertEqual(P.cycle_record_path(self.root, first["cycle_id"]).read_bytes(), record_before)
+        self.assertEqual(self.events(), events_before)
+        # The existing writer reconciliation owns move bookkeeping.
+        P.reconcile_root(self.root)
+        P.deliver_pending_history(self.root)
         self.assertEqual(P.read_cycle_record(self.root, first["cycle_id"])["campaign_id"], other["campaign_id"])
         self.assertTrue(any(row["operation"] == "move" and row["target"]["id"] == first["cycle_id"]
                             for row in self.events()))
@@ -113,7 +120,11 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
                 parent = Path(other["cycle_dir"]).parent if cross_campaign else old.parent
                 moved = parent / f"renamed-{old.name}"
                 old.rename(moved)
+                record_before = P.cycle_record_path(self.root, first["cycle_id"]).read_bytes()
                 P.list_campaign_summaries(self.root)
+                self.assertEqual(P.cycle_record_path(self.root, first["cycle_id"]).read_bytes(), record_before)
+                P.reconcile_root(self.root)
+                P.deliver_pending_history(self.root)
                 record = P.read_cycle_record(self.root, first["cycle_id"])
                 self.assertEqual(record["locator"], moved.name)
                 self.assertEqual(record["campaign_id"], other["campaign_id"] if cross_campaign else first["campaign_id"])
@@ -121,6 +132,8 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
                                  and row["target"]["id"] == first["cycle_id"]]
                 self.assertEqual(len(moves()), 1)
                 P.list_campaign_summaries(self.root)
+                P.reconcile_root(self.root)
+                P.deliver_pending_history(self.root)
                 self.assertEqual(len(moves()), 1)
                 self.assertFalse((moved / "artifacts/plans/cycle/REPORT.md").exists())
                 self.assertTrue(P.finalize(self.root, cycle_id=first["cycle_id"])["refreshed"])
@@ -190,6 +203,9 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         first = self.finished()
         for name in ("INDEX.json", "INDEX.md"):
             (self.root / "campaigns" / name).unlink()
+        # Pure list observes without repairing; the writer-side reconcile
+        # owns the single heal, further pure lists stay write-free.
+        P.reconcile_root(self.root)
         P.list_campaign_summaries(self.root)
         P.list_campaign_summaries(self.root)
         self.assertEqual(len(self.control_events(first, "INDEX.json")), 1)
@@ -270,6 +286,9 @@ class ArtifactFreedomTest(FX.ProducerTestBase):
         index_md = self.root / "campaigns/INDEX.md"
         index_md.write_text(index_md.read_text() + "\nUser annotation\n")
         for _ in range(2):
+            # Writers observe external edits; listing leaves them unrepaired.
+            P.reconcile_root(self.root)
+            P.deliver_pending_history(self.root)
             P.checkpoint(self.root, cycle_id=first["cycle_id"], trigger="explicit")
             P.list_campaign_summaries(self.root)
             P.finalize(self.root, cycle_id=first["cycle_id"])

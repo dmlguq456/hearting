@@ -86,6 +86,16 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    follow-up, display, and cleanup duties after the model turn or bounded
    observer exits; startup and reconnect resume the exact unfinished duty
    without replaying the assignment or requiring a manual rearm.
+   Campaign satisfaction is a separate optional owner judgment. An exact owner
+   primary may contain a `campaign-goal` JSON fence with `campaign_id`,
+   `verdict: "satisfied"`, and optional `reason`; a JSON primary uses the
+   `campaign_goal` key. Normal completion records the official close through
+   the existing durable terminal transaction. Claude, Codex, and OpenCode use
+   this shared consumer. A missing, malformed, scoped, child, or ambiguous
+   judgment never infers campaign completion from PASS or sealed cycles.
+   Interrupted close retains PASS and its recovery duty; a later begin cannot
+   be closed again by an older goal judgment. No new confirmation or required
+   report field is introduced.
 5. **shared admission.** This capability's output is cycle-local; it is never admitted to `shared/` (only `spec`, `analysis`, and explicitly promoted `research` are shared kinds).
 
 ## Role Requirements

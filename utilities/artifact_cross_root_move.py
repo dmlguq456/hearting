@@ -42,11 +42,11 @@ def _json(path):
     return json.loads(path.read_bytes())
 
 
-def _campaign(root, selector):
+def _campaign(root, selector, *, read_record=None):
     matches = []
     for path in sorted((root / "campaigns").glob("*/campaign.json")):
         _safe(root, path)
-        row = _json(path)
+        row = (read_record or _json)(path)
         if selector in {row.get("campaign_id"), row.get("key"), str(path), str(path.relative_to(root))}:
             matches.append((path, campaigns.fold_campaign(root, path, row)))
     active = [item for item in matches if item[1].get("state") == "active"]
