@@ -361,7 +361,7 @@ class TestLocatorSafety(unittest.TestCase):
             ("artifacts//.result", "locator-empty-component"),
             ("artifacts/.result\n", "locator-control-char"),
             ("/artifacts/.result", "locator-absolute"),
-            ("artifacts/." + "a" * 128, "locator-invalid-component"),
+            ("artifacts/." + "a" * 255, "locator-invalid-component"),
             ("artifacts-shadow/.result", "locator-hidden-component"),
             (".runtime/result", "locator-hidden-component"),
             (".cycle.json", "locator-hidden-component"),
@@ -383,6 +383,27 @@ class TestLocatorSafety(unittest.TestCase):
             m.validate_locator_path("nested/" * 40 + "legacy.md")))
         self.assertIn("locator-control-char", _codes(
             m.validate_locator_path("artifacts/analysis/report/fig/bad\nname.png")))
+
+    def test_payload_names_keep_research_punctuation_but_not_shell_syntax(self):
+        for path in ("artifacts/raw-results/gate/run1/672-122797-0000~0004_doa.npz",
+                     "artifacts/raw-results/replay/REL+UP3/rows.csv",
+                     "artifacts/_internal/snapshot/examples/input(004).wav",
+                     "artifacts/_internal/snapshot/ref/A unified beamformer.pdf",
+                     "artifacts/policy/AVG-L8@tL/summary.json",
+                     "artifacts/sweep/lr=1e-3,bs=32/metrics.json",
+                     "artifacts/ref/" + "b" * 251 + ".pdf"):
+            with self.subTest(path=path):
+                self.assertTrue(m.validate_locator_path(path).ok)
+                self.assertTrue(m.validate(self._with_path(path)).ok)
+        for name in ("it's.wav", 'say"hi".txt', "cost$1.csv", "run`id`.log", "a;b.txt",
+                     "a|b.txt", "a&b.txt", "a<b.txt", "a>b.txt", "fig*.png", "fig?.png",
+                     "fig[1].png", "{a,b}.txt", "take#2.wav", "100%.csv", "b" * 252 + ".pdf"):
+            with self.subTest(name=name):
+                self.assertIn("locator-invalid-component",
+                              _codes(m.validate_locator_path("artifacts/out/" + name)))
+        # Cycle-relative names outside artifacts/ keep the legacy grammar.
+        self.assertIn("locator-invalid-component",
+                      _codes(m.validate_locator_path("notes/A unified beamformer.md")))
 
     def test_rejects_reserved_manifest_filename_locator(self):
         self.assertIn("locator-reserved-name", _codes(m.validate_locators(self._with_path("manifest.json"))))

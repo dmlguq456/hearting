@@ -29,10 +29,14 @@ _MEDIA_TYPE_RE = re.compile(
 # A leading underscore is the harness's own cycle-internal convention
 # (`_internal/`, CORE.md §3 C-INT) and is therefore a valid locator component;
 # Legacy cycle-relative names retain this grammar. The explicit artifacts/
-# payload namespace admits UTF-8 names and dot-prefixed names; dot segments
-# and control characters remain invalid.
+# payload namespace also admits UTF-8 and dot-prefixed names, spaces and the
+# punctuation research outputs commonly carry (`~ + ( ) @ , =`), up to the
+# 255-byte NAME_MAX of Linux file systems. Quotes, `$`, backquotes, `;`, `|`,
+# `&`, redirections and glob characters stay invalid, as do dot segments and
+# control characters.
 _LOCATOR_COMPONENT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$")
-_PAYLOAD_COMPONENT_RE = re.compile(r"^(?:[A-Za-z0-9_.-]|[^\x00-\x7f]){1,128}$")
+_PAYLOAD_COMPONENT_RE = re.compile(r"^(?:[A-Za-z0-9_.~+()@,= -]|[^\x00-\x7f])+$")
+_PAYLOAD_COMPONENT_MAX_BYTES = 255
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 
 _MAX_LOCATOR_COMPONENTS = 32
@@ -174,7 +178,8 @@ def _locator_error(path_value: Any) -> Optional[Tuple[str, str]]:
             return "locator-dot-segment", "dot segment"
         if comp.startswith(".") and not payload:
             return "locator-hidden-component", "hidden component"
-        if not component_re.fullmatch(comp):
+        if not component_re.fullmatch(comp) or (
+                payload and len(comp.encode("utf-8")) > _PAYLOAD_COMPONENT_MAX_BYTES):
             return "locator-invalid-component", "invalid component"
     if components[-1] in _LEGACY_RESERVED_LOCATOR_NAMES and not payload:
         return "locator-reserved-name", "reserved locator name"

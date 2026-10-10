@@ -414,7 +414,7 @@ class CutoverTest(unittest.TestCase):
         self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/plans/2026-01-01_x/_internal/note.md", "internal\n")
         self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/documents/d.md", "doc\n")
         self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/plans/2026-01-01_x/.claude/settings.json", "{}\n")
-        self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/plans/2026-01-01_x/{'l' * 140}.txt", "long\n")
+        self.w(f"campaigns/{camp}/cycles/{cyc}/artifacts/plans/2026-01-01_x/residue|copy.txt", "residue\n")
         C.adopt_campaign(self.root, camp, title="w7", goal="g")
         return camp, cyc, base.parent
 

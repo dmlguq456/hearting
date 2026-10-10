@@ -1443,12 +1443,12 @@ class FinalizeTest(ProducerTestBase):
         artifacts = directory / "artifacts"
         artifacts.mkdir(parents=True)
         (artifacts / "a.md").write_text("valid output")
-        invalid = artifacts / "bad name.txt"
+        invalid = artifacts / "bad|name.txt"
         invalid.write_text("retain invalid output")
         with mock.patch.object(Path, "read_bytes", side_effect=AssertionError("premature payload read")):
             rows, violations = P._enumerate_output(directory)
         self.assertEqual(rows, [])
-        self.assertIn("locator-invalid-component:artifacts/bad name.txt", violations)
+        self.assertIn("locator-invalid-component:artifacts/bad|name.txt", violations)
         invalid.unlink()  # fixture only
         outside = Path(self._tmp.name) / "outside"
         outside.write_text("not a payload")
@@ -4361,6 +4361,31 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                         self.assertEqual(jobs.read_bytes(), registry)
                 finally:
                     fixture.doCleanups()
+
+    def test_payload_names_with_research_punctuation_settle_with_their_bytes(self):
+        # A lab cycle stayed at route-closed with producer-finalize-failed because
+        # session ranges (`0000~0004`), combined configs (`CDR+MCWF`), copies
+        # (`input(004)`), spaced paper titles and 134-character names were refused.
+        import dispatch_terminal_commit as terminal
+        route, route_file, jobs, owner, result, artifact, request = self._prepare_fixture()
+        names = {"raw/672-122797-0000~0004_doa.npz": b"npz\n",
+                 "replay/REL+UP3/rows.csv": b"a,b\n",
+                 "examples/input(004).wav": b"RIFF\n",
+                 "ref/A unified convolutional beamformer.pdf": b"%PDF-1.7\n",
+                 "policy/AVG-L8@tL/lr=1e-3,bs=32.json": b"{}\n",
+                 "ref/" + "b" * 130 + ".pdf": b"%PDF-1.4\n"}
+        for rel, data in names.items():
+            self.write_output(result, rel=rel, data=data)
+        self._closed_owner(jobs, owner)
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}):
+            settled = terminal.settle_terminal_commit(request)
+        self.assertEqual(settled.result, "completed", settled)
+        doc = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_bytes())
+        digests = {r["locator"]["path"]: r["content_digest"] for r in doc["artifact_revisions"]}
+        for rel, data in names.items():
+            with self.subTest(rel=rel):
+                self.assertEqual(digests.get("artifacts/" + rel),
+                                 "sha256:" + hashlib.sha256(data).hexdigest())
 
     def test_default_services_recover_each_durable_boundary_without_duplicate_outputs(self):
         import dispatch_terminal_commit as terminal

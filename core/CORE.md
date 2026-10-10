@@ -249,8 +249,10 @@ locator check, and finalization and every later refresh share one inclusion rule
 links are not output: a link is only `lstat`-ed and its target is not followed or read, and each
 such path is left out of the manifest and listed as excluded instead of failing
 the close. `_internal/` and other non-hidden support paths, binary and large
-files are output. Absolute/escaping paths and out-of-payload files remain
-invalid. Cycle controls and legacy relocation/exclusion retain their contracts.
+files are output. A payload name keeps UTF-8, spaces and the ASCII punctuation
+`_ . - ~ + ( ) @ , =` up to 255 bytes; other ASCII punctuation (quotes, `$`,
+backquotes, `;`, `|`, `&`, `<`/`>` and glob characters among them) makes it
+invalid. Absolute/escaping paths and out-of-payload files remain invalid. Cycle controls and legacy relocation/exclusion retain their contracts.
 Invalid paths identify the locator and reason before payload reads or manifest
 publication.
 
