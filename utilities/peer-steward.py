@@ -1109,19 +1109,25 @@ def _seat_successor_path(pane):
     return peer_message.peer_state_root() / "seat-successors" / f"{digest}.json"
 
 
+def _seat_successor_lock(pane):
+    import session_tidy
+    return session_tidy.seat_lock("peer-successor-" + _seat_successor_path(pane).stem)
+
+
 def _mark_seat_successor(pane, beside, kind, session_id):
     """`start --beside`: the started pane is the seat successor of the agent beside it.
 
     The one fact a later `retire` from this pane needs to hand that agent's routes on
     (OPERATIONS same-seat change). Best effort: a missing mark only means no handover."""
     try:
-        path = _seat_successor_path(pane)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"schema": 1, "pane": pane, "beside": beside,
-                                   "successor": {"harness": kind, "session_id": session_id or ""},
-                                   "at": time.time()}, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
+        with _seat_successor_lock(pane):
+            path = _seat_successor_path(pane)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"schema": 1, "pane": pane, "beside": beside,
+                                       "successor": {"harness": kind, "session_id": session_id or ""},
+                                       "at": time.time()}, sort_keys=True), encoding="utf-8")
+            os.replace(tmp, path)
     except OSError:
         pass
 
@@ -1134,6 +1140,15 @@ def _seat_handover(ident, own_sid, own_harness, *, requester=None, accepted_at=N
     pane = requester.get("pane") if requester is not None else _caller_pane()
     if not pane:
         return None
+    try:
+        with _seat_successor_lock(pane):
+            return _seat_handover_locked(ident, own_sid, own_harness, pane,
+                                         requester=requester, accepted_at=accepted_at)
+    except OSError:
+        return "error"
+
+
+def _seat_handover_locked(ident, own_sid, own_harness, pane, *, requester=None, accepted_at=None):
     path = _seat_successor_path(pane)
     try:
         mark_bytes = path.read_bytes()

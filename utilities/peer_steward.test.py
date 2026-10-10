@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -6039,6 +6040,44 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
         store.update(duty["id"], state="complete", result="normal-exit")
         peer_steward._resume_retire_obligation(store.get(duty["id"]), store)
         self.assert_authority("first-successor")
+
+    def test_concurrent_replacement_survives_the_original_marks_consumption(self):
+        store, duty = self.booking()
+        marker = peer_steward._seat_successor_path("w1:pNew")
+        requested, replaced = threading.Event(), threading.Event()
+        original_read = Path.read_bytes
+        reads = 0
+
+        def replace():
+            requested.wait(2)
+            peer_steward._mark_seat_successor("w1:pNew", "w2:pLater", "opencode", "later-sid")
+            replaced.set()
+
+        writer = threading.Thread(target=replace)
+        writer.start()
+
+        def read(path):
+            nonlocal reads
+            value = original_read(path)
+            if path == marker:
+                reads += 1
+                if reads == 2:
+                    # Precisely between the preimage read and unlink. Without
+                    # shared serialization the replacement is lost here.
+                    requested.set()
+                    self.assertFalse(replaced.wait(.1))
+            return value
+
+        try:
+            with mock.patch.object(Path, "read_bytes", read):
+                self.assertEqual(peer_steward._retire_handover(duty), "1")
+        finally:
+            requested.set()
+            writer.join(2)
+        self.assertFalse(writer.is_alive())
+        self.assertTrue(replaced.is_set())
+        self.assertEqual(json.loads(marker.read_text())["successor"]["session_id"], "later-sid")
+        self.assert_authority()
 
 
 class RetireBackgroundDialogTest(unittest.TestCase):
