@@ -25,12 +25,14 @@ if __package__ in (None, ""):
     from fleet.collectors import compute_hosts
     from fleet.collectors import procscan
     from fleet import installinfo
+    from fleet import install_follow
     from fleet.refresh import as_snapshot
 else:
     from .collectors import collect_all
     from .collectors import compute_hosts
     from .collectors import procscan
     from . import installinfo
+    from . import install_follow
     from .refresh import as_snapshot
 
 
@@ -237,7 +239,9 @@ def _discard_empty(path):
 
 
 def main(argv=None):
-    args = parse_args(argv if argv is not None else sys.argv[1:])
+    argv = list(argv if argv is not None else sys.argv[1:])
+    args = parse_args(argv)
+    viewer_state = install_follow.read_handoff()
     _arm_stall_dump()
     hfilter = _harness_filter(args.harness)
     hearting = (installinfo.collect() if args.json or args.once
@@ -338,6 +342,8 @@ def main(argv=None):
         return render.render_once(projected_collector, hfilter, args.section,
                                   compute_hosts_refresh=compute_hosts.collect)
     render.reset_scroll()   # fresh launch starts scrolled to top (belt-and-suspenders)
+    if viewer_state is not None:
+        render.restore_viewer_state(viewer_state)
 
     base_collector = projected_collector
     previous_sessions = []
@@ -377,6 +383,8 @@ def main(argv=None):
     # F-83: SSH/GPU polling has its own slower pump in render. Never put it in
     # the 2-second process snapshot producer or on the curses thread.
     live_collector.compute_hosts_refresh = compute_hosts.collect
+    live_collector.install_follower = install_follow.InstallFollower()
+    live_collector.restart_argv = argv
 
     return render.run_live(live_collector, hfilter, args.section, args.interval)
 
