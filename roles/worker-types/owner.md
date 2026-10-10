@@ -29,6 +29,12 @@ sealing after exact terminal evidence and process cleanup. It reuses the same
 durable transaction after interruption; a closure problem keeps the PASS result
 and sends a recovery notice. Separate close/finalize commands belong to inline
 work and legacy recovery, not this owner or its interactive parent.
+An owner whose final report already states the campaign goal judgment may carry
+it in one optional `campaign-goal` JSON fence there with `campaign_id`,
+`verdict: "satisfied"`, and optional `reason` (a JSON primary uses the
+`campaign_goal` key); without that block nothing
+closes — a child PASS, a scoped completion, sealed cycles, or a past satisfied
+state never imply the goal.
 
 Use a branch-backed route worktree, including for spec-only work. A detached
 HEAD cannot launch children; create a new branch at the existing HEAD with

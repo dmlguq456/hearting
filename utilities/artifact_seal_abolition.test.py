@@ -2053,6 +2053,19 @@ class C1ChangesBase(B1RefreshBase):
     def lines(self, **match):
         return [m for m in self.history.made if all(m.get(k) == v for k, v in match.items())]
 
+    def observe_then_reconcile(self):
+        """A query leaves bookkeeping to the next writer, including pending history."""
+        def snapshot():
+            return {p.relative_to(self.root).as_posix(): (p.read_bytes(), p.stat().st_mtime_ns)
+                    for p in self.root.rglob("*") if p.is_file()}
+        before = snapshot()
+        history = (list(self.history.made), list(self.history.published))
+        P.list_campaign_summaries(self.root, active_only=False)
+        self.assertEqual(snapshot(), before)
+        self.assertEqual((self.history.made, self.history.published), history)
+        P.reconcile_root(self.root)
+        P.deliver_pending_history(self.root)
+
     def cycle_path(self, result):
         record = self.record(result)
         return P.cycle_dir(self.root, record["campaign_id"], record["cycle_id"], record)
@@ -2408,7 +2421,7 @@ class C1MoveTest(C1ChangesBase):
     def manifest_of(self, result):
         return json.loads((self.cycle_path(result) / "manifest.json").read_text(encoding="utf-8"))
 
-    def test_c1_manual_move_and_rename_are_found_by_the_next_listing(self):
+    def test_c1_manual_move_and_rename_are_found_by_the_next_writer(self):
         mover = self.closed_with("hand-move", "c1-hand-src", {"plans/cycle/a.md": b"a\n"}, activate=True)
         peer = self.closed_with("hand-peer", "c1-hand-dst")
         src_id, dst_id = mover["campaign_id"], peer["campaign_id"]
@@ -2416,7 +2429,8 @@ class C1MoveTest(C1ChangesBase):
         source = Path(mover["cycle_dir"])
         target = P.campaign_dir(self.root, dst_id) / source.name
         os.rename(str(source), str(target))
-        # No command and no recovery step: the next listing finds the cycle where it now is.
+        # Queries remain pure; the next writer reconciles the physical move.
+        self.observe_then_reconcile()
         rows = P.list_campaign_summaries(self.root, active_only=False)
         self.assertEqual({row["key"]: row["cycle_count"] for row in rows}["c1-hand-dst"], 2)
         record = self.record(mover)
@@ -2435,7 +2449,7 @@ class C1MoveTest(C1ChangesBase):
         # Looking again changes nothing.
         before = (self.record(mover), self.locator_map(), adm.load_index(self.root))
         self.history.made.clear()
-        P.list_campaign_summaries(self.root, active_only=False)
+        self.observe_then_reconcile()
         self.assertEqual((self.record(mover), self.locator_map(), adm.load_index(self.root)), before)
         self.assertEqual(self.history.made, [])
         # The campaign closes: the moved cycle is a member of where it is.
@@ -2445,7 +2459,7 @@ class C1MoveTest(C1ChangesBase):
         renamed = folder.with_name("renamed-by-hand")
         os.rename(str(folder), str(renamed))
         self.history.made.clear()
-        P.list_campaign_summaries(self.root, active_only=False)
+        self.observe_then_reconcile()
         self.assertEqual(P.read_campaign(self.root, dst_id)["locator"], "renamed-by-hand")
         self.assertEqual(P.campaign_dir(self.root, dst_id), renamed)
         (line,) = self.lines(field="path", target_type="campaign")
@@ -2456,7 +2470,7 @@ class C1MoveTest(C1ChangesBase):
         # A cycle folder renamed inside its campaign keeps its ID too.
         inner = renamed / source.name
         os.rename(str(inner), str(renamed / "inner-rename"))
-        P.list_campaign_summaries(self.root, active_only=False)
+        self.observe_then_reconcile()
         self.assertEqual(self.record(mover)["locator"], "inner-rename")
         self.assertEqual(self.record(mover)["campaign_id"], dst_id)
 
@@ -2621,7 +2635,7 @@ class C1DeleteTest(C1ChangesBase):
         other = self.closed_with("hand-del-peer", "c1-hand-del")
         shutil.rmtree(L.manifest_snapshot_dir(self.root, result["cycle_id"]))  # closed before copies existed
         shutil.rmtree(result["cycle_dir"])
-        P.list_campaign_summaries(self.root, active_only=False)
+        self.observe_then_reconcile()
         record = self.record(result)
         self.assertRegex(record["deleted_at"], RFC3339)
         self.assertNotIn(result["cycle_id"], adm.load_index(self.root).cycles)
@@ -2642,7 +2656,7 @@ class C1DeleteTest(C1ChangesBase):
         last_path = folder.relative_to(self.root).as_posix()
         shutil.rmtree(str(folder))
         self.history.made.clear()
-        P.list_campaign_summaries(self.root, active_only=False)
+        self.observe_then_reconcile()
         tomb = P.read_campaign_tombstone(self.root, solo["campaign_id"])
         self.assertEqual((tomb["campaign_id"], tomb["last_path"]), (solo["campaign_id"], last_path))
         self.assertIsNotNone(self.record(solo)["deleted_at"])
@@ -2779,7 +2793,7 @@ class C1DeleteTest(C1ChangesBase):
                   | {e["event_id"] for e in tomb["history_pending"]}
                   | {e["event_id"] for e in sidecar["history_pending"]}
                   | {e["event_id"] for e in self.record(solo)["history_pending"]})  # its own close line
-        P.list_campaign_summaries(self.root, active_only=False)
+        self.observe_then_reconcile()
         self.assertEqual({e["event_id"] for e in self.history.published}, wanted)
         self.assertNotIn("history_pending", self.record(moved))
         self.assertNotIn("history_pending", self.record(peer))

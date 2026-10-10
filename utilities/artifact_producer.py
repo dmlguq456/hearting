@@ -2216,26 +2216,30 @@ def backfill_cycle_bindings(root: Path, *, apply: bool = False) -> Dict[str, Any
 
 
 def list_campaign_summaries(root: Path, *, active_only: bool = True) -> List[Dict[str, Any]]:
-    """Cheap, read-only listing of the root's campaigns for callers that
+    """Pure read-only listing of the root's campaigns for callers that
     must show the agent which work streams already exist (compose).
 
     Each row uses the same validated campaign event fold as admission.
+    This performs no reconcile, history flush, or index heal; writer
+    commands (`campaign-close`, `compose`, `campaign-recover`) own repairs.
     """
     root = Path(root)
-    # §45 D-126: a folder moved, renamed or removed by hand is found first; lines a recorder could
-    # not take earlier are handed over now.  Neither can fail this listing.
-    reconcile_root(root)
-    deliver_pending_history(root)
     rows: List[Dict[str, Any]] = []
     for entry in artifact_locator.iter_campaign_dirs(root):
-        record = _read_json(entry / "campaign.json")
-        if not record or not isinstance(record.get("campaign_id"), str):
+        try:
+            record, _ = artifact_campaign.read_json(root, entry / "campaign.json")
+        except artifact_campaign.CampaignError:
+            continue
+        if not isinstance(record.get("campaign_id"), str):
             continue
         try:
-            state = artifact_campaign.campaign_state(root, entry / "campaign.json", record).state
+            folded = artifact_campaign.campaign_state(root, entry / "campaign.json", record)
+            state = folded.state
+            projection_pending = folded.projection_pending
             state_error = None
         except artifact_campaign.CampaignError as exc:
             state, state_error = "invalid", exc.code
+            projection_pending = False
         if active_only and state != "active":
             continue
         cycles = record.get("cycles")
@@ -2253,6 +2257,7 @@ def list_campaign_summaries(root: Path, *, active_only: bool = True) -> List[Dic
             "locator": entry.name,
             "state": state,
             **({"state_error": state_error} if state_error else {}),
+            "projection_pending": projection_pending,
             "degraded": record.get("degraded") is True,
             "cycle_count": len(cycles) if isinstance(cycles, list) else 0,
             "created_on": str(record.get("created_on") or ""),
@@ -10098,16 +10103,21 @@ def resolve_output_dir(root: Path, bucket: str, *, cycle_dir_hint: Optional[str]
 def _route_autoclose(root: Path, trigger: str, campaign: Optional[str] = None) -> None:
     """Close routes nobody works on before campaign bookkeeping reads them
     (route_autoclose.py).  Bookkeeping only: it never fails the command.
-    `campaign` is the one `campaign-close` ends; its members close sooner."""
+    `campaign` limits `campaign-close` bookkeeping to that campaign."""
     try:
         import artifact_cutover
         import route_autoclose
         campaign_id = None
+        scope = {}
         if campaign is not None:
-            record, _raw = artifact_campaign.read_json(root, artifact_campaign.campaign_path(root, campaign))
+            path = artifact_campaign.campaign_path(root, campaign)
+            record, _raw = artifact_campaign.read_json(root, path)
             campaign_id = record.get("campaign_id")
+            scope = {"scope_campaign_id": campaign_id, "scope_dir": path.parent,
+                     "scope_key": record.get("key")}
         route_autoclose.report(route_autoclose.sweep(
-            root, api=artifact_cutover._route_module(), trigger=trigger, campaign_id=campaign_id))
+            root, api=artifact_cutover._route_module(), trigger=trigger,
+            campaign_id=campaign_id, **scope))
     except Exception as exc:  # noqa: BLE001
         print(f"route_autoclose error={type(exc).__name__}", file=sys.stderr)
 
@@ -10155,6 +10165,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p = sub.add_parser("campaign-list", help="summarize the root's campaigns (keys, titles, cycle counts)")
     p.add_argument("--artifact-root", required=True)
     p.add_argument("--all-states", action="store_true", help="include satisfied/superseded campaigns")
+
+    p = sub.add_parser("campaign-export", help="pure read of every campaign's current state (artifact-campaign-current/v1)")
+    p.add_argument("--artifact-root", required=True)
 
     p = sub.add_parser("cycle-binding-backfill",
                        help="add started_on to .cycle.json bindings written before the field existed")
@@ -10343,6 +10356,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "campaign-list":
             rows = list_campaign_summaries(root, active_only=not args.all_states)
             result = {"status": "ok", "artifact_root": str(Path(root).resolve()), "campaigns": rows}
+        elif args.command == "campaign-export":
+            # Pure read: captured bytes, no writes or locks; only an
+            # OS-unreadable root is exit 65, never a content verdict.
+            try:
+                result = artifact_campaign.export_current(root)
+            except OSError as exc:
+                _print({"status": "blocked", "code": "root-unreadable", "detail": str(exc)[:200]})
+                return 65
         elif args.command == "cycle-binding-backfill":
             result = backfill_cycle_bindings(root, apply=args.apply)
         elif args.command == "cycle-time-recovery":
@@ -10364,15 +10385,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "campaign-status":
             import artifact_cross_root_move as cross_move
             try:
-                historical_path, historical = cross_move._campaign(root, args.campaign)
+                historical_path, historical = cross_move._campaign(
+                    root, args.campaign,
+                    read_record=lambda path: artifact_campaign.read_json(root, path)[0])
             except ProducerError:
                 historical = {}
             if historical.get("relocation"):
                 result = {"status": historical["state"], "state": historical["state"],
                           "campaign_id": historical["campaign_id"], "canonical": historical["relocation"]}
             else:
-                _route_autoclose(root, "campaign-status")
-                reconcile_root(root)
+                # Pure read: no route sweep, no reconcile, no history flush.
+                # Writer paths (`campaign-close`, `compose`) keep the sweep.
                 result = artifact_campaign.status(root, args.campaign)
         elif args.command == "campaign-close":
             _route_autoclose(root, "campaign-close", campaign=args.campaign)

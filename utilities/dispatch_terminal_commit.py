@@ -105,6 +105,7 @@ class TerminalCommitRequest:
     jobs: Path
     artifact_root: Path
     owner_handoff: Optional[Mapping[str, Any]] = None
+    campaign_goal: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class TerminalCommitResult:
     envelope_text: Optional[str] = None
     shared_publication: Optional[Mapping[str, Any]] = None
     next_step: Optional[Mapping[str, Any]] = None
+    campaign_goal: Optional[Mapping[str, Any]] = None
 
 
 def _default_close_route(route, route_file, **kwargs):
@@ -695,6 +697,147 @@ def _exact_owner_handoff(jobs: Path, attempt: str, route: Mapping[str, Any]) -> 
     return None
 
 
+def parse_campaign_goal(value: Any) -> tuple[Optional[dict], str]:
+    """Validate the optional goal shape; malformed stays a skip, never a close.
+
+    Fixed shape: `{"campaign_id": "camp_…", "verdict": "satisfied", "reason": "<one line, optional>"}`.
+    """
+    if value is None:
+        return None, "no-judgment"
+    if not isinstance(value, Mapping):
+        return None, "malformed-goal"
+    campaign_id, verdict, reason = value.get("campaign_id"), value.get("verdict"), value.get("reason", "")
+    try:
+        import artifact_identity as _identity
+        well_formed = _identity.is_well_formed(campaign_id, "campaign")
+    except (ImportError, AttributeError):
+        import re as _re
+        well_formed = isinstance(campaign_id, str) and _re.fullmatch(r"camp_[0-9a-f]{32}", campaign_id) is not None
+    if (set(value) - {"campaign_id", "verdict", "reason"}
+            or not well_formed or verdict != "satisfied"):
+        return None, "malformed-goal"
+    if reason is not None and not isinstance(reason, str):
+        return None, "malformed-goal"
+    cleaned = str(reason).strip()[:240] if isinstance(reason, str) and str(reason).strip() else ""
+    return {"campaign_id": campaign_id, "verdict": "satisfied", "reason": cleaned}, "ok"
+
+
+def read_owner_campaign_goal(primary: Optional[str]) -> tuple[Optional[dict], str]:
+    """Consume an explicit optional judgment in the exact owner primary only.
+
+    JSON primaries use the campaign_goal key. Markdown uses a dedicated
+    campaign-goal fence; ordinary JSON examples and neighboring files are
+    never executable judgments. No report is required to carry this block.
+    """
+    if not primary:
+        return None, "no-judgment"
+    try:
+        path = Path(primary)
+        if path.is_symlink():
+            return None, "malformed-goal"
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return None, "no-judgment"
+    candidates = []
+    try:
+        document = json.loads(text)
+        if isinstance(document, Mapping) and "campaign_goal" in document:
+            candidates.append(document["campaign_goal"])
+    except ValueError:
+        import re
+        for match in re.finditer(r"^```campaign-goal[ \t]*\n(.*?)\n```[ \t]*$", text, re.M | re.S):
+            try:
+                candidates.append(json.loads(match.group(1)))
+            except ValueError:
+                return None, "malformed-goal"
+    if not candidates:
+        return None, "no-judgment"
+    if len(candidates) != 1:
+        return None, "ambiguous-goal"
+    return parse_campaign_goal(candidates[0])
+
+
+def campaign_goal_path(request: TerminalCommitRequest) -> Path:
+    return _commit_state_path(request).parent / "campaign-goal.json"
+
+
+def prepare_campaign_goal(request, binding, commit_id):
+    """Save the optional duty before claiming/closing the existing transaction."""
+    goal, source = parse_campaign_goal(request.campaign_goal)
+    hint = (request.owner_handoff or {}).get("primary")
+    if hint is not None and (not binding or _valid_cycle_primary(
+            hint, root=request.artifact_root, binding=binding) is None):
+        goal = None
+    if goal is None and isinstance(binding, Mapping):
+        goal, source = read_owner_campaign_goal(binding.get("primary"))
+    if goal is None:
+        return
+    path = campaign_goal_path(request)
+    if path.exists():
+        return  # A replay retains the first decision, including its stream fence.
+    intent = {"terminal_commit_id": commit_id, "goal": goal, "head": None,
+              "event": None, "status": "pending", "reason": "goal-close-pending", "event_id": None}
+    try:
+        import artifact_producer as producer
+        import artifact_campaign as campaign
+        record = producer.read_cycle_record(request.artifact_root, binding["cycle_id"]) if binding else None
+        if not record or record.get("campaign_id") != goal["campaign_id"]:
+            intent.update(status="skipped", reason="campaign-mismatch")
+        else:
+            target = campaign.campaign_path(request.artifact_root, goal["campaign_id"], heal=False)
+            intent["head"] = campaign.completion_head(request.artifact_root, target)
+    except Exception as exc:
+        # Do not claim a terminal transaction or persist an unusable stream
+        # fence. The existing completion controller retries this preparation.
+        raise TerminalCommitError("goal-input-unavailable",
+                                  str(getattr(exc, "code", type(exc).__name__))) from exc
+    _atomic_json(path, intent, exclusive=True)
+
+
+def settle_campaign_goal(request, binding=None):
+    """Retry the stored optional duty while preserving the committed owner PASS."""
+    path = campaign_goal_path(request)
+    try:
+        intent = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        state_path = _commit_state_path(request)
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if state.get("campaign_goal_duty"):
+            return {"status": "pending", "reason": "goal-state-missing", "event_id": None}
+        return {"status": "skipped", "reason": "no-judgment", "event_id": None}
+    if intent["status"] in ("satisfied", "skipped") or intent.get("head") is None:
+        return intent
+    import artifact_campaign as campaign
+
+    def before_publish(event):
+        # The exact official event is durable before it can become visible.
+        # After a crash, replay publishes these same bytes or recognizes this
+        # event in the stream, including after a later reopen.
+        intent["event"] = event
+        _atomic_json(path, intent)
+
+    try:
+        # Refresh after acquiring the writer lock as well, so simultaneous
+        # recovering consumers observe the same prepared event.
+        result = campaign.close_for_completion(request.artifact_root, intent["goal"]["campaign_id"],
+            intent=intent, before_publish=before_publish,
+            load_intent=lambda: json.loads(path.read_text(encoding="utf-8")))
+        intent.update(status="skipped" if result.get("skipped") else "satisfied",
+                      reason=result.get("skipped") or "goal-satisfied", event_id=result.get("event_id"))
+    except Exception as exc:
+        # A committed event may need projection recovery. The saved event
+        # makes the next ordinary completion retry safe without a new proof.
+        intent.update(status="pending", reason=str(getattr(exc, "code", "goal-close-error")))
+    with _jobs_lock(request.jobs):
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        if stored.get("status") in ("satisfied", "skipped"):
+            return stored
+        # Do not lose a prepared event written by a concurrent recovery.
+        intent["event"] = stored.get("event") or intent.get("event")
+        _atomic_json(path, intent)
+    return intent
+
+
 def producer_binding_digest(binding_path: Path) -> str:
     try:
         return _digest(Path(binding_path).read_bytes())
@@ -1213,6 +1356,11 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
                                "owner_attempt_id": request.owner_attempt_id,
                                "terminal_marker_digest": marker_digest,
                                "producer_binding_digest": producer_digest, "state": "claimed"}
+            if existing_state_value is None:
+                prepare_campaign_goal(request, binding_value, commit_id)
+            if campaign_goal_path(request).exists():
+                intent = json.loads(campaign_goal_path(request).read_text())
+                initial["campaign_goal_duty"] = {key: intent[key] for key in ("terminal_commit_id", "goal", "head")}
             dispatch_contract.claim_terminal_route_locked(
                 request.jobs, route["route_id"], request.owner_attempt_id,
                 lock_fd=jobs_lock.fileno(),
@@ -1595,8 +1743,11 @@ def _completion_request(jobs, status, metadata):
     explicit_handoff = metadata.get("owner_handoff")
     if isinstance(explicit_handoff, Mapping) and isinstance(explicit_handoff.get("primary"), str):
         handoff = {"primary": explicit_handoff["primary"]}
+    # Optional goal judgment: metadata alone is insufficient; the exact
+    # owner-bound primary artifact is authoritative across harnesses.
+    goal, _goal_source = read_owner_campaign_goal((handoff or {}).get("primary"))
     request = TerminalCommitRequest(path, metadata["attempt_id"], Path(jobs),
-                                    Path(route["artifact_root"]), handoff)
+                                    Path(route["artifact_root"]), handoff, goal)
     verify_request_identity(request, route)
     validate_owner_route(jobs=request.jobs, route_file=path, owner_attempt_id=request.owner_attempt_id)
     return request
@@ -1681,6 +1832,10 @@ def owner_completion_state(jobs, status, metadata) -> CompletionState:
         # The exact closed outcome, finalized producer and sealed handoff above
         # are the completion proof. A progress ledger can be absent or lag after
         # settlement; reclassifying those facts by its status strands closed work.
+        goal_path = campaign_goal_path(request)
+        if (state.get("campaign_goal_duty") and not goal_path.exists()
+                or goal_path.exists() and json.loads(goal_path.read_text()).get("status") == "pending"):
+            return CompletionState("pending", "campaign-goal-close-pending")
         return CompletionState("complete")
     except (OSError, ValueError, KeyError, TypeError, TerminalCommitError) as exc:
         return CompletionState("unknown", str(getattr(exc, "code", type(exc).__name__)))
@@ -1803,8 +1958,13 @@ def settle_owner_completion(jobs, status, metadata) -> TerminalCommitResult | No
         if result.result == "completed":
             # The terminal transaction fences late starts and proves every
             # child before the workflow can advertise COMPLETE.
+            goal_outcome = settle_campaign_goal(request)
             with ledger.lock():
                 ledger.complete(workflow.route_terminal_nodes(route), gates, actor="completion-controller")
+            result = TerminalCommitResult(result.result, result.reason, result.detail,
+                                          result.terminal_nodes, result.envelope_text,
+                                          result.shared_publication, next_step=result.next_step,
+                                          campaign_goal=goal_outcome)
     except (OSError, ValueError, KeyError, TypeError, TerminalCommitError) as exc:
         result = TerminalCommitResult("recoverable", getattr(exc, "code", "recovery-unavailable"), str(exc),
                                       next_step=getattr(exc, "next_step", None))
@@ -1814,7 +1974,8 @@ def settle_owner_completion(jobs, status, metadata) -> TerminalCommitResult | No
         result = TerminalCommitResult("recoverable", "recovery-unavailable",
                                       str(getattr(exc, "code", type(exc).__name__)))
     publication_pending = result.shared_publication is not None and result.shared_publication.get("status") == "pending"
-    if (result.result != "completed" or publication_pending) and _parent_has_notice_carrier(metadata):
+    goal_pending = result.campaign_goal is not None and result.campaign_goal.get("status") == "pending"
+    if (result.result != "completed" or publication_pending or goal_pending) and _parent_has_notice_carrier(metadata):
         from dispatch_supervision import materialize
         try:
             materialize(Path(jobs), {metadata["attempt_id"]}, reason="workflow-completion-pending")

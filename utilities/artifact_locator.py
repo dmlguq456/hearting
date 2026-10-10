@@ -1230,6 +1230,7 @@ def _heal_via_lock(root: Path, write: Callable[[], None]) -> None:
 def _locate_within_owner_campaign(
     root: Path, cycle_id: str, owner_campaign_id: str,
     owner_campaign_candidates: Optional[Callable[[], Iterable[Path]]],
+    *, heal: bool = True,
 ) -> Any:
     """§3.5 3a: once a cycle's owning campaign is known, look there instead of
     the whole root. A miss here is a proof, not a guess (D-88: a cycle
@@ -1256,7 +1257,7 @@ def _locate_within_owner_campaign(
     if part is not None and cycle_id in part:
         rel = part[cycle_id]["path"]
         hints = _hint_map(root)
-        if hints.get(cycle_id) != rel:
+        if heal and hints.get(cycle_id) != rel:
             _heal_via_lock(root, lambda: update_indexes(root, [owner_campaign_id]))
         return root / rel
 
@@ -1327,6 +1328,7 @@ def locate(
     candidates: Optional[Callable[[], Iterable[Path]]] = None,
     owner_campaign_id: Optional[str] = None,
     owner_campaign_candidates: Optional[Callable[[], Iterable[Path]]] = None,
+    heal: bool = True,
 ) -> Optional[Path]:
     """The one verified ID -> path lookup behind `find_path_by_id`,
     `resolve_path`, `campaign_dir`, `cycle_dir`, `read_campaign` and their
@@ -1336,6 +1338,9 @@ def locate(
 
     `owner_campaign_id` only matters when `identifier` is a cycle id: it lets
     a cache miss scan just that one campaign instead of the whole root.
+    `heal=False` skips only the index-heal write; scan, verify and duplicate
+    decisions stay identical, so pure readers (status/list/export) observe
+    without repairing.
     """
 
     root = Path(root).resolve()
@@ -1353,12 +1358,13 @@ def locate(
 
     is_cycle = _CYCLE_ID.fullmatch(str(identifier)) is not None
     if is_cycle and owner_campaign_id is not None:
-        result = _locate_within_owner_campaign(root, identifier, owner_campaign_id, owner_campaign_candidates)
+        result = _locate_within_owner_campaign(root, identifier, owner_campaign_id, owner_campaign_candidates,
+                                               heal=heal)
         if result is not _UNRESOLVED_OWNER:
             return result
 
     mapping, rows, duplicates, defect = _scan_lenient(root)
-    if not duplicates and defect is None:
+    if heal and not duplicates and defect is None:
         _heal_root(root, mapping, rows)
     if identifier in duplicates:
         raise LocatorError("locator-index-duplicate-id", identifier)
@@ -1370,8 +1376,8 @@ def locate(
     return None
 
 
-def find_path_by_id(root: Path, identifier: str) -> Optional[Path]:
-    return locate(root, identifier)
+def find_path_by_id(root: Path, identifier: str, *, heal: bool = True) -> Optional[Path]:
+    return locate(root, identifier, heal=heal)
 
 
 def resolve_path(root: Path, identifier: str) -> Optional[Path]:

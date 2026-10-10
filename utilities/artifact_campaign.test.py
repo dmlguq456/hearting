@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -110,6 +111,8 @@ class CampaignTest(F.ProducerTestBase):
         path = Path(path or self.path)
         record = json.loads(path.read_text())
         snapshot = C._snapshot(self.root, path)
+        # Actual v1 snapshots, including TF history, predate repository_id.
+        snapshot.pop("repository_id", None)
         harness, session = "codex", "legacy-session"
         actor_id = "native-user:" + C.hashlib.sha256((harness + ":" + session).encode()).hexdigest()
         approval = {"harness": harness, "session_id": session, "actor_id": actor_id,
@@ -708,6 +711,184 @@ class SupersededCampaignTest(CampaignTest):
 for _name in dir(CampaignTest):
     if _name.startswith("test_"):
         setattr(SupersededCampaignTest, _name, None)
+
+
+class RenameBindingTest(F.ProducerTestBase):
+    """A root rename keeps legacy v1 and current v2 closes valid through stable
+    RootIdentity evidence; a bare root ID, a foreign repository, tamper, and
+    missing evidence stay explicit errors.  History bytes are never rewritten."""
+
+    def setUp(self):
+        super().setUp()
+        self.activate()
+        route, route_file, self.result = self.begin(campaign_key="rename-binding")
+        self.output = self.write_output(self.result)
+        self.close(route, route_file)
+        P.finalize(self.root, cycle_id=self.result["cycle_id"])
+        self.campaign = self.result["campaign_id"]
+        self.path = Path(self.result["cycle_dir"]).parent / "campaign.json"
+        self.event_path = self.path.parent / "campaign.events" / "000001.json"
+
+    def _moved_root(self):
+        target = Path(self._tmp.name) / "renamed-root"
+        shutil.move(str(self.root), str(target))
+        return target, target / self.path.relative_to(self.root)
+
+    def _write_v1_close(self, path):
+        record = json.loads(path.read_text())
+        snapshot = C._snapshot(self.root, path)
+        # Actual v1 snapshots, including TF history, predate repository_id.
+        snapshot.pop("repository_id", None)
+        harness, session = "codex", "legacy-session"
+        actor_id = "native-user:" + C.hashlib.sha256((harness + ":" + session).encode()).hexdigest()
+        approval = {"harness": harness, "session_id": session, "actor_id": actor_id,
+                    "statement": "campaign-" + "satisfy " + record["campaign_id"] + " " + C.digest(snapshot),
+                    "decision": "accepted", "native_message_digest": "sha256:" + "a" * 64}
+        first = snapshot["cycles"][0]
+        event = {"stream_id": "strm_" + "1" * 32, "stream_sequence": 1,
+                 "event_type": "campaign.satisfied", "target_id": record["campaign_id"],
+                 "actor": {"kind": "user", "id": actor_id}, "recorded_at": "2026-09-26T00:00:00Z",
+                 "provenance": {"source_manifest_id": first["manifest_id"],
+                                "source_revision_id": first["manifest_revision_id"],
+                                "producer_route_id": first["route_id"], "schema_version": 1,
+                                "algorithm_version": C.CONTRACT_V1, "source_digest": C.digest(snapshot)},
+                 "evidence_ids": [],
+                 "payload": {"contract": C.CONTRACT_V1, "root": str(self.root),
+                             "snapshot": snapshot, "approval": approval}}
+        event["event_id"] = C._id("evt", event)
+        raw = C.canonical(event) + b"\n"
+        (path.parent / C.LEGACY_EVENT_NAME).write_bytes(raw)
+        return raw
+
+    def test_v2_rename_survives_with_stable_identity(self):
+        C.close(self.root, self.path, reason="done")
+        raw = self.event_path.read_bytes()
+        new_root, new_path = self._moved_root()
+        folded = C.campaign_state(new_root, new_path)
+        self.assertEqual((folded.state, folded.last_sequence), ("satisfied", 1))
+        self.assertEqual((new_path.parent / "campaign.events" / "000001.json").read_bytes(), raw)
+
+    def test_v1_rename_survives_with_stable_identity(self):
+        raw = self._write_v1_close(self.path)
+        new_root, new_path = self._moved_root()
+        folded = C.campaign_state(new_root, new_path)
+        self.assertEqual((folded.state, folded.last_sequence), ("satisfied", 1))
+        self.assertEqual((new_path.parent / C.LEGACY_EVENT_NAME).read_bytes(), raw)
+
+    def test_v2_rename_keeps_manifestless_closed_member_provenance(self):
+        route, route_file = self.route(slug="closed-without-manifest", campaign_key="rename-binding")
+        child = P.begin(self.root, route_file=route_file, capability="autopilot-code",
+                        intensity="direct", campaign_id=self.campaign)
+        self.write_output(child)
+        self.close(route, route_file)
+        C.close(self.root, self.path, reason="explicit campaign goal judgment")
+        raw = self.event_path.read_bytes()
+        snapshot = json.loads(raw)["payload"]["snapshot"]
+        self.assertTrue(any(row["state"] == "open" and row["manifest_id"] is None
+                            and row["route_closed"] is True for row in snapshot["cycles"]))
+        new_root, new_path = self._moved_root()
+        folded = C.campaign_state(new_root, new_path)
+        self.assertEqual((folded.state, folded.last_sequence), ("satisfied", 1))
+        self.assertEqual((new_path.parent / C.EVENTS_DIR / "000001.json").read_bytes(), raw)
+        identity_path = new_root / P.artifact_admission.ADMISSION_REL / "root-identity.json"
+        payload = json.loads(identity_path.read_text())
+        payload["repository_id"] = "repo_" + "f" * 32
+        identity_path.write_text(json.dumps(payload))
+        with self.assertRaisesRegex(C.CampaignError, "rename-binding-mismatch"):
+            C.campaign_state(new_root, new_path)
+
+    def test_same_path_history_without_identity_is_unverified(self):
+        C.close(self.root, self.path, reason="done")
+        raw = self.event_path.read_bytes()
+        (self.root / P.artifact_admission.ADMISSION_REL / "root-identity.json").unlink()
+        with self.assertRaisesRegex(C.CampaignError, "campaign-event-invalid"):
+            C.campaign_state(self.root, self.path)
+        self.assertEqual(self.event_path.read_bytes(), raw)
+
+    def test_renamed_root_without_identity_stays_invalid(self):
+        C.close(self.root, self.path, reason="done")
+        new_root, new_path = self._moved_root()
+        (new_root / P.artifact_admission.ADMISSION_REL / "root-identity.json").unlink()
+        with self.assertRaisesRegex(C.CampaignError, "campaign-event-invalid"):
+            C.campaign_state(new_root, new_path)
+
+    def test_foreign_repository_is_rejected(self):
+        C.close(self.root, self.path, reason="done")
+        new_root, new_path = self._moved_root()
+        identity_path = new_root / P.artifact_admission.ADMISSION_REL / "root-identity.json"
+        payload = json.loads(identity_path.read_text())
+        payload["repository_id"] = "repo_" + "f" * 32
+        identity_path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaisesRegex(C.CampaignError, "campaign-event-invalid"):
+            C.campaign_state(new_root, new_path)
+        # The failure is a binding mismatch, not missing evidence: the
+        # manifests survive but no longer name this repository.
+        try:
+            C.campaign_state(new_root, new_path)
+        except C.CampaignError as exc:
+            self.assertIn("rename-binding-mismatch", str(exc.detail))
+
+    def test_tampered_manifest_is_rejected(self):
+        C.close(self.root, self.path, reason="done")
+        new_root, new_path = self._moved_root()
+        # Preserved snapshots are canonical when present, so a tampered
+        # current manifest alone still folds through them. Remove the
+        # preserved revision first so the fold must bind the tampered bytes.
+        store = new_root / P.artifact_lifecycle.MANIFEST_SNAPSHOT_REL / self.result["cycle_id"]
+        shutil.rmtree(store, ignore_errors=True)
+        manifest_path = new_root / Path(self.result["cycle_dir"]).relative_to(self.root) / "manifest.json"
+        raw = manifest_path.read_bytes()
+        manifest_path.write_bytes(raw.replace(b'"state"', b'"stated"', 1) or raw + b" ")
+        with self.assertRaisesRegex(C.CampaignError, "campaign-event-invalid"):
+            C.campaign_state(new_root, new_path)
+        try:
+            C.campaign_state(new_root, new_path)
+        except C.CampaignError as exc:
+            self.assertIn("rename-evidence-tampered", str(exc.detail))
+
+    def test_malformed_preserved_revision_cannot_fall_back_to_current(self):
+        C.close(self.root, self.path, reason="done")
+        new_root, new_path = self._moved_root()
+        row = json.loads((new_path.parent / "campaign.events/000001.json").read_text())["payload"]["snapshot"]["cycles"][0]
+        preserved = new_root / P.artifact_lifecycle.MANIFEST_SNAPSHOT_REL / row["cycle_id"] / (row["manifest_revision_id"] + ".json")
+        original = preserved.read_bytes()
+        for malformed in (b"{", b"{}"):
+            with self.subTest(malformed=malformed):
+                preserved.write_bytes(malformed)
+                exported = C.export_current(new_root)
+                observed = next(r for r in exported["campaigns"] if r["campaign_id"] == self.campaign)
+                self.assertEqual(observed["status"], "invalid")
+                self.assertIsNone(observed["state"])
+        preserved.write_bytes(original)
+        self.assertEqual(C.campaign_state(new_root, new_path).state, "satisfied")
+
+    def test_unhashable_manifest_id_returns_an_invalid_document(self):
+        C.close(self.root, self.path, reason="done")
+        new_root, new_path = self._moved_root()
+        row = json.loads((new_path.parent / "campaign.events/000001.json").read_text())["payload"]["snapshot"]["cycles"][0]
+        preserved = new_root / P.artifact_lifecycle.MANIFEST_SNAPSHOT_REL / row["cycle_id"] / (row["manifest_revision_id"] + ".json")
+        preserved.unlink()
+        current = new_root / Path(self.result["cycle_dir"]).relative_to(self.root) / "manifest.json"
+        doc = json.loads(current.read_text())
+        doc["cycle"]["cycle_id"] = []
+        current.write_text(json.dumps(doc))
+        observed = next(row for row in C.export_current(new_root)["campaigns"]
+                        if row["campaign_id"] == self.campaign)
+        self.assertNotEqual(observed["status"], "valid")
+        self.assertIsNone(observed["state"])
+
+    def test_missing_evidence_is_rejected(self):
+        C.close(self.root, self.path, reason="done")
+        new_root, new_path = self._moved_root()
+        manifest_path = new_root / Path(self.result["cycle_dir"]).relative_to(self.root) / "manifest.json"
+        manifest_path.unlink()
+        store = new_root / P.artifact_lifecycle.MANIFEST_SNAPSHOT_REL / self.result["cycle_id"]
+        shutil.rmtree(store, ignore_errors=True)
+        try:
+            C.campaign_state(new_root, new_path)
+            self.fail("expected campaign-event-invalid")
+        except C.CampaignError as exc:
+            self.assertIn("rename-evidence-missing", str(exc.detail))
 
 
 if __name__ == "__main__":

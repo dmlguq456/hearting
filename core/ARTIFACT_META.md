@@ -69,6 +69,34 @@ of an entry is optional; the writer adds fields as they become known.
 - **Identity.** `artifact_root_id` and `campaign_id` equal the root and the campaign of
   the folder the file sits in. `cycles` holds only cycles the producer currently
   assigns to that campaign.
+- **Presentation mark (optional).** The campaign entry may carry
+  `presentation_kind: "archive_bundle"` — the single allowed value; absence means an
+  ordinary campaign. While present, top-level `repository_id` is required and must
+  equal the root's `repository_id`, exactly bound together with `artifact_root_id`
+  and `campaign_id`. A cycle entry must never carry `presentation_kind`. A wrong enum,
+  a wrong type, a cycle-scoped value, or a mismatched ID is a `presentation-*`
+  error: the campaign's own meta is skipped with that reason while lifecycle state
+  keeps folding underneath it. The writer is the official
+  `set --presentation-kind archive_bundle` (a person or an agent may record the
+  classification evidence in the existing optional `--reason`; the background
+  model judgement never creates it); readers
+  skip an invalid mark without repairing it.
+
+```json
+{
+  "schema_version": 1,
+  "contract": "artifact-meta/v1",
+  "artifact_root_id": "root_11111111111111111111111111111111",
+  "repository_id": "repo_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "campaign_id": "camp_22222222222222222222222222222222",
+  "campaign": {
+    "short_id": "CMD-03",
+    "presentation_kind": "archive_bundle",
+    "title": "명령어 인식 모델 TTS 화자 추가 (V8)"
+  },
+  "cycles": {}
+}
+```
 - **Readers** check only the types and limits of the fields they know and **ignore
   unknown fields** (a later `groups` field does not break them). A campaign that breaks
   a rule has only its own meta skipped, with a warning; other campaigns and the
@@ -236,7 +264,7 @@ selector; a short ID or alias works when it names one owner.
 | Subcommand | Meaning |
 |---|---|
 | `show --campaign ID [--cycle ID]` / `show --project` | Values, sources, aliases. |
-| `set --campaign ID [--cycle ID] [--title] [--summary] [--branches A,B] [--kinds 학습,…] [--short-id ID] [--by human\|agent] [--reason] [--session] [--dry-run]` | Change the given fields; each changed field is one history line. |
+| `set --campaign ID [--cycle ID] [--title] [--summary] [--branches A,B] [--kinds 학습,…] [--short-id ID] [--presentation-kind archive_bundle] [--by human\|agent] [--reason] [--session] [--dry-run]` | Change the given fields; each changed field is one history line. `--presentation-kind` is campaign-only (refused with `--cycle`) and official marks only. |
 | `set --project --display-name TEXT` | Project display name. |
 | `release --campaign ID [--cycle ID] --field F … [--dry-run]` | Hand a field back to the model; the value stays. |
 | `branches list` / `add --code --label [--note]` / `import --input FILE` / `rename --code OLD [--new-code NEW] [--label] [--note]` / `merge --from OLD --into DEST` / `remove --code CODE` | Vocabulary. `import` takes `{"branches":[…]}` once, adds only, and is a no-op on rerun. A rename or merge rewrites every tag and, for a changed representative, the IDs. `remove` takes only unused codes; `ETC` cannot be renamed, merged away, or removed. |

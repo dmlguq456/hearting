@@ -50,6 +50,7 @@ DISPLAY_TITLES_REL = ".runtime/artifact-producer/v1/campaign-display-titles.json
 KINDS = ("학습", "데이터", "평가", "문서", "운영", "조사", "배포")
 FIELDS = ("short_id", "title", "summary", "branches", "kinds")
 ENTRY_ORDER = ("short_id", "aliases", "title", "summary", "branches", "kinds", "source")
+PRESENTATION_KINDS = ("archive_bundle",)
 ACTORS = ("rule", "model", "human", "agent")
 PROTECTING = frozenset(("human", "agent"))
 ETC = "ETC"
@@ -167,6 +168,11 @@ def validate_entry(entry: Any, *, cycle: bool) -> None:
     """Known fields only: a type or limit violation raises; unknown fields are ignored."""
     if not isinstance(entry, dict):
         raise MetaError("entry-invalid")
+    if "presentation_kind" in entry:
+        if cycle:
+            raise MetaError("presentation-cycle-not-allowed")
+        if entry["presentation_kind"] not in PRESENTATION_KINDS:
+            raise MetaError("presentation-kind-invalid", str(entry["presentation_kind"])[:40])
     if "short_id" in entry:
         check_short_id(entry["short_id"], cycle=cycle)
     if "aliases" in entry:
@@ -229,15 +235,24 @@ def _membership(root: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def _validate_meta_doc(doc: Mapping[str, Any], root_id: str, campaign_id: str,
-                       members: Mapping[str, Mapping[str, Any]]) -> List[str]:
+                       members: Mapping[str, Mapping[str, Any]], repository_id: Optional[str] = None) -> List[str]:
     """Raises MetaError on any known-field violation; returns the cycle keys owned by another campaign."""
-    if (doc.get("schema_version") != 1 or isinstance(doc.get("schema_version"), bool)
+    if (type(doc.get("schema_version")) is not int or doc.get("schema_version") != 1
             or doc.get("contract") != META_CONTRACT):
         raise MetaError("contract-unknown")
     if doc.get("artifact_root_id") != root_id or doc.get("campaign_id") != campaign_id:
         raise MetaError("identity-mismatch")
     if "campaign" in doc:
         validate_entry(doc["campaign"], cycle=False)
+    # Presentation mark binds the current repository/root/campaign identities
+    # exactly; any mismatch is a presentation-* error that skips only this
+    # meta while lifecycle keeps folding. Lifecycle codes stay distinct.
+    presentation = (doc.get("campaign") or {}).get("presentation_kind") if isinstance(doc.get("campaign"), dict) else None
+    if isinstance(doc.get("campaign"), dict) and "presentation_kind" in doc["campaign"]:
+        if repository_id is None:
+            raise MetaError("presentation-identity-missing")
+        if doc.get("repository_id") != repository_id:
+            raise MetaError("presentation-repository-mismatch", str(doc.get("repository_id"))[:40])
     cycles = doc.get("cycles", {})
     if not isinstance(cycles, dict):
         raise MetaError("cycles-invalid")
@@ -249,6 +264,35 @@ def _validate_meta_doc(doc: Mapping[str, Any], root_id: str, campaign_id: str,
         if (members.get(cycle_id) or {}).get("campaign_id") != campaign_id:
             foreign.append(cycle_id)
     return foreign
+
+
+def presentation_view(raw: Optional[bytes], *, root_id: str, repository_id: str, campaign_id: str,
+                      members: Optional[Mapping[str, Mapping[str, Any]]] = None) -> Dict[str, Any]:
+    """Pure bytes -> (kind, status, reason) for the archive mark; never raises.
+
+    `absent` when no mark is present, `valid` when the mark binds exactly,
+    `invalid` with a `presentation-*`/identity reason otherwise. Lifecycle
+    errors never surface here; unknown fields are preserved elsewhere.
+    """
+    if raw is None:
+        return {"presentation_kind": None, "presentation_status": "absent", "presentation_reason": None}
+    try:
+        doc = _parse(raw)
+    except MetaError as exc:
+        return {"presentation_kind": None, "presentation_status": "invalid", "presentation_reason": exc.code if exc.code.startswith("presentation-") else "presentation-" + exc.code}
+    entry = doc.get("campaign")
+    kind = entry.get("presentation_kind") if isinstance(entry, dict) else None
+    # Validate known metadata even when the mark is absent: a null mark or
+    # a mark on a cycle is invalid, never silently interpreted as absence.
+    try:
+        if not root_id or not repository_id or not identity.is_well_formed(campaign_id, "campaign"):
+            raise MetaError("presentation-identity-missing")
+        _validate_meta_doc(doc, root_id, campaign_id, members or {}, repository_id=repository_id)
+    except MetaError as exc:
+        return {"presentation_kind": kind if isinstance(kind, str) else None,
+                "presentation_status": "invalid", "presentation_reason": exc.code if exc.code.startswith("presentation-") else "presentation-" + exc.code}
+    return {"presentation_kind": kind, "presentation_status": "valid" if kind is not None else "absent",
+            "presentation_reason": None}
 
 
 def _campaign_location(root: Path, campaign_id: str) -> Tuple[Dict[str, Any], str]:
@@ -264,7 +308,7 @@ def read_campaign_meta(root: Path, campaign_id: str, *,
     """The campaign's meta.json as a reader sees it: `invalid` (never an exception) on any violation."""
     root = Path(root).resolve()
     try:
-        root_id, _repo = _root_ids(root)
+        root_id, repo_id = _root_ids(root)
         _campaign, rel = _campaign_location(root, campaign_id)
         raw = _read_raw(root, rel)
     except MetaError as exc:
@@ -273,7 +317,8 @@ def read_campaign_meta(root: Path, campaign_id: str, *,
         return FileRead("missing", rel)
     try:
         doc = _parse(raw)
-        foreign = _validate_meta_doc(doc, root_id, campaign_id, members if members is not None else _membership(root))
+        foreign = _validate_meta_doc(doc, root_id, campaign_id, members if members is not None else _membership(root),
+                                     repository_id=repo_id)
     except MetaError as exc:
         return FileRead("invalid", rel, raw=raw, code=exc.code)
     if foreign:
@@ -426,7 +471,7 @@ def _ordered_entry(entry: Mapping[str, Any]) -> Dict[str, Any]:
 
 
 def _ordered_meta(doc: Mapping[str, Any]) -> Dict[str, Any]:
-    head = ("schema_version", "contract", "artifact_root_id", "campaign_id")
+    head = ("schema_version", "contract", "artifact_root_id", "repository_id", "campaign_id")
     out = {name: doc[name] for name in head if name in doc}
     out["campaign"] = _ordered_entry(doc.get("campaign") or {})
     out["cycles"] = {cid: _ordered_entry(entry) for cid, entry in sorted((doc.get("cycles") or {}).items())}
@@ -525,7 +570,8 @@ class Workspace:
             return None
         try:
             doc = _parse(raw)
-            foreign = _validate_meta_doc(doc, self.root_id, campaign_id, self.members)
+            foreign = _validate_meta_doc(doc, self.root_id, campaign_id, self.members,
+                                         repository_id=self.repo_id)
         except MetaError as exc:
             self.warnings.append(f"{rel}: {exc.code}")
             self.invalid[campaign_id] = exc.code
@@ -970,8 +1016,31 @@ def op_set(ws: Workspace, campaign: str, cycle: Optional[str], values: Mapping[s
     if not values:
         raise MetaError("nothing-to-set")
     campaign_id, cycle_id = _target(ws, campaign, cycle)
+    if "presentation_kind" in values and cycle_id is not None:
+        raise MetaError("presentation-cycle-not-allowed")
+    if "presentation_kind" in values and ws.actor_by not in PROTECTING:
+        # The background model judgement never creates the archive mark; only
+        # an explicit human/agent `set --presentation-kind` with evidence may.
+        raise MetaError("presentation-model-forbidden")
+    if "presentation_kind" in values and values["presentation_kind"] not in PRESENTATION_KINDS:
+        raise MetaError("presentation-kind-invalid", str(values["presentation_kind"])[:40])
     meta = ws.require_meta(campaign_id, create=True)
     by = ws.actor_by if ws.actor_by in PROTECTING else "human"
+    if "presentation_kind" in values:
+        # Exact binding: the mark always carries this root/repository/campaign.
+        existing_repo = meta.doc.get("repository_id")
+        if existing_repo is None:
+            meta.doc["repository_id"] = ws.repo_id
+            meta.changed = True
+        elif existing_repo != ws.repo_id:
+            raise MetaError("presentation-repository-mismatch", str(existing_repo)[:40])
+        ws.put(meta, None, "presentation_kind", values["presentation_kind"], by=by)
+    if "title" in values:
+        check_title(values["title"])
+    if "summary" in values:
+        check_summary(values["summary"])
+    if "kinds" in values:
+        check_kinds(values["kinds"])
     if "title" in values:
         check_title(values["title"])
     if "summary" in values:
@@ -1316,6 +1385,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--branches")
     p.add_argument("--kinds")
     p.add_argument("--short-id")
+    p.add_argument("--presentation-kind", choices=("archive_bundle",))
     p = sub.add_parser("release", allow_abbrev=False)
     common(p, write=True)
     p.add_argument("--campaign", required=True)
@@ -1394,6 +1464,8 @@ def _dispatch(root: Path, args: argparse.Namespace) -> Dict[str, Any]:
             values["branches"] = _csv(args.branches)
         if args.kinds is not None:
             values["kinds"] = _csv(args.kinds)
+        if getattr(args, "presentation_kind", None) is not None:
+            values["presentation_kind"] = args.presentation_kind
         return run_write(root, lambda ws: op_set(ws, args.campaign, args.cycle, values), **options)
     if args.action == "add":
         return run_write(root, lambda ws: op_branch_add(ws, args.code, args.label, args.note), **options)

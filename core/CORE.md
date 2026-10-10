@@ -331,6 +331,20 @@ records: an output-less cycle removed from `campaign.cycles` remains auditable
 as detached rather than causing membership drift. Abandoned cycles remain
 abandoned; closure adds neither route repair nor a residual-zero condition.
 
+Presentation is independent of lifecycle: `campaign.presentation_kind`
+(`archive_bundle`, [ARTIFACT_META.md](ARTIFACT_META.md)) only marks how a
+campaign is shown while preserving its lifecycle state.
+`campaign-export` ([artifact-campaign-current/v1](ARTIFACT_CAMPAIGN_CURRENT.md)) is the pure read of that
+current state; `campaign-status`, `campaign-list`, and `campaign-export`
+repair nothing — reconcile, history flush, and index heals belong to writer
+commands (`campaign-close`, `compose`). A legacy close event survives a root
+rename when its snapshot rows still bind, byte-exact, to surviving manifests
+under the stable RootIdentity (the old absolute path stays as provenance, not
+proof). Only an explicit goal judgment in the owner's own final report lets
+normal settlement record a `campaign.satisfied` event; completed or sealed
+cycles alone leave the stream open, and the next begin on the same key still
+reopens it.
+
 **Campaign workflow groups.** A producer-owned versioned declaration at
 `campaigns/<campaign-locator>/workflow-groups.json` may group existing cycles by
 an explicitly named subgoal without changing cycle boundaries, sealed
