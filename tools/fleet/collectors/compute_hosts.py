@@ -202,6 +202,8 @@ def unregistered_gpu(snapshot, resource_jobs=(), shown_sessions=frozenset(), age
                         "pid": pid, "proc_start": proc_start,
                         "pgid": pgid if _pos_int(pgid) else None,
                         "used_memory_mib": None,
+                        "telemetry_unknown": bool(gpu.get("observation_source")),
+                        "gpu_placement": process.get("gpu_placement"),
                         "elapsed_s": (elapsed + max(0, int(age_s or 0)))
                         if _nonneg_int(elapsed) else None,
                         "command": process.get("command")
