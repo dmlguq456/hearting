@@ -1656,7 +1656,9 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         from artifact_producer import prepare_route_artifact_env
         return {**result, "state": "inline", "required_action": "execute-inline",
                 "task": request["text"],
-                "artifact_env": prepare_route_artifact_env(path, start=True, jobs=jobs)}
+                # The inline session is the producer (capabilities/*.md lifecycle step 1):
+                # an inactive root with legacy content keeps its legacy-compat window.
+                "artifact_env": prepare_route_artifact_env(path, start=True, jobs=jobs, require_cycle=False)}
     rows = _rows(jobs)
     existing_owner = _slot(route, "owner", rows, jobs)
     frames = ([] if existing_owner in rows and not (interview or answers) else

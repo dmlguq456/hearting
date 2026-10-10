@@ -1959,7 +1959,8 @@ def bind_owner_launch(args, jobs: Path, *, environ=None) -> Optional[Dict[str, A
         raise ProducerError(getattr(exc, "code", type(exc).__name__), detail) from exc
 
 
-def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path) -> Dict[str, str]:
+def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path,
+                               require_cycle: bool = True) -> Dict[str, str]:
     """Resolve the route's own output context; callers need not copy begin's env.
 
     Start owns idempotent preparation. Readiness checks only read an existing
@@ -1980,7 +1981,7 @@ def prepare_route_artifact_env(route_file: Path, *, start: bool, jobs: Path) -> 
             selection = {"workflow_group_id": context["group_id"]}
         return _begin_waiting_for_admission(
             root, route_file=route_file, capability=route["capability"],
-            intensity=route["effective_intensity"], require_cycle=True, jobs=jobs, **selection)["env"]
+            intensity=route["effective_intensity"], require_cycle=require_cycle, jobs=jobs, **selection)["env"]
     record = route_cycle_for(root, route)
     if record is None:
         return {"AGENT_ARTIFACT_ROOT": str(root), **{name: "" for name in (

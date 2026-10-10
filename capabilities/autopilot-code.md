@@ -67,6 +67,9 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
    resumes the route's cycle and carries its exact `AGENT_ARTIFACT_*` context.
    Inline `compose --start` / `start` prepares the same cycle and returns
    `artifact_env` with its exact output path; no separate `begin` is needed.
+   While the cutover is inactive and the root already holds legacy content,
+   inline start returns `legacy-compat` (`AGENT_ARTIFACT_ROOT` only) and the
+   legacy `<artifact-root>/plans/` layout stays writable.
    Compile-only legacy routes can still use explicit producer `begin`.
 2. **write only inside the open cycle.** Every durable artifact goes under
    `<cycle_dir>/artifacts/plans/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).

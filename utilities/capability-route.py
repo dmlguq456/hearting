@@ -11022,7 +11022,12 @@ def main():
         try:
             receipt=inline_finish.finish(a,route,a.route,sys.modules[__name__])
         except inline_finish.InlineFinishError as exc:
-            if str(exc) not in {"finish-route-not-direct", "finish-inline-owner-sentinel-required"}:
+            legacy_root = False
+            if str(exc) == "finish-route-cycle-missing":
+                import artifact_producer
+                legacy_root = artifact_producer.classify_root(
+                    Path(route["artifact_root"]))["state"] == "inactive-with-legacy"
+            if str(exc) not in {"finish-route-not-direct", "finish-inline-owner-sentinel-required"} and not legacy_root:
                 raise
             receipt=_legacy_inline_finish(a,route,a.route,sys.modules[__name__], entry_error=exc)
         print(json.dumps(receipt,sort_keys=True))
@@ -11287,3 +11292,8 @@ if __name__=="__main__":
     # OSError too: completion walks a worker-supplied tree, and a refusal there
     # must be a typed line, never a traceback (review S-a).
     except (ValueError,OSError,TOPO.TopologyError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)
+    except Exception as exc:
+        # A producer refusal (e.g. cutover-inactive) is a typed line too, never a traceback.
+        import artifact_producer
+        if not isinstance(exc, artifact_producer.ProducerError): raise
+        print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)

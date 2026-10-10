@@ -1353,7 +1353,7 @@ class WorkStartTest(unittest.TestCase):
             result = self.start()
         self.assertEqual(result["state"], "inline")
         self.assertEqual(result["artifact_env"]["AGENT_ARTIFACT_OUTPUT_DIR"], "/exact/artifacts")
-        prepare.assert_called_once_with(self.path, start=True, jobs=self.jobs)
+        prepare.assert_called_once_with(self.path, start=True, jobs=self.jobs, require_cycle=False)
         self.assertEqual(self.calls, [])
 
     def test_verified_resume_start_defers_owner_and_preserves_checked_fallback(self):
