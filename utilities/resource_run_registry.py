@@ -11,6 +11,9 @@ import sys
 import stat
 import tempfile
 import time
+import uuid
+import functools
+import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -50,9 +53,116 @@ def proc_identity(pid) -> dict | None:
             "pid": pid,
             "starttime": fields[19],
             "command_hash": hashlib.sha256(command).hexdigest(),
+            **boot_identity(),
         }
     except (OSError, TypeError, ValueError, IndexError):
         return None
+
+
+def boot_identity() -> dict:
+    """Bind new local resource identities to their host and kernel lifetime."""
+    try:
+        boot = str(uuid.UUID(Path('/proc/sys/kernel/random/boot_id').read_text().strip()))
+        machine = Path('/etc/machine-id').read_text().strip()
+        host = Path('/proc/sys/kernel/hostname').read_text().strip()
+        if len(machine) != 32 or not all(c in '0123456789abcdef' for c in machine) or not host:
+            return {}
+        return {'boot_id': boot, 'boot_host': machine + ':' + host}
+    except (OSError, ValueError):
+        return {}
+
+
+@functools.lru_cache(maxsize=4)
+def local_boot_history(current_boot: str) -> frozenset[str]:
+    """Read this machine's existing boot journal, never another host's namespace."""
+    try:
+        result = subprocess.run(['journalctl', '--list-boots', '--no-pager', '--quiet'],
+                                capture_output=True, text=True, timeout=2)
+        if result.returncode != 0:
+            return frozenset()
+        boots = set()
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) > 1 and fields[0].lstrip('-').isdigit():
+                boots.add(str(uuid.UUID(fields[1])))
+        return frozenset(boots) if current_boot in boots else frozenset()
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return frozenset()
+
+
+def legacy_resource_boot(run: dict) -> str | None:
+    """Use the exact recorded owner's governor identity for pre-UUID resources."""
+    try:
+        from dispatch_contract import parse_registry_metadata
+        wait = run['owner_wait']
+        aid = run['parent_attempt_id']
+        if (wait.get('parent_attempt_id') != aid or wait.get('jobs') != run['jobs']
+                or not wait.get('owner_pid') or not wait.get('owner_start')):
+            return None
+        owners = []
+        for line in Path(run['jobs']).read_text().splitlines():
+            fields = line.split('\t')
+            if len(fields) == 6:
+                meta = parse_registry_metadata(fields[5])
+                if meta.get('attempt_id') == aid:
+                    owners.append(meta)
+        if len(owners) != 1:
+            return None
+        owner = owners[0]
+        if (owner.get('worker_type') != 'owner' or owner.get('owner_route_file') != run['route']
+                or owner.get('owner_route_id') != wait.get('route_id')
+                or owner.get('owner_route_hash') != wait.get('route_hash')
+                or owner.get('pid') != str(wait['owner_pid'])
+                or owner.get('pid_start') != str(wait['owner_start'])
+                or owner.get('pid_ns') != run.get('pid_namespace')):
+            return None
+        path = Path(owner['artifact_root']) / '.runtime/model-worker-governor/state.json'
+        state = json.loads(path.read_text())
+        boots = set()
+        for claim in state.get('claims', {}).values():
+            identity = claim.get('claimant_identity') or {}
+            if (str(identity.get('pid')) == owner['pid']
+                    and str(identity.get('starttime')) == owner['pid_start']
+                    and f"pid:[{identity.get('pid_namespace')}]" == owner['pid_ns']):
+                boots.add(str(uuid.UUID(identity['boot_id'])))
+        return boots.pop() if len(boots) == 1 else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def reboot_evidence(run: dict) -> dict | None:
+    """Positive local boot change; missing/unobservable identities are not death.
+
+    Older local runner rows have no boot UUID. Their recorded start ticks beyond
+    this kernel's uptime, together with a launch epoch before this boot and the
+    exact owner boot in this host's journal, prove a local previous-boot run.
+    """
+    if run.get('boot_id') or run.get('boot_host'):
+        current = boot_identity()
+        try:
+            old = str(uuid.UUID(run['boot_id']))
+        except (KeyError, ValueError, TypeError):
+            return None
+        if current and run.get('boot_host') == current['boot_host'] and old != current['boot_id']:
+            return {'previous_boot_id': old, **current}
+        return None
+    if (run.get('resource_policy') not in {'supervised-owner', 'verified-resume'}
+            or not run.get('started_at') or not run.get('starttime') or not run.get('owner_wait')):
+        return None
+    try:
+        boot = _boot_epoch()
+        uptime = float(Path('/proc/uptime').read_text().split()[0])
+        start, launched = int(run['starttime']), float(run['started_at'])
+        if (boot and 0 < launched < boot and start > uptime * os.sysconf('SC_CLK_TCK')
+                and run.get('pid_namespace') == os.readlink('/proc/self/ns/pid')):
+            current = boot_identity()
+            previous = legacy_resource_boot(run)
+            if (current and previous and previous != current['boot_id']
+                    and previous in local_boot_history(current['boot_id'])):
+                return {'previous_boot_id': previous, **current, 'reason': 'boot-clock-reset'}
+    except (OSError, KeyError, ValueError, TypeError, IndexError):
+        pass
+    return None
 
 
 def _owned_wrapper_awaiting_reap(run, pid, identity_reader):
@@ -104,6 +214,8 @@ def classify_identity(run: dict, identity_reader=proc_identity) -> tuple[str, di
         pid = int(run["pid"])
     except (TypeError, ValueError):
         return "stale", None, "recorded-pid-invalid"
+    if reboot_evidence(run):
+        return "exited", None, "host-reboot"
     if run.get("pid_namespace") is not None:
         try:
             if run["pid_namespace"] != os.readlink("/proc/self/ns/pid"):

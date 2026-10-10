@@ -162,6 +162,39 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         self.assertEqual(json.loads((output / 'run.json').read_text()), {"phase":"resumed"})
         self.assertTrue((jobs.parent / 'completion' / route['route_id'] / 'full-run.json').is_file())
 
+    def test_rebooted_running_resource_without_sentinel_is_settled_before_real_successor(self):
+        route, path, jobs, registry, output, ledger = self.fixture()
+        data = json.loads(registry.read_text())
+        old = data['runs']['fixture-run']
+        Path(old['sentinel']).unlink()
+        old.update(status='running', workflow_state='RUNNING', exit_code=None,
+                   boot_id='83f954bc-4963-4dfa-9f2f-c8f3597900a6', boot_host='local')
+        data['runs']['fixture-run'] = old
+        registry.write_text(json.dumps(data))
+        checkpoint = self.base / 'checkpoint'
+        checkpoint.write_text('epoch-26')
+        Path(old['log']).write_text('epoch-26 saved\n')
+        log_before = Path(old['log']).read_bytes()
+        body = self.next_body(registry, 'fixture-run__a1', output)
+        body['command'] = [sys.executable, '-c',
+            f'from pathlib import Path; assert Path({str(checkpoint)!r}).read_text() == "epoch-26"']
+        current = SUP.RR.boot_identity()
+        # New payload capture must retain the real boot; only the old row belongs to the prior one.
+        old['boot_host'] = current['boot_host']
+        registry.write_text(json.dumps(data))
+        procs, receipt = self.launch(route, path, jobs, registry, output, body)
+        self.assertEqual(len(procs), 1)
+        self.assertTrue(receipt['payload_spawned'])
+        settled = json.loads(registry.read_text())['runs']['fixture-run']
+        self.assertEqual((settled['status'], settled['failure_class']), ('failed', 'host-reboot'))
+        self.assertIsNone(settled['exit_code'])
+        self.assertFalse(Path(old['sentinel']).exists())
+        self.assertEqual(Path(old['log']).read_bytes(), log_before)
+        self.assertEqual(checkpoint.read_text(), 'epoch-26')
+        again, repeated = self.launch(route, path, jobs, registry, output, body)
+        self.assertEqual(again, [])
+        self.assertFalse(repeated['payload_spawned'])
+
     def unstarted_fixture(self, **changes):
         route, path, jobs, registry, output, ledger = self.fixture()
         data = json.loads(registry.read_text())

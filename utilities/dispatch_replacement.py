@@ -314,8 +314,7 @@ def death_kind(fields, meta, *, jobs=None, lines=None):
             and route_authority.answerable_owner_end(fields[1], meta)
             and _retained_corrections(jobs, meta.get('attempt_id'))):
         return CORRECTED  # an answered stop is a pause; no automatic retry of an unanswered FAIL
-    if (jobs is not None and meta.get('worker_type') == 'owner' and fields[1] == 'done'
-            and meta.get('note') in RUNTIME_DEATH_NOTES
+    if (jobs is not None and route_authority.runtime_owner_can_resume(fields[1], meta)
             and _retained_corrections(jobs, meta.get('attempt_id'))):
         return CORRECTED
     if (meta.get('note') == 'cancelled-receipt-unavailable'
@@ -369,7 +368,7 @@ def death_proof(fields, meta, *, jobs=None, lines=None):
         handoff = _blocked_handoff(fields, meta)
         if handoff:
             result['handoff'] = handoff
-        if meta.get('note') in RUNTIME_DEATH_NOTES:
+        if route_authority.runtime_owner_can_resume(fields[1], meta):
             result['source_result'] = 'EXITED'
     return result
 

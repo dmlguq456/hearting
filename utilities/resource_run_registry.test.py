@@ -68,6 +68,73 @@ class ResourceRegistryTest(unittest.TestCase):
                 self.assertNotEqual(diagnostics[0]["kind"], "missing-registry")
                 self.assertEqual(diagnostics[0]["path"], str(source))
 
+    def test_boot_change_is_host_bound_and_rejects_reused_pid(self):
+        current = {'boot_id': '67138871-1a60-467f-b9dc-d46749025baa', 'boot_host': 'local'}
+        row = {'pid': 123, 'starttime': '42', 'command_hash': 'hash',
+               'boot_id': '83f954bc-4963-4dfa-9f2f-c8f3597900a6', 'boot_host': 'local'}
+        with mock.patch.object(registry, 'boot_identity', return_value=current):
+            self.assertEqual(registry.classify_identity(row, lambda _: row), ('exited', None, 'host-reboot'))
+            for changes in ({'boot_host': 'foreign'}, {'boot_id': current['boot_id']},
+                            {'boot_id': 'invalid'}, {'boot_host': None}):
+                self.assertIsNone(registry.reboot_evidence({**row, **changes}))
+
+    def test_legacy_boot_reset_requires_all_existing_launch_coordinates(self):
+        row = {'resource_policy': 'supervised-owner', 'started_at': 50, 'starttime': '10000', 'owner_wait': {'bound': True},
+               'pid_namespace': os.readlink('/proc/self/ns/pid')}
+        with mock.patch.object(registry, '_boot_epoch', return_value=100), \
+                mock.patch.object(Path, 'read_text', return_value='10.0 1.0'), \
+                mock.patch.object(os, 'sysconf', return_value=100), \
+                mock.patch.object(registry, 'legacy_resource_boot', return_value='old'), \
+                mock.patch.object(registry, 'boot_identity', return_value={'boot_id': 'new', 'boot_host': 'local'}), \
+                mock.patch.object(registry, 'local_boot_history', return_value={'old', 'new'}):
+            self.assertIsNotNone(registry.reboot_evidence(row))
+            for changes in ({'started_at': 101}, {'starttime': '500'}, {'started_at': None},
+                            {'pid_namespace': 'foreign'}, {'resource_policy': None}, {'boot_id': 'bad'}):
+                self.assertIsNone(registry.reboot_evidence({**row, **changes}))
+            with mock.patch.object(registry, 'local_boot_history', return_value={'new'}):
+                self.assertIsNone(registry.reboot_evidence(row))
+        with mock.patch.object(registry, '_boot_epoch', return_value=None):
+            self.assertIsNone(registry.reboot_evidence(row))
+
+    def test_legacy_boot_is_bound_to_the_exact_owner_and_governor_claim(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); jobs = root / 'jobs.log'
+            namespace = os.readlink('/proc/self/ns/pid')
+            row = {'jobs': str(jobs), 'parent_attempt_id': 'att-owner', 'route': str(root / 'route.json'),
+                   'pid_namespace': namespace, 'owner_wait': {'parent_attempt_id': 'att-owner',
+                       'jobs': str(jobs), 'owner_pid': 123, 'owner_start': '456',
+                       'route_id': 'rt-test', 'route_hash': 'hash'}}
+            meta = {'attempt_id': 'att-owner', 'worker_type': 'owner', 'owner_route_file': row['route'],
+                    'owner_route_id': 'rt-test', 'owner_route_hash': 'hash', 'pid': '123',
+                    'pid_start': '456', 'pid_ns': namespace, 'artifact_root': str(root)}
+            jobs.write_text('now\tdone\tx\tx\towner\t' + ','.join(k+'='+v for k,v in meta.items()) + '\n')
+            state = root / '.runtime/model-worker-governor/state.json'
+            state.parent.mkdir(parents=True)
+            identity = {'pid': 123, 'starttime': '456', 'pid_namespace': int(namespace[5:-1]),
+                        'boot_id': '83f954bc-4963-4dfa-9f2f-c8f3597900a6'}
+            state.write_text(json.dumps({'claims': {'token': {'claimant_identity': identity}}}))
+            self.assertEqual(registry.legacy_resource_boot(row), identity['boot_id'])
+            for change in ({'owner_pid': 124}, {'owner_start': '457'}, {'route_hash': 'foreign'},
+                           {'jobs': 'foreign'}, {'parent_attempt_id': 'foreign'}):
+                self.assertIsNone(registry.legacy_resource_boot({**row, 'owner_wait': {**row['owner_wait'], **change}}))
+            for change in ({'pid': 124}, {'starttime': '457'}, {'pid_namespace': 1}):
+                state.write_text(json.dumps({'claims': {'token': {'claimant_identity': {**identity, **change}}}}))
+                self.assertIsNone(registry.legacy_resource_boot(row))
+
+    def test_local_journal_requires_current_boot_and_never_uses_unreadable_history(self):
+        from types import SimpleNamespace
+        current, previous = '67138871-1a60-467f-b9dc-d46749025baa', '83f954bc-4963-4dfa-9f2f-c8f3597900a6'
+        output = f'-1 {previous.replace("-", "")} previous\n0 {current.replace("-", "")} current\n'
+        for code, stdout, expected in ((0, output, {current, previous}),
+                                       (0, output.splitlines()[0], set()), (1, output, set())):
+            registry.local_boot_history.cache_clear()
+            with mock.patch.object(registry.subprocess, 'run', return_value=SimpleNamespace(returncode=code, stdout=stdout)):
+                self.assertEqual(registry.local_boot_history(current), expected)
+        registry.local_boot_history.cache_clear()
+        with mock.patch.object(registry.subprocess, 'run', side_effect=PermissionError()):
+            self.assertEqual(registry.local_boot_history(current), set())
+        registry.local_boot_history.cache_clear()
+
     def test_live_exited_and_pid_reuse(self):
         row = {"pid": 2147483647, "starttime": "11", "command_hash": "abc"}
         exact = lambda pid: {"pid": pid, "starttime": "11", "command_hash": "abc"}

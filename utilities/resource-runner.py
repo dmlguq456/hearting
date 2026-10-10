@@ -13,6 +13,7 @@ from resource_run_registry import (
     proc_identity,
     register_registry,
     resource_never_started,
+    reboot_evidence,
 )
 
 SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -55,7 +56,7 @@ def read_sentinel(path):
     except ValueError:
         return None
 
-def settle(registry, run_id, run):
+def settle(registry, run_id, run, *, data=None):
     """Persist the terminal row once the process is verifiably gone.
 
     Any observer may call this — `reap`, `status`, `list`, a continuation supervisor, or
@@ -72,7 +73,7 @@ def settle(registry, run_id, run):
                 return row, False
             row.update(ended_at=time.time(), exit_code=None)
             return row, True
-        return locked_update(registry, settle_unstarted)
+        return settle_unstarted(data) if data is not None else locked_update(registry, settle_unstarted)
     liveness,_current,reason=classify_identity(run)
     if liveness in {"working", "reaping"} or (run.get("resource_policy") in {"verified-resume", "supervised-owner"}
                               and run.get("status") == "launching"):
@@ -80,6 +81,8 @@ def settle(registry, run_id, run):
     exit_code=read_sentinel(run.get("sentinel"))
     if run.get("resource_policy") in {"verified-resume", "supervised-owner"} and run.get("cancel_requested") is True:
         status,state,failure="failed","CANCELLED","cancelled"
+    elif reason == 'host-reboot' and exit_code is None:
+        status,state,failure="failed","FAILED_RETRYABLE","host-reboot"
     elif run.get("resource_policy") in {"verified-resume", "supervised-owner"} and liveness != "exited":
         status,state,failure="failed","FAILED_RETRYABLE",reason
     elif exit_code==0:
@@ -97,11 +100,19 @@ def settle(registry, run_id, run):
         if row is None: raise ValueError("unknown run id")
         if row.get("status") in TERMINAL_STATUSES:
             return row, False
+        if row != run:
+            raise ValueError('resource-reservation-changed')
         row.update({"status":status,"exit_code":exit_code,"ended_at":time.time(),
                     "workflow_state":state,"failure_class":failure,
                     "liveness_reason":reason})
+        if failure == 'host-reboot':
+            boot = reboot_evidence(run)
+            if boot:
+                # Retain the observed old boot so compatibility evidence does
+                # not expire when this kernel's uptime grows past old ticks.
+                row.update(boot_id=boot['previous_boot_id'], boot_host=boot['boot_host'])
         return row, True
-    return locked_update(registry,apply)
+    return apply(data) if data is not None else locked_update(registry,apply)
 
 
 class LaunchDeferred(Exception):
@@ -198,6 +209,9 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
             if any(current.get(k) != placeholder.get(k) for k in keys):
                 raise ValueError("resource-route-body-conflict")
             return False, current
+        for previous in matches:
+            if reboot_evidence(previous):
+                settle(registry, previous['run_id'], previous, data=data)
         from route_authority import require_resource_predecessors
         require_resource_predecessors([*matches, *history], placeholder)
         data["runs"][args.run_id] = placeholder

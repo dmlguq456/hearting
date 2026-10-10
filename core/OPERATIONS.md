@@ -1531,6 +1531,16 @@ the existing supervision notice carrier. A host whose supervisor probe does not
 report support runs the owner as the existing one-shot, creates no input state,
 and `correct` reports `owner-input-unsupported` before queueing; an owner
 already running under an older supervisor behaves the same way.
+An interrupted launched supervisor with no terminal event also accepts the existing
+`correct` request once its exact process and children are quiescent. This is an
+answered continuation on the same route, not another automatic retry: keep the
+original failure, completed stages, permissions and review budgets. A valid
+terminal result, cancellation or unknown execution retains its existing path.
+Resource registration settles a positively observed previous-boot execution as
+retryable failure even when power loss left no exit sentinel. The same observation
+admits its successor while preserving logs, checkpoints and settled results; a
+missing sentinel or stale PID alone grants no such admission.
+
 An owner that already ended `BLOCKED`, or with a readable FAIL a person answers with an
 approved fix, keeps the answer (`retained`), and `correct`
 continues its route in the same call through a replacement owner that receives it
