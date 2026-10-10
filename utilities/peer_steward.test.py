@@ -5127,6 +5127,16 @@ class _RetireWorld:
 
 
 class RetireTest(_TmpRootMixin, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        # The fixture PIDs (101 shell, 4242 agent) are plain numbers, not live
+        # processes: on a host where either belongs to another user, reading its
+        # /proc environ fails and the pane looks unverifiable.
+        patcher = mock.patch.object(peer_steward.peer_obligations,
+                                    "execution_attempts_for_processes", return_value=())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_current_runner_leaves_retire_untouched_while_legacy_runner_is_live(self):
         world = _RetireWorld(status="working")
         self.retire(world)

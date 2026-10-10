@@ -373,7 +373,7 @@ class EvidenceCacheTests(unittest.TestCase):
         for leaked in ("/repo", "launch_outcome", "governed-process-group-drained"):
             self.assertNotIn(leaked, text)
         self.assertEqual(len(data["native"][0]["e"]), 2)
-        self.assertEqual([p.name for p in self.home.glob("jobs.log*")],
+        self.assertEqual(sorted(p.name for p in self.home.glob("jobs.log*")),
                          ["jobs.log", "jobs.log.capacity-cache.json",
                           "jobs.log.capacity-cache.json.lock"])
 

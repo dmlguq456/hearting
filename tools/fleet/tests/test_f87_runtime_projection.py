@@ -104,7 +104,12 @@ class RuntimeProjectionTest(unittest.TestCase):
         bindir, log = root / "bin", root / "herdr.jsonl"
         bindir.mkdir(exist_ok=True)
         path = bindir / "herdr"
-        path.write_text("#!/usr/bin/env python3\nimport json,os,sys,time\nwith open(os.environ['HERDR_LOG'],'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\nif os.environ.get('HERDR_MODE')=='timeout': time.sleep(.8)\nraise SystemExit(int(os.environ.get('HERDR_EXIT','0')))\n")
+        path.write_text("#!/usr/bin/env python3\nimport json,os,sys,time\n"
+                        # A read-only `pane list` is what the identity walk issues when it
+                        # passes a live `claude` ancestor (a suite run from Claude Code); it
+                        # reports nothing, so only the commands that would are logged.
+                        "if sys.argv[1:3]!=['pane','list']:\n"
+                        " with open(os.environ['HERDR_LOG'],'a') as f: f.write(json.dumps(sys.argv[1:])+'\\n')\nif os.environ.get('HERDR_MODE')=='timeout': time.sleep(.8)\nraise SystemExit(int(os.environ.get('HERDR_EXIT','0')))\n")
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return bindir, log
 
