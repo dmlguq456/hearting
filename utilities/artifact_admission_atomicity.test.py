@@ -422,7 +422,8 @@ class TestCrashRecovery(AtomicityTestBase):
 
             def _kill_before_rename(src_path, dst_path):
                 os.kill(os.getpid(), 9)
-            adm.os.rename = _kill_before_rename
+            # Inject at the shared commit boundary on native and fallback paths.
+            adm.atomic_publish.rename_directory_locked = _kill_before_rename
 
             req = adm.AdmissionRequest(idempotency_key=key, document=document, staging_source=src)
             adm.admit(root, req)
@@ -531,7 +532,8 @@ class TestCrashRecovery(AtomicityTestBase):
             key = {key!r}
             def _kill_before_rename(src_path, dst_path):
                 os.kill(os.getpid(), 9)
-            adm.os.rename = _kill_before_rename
+            # Inject at the shared commit boundary on native and fallback paths.
+            adm.atomic_publish.rename_directory_locked = _kill_before_rename
             req = adm.AdmissionRequest(idempotency_key=key, document=document, staging_source=src)
             adm.admit(root, req)
             """
