@@ -72,6 +72,12 @@ not-observed-wrong.
 
 ## Levels (execute in order; stop at the first failure)
 
+Browser verification keeps screenshots, console/network logs and its verdict
+in the assigned output folder. A persistent Chromium user-data directory is
+process-owned scratch: create it with `tempfile.TemporaryDirectory()` outside
+the cycle payload, close the browser in `finally`, then clean only that
+directory. Never remove or relocate an existing reviewer's profile.
+
 1. **Syntax:** parse, compile, or type-check each changed surface (e.g. `ast` parse for
    Python files). On failure: report the syntax error and stop.
 2. **Import:** import the public module or load the application entry. On failure:

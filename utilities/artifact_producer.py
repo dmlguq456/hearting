@@ -2801,6 +2801,19 @@ def _unmanifestable_reason(rel: str) -> Optional[str]:
 _TEMPORARY_FILE_SUFFIXES = (".pyc", ".swp", "~", ".tmp", ".part")
 
 
+def _browser_profile(parts: Sequence[str], *, directory: bool = False) -> bool:
+    """Reserved browser-review scratch, including profiles left by old reviewers."""
+    payload = tuple(parts)
+    if payload and payload[0] == "artifacts":
+        payload = payload[1:]
+    return bool(payload and payload[0] == "reviews" and any(
+        payload[index - 1] == "browser"
+        and (part == "profile" or part.startswith("profile-"))
+        for index, part in enumerate(payload)
+        if index > 1 and (directory or index < len(payload) - 1)
+    ))
+
+
 def _outside_inclusion_rule(rel: str) -> bool:
     """§45 D-123's one inclusion rule: what a cycle's manifest never lists.
 
@@ -2812,6 +2825,7 @@ def _outside_inclusion_rule(rel: str) -> bool:
     """
     parts = rel.split("/")
     return (any(part.startswith(".") or part == "__pycache__" for part in parts)
+            or _browser_profile(parts)
             or parts[-1].endswith(_TEMPORARY_FILE_SUFFIXES))
 
 
@@ -6264,7 +6278,8 @@ class _RefreshScan:
 
 def _pruned_directory(parts: Sequence[str]) -> bool:
     """A directory the inclusion rule leaves out whole (hidden component or `__pycache__`)."""
-    return any(part.startswith(".") or part == "__pycache__" for part in parts)
+    return (any(part.startswith(".") or part == "__pycache__" for part in parts)
+            or _browser_profile(parts, directory=True))
 
 
 def _walk_sorted(top: str, prefix: Tuple[str, ...], after: Optional[Tuple[str, ...]]):

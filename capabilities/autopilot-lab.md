@@ -252,6 +252,10 @@ opening one session per stage:
 | closing stage | `autopilot-spec` update when applicable (a research-mode blueprint advances as a roadmap: close the step with its verdict and evidence, re-plan the tail), then offer only `bundle_id`, version, and `report/index.html` to the optional app-neutral sink; unavailable records `skipped/extension-unavailable` | 9 |
 
 This is a stage catalog, not a requirement to repeat completed computation.
+Browser verification writes its screenshots, logs and verdict in its review
+folder, using a process-owned temporary Chromium profile outside cycle
+`artifacts/`. Existing `reviews/**/browser/profile/` and `profile-*/` runtime
+directories are left in place and excluded by the producer on close and refresh.
 For reporting or media work on fixed results, use `WORKFLOW §0.2.1` to select
 the needed subgraph (for example `report,independent-verify,publish,sync` for a publishable
 report from existing inputs). Reuse metrics, checkpoints, and media; omit

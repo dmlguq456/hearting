@@ -1465,6 +1465,55 @@ class FinalizeTest(ProducerTestBase):
         self.assertEqual(sorted(links), ["artifacts/.cache", "artifacts/.link"])
 
 
+class BrowserProfileCollectionTest(ProducerTestBase):
+    def test_close_and_refresh_preserve_profiles_without_reading_cache_bytes(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        cycle = Path(result["cycle_dir"])
+        self.write_output(result, "reviews/eval/att-old/browser/screenshot.png", b"image")
+        self.write_output(result, "reviews/eval/att-old/verdict.md", b"PASS")
+        profiles = [
+            self.write_output(result, f"reviews/eval/att-old/browser/{name}/Default/Code Cache/js/index", b"cache")
+            for name in ("profile", "profile-cdp", "profile-cli-prior-final-flags")
+        ]
+        real_read = Path.read_bytes
+        def read(path):
+            if any(profile.parent.parent.parent in path.parents for profile in profiles):
+                self.fail(f"read Chromium profile payload: {path}")
+            return real_read(path)
+        before = {path: (path.stat().st_ino, path.read_bytes()) for path in profiles}
+        self.close(route, route_file)
+        with mock.patch.object(Path, "read_bytes", read):
+            sealed = P.finalize(self.root, cycle_id=result["cycle_id"])
+            facts = P._scan_cycle_facts(cycle, excluded=[], excluded_symlinks=[])
+            bounded = P._bounded_scan(cycle, cursor=None, known={}, budget=P.RefreshBudget())
+        locators = {row[0] for row in facts}
+        self.assertIn("artifacts/reviews/eval/att-old/browser/screenshot.png", locators)
+        self.assertIn("artifacts/reviews/eval/att-old/verdict.md", locators)
+        self.assertEqual(locators, set(bounded.facts))
+        self.assertEqual(len(sealed["excluded_hidden"]), 3)
+        for path, identity in before.items():
+            self.assertEqual((path.stat().st_ino, path.read_bytes()), identity)
+
+    def test_profile_like_outputs_and_invalid_output_names_keep_existing_rules(self):
+        cycle = self.root / "cycle"
+        (cycle / "artifacts").mkdir(parents=True)
+        for rel in ("artifacts/reviews/eval/att/browser/profile.txt",
+                    "artifacts/reviews/eval/att/browser/profile",
+                    "artifacts/experiments/browser/profile-cdp/result.txt",
+                    "artifacts/reviews/profile-cdp/result.txt"):
+            path = cycle / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"output")
+        rows, violations = P._enumerate_output(cycle)
+        self.assertEqual(violations, [])
+        self.assertEqual(len(rows), 4)
+        invalid = cycle / "artifacts/bad name.txt"
+        invalid.write_bytes(b"invalid")
+        self.assertEqual(P._enumerate_output(cycle)[1],
+                         ["locator-invalid-component:artifacts/bad name.txt"])
+
+
 class RecoveryTest(ProducerTestBase):
     def _sealing_crash(self):
         self.activate()
