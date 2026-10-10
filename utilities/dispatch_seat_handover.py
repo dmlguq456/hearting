@@ -418,7 +418,7 @@ def record_locked(seat, harness: str, sid: str, event: str, source: str, now: fl
 
 def record_retire_handover(predecessor_sid: str, predecessor_harness: str, successor_sid: str,
                            successor_harness: str, *, env=None, jobs=None,
-                           now: Optional[float] = None) -> Optional[dict]:
+                           now: Optional[float] = None, successor_seat=None) -> Optional[dict]:
     """Hand a retired predecessor's routes to its seat successor, across harnesses.
 
     Called after ``peer-steward retire`` proved the predecessor exited and the caller runs in the
@@ -428,11 +428,13 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
     naming the successor) that lets :func:`effective_parent` find it.  Registry rows are untouched.
     Returns the row (the existing one when repeated), or None when there is nothing to hand over
     -- including attempts the predecessor already handed to another session.
+    A deferred retire supplies the seat proven by its immutable requester and
+    original successor mark; its observer need not own that physical pane.
     """
     if not predecessor_sid or not successor_sid or predecessor_sid == successor_sid:
         return None
     st = _st()
-    seat = pane_seat(env, successor_harness, successor_sid)
+    seat = successor_seat or pane_seat(env, successor_harness, successor_sid)
     if seat is None or seat.kind != "pane":
         return None
     jobs = jobs or _default_jobs()

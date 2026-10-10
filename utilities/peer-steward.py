@@ -1126,35 +1126,62 @@ def _mark_seat_successor(pane, beside, kind, session_id):
         pass
 
 
-def _seat_handover(ident, own_sid, own_harness):
+def _seat_handover(ident, own_sid, own_harness, *, requester=None, accepted_at=None):
     """After `retire` proved the predecessor exited: when this session runs in the pane started
     beside the predecessor, its routes become this session's, across harnesses
     (`dispatch_seat_handover.record_retire_handover`). Returns the receipt value, or None when
     this is not a seat change (the receipt then stays as it was); it never fails the retire."""
-    pane = _caller_pane()
+    pane = requester.get("pane") if requester is not None else _caller_pane()
     if not pane:
         return None
     path = _seat_successor_path(pane)
     try:
-        mark = json.loads(path.read_text(encoding="utf-8"))
+        mark_bytes = path.read_bytes()
+        mark = json.loads(mark_bytes)
     except (OSError, ValueError):
         return None
     if not isinstance(mark, dict) or mark.get("pane") != pane or mark.get("beside") != ident["pane"]:
         return None
-    recorded = (mark.get("successor") or {}).get("session_id")
-    if not own_sid or own_harness not in {"claude", "codex", "opencode"} or (recorded and recorded != own_sid):
+    successor = mark.get("successor") or {}
+    recorded = successor.get("session_id")
+    if (not own_sid or own_sid == "-" or ident.get("session_id") in {None, "", "-"}
+            or own_harness not in {"claude", "codex", "opencode"}
+            or successor.get("harness") != own_harness or (recorded and recorded != own_sid)):
         return "skipped:successor-unverified"
+    if requester is not None:
+        try:
+            if not accepted_at or not (0 < float(mark.get("at", 0)) <= float(accepted_at)):
+                return "skipped:successor-unverified"
+        except (TypeError, ValueError):
+            return "skipped:successor-unverified"
     try:
         import dispatch_seat_handover as handover
+        booked = {}
+        if requester is not None:
+            import session_tidy
+            booked["successor_seat"] = session_tidy._pane_seat_of(pane)
         row = handover.record_retire_handover(
-            ident["session_id"], ident["harness"], own_sid, own_harness, env=os.environ)
+            ident["session_id"], ident["harness"], own_sid, own_harness, env=os.environ, **booked)
     except Exception:  # noqa: BLE001 - the retire itself already succeeded
         return "error"
     try:
-        path.unlink()
+        if row is not None and path.read_bytes() == mark_bytes:
+            path.unlink()
     except OSError:
         pass
     return str(len(row["bindings"])) if row else "none"
+
+
+def _retire_handover(duty):
+    """Consume only the accepted retirement's original succession, on any observer."""
+    intent = duty.get("intent") or {}
+    requester = intent.get("requester") or {}
+    if (not _retire_booked_foreground(duty)
+            or (intent.get("identity") or {}).get("session_id") in {None, "", "-"}):
+        return None
+    return _seat_handover(intent.get("identity") or {}, requester.get("session_id"),
+                          requester.get("harness"), requester=requester,
+                          accepted_at=duty.get("accepted_at"))
 
 
 def _observed_start_agent(args, deadline=None, wait=False):
@@ -1829,6 +1856,7 @@ def _retire_subject_state(duty):
 
 
 def _complete_gone_retire(store, duty):
+    handover = _retire_handover(duty)
     phase = (duty.get("observation") or {}).get("phase", "waiting")
     settled = store.update(duty["id"], state="complete", result="target-already-gone",
                            delivery="completed", cleanup="complete", expected_phases={phase},
@@ -1836,7 +1864,8 @@ def _complete_gone_retire(store, duty):
     if settled.get("state") == "complete":
         ident = (duty.get("intent") or {}).get("identity") or {}
         print(f"retired=true reason=target-already-gone agent={ident.get('harness', '-')} "
-              f"name={ident.get('name', '-')} pane={ident.get('pane', '-')}")
+              f"name={ident.get('name', '-')} pane={ident.get('pane', '-')}"
+              + (f" handover={handover}" if handover else ""))
         return True
     return False
 
@@ -1881,7 +1910,7 @@ def _finish_retire_cleanup(store, duty, ident, foreground):
             and _proc_start_ticks(foreground.get("shell_pid")) == foreground.get("shell_start")
         )
         if not still_exact or not _retire_shell_returned(info, foreground):
-            if info is not None and _retire_subject_state(duty) == "gone":
+            if _retire_subject_state(duty) == "gone":
                 return 0 if _complete_gone_retire(store, duty) else 1
             current = store.get(duty["id"]) or duty
             observation = {**(current.get("observation") or {}),
@@ -1893,14 +1922,10 @@ def _finish_retire_cleanup(store, duty, ident, foreground):
         if (not final_info or final_info.get("shell_pid") != foreground.get("shell_pid")
                 or _proc_start_ticks(foreground.get("shell_pid")) != foreground.get("shell_start")
                 or not _retire_shell_returned(final_info, foreground)):
-            if final_info is not None and _retire_subject_state(duty) == "gone":
+            if _retire_subject_state(duty) == "gone":
                 return 0 if _complete_gone_retire(store, duty) else 1
             return 1
-        requester = (duty.get("intent") or {}).get("requester") or {}
-        predecessor = {"harness": ident["harness"], "session_id": ident["session_id"],
-                       "name": ident["name"], "pane": pane}
-        handover = _seat_handover(predecessor, requester.get("session_id", ""),
-                                  requester.get("harness", "unknown"))
+        handover = _retire_handover(duty)
         if not _close_pane(pane):
             current = store.get(duty["id"]) or duty
             store.update(duty["id"], state="cleanup-pending",
@@ -1930,7 +1955,11 @@ def _resume_retire_obligation(duty, store):
     target = intent.get("target") or ""
     observation = duty.get("observation") or {}
     phase = observation.get("phase", "waiting")
-    if duty.get("state") in {"complete", "cancelled"}:
+    if duty.get("state") == "complete":
+        if duty.get("result") in {"normal-exit", "target-already-gone"}:
+            _retire_handover(duty)
+        return
+    if duty.get("state") == "cancelled":
         return
     if phase == "shell-returned":
         foreground = observation.get("foreground") or {}
@@ -1950,7 +1979,7 @@ def _resume_retire_obligation(duty, store):
                     state="cleanup-pending", extra={"foreground": foreground})
                 if claimed:
                     _finish_retire_cleanup(store, claimed, ident, foreground)
-            elif info is not None and _retire_subject_state(duty) == "gone":
+            elif _retire_subject_state(duty) == "gone":
                 _complete_gone_retire(store, duty)
             else:
                 store.update(duty["id"], state="pending",
@@ -2040,6 +2069,25 @@ def cmd_retire(args):
         return finish("herdr-not-found")
     state, ident, _, reason = _retire_target(target)
     if not isinstance(ident.get("pane"), str) or ident["pane"] in {"", "-"}:
+        # The pane may be gone while the accepted request still proves the
+        # lifetime and its successor. Never borrow another requester's duty.
+        own_sid, own_harness = _current_session_identity()
+        own_pane = _caller_pane()
+        matches = [row for row in store.list(states=peer_obligations._PENDING_STATES | {"complete"})
+                   if row.get("intent", {}).get("kind") == "retire"
+                   and row["intent"].get("target") == target
+                   and row["intent"].get("requester") == {
+                       "session_id": own_sid, "harness": own_harness,
+                       "pane": own_pane, "server": _HERDR_SESSION or "default"}]
+        if own_sid and own_pane and len(matches) == 1:
+            saved = matches[0]
+            if saved.get("state") == "complete" and saved.get("result") in {"normal-exit", "target-already-gone"}:
+                handover = _retire_handover(saved)
+                print("retired=true reason=already-complete"
+                      + (f" handover={handover}" if handover else ""))
+                return 0
+            if _retire_subject_state(saved) == "gone" and _complete_gone_retire(store, saved):
+                return 0
         return finish(reason or "pane-unverified")
     pane, harness = ident["pane"], ident["harness"]
     if duty is not None:
@@ -2066,6 +2114,7 @@ def cmd_retire(args):
     else:
         duty_id = duty["id"]
     if duty.get("state") == "complete":
+        _resume_retire_obligation(duty, store)
         print(f"retired=true reason=already-complete agent={harness} "
               f"name={ident['name']} pane={pane}")
         return 0
@@ -2152,7 +2201,7 @@ def cmd_retire(args):
     if harness == "claude":
         return _retire_claude_background_confirm(
             target, pane, harness, ident, identity, finish,
-            own_sid, own_harness)
+            own_sid, own_harness, duty=duty)
     return finish("agent-still-running", pending=True)
 
 
@@ -2207,7 +2256,7 @@ def _retire_background_dialog_lines(lines):
 
 
 def _retire_claude_background_confirm(target, pane, harness, ident, identity, finish,
-                                      own_sid, own_harness):
+                                      own_sid, own_harness, *, duty=None):
     """Finish one normal retire path through Claude's background-work confirm.
 
     The default picks 1 (exit and stop tasks): retire closes a handed-over
@@ -2244,7 +2293,7 @@ def _retire_claude_background_confirm(target, pane, harness, ident, identity, fi
         if _retire_shell_returned(info, identity):
             if not _retire_shell_returned(_retire_pane_info(pane), identity):
                 return finish("shell-changed", pending=True)
-            handover = _seat_handover(ident, own_sid, own_harness)
+            handover = _retire_handover(duty) if duty is not None else _seat_handover(ident, own_sid, own_harness)
             if not _close_pane(pane):
                 return finish("pane-close-failed", handover=handover, pending=True)
             return finish("normal-exit", True, handover=handover,
@@ -3946,6 +3995,17 @@ def cmd_ensure_obligations(_args):
                     _resume_message_obligation(duty, store)
                 except Exception:
                     store.update(duty["id"], observer_error="observer-unavailable")
+        # Older observers could close a retire without consuming its successor
+        # mark. Only that requester's existing lifecycle repairs the omission.
+        sid, harness = _current_session_identity()
+        pane = _caller_pane()
+        if sid and pane and _seat_successor_path(pane).is_file():
+            for duty in store.list(states={"complete"}):
+                requester = duty.get("intent", {}).get("requester") or {}
+                if (duty.get("intent", {}).get("kind") == "retire"
+                        and requester == {"session_id": sid, "harness": harness,
+                                          "pane": pane, "server": _HERDR_SESSION or "default"}):
+                    _resume_retire_obligation(duty, store)
         peer_obligations.ensure_runner()
         dispatch_batch_obligations.ensure_observers()
     except Exception:

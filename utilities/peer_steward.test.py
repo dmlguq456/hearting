@@ -5668,7 +5668,9 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
             return rc, line, handed
         rc, line, handed = run("w1:pOld", "new-sid")
         self.assertEqual((rc, line), (0, handed_line + " handover=2"))
-        handed.assert_called_once_with("old-sid", "codex", "new-sid", "claude", env=mock.ANY)
+        handed.assert_called_once_with("old-sid", "codex", "new-sid", "claude", env=mock.ANY,
+                                      successor_seat=mock.ANY)
+        self.assertEqual(handed.call_args.kwargs["successor_seat"].pane, "w1:pNew")
         self.assertFalse(peer_steward._seat_successor_path("w1:pNew").exists())      # used once
         rc, line, handed = run("w1:pElse", "new-sid")                               # not beside this one
         self.assertEqual((rc, line), (0, handed_line))
@@ -5880,6 +5882,163 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
                     self.assertEqual(result, {"start": "800", "group": 4242, "argv": ["codex"]})
                 else:
                     self.assertIsNone(result)
+
+
+class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
+    """The recorded successor inherits; observers and later pane occupants do not."""
+
+    def booking(self, predecessor="claude", successor="opencode"):
+        import dispatch_seat_handover as handover
+        self.handover = handover
+        self.meta = {"attempt_id": "att-original", "dispatch_depth": "1", "worker_type": "owner",
+                     "parent_sid": "old-sid", "parent_harness": predecessor,
+                     "route_id": "rt-original", "route_hash": "sha256:original", "route_node": "owner"}
+        unrelated = {**self.meta, "attempt_id": "att-unrelated", "parent_sid": "other-parent",
+                     "route_id": "rt-unrelated", "route_hash": "sha256:unrelated"}
+        self.jobs_path.write_text("".join("now\trunning\t0\tjob\tlog\t" +
+            ",".join(f"{key}={value}" for key, value in row.items()) + "\n"
+            for row in (self.meta, unrelated)))
+        self.registry_bytes = self.jobs_path.read_bytes()
+        self.unrelated = unrelated
+        peer_steward._mark_seat_successor("w1:pNew", "w1:pOld", successor, "")
+        marker = peer_steward._seat_successor_path("w1:pNew")
+        value = json.loads(marker.read_text()); value["at"] = 100
+        marker.write_text(json.dumps(value))
+        requester = {"session_id": "new-sid", "harness": successor,
+                     "pane": "w1:pNew", "server": "default"}
+        foreground = {"pid": 4242, "start": "800", "shell_pid": 101, "shell_start": "700"}
+        identity = {"session_id": "old-sid", "harness": predecessor,
+                    "pane": "w1:pOld", "foreground": foreground, "server": "default", "name": "old"}
+        store = peer_steward.peer_obligations.ObligationStore()
+        with mock.patch.object(peer_steward.peer_obligations.time, "time", return_value=200):
+            duty = store.create("retire-fixture", "retire", identity,
+                                {"target": "old", "requester": requester})
+        return store, duty
+
+    def assert_authority(self, successor="new-sid"):
+        self.assertEqual(self.handover.effective_parent(self.meta, self.jobs_path), successor)
+        self.assertEqual(self.handover.effective_parent(self.unrelated, self.jobs_path), "other-parent")
+        self.assertEqual(self.jobs_path.read_bytes(), self.registry_bytes)
+
+    def test_gone_predecessor_hands_over_from_an_observer_on_every_harness(self):
+        import session_tidy
+        import pane_ownership
+        for predecessor, successor in (("claude", "opencode"), ("opencode", "codex"), ("codex", "claude")):
+            with self.subTest(predecessor=predecessor, successor=successor):
+                # Each chain has its own isolated state, as independent seats do.
+                with tempfile.TemporaryDirectory() as root, mock.patch.dict(os.environ, {
+                        "XDG_STATE_HOME": root}):
+                    store, duty = self.booking(predecessor, successor)
+                    with mock.patch.object(peer_steward, "_caller_pane", return_value="w9:pObserver"), \
+                         mock.patch.object(peer_steward, "_retire_subject_state", return_value="gone"), \
+                         mock.patch.object(pane_ownership, "verified_pane", return_value=""), \
+                         mock.patch.object(peer_steward.subprocess, "run") as native:
+                        peer_steward._resume_retire_obligation(duty, store)
+                        native.assert_not_called()
+                    self.assert_authority()
+                    settled = store.get(duty["id"])
+                    self.assertEqual((settled["state"], settled["result"]), ("complete", "target-already-gone"))
+                    seat = session_tidy._pane_seat_of("w1:pNew")
+                    before = session_tidy._ledger_path(seat).read_bytes()
+                    peer_steward._resume_retire_obligation(settled, store)
+                    self.assertEqual(session_tidy._ledger_path(seat).read_bytes(), before)
+                    # Keep the next case's immutable duty identity separate.
+                    store._record_path(duty["id"]).unlink()
+
+    def test_missing_pane_finishes_each_exit_phase_without_input_or_close(self):
+        for phase in ("exit-requested", "shell-returned"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as root, \
+                 mock.patch.dict(os.environ, {"XDG_STATE_HOME": root}):
+                store, duty = self.booking()
+                duty = store.claim_phase(duty["id"], {"waiting"}, phase,
+                                         extra={"foreground": duty["intent"]["identity"]["foreground"]})
+                with mock.patch.object(peer_steward, "_retire_pane_info", return_value=None), \
+                     mock.patch.object(peer_steward, "_retire_subject_state", return_value="gone"), \
+                     mock.patch.object(peer_steward.subprocess, "run") as native:
+                    peer_steward._resume_retire_obligation(duty, store)
+                    native.assert_not_called()
+                self.assert_authority()
+                self.assertEqual(store.get(duty["id"])["state"], "complete")
+                store._record_path(duty["id"]).unlink()
+
+    def test_normal_exit_cleanup_uses_the_booked_successor_pane(self):
+        store, duty = self.booking()
+        foreground = duty["intent"]["identity"]["foreground"]
+        info = {"pane_id": "w1:pOld", "shell_pid": 101, "foreground_process_group_id": 101}
+        with mock.patch.object(peer_steward, "_caller_pane", return_value="w9:pObserver"), \
+             mock.patch.object(peer_steward, "_retire_pane_info", return_value=info), \
+             mock.patch.object(peer_steward, "_retire_shell_returned", return_value=True), \
+             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="700"), \
+             mock.patch.object(peer_steward, "_close_pane", return_value=True) as close:
+            peer_steward._finish_retire_cleanup(store, duty, duty["intent"]["identity"], foreground)
+        close.assert_called_once_with("w1:pOld")
+        self.assert_authority()
+
+    def test_completed_legacy_retire_repairs_via_the_same_command(self):
+        store, duty = self.booking()
+        completed = store.update(duty["id"], state="complete", result="normal-exit",
+                                 observation={"phase": "complete"})
+        with mock.patch.object(peer_steward, "_retire_target", return_value=("unknown", {
+                "harness": "-", "name": "old", "pane": "-", "session_id": "-"}, 1, "pane-unverified")), \
+             mock.patch.object(peer_steward, "_current_session_identity", return_value=("new-sid", "opencode")), \
+             mock.patch.object(peer_steward, "_caller_pane", return_value="w1:pNew"), \
+             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+             mock.patch.object(peer_steward.subprocess, "run") as native:
+            self.assertEqual(peer_steward.cmd_retire(SimpleNamespace(target="old")), 0)
+            native.assert_not_called()
+        self.assert_authority()
+        self.assertEqual(store.get(duty["id"]), completed)
+
+    def test_requester_lifecycle_repairs_a_completed_legacy_retire(self):
+        store, duty = self.booking()
+        store.update(duty["id"], state="complete", result="normal-exit")
+        with mock.patch.object(peer_steward, "_current_session_identity", return_value=("new-sid", "opencode")), \
+             mock.patch.object(peer_steward, "_caller_pane", return_value="w1:pNew"), \
+             mock.patch.object(peer_steward, "_ensure_watch_observers"), \
+             mock.patch.object(peer_steward.dispatch_batch_obligations, "ensure_observers"):
+            self.assertEqual(peer_steward.cmd_ensure_obligations(None), 0)
+        self.assert_authority()
+
+    def test_later_requester_cannot_replay_another_sessions_retire(self):
+        store, duty = self.booking()
+        store.update(duty["id"], state="complete", result="normal-exit")
+        with mock.patch.object(peer_steward, "_retire_target", return_value=("unknown", {
+                "harness": "-", "name": "old", "pane": "-", "session_id": "-"}, 1, "pane-unverified")), \
+             mock.patch.object(peer_steward, "_current_session_identity", return_value=("later-sid", "opencode")), \
+             mock.patch.object(peer_steward, "_caller_pane", return_value="w1:pNew"), \
+             mock.patch.object(peer_steward, "_herdr_missing", return_value=False):
+            self.assertEqual(peer_steward.cmd_retire(SimpleNamespace(target="old")), 1)
+        self.assert_authority("old-sid")
+
+    def test_cancelled_or_unknown_lifetime_grants_nothing(self):
+        store, duty = self.booking()
+        with mock.patch.object(peer_steward, "_retire_subject_state", return_value="unknown"):
+            peer_steward._resume_retire_obligation(duty, store)
+        self.assert_authority("old-sid")
+        cancelled = store.update(duty["id"], state="cancelled")
+        peer_steward._resume_retire_obligation(cancelled, store)
+        self.assert_authority("old-sid")
+
+    def test_a_later_or_mismatched_successor_mark_grants_nothing(self):
+        store, duty = self.booking()
+        marker = peer_steward._seat_successor_path("w1:pNew")
+        original = json.loads(marker.read_text())
+        for change in ({"at": 300}, {"successor": {"harness": "claude", "session_id": "new-sid"}},
+                       {"successor": {"harness": "opencode", "session_id": "later-sid"}}):
+            with self.subTest(change=change):
+                marker.write_text(json.dumps({**original, **change}))
+                self.assertEqual(peer_steward._retire_handover(duty), "skipped:successor-unverified")
+                self.assert_authority("old-sid")
+                self.assertTrue(marker.exists())
+
+    def test_existing_transfer_to_another_successor_is_preserved(self):
+        import session_tidy
+        store, duty = self.booking()
+        self.handover.record_retire_handover("old-sid", "claude", "first-successor", "codex",
+            jobs=self.jobs_path, successor_seat=session_tidy._pane_seat_of("w1:pFirst"))
+        store.update(duty["id"], state="complete", result="normal-exit")
+        peer_steward._resume_retire_obligation(store.get(duty["id"]), store)
+        self.assert_authority("first-successor")
 
 
 class RetireBackgroundDialogTest(unittest.TestCase):
