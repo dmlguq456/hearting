@@ -251,7 +251,19 @@ def admit_controller_launch(args, control, armed, row, delivered=()):
     # Tool receipts stay in the native tool response; the outer stream contains
     # only its existing typed controller events, not a second raw CLI receipt.
     with contextlib.redirect_stdout(io.StringIO()):
-        runner.main(runner.controller_argv(armed["resource_registry"], row), controller=controller)
+        try:
+            runner.main(runner.controller_argv(armed["resource_registry"], row), controller=controller)
+        except Exception:
+            # The runner settles its own pre-release failures before raising.
+            # Let the ordinary resource outbox carry that failure to this same
+            # owner. Unsettled/foreign rows and errors after release still raise.
+            from resource_run_registry import resource_never_started
+            actual = json.loads(Path(armed["resource_registry"]).read_text())["runs"].get(row["run_id"])
+            if (not isinstance(actual, dict) or not resource_never_started(actual)
+                    or resource_body_digest(actual) != resource_body_digest(row)
+                    or actual.get("share") != row.get("share")
+                    or actual.get("launch_controller") != identity):
+                raise
     if hasattr(controller, "children"):
         owned = getattr(args, "resource_children", None)
         if owned is None:
@@ -274,6 +286,7 @@ def pending_prompt(path, parent, args=None, control=None):
     box = (state.resource or {}).get("outbox") if state else None
     if not box:
         return None
+    row = None
     if args is not None and control is not None:
         receipt = box["receipt"]
         expected = {"parent_attempt_id": parent, "session_id": control.thread_id,
@@ -301,10 +314,14 @@ def pending_prompt(path, parent, args=None, control=None):
         if (any(receipt.get(k) != v for k, v in expected.items()) or row is None
                 or RESUME.row_digest(row) != receipt.get("resource_sha256")):
             raise JOIN.JoinContractError("resource-outbox-binding-changed")
+    from resource_run_registry import resource_never_started
+    next_work = ("The payload never started. Preserve this failed run, address its launch diagnostic, "
+        "and use the normal distinct __a<N> resource retry for unfinished authorized work. "
+        "Do not rerun completed stages." if row is not None and resource_never_started(row) else
+        "Continue only the already authorized next work; do not restart the resource.")
     return ("Runtime resource receipt (not a model child or verification PASS): "
         + json.dumps(box["receipt"], sort_keys=True, separators=(",", ":"))
-        + "\nUse pending user corrections first. Continue only the already authorized next work; "
-        "do not restart the resource. Exit is not workflow completion.")
+        + "\nUse pending user corrections first. " + next_work + " Exit is not workflow completion.")
 
 
 def acknowledge(path, parent, receipt_id):
@@ -412,6 +429,7 @@ def wait(args, path, control, delivered, emit, *, sleep=time.sleep):
                 "resource_key": key, "resource_sha256": RESUME.row_digest(receipt_row), "state": outcome, "exit_code": evidence.get("exit_code"),
                 "reason": "awaiting-next-resource" if execution_only else
                     "resource-watch-lost" if lost_watch and not evidence.get("terminal") else stage.get("state"),
+                **({"launch_error": receipt_row["launch_error"]} if receipt_row.get("launch_error") else {}),
                 "verification_pass": False, "workflow_complete": False,
                 "successors": list(armed["successors"]) if proven else []}
             digest = RESUME.row_digest(receipt)

@@ -286,8 +286,11 @@ def resource_admission(node, command, *, gpu_scoped=False, share=False, jobs=Non
         return None, None, {}
     observation = local_observation()
     path = state_path({**os.environ, **({"AGENT_DISPATCH_JOBS": str(jobs)} if jobs else {})})
-    lease = acquire(path, observation, requested=requested, share=share, owner=launcher_owner(),
-                    task=run_id or shlex.join(command), run_id=run_id)
+    try:
+        lease = acquire(path, observation, requested=requested, share=share, owner=launcher_owner(),
+                        task=run_id or shlex.join(command), run_id=run_id)
+    except GPUUnavailable as error:
+        raise GPUUnavailable("Local GPU admission on %s: %s" % (socket.gethostname(), error)) from error
     if not lease:
         return path, None, {}
     source = Path(__file__).read_text()
