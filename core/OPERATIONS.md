@@ -831,15 +831,29 @@ needed. Missing, corrupt or unwritable assignment state falls back to the origin
 session-id hash. Exhaustion of the 256 values and duplicate fixed Claude numbers
 leave uniqueness unavailable.
 
-Merge with `hearting run merge-line <PR>`. This shared command queues sessions
-and worktrees for the same GitHub repository under a user-state `flock`, shows
-the waiting position and preceding PR, then updates the branch only if it lacks
-the latest default-branch commit. It waits for that head's CI, rechecks head and
-base immediately before merging, and pins the merge to the checked head. Existing
-successful CI on an up-to-date head is reused. Failure or interruption releases
-the turn; process death releases the OS lock and the next caller discards the
-dead PID/start entry. This is local cooperative merge serialization, with no
-new approval or workflow gate; all three harnesses use the same command.
+Merge with `hearting run merge-line <PR>`. Sessions and worktrees for the same
+GitHub repository share one user-state FIFO `flock`. A lone PR retains the
+existing latest-base/head-CI path. Multiple waiting PRs are merged in order into
+an isolated integration branch and tested together through a temporary PR. Only
+successful CI for that exact integration head and merge-result tree authorizes
+one fast-forward publication of the PRs' individual merge commits. GitHub marks
+the original PRs merged through commit ancestry; their heads, history and reviews
+remain intact. The publication lease pins the checked base, avoiding intermediate
+main CI runs and preserving any concurrent default-branch successor. Protected
+branches/rules use the original per-PR path rather than bypassing merge policy. A
+changed head or default branch restarts validation for the remaining work. PR
+and main Checks share the same authenticated validated-tree lookup: an identical
+tree reuses its completed successful full PR run, including across a rebase;
+changed, failed, partial or unverified trees retain full validation.
+CI failure splits the group automatically, excluding a failing singleton while
+continuing the others. Integration conflicts use the original single-PR path.
+Every caller receives its own result through the same command, without new
+input or approval. Interruption releases the OS lock; the next caller removes
+dead PID/start entries, resumes uncompleted requests and cleans abandoned
+integration PRs/branches. This is cooperative local serialization; outside
+merges are observed through head/base checks and rejected by the publication
+lease. Temporary branch deletion uses an exact-head lease too. All three
+harnesses use the same implementation.
 
 Release publication uses immutable tags and the tested commit. Repeated or
 out-of-order successful checks are ordinary observations: refresh tags before

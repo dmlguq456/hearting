@@ -103,9 +103,11 @@ def select(repo, event, context, *, released_tag=None, api=gh_api):
         paths = [path for path in result.stdout.split("\0") if path]
         if paths and all(documentation_path(path) for path in paths):
             return False, "documentation-only"
-        if kind == "push":
+        if kind in ("push", "pull_request"):
             # Only a change that would otherwise run everything asks whether
-            # the PR already ran this exact tree; any doubt keeps the full run.
+            # a PR already ran this exact tree; any doubt keeps the full run.
+            # Rebasing queued heads can change commit identity without changing
+            # the integration's bytes. Use the same proven tree on PR and main.
             try:
                 tree = validated_pr_tree(repo, head, context, api)
             except Exception:

@@ -107,7 +107,7 @@ class ScopeTest(GitRepoCase):
 
 
 class ValidatedTreeTest(GitRepoCase):
-    """A main push whose tree a successful same-repository PR run already tested."""
+    """PR/main trees already tested by a successful same-repository full PR run."""
 
     REPO = "owner/repo"
 
@@ -210,10 +210,27 @@ class ValidatedTreeTest(GitRepoCase):
                 self.assertTrue(self.chosen(**context)[0])
                 self.assertEqual(self.calls, [])
 
-    def test_lookup_is_only_for_a_main_push_that_would_have_run_everything(self):
+    def test_pr_rebase_reuses_the_same_authenticated_tree_without_new_full_ci(self):
         event = {"pull_request": {"base": {"sha": self.base}}}
+        # An empty commit changes head identity while preserving all tested bytes.
+        self.git("commit", "--allow-empty", "-qm", "rebased equivalent head")
+        self.context["GITHUB_SHA"] = self.git("rev-parse", "HEAD").strip()
         pr = SCOPE.select(self.repo, event, dict(self.context, GITHUB_EVENT_NAME="pull_request"), api=self.api)
-        self.assertEqual(pr, (True, "runtime-test-or-unclassified-change"))
+        self.assertEqual(pr, (False, f"validated-pr-tree:{self.tree}"))
+        self.assertIn(f"name=validated-tree-{self.tree}", self.calls[0])
+
+    def test_changed_pr_tree_failed_run_and_unavailable_lookup_retain_full_ci(self):
+        event = {"pull_request": {"base": {"sha": self.base}}}
+        context = dict(self.context, GITHUB_EVENT_NAME="pull_request")
+        self.runs[11] = self.run_record(conclusion="failure")
+        self.assertTrue(SCOPE.select(self.repo, event, context, api=self.api)[0])
+        self.runs[11] = self.run_record()
+        self.commit("tools/new-runtime.py")
+        context["GITHUB_SHA"] = self.git("rev-parse", "HEAD").strip()
+        self.assertTrue(SCOPE.select(self.repo, event, context, api=self.api)[0])
+        self.assertTrue(SCOPE.select(self.repo, event, context, api=lambda _: {})[0])
+
+    def test_manual_tag_and_release_validation_never_use_tree_reuse(self):
         for context in ({"GITHUB_EVENT_NAME": "workflow_dispatch"}, {"GITHUB_EVENT_NAME": "workflow_call"},
                         {"GITHUB_REF": "refs/tags/v1.0.1"}):
             with self.subTest(context):
