@@ -121,6 +121,16 @@ projection processes without that reference conservatively retain their release 
 until they exit. This uses the installer's existing in-use judgment, with no
 additional registry or caller step.
 
+The live Fleet viewer follows a committed forward managed installation by
+replacing its own process in the same terminal. It reads the existing distribution
+lock and installation record; an in-progress, failed, incomplete or rolled-back
+installation leaves the viewer on its source. Its view, explicit folds, scroll,
+selection and ordering pass to the new process as private viewer state. The last
+drawn frame stays visible until new observations arrive. Pending confirmation or
+process termination defers replacement. Snapshot modes and development checkouts
+keep their original source. This shared viewer behavior adds no option or step
+to any runtime, and does not move a pinned dispatch tree.
+
 A route's `launch_compatibility_tuple.launch_home.path` is also the source of
 its contract read access. A replacement or child launched after activation
 retains read access to that sealed home's `capabilities/`, alongside its own
