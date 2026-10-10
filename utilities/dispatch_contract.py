@@ -7786,7 +7786,39 @@ def gate_currency(
     except (OSError, ValueError):
         return GateCurrency("integrity-broken:history-conflict", "completion-marker-unreadable")
     base = evidence_currency(route, node, marker_path, marker, observe=observe)
-    if base.state not in {"current", "revised-unrecorded"}:
+    return _marker_provenance_currency(route, node, marker_path, marker, base, observe=observe)
+
+
+def _marker_provenance_currency(route, node, marker_path, marker, base, *, observe=False):
+    """Prove recorded marker lineage without rereading historical payloads."""
+    if base.state not in {"current", "revised-unrecorded", "superseded"}:
+        return base
+    try:
+        schema_ok, _ = _marker_schema_identity_ok(route, node, marker, marker_path, observe=observe)
+    except (KeyError, OSError, TypeError, ValueError):
+        schema_ok = False
+    if not schema_ok:
+        return GateCurrency("integrity-broken:identity-mismatch", "revision-predecessor-identity-invalid")
+    # Legacy tombstones kept the original sequence. Run their ordinary
+    # provenance walk, including sequence and revision-edge validation,
+    # rather than treating an exact attempt link as the whole proof.
+    legacy_supersession = (marker.get("state") == "superseded-by-upstream-revision"
+                           and not marker.get("superseded_by"))
+    if marker.get("state") == "superseded-by-upstream-revision" and not legacy_supersession:
+        # Revise writes a new history row for the supersession, without
+        # changing the original worker's attempt link. Prove that exact
+        # predecessor rather than expecting its link to name the new row.
+        try:
+            prior_path, prior = _superseded_marker_predecessor(route, node, marker_path, marker)
+            prior_currency = _marker_provenance_currency(
+                route, node, prior_path, prior,
+                GateCurrency("current", "completion-marker-verified"), observe=True)
+        except (DispatchContractError, KeyError, OSError, TypeError, ValueError):
+            return GateCurrency("integrity-broken:identity-mismatch", "supersession-provenance-invalid")
+        if prior_currency.state not in {"current", "revised-unrecorded"}:
+            return prior_currency
+        return base
+    if base.state not in {"current", "revised-unrecorded"} and not legacy_supersession:
         return base
     node_id = str(node.get("id"))
     current = marker
@@ -7809,6 +7841,12 @@ def gate_currency(
     seen: set[int] = set()
     for _depth in range(max_steps):
         sequence = current.get("sequence")
+        if (current.get("state") == "superseded-by-upstream-revision"
+                and not (legacy_supersession and current is marker)):
+            historical = _marker_provenance_currency(
+                route, node, current_path, current,
+                GateCurrency("current", "completion-marker-verified"), observe=True)
+            return base if historical.state == "current" else historical
         if current.get("stage_authority") != "revision":
             try:
                 link_ok = _marker_link_current(route, node, current, current_path)
@@ -7848,6 +7886,50 @@ def gate_currency(
             return GateCurrency("integrity-broken:identity-mismatch", "revision-predecessor-identity-invalid")
         current, current_path = prior_marker, prior_path
     return GateCurrency("integrity-broken:identity-mismatch", "revision-provenance-invalid")
+
+
+def _superseded_marker_predecessor(route, node, marker_path, marker):
+    """Read the predecessor copied by the existing revision writer."""
+    node_id = str(node["id"])
+    sequence = marker.get("sequence")
+    if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 2:
+        raise ValueError("supersession-sequence-invalid")
+    predecessors = []
+    prefix = f"{node_id}."
+    for path in marker_path.parent.glob(f"{node_id}.*.json"):
+        suffix = path.name[len(prefix):-len(".json")]
+        if suffix.isdecimal() and 1 <= int(suffix) < sequence:
+            predecessors.append((int(suffix), path))
+    prior_sequence, prior_path = max(predecessors)
+    prior = json.loads(prior_path.read_text(encoding="utf-8"))
+    if (not isinstance(prior, dict) or prior.get("sequence") != prior_sequence
+            or prior.get("state") == "superseded-by-upstream-revision"):
+        raise ValueError("supersession-predecessor-invalid")
+    expected = dict(prior, sequence=sequence, state="superseded-by-upstream-revision",
+                    superseded_by=marker.get("superseded_by"))
+    if expected != marker:
+        raise ValueError("supersession-predecessor-mismatch")
+    superseding = marker.get("superseded_by") or {}
+    if not isinstance(superseding, dict):
+        raise ValueError("supersession-upstream-invalid")
+    upstream_id, upstream_sequence = superseding.get("node"), superseding.get("sequence")
+    upstream_node = next((n for n in route["nodes"] if n["id"] == upstream_id), None)
+    if (upstream_node is None
+            or not isinstance(upstream_sequence, int) or isinstance(upstream_sequence, bool)
+            or upstream_sequence < 2
+            or node_id not in _route_module()._downstream_node_ids(route, upstream_id)):
+        raise ValueError("supersession-upstream-invalid")
+    upstream_path = marker_path.parent / f"{upstream_id}.{upstream_sequence}.json"
+    upstream = json.loads(upstream_path.read_text(encoding="utf-8"))
+    if (not isinstance(upstream, dict) or upstream.get("stage_authority") != "revision"
+            or upstream.get("sequence") != upstream_sequence):
+        raise ValueError("supersession-upstream-not-revision")
+    upstream_currency = _marker_provenance_currency(
+        route, upstream_node, upstream_path, upstream,
+        GateCurrency("current", "completion-marker-verified"), observe=True)
+    if upstream_currency.state not in {"current", "revised-unrecorded"}:
+        raise ValueError("supersession-upstream-unproven")
+    return prior_path, prior
 
 
 def observe_terminal_review_failure(

@@ -2871,6 +2871,125 @@ class CompletionMarkerTest(unittest.TestCase):
         budget = dispatch.admit_round(route, node, self.jobs).budget
         self.assertEqual(budget.state, "admit")
 
+    def upstream_superseded_review_fixture(self):
+        self.jobs = self.stable_dispatch / "jobs.log"
+        self.jobs.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.jobs.touch(mode=0o600)
+        route = self.compile_route(intensity="standard")
+        path = self.write_route(route)
+        plan = self.base / "plan.md"
+        plan.write_text("original plan\n")
+        self.assertEqual(self.complete(path, "plan", plan).returncode, 0)
+        review = self.review_blocking_row("att-original-fail", 1)
+        self.jobs.write_text(self.jobs.read_text().replace(
+            "attempt_id=att-original-fail,", "attempt_id=att-original-fail,failure_class=fail,"))
+        self.write_row("running", "review-pass", "att-original-pass", "worker_type=review", node_id="plan-check")
+        self._reap_real_process("att-original-pass")
+        passed = self.base / "review-pass.md"
+        passed.write_text("independent PASS on original plan\n")
+        result = self.complete(path, "plan-check", passed, jobs=self.jobs, attempt_id="att-original-pass")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        plan.write_text("corrected plan\n")
+        result = self.revise(path, "plan", plan, basis="owner-correction", reason="corrected upstream source")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        node = next(n for n in route["nodes"] if n["id"] == "plan-check")
+        directory = self.stable_dispatch / "completion" / route["route_id"]
+        memo = self.owner_closure(route, attempts=("att-original-fail",), artifacts=(review.name,))
+        return route, path, node, directory, memo
+
+    def test_upstream_superseded_pass_admits_original_fail_owner_closure(self):
+        route, path, node, directory, memo = self.upstream_superseded_review_fixture()
+        history = {p.name: p.read_bytes() for p in directory.glob("plan-check.*.json")
+                   if p.name != "plan-check.attempt.json"}  # mutable compatibility pointer
+        with mock.patch.dict(os.environ, self.base_env(), clear=True):
+            before = {str(p): (p.read_bytes(), p.stat().st_mtime_ns)
+                      for root in (self.artifact, self.stable_dispatch) for p in root.rglob("*") if p.is_file()}
+            proof = ROUTE.owner_closure_plan(route, node, memo, self.jobs, "att-original-fail")
+            self.assertEqual(proof["source_attempt_id"], "att-original-fail")
+            self.assertEqual(before, {str(p): (p.read_bytes(), p.stat().st_mtime_ns)
+                                     for root in (self.artifact, self.stable_dispatch) for p in root.rglob("*") if p.is_file()})
+        result = self.complete(path, "plan-check", memo, jobs=self.jobs, attempt_id="att-original-fail")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        marker = json.loads((directory / "plan-check.json").read_text())
+        self.assertEqual(marker["review_independence"], "owner-overridden")
+        self.assertEqual(marker["review_gate_closure"], "owner-closure")
+        self.assertNotIn("state", marker)
+        for name, raw in history.items():
+            self.assertEqual((directory / name).read_bytes(), raw)
+        with mock.patch.dict(os.environ, self.base_env(), clear=True):
+            self.assertEqual(D.gate_currency(route, node, directory / "plan-check.json", observe=True).state, "current")
+        _, meta = self.read_row("att-original-fail")
+        self.assertEqual(meta["failure_class"], "fail")
+
+    def test_supersession_reader_proves_original_attempt_link_in_both_gate_modes(self):
+        route, _, node, directory, _ = self.upstream_superseded_review_fixture()
+        for mode in ("on", "off"):
+            with self.subTest(gates=mode), mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": mode}, clear=True):
+                observed = D.gate_currency(route, node, directory / "plan-check.json", observe=True)
+                self.assertEqual(observed.state, "superseded", observed)
+                execution = D.gate_currency(route, node, directory / "plan-check.json")
+                self.assertEqual(execution.state, "superseded" if mode == "on" else "current", execution)
+        link = directory / "plan-check.att-original-pass.attempt.json"
+        link.unlink()
+        with mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": "off"}, clear=True):
+            self.assertEqual(D.gate_currency(route, node, directory / "plan-check.json").reason,
+                             "revision-predecessor-link-invalid")
+
+    def test_supersession_history_does_not_require_deleted_historical_payloads(self):
+        route, _, node, directory, _ = self.upstream_superseded_review_fixture()
+        (self.base / "plan.md").unlink()
+        (self.base / "review-pass.md").unlink()
+        for mode in ("on", "off"):
+            with self.subTest(gates=mode), mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": mode}, clear=True):
+                self.assertEqual(D.gate_currency(route, node, directory / "plan-check.json", observe=True).state,
+                                 "superseded")
+                if mode == "off":
+                    self.assertEqual(D.gate_currency(route, node, directory / "plan-check.json").state, "current")
+
+    def test_superseded_closure_refuses_forged_history_and_newer_blocking_round(self):
+        route, path, node, directory, memo = self.upstream_superseded_review_fixture()
+        self.review_blocking_row("att-newer-fail", 3)
+        memo = self.owner_closure(route, attempts=("att-original-fail", "att-newer-fail"),
+                                  artifacts=("round_1.md", "round_3.md"))
+        before = (directory / "plan-check.json").read_bytes()
+        result = self.complete(path, "plan-check", memo, jobs=self.jobs, attempt_id="att-original-fail")
+        self.assertIn("owner-closure-node-already-complete", result.stderr)
+        self.assertEqual(before, (directory / "plan-check.json").read_bytes())
+        original = json.loads(before)
+        for field, value in (("superseded_by", {"node": "execute", "sequence": 2}),
+                             ("review_independence", "owner-overridden")):
+            forged = dict(original, **{field: value})
+            for name in ("plan-check.json", "plan-check.2.json"):
+                (directory / name).write_text(json.dumps(forged))
+            with mock.patch.dict(os.environ, self.base_env(), clear=True):
+                currency = D.gate_currency(route, node, directory / "plan-check.json", observe=True)
+                self.assertEqual(currency.reason, "supersession-provenance-invalid")
+                with self.assertRaisesRegex(ValueError, "canonical-marker-unproven"):
+                    ROUTE.owner_closure_plan(route, node, memo, self.jobs, "att-newer-fail")
+
+    def test_revision_provenance_can_cross_a_superseded_predecessor(self):
+        route, path, node, directory, _ = self.upstream_superseded_review_fixture()
+        evidence = self.base / "review-pass.md"
+        evidence.write_text("new review disposition\n")
+        with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}):
+            result = self.revise(path, "plan-check", evidence, basis="owner-correction", reason="new disposition")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for mode in ("on", "off"):
+            with self.subTest(gates=mode), mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": mode}, clear=True):
+                self.assertEqual(D.gate_currency(route, node, directory / "plan-check.json").state, "current")
+
+    def test_supersession_reader_refuses_malformed_predecessor_and_upstream(self):
+        route, _, node, directory, _ = self.upstream_superseded_review_fixture()
+        for path in (directory / "plan-check.1.json", directory / "plan.2.json"):
+            original = path.read_bytes()
+            for value in ([], None):
+                with self.subTest(path=path.name, value=value):
+                    path.write_text(json.dumps(value))
+                    with mock.patch.dict(os.environ, self.base_env(), clear=True):
+                        currency = D.gate_currency(route, node, directory / "plan-check.json", observe=True)
+                    self.assertEqual(currency.reason, "supersession-provenance-invalid")
+            path.write_bytes(original)
+
     def test_m4b_latest_round_closure_replaces_a_superseded_pass_marker(self):
         """A correction added a review round after round 1 passed: the round 1
         marker is no longer current, so closing the exhausted latest round must

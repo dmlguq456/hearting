@@ -463,6 +463,17 @@ class ClosedFindingTests(ProjectionFixture):
             self.assertEqual(tree_snapshot(Path(self.tmp.name)), before)
             self.assertEqual(os.environ["HEARTING_GATES"], "off")
 
+    def test_legacy_tombstone_retains_sequence_and_revision_provenance_checks(self):
+        node, path, original = self.real_currency()
+        for fields in ({"sequence": True}, {"sequence": "1"}, {"stage_authority": "revision"}):
+            with self.subTest(fields=fields):
+                marker = dict(original, state="superseded-by-upstream-revision", **fields)
+                path.write_bytes(encoded(marker))
+                (self.marker_dir / f"{node['id']}.1.json").write_bytes(encoded(marker))
+                with mock.patch.dict(os.environ, HEARTING_GATES="off"):
+                    self.assertEqual(REAL_GATE(self.route, node, path, marker).reason,
+                                     "revision-provenance-invalid")
+
     def test_history_conflict_and_live_digest_edit_are_not_read_current(self):
         node, path, marker = self.real_currency()
         prior = dict(marker, route_hash="sha256:" + "0" * 64)
