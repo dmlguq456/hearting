@@ -3020,14 +3020,14 @@ def _tag_scan_authority(metadata: dict[str, str], host_complete: bool) -> bool:
 
 def _tagged_descendants_from_scan(
     scan: ProcessTableScan, metadata: dict[str, str], attempt_id: str,
-    *, host_complete: bool = False,
+    *, host_complete: bool = False, preserved=frozenset(),
 ) -> ProcessGroupObservation:
     if scan.error:
         return ProcessGroupObservation("unverifiable", reason=scan.error)
     excluded_pids = _parent_leader_pids(metadata)
     ordered = tuple(
         member for member in scan.members_by_attempt.get(attempt_id, ())
-        if member[0] not in excluded_pids
+        if member[0] not in excluded_pids and member[:2] not in preserved
     )
     if ordered:
         return ProcessGroupObservation("populated", ordered, scan.incomplete_reason)
@@ -3137,7 +3137,7 @@ def _denied_process_outside_attempt(start: str, metadata: dict[str, str], *, hos
 
 
 def attempt_tagged_descendants(
-    metadata: dict[str, str], *, host_complete: bool = False
+    metadata: dict[str, str], *, host_complete: bool = False, preserved=frozenset()
 ) -> ProcessGroupObservation:
     """Find live processes still tagged with this attempt, whatever group they left.
 
@@ -3156,6 +3156,9 @@ def attempt_tagged_descendants(
     recorded namespaces are extinct (`attempt_process_quiescence`): then a
     complete walk by a host-like observer, which sees every namespace, is the
     one that may answer ``empty``.
+    ``preserved`` excludes only already classified exact PID/start positives;
+    the existing completeness and denied-environment checks still prove absence.
+    Whole-attempt callers leave it empty.
     """
 
     attempt_id = metadata.get("attempt_id", "")
@@ -3166,7 +3169,7 @@ def attempt_tagged_descendants(
         # Batch observer pass (`process_table_scan_scope`): same verdict, one
         # walk shared by every attempt of the pass instead of one per call.
         return _tagged_descendants_from_scan(
-            scan, metadata, attempt_id, host_complete=host_complete
+            scan, metadata, attempt_id, host_complete=host_complete, preserved=preserved
         )
     tag = f"{ATTEMPT_DESCENDANT_ENV}={attempt_id}".encode()
     # SD-OPEN-47 (H7-b): a child's liveness is its own process set. The
@@ -3215,7 +3218,7 @@ def attempt_tagged_descendants(
             continue
         if int(entry.name) in excluded_pids:
             continue
-        if tag in environ.split(b"\0"):
+        if tag in environ.split(b"\0") and (int(entry.name), start) not in preserved:
             members.append((int(entry.name), start, state))
     ordered = tuple(sorted(members, key=lambda member: member[0]))
     if ordered:
@@ -3708,6 +3711,16 @@ def residue_live_pids(metadata: dict[str, str]) -> tuple[int, ...]:
     return tuple(member[0] for member in probe.members) if probe.state == "populated" else ()
 
 
+def terminal_receipt_incomplete(metadata, *, terminal_receipt=True):
+    """The existing durable terminal gate for namespace-local registered workers."""
+    return bool(terminal_receipt
+                and metadata.get("registered_worker") == "1"
+                and metadata.get("pid_scope") == "namespace-local"
+                and not _post_exit_receipt_reason(metadata)
+                and not _cancellation_receipt_reason(metadata)
+                and not _cleanup_receipt_reason(metadata))
+
+
 def attempt_process_quiescence(
     metadata: dict[str, str], *, terminal_receipt: bool = False
 ) -> ProcessQuiescence:
@@ -3751,14 +3764,7 @@ def attempt_process_quiescence(
     # successor, join, wait, and cleanup gate that reads an old row, so they
     # keep the verdict they already had instead.
     if not metadata.get("attempt_id"):
-        if (
-            terminal_receipt
-            and metadata.get("registered_worker") == "1"
-            and metadata.get("pid_scope") == "namespace-local"
-            and not _post_exit_receipt_reason(metadata)
-            and not _cancellation_receipt_reason(metadata)
-            and not _cleanup_receipt_reason(metadata)
-        ):
+        if terminal_receipt_incomplete(metadata, terminal_receipt=terminal_receipt):
             return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
         return result
     probe = attempt_tagged_descendants(metadata)
@@ -3772,14 +3778,7 @@ def attempt_process_quiescence(
         # Nobody is left to publish a namespace-local receipt: the wrapper
         # died with the namespace. The receipt gate below never applies here.
         return extinct
-    if (
-        terminal_receipt
-        and metadata.get("registered_worker") == "1"
-        and metadata.get("pid_scope") == "namespace-local"
-        and not _post_exit_receipt_reason(metadata)
-        and not _cancellation_receipt_reason(metadata)
-        and not _cleanup_receipt_reason(metadata)
-    ):
+    if terminal_receipt_incomplete(metadata, terminal_receipt=terminal_receipt):
         return ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete")
     if result.state != "quiescent":
         # A non-quiescent leader verdict remains authoritative unless the

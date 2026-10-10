@@ -1584,8 +1584,13 @@ report support runs the owner as the existing one-shot, creates no input state,
 and `correct` reports `owner-input-unsupported` before queueing; an owner
 already running under an older supervisor behaves the same way.
 An interrupted launched supervisor with no terminal event also accepts the existing
-`correct` request once its exact process and children are quiescent. This is an
-answered continuation on the same route, not another automatic retry: keep the
+`correct` request once its owner execution and unregistered children are quiescent.
+Registered resource/compute payloads stay under their existing run records when
+the owner is replaced; their survival is not surviving owner execution. The
+shared parent-close classification separates them, with exact route/attempt
+binding and complete observation of the remaining process set. Recovery context
+passes their record locations to the new owner without relaunching or editing
+them. This is an answered continuation on the same route: keep the
 original failure, completed stages, permissions and review budgets. A valid
 terminal result, cancellation or unknown execution retains its existing path.
 Resource registration settles a positively observed previous-boot execution as
