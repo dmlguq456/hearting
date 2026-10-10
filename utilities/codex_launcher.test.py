@@ -11,6 +11,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -648,6 +650,42 @@ class ReadOnlyLauncherStateTest(LauncherTestCase):
                     installer.fileno(), launcher.fcntl.LOCK_EX | launcher.fcntl.LOCK_NB
                 )
                 launcher.fcntl.flock(installer.fileno(), launcher.fcntl.LOCK_UN)
+
+    def test_a_waiting_reader_never_returns_holding_a_discarded_lock(self) -> None:
+        """Restore unlinks the lock it holds (`discard_pathname`) and the next
+        install creates and holds a new one. A launcher that waited behind the
+        restore must wait for the live lock, not return holding the old inode.
+        """
+        if launcher.fcntl is None:  # pragma: no cover - POSIX only
+            self.skipTest("fcntl is unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            home = self._installed_home(Path(temporary), lock=True)
+            path = home / ".harness" / "codex-launcher.lock"
+            restore = os.open(path, os.O_RDWR)
+            launcher.fcntl.flock(restore, launcher.fcntl.LOCK_EX)
+            held: list[int] = []
+            reader = threading.Thread(
+                target=lambda: held.append(launcher._launcher_lock(home)), daemon=True)
+            reader.start()
+            time.sleep(0.2)
+            self.assertEqual(held, [])
+            path.unlink()
+            install = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+            launcher.fcntl.flock(install, launcher.fcntl.LOCK_EX)
+            os.close(restore)
+            reader.join(0.5)
+            try:
+                self.assertEqual(held, [], "the reader returned while the install held the live lock")
+            finally:
+                launcher.fcntl.flock(install, launcher.fcntl.LOCK_UN)
+                os.close(install)
+                reader.join(5)
+            try:
+                self.assertEqual(len(held), 1)
+                self.assertEqual(os.fstat(held[0]).st_ino, path.stat().st_ino)
+            finally:
+                for descriptor in held:
+                    launcher._unlock(descriptor)
 
     def test_a_missing_lock_is_created_only_where_the_tree_is_writable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

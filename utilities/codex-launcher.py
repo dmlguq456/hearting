@@ -141,17 +141,26 @@ def _launcher_lock(home: Path) -> int:
     refuse, as before: an unlocked read cannot preserve the install transaction.
     """
     path = home / ".harness" / LOCK_NAME
-    descriptor = _open_lock_descriptor(path)
-    try:
-        info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-            raise LauncherError(f"unsafe Codex launcher lock: {path}")
-        if fcntl is not None:
+    for _ in range(5):
+        descriptor = _open_lock_descriptor(path)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                raise LauncherError(f"unsafe Codex launcher lock: {path}")
+            if fcntl is None:
+                return descriptor
             fcntl.flock(descriptor, fcntl.LOCK_SH)
-    except BaseException:
-        os.close(descriptor)
-        raise
-    return descriptor
+            try:
+                current = os.stat(path, follow_symlinks=False)
+            except FileNotFoundError:
+                current = None
+            if current is not None and (current.st_dev, current.st_ino) == (info.st_dev, info.st_ino):
+                return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+        os.close(descriptor)  # orphaned inode (installer discard_pathname); retry on the live name
+    raise LauncherError(f"Codex launcher lock kept changing: {path}")
 
 
 def _unlock(descriptor: int | None) -> None:
