@@ -783,6 +783,14 @@ process this retained duty, its exact PID and existing lock identify a safe
 observer replacement: accepted records remain intact and the replacement takes
 the same lock. A supported observer and the native carrier stay alive.
 
+Session activation is observation, not receipt: startup/resume context leaves
+pending notices and delivery leases untouched. Activation reconnects
+the existing retained courier for the exact current session, across all three
+harnesses. It wakes a restored recipient through the checked prompt surface;
+drafts, forms and changed session identities remain protected. With no recipient,
+the notice remains pending and Fleet shows the outstanding delivery. A real
+prompt or accepted runtime turn supplies receipt, independently of execution.
+
 A replay that verifies the exact closed outcome, finalized cycle, sealed owner
 handoff and quiescent children reports completed work. A missing or stale progress
 ledger does not overturn those settled facts. Parent delivery facts remain

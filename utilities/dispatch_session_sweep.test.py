@@ -9,6 +9,7 @@ temp tree and appends the actual values to evidence/sd111/fixture_env.tsv
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -17,6 +18,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
+from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
@@ -222,6 +225,59 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.assertIn("Follow each receipt's required_action", context)
         state = PD.read(self.root, "sess-owner", "delivery-" + "a" * 32)["state"]
         self.assertEqual(state, "acked")
+
+    def test_startup_and_resume_context_never_ack_or_take_a_delivery_lease(self):
+        self._seed()
+        hook = ROOT / "hooks/dispatch-session-sweep.py"
+        env = {**os.environ, "AGENT_DISPATCH_JOBS": str(self.root / "jobs.log"),
+               "HARNESS_STATE_ROOT": str(self.root)}
+        before = PD.read(self.root, "sess-owner", "delivery-" + "a" * 32)
+        for source in ("startup", "resume"):
+            proc = subprocess.run([sys.executable, str(hook)], capture_output=True, text=True,
+                                  env=env, input=json.dumps({"session_id": "sess-owner",
+                                  "hook_event_name": "SessionStart", "source": source}))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("att-0000000000000000000000000000bbbb", proc.stdout)
+            self.assertEqual(PD.read(self.root, "sess-owner", before["delivery_id"]), before)
+        self.test_hook_injects_additional_context_and_acks()
+
+    def test_all_carriers_activate_without_claiming_and_reconnect_exact_attempt_only(self):
+        import peer_obligations
+        for kind in ("claude-parent-runtime", "codex-native-queue", "opencode-turn"):
+            with self.subTest(kind=kind):
+                delivery = "delivery-" + {"claude-parent-runtime": "a", "codex-native-queue": "b",
+                                          "opencode-turn": "c"}[kind] * 32
+                self._seed(recipient_kind=kind, delivery_id=delivery)
+                before = PD.read(self.root, "sess-owner", delivery)
+                with mock.patch.object(peer_obligations, "retain_registered_completion") as retain:
+                    records = SWEEP.activate(self.root, kind, "sess-owner")
+                    self.assertEqual(len(records), 1)
+                    retain.assert_called_once_with(self.root / "jobs.log",
+                        "att-0000000000000000000000000000bbbb", "sess-owner", kind)
+                    self.assertEqual(SWEEP.activate(self.root, kind, "other-session"), [])
+                    self.assertEqual(retain.call_count, 1)
+                self.assertEqual(PD.read(self.root, "sess-owner", delivery), before)
+
+    def test_codex_session_start_reconnects_without_acknowledging_context(self):
+        self._seed(recipient_kind="codex-native-queue")
+        bridge = _load("activation_codex_bridge", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
+        import dispatch_contract, peer_obligations
+        before = PD.read(self.root, "sess-owner", "delivery-" + "a" * 32)
+        out = io.StringIO()
+        with mock.patch.object(bridge, "load_payload", return_value={"session_id": "sess-owner",
+                "source": "resume"}), mock.patch.object(bridge, "is_worker_session", return_value=False), \
+                mock.patch.object(bridge, "forget_shown_candidates"), \
+                mock.patch.object(bridge, "card_context", return_value=""), \
+                mock.patch.object(bridge, "local_evidence_context", return_value=""), \
+                mock.patch.object(dispatch_contract, "dispatch_state_roots", return_value=[self.root]), \
+                mock.patch.object(dispatch_contract, "resolve_agent_home", return_value=ROOT), \
+                mock.patch.object(peer_obligations, "retain_registered_completion") as retain, \
+                mock.patch.dict(sys.modules, {"herdr_session_projection": SimpleNamespace(project=lambda *a, **k: None)}), \
+                mock.patch.object(bridge.sys, "stdout", out):
+            self.assertEqual(bridge.main(), 0)
+        self.assertIn("att-0000000000000000000000000000bbbb", out.getvalue())
+        retain.assert_called_once()
+        self.assertEqual(PD.read(self.root, "sess-owner", before["delivery_id"]), before)
 
     # -- A-21: generation-unproven claim refused, state unchanged. ---------
 
@@ -487,6 +543,18 @@ console.log(JSON.stringify({carrierEnv: globalThis.carrierEnv}));
         self.assertIn(("claim", "claimed"), [(item["stage"], item["reason"]) for item in carrier])
         self.assertIn(("prompt", "accepted"), [(item["stage"], item["reason"]) for item in carrier])
         self.assertTrue(all("text" not in item for item in carrier))
+
+    def test_restored_session_creation_reconnects_then_idle_starts_one_turn(self):
+        self.seed_turn()
+        result = self.run_plugin('''
+await hooks.event({event: {type: "session.created", properties: {info: {id: "ses-oc-parent"}}}});
+if (prompts.length) throw new Error("activation itself started a turn");
+await hooks.event({event: {type: "session.idle", properties: {sessionID: "ses-oc-parent"}}});
+await new Promise(r => setTimeout(r, 1500));
+''')
+        self.assertEqual(len(result["prompts"]), 1)
+        self.assertEqual(result["prompts"][0]["path"], {"id": self.SID})
+        self.assertEqual(self.state(), "acked")
 
     def test_a_turn_opencode_did_not_take_is_released_for_the_next_pass(self):
         self.seed_turn()

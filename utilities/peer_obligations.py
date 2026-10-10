@@ -111,6 +111,32 @@ def _write_atomic(path: Path, value: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holder=None):
+    """Reconnect the existing exact-attempt courier; never start the work again."""
+    from dispatch_completion_join import JoinContractError, current_attempt_row
+    from dispatch_seat_handover import effective_parent
+    from harness_capabilities import HARNESSES, parent_completion
+    try:
+        row = current_attempt_row(Path(jobs), attempt_id)
+    except JoinContractError:
+        return
+    harness = next((h for h in HARNESSES if parent_completion(h)["carrier"] == carrier), None)
+    if (not harness or row is None or row.status not in {"open", "running", "done"}
+            or row.metadata.get("parent_completion_delivery") != carrier
+            or effective_parent(row.metadata, Path(jobs)) != session_id):
+        return
+    identity = {"jobs": str(Path(jobs).resolve()), "attempt_id": attempt_id,
+                "session_id": session_id, "harness": harness,
+                "server": os.environ.get("AGENT_HERDR_SESSION") or "default"}
+    store = ObligationStore(Path(jobs).parent)
+    duty = store.create(stable_duty_id("registered-batch", identity),
+                        "registered-batch", identity, {"carrier": carrier})
+    if duty.get("state") not in {"complete", "cancelled"}:
+        if holder:
+            store.update(duty["id"], observation={"holder": list(holder)})
+        ensure_runner(Path(jobs).parent)
+
+
 class ObligationStore:
     """Atomic intent records; immutable intent is separate from mutable progress."""
 
@@ -252,8 +278,7 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path) -> bool:
     Accepted work stays in the existing store; the same flock fences its next
     observer. A pidfd prevents a recycled PID from ever receiving the signal.
     """
-    if not any(d.get("intent", {}).get("carrier") == "claude-parent-runtime"
-               for d in store.list()):
+    if not any(d.get("intent", {}).get("kind") == "registered-batch" for d in store.list()):
         return False
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         return False
@@ -272,7 +297,9 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path) -> bool:
             lock_fd = argv[argv.index("--lock-fd") + 1]
             if (proc / "fd" / lock_fd).resolve() != lock_path.resolve():
                 continue
-            if "def _resume_registered_obligation(" in Path(argv[1]).read_text():
+            source = Path(argv[1]).read_text()
+            if ("def _resume_registered_obligation(" in source
+                    and "from dispatch_session_sweep import addressed_records" in source):
                 continue
             signal.pidfd_send_signal(pidfd, signal.SIGTERM)
             return True

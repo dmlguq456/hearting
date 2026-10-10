@@ -1523,19 +1523,9 @@ def _observe_carrier(launch: Launch, claim: ArmClaim, payload: Any) -> int:
 def _retain_completion(launch: Launch, claim: ArmClaim) -> None:
     """The existing outer task runner retains the wake if this native hook dies."""
     try:
-        row = current_attempt_row(launch.jobs, launch.attempt_id)
-        if (row is None or seat_handover.effective_parent(row.metadata, launch.jobs) != launch.session_id
-                or row.metadata.get("parent_completion_delivery") != "claude-parent-runtime"):
-            return
-        identity = {"jobs": str(launch.jobs.resolve()), "attempt_id": launch.attempt_id,
-                    "session_id": launch.session_id, "harness": "claude",
-                    "server": os.environ.get("AGENT_HERDR_SESSION") or "default"}
-        store = peer_obligations.ObligationStore(launch.jobs.parent)
-        duty = store.create(peer_obligations.stable_duty_id("registered-batch", identity),
-                            "registered-batch", identity, {"carrier": "claude-parent-runtime"})
-        if duty.get("state") not in {"complete", "cancelled"}:
-            store.update(duty["id"], observation={"holder": list(claim.holder)})
-            peer_obligations.ensure_runner(launch.jobs.parent)
+        peer_obligations.retain_registered_completion(
+            launch.jobs, launch.attempt_id, launch.session_id, "claude-parent-runtime",
+            holder=claim.holder)
     except (OSError, ValueError, JoinContractError):
         pass  # Native delivery still owns this attempt; persistence is best effort.
 

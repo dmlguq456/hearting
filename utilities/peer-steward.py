@@ -3874,16 +3874,19 @@ def _resume_message_obligation(duty, store):
 
 
 def _resume_registered_obligation(duty, store):
-    """Recover a lost Claude native wake through the existing durable peer courier."""
+    """Wake an exact restored recipient through the existing durable peer courier."""
     intent = duty.get("intent") or {}
-    if intent.get("carrier") != "claude-parent-runtime":
-        return
+    from harness_capabilities import parent_completion
     identity = intent["identity"]
+    harness = identity.get("harness")
+    if intent.get("carrier") != parent_completion(harness)["carrier"]:
+        return
     jobs = Path(identity["jobs"])
     from dispatch_completion_join import current_attempt_row, materialize_after_terminal_close
     from dispatch_notice_state import keep_claim
     import dispatch_pending_delivery as pending
     from dispatch_seat_handover import effective_parent
+    from dispatch_session_sweep import addressed_records, delivery_context, is_human_gate_record
     spec = importlib.util.spec_from_file_location(
         "_retained_rewake", _UTILITIES_DIR.parent / "hooks/dispatch-owner-rewake.py")
     rewake = sys.modules.get(spec.name)
@@ -3893,10 +3896,14 @@ def _resume_registered_obligation(duty, store):
         spec.loader.exec_module(rewake)
     arm = rewake._read_arm(rewake.arm_path(jobs, identity["attempt_id"]))
     holder = (arm or {}).get("holder") or (duty.get("observation") or {}).get("holder")
-    if rewake._holder_alive(holder):
-        return
     row = current_attempt_row(jobs, identity["attempt_id"])
     if row is None:
+        return
+    parent = [row.metadata.get(key, "") for key in
+              ("parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns")]
+    # A native hook belongs to its original runtime. A live holder cannot wake
+    # a replacement process after that runtime died. Unknown identity stays protected.
+    if holder and rewake._holder_alive(holder) and rewake._holder_alive(parent):
         return
     # The duty follows confirmed handover; the signed queue stays under the
     # registered parent, even when its current recipient is a successor.
@@ -3919,35 +3926,37 @@ def _resume_registered_obligation(duty, store):
     try:
         result = subprocess.run(_herdr_argv("agent", "list"), capture_output=True, text=True, timeout=5)
         agents = (json.loads(result.stdout).get("result") or {}).get("agents") or []
-        matches = [a for a in agents if a.get("agent") == "claude"
+        matches = [a for a in agents if a.get("agent") == harness
                    and (a.get("agent_session") or {}).get("value") == recipient_sid]
         if len(matches) != 1:
+            store.update(duty["id"], observation={"reason": "recipient-unavailable",
+                                                  "session_id": recipient_sid})
             return
         pane = matches[0]["pane_id"]
-        if _resolve_target(pane)[:2] != ("claude", recipient_sid):
+        if _resolve_target(pane)[:2] != (harness, recipient_sid):
             return
-        launch = rewake.Launch(identity["attempt_id"], jobs, recipient_sid)
-        win = None
         if row.status in {"open", "running"}:
-            claims = []
-            notices = rewake._gate_notices(launch, attempt_only=True, settle="sent-ambiguous",
-                                           supervision_claims=claims)
-            for root, recipient, delivery_id, owner in claims:
-                pending.release_claim(root, recipient, delivery_id, claim_owner=owner)
-            if not notices:
+            records, _ = addressed_records(jobs.parent, intent["carrier"], recipient_sid)
+            record = next((r for r in records if row.attempt_id in (r.get("attempt_ids") or [])
+                           and (is_human_gate_record(r) or
+                                r.get("receipt", {}).get("kind") == "supervision")), None)
+            if record is None:
                 return
-            message = rewake.gate_wake_message(launch, notices)
-        else:
-            owner = "retained-rewake:" + duty["id"]
-            if record and record.get("state") in {"claimed", "sent-ambiguous"}:
-                pending.reclaim(jobs.parent, storage_recipient, delivery_id,
-                                now_ns=time.monotonic_ns())
-            record = pending.claim(jobs.parent, storage_recipient, delivery_id,
-                                   claim_owner=owner, lease_seconds=30, require_generation_proof=False)
-            if not keep_claim(jobs.parent, storage_recipient, delivery_id, record, owner, jobs=jobs):
-                return
-            win = (delivery_id, owner)
-            _state, message = rewake.classified_receipt(launch, "ready", "retained-carrier", rewake.agent_home())
+            storage_recipient = record.get("_storage_key") or storage_recipient
+            delivery_id = record["delivery_id"]
+        owner = "retained-rewake:" + duty["id"]
+        if record and record.get("state") in {"claimed", "sent-ambiguous"}:
+            pending.reclaim(jobs.parent, storage_recipient, delivery_id,
+                            now_ns=time.monotonic_ns())
+        record = pending.claim(jobs.parent, storage_recipient, delivery_id,
+                               claim_owner=owner, lease_seconds=30, require_generation_proof=False)
+        if not keep_claim(jobs.parent, storage_recipient, delivery_id, record, owner, jobs=jobs):
+            return
+        from dispatch_supervision import CONTINUED_KEY, continue_for_parent
+        continued = continue_for_parent(record, session_id=recipient_sid,
+                                        recipient_kind=intent["carrier"])
+        message = delivery_context([(jobs.parent, [{**record, **(
+            {CONTINUED_KEY: continued} if continued else {})}])])
         # The normal prompt command seals the body, checks the recipient again,
         # and retains it through forms, busy turns and sender/observer exit (#446).
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as body:
@@ -3955,14 +3964,14 @@ def _resume_registered_obligation(duty, store):
             body.flush()
             args = build_parser().parse_args(["prompt", pane, "--body-file", body.name,
                                               "--ref", duty["id"]])
-            code = cmd_prompt(args, expected_recipient=("claude", recipient_sid))
+            code = cmd_prompt(args, expected_recipient=(harness, recipient_sid))
         if code in {0, 3}:
-            if win:
-                pending.mark_sent_ambiguous(jobs.parent, storage_recipient, win[0], claim_owner=win[1])
-            store.update(duty["id"], state="complete" if win else "pending",
-                         delivery="peer-courier", cleanup="complete" if win else "pending")
-        elif win:
-            pending.release_claim(jobs.parent, storage_recipient, win[0], claim_owner=win[1])
+            pending.mark_sent_ambiguous(jobs.parent, storage_recipient, delivery_id, claim_owner=owner)
+            terminal = row.status == "done"
+            store.update(duty["id"], state="complete" if terminal else "pending",
+                         delivery="peer-courier", cleanup="complete" if terminal else "pending")
+        else:
+            pending.release_claim(jobs.parent, storage_recipient, delivery_id, claim_owner=owner)
     finally:
         globals()["_HERDR_SESSION"] = old_server
 

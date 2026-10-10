@@ -176,6 +176,19 @@ def main() -> int:
     if not is_worker_session():
         forget_shown_candidates(payload)
         parts.append(card_context(payload, current_cwd))
+        try:
+            utilities = ROOT / "utilities"
+            sys.path.insert(0, str(utilities))
+            from dispatch_contract import dispatch_state_roots, resolve_agent_home
+            from dispatch_session_sweep import activate, delivery_context
+            sid = session_id(payload)
+            if sid:
+                batches = [(root, activate(root, "codex-native-queue", sid))
+                           for root in dict.fromkeys(dispatch_state_roots(resolve_agent_home()))
+                           if root.is_dir()]
+                parts.append(delivery_context(batches))
+        except Exception:
+            pass
         if env_truthy("CODEX_SESSION_MEMORY_INJECT"):
             parts.append(run_preflight("memory", current_cwd))
         parts.append(local_evidence_context(current_cwd))

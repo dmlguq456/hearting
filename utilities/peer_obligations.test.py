@@ -110,16 +110,23 @@ class ObligationStoreTest(unittest.TestCase):
         self._check_observer_handoff(supported=True)
 
     @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    def test_claude_only_observer_is_replaced_for_shared_activation_delivery(self):
+        self._check_observer_handoff(supported=False, native_only=True)
+
+    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
     def test_a_legacy_observer_keeps_its_pid_while_current_runner_starts(self):
         self._check_observer_handoff(supported=False, legacy=True)
 
-    def _check_observer_handoff(self, supported, legacy=False):
+    def _check_observer_handoff(self, supported, legacy=False, native_only=False):
         duty = self.store.create("registered-batch-fixture", "registered-batch",
                                  {"session_id": "parent"}, {"carrier": "claude-parent-runtime"})
         prior = self.store.create("message-fixture", "message", {"session_id": "other"}, {"ref": "old"})
         script = self.root / "peer-steward.py"
         source = "import time\nprint('ready', flush=True)\ntime.sleep(30)\n"
         if supported:
+            source = ("def _resume_registered_obligation():\n"
+                      "    from dispatch_session_sweep import addressed_records\n" + source)
+        elif native_only:
             source = "def _resume_registered_obligation(): pass\n" + source
         script.write_text(source)
         lock_path = self.store.root / ("runner.lock" if legacy else obligations.RUNNER_LOCK_NAME)

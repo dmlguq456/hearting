@@ -923,6 +923,14 @@ function createCompletionCarrier(ctx) {
   }
 
   return {
+    async activate(sid) {
+      if (!sid || !available()) return
+      sessions.add(sid)
+      await command("activate", sid)
+      // The existing timer and idle callback deliver the retained receipt;
+      // session creation by itself never acknowledges it.
+      this.env(sid)
+    },
     // The env a tool command of `sid` carries: only a runtime that will carry the receipt says so.
     env(sid) {
       if (!sid || !available()) return null
@@ -1103,6 +1111,8 @@ export const AgentHarnessGuards = async (ctx) => {
   event: async ({ event }) => {
     if (event && event.type === "session.created" && !isWorkerSession()) {
       reconnectPeerObligations()
+      const sid = event.properties?.info?.id || event.properties?.sessionID || ""
+      await completionCarrier.activate(sid)
     }
     if (event && event.type === "session.compacted") {
       collectCard("compact", (event.properties && event.properties.sessionID) || "", baseDir(ctx))

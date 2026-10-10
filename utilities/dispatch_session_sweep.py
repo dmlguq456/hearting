@@ -139,6 +139,44 @@ def _bounded_receipt_text(record: dict) -> str:
     )
 
 
+def addressed_records(root: Path, recipient_kind: str, session_id: str) -> tuple[list[dict], int]:
+    """Read the current session's open notices without claiming or consuming them."""
+    from dispatch_seat_handover import record_for_session, storage_recipients
+    records, count = [], 0
+    for storage_key, allowed in storage_recipients(
+            session_id, harness="codex" if recipient_kind.startswith("codex") else None):
+        try:
+            directory = pending_delivery.record_directory(root, storage_key)
+            entries = sorted(directory.glob("delivery-*.json"))
+        except (OSError, pending_delivery.PendingDeliveryError):
+            continue
+        count += len(entries)
+        for entry in entries:
+            try:
+                record = pending_delivery.read(root, storage_key, entry.stem)
+            except (OSError, pending_delivery.PendingDeliveryError):
+                continue
+            if (record and record.get("recipient_kind") == recipient_kind
+                    and record.get("state") in pending_delivery.OPEN_STATES
+                    and record_for_session(record, allowed)):
+                records.append({**record, STORAGE_KEY: storage_key})
+    return records, count
+
+
+def activate(root: Path, recipient_kind: str, session_id: str) -> list[dict]:
+    """Reconnect existing courier duties on startup/resume; context alone is not receipt."""
+    records, _ = addressed_records(root, recipient_kind, session_id)
+    from peer_obligations import retain_registered_completion
+    for record in records:
+        for attempt in record.get("attempt_ids") or []:
+            try:
+                retain_registered_completion(Path(root) / "jobs.log", attempt, session_id,
+                                             recipient_kind)
+            except (OSError, ValueError):
+                continue
+    return records
+
+
 def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None
 ) -> tuple[list[dict], int]:
@@ -161,66 +199,48 @@ def sweep_deliver(
     now = time.monotonic_ns() if now_ns is None else now_ns
     start_ns = time.monotonic_ns()
     claimed: list[dict] = []
-    entries: list[Path] = []
+    addressed, entry_count = addressed_records(root, recipient_kind, session_id)
     # The session's own records, then the records of a cleared predecessor at the same pane
     # that the seat handover bound to it. Those stay stored (and acked) under the registered
     # parent; only the receiving session differs.
-    from dispatch_seat_handover import record_for_session, storage_recipients
-    for storage_key, allowed in storage_recipients(
-            session_id, harness="codex" if recipient_kind.startswith("codex") else None):
-        try:
-            directory = pending_delivery.record_directory(root, storage_key)
-            found = sorted(
-                p for p in directory.glob("delivery-*.json") if p.is_file()
-            )
-        except (OSError, pending_delivery.PendingDeliveryError):
+    for current in addressed:
+        storage_key = current[STORAGE_KEY]
+        delivery_id = current["delivery_id"]
+        state = current.get("state")
+        if state in {"claimed", "sent-ambiguous"}:
+            try:
+                pending_delivery.reclaim(root, storage_key, delivery_id, now_ns=now)
+            except pending_delivery.PendingDeliveryError:
+                continue
+        elif state != "pending":
             continue
-        entries.extend(found)
-        for entry in found:
-            delivery_id = entry.stem
-            try:
-                current = pending_delivery.read(root, storage_key, delivery_id)
-            except pending_delivery.PendingDeliveryError:
-                continue
-            if current is None or current.get("recipient_kind") != recipient_kind:
-                continue
-            if not record_for_session(current, allowed):
-                continue
-            state = current.get("state")
-            if state in {"claimed", "sent-ambiguous"}:
-                try:
-                    pending_delivery.reclaim(root, storage_key, delivery_id, now_ns=now)
-                except pending_delivery.PendingDeliveryError:
-                    continue
-            elif state != "pending":
-                continue
-            claim_owner = (
-                f"session-sweep:{recipient_kind}:{os.getpid()}:{time.monotonic_ns()}"
+        claim_owner = (
+            f"session-sweep:{recipient_kind}:{os.getpid()}:{time.monotonic_ns()}"
+        )
+        try:
+            record = pending_delivery.claim(
+                root,
+                storage_key,
+                delivery_id,
+                claim_owner=claim_owner,
+                lease_seconds=DELIVER_LEASE_SECONDS,
+                require_generation_proof=False,
             )
-            try:
-                record = pending_delivery.claim(
-                    root,
-                    storage_key,
-                    delivery_id,
-                    claim_owner=claim_owner,
-                    lease_seconds=DELIVER_LEASE_SECONDS,
-                    require_generation_proof=False,
-                )
-            except pending_delivery.PendingDeliveryError:
+        except pending_delivery.PendingDeliveryError:
+            continue
+        from dispatch_notice_state import keep_claim
+        try:
+            if not keep_claim(root, storage_key, delivery_id, record, claim_owner):
                 continue
-            from dispatch_notice_state import keep_claim
-            try:
-                if not keep_claim(root, storage_key, delivery_id, record, claim_owner):
-                    continue
-            except OSError:
-                continue
-            # An answer another session sent: this session is the parent, so its carrier continues the route.
-            from dispatch_supervision import CONTINUED_KEY, continue_for_parent
-            continued = continue_for_parent(record, session_id=session_id, recipient_kind=recipient_kind)
-            claimed.append({**record, STORAGE_KEY: storage_key, **({CONTINUED_KEY: continued} if continued else {})})
+        except OSError:
+            continue
+        # An answer another session sent: this session is the parent, so its carrier continues the route.
+        from dispatch_supervision import CONTINUED_KEY, continue_for_parent
+        continued = continue_for_parent(record, session_id=session_id, recipient_kind=recipient_kind)
+        claimed.append({**record, STORAGE_KEY: storage_key, **({CONTINUED_KEY: continued} if continued else {})})
     elapsed_ns = time.monotonic_ns() - start_ns
-    _append_self_instrumentation(root, elapsed_ns, len(entries), len(claimed))
-    return claimed, len(entries)
+    _append_self_instrumentation(root, elapsed_ns, entry_count, len(claimed))
+    return claimed, entry_count
 
 
 NOTICE_DELIVERY_HEADER = (
@@ -390,7 +410,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     import argparse
     parser = argparse.ArgumentParser(description=main.__doc__)
-    parser.add_argument("action", choices=("roots", "deliver", "ack", "release"))
+    parser.add_argument("action", choices=("roots", "activate", "deliver", "ack", "release"))
     parser.add_argument("--recipient-kind", default="")
     parser.add_argument("--session", default="")
     args = parser.parse_args(argv)
@@ -402,10 +422,13 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--session is required")
     if args.recipient_kind not in pending_delivery.RECIPIENT_KINDS:
         parser.error(f"unknown recipient kind {args.recipient_kind}")
-    if args.action == "deliver":
+    if args.action in {"activate", "deliver"}:
         batches = []
         for root in _state_roots():
-            records, _entries = sweep_deliver(root, args.recipient_kind, args.session)
+            if args.action == "activate":
+                records = activate(root, args.recipient_kind, args.session)
+            else:
+                records, _entries = sweep_deliver(root, args.recipient_kind, args.session)
             if records:
                 batches.append((root, records))
         print(json.dumps({
