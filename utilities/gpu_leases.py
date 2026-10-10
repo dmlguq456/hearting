@@ -133,7 +133,9 @@ def description(row):
 def select(observation, leases, requested=None, share=False):
     if requested == "":
         return []  # explicit CPU-only
-    if not observation.get("reachable") or observation.get("detail") or observation.get("reservation_detail"):
+    if (not observation.get("reachable") or observation.get("detail")
+            or observation.get("reservation_detail") or observation.get("gpu_status")
+            or any(g.get("observation_source") for g in observation.get("gpus", []))):
         status = observation.get("gpu_status") or {}
         if status.get("summary"):
             occupied = sorted({str(g["index"]) for g in observation.get("gpus", [])

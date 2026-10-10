@@ -782,7 +782,8 @@ def smi(query):
     except (OSError, subprocess.TimeoutExpired) as exc:
         return None, str(exc)
     if result.returncode:
-        return None, (result.stderr or result.stdout or "nvidia-smi failed").strip()[:160]
+        detail = (result.stderr or result.stdout or "nvidia-smi failed").strip()[:160]
+        return None, detail or "nvidia-smi failed"
     return list(csv.reader(io.StringIO(result.stdout))), None
 
 
@@ -1371,13 +1372,20 @@ def gpu_proc_fallback():
             if mask is not None:
                 for value in mask.split(","):
                     value = value.strip()
-                    if value.isdigit() and int(value) in opened:
-                        selected.add(int(value))
+                    index = None
+                    if re.fullmatch(r"[0-9]+", value) and int(value) in devices:
+                        index = int(value)
                     elif value.startswith("GPU-"):
                         matches = [i for i, gpu in devices.items()
-                                   if gpu["uuid"] and gpu["uuid"].startswith(value) and i in opened]
+                                   if gpu["uuid"] and gpu["uuid"].startswith(value)]
                         if len(matches) == 1:
-                            selected.add(matches[0])
+                            index = matches[0]
+                    # CUDA ignores the suffix after an invalid identifier. UUID
+                    # abbreviations must be unique on the host, not just open FDs.
+                    if index is None:
+                        break
+                    if index in opened:
+                        selected.add(index)
             # Unknown masks retain device-access evidence, clearly labelled.
             indexes = selected or opened
             owner, reason, session_owner = process_owner(pid, before["start"])
@@ -1456,11 +1464,9 @@ if gpu_rows is None:
     if not payload["gpus"] and isinstance(gpu_error, str) and "No such file or directory" in gpu_error:
         payload.pop("gpu_error", None)
         payload.pop("gpu_status", None)
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    raise SystemExit(0)
 
 by_uuid = {}
-for row in gpu_rows:
+for row in gpu_rows or ():
     if len(row) != 6:
         continue
     index, uuid, name, util, total, used = (part.strip() for part in row)
@@ -1477,7 +1483,8 @@ for row in gpu_rows:
     if uuid:
         by_uuid[uuid] = gpu
 
-process_rows, process_error = smi("--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory")
+process_rows, process_error = (smi("--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory")
+                               if gpu_rows is not None else ([], None))
 if process_rows is None:
     payload["process_error"] = process_error
 else:
@@ -1694,14 +1701,26 @@ def cmd_probe(args):
         for row in results:
             detail = row.get("detail") or row.get("process_detail")
             if not row["reachable"] or detail:
-                print(f"compute-hosts: observation unavailable or partial for {row['host']}: "
-                      f"{detail or 'unreachable'}", file=sys.stderr)
+                summary = (row.get("gpu_status") or {}).get("summary")
+                if summary:
+                    print(f"compute-hosts: {row['host']}: {summary}", file=sys.stderr)
+                else:
+                    print(f"compute-hosts: observation unavailable or partial for {row['host']}: "
+                          f"{detail or 'unreachable'}", file=sys.stderr)
         return 0
     else:
         for row in results:
             state = "up" if row["reachable"] else f"down ({row.get('detail', '')})"
             print(f"{row['host']:<10} {state}")
+            summary = (row.get("gpu_status") or {}).get("summary")
+            if summary:
+                print("    " + summary)
             for gpu in row.get("gpus", []):
+                if gpu.get("observation_source"):
+                    print(f"    GPU {gpu['index']} {gpu.get('name') or '모름'}: 사용률·VRAM 모름")
+                    for process in gpu.get("processes", []):
+                        print(f"      pid {process['pid']} · {process.get('command') or '장치 접근 확인'}")
+                    continue
                 util = gpu.get("utilization_gpu_pct")
                 print(f"    gpu{gpu['index']} {gpu['name']}: "
                       f"{gpu.get('used_mib')}/{gpu.get('total_mib')} MiB used, "
@@ -1813,7 +1832,7 @@ def _run_gpu_observation(name, host):
         row = {"reachable": False, "detail": str(exc)[:120], "gpus": [],
                "observed_at": datetime.datetime.now().timestamp()}
     gpus = [{key: gpu.get(key) for key in
-             ("index", "uuid", "name", "free_mib", "total_mib", "utilization_gpu_pct", "processes", "reservations")}
+             ("index", "uuid", "name", "free_mib", "total_mib", "utilization_gpu_pct", "processes", "reservations", "observation_source")}
             for gpu in row.get("gpus", [])]
     idle = [gpu for gpu in row.get("gpus", [])
             if row.get("reachable") and not row.get("process_detail") and not row.get("reservation_detail")
@@ -1825,6 +1844,7 @@ def _run_gpu_observation(name, host):
                     default=None)
     return {"observed_at": row.get("observed_at"),
             "reachable": row.get("reachable"), "detail": row.get("detail"),
+            "gpu_status": row.get("gpu_status"),
             "process_detail": row.get("process_detail"), "gpus": gpus,
             "reservation_detail": row.get("reservation_detail"),
             "suggested_gpu": suggested["index"] if suggested is not None else None}
@@ -1837,10 +1857,15 @@ def _print_run_gpu_observation(observation):
                      if isinstance(observed_at, (int, float)) else "unknown")
     print(f"  GPUs observed at: {observed_time}")
     if not observation.get("reachable") or observation.get("detail"):
-        print(f"  GPU headroom: unknown ({observation.get('detail') or 'probe unavailable'})")
+        summary = (observation.get("gpu_status") or {}).get("summary")
+        print("  " + summary if summary else
+              f"  GPU headroom: unknown ({observation.get('detail') or 'probe unavailable'})")
     elif not observation["gpus"]:
         print("  GPU headroom: no GPUs observed")
     for gpu in observation["gpus"]:
+        if gpu.get("observation_source"):
+            print(f"  GPU {gpu['index']}: 사용률·VRAM 모름")
+            continue
         free, total, util = (gpu.get(key) for key in
                              ("free_mib", "total_mib", "utilization_gpu_pct"))
         print(f"  gpu{gpu['index']}: {free if free is not None else '—'}/"

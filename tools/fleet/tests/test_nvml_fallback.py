@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import socket
 import subprocess
 import sys
 import tempfile
@@ -67,7 +68,7 @@ class NVMLFallbackTest(unittest.TestCase):
         for index in devices:
             (base / "fd" / str(index + 10)).symlink_to("/dev/nvidia%d" % index)
 
-    def probe(self, error=ERROR, overrides=None):
+    def probe(self, error=ERROR, overrides=None, script=None):
         real_path, real_readlink = Path, os.readlink
 
         def mapped_path(value, *args):
@@ -79,7 +80,7 @@ class NVMLFallbackTest(unittest.TestCase):
         def readlink(value, *args, **kwargs):
             return real_readlink(mapped_path(value), *args, **kwargs)
 
-        script = CH.PROBE_SCRIPT.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        script = (script or CH.PROBE_SCRIPT).split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
         output = io.StringIO()
         with mock.patch("pathlib.Path", side_effect=mapped_path), \
                 mock.patch("os.readlink", side_effect=readlink), \
@@ -177,11 +178,75 @@ class NVMLFallbackTest(unittest.TestCase):
 
     def test_admission_refuses_unknown_measurement_even_with_share(self):
         host = self.probe()
+        with mock.patch.object(CH, "probe_host", return_value=host):
+            observation = CH._run_gpu_observation("cnn", {"ssh_host": "local"})
+        self.assertEqual(observation["gpu_status"], host["gpu_status"])
         for requested in (None, "0", "1"):
             for share in (False, True):
                 with self.assertRaisesRegex(gpu_leases.GPUUnavailable, "GPU 상태 확인 불가.*실행 중 2개"):
-                    gpu_leases.select(host, [], requested=requested, share=share)
+                    gpu_leases.select(observation, [], requested=requested, share=share)
         self.assertEqual(gpu_leases.select(host, [], requested=""), [])
+
+    def test_probe_human_output_uses_summary_and_keeps_raw_error_in_json(self):
+        host = self.probe()
+        from types import SimpleNamespace
+        config = {"hosts": {"cnn": {"ssh_host": "local"}}, "run_root": self.root}
+        for as_json in (True, False):
+            output, warning = io.StringIO(), io.StringIO()
+            with mock.patch.object(CH, "load_config", return_value=config), \
+                    mock.patch.object(CH, "_probe_selected", return_value=[host]), \
+                    contextlib.redirect_stdout(output), contextlib.redirect_stderr(warning):
+                self.assertEqual(CH.cmd_probe(SimpleNamespace(hosts=["cnn"], json=as_json)), 0)
+            self.assertNotIn("Failed to initialize", warning.getvalue())
+            if as_json:
+                self.assertIn("Failed to initialize", json.loads(output.getvalue())[0]["detail"])
+                self.assertIn("GPU 상태 확인 불가", warning.getvalue())
+            else:
+                self.assertIn("GPU 상태 확인 불가", output.getvalue())
+                self.assertIn("모름", output.getvalue())
+                self.assertIn("fix.yaml", output.getvalue())
+
+    def test_empty_query_error_cannot_allow_share_on_an_unmeasured_gpu(self):
+        host = self.probe("  \n")
+        self.assertTrue(host["detail"])
+        for row in (host, {**host, "detail": ""}, {**host, "detail": "", "gpu_status": None}):
+            with self.assertRaises(gpu_leases.GPUUnavailable):
+                gpu_leases.select(row, [], share=True)
+
+    def test_failed_nvml_reaches_real_reservation_snapshot_without_writing(self):
+        namespace = self.root / "proc/self/ns/pid"
+        namespace.parent.mkdir(parents=True)
+        namespace.symlink_to("pid:[fixture]")
+        state = self.root / "gpu-leases.json"
+        state.write_text(json.dumps({"schema_version": 1, "leases": {"lease": {
+            "host": socket.gethostname().lower().split(".")[0], "pid": 71,
+            "starttime": "99", "pid_namespace": "pid:[fixture]", "gpus": ["0"],
+            "owner": {"label": "확인된 예약"}, "task": "train", "started_at": 10,
+        }}}))
+        original, mtime = state.read_bytes(), state.stat().st_mtime_ns
+        with mock.patch.object(gpu_leases, "state_path", return_value=state), \
+                mock.patch.object(CH, "remote", return_value=subprocess.CompletedProcess([], 0, '{"gpus":[]}', "")) as remote:
+            CH.probe_host("cnn", {"ssh_host": "local"}, ssh_session_bridges=[])
+        # Execute the actual composed script, including its embedded lease API.
+        host = self.probe(script=remote.call_args.args[1])
+        self.assertEqual(host["gpus"][0]["reservations"][0]["owner"]["label"], "확인된 예약")
+        self.assertEqual(host["gpu_status"]["running_count"], 2)
+        self.assertEqual(state.read_bytes(), original)
+        self.assertEqual(state.stat().st_mtime_ns, mtime)
+        self.assertFalse(Path(str(state) + ".lock").exists())
+
+    def test_invalid_cuda_identifier_stops_mask_and_uuid_prefix_is_host_unique(self):
+        for pid in (71, 73):
+            self.write("proc/%d/environ" % pid,
+                       "HEARTING_COMPUTE_RUN_ID=fix\0CUDA_VISIBLE_DEVICES=0,-1,1\0")
+        host = self.probe()
+        self.assertEqual([p["pid"] for p in host["gpus"][0]["processes"]], [71])
+        self.assertEqual([p["pid"] for p in host["gpus"][1]["processes"]], [72])
+        self.process(75, "ambiguous-uuid", "GPU-", devices=(0,))
+        host = self.probe()
+        process = next(p for p in host["gpus"][0]["processes"] if p["pid"] == 75)
+        self.assertEqual(process["gpu_placement"], "device-access-only")
+        self.assertEqual(host["gpu_status"]["running_count"], 2)
 
 
 if __name__ == "__main__":
