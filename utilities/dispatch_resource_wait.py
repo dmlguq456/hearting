@@ -247,13 +247,13 @@ def admit_controller_launch(args, control, armed, row, delivered=()):
         return
     command, sandbox = command_builder(row)
     controller = SimpleNamespace(expected=row, identity=identity, command=command,
-                                 sandbox=sandbox, guard=guard)
+                                 sandbox=sandbox, guard=guard, registry=armed["resource_registry"])
     # Tool receipts stay in the native tool response; the outer stream contains
     # only its existing typed controller events, not a second raw CLI receipt.
     with contextlib.redirect_stdout(io.StringIO()):
         try:
             runner.main(runner.controller_argv(armed["resource_registry"], row), controller=controller)
-        except Exception:
+        except (Exception, SystemExit):
             # The runner settles its own pre-release failures before raising.
             # Let the ordinary resource outbox carry that failure to this same
             # owner. Unsettled/foreign rows and errors after release still raise.
@@ -316,6 +316,7 @@ def pending_prompt(path, parent, args=None, control=None):
             raise JOIN.JoinContractError("resource-outbox-binding-changed")
     from resource_run_registry import resource_never_started
     next_work = ("The payload never started. Preserve this failed run, address its launch diagnostic, "
+        "recheck current inputs through the existing smoke/config verification, "
         "and use the normal distinct __a<N> resource retry for unfinished authorized work. "
         "Do not rerun completed stages." if row is not None and resource_never_started(row) else
         "Continue only the already authorized next work; do not restart the resource.")

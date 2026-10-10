@@ -36,7 +36,9 @@ def alive(run):
     return is_alive(run)
 def fail(message):
     print("resource-runner:", message, file=sys.stderr)
-    raise SystemExit(65)
+    error = SystemExit(65)
+    error.resource_message = message
+    raise error
 def locked_update(path, fn):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
     with open(str(path)+".lock","a+") as lock:
@@ -362,7 +364,7 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
                     current.update(status="failed", workflow_state="FAILED_RETRYABLE",
                                    failure_class="resource-launch-incomplete",
                                    launch_state="not-started", ended_at=time.time(), exit_code=None,
-                                   launch_error={"type": type(error).__name__, "message": str(error)[:2048]})
+                                   launch_error=launch_error(error))
                 return current
             failed = locked_update(registry, mark_failed)
             if ledger and resource_never_started(failed):
@@ -383,7 +385,71 @@ def publish_verified_run(registry, run_id, expected, published):
             raise ValueError("resource-reservation-changed")
         data["runs"][run_id] = published
     locked_update(registry, apply)
+
+
+def launch_error(error):
+    diagnostic = getattr(error, "stderr", None) or getattr(error, "resource_message", None)
+    if isinstance(diagnostic, bytes):
+        diagnostic = diagnostic.decode("utf-8", errors="replace")
+    return {"type": type(error).__name__, "message": str(diagnostic or error).strip()[:2048]}
+
+
+def verify_launch_input(command, **kwargs):
+    """Keep a verifier's actual diagnostic when returning its refusal to the owner."""
+    try:
+        result = subprocess.run(command, check=True, stderr=subprocess.PIPE, text=True, **kwargs)
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            print(error.stderr, file=sys.stderr, end="")
+        raise
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="")
+
+
+def settle_queued_validation_failure(controller, error):
+    """Only this leased launcher's unchanged pre-claim request proves no payload ran."""
+    expected = controller.expected
+    if (isinstance(error, LaunchDeferred) or expected.get("status") != "launching"
+            or expected.get("launch_state") != "queued"
+            or any(expected.get(k) is not None for k in
+                   ("pid", "starttime", "command_hash", "process_group", "launch_controller"))):
+        return
+    import dispatch_resource_wait as OWNER_RESOURCE
+    sup = OWNER_RESOURCE.supervisor()
+    route = sup.load_route(expected["route"])
+    ledger = sup.ledger_for(route, expected["jobs"])
+    with ledger.lock():
+        current = json.loads(Path(controller.registry).read_text())["runs"].get(expected["run_id"])
+        if current != expected:
+            return
+        armed = sup.read_armed(ledger).get(expected["node"])
+        if (not armed or armed.get("predecessor_id") != expected["run_id"]
+                or armed.get("resource_registry") != str(Path(controller.registry).resolve())
+                or armed.get("resource_binding") != OWNER_RESOURCE.resource_body_digest(expected)
+                or sup.resource_continuation_cancelled(route, ledger)):
+            return
+        failed = {**expected, "status": "failed", "workflow_state": "FAILED_RETRYABLE",
+            "failure_class": "resource-launch-incomplete", "launch_state": "not-started",
+            "launch_controller": controller.identity, "ended_at": time.time(), "exit_code": None,
+            "launch_error": launch_error(error)}
+        if not resource_never_started(failed):
+            return
+        with controller.guard():
+            # The existing reservation lock rejects a claim or foreign successor.
+            publish_verified_run(controller.registry, expected["run_id"], expected, failed)
+        sup._evaluate(route, ledger, armed, [])
+
+
 def main(argv=None, *, controller=None):
+    try:
+        return _main(argv, controller=controller)
+    except (Exception, SystemExit) as error:
+        if controller is not None and (not isinstance(error, SystemExit) or error.code == 65):
+            settle_queued_validation_failure(controller, error)
+        raise
+
+
+def _main(argv=None, *, controller=None):
     p=argparse.ArgumentParser(); p.add_argument("--registry"); s=p.add_subparsers(dest="cmd",required=True)
     a=s.add_parser("start"); a.add_argument("--run-id",required=True); a.add_argument("--cwd",required=True); a.add_argument("--log",required=True); a.add_argument("--route",required=True); a.add_argument("--node",required=True); a.add_argument("--smoke-attestation"); a.add_argument("--config-manifest")
     a.add_argument("--parent-attempt-id",help="registered headless attempt that owns this resource child")
@@ -416,10 +482,10 @@ def main(argv=None, *, controller=None):
         artifact_root=Path(str(route.get("artifact_root", ""))).resolve()
         if not route_file.is_relative_to(artifact_root):
             fail("route-file-outside-artifact-root")
-        subprocess.run([
+        verify_launch_input([
             sys.executable, str(Path(__file__).with_name("capability-route.py")),
             "verify", "--route", str(route_file), "--cwd", str(cwd),
-        ], check=True, stdout=subprocess.DEVNULL)
+        ], stdout=subprocess.DEVNULL)
         node=next((n for n in route["nodes"] if isinstance(n,dict) and n.get("id")==args.node),None)
         if not node or node.get("kind")!="resource-runner" or node.get("resource_transport")!="detached-process":
             fail("route node is not detached resource-runner")
@@ -427,12 +493,12 @@ def main(argv=None, *, controller=None):
         if resume and not SAFE_RUN_ID.fullmatch(args.run_id): fail("invalid --run-id")
         if not args.smoke_attestation and not resume: fail("hash-bound smoke attestation required")
         if args.smoke_attestation:
-            subprocess.run([sys.executable,str(Path(__file__).parents[1]/"tools/smoke-attestation.py"),"verify","--attestation",args.smoke_attestation],check=True)
+            verify_launch_input([sys.executable,str(Path(__file__).parents[1]/"tools/smoke-attestation.py"),"verify","--attestation",args.smoke_attestation])
         provenance = {}
         if args.config_manifest:
             manifest = json.loads(Path(args.config_manifest).read_text())
             verify_tool = Path(__file__).parents[1] / "tools" / "lab-config-provenance.py"
-            subprocess.run([sys.executable, str(verify_tool), "verify", "--manifest", args.config_manifest], check=True)
+            verify_launch_input([sys.executable, str(verify_tool), "verify", "--manifest", args.config_manifest])
             if not SAFE_RUN_ID.match(args.run_id):
                 fail("invalid --run-id")
             # --attempt suffix policy: "<manifest_run_id>__a<N>" retries the same
