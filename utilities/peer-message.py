@@ -277,6 +277,19 @@ def _read_pending(ref):
         body, sep, _trailer = text.rpartition("\n\n(peer-from:")
         if not sep or hashlib.sha256(body.encode("utf-8")).hexdigest() != row.get("source_sha256"):
             raise ValueError("peer-pending-source-invalid")
+    binding = row.get("dispatch_notice")
+    if binding is not None:
+        keys = {"duty_id", "jobs", "attempt_id", "carrier", "recipient_sid",
+                "storage_recipient", "delivery_id", "claim_owner"}
+        if (not isinstance(binding, dict) or set(binding) != keys
+                or any(not isinstance(value, str) or not value or len(value) > 4096 or "\0" in value
+                       for value in binding.values())
+                or not binding["duty_id"].startswith("registered-batch-")
+                or binding["duty_id"] not in row["refs"]
+                or binding["recipient_sid"] != row["to"].get("session_id")
+                or binding["claim_owner"] != "retained-rewake:" + binding["duty_id"]
+                or not Path(binding["jobs"]).is_absolute()):
+            raise ValueError("peer-dispatch-binding-invalid")
     # Old writers marked an unsent shell notification unverified solely because
     # its sender was absent. Keep the immutable endpoints/body and use the normal
     # claim transition. Queued, attempted or ambiguous sends are never reset.
@@ -301,6 +314,15 @@ def _save_pending(row):
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)  # Own temporary payload only.
+
+
+def bind_dispatch_notice(ref, binding):
+    """Keep each transfer's exact notice binding through later gate/final transfers."""
+    with pending_lock(ref):
+        row = _read_pending(ref)
+        if not row or (row.get("dispatch_notice") and row["dispatch_notice"] != binding):
+            raise ValueError("peer-dispatch-binding-conflict")
+        _save_pending(dict(row, dispatch_notice=dict(binding)))
 
 
 def _quarantine_pending(path, expected):

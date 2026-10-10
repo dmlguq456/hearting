@@ -111,7 +111,10 @@ class ObligationStoreTest(unittest.TestCase):
                        "delivery_id": "delivery-gate", "storage_recipient": "sid", "claim_owner": "owner"}
         self.store.update(duty["id"], observation=observation)
         message = {"state": "received", "ref": "a" * 32, "refs": [duty["id"]],
-                   "to": {"harness": "claude", "session_id": "sid"}}
+                   "to": {"harness": "claude", "session_id": "sid"},
+                   "dispatch_notice": {**observation, "duty_id": duty["id"],
+                       "jobs": identity["jobs"], "attempt_id": identity["attempt_id"],
+                       "carrier": "claude-parent-runtime"}}
         row = SimpleNamespace(status="done", attempt_id="att-owner",
                               metadata={"parent_sid": "sid", "delivery_id": "delivery-final"})
         record = {"state": "claimed", "attempt_ids": ["att-owner"], "claim_owner": "owner",
@@ -122,8 +125,16 @@ class ObligationStoreTest(unittest.TestCase):
             obligations.acknowledge_registered_delivery(message, roots=[self.root])
             ack.assert_called_once()
             self.assertEqual(self.store.get(duty["id"])["state"], "pending")
-            self.store.update(duty["id"], observation={**observation, "delivery_id": "delivery-final"})
+            self.store.update(duty["id"], observation={**observation, "transfer_ref": "b" * 32,
+                                                      "delivery_id": "delivery-final"})
+            record["state"] = "acked"
+            self.assertTrue(obligations.registered_delivery_settled(message, roots=[self.root]))
             obligations.acknowledge_registered_delivery(message, roots=[self.root])
+            self.assertEqual(self.store.get(duty["id"])["state"], "pending")
+            record["state"] = "claimed"
+            final = {**message, "ref": "b" * 32,
+                     "dispatch_notice": {**message["dispatch_notice"], "delivery_id": "delivery-final"}}
+            obligations.acknowledge_registered_delivery(final, roots=[self.root])
             self.assertEqual(self.store.get(duty["id"])["state"], "complete")
 
     @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")

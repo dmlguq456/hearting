@@ -1663,6 +1663,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         spec.loader.exec_module(steward)
         from dispatch_session_sweep import activate, sweep_deliver
         self.enterContext(mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": str(self.root)}))
+        self.enterContext(mock.patch.object(steward.peer_obligations, "ensure_runner"))
         for harness, carrier in (("claude", "claude-parent-runtime"),
                                  ("codex", "codex-native-queue"), ("opencode", "opencode-turn")):
             with self.subTest(harness=harness):
@@ -1735,13 +1736,14 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                         steward.peer_message.receive_peer_message("altered " + text, {"harness": harness, "session_id": "session-1"})
                         self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
                         if other_carrier:
-                            rewake.pending_delivery.ack(self.root, "session-1", transfer_id := queued["observation"]["delivery_id"],
+                            rewake.pending_delivery.ack(self.root, "session-1", queued["observation"]["delivery_id"],
                                                          acked_by="other-native-carrier")
                             self.assertEqual(steward.peer_message.pending_messages({
                                 "harness": harness, "session_id": "session-1"}), [])
                             self.assertIsNone(steward.peer_message.claim_pending_herdr(transfer["ref"], transfer["to"]))
                             self.assertEqual(steward.peer_message.deliver_pending_codex(transfer["ref"])["status"], "not-required")
-                            msg = store.create("message-" + transfer["ref"], "message", {}, {"ref": transfer["ref"]})
+                            msg = store.get("message-" + transfer["ref"])
+                            self.assertIsNotNone(msg)
                             with mock.patch.object(steward, "_flush_pending_for_target") as resend:
                                 steward._resume_message_obligation(msg, store)
                                 resend.assert_not_called()

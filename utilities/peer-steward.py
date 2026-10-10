@@ -3910,6 +3910,8 @@ def _resume_registered_obligation(duty, store):
         transferred = peer_message._read_pending(transfer_ref)
         if transferred and transferred.get("state") == "received":
             peer_obligations.acknowledge_registered_delivery(transferred, roots=[jobs.parent])
+        if transferred and peer_obligations.registered_delivery_settled(transferred, roots=[jobs.parent]):
+            transferred = None
     parent = [row.metadata.get(key, "") for key in
               ("parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns")]
     # A native hook belongs to its original runtime. A live holder cannot wake
@@ -3977,10 +3979,14 @@ def _resume_registered_obligation(duty, store):
         # and retains it through forms, busy turns and sender/observer exit (#446).
         prepared = []
         def bind_transfer(ref):
-            prepared.append(ref)
+            binding = {"duty_id": duty["id"], "jobs": str(jobs), "attempt_id": row.attempt_id,
+                "carrier": intent["carrier"], "recipient_sid": recipient_sid,
+                "delivery_id": delivery_id, "storage_recipient": storage_recipient, "claim_owner": owner}
+            peer_message.bind_dispatch_notice(ref, binding)
             store.update(duty["id"], observation={**observation, "transfer_ref": ref,
                 "delivery_id": delivery_id, "storage_recipient": storage_recipient,
                 "recipient_sid": recipient_sid, "claim_owner": owner})
+            prepared.append(ref)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as body:
             body.write(message)
             body.flush()

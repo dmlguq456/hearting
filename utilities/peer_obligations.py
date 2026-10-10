@@ -138,39 +138,34 @@ def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holde
 
 
 def _registered_delivery_bindings(message, roots=None):
-    refs = [ref for ref in message.get("refs") or [] if ref.startswith("registered-batch-")]
-    if not refs:
+    binding = message.get("dispatch_notice") or {}
+    if not binding or binding.get("duty_id") not in (message.get("refs") or []):
         return
-    from dispatch_contract import dispatch_state_roots, resolve_agent_home
     from dispatch_completion_join import current_attempt_row
-    from dispatch_seat_handover import effective_parent
     import dispatch_pending_delivery as pending
     recipient = message.get("to") or {}
-    if roots is None:
-        roots = dispatch_state_roots(resolve_agent_home())
-    for root in dict.fromkeys(Path(r) for r in roots):
-        store = ObligationStore(root)
-        for duty_id in refs:
-            duty = store.get(duty_id)
-            intent = (duty or {}).get("intent") or {}
-            identity = intent.get("identity") or {}
-            observation = (duty or {}).get("observation") or {}
-            if (intent.get("kind") != "registered-batch"
-                    or observation.get("transfer_ref") != message.get("ref")
-                    or identity.get("harness") != recipient.get("harness")
-                    or observation.get("recipient_sid") != recipient.get("session_id")):
-                continue
-            jobs = Path(identity["jobs"])
-            row = current_attempt_row(jobs, identity["attempt_id"])
-            if (jobs.resolve().parent != root.resolve() or row is None
-                    or effective_parent(row.metadata, jobs) != recipient.get("session_id")):
-                continue
-            storage, delivery_id = observation["storage_recipient"], observation["delivery_id"]
-            record = pending.read(root, storage, delivery_id)
-            if (not record or row.attempt_id not in record.get("attempt_ids", [])
-                    or record.get("recipient_kind") != intent.get("carrier")):
-                continue
-            yield store, duty, row, record, root, storage, delivery_id
+    jobs = Path(binding["jobs"])
+    root = jobs.resolve().parent
+    if roots is not None and root not in {Path(r).resolve() for r in roots}:
+        return
+    store = ObligationStore(root)
+    duty = store.get(binding["duty_id"])
+    intent = (duty or {}).get("intent") or {}
+    identity = intent.get("identity") or {}
+    if (intent.get("kind") != "registered-batch" or identity.get("jobs") != str(jobs)
+            or identity.get("attempt_id") != binding.get("attempt_id")
+            or identity.get("harness") != recipient.get("harness")
+            or binding.get("recipient_sid") != recipient.get("session_id")
+            or intent.get("carrier") != binding.get("carrier")):
+        return
+    row = current_attempt_row(jobs, binding["attempt_id"])
+    storage, delivery_id = binding["storage_recipient"], binding["delivery_id"]
+    record = pending.read(root, storage, delivery_id)
+    if (row is None or not record or row.attempt_id not in record.get("attempt_ids", [])
+            or record.get("recipient_kind") != binding.get("carrier")
+            or row.metadata.get("parent_sid") != storage):
+        return
+    yield store, duty, row, record, root, storage, delivery_id
 
 
 def registered_delivery_settled(message, *, roots=None):
@@ -185,16 +180,20 @@ def acknowledge_registered_delivery(message, *, roots=None):
     if message.get("state") != "received":
         return
     import dispatch_pending_delivery as pending
+    from dispatch_seat_handover import effective_parent
     for store, duty, row, record, root, storage, delivery_id in _registered_delivery_bindings(message, roots):
-        if record.get("claim_owner") != (duty.get("observation") or {}).get("claim_owner"):
+        binding = message["dispatch_notice"]
+        if (record.get("claim_owner") != binding.get("claim_owner")
+                or effective_parent(row.metadata, Path(binding["jobs"])) != binding["recipient_sid"]):
             continue
         if record["state"] in {"claimed", "sent-ambiguous"}:
             pending.ack(root, storage, delivery_id, acked_by="peer-received:" + message["ref"])
         elif record["state"] != "acked":
             continue
         terminal = row.status == "done" and row.metadata.get("delivery_id") == delivery_id
-        store.update(duty["id"], state="complete" if terminal else "pending",
-                     delivery="acknowledged", cleanup="complete" if terminal else "pending")
+        if duty.get("state") not in {"complete", "cancelled"}:
+            store.update(duty["id"], state="complete" if terminal else "pending",
+                         delivery="acknowledged", cleanup="complete" if terminal else "pending")
 
 
 class ObligationStore:
