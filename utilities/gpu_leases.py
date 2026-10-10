@@ -109,11 +109,12 @@ def locked(path):
 
 
 def snapshot(path):
-    if not Path(path).exists():
-        return []
-    with locked(path) as data:
-        host = socket.gethostname().lower().split(".")[0]
-        return [row for row in data["leases"].values() if row.get("host") == host]
+    # Probes are read-only, including on a remote host. Atomic writers already
+    # publish complete JSON; prune the view here and persist cleanup at admission.
+    data = _read(path)
+    host = socket.gethostname().lower().split(".")[0]
+    return [row for row in data["leases"].values()
+            if row.get("host") == host and living(row) is not False]
 
 
 def owner_label(owner):
@@ -133,6 +134,12 @@ def select(observation, leases, requested=None, share=False):
     if requested == "":
         return []  # explicit CPU-only
     if not observation.get("reachable") or observation.get("detail") or observation.get("reservation_detail"):
+        status = observation.get("gpu_status") or {}
+        if status.get("summary"):
+            occupied = sorted({str(g["index"]) for g in observation.get("gpus", [])
+                               if g.get("processes")}, key=int)
+            suffix = " · 장치 점유 " + ", ".join("GPU " + d for d in occupied) if occupied else ""
+            raise GPUUnavailable(status["summary"] + suffix + " · 새 GPU 실행 예약 불가")
         raise GPUUnavailable("GPU availability unknown: %s" % (observation.get("detail") or "probe unavailable"))
     gpus = {str(g["index"]): g for g in observation.get("gpus", [])}
     if not gpus and requested is None:

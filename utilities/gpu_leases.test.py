@@ -81,6 +81,19 @@ class LeasesTest(unittest.TestCase):
         self.assertEqual(len(G.snapshot(self.state)), 1)
         self.assertEqual(self.acquire(requested="GPU-zero")["gpus"], ["0"])
 
+    def test_snapshot_does_not_create_or_rewrite_remote_state(self):
+        missing = self.root / "remote" / "gpu-leases.json"
+        self.assertEqual(G.snapshot(missing), [])
+        self.assertFalse(missing.parent.exists())
+        self.acquire(requested="0")
+        before = self.state.read_bytes()
+        before_stat = self.state.stat()
+        with mock.patch.object(G, "living", return_value=False), \
+                mock.patch.object(G, "locked", side_effect=AssertionError("probe must not lock/write")):
+            self.assertEqual(G.snapshot(self.state), [])
+        self.assertEqual(self.state.read_bytes(), before)
+        self.assertEqual(self.state.stat().st_mtime_ns, before_stat.st_mtime_ns)
+
     def test_unknown_gpu_measurement_refuses_gpu_but_explicit_cpu_still_runs(self):
         for row in ({"reachable": False}, {**OBS, "detail": "smi error"},
                     {**OBS, "process_detail": "process query failed"}):

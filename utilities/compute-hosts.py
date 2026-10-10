@@ -877,7 +877,8 @@ def proc_stat(pid):
         raw = Path("/proc") / str(pid) / "stat"
         text = raw.read_text(encoding="utf-8", errors="replace")
         rest = text[text.rfind(")") + 2:].split()
-        return {"ppid": int(rest[1]), "pgid": int(rest[2]), "start": int(rest[19])}
+        return {"ppid": int(rest[1]), "pgid": int(rest[2]), "start": int(rest[19]),
+                "state": rest[0]}
     except (OSError, ValueError, IndexError):
         return None
 
@@ -1099,6 +1100,7 @@ ENV_KEYS = {
     "HEARTING_COMPUTE_RUN_ID", "HEARTING_COMPUTE_HOST",
     "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID",
     "OPENCODE_SESSION_ID", "SSH_CONNECTION",
+    "CUDA_VISIBLE_DEVICES",
 }
 
 
@@ -1279,6 +1281,154 @@ def process_owner(pid, expected_start):
     return None, "no-exact-owner", session_owner
 
 
+def gpu_failure_status(error, running_count):
+    # The error proves mismatch, not how it happened. Reboot is a host signal.
+    mismatch = "driver/library version mismatch" in str(error).lower()
+    library = re.search(r"NVML library version:\s*([0-9]+(?:\.[0-9]+)+)", str(error))
+    library = library.group(1) if library else None
+    try:
+        version = Path("/proc/driver/nvidia/version").read_text()
+    except OSError:
+        version = ""
+    module = re.search(r"NVRM version:.*?\s([0-9]+(?:\.[0-9]+)+)(?:\s|$)", version)
+    module = module.group(1) if module else None
+    try:
+        Path("/var/run/reboot-required").stat()
+        reboot = True
+    except FileNotFoundError:
+        reboot = False
+    except OSError:
+        reboot = None
+    summary = "GPU 상태 확인 불가"
+    if mismatch:
+        summary += " · 드라이버 불일치"
+        summary += "(라이브러리 %s / 모듈 %s)" % (library or "모름", module or "모름")
+    if reboot:
+        summary += " · 호스트 재부팅 필요"
+    summary += " · 실행 중 %d개 확인" % running_count
+    return {"code": "nvml-driver-mismatch" if mismatch else "gpu-observation-unavailable",
+            "library_version": library, "module_version": module,
+            "reboot_required": reboot, "running_count": running_count, "summary": summary}
+
+
+def gpu_proc_fallback():
+    # Device metadata and open descriptors survive NVML/library failure. A mask
+    # alone is not activity; CUDA opens other devices while using its selection.
+    devices = {}
+    for path in Path("/proc/driver/nvidia/gpus").glob("*/information"):
+        try:
+            fields = dict(line.split(":", 1) for line in path.read_text().splitlines() if ":" in line)
+            index = int(fields["Device Minor"].strip())
+        except (OSError, ValueError, KeyError):
+            continue
+        if index < 0:
+            continue
+        devices[index] = {"index": index, "uuid": fields.get("GPU UUID", "").strip() or None,
+                          "name": fields.get("Model", "").strip() or None}
+    for path in Path("/dev").glob("nvidia[0-9]*"):
+        match = re.fullmatch(r"nvidia([0-9]+)", path.name)
+        if match:
+            index = int(match.group(1))
+            devices.setdefault(index, {"index": index, "uuid": None, "name": None})
+    for gpu in devices.values():
+        gpu.update({"utilization_gpu_pct": None, "memory_total_mib": None,
+                    "memory_used_mib": None, "processes": [], "observation_source": "proc-device"})
+    processes = {}
+    uptime = host_uptime_s()
+    detail = None
+    try:
+        paths = Path("/proc").iterdir()
+        for position, path in enumerate(paths):
+            if position >= 8192:
+                detail = "proc scan limit reached"
+                break
+            if not path.name.isdigit():
+                continue
+            pid = int(path.name)
+            before = proc_stat(pid)
+            if before is None or before.get("state") in {"Z", "X"} or not same_euid(pid):
+                continue
+            opened = set()
+            try:
+                for count, fd in enumerate((path / "fd").iterdir()):
+                    if count >= 512:
+                        detail = "descriptor scan limit reached"
+                        break
+                    try:
+                        target = os.readlink(fd)
+                    except OSError:
+                        continue
+                    match = re.fullmatch(r"/dev/nvidia([0-9]+)", target)
+                    if match:
+                        opened.add(int(match.group(1)))
+            except OSError:
+                continue
+            if not opened:
+                continue
+            env = identity_env(pid)
+            mask = env.get("CUDA_VISIBLE_DEVICES")
+            selected = set()
+            if mask is not None:
+                for value in mask.split(","):
+                    value = value.strip()
+                    if value.isdigit() and int(value) in opened:
+                        selected.add(int(value))
+                    elif value.startswith("GPU-"):
+                        matches = [i for i, gpu in devices.items()
+                                   if gpu["uuid"] and gpu["uuid"].startswith(value) and i in opened]
+                        if len(matches) == 1:
+                            selected.add(matches[0])
+            # Unknown masks retain device-access evidence, clearly labelled.
+            indexes = selected or opened
+            owner, reason, session_owner = process_owner(pid, before["start"])
+            process = {"pid": pid, "proc_start": before["start"], "gpu_uuid": None,
+                       "process_name": None, "used_memory_mib": None,
+                       "command": process_command(pid, before["start"], None),
+                       "command_hash": process_command_hash(pid, before["start"]),
+                       "cwd": process_cwd(pid, before["start"]), "pgid": before["pgid"],
+                       "elapsed_s": process_elapsed_s(before["start"], uptime),
+                       "owner": owner, "attribution_reason": reason,
+                       "observation_source": "proc-device-fd+cuda-visible" if selected else "proc-device-fd",
+                       "gpu_placement": "visible-device-access" if selected else "device-access-only",
+                       "opened_gpu_indexes": sorted(opened), "cuda_visible_devices": mask}
+            if session_owner is not None:
+                process["session_owner"] = session_owner
+            after = proc_stat(pid)
+            if (after is None or after["start"] != before["start"]
+                    or after.get("state") in {"Z", "X"} or not same_euid(pid)
+                    or identity_env(pid) != env):
+                continue
+            processes[pid] = (process, indexes, env.get("HEARTING_COMPUTE_RUN_ID"), before["ppid"])
+    except OSError as exc:
+        detail = str(exc)[:120]
+    count = 0
+    for pid, (process, indexes, run_id, parent) in processes.items():
+        seen = {pid}
+        represented = False
+        for _ in range(128):
+            if parent <= 0 or parent in seen:
+                break
+            seen.add(parent)
+            ancestor = processes.get(parent)
+            if run_id and ancestor and ancestor[2] == run_id and indexes <= ancestor[1]:
+                represented = True
+                break
+            stat = proc_stat(parent)
+            if stat is None:
+                break
+            parent = stat["ppid"]
+        if represented:
+            continue
+        if process["gpu_placement"] == "visible-device-access":
+            count += 1
+        for index in indexes:
+            gpu = devices.setdefault(index, {"index": index, "uuid": None, "name": None,
+                "utilization_gpu_pct": None, "memory_total_mib": None, "memory_used_mib": None,
+                "processes": [], "observation_source": "proc-device"})
+            gpu["processes"].append({**process, "gpu_uuid": gpu["uuid"]})
+    return sorted(devices.values(), key=lambda g: g["index"]), count, detail
+
+
 cpu_count = os.cpu_count()
 cpu_utilization, cpu_threads = cpu_sample(cpu_count)
 if cpu_count is None and cpu_threads:
@@ -1295,14 +1445,17 @@ try:
 except OSError:
     pass
 
-if not any(os.access(os.path.join(path, "nvidia-smi"), os.X_OK)
-           for path in os.environ.get("PATH", "").split(os.pathsep)):
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    raise SystemExit(0)
-
 gpu_rows, gpu_error = smi("--query-gpu=index,uuid,name,utilization.gpu,memory.total,memory.used")
 if gpu_rows is None:
+    payload["gpus"], running_count, fallback_detail = gpu_proc_fallback()
     payload["gpu_error"] = gpu_error
+    if fallback_detail:
+        payload["process_error"] = fallback_detail
+    payload["gpu_status"] = gpu_failure_status(gpu_error, running_count)
+    # A host without NVIDIA devices or an installed query tool remains GPU-less.
+    if not payload["gpus"] and isinstance(gpu_error, str) and "No such file or directory" in gpu_error:
+        payload.pop("gpu_error", None)
+        payload.pop("gpu_status", None)
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
     raise SystemExit(0)
 
@@ -1440,6 +1593,8 @@ def probe_host(name, host, owner_claims=None, ssh_session_bridges=None):
         row["reservation_detail"] = payload["reservation_detail"]
     if payload.get("gpu_error"):
         row["detail"] = str(payload["gpu_error"])[:120]
+    if isinstance(payload.get("gpu_status"), dict):
+        row["gpu_status"] = payload["gpu_status"]
     if payload.get("process_error"):
         row["process_detail"] = str(payload["process_error"])[:120]
     return row
@@ -1505,7 +1660,10 @@ def cmd_list(args):
             f"{g['used_mib'] / 1024:.1f}/{g['total_mib'] / 1024:.0f}G "
             f"{g.get('utilization_gpu_pct') if g.get('utilization_gpu_pct') is not None else '—'}%"
             for g in row["gpus"] if g.get("used_mib") is not None
-            and g.get("total_mib") is not None) or "no gpu"
+            and g.get("total_mib") is not None)
+        if row.get("gpu_status"):
+            summary = row["gpu_status"]["summary"]
+        summary = summary or "no gpu"
         here = "*" if row.get("self") else " "
         cpu = row.get("cpu_utilization_pct")
         cpu_text = "%s%%" % cpu if isinstance(cpu, int) else "—"

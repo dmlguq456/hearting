@@ -5378,17 +5378,21 @@ def _gpu_session_resources(snapshot=None, excluded_processes=()):
                     "model": _gpu_safe_text(gpu.get("name")).replace("NVIDIA ", ""),
                     "process_count": 0, "used_memory_mib": 0,
                     "has_memory": False, "processes": [], "_process_keys": [], "_process_memory": {},
+                    "telemetry_unknown": bool(gpu.get("observation_source")),
+                    "access_only": True,
                 })
+                resource["access_only"] &= process.get("gpu_placement") == "device-access-only"
                 resource["process_count"] += 1
                 resource["_process_keys"].append(process_key)
                 resource["_process_memory"][process_key] = (
                     process.get("used_memory_mib") if type(process.get("used_memory_mib")) is int else None)
                 pid, proc_start = process.get("pid"), process.get("proc_start")
                 primary = process.get("owner")
-                if (isinstance(primary, dict) and primary.get("kind") == "session"
+                if ((process.get("observation_source")
+                     or (isinstance(primary, dict) and primary.get("kind") == "session"
                         and primary.get("source") == "persistent-claim+ancestry"
                         and primary.get("harness") == owner["harness"]
-                        and primary.get("id") == owner["id"]
+                        and primary.get("id") == owner["id"]))
                         and isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
                         and isinstance(proc_start, int) and not isinstance(proc_start, bool)):
                     resource["processes"].append({
@@ -5431,6 +5435,8 @@ def _gpu_resources_for_session(session, resource_index):
             resource["process_count"] += source["process_count"]
             resource["used_memory_mib"] += source["used_memory_mib"]
             resource["has_memory"] |= source["has_memory"]
+            resource["telemetry_unknown"] |= source.get("telemetry_unknown", False)
+            resource["access_only"] &= source.get("access_only", False)
             resource["processes"].extend(source.get("processes") or ())
             resource["_process_keys"].extend(source.get("_process_keys") or ())
             resource["_process_memory"].update(source.get("_process_memory") or {})
@@ -5478,7 +5484,8 @@ def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False, reso
                 segs.append((" · ", "dim"))
             identity = "GPU %s:%s" % (resource["host"], resource["index"])
             pulse_key = "g_work" if _BLINK_ON else "g_work_off"
-            segs += [("●", pulse_key), (" ", None), (identity, "name_dim")]
+            segs += [("◇" if resource.get("access_only") else "●", pulse_key),
+                     (" ", None), (identity, "name_dim")]
             label = labels[id(resource)]
             if name_width is not None:
                 label = (_gpu_clip_command(label, name_width) if name_width > 0 else "")
@@ -5493,6 +5500,10 @@ def _gpu_resource_strip(resources, term_width=None, depth=0, in_card=False, reso
             if show_memory and resource.get("has_memory"):
                 segs += [(" · " + _gpu_gib(resource.get("used_memory_mib", 0))
                           + " GB", "dim")]
+            elif show_memory and resource.get("telemetry_unknown"):
+                segs += [(" · 사용률·VRAM 모름", "dim")]
+                if resource.get("access_only"):
+                    segs += [(" · 장치 접근 확인", "dim")]
             elapsed = resource.get("elapsed_s")
             if show_time and isinstance(elapsed, int) and not isinstance(elapsed, bool):
                 segs += [(" · " + fmt_min(elapsed // 60), "dim")]
@@ -5532,7 +5543,9 @@ def _gpu_work_strip(entries, term_width=None):
             "model": _gpu_safe_text(entry.get("gpu_name")).replace("NVIDIA ", ""),
             "processes": [], "used_memory_mib": 0, "has_memory": False,
             "elapsed_s": None, "owner_label": entry.get("owner_label") or "미등록",
+            "telemetry_unknown": entry.get("telemetry_unknown", False), "access_only": True,
         })
+        resource["access_only"] &= entry.get("gpu_placement") == "device-access-only"
         resource["processes"].append({
             "pid": entry["pid"], "proc_start": entry.get("proc_start"),
             "command": entry.get("command") or entry.get("process_name") or "process",
@@ -5626,6 +5639,9 @@ def _gpu_process_label(command):
 
 def _gpu_state(gpu):
     """GPU liveness from exact current process evidence, never utilization heuristics."""
+    if gpu.get("observation_source"):
+        return ("working" if any(p.get("gpu_placement") == "visible-device-access"
+                                 for p in gpu.get("processes") or ()) else "unknown")
     return ("working" if any(isinstance(process, dict)
                              for process in (gpu.get("processes") or ()))
             else "idle")
@@ -5757,6 +5773,18 @@ def _subdued_ratio_key(used, total):
 
 def _gpu_token(gpu, available, show_name=False, sessions=None, index_width=1,
                vram_slot=None):
+    if gpu.get("observation_source"):
+        state = _gpu_state(gpu)
+        glyph, state_key = _glyph(state)
+        identity = "%s: " % gpu.get("index", "?")
+        name = _gpu_display_model(gpu.get("name")) if show_name and gpu.get("name") else ""
+        segs = [(glyph + " ", state_key), (identity, "name_dim")]
+        if name:
+            segs += [(name + "  ", "name_dim")]
+        segs += [("사용률·VRAM 모름", "dim")]
+        if any(p.get("gpu_placement") == "device-access-only" for p in gpu.get("processes") or ()):
+            segs += [(" · 장치 접근 확인", "lvl_y")]
+        return _clip_segs(segs, available)[0]
     index = gpu.get("index")
     util = gpu.get("utilization_gpu_pct")
     total, used = gpu.get("memory_total_mib"), gpu.get("memory_used_mib")
@@ -5905,8 +5933,25 @@ def _compute_host_rows(term_width=None, sessions=None, resources=None):
         rows.append(_clip_segs(host_row, width)[0])
 
         gpus = [gpu for gpu in (host.get("gpus") or ()) if isinstance(gpu, dict)]
+        status = host.get("gpu_status")
+        if isinstance(status, dict) and status.get("summary"):
+            indent = " " * prefix_width
+            text = _gpu_safe_text(status["summary"])
+            # Wrap diagnostics at terminal cells, keeping the cause/count visible
+            # even in narrow views. Raw query errors remain in full JSON only.
+            room = max(1, width - prefix_width - 1)
+            while text:
+                part = _clip_w(text, room, ellipsis="")
+                if len(part) < len(text) and " " in part:
+                    part = part.rsplit(" ", 1)[0]
+                if not part:
+                    break
+                rows.append([(indent, None), (part, "lvl_y")])
+                text = text[len(part):].lstrip()
         if not gpus:
-            state = "gpu unavailable" if host.get("detail") else "no gpu"
+            if isinstance(status, dict) and status.get("summary"):
+                continue
+            state = "GPU 상태 확인 불가" if host.get("detail") else "no gpu"
             row = [(" " * prefix_width, None),
                    (state, "lvl_y" if host.get("detail") else "dim")]
             rows.append(_clip_segs(row, width)[0])
