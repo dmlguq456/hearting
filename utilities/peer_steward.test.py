@@ -6024,7 +6024,8 @@ class DeferredRetireHandoverTest(_TmpRootMixin, unittest.TestCase):
         store, duty = self.booking()
         marker = peer_steward._seat_successor_path("w1:pNew")
         original = json.loads(marker.read_text())
-        for change in ({"at": 300}, {"successor": {"harness": "claude", "session_id": "new-sid"}},
+        for change in ({"at": 300}, {"server": "another-server"},
+                       {"successor": {"harness": "claude", "session_id": "new-sid"}},
                        {"successor": {"harness": "opencode", "session_id": "later-sid"}}):
             with self.subTest(change=change):
                 marker.write_text(json.dumps({**original, **change}))

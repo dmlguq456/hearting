@@ -1125,6 +1125,7 @@ def _mark_seat_successor(pane, beside, kind, session_id):
             path.parent.mkdir(parents=True, exist_ok=True)
             tmp = path.with_suffix(".tmp")
             tmp.write_text(json.dumps({"schema": 1, "pane": pane, "beside": beside,
+                                       "server": _HERDR_SESSION or "default",
                                        "successor": {"harness": kind, "session_id": session_id or ""},
                                        "at": time.time()}, sort_keys=True), encoding="utf-8")
             os.replace(tmp, path)
@@ -1157,6 +1158,9 @@ def _seat_handover_locked(ident, own_sid, own_harness, pane, *, requester=None, 
         return None
     if not isinstance(mark, dict) or mark.get("pane") != pane or mark.get("beside") != ident["pane"]:
         return None
+    server = requester.get("server", "default") if requester is not None else _HERDR_SESSION or "default"
+    if mark.get("server", "default") != server:
+        return "skipped:successor-unverified"
     successor = mark.get("successor") or {}
     recorded = successor.get("session_id")
     if (not own_sid or own_sid == "-" or ident.get("session_id") in {None, "", "-"}
