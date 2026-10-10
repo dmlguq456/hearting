@@ -739,13 +739,16 @@ def continuation_attempt_state(metadata):
 
 def resource_predecessor_finished(row):
     """A resource's exact ended execution, independent of its scientific verdict."""
-    from resource_run_registry import classify_identity, resource_never_started
+    from resource_run_registry import classify_identity, resource_never_started, reboot_evidence
     from dispatch_resource_wait import supervisor
     if resource_never_started(row):
         return True
     if (row.get("status") == "launching" or row.get("cancel_requested")
             or row.get("parent_close_requested") or classify_identity(row)[0] != "exited"):
         return False
+    if (row.get('status') != 'succeeded' and row.get('exit_code') is None
+            and reboot_evidence(row)):
+        return True
     code = supervisor().runner().read_sentinel(row.get("sentinel"))
     return (code is not None and row.get("exit_code", code) == code
             and not (row.get("status") == "failed" and code == 0)
@@ -1059,7 +1062,11 @@ def runtime_owner_can_resume(status, meta) -> bool:
             and meta.get("launch_started") == "1"
             and meta.get("supervisor_lease") == "flock-v1"
             and bool(meta.get("supervisor_lease_file"))
-            and meta.get("note") in {"dead-runtime-exit", "dead-runtime-error"})
+            and (meta.get("note") in {"dead-runtime-exit", "dead-runtime-error"}
+                 or (meta.get("note") == "dead-protocol"
+                     and meta.get("reconcile_reason") == "terminal-event-missing"
+                     and meta.get("terminal_event") == "dispatch.supervisor.error"
+                     and not readable_result(meta))))
 
 
 def answerable_owner_end(status, meta) -> str:

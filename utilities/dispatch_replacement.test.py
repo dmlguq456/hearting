@@ -1550,6 +1550,53 @@ class ReplacementTest(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertNotIn('ended BLOCKED', text)
 
+    def test_interrupted_supervisor_accepts_answer_after_previous_replacement(self):
+        import dispatch_owner_input as I
+        for harness in ('claude', 'codex', 'opencode'):
+            with self.subTest(harness=harness):
+                self.tearDown_case()
+                self.meta['harness'] = harness
+                meta = self._blocked_owner()
+                self._answer()
+                first = self.claim()
+                successor = self._successor(first, meta, status='open')
+                I.initialize_owner_input(self.jobs, successor['attempt_id'], 'claude-next-turn')
+                ended = self._die(successor, note='dead-protocol', failure_class='protocol',
+                          reconcile_reason='terminal-event-missing', terminal_event='dispatch.supervisor.error',
+                          launch_started='1', supervisor_lease='flock-v1',
+                          supervisor_lease_file=str(D.supervisor_lease_path(self.jobs, successor['attempt_id'])))
+                before = self.jobs.read_bytes()
+                tick = R.advance(self.jobs, successor['attempt_id'], authority_check=lambda *_: True)
+                self.assertNotEqual(tick.get('state'), 'started')
+                self.assertEqual(self.jobs.read_bytes(), before)
+                self.assertTrue(self._answer(successor['attempt_id'], text='정전 뒤 남은 평가만 이어가세요.')['retained'])
+                record = R.claim(self.jobs, successor['attempt_id'])
+                self.assertEqual(record['proof']['source_result'], 'EXITED')
+                self.assertEqual(record['route_id'], first['route_id'])
+                self.assertNotEqual(record['family_id'], first['family_id'])
+                self.assertEqual(R.claim(self.jobs, successor['attempt_id']), record)
+
+    def test_interrupted_supervisor_correction_excludes_results_cancel_and_unknown_process(self):
+        import route_authority as RA
+        meta = self._blocked_owner()
+        meta.update(note='dead-protocol', failure_class='protocol', launch_started='1',
+                    supervisor_lease='flock-v1', supervisor_lease_file='lease',
+                    reconcile_reason='terminal-event-missing', terminal_event='dispatch.supervisor.error')
+        self.write(meta)
+        self.assertTrue(RA.runtime_owner_can_resume('done', meta))
+        for change in ({'note': 'dead-worker-fail'}, {'note': 'completed-supervisor'},
+                       {'reconcile_reason': 'terminal-envelope-invalid'}, {'launch_started': '0'},
+                       {'terminal_event': 'dispatch.supervisor.done'}):
+            self.assertFalse(RA.runtime_owner_can_resume('done', {**meta, **change}))
+        self.assertFalse(RA.runtime_owner_can_resume('cancelled', meta))
+        with mock.patch.object(RA, 'readable_result', return_value='PASS'):
+            self.assertFalse(RA.runtime_owner_can_resume('done', meta))
+        for state in ('live', 'unverifiable'):
+            with self.subTest(state=state), mock.patch.object(D, 'attempt_process_quiescence',
+                    return_value=SimpleNamespace(state=state, reason='fixture')):
+                with self.assertRaisesRegex(Exception, 'owner-input-unavailable'):
+                    self._answer()
+
     # -- an owner that ended with a readable FAIL, answered with a fix a person approved ----------
     def _failed_owner(self, test_fails=2):
         """BC rt-96bab699: the owner reported its test FAIL as its result; the check's rounds are spent."""
