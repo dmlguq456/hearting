@@ -3811,6 +3811,10 @@ def _resume_message_obligation(duty, store):
         store.update(duty["id"], state="unknown",
                      observation={"ref": ref, "reason": "pending-row-missing"})
         return
+    if peer_obligations.registered_delivery_settled(row):
+        store.update(duty["id"], state="complete", delivery="not-required", cleanup="complete",
+                     observation={"ref": ref, "reason": "dispatch-notice-consumed"})
+        return
     if row.get("state") == "received":
         store.update(duty["id"], state="complete", result="received",
                      delivery="acknowledged", cleanup="complete",
@@ -3874,16 +3878,19 @@ def _resume_message_obligation(duty, store):
 
 
 def _resume_registered_obligation(duty, store):
-    """Recover a lost Claude native wake through the existing durable peer courier."""
+    """Wake an exact restored recipient through the existing durable peer courier."""
     intent = duty.get("intent") or {}
-    if intent.get("carrier") != "claude-parent-runtime":
-        return
+    from harness_capabilities import parent_completion
     identity = intent["identity"]
+    harness = identity.get("harness")
+    if intent.get("carrier") != parent_completion(harness)["carrier"]:
+        return
     jobs = Path(identity["jobs"])
     from dispatch_completion_join import current_attempt_row, materialize_after_terminal_close
     from dispatch_notice_state import keep_claim
     import dispatch_pending_delivery as pending
     from dispatch_seat_handover import effective_parent
+    from dispatch_session_sweep import addressed_records, delivery_context, is_human_gate_record
     spec = importlib.util.spec_from_file_location(
         "_retained_rewake", _UTILITIES_DIR.parent / "hooks/dispatch-owner-rewake.py")
     rewake = sys.modules.get(spec.name)
@@ -3893,11 +3900,22 @@ def _resume_registered_obligation(duty, store):
         spec.loader.exec_module(rewake)
     arm = rewake._read_arm(rewake.arm_path(jobs, identity["attempt_id"]))
     holder = (arm or {}).get("holder") or (duty.get("observation") or {}).get("holder")
-    if rewake._holder_alive(holder):
-        return
     row = current_attempt_row(jobs, identity["attempt_id"])
     if row is None:
         return
+    observation = duty.get("observation") or {}
+    transfer_ref = observation.get("transfer_ref")
+    transferred = None
+    if transfer_ref:
+        transferred = peer_message._read_pending(transfer_ref)
+        if transferred and transferred.get("state") == "received":
+            peer_obligations.acknowledge_registered_delivery(transferred, roots=[jobs.parent])
+        if transferred and peer_obligations.registered_delivery_settled(transferred, roots=[jobs.parent]):
+            transferred = None
+    parent = [row.metadata.get(key, "") for key in
+              ("parent_runtime_pid", "parent_runtime_pid_start", "parent_runtime_ns")]
+    # A native hook belongs to its original runtime. A live holder cannot wake
+    # a replacement process after that runtime died. Unknown identity stays protected.
     # The duty follows confirmed handover; the signed queue stays under the
     # registered parent, even when its current recipient is a successor.
     recipient_sid = effective_parent(row.metadata, jobs)
@@ -3914,55 +3932,75 @@ def _resume_registered_obligation(duty, store):
         if record and record.get("state") in {"acked", "rejected", "expired"}:
             store.update(duty["id"], state="complete", delivery=record["state"], cleanup="complete")
             return
+    if transferred and transferred.get("state") in {"queued", "unverified"}:
+        return  # The existing message courier owns this accepted/ambiguous send.
+    if holder and rewake._holder_alive(holder) and rewake._holder_alive(parent):
+        return
     old_server = _HERDR_SESSION
     globals()["_HERDR_SESSION"] = None if identity["server"] == "default" else identity["server"]
     try:
         result = subprocess.run(_herdr_argv("agent", "list"), capture_output=True, text=True, timeout=5)
         agents = (json.loads(result.stdout).get("result") or {}).get("agents") or []
-        matches = [a for a in agents if a.get("agent") == "claude"
+        matches = [a for a in agents if a.get("agent") == harness
                    and (a.get("agent_session") or {}).get("value") == recipient_sid]
         if len(matches) != 1:
+            store.update(duty["id"], observation={"reason": "recipient-unavailable",
+                                                  "session_id": recipient_sid})
             return
         pane = matches[0]["pane_id"]
-        if _resolve_target(pane)[:2] != ("claude", recipient_sid):
+        if _resolve_target(pane)[:2] != (harness, recipient_sid):
             return
-        launch = rewake.Launch(identity["attempt_id"], jobs, recipient_sid)
-        win = None
+        if transferred and transferred.get("state") == "pending":
+            _schedule_message_obligation(transferred, pane, pane)
+            return
         if row.status in {"open", "running"}:
-            claims = []
-            notices = rewake._gate_notices(launch, attempt_only=True, settle="sent-ambiguous",
-                                           supervision_claims=claims)
-            for root, recipient, delivery_id, owner in claims:
-                pending.release_claim(root, recipient, delivery_id, claim_owner=owner)
-            if not notices:
+            records, _ = addressed_records(jobs.parent, intent["carrier"], recipient_sid)
+            record = next((r for r in records if row.attempt_id in (r.get("attempt_ids") or [])
+                           and (is_human_gate_record(r) or
+                                r.get("receipt", {}).get("kind") == "supervision")), None)
+            if record is None:
                 return
-            message = rewake.gate_wake_message(launch, notices)
-        else:
-            owner = "retained-rewake:" + duty["id"]
-            if record and record.get("state") in {"claimed", "sent-ambiguous"}:
-                pending.reclaim(jobs.parent, storage_recipient, delivery_id,
-                                now_ns=time.monotonic_ns())
-            record = pending.claim(jobs.parent, storage_recipient, delivery_id,
-                                   claim_owner=owner, lease_seconds=30, require_generation_proof=False)
-            if not keep_claim(jobs.parent, storage_recipient, delivery_id, record, owner, jobs=jobs):
-                return
-            win = (delivery_id, owner)
-            _state, message = rewake.classified_receipt(launch, "ready", "retained-carrier", rewake.agent_home())
+            storage_recipient = record.get("_storage_key") or storage_recipient
+            delivery_id = record["delivery_id"]
+        owner = "retained-rewake:" + duty["id"]
+        if record and record.get("state") in {"claimed", "sent-ambiguous"}:
+            pending.reclaim(jobs.parent, storage_recipient, delivery_id,
+                            now_ns=time.monotonic_ns())
+        record = pending.claim(jobs.parent, storage_recipient, delivery_id,
+                               claim_owner=owner, lease_seconds=30, require_generation_proof=False)
+        if not keep_claim(jobs.parent, storage_recipient, delivery_id, record, owner, jobs=jobs):
+            return
+        from dispatch_supervision import CONTINUED_KEY, continue_for_parent
+        continued = continue_for_parent(record, session_id=recipient_sid,
+                                        recipient_kind=intent["carrier"])
+        message = delivery_context([(jobs.parent, [{**record, **(
+            {CONTINUED_KEY: continued} if continued else {})}])])
         # The normal prompt command seals the body, checks the recipient again,
         # and retains it through forms, busy turns and sender/observer exit (#446).
+        prepared = []
+        def bind_transfer(ref):
+            binding = {"duty_id": duty["id"], "jobs": str(jobs), "attempt_id": row.attempt_id,
+                "carrier": intent["carrier"], "recipient_sid": recipient_sid,
+                "delivery_id": delivery_id, "storage_recipient": storage_recipient, "claim_owner": owner}
+            peer_message.bind_dispatch_notice(ref, binding)
+            store.update(duty["id"], observation={**observation, "transfer_ref": ref,
+                "delivery_id": delivery_id, "storage_recipient": storage_recipient,
+                "recipient_sid": recipient_sid, "claim_owner": owner})
+            prepared.append(ref)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as body:
             body.write(message)
             body.flush()
             args = build_parser().parse_args(["prompt", pane, "--body-file", body.name,
                                               "--ref", duty["id"]])
-            code = cmd_prompt(args, expected_recipient=("claude", recipient_sid))
-        if code in {0, 3}:
-            if win:
-                pending.mark_sent_ambiguous(jobs.parent, storage_recipient, win[0], claim_owner=win[1])
-            store.update(duty["id"], state="complete" if win else "pending",
-                         delivery="peer-courier", cleanup="complete" if win else "pending")
-        elif win:
-            pending.release_claim(jobs.parent, storage_recipient, win[0], claim_owner=win[1])
+            code = cmd_prompt(args, expected_recipient=(harness, recipient_sid), on_prepared=bind_transfer)
+        current = pending.read(jobs.parent, storage_recipient, delivery_id)
+        if current and current.get("state") == "acked":
+            return
+        if prepared or code in {0, 3}:
+            pending.mark_sent_ambiguous(jobs.parent, storage_recipient, delivery_id, claim_owner=owner)
+            store.update(duty["id"], state="pending", delivery="peer-courier", cleanup="pending")
+        else:
+            pending.release_claim(jobs.parent, storage_recipient, delivery_id, claim_owner=owner)
     finally:
         globals()["_HERDR_SESSION"] = old_server
 
@@ -4077,7 +4115,7 @@ def _verify_after_send(target, first, t_harness, t_sid, sent_at):
     return "queued", "prompt-box", "prompt-box-residue"
 
 
-def cmd_prompt(args, *, expected_recipient=None):
+def cmd_prompt(args, *, expected_recipient=None, on_prepared=None):
     """F-100c — the harness-neutral steward send: `herdr agent prompt <target> <body +
     trailer>`, recorded with the target's exact session id (herdr `agent get`) and the
     sender's name. The trailer lets the receiving harness write its own `notice`.
@@ -4149,7 +4187,10 @@ def cmd_prompt(args, *, expected_recipient=None):
             text, transfer_ref = peer_message.prepare_peer_message(
                 body, {"harness": from_harness, "session_id": from_sid, "name": from_name},
                 {"harness": t_harness, "session_id": t_sid, "name": _t_name},
-                defer=bool(input_reason), refs=args.ref, receipt=input_reason or "target-form-open")
+                defer=bool(input_reason) or on_prepared is not None,
+                refs=args.ref, receipt=input_reason or "target-form-open")
+            if on_prepared is not None:
+                on_prepared(transfer_ref)
         except (OSError, ValueError):
             print("prompted=unverified reason=peer-pending-or-transfer-unavailable")
             return 5
@@ -4196,11 +4237,13 @@ def cmd_prompt(args, *, expected_recipient=None):
                         body, {"harness": from_harness, "session_id": from_sid, "name": from_name},
                         {"harness": t_harness, "session_id": t_sid, "name": _t_name},
                         defer=True, refs=args.ref, receipt=input_reason)
+                    if on_prepared is not None:
+                        on_prepared(transfer_ref)
                     pending = peer_message._read_pending(transfer_ref)
                 except (OSError, ValueError):
                     print("prompted=unverified reason=peer-pending-unavailable")
                     return 5
-    if pending and pending.get("state") == "pending" and input_reason:
+    if pending and pending.get("state") == "pending" and (input_reason or on_prepared is not None):
         _schedule_message_obligation(pending, args.target, target_pane)
     if pending and t_harness == "codex":
         surface = "codex-queue"

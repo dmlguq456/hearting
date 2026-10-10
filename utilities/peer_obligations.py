@@ -111,6 +111,91 @@ def _write_atomic(path: Path, value: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holder=None):
+    """Reconnect the existing exact-attempt courier; never start the work again."""
+    from dispatch_completion_join import JoinContractError, current_attempt_row
+    from dispatch_seat_handover import effective_parent
+    from harness_capabilities import HARNESSES, parent_completion
+    try:
+        row = current_attempt_row(Path(jobs), attempt_id)
+    except JoinContractError:
+        return
+    harness = next((h for h in HARNESSES if parent_completion(h)["carrier"] == carrier), None)
+    if (not harness or row is None or row.status not in {"open", "running", "done"}
+            or row.metadata.get("parent_completion_delivery") != carrier
+            or effective_parent(row.metadata, Path(jobs)) != session_id):
+        return
+    identity = {"jobs": str(Path(jobs).resolve()), "attempt_id": attempt_id,
+                "session_id": session_id, "harness": harness,
+                "server": os.environ.get("AGENT_HERDR_SESSION") or "default"}
+    store = ObligationStore(Path(jobs).parent)
+    duty = store.create(stable_duty_id("registered-batch", identity),
+                        "registered-batch", identity, {"carrier": carrier})
+    if duty.get("state") not in {"complete", "cancelled"}:
+        if holder:
+            store.update(duty["id"], observation={"holder": list(holder)})
+        ensure_runner(Path(jobs).parent)
+
+
+def _registered_delivery_bindings(message, roots=None):
+    binding = message.get("dispatch_notice") or {}
+    if not binding or binding.get("duty_id") not in (message.get("refs") or []):
+        return
+    from dispatch_completion_join import current_attempt_row
+    import dispatch_pending_delivery as pending
+    recipient = message.get("to") or {}
+    jobs = Path(binding["jobs"])
+    root = jobs.resolve().parent
+    if roots is not None and root not in {Path(r).resolve() for r in roots}:
+        return
+    store = ObligationStore(root)
+    duty = store.get(binding["duty_id"])
+    intent = (duty or {}).get("intent") or {}
+    identity = intent.get("identity") or {}
+    if (intent.get("kind") != "registered-batch" or identity.get("jobs") != str(jobs)
+            or identity.get("attempt_id") != binding.get("attempt_id")
+            or identity.get("harness") != recipient.get("harness")
+            or binding.get("recipient_sid") != recipient.get("session_id")
+            or intent.get("carrier") != binding.get("carrier")):
+        return
+    row = current_attempt_row(jobs, binding["attempt_id"])
+    storage, delivery_id = binding["storage_recipient"], binding["delivery_id"]
+    record = pending.read(root, storage, delivery_id)
+    if (row is None or not record or row.attempt_id not in record.get("attempt_ids", [])
+            or record.get("recipient_kind") != binding.get("carrier")
+            or row.metadata.get("parent_sid") != storage):
+        return
+    yield store, duty, row, record, root, storage, delivery_id
+
+
+def registered_delivery_settled(message, *, roots=None):
+    """A consumed exact notice makes its deferred peer payload unnecessary."""
+    return any(record["state"] in {"acked", "rejected", "expired"}
+               for _store, _duty, _row, record, _root, _storage, _delivery_id
+               in _registered_delivery_bindings(message, roots))
+
+
+def acknowledge_registered_delivery(message, *, roots=None):
+    """Consume only the dispatch notice bound before this exact peer transfer was sent."""
+    if message.get("state") != "received":
+        return
+    import dispatch_pending_delivery as pending
+    from dispatch_seat_handover import effective_parent
+    for store, duty, row, record, root, storage, delivery_id in _registered_delivery_bindings(message, roots):
+        binding = message["dispatch_notice"]
+        if (record.get("claim_owner") != binding.get("claim_owner")
+                or effective_parent(row.metadata, Path(binding["jobs"])) != binding["recipient_sid"]):
+            continue
+        if record["state"] in {"claimed", "sent-ambiguous"}:
+            pending.ack(root, storage, delivery_id, acked_by="peer-received:" + message["ref"])
+        elif record["state"] != "acked":
+            continue
+        terminal = row.status == "done" and row.metadata.get("delivery_id") == delivery_id
+        if duty.get("state") not in {"complete", "cancelled"}:
+            store.update(duty["id"], state="complete" if terminal else "pending",
+                         delivery="acknowledged", cleanup="complete" if terminal else "pending")
+
+
 class ObligationStore:
     """Atomic intent records; immutable intent is separate from mutable progress."""
 
@@ -252,8 +337,7 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path) -> bool:
     Accepted work stays in the existing store; the same flock fences its next
     observer. A pidfd prevents a recycled PID from ever receiving the signal.
     """
-    if not any(d.get("intent", {}).get("carrier") == "claude-parent-runtime"
-               for d in store.list()):
+    if not any(d.get("intent", {}).get("kind") == "registered-batch" for d in store.list()):
         return False
     if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
         return False
@@ -272,7 +356,9 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path) -> bool:
             lock_fd = argv[argv.index("--lock-fd") + 1]
             if (proc / "fd" / lock_fd).resolve() != lock_path.resolve():
                 continue
-            if "def _resume_registered_obligation(" in Path(argv[1]).read_text():
+            source = Path(argv[1]).read_text()
+            if ("def _resume_registered_obligation(" in source
+                    and "from dispatch_session_sweep import addressed_records" in source):
                 continue
             signal.pidfd_send_signal(pidfd, signal.SIGTERM)
             return True

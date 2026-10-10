@@ -101,6 +101,42 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertEqual((ready.state, ready.scope, ready.outcome),
                          ("ready", "native-turn", None))
 
+    def test_a_received_gate_does_not_close_a_later_terminal_completion(self):
+        from types import SimpleNamespace
+        identity = {"jobs": str(self.root / "route-jobs.tsv"), "attempt_id": "att-owner",
+                    "session_id": "sid", "harness": "claude"}
+        duty = self.store.create("registered-batch-fixture", "registered-batch", identity,
+                                 {"carrier": "claude-parent-runtime"})
+        observation = {"transfer_ref": "a" * 32, "recipient_sid": "sid",
+                       "delivery_id": "delivery-gate", "storage_recipient": "sid", "claim_owner": "owner"}
+        self.store.update(duty["id"], observation=observation)
+        message = {"state": "received", "ref": "a" * 32, "refs": [duty["id"]],
+                   "to": {"harness": "claude", "session_id": "sid"},
+                   "dispatch_notice": {**observation, "duty_id": duty["id"],
+                       "jobs": identity["jobs"], "attempt_id": identity["attempt_id"],
+                       "carrier": "claude-parent-runtime"}}
+        row = SimpleNamespace(status="done", attempt_id="att-owner",
+                              metadata={"parent_sid": "sid", "delivery_id": "delivery-final"})
+        record = {"state": "claimed", "attempt_ids": ["att-owner"], "claim_owner": "owner",
+                  "recipient_kind": "claude-parent-runtime"}
+        with mock.patch("dispatch_completion_join.current_attempt_row", return_value=row), \
+                mock.patch("dispatch_pending_delivery.read", return_value=record), \
+                mock.patch("dispatch_pending_delivery.ack") as ack:
+            obligations.acknowledge_registered_delivery(message, roots=[self.root])
+            ack.assert_called_once()
+            self.assertEqual(self.store.get(duty["id"])["state"], "pending")
+            self.store.update(duty["id"], observation={**observation, "transfer_ref": "b" * 32,
+                                                      "delivery_id": "delivery-final"})
+            record["state"] = "acked"
+            self.assertTrue(obligations.registered_delivery_settled(message, roots=[self.root]))
+            obligations.acknowledge_registered_delivery(message, roots=[self.root])
+            self.assertEqual(self.store.get(duty["id"])["state"], "pending")
+            record["state"] = "claimed"
+            final = {**message, "ref": "b" * 32,
+                     "dispatch_notice": {**message["dispatch_notice"], "delivery_id": "delivery-final"}}
+            obligations.acknowledge_registered_delivery(final, roots=[self.root])
+            self.assertEqual(self.store.get(duty["id"])["state"], "complete")
+
     @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
     def test_unsupported_observer_releases_same_lock_without_losing_accepted_duties(self):
         self._check_observer_handoff(supported=False)
@@ -110,16 +146,23 @@ class ObligationStoreTest(unittest.TestCase):
         self._check_observer_handoff(supported=True)
 
     @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    def test_claude_only_observer_is_replaced_for_shared_activation_delivery(self):
+        self._check_observer_handoff(supported=False, native_only=True)
+
+    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
     def test_a_legacy_observer_keeps_its_pid_while_current_runner_starts(self):
         self._check_observer_handoff(supported=False, legacy=True)
 
-    def _check_observer_handoff(self, supported, legacy=False):
+    def _check_observer_handoff(self, supported, legacy=False, native_only=False):
         duty = self.store.create("registered-batch-fixture", "registered-batch",
                                  {"session_id": "parent"}, {"carrier": "claude-parent-runtime"})
         prior = self.store.create("message-fixture", "message", {"session_id": "other"}, {"ref": "old"})
         script = self.root / "peer-steward.py"
         source = "import time\nprint('ready', flush=True)\ntime.sleep(30)\n"
         if supported:
+            source = ("def _resume_registered_obligation():\n"
+                      "    from dispatch_session_sweep import addressed_records\n" + source)
+        elif native_only:
             source = "def _resume_registered_obligation(): pass\n" + source
         script.write_text(source)
         lock_path = self.store.root / ("runner.lock" if legacy else obligations.RUNNER_LOCK_NAME)

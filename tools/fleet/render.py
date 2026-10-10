@@ -3546,6 +3546,12 @@ def _mem_repo_rows(events, sid_titles, limit=_MEM_REPO_ROW_LIMIT, term_width=Non
     return _mem_change_rows(events or [], sid_titles, limit, term_width)
 
 
+def _delivery_pending_rows(counts):
+    if isinstance(counts, dict) and counts.get("pending", 0):
+        return [[("  delivery pending: %d · awaiting recipient" % counts["pending"], "lvl_y")]]
+    return []
+
+
 def _diagnostic_rows(diagnostics, malformed=0, term_width=None):
     """One reader-evidence summary for group/process views; never infer execution failure."""
     rows = []
@@ -7331,7 +7337,7 @@ def _observation_lines(observations, term_width=None):
 def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memory=None,
                  term_width=None, live_order=None, resources=None, usage_snapshots=None,
                  governor=_IO_UNSET, loading=False, node_evidence=None,
-                 route_entities=None, observations=None, resource_diagnostics=None):
+                 route_entities=None, observations=None, resource_diagnostics=None, pending_delivery=None):
     """One cell budget for plain output and curses, preserving row/map indexes."""
     if term_width and layout == "wide" and term_width < _TWO_LINE_CUTOFF:
         layout = "stack" if term_width < _NARROW_CUTOFF else "narrow"
@@ -7340,7 +7346,8 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
     lines = _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout, memory,
                                     term_width, live_order, resources, usage_snapshots, governor, loading,
                                     node_evidence=node_evidence, route_entities=route_entities,
-                                    observations=observations, resource_diagnostics=resource_diagnostics)
+                                    observations=observations, resource_diagnostics=resource_diagnostics,
+                                    pending_delivery=pending_delivery)
     if term_width is None:
         return lines
     width = max(1, term_width - 1)  # curses reserves its rightmost cell
@@ -7373,7 +7380,7 @@ def _build_lines(sessions, jobs, section, narrow, malformed, layout="wide", memo
 def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="wide", memory=None,
                  term_width=None, live_order=None, resources=None, usage_snapshots=None,
                  governor=_IO_UNSET, loading=False, node_evidence=None,
-                 route_entities=None, observations=None, resource_diagnostics=None):
+                 route_entities=None, observations=None, resource_diagnostics=None, pending_delivery=None):
     """Return a flat list of segment-lines for the whole screen (None = blank line).
 
     Side effect: refreshes the module-level `_SELECTABLE` stash (F-27) — see its definition.
@@ -7430,7 +7437,8 @@ def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="w
             term_width, layout, node_evidence=_node_evidence, governor=governor,
             resources=resources, loading=loading, observations=observations,
             resource_diagnostics=resource_diagnostics)
-        top_rows = _top_rows(term_width, narrow) + _observation_lines(observations, term_width)
+        top_rows = (_top_rows(term_width, narrow) + _observation_lines(observations, term_width)
+                    + _delivery_pending_rows(pending_delivery))
         for entry in _FOLDABLE + _SELECTABLE:
             entry["line"] += len(top_rows)
         return top_rows + process_lines
@@ -8187,6 +8195,7 @@ def _build_unbounded_lines(sessions, jobs, section, narrow, malformed, layout="w
         lines.append([(message, "dim")])
 
     diagnostic_rows = _diagnostic_rows(resource_diagnostics, malformed, term_width)
+    diagnostic_rows.extend(_delivery_pending_rows(pending_delivery))
     if diagnostic_rows:
         lines.append(None)
         lines.extend(diagnostic_rows)
@@ -8402,7 +8411,8 @@ def render_once(collect_all, hfilter, section, *, compute_hosts_refresh=None):
                              resources=resources, usage_snapshots=usage_snapshots,
                              governor=governor_snapshot, node_evidence=snapshot.node_evidence,
                              route_entities=snapshot.route_entities, observations=snapshot.observations,
-                             resource_diagnostics=resource_diagnostics)
+                             resource_diagnostics=resource_diagnostics,
+                             pending_delivery=snapshot.pending_delivery)
     finally:
         _GIT_TELEMETRY = previous_git_telemetry
     colored = bool(getattr(sys.stdout, "isatty", lambda: False)()) and not os.environ.get("NO_COLOR")
@@ -9219,7 +9229,8 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                          node_evidence=snapshot.node_evidence if snapshot else None,
                          route_entities=snapshot.route_entities if snapshot else None,
                          observations=snapshot.observations if snapshot else None,
-                         resource_diagnostics=snapshot.resource_diagnostics if snapshot else resource_diagnostics)
+                         resource_diagnostics=snapshot.resource_diagnostics if snapshot else resource_diagnostics,
+                         pending_delivery=snapshot.pending_delivery if snapshot else None)
         _RELOAD_FRAME = lines
         _RELOAD_FRAME_AT = min(now, _COMPUTE_HOSTS_SET_AT) if _COMPUTE_HOSTS_SET_AT is not None else now
         _RELOAD_FRAME_COMPUTE_AT = _COMPUTE_HOSTS_SET_AT

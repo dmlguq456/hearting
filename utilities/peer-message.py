@@ -277,6 +277,19 @@ def _read_pending(ref):
         body, sep, _trailer = text.rpartition("\n\n(peer-from:")
         if not sep or hashlib.sha256(body.encode("utf-8")).hexdigest() != row.get("source_sha256"):
             raise ValueError("peer-pending-source-invalid")
+    binding = row.get("dispatch_notice")
+    if binding is not None:
+        keys = {"duty_id", "jobs", "attempt_id", "carrier", "recipient_sid",
+                "storage_recipient", "delivery_id", "claim_owner"}
+        if (not isinstance(binding, dict) or set(binding) != keys
+                or any(not isinstance(value, str) or not value or len(value) > 4096 or "\0" in value
+                       for value in binding.values())
+                or not binding["duty_id"].startswith("registered-batch-")
+                or binding["duty_id"] not in row["refs"]
+                or binding["recipient_sid"] != row["to"].get("session_id")
+                or binding["claim_owner"] != "retained-rewake:" + binding["duty_id"]
+                or not Path(binding["jobs"]).is_absolute()):
+            raise ValueError("peer-dispatch-binding-invalid")
     # Old writers marked an unsent shell notification unverified solely because
     # its sender was absent. Keep the immutable endpoints/body and use the normal
     # claim transition. Queued, attempted or ambiguous sends are never reset.
@@ -301,6 +314,15 @@ def _save_pending(row):
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)  # Own temporary payload only.
+
+
+def bind_dispatch_notice(ref, binding):
+    """Keep each transfer's exact notice binding through later gate/final transfers."""
+    with pending_lock(ref):
+        row = _read_pending(ref)
+        if not row or (row.get("dispatch_notice") and row["dispatch_notice"] != binding):
+            raise ValueError("peer-dispatch-binding-conflict")
+        _save_pending(dict(row, dispatch_notice=dict(binding)))
 
 
 def _quarantine_pending(path, expected):
@@ -346,8 +368,16 @@ def _pending_rows():
                 ref = path.stem if re.fullmatch(r"[0-9a-f]{32}", path.stem) else "invalid-ref"
                 print(f"peer-pending-invalid ref={ref}", file=sys.stderr)
             continue
-        if row and row["state"] != "received":
+        if row and row["state"] != "received" and not _registered_delivery_settled(row):
             yield row
+
+
+def _registered_delivery_settled(row):
+    try:
+        from peer_obligations import registered_delivery_settled
+        return registered_delivery_settled(row)
+    except (OSError, ValueError, KeyError):
+        return False
 
 
 def pending_messages(recipient):
@@ -416,6 +446,8 @@ def claim_pending_herdr(ref, recipient, *, receipt="herdr-delivery-inflight"):
         if (not row or row["state"] != "pending" or row.get("rpc_claim")
                 or any(row["to"].get(k) != recipient.get(k) for k in ("harness", "session_id"))):
             return None
+        if _registered_delivery_settled(row):
+            return None
         claim = {"token": secrets.token_hex(16), "pid": os.getpid(),
                  "start": process_start_ticks(os.getpid())}
         _save_pending(dict(row, state="unverified", receipt=receipt, rpc_claim=claim))
@@ -445,6 +477,8 @@ def deliver_pending_codex(ref, *, timeout=1.0):
             return {"status": "unsupported", "reason": "peer-pending-missing"}
         if row["state"] == "received":
             return {"status": "received", "reason": "exact-peer-ref"}
+        if _registered_delivery_settled(row):
+            return {"status": "not-required", "reason": "dispatch-notice-consumed"}
         if not _valid_transfer_sender(row["from"]) or not _valid_transfer_endpoint(row["to"]):
             return {"status": "unverified", "reason": "peer-endpoint-unverified"}
         if row["to"]["harness"] != "codex":
@@ -497,7 +531,9 @@ def deliver_pending_codex(ref, *, timeout=1.0):
             if rc:
                 _save_pending(dict(current, rpc_claim=None))
                 return {"status": "unverified", "reason": "peer-receive-ledger-unavailable"}
-            _save_pending(dict(current, state="received", text=None, rpc_claim=None, receipt="exact-native-history"))
+            received = dict(current, state="received", text=None, rpc_claim=None, receipt="exact-native-history")
+            _save_pending(received)
+            _ack_registered_delivery(received)
             return {"status": "received", "reason": "exact-native-history"}
         _save_pending(dict(current, state="queued", rpc_claim=None, receipt="native-queue-accepted"))
         return {"status": "queued", "reason": "native-queue-accepted"}
@@ -605,6 +641,14 @@ def _peer_notice_exists(ref, recipient):
         for r in _iter_records())
 
 
+def _ack_registered_delivery(received):
+    try:
+        from peer_obligations import acknowledge_registered_delivery
+        acknowledge_registered_delivery(received)
+    except (OSError, ValueError, KeyError):
+        pass  # The retained courier retries the same receipt, never another send.
+
+
 def receive_peer_message(text, recipient, project="", *, summary_text=""):
     """Actual receiver observation; rendering a callback is never this boundary."""
     trailer = parse_peer_trailer(text, recipient, include_ref=True)
@@ -624,8 +668,10 @@ def receive_peer_message(text, recipient, project="", *, summary_text=""):
             ref=[ref, *(pending.get("refs", []) if pending else [])] if ref else [], transfer_ref=ref,
             body_file=None, body_stdin=False, body_text=summary_text))
         if rc == 0 and pending:
-            _save_pending(dict(pending, state="received", text=None, rpc_claim=None,
-                               receipt="exact-peer-ref", received_at=time.time()))
+            received = dict(pending, state="received", text=None, rpc_claim=None,
+                            receipt="exact-peer-ref", received_at=time.time())
+            _save_pending(received)
+            _ack_registered_delivery(received)
         return rc
 
 

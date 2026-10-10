@@ -10,9 +10,9 @@ measured-unsupported for a session-generation proof, so the claim is made
 without one and the accepted trade is bounded at-least-once re-delivery over
 never-delivered. For every record addressed to this session that is pending
 or lease-expired, one bounded receipt line is injected as
-``additionalContext`` and the record is acked -- the injection is synchronous
-with this session's next inference, which is the consumption token the
-async rewake carrier can never prove. The Claude Code `asyncRewake` hook only
+``additionalContext``. A real UserPromptSubmit acknowledges after rendering;
+SessionStart only observes and reconnects the existing courier, since startup
+context does not itself start inference. The Claude Code `asyncRewake` hook only
 wakes an idle session on exit code 2 and its exit-0 output waits for the next
 user interaction, so this sweep is the path that guarantees a completion is
 seen at the latest on the user's next prompt.
@@ -27,6 +27,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utilities"))
 from dispatch_contract import dispatch_state_roots, resolve_agent_home  # noqa: E402
 from dispatch_session_sweep import (  # noqa: E402
+    activate,
     ack_delivered,
     delivery_context,
     sweep_deliver,
@@ -75,7 +76,10 @@ def main() -> int:
             # does not exist holds nothing to sweep; touching it would create it.
             continue
         try:
-            records, _entries = sweep_deliver(root, RECIPIENT_KIND, session_id)
+            if _event_name(payload) == "SessionStart":
+                records = activate(root, RECIPIENT_KIND, session_id)
+            else:
+                records, _entries = sweep_deliver(root, RECIPIENT_KIND, session_id)
         except Exception:  # noqa: BLE001 -- fail-open (§13.33.1-(3))
             continue
         if records:
@@ -100,11 +104,6 @@ def main() -> int:
             except Exception:  # noqa: BLE001
                 continue
     context = delivery_context(batches)
-    for root, records in batches:
-        try:
-            ack_delivered(root, session_id, records, acked_by=f"session-sweep:{session_id}")
-        except Exception:  # noqa: BLE001
-            pass
     if not context:
         return 0
     print(
@@ -119,6 +118,12 @@ def main() -> int:
             separators=(",", ":"),
         )
     )
+    if _event_name(payload) == "UserPromptSubmit":
+        for root, records in batches:
+            try:
+                ack_delivered(root, session_id, records, acked_by=f"session-sweep:{session_id}")
+            except Exception:  # noqa: BLE001
+                pass
     return 0
 
 

@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from unittest import mock
 
@@ -88,6 +89,26 @@ class PendingDeliveryCountsTest(unittest.TestCase):
         pending_delivery.create(**_record(root=self.state_root))
         counts = dispatch._pending_delivery_counts([str(self.jobs_path)])
         self.assertEqual(counts, {"pending": 1, "expired": 0, "retained_batch_duties": 0})
+
+    def test_notice_remains_visible_without_any_parent_session(self):
+        from fleet import render
+        record = pending_delivery.create(**_record(root=self.state_root))
+        before = pending_delivery.read(self.state_root, "sess-p6", record["delivery_id"])
+        counts = dispatch._pending_delivery_counts([str(self.jobs_path)])
+        for process_view in (False, True):
+            with mock.patch.object(render, "_PROCESS_VIEW", process_view):
+                lines = render._build_lines([], [], "all", False, 0, term_width=80,
+                                            pending_delivery=counts)
+                text = "\n".join("".join(segment[0] for segment in line) for line in lines if line)
+                self.assertIn("delivery pending: 1", text)
+                self.assertIn("awaiting recipient", text)
+        self.assertEqual(pending_delivery.read(self.state_root, "sess-p6", record["delivery_id"]), before)
+        pending_delivery.claim(self.state_root, "sess-p6", record["delivery_id"],
+                               claim_owner="test", lease_seconds=30, require_generation_proof=False)
+        pending_delivery.ack(self.state_root, "sess-p6", record["delivery_id"], acked_by="prompt")
+        lines = render._build_lines([], [], "all", False, 0, term_width=80,
+            pending_delivery=dispatch._pending_delivery_counts([str(self.jobs_path)]))
+        self.assertNotIn("delivery pending", str(lines))
 
     def test_expired_record_counted_separately_and_never_deleted(self):
         record = pending_delivery.create(**_record(root=self.state_root))
