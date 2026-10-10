@@ -1063,6 +1063,16 @@ as soon as the transport binds it, including during the first model turn.
 A registered resource launched in that turn uses the same live supervisor and
 session binding, available during the turn itself.
 
+A resource launch failure proven before payload release stays a resource
+outcome, with its original diagnostic. The supervising controller returns that
+outcome to the same owner instead of exiting or spending an owner replacement.
+The owner continues the already authorized work using the normal resource retry;
+failed rows and evidence remain intact. GPU admission concerns the host actually
+running CUDA: an orchestration bridge for `compute-hosts` uses the existing
+CPU-only CUDA visibility on its controller host, and the target-host launcher
+reserves the real devices. A GPU route label alone does not choose another host
+or authorize bypassing a local reservation failure.
+
 For the explicit `resume-run,run-verify` graph, `resource-runner start` also
 arms the shared supervisor and starts its watch, without a model waiting on the
 payload. The same route's normal `start` is the claimed successor: before the

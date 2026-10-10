@@ -361,7 +361,8 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
                 else:
                     current.update(status="failed", workflow_state="FAILED_RETRYABLE",
                                    failure_class="resource-launch-incomplete",
-                                   launch_state="not-started", ended_at=time.time(), exit_code=None)
+                                   launch_state="not-started", ended_at=time.time(), exit_code=None,
+                                   launch_error={"type": type(error).__name__, "message": str(error)[:2048]})
                 return current
             failed = locked_update(registry, mark_failed)
             if ledger and resource_never_started(failed):
