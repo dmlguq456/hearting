@@ -327,6 +327,26 @@ class QuiescenceTest(unittest.TestCase):
                 self.assertFalse(value["observation_valid"])
                 self.assertEqual(value["unattributable_open_items"], 1)
 
+    def test_resource_row_whose_process_left_its_exit_sentinel_is_not_open(self):
+        # The registry row still says `running` until an observer settles it;
+        # the process is gone and its exit sentinel exists (route_autoclose's end record).
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); config = self.fixture(base)
+            root = Path(config["artifact_root"])
+            _, path = self.sealed_route(root, "eval-run")
+            sentinel = base / "driver.log.exit"
+            run = {"status": "running", "route": str(path), "node": "eval-run",
+                   "pid": 4194304, "starttime": "1", "command_hash": "0" * 64,
+                   "sentinel": str(sentinel)}
+            for ended in (False, True):
+                with self.subTest(ended=ended):
+                    if ended:
+                        sentinel.write_text("0", encoding="utf-8")
+                    self.write_resource_runs(config, base, {"run": dict(run)})
+                    value = Q.collect(config)
+                    self.assertTrue(value["observation_valid"], value.get("source_diagnostics"))
+                    self.assertEqual(value["open_jobs"], 0 if ended else 1, value)
+
     def test_review_real_resource_route_remains_attributable_when_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); config = self.fixture(base)

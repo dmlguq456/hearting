@@ -390,10 +390,15 @@ def _attribute_open_item(kind: str, row: dict, target: dict) -> dict:
 
 
 def _resource_is_open(row: dict) -> bool:
-    return (
-        row.get("liveness") == "working"
-        or str(row.get("registry_status", "")).lower() in RESOURCE_OPEN
-    )
+    if row.get("liveness") == "working":
+        return True
+    if str(row.get("registry_status", "")).lower() not in RESOURCE_OPEN:
+        return False
+    # Same end record route_autoclose reads: a process that is gone and left its
+    # exit sentinel has ended even before an observer settles the registry row.
+    sentinel = row.get("sentinel")
+    return not (row.get("liveness") == "exited" and isinstance(sentinel, str) and sentinel
+                and os.path.exists(sentinel))
 
 
 def _attribution_snapshot(config: dict, resource_rows: list[dict], dispatch_rows: list[dict]) -> dict:
