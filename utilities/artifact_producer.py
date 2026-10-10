@@ -8227,7 +8227,7 @@ def admit_shared(
             shutil.rmtree(str(staging), ignore_errors=True)
             raise ProducerError("revision-exists", str(target))
         # COMMIT POINT: no-replace rename of the staged immutable revision.
-        os.rename(str(staging), str(target))
+        artifact_admission.atomic_publish.rename_directory_locked(staging, target)
         _fsync_dir(revisions_dir)
         journal["state"] = "published"
         _write_atomic(shared_journal_path(root, revision_id), _json_bytes(journal), 0o600)

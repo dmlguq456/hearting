@@ -539,8 +539,8 @@ class RenameMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
         source = Path(self.src["cycle_dir"])
         inode = source.stat().st_ino
         library = mock.Mock(renameat2=mock.Mock(return_value=-1))
-        with mock.patch.object(X.ctypes, "CDLL", return_value=library), \
-             mock.patch.object(X.ctypes, "get_errno", return_value=errno.EINVAL), \
+        with mock.patch.object(X.atomic_publish.ctypes, "CDLL", return_value=library), \
+             mock.patch.object(X.atomic_publish.ctypes, "get_errno", return_value=errno.EINVAL), \
              mock.patch.object(X, "tree", side_effect=AssertionError("payload hash")), \
              mock.patch.object(X.shutil, "copytree", side_effect=AssertionError("copy")):
             out = self.move(attach_logs=args)
@@ -558,8 +558,8 @@ class RenameMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
             foreign.append((path, path.stat().st_ino))
             return -1
         library = mock.Mock(renameat2=mock.Mock(side_effect=unsupported))
-        with mock.patch.object(X.ctypes, "CDLL", return_value=library), \
-             mock.patch.object(X.ctypes, "get_errno", return_value=errno.EINVAL), \
+        with mock.patch.object(X.atomic_publish.ctypes, "CDLL", return_value=library), \
+             mock.patch.object(X.atomic_publish.ctypes, "get_errno", return_value=errno.EINVAL), \
              self.assertRaises(P.ProducerError):
             self.move()
         self.assertTrue(Path(self.src["cycle_dir"]).exists())
@@ -567,8 +567,8 @@ class RenameMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
 
     def test_rename_exdev_keeps_source_and_is_not_treated_as_unsupported_flag(self):
         library = mock.Mock(renameat2=mock.Mock(return_value=-1))
-        with mock.patch.object(X.ctypes, "CDLL", return_value=library), \
-             mock.patch.object(X.ctypes, "get_errno", return_value=errno.EXDEV), \
+        with mock.patch.object(X.atomic_publish.ctypes, "CDLL", return_value=library), \
+             mock.patch.object(X.atomic_publish.ctypes, "get_errno", return_value=errno.EXDEV), \
              self.assertRaises(OSError) as caught:
             self.move()
         self.assertEqual(caught.exception.errno, errno.EXDEV)
@@ -577,8 +577,8 @@ class RenameMoveTest(CrossRootMoveFixture, F.ProducerTestBase):
     def test_nfs_copy_publication_uses_the_same_locked_fallback(self):
         library = mock.Mock(renameat2=mock.Mock(return_value=-1))
         with mock.patch.object(X, "_same_device", return_value=False), \
-             mock.patch.object(X.ctypes, "CDLL", return_value=library), \
-             mock.patch.object(X.ctypes, "get_errno", return_value=errno.EINVAL):
+             mock.patch.object(X.atomic_publish.ctypes, "CDLL", return_value=library), \
+             mock.patch.object(X.atomic_publish.ctypes, "get_errno", return_value=errno.EINVAL):
             out = self.move()
         self.assertEqual(out["status"], "moved")
         self.assertEqual(out["cycles"][0]["transfer"], "copy")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import io
@@ -405,6 +406,20 @@ class BundleV2Tests(unittest.TestCase):
             source.mkdir(); target.mkdir()
             with self.assertRaisesRegex(B.BundleError, "collision"): B._rename_noreplace(source, target)
             self.assertTrue(source.is_dir()); self.assertTrue(target.is_dir())
+
+    def test_publish_uses_unsupported_filesystem_fallback_and_preserves_bytes(self):
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td); source = base / "source"; source.mkdir(); self.prose(source)
+            store = base / "store"; store.mkdir()
+            library = mock.Mock(renameat2=mock.Mock(return_value=-1))
+            with mock.patch.object(B.atomic_publish.ctypes, "CDLL", return_value=library), \
+                    mock.patch.object(B.atomic_publish.ctypes, "get_errno", return_value=errno.EINVAL):
+                self.assertEqual(B.publish(source, "proj", "exp", "v1", store)["status"], "published")
+            target = store / "proj/exp/v1/report"
+            for name in ("REPORT.md", "index.html", "report_manifest.json"):
+                self.assertEqual((source / name).read_bytes(), (target / name).read_bytes())
+            self.assertEqual(B.publish(source, "proj", "exp", "v1", store)["status"], "unchanged")
+            self.assertEqual(B.VERIFY.verify(target / "report_manifest.json")["bundle_classification"], "bundle/v2")
 
     def test_integrity_sweep_writes_bundle_state_only_on_transition(self):
         with tempfile.TemporaryDirectory() as td:

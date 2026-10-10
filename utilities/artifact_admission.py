@@ -7,7 +7,7 @@ the filesystem for producer admission. Exclusivity comes from an OS advisory
 lock (`flock`) held for the whole admission — process death releases it, so
 there is no dead-holder reclamation to race on — never from a rename flag
 (F-1/F-2 measured this root does not give no-replace rename). The single
-commit point is the canonical publish `os.rename(staging, publish_target)`
+commit point is the canonical publish `atomic_publish.rename_directory_locked`
 — see `admit()` step 14.
 
 `.runtime/artifact-admission/v1/index.json` is a derived, rebuildable
@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import artifact_identity
+import atomic_publish
 import artifact_index
 import artifact_locator
 import artifact_manifest
@@ -629,7 +630,7 @@ def _quarantine(root: Path, staging: Path, idempotency_key: str) -> Path:
     while True:
         dest = quarantine_dir / "{0}-{1}".format(idempotency_key, n)
         try:
-            os.rename(str(staging), str(dest))
+            atomic_publish.rename_directory_locked(staging, dest)
             return dest
         except FileExistsError:
             n += 1
@@ -1366,7 +1367,7 @@ def admit(
             )
 
         # step 14 -- SINGLE COMMIT POINT.
-        os.rename(str(staging), str(publish_target))
+        atomic_publish.rename_directory_locked(staging, publish_target)
 
         # After the commit point a failure can no longer mean "nothing was
         # admitted": the canonical folder is visible and the journal (still
