@@ -790,6 +790,10 @@ harnesses. It wakes a restored recipient through the checked prompt surface;
 drafts, forms and changed session identities remain protected. With no recipient,
 the notice remains pending and Fleet shows the outstanding delivery. A real
 prompt or accepted runtime turn supplies receipt, independently of execution.
+The retained courier binds its peer transfer to that exact notice before sending;
+actual peer receipt can settle a still-live notice lease. A queued transfer stays
+owned by the existing message courier. Receipt of an earlier gate does not settle
+the owner's later completion notice.
 
 A replay that verifies the exact closed outcome, finalized cycle, sealed owner
 handoff and quiescent children reports completed work. A missing or stale progress

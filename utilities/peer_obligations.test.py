@@ -101,6 +101,31 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertEqual((ready.state, ready.scope, ready.outcome),
                          ("ready", "native-turn", None))
 
+    def test_a_received_gate_does_not_close_a_later_terminal_completion(self):
+        from types import SimpleNamespace
+        identity = {"jobs": str(self.root / "route-jobs.tsv"), "attempt_id": "att-owner",
+                    "session_id": "sid", "harness": "claude"}
+        duty = self.store.create("registered-batch-fixture", "registered-batch", identity,
+                                 {"carrier": "claude-parent-runtime"})
+        observation = {"transfer_ref": "a" * 32, "recipient_sid": "sid",
+                       "delivery_id": "delivery-gate", "storage_recipient": "sid", "claim_owner": "owner"}
+        self.store.update(duty["id"], observation=observation)
+        message = {"state": "received", "ref": "a" * 32, "refs": [duty["id"]],
+                   "to": {"harness": "claude", "session_id": "sid"}}
+        row = SimpleNamespace(status="done", attempt_id="att-owner",
+                              metadata={"parent_sid": "sid", "delivery_id": "delivery-final"})
+        record = {"state": "claimed", "attempt_ids": ["att-owner"], "claim_owner": "owner",
+                  "recipient_kind": "claude-parent-runtime"}
+        with mock.patch("dispatch_completion_join.current_attempt_row", return_value=row), \
+                mock.patch("dispatch_pending_delivery.read", return_value=record), \
+                mock.patch("dispatch_pending_delivery.ack") as ack:
+            obligations.acknowledge_registered_delivery(message, roots=[self.root])
+            ack.assert_called_once()
+            self.assertEqual(self.store.get(duty["id"])["state"], "pending")
+            self.store.update(duty["id"], observation={**observation, "delivery_id": "delivery-final"})
+            obligations.acknowledge_registered_delivery(message, roots=[self.root])
+            self.assertEqual(self.store.get(duty["id"])["state"], "complete")
+
     @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
     def test_unsupported_observer_releases_same_lock_without_losing_accepted_duties(self):
         self._check_observer_handoff(supported=False)

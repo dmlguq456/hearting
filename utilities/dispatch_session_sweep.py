@@ -168,13 +168,24 @@ def activate(root: Path, recipient_kind: str, session_id: str) -> list[dict]:
     records, _ = addressed_records(root, recipient_kind, session_id)
     from peer_obligations import retain_registered_completion
     for record in records:
+        jobs = record_jobs(root, record)
+        if jobs is None:
+            continue
         for attempt in record.get("attempt_ids") or []:
             try:
-                retain_registered_completion(Path(root) / "jobs.log", attempt, session_id,
-                                             recipient_kind)
+                retain_registered_completion(jobs, attempt, session_id, recipient_kind)
             except (OSError, ValueError):
                 continue
     return records
+
+
+def record_jobs(root: Path, record: dict) -> Path | None:
+    """Use the receipt's registry or the canonical selection, preserving its filename."""
+    from dispatch_contract import resolve_agent_home, resolve_global_registry
+    raw = (record.get("receipt") or {}).get("job_registry")
+    jobs = Path(raw) if isinstance(raw, str) and raw else resolve_global_registry(
+        resolve_agent_home(), None, 0, "read").path
+    return jobs if jobs.resolve().parent == Path(root).resolve() else None
 
 
 def sweep_deliver(
@@ -280,8 +291,11 @@ def _followup(root: Path, record: dict) -> str:
         return ""
     try:
         from dispatch_completion_join import completion_followup_text
+        jobs = record_jobs(root, record)
+        if jobs is None:
+            return ""
         return completion_followup_text(
-            receipt, jobs=str(Path(root) / "jobs.log"),
+            receipt, jobs=str(jobs),
             surface=str(Path(__file__).resolve().parents[1] / "adapters" / "codex" / "bin" / "preflight.sh"))
     except Exception:  # noqa: BLE001 -- the bounded receipt line still reaches the parent
         return ""

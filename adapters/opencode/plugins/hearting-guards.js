@@ -1102,9 +1102,14 @@ export const AgentHarnessGuards = async (ctx) => {
   // was loaded by the headless runtime (dispatch-liveness.py inspects it).
   markPluginLoaded(dispatchSlug())
   peerIdentityLog(ctx, "plugin", "plugin-registered")
-  registerPaneContext(ctx)
+  const paneBinding = registerPaneContext(ctx)
   if (!isWorkerSession()) reconnectPeerObligations()
   const completionCarrier = createCompletionCarrier(ctx)
+  // Restoring an existing -s/--session TUI does not emit session.created.
+  // Reuse the process-bound selector; a directory/SDK root cannot pick a recipient.
+  if (paneBinding.ownsOrigin && paneNativeOrigin?.sid) {
+    await completionCarrier.activate(paneNativeOrigin.sid)
+  }
 
   return ({
   dispose: () => { completionCarrier.dispose(); retirePaneContext(ctx) },

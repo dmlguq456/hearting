@@ -1649,10 +1649,17 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         self._check_lost_carrier_completion(live_holder=True)
 
     def test_restored_parent_uses_existing_courier_without_user_prompt_all_harnesses(self):
+        self._check_restored_courier(immediate=True)
+
+    def test_queued_restored_wake_waits_for_exact_receipt_without_another_send(self):
+        self._check_restored_courier(immediate=False)
+
+    def _check_restored_courier(self, *, immediate):
         spec = importlib.util.spec_from_file_location("restored_steward_test", ROOT / "utilities/peer-steward.py")
         steward = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steward)
-        from dispatch_session_sweep import activate, sweep_deliver, ack_delivered
+        from dispatch_session_sweep import activate, sweep_deliver
+        self.enterContext(mock.patch.dict(os.environ, {"AGENT_PEER_LEDGER_ROOT": str(self.root)}))
         for harness, carrier in (("claude", "claude-parent-runtime"),
                                  ("codex", "codex-native-queue"), ("opencode", "opencode-turn")):
             with self.subTest(harness=harness):
@@ -1665,27 +1672,71 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 duty = next(d for d in store.list() if d["intent"]["identity"]["harness"] == harness)
                 self.assertEqual(json.loads(path.read_text())["attempts"], 0)
                 agents = {"result": {"agents": []}}
+                real_prompt = steward.cmd_prompt
+                delivered = []
+                def prompt(args, **kwargs):
+                    # Run the real preparation and dispatch binding. Only the external
+                    # transport is substituted; no timer expiry is involved.
+                    def receive(text):
+                        record = json.loads(path.read_text())
+                        self.assertGreater(record["claim_deadline_ns"], time.monotonic_ns())
+                        self.assertEqual(sweep_deliver(self.root, carrier, "session-1")[0], [])
+                        self.assertEqual(steward.peer_message.receive_peer_message(text, {
+                            "harness": harness, "session_id": "session-1"}), 0)
+                        delivered.append(text)
+                    def herdr_prompt(target, text, **options):
+                        receive(text)
+                        return 0, {}
+                    def queue(ref):
+                        if not immediate:
+                            return {"status": "queued", "reason": "native-queue-accepted"}
+                        receive(steward.peer_message._read_pending(ref)["text"])
+                        return {"status": "received", "reason": "exact-peer-ref"}
+                    with mock.patch.object(steward, "_herdr_missing", return_value=False), \
+                            mock.patch.object(steward, "_current_session_identity", return_value=("sender-1", "claude")), \
+                            mock.patch.object(steward, "_from_name", return_value="fixture"), \
+                            mock.patch.object(steward, "_agent_state", return_value=("idle", "w1:p9")), \
+                            mock.patch.object(steward, "_prompt_input_reason",
+                                return_value=None if immediate else "target-form-open"), \
+                            mock.patch.object(steward, "_flush_pending_for_target", return_value=(0, 0)), \
+                            mock.patch.object(steward, "_schedule_message_obligation") as scheduled, \
+                            mock.patch.object(steward, "_herdr_prompt", side_effect=herdr_prompt), \
+                            mock.patch.object(steward.peer_message, "deliver_pending_codex", side_effect=queue), \
+                            mock.patch.object(steward, "_record"):
+                        code = real_prompt(args, **kwargs)
+                        scheduled.assert_called_once()
+                        return code
                 with mock.patch.object(steward.subprocess, "run", side_effect=lambda *a, **kw:
                         type("Reply", (), {"stdout": json.dumps(agents), "returncode": 0})()), \
                         mock.patch.object(steward, "_resolve_target", return_value=(harness, "session-1", None)), \
-                        mock.patch.object(steward, "cmd_prompt", return_value=3) as prompt:
+                        mock.patch.object(steward, "cmd_prompt", side_effect=prompt) as prompt_call:
                     steward._resume_registered_obligation(duty, store)
-                    prompt.assert_not_called()
+                    prompt_call.assert_not_called()
                     self.assertEqual(json.loads(path.read_text())["state"], "pending")
                     self.assertEqual(store.get(duty["id"])["observation"]["reason"], "recipient-unavailable")
                     agents["result"]["agents"] = [{"agent": harness, "pane_id": "w1:p9",
                                                     "agent_session": {"value": "session-1"}}]
                     steward._resume_registered_obligation(store.get(duty["id"]), store)
-                    self.assertEqual(prompt.call_count, 1)
-                    self.assertEqual(prompt.call_args.kwargs["expected_recipient"], (harness, "session-1"))
-                    self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
-                # Courier admission is not receipt. Only the processing turn consumes it.
-                record = json.loads(path.read_text())
-                pending = rewake.pending_delivery
-                pending.reclaim(self.root, "session-1", record["delivery_id"],
-                                now_ns=record["claim_deadline_ns"] + 1)
-                records, _ = sweep_deliver(self.root, carrier, "session-1")
-                self.assertEqual(ack_delivered(self.root, "session-1", records, acked_by="real-prompt"), 1)
+                    self.assertEqual(prompt_call.call_count, 1)
+                    self.assertEqual(prompt_call.call_args.kwargs["expected_recipient"], (harness, "session-1"))
+                    if not immediate:
+                        queued = store.get(duty["id"])
+                        self.assertEqual(queued["state"], "pending")
+                        self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
+                        transfer = steward.peer_message._read_pending(queued["observation"]["transfer_ref"])
+                        text = transfer["text"]
+                        steward._resume_registered_obligation(queued, store)
+                        self.assertEqual(prompt_call.call_count, 1)
+                        # An unrelated session and an altered body cannot consume the notice.
+                        steward.peer_message.receive_peer_message(text, {"harness": harness, "session_id": "stranger"})
+                        steward.peer_message.receive_peer_message("altered " + text, {"harness": harness, "session_id": "session-1"})
+                        self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
+                        self.assertEqual(steward.peer_message.receive_peer_message(text, {
+                            "harness": harness, "session_id": "session-1"}), 0)
+                    else:
+                        self.assertEqual(len(delivered), 1)
+                    self.assertEqual(json.loads(path.read_text())["state"], "acked")
+                    self.assertEqual(store.get(duty["id"])["state"], "complete")
                 with mock.patch.object(steward, "cmd_prompt") as prompt:
                     steward._resume_registered_obligation(store.get(duty["id"]), store)
                     prompt.assert_not_called()
@@ -1710,7 +1761,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
         duty, = store.list()
         sent = []
         real_prompt = steward.cmd_prompt
-        def prompt(args, *, expected_recipient):
+        def prompt(args, *, expected_recipient, on_prepared=None):
             self.assertEqual(expected_recipient, ("claude", recipient_sid))
             if changed_pane:
                 # The real courier must refuse before sealing any payload if
@@ -1718,7 +1769,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 with mock.patch.object(steward, "_herdr_missing", return_value=False), \
                         mock.patch.object(steward, "_resolve_target", return_value=("claude", "stranger", None)), \
                         mock.patch.object(steward.peer_message, "prepare_peer_message") as sealed:
-                    code = real_prompt(args, expected_recipient=expected_recipient)
+                    code = real_prompt(args, expected_recipient=expected_recipient, on_prepared=on_prepared)
                     sealed.assert_not_called()
                     return code
             sent.append(Path(args.body_file).read_text())
@@ -1745,7 +1796,7 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 return
             self.assertEqual(len(sent), 1)
             self.assertIn("att-owner-1", sent[0])
-            self.assertEqual(store.get(duty["id"])["state"], "complete")
+            self.assertEqual(store.get(duty["id"])["state"], "pending")
             self.assertEqual(json.loads(path.read_text())["state"], "sent-ambiguous")
             # Acknowledged notices retain their original delivery identity.
             rewake.pending_delivery.ack(self.root, "session-1", json.loads(path.read_text())["delivery_id"],

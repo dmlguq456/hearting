@@ -258,6 +258,22 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
                     self.assertEqual(retain.call_count, 1)
                 self.assertEqual(PD.read(self.root, "sess-owner", delivery), before)
 
+    def test_activation_preserves_an_explicit_registry_filename(self):
+        import peer_obligations
+        self._seed()
+        jobs = self.root / "route-jobs.tsv"
+        (self.root / "jobs.log").rename(jobs)
+        path = PD.record_path(self.root, "sess-owner", "delivery-" + "a" * 32)
+        record = json.loads(path.read_text())
+        record["receipt"]["job_registry"] = str(jobs)
+        path.write_text(json.dumps(record))
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}), \
+                mock.patch.object(peer_obligations, "retain_registered_completion") as retain:
+            SWEEP.activate(self.root, "claude-parent-runtime", "sess-owner")
+            self.assertEqual(retain.call_args.args[0], jobs)
+            self.assertEqual(SWEEP.record_jobs(self.root, {"receipt": {"kind": "human-gate"}}), jobs)
+            self.assertIn(str(jobs), SWEEP.delivery_context([(self.root, [record])]))
+
     def test_codex_session_start_reconnects_without_acknowledging_context(self):
         self._seed(recipient_kind="codex-native-queue")
         bridge = _load("activation_codex_bridge", ROOT / "adapters/codex/hooks/sessionstart-lifecycle.py")
@@ -497,10 +513,19 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
                      ROOT / "adapters" / "codex" / "hooks" / "userprompt-lifecycle.py"):
             self.assertIn("delivery_context", hook.read_text(encoding="utf-8"))
 
-    def run_plugin(self, body, *, prompt_async="accept"):
+    def run_plugin(self, body, *, prompt_async="accept", restored_selector=False):
+        plugin = ROOT / "adapters/opencode/plugins/hearting-guards.js"
+        if restored_selector:
+            fixture = self.root.parent / "restored-plugin/adapters/opencode/plugins/hearting-guards.js"
+            fixture.parent.mkdir(parents=True)
+            source = plugin.read_text().replace("let paneNativeOrigin //", 'let paneNativeOrigin = '
+                + json.dumps({"pid": 123, "start": "456", "sid": self.SID,
+                              "directory": str(self.root), "state": "pending"}) + ' //')
+            fixture.write_text(source)
+            plugin = fixture
         js = r'''
 import { pathToFileURL } from "node:url";
-const { AgentHarnessGuards } = await import(pathToFileURL(process.env.AGENT_HOME + "/adapters/opencode/plugins/hearting-guards.js"));
+const { AgentHarnessGuards } = await import(pathToFileURL(PLUGIN));
 const prompts = [];
 const logs = [];
 const session = {
@@ -514,7 +539,7 @@ const settle = async () => { for (let i = 0; i < 100 && !globalThis.done; i++) a
 BODY
 hooks.dispose();
 console.log(JSON.stringify({prompts, logs}));
-'''.replace("MODE", json.dumps(prompt_async)).replace("BODY", body)
+'''.replace("MODE", json.dumps(prompt_async)).replace("BODY", body).replace("PLUGIN", json.dumps(str(plugin)))
         run = subprocess.run(["node", "--input-type=module", "-e", js], env=self.env(), cwd=str(self.root),
                              capture_output=True, text=True, timeout=60)
         self.assertEqual(run.returncode, 0, run.stderr)
@@ -552,6 +577,17 @@ if (prompts.length) throw new Error("activation itself started a turn");
 await hooks.event({event: {type: "session.idle", properties: {sessionID: "ses-oc-parent"}}});
 await new Promise(r => setTimeout(r, 1500));
 ''')
+        self.assertEqual(len(result["prompts"]), 1)
+        self.assertEqual(result["prompts"][0]["path"], {"id": self.SID})
+        self.assertEqual(self.state(), "acked")
+
+    def test_existing_selected_session_restores_without_a_creation_event(self):
+        self.seed_turn()
+        result = self.run_plugin('''
+if (prompts.length) throw new Error("startup context was treated as receipt");
+await hooks.event({event: {type: "session.idle", properties: {sessionID: "ses-oc-parent"}}});
+await new Promise(r => setTimeout(r, 1500));
+''', restored_selector=True)
         self.assertEqual(len(result["prompts"]), 1)
         self.assertEqual(result["prompts"][0]["path"], {"id": self.SID})
         self.assertEqual(self.state(), "acked")

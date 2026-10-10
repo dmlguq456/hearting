@@ -497,7 +497,9 @@ def deliver_pending_codex(ref, *, timeout=1.0):
             if rc:
                 _save_pending(dict(current, rpc_claim=None))
                 return {"status": "unverified", "reason": "peer-receive-ledger-unavailable"}
-            _save_pending(dict(current, state="received", text=None, rpc_claim=None, receipt="exact-native-history"))
+            received = dict(current, state="received", text=None, rpc_claim=None, receipt="exact-native-history")
+            _save_pending(received)
+            _ack_registered_delivery(received)
             return {"status": "received", "reason": "exact-native-history"}
         _save_pending(dict(current, state="queued", rpc_claim=None, receipt="native-queue-accepted"))
         return {"status": "queued", "reason": "native-queue-accepted"}
@@ -605,6 +607,14 @@ def _peer_notice_exists(ref, recipient):
         for r in _iter_records())
 
 
+def _ack_registered_delivery(received):
+    try:
+        from peer_obligations import acknowledge_registered_delivery
+        acknowledge_registered_delivery(received)
+    except (OSError, ValueError, KeyError):
+        pass  # The retained courier retries the same receipt, never another send.
+
+
 def receive_peer_message(text, recipient, project="", *, summary_text=""):
     """Actual receiver observation; rendering a callback is never this boundary."""
     trailer = parse_peer_trailer(text, recipient, include_ref=True)
@@ -624,8 +634,10 @@ def receive_peer_message(text, recipient, project="", *, summary_text=""):
             ref=[ref, *(pending.get("refs", []) if pending else [])] if ref else [], transfer_ref=ref,
             body_file=None, body_stdin=False, body_text=summary_text))
         if rc == 0 and pending:
-            _save_pending(dict(pending, state="received", text=None, rpc_claim=None,
-                               receipt="exact-peer-ref", received_at=time.time()))
+            received = dict(pending, state="received", text=None, rpc_claim=None,
+                            receipt="exact-peer-ref", received_at=time.time())
+            _save_pending(received)
+            _ack_registered_delivery(received)
         return rc
 
 
