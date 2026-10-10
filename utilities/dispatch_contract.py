@@ -7799,17 +7799,12 @@ def _marker_provenance_currency(route, node, marker_path, marker, base, *, obser
         schema_ok = False
     if not schema_ok:
         return GateCurrency("integrity-broken:identity-mismatch", "revision-predecessor-identity-invalid")
-    if (marker.get("state") == "superseded-by-upstream-revision"
-            and base.state in {"current", "revised-unrecorded", "superseded"}):
-        # Older tombstones retained the original history sequence. Their
-        # exact attempt link still proves that row, so retain the existing
-        # gates-off/current and observational/superseded contract.
-        try:
-            original_link = _marker_link_current(route, node, marker, marker_path)
-        except (DispatchContractError, KeyError, OSError, TypeError, ValueError):
-            original_link = False
-        if not marker.get("superseded_by") and original_link:
-            return base
+    # Legacy tombstones kept the original sequence. Run their ordinary
+    # provenance walk, including sequence and revision-edge validation,
+    # rather than treating an exact attempt link as the whole proof.
+    legacy_supersession = (marker.get("state") == "superseded-by-upstream-revision"
+                           and not marker.get("superseded_by"))
+    if marker.get("state") == "superseded-by-upstream-revision" and not legacy_supersession:
         # Revise writes a new history row for the supersession, without
         # changing the original worker's attempt link. Prove that exact
         # predecessor rather than expecting its link to name the new row.
@@ -7823,7 +7818,7 @@ def _marker_provenance_currency(route, node, marker_path, marker, base, *, obser
         if prior_currency.state not in {"current", "revised-unrecorded"}:
             return prior_currency
         return base
-    if base.state not in {"current", "revised-unrecorded"}:
+    if base.state not in {"current", "revised-unrecorded"} and not legacy_supersession:
         return base
     node_id = str(node.get("id"))
     current = marker
@@ -7846,7 +7841,8 @@ def _marker_provenance_currency(route, node, marker_path, marker, base, *, obser
     seen: set[int] = set()
     for _depth in range(max_steps):
         sequence = current.get("sequence")
-        if current.get("state") == "superseded-by-upstream-revision":
+        if (current.get("state") == "superseded-by-upstream-revision"
+                and not (legacy_supersession and current is marker)):
             historical = _marker_provenance_currency(
                 route, node, current_path, current,
                 GateCurrency("current", "completion-marker-verified"), observe=True)
