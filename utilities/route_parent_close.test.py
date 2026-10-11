@@ -379,7 +379,7 @@ class ParentCloseTest(unittest.TestCase):
         self.resource(resource)
         owner.terminate(); owner.wait(timeout=2)
         fields, _ = CLOSE._rows(self.jobs)[self.aid("att-owner")]
-        original = CLOSE._protected
+        original = CLOSE._protected_records
         payload = None
 
         def publish_branch_after_first_scan(resources):
@@ -398,7 +398,7 @@ class ParentCloseTest(unittest.TestCase):
                 self.addCleanup(CLOSE._signal, payload, birth, signal.SIGKILL)
             return protected
 
-        with mock.patch.object(CLOSE, "_protected", side_effect=publish_branch_after_first_scan):
+        with mock.patch.object(CLOSE, "_protected_records", side_effect=publish_branch_after_first_scan):
             CLOSE.reap_terminal_descendants(self.jobs, fields)
         observation = DC.process_observation(payload)
         self.assertEqual(observation[0], "present")

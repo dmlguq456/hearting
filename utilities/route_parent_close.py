@@ -296,7 +296,7 @@ def linked_resources(route, path, jobs, attempts, *, all_known=False):
             state = compute._run_state(config, meta_path.parent.name)
             result.append({"kind": "compute", "run_id": meta_path.parent.name,
                            "state": "stopped" if state["stop_reason"] else state["state"],
-                           "config": str(compute.config_path())})
+                           "config": str(compute.config_path()), "record": str(meta_path)})
     return result
 
 
@@ -372,8 +372,8 @@ def resource_branches(resources):
             for r in resources if r["kind"] == "resource"}
 
 
-def _protected(resources):
-    protected = set()
+def _protected_records(resources):
+    protected = {}
     for resource in resources:
         if resource["kind"] != "resource":
             continue
@@ -381,17 +381,22 @@ def _protected(resources):
         if not _namespace_authoritative(run):
             continue  # A foreign namespace's PID is never a local PID authority.
         branch, _ = _branch(run)
-        protected |= branch
+        protected.update(dict.fromkeys(branch, resource))
         supervision = run.get("supervision") or {}
         if supervision.get("pid") and supervision.get("starttime"):
             watcher = (int(supervision["pid"]), str(supervision["starttime"]))
             if resource.get("parent_close_linked"):
                 visible, actual, state = DC.process_observation(watcher[0])
                 if visible == "present" and actual == watcher[1] and state != "Z":
-                    protected.add(watcher)
+                    protected[watcher] = resource
             else:
-                protected |= _branch({**run, "pid": watcher[0], "starttime": watcher[1]})[0]
+                protected.update(dict.fromkeys(
+                    _branch({**run, "pid": watcher[0], "starttime": watcher[1]})[0], resource))
     return protected
+
+
+def _protected(resources):
+    return set(_protected_records(resources))
 
 
 def _workflow_processes(route, ledger, seeds=()):
@@ -459,17 +464,17 @@ def _drain_workflow(value, ledger, resources, grace, kill_wait):
         time.sleep(0.02)
 
 
-def _agent_processes(meta, resources):
+def _classify_agent_processes(meta, resources):
     """Filter resource branches before selecting exact agent PID/start pairs."""
     if meta.get("launch_claimed") == "0" and not meta.get("pid"):
-        return [], True
+        return [], True, {}
     identities = DC.authoritative_process_identities(meta)
     identity = identities[0] if identities else None
     if identity is None:
-        return [], DC.attempt_process_quiescence(meta).state == "quiescent"
+        return [], DC.attempt_process_quiescence(meta).state == "quiescent", {}
     visibility, actual, leader_state = DC.process_observation(identity.pid)
     if visibility == "inaccessible":
-        return [], False
+        return [], False, {}
     # Reuse is absence of the old leader, never authority over the new group.
     reused = visibility == "present" and actual != identity.expected_start
     group = (DC.ProcessGroupObservation("empty") if reused else
@@ -483,11 +488,14 @@ def _agent_processes(meta, resources):
     if any(pid in ambiguous for pid, _ in members):
         if (visibility == "present" and actual == identity.expected_start
                 and leader_state != "Z" and identity.pid not in ambiguous):
-            return [(identity.pid, actual)], True
-        return [], False  # An ambiguous resource cannot become an agent target.
-    members -= _protected(resources)
+            return [(identity.pid, actual)], True, {}
+        return [], False, {}  # An ambiguous resource cannot become an agent target.
+    preserved = {pair: record for pair, record in _protected_records(resources).items()
+                 if pair in members}
+    members -= preserved.keys()
     # Resource-run environment tags also identify a re-setsid branch.
     run_ids = {r["run_id"] for r in resources}
+    compute_records = {r["run_id"]: r for r in resources if r["kind"] == "compute"}
     agents = []
     for pid, start in sorted(members, reverse=True):
         try:
@@ -495,11 +503,72 @@ def _agent_processes(meta, resources):
         except FileNotFoundError:
             continue
         except OSError:
-            return [], False
-        if any(b"HEARTING_COMPUTE_RUN_ID=" + rid.encode() in env for rid in run_ids):
+            return [], False, {}
+        matches = sorted(rid for rid in run_ids
+                         if b"HEARTING_COMPUTE_RUN_ID=" + rid.encode() in env)
+        if matches:
+            # Keep cleanup's existing selection. Continuation preserves only a
+            # registered compute record, never a resource-only ID used as a compute tag.
+            for rid in matches:
+                if rid in compute_records:
+                    preserved[(pid, start)] = compute_records[rid]
+                    break
             continue
         agents.append((pid, start))
-    return agents, group.state != "unverifiable" and tagged.state != "unverifiable"
+    return agents, group.state != "unverifiable" and tagged.state != "unverifiable", preserved
+
+
+def _agent_processes(meta, resources):
+    agents, observed, _ = _classify_agent_processes(meta, resources)
+    return agents, observed
+
+
+def owner_continuation_processes(meta, jobs):
+    """Owner execution may end while its registered payloads keep running.
+
+    Whole-attempt quiescence and cleanup retain their meaning. This observation
+    grants no resource launch or signal authority and writes no run record.
+    """
+    proof = DC.attempt_process_quiescence(meta, terminal_receipt=True)
+    if (meta.get("worker_type") != "owner" or jobs is None
+            or proof.state != "live" or proof.reason != "attempt-descendant-live"):
+        return proof, []
+    governed = DC.attempt_governed_process_quiescence(meta)
+    if governed.state != "quiescent":
+        return governed, []
+    if not DC.attempt_scan_namespace_authority(meta):
+        return DC.ProcessQuiescence("unverifiable", "observer-namespace-mismatch"), []
+    if DC.terminal_receipt_incomplete(meta):
+        return DC.ProcessQuiescence("unverifiable", "post-exit-receipt-incomplete"), []
+    import owner_route_binding as OWNER
+    try:
+        binding, _ = OWNER.resolve_owner_route_lifecycle(jobs, owner_attempt_id=meta["attempt_id"])
+        if binding is None:
+            return proof, []
+        _, route = OWNER._verified_binding(binding)
+        resources = linked_resources(route, Path(binding.route_file), Path(jobs), {meta["attempt_id"]})
+    except (OWNER.OwnerRouteBindingError, OSError, ValueError, KeyError, TypeError):
+        # Without resource evidence, retain the already observed live residue.
+        # Failed classification cannot grant continuation or erase that positive.
+        return proof, []
+    agents, observed, preserved = _classify_agent_processes(meta, resources)
+    if agents:
+        return DC.ProcessQuiescence("live", "attempt-descendant-live", agents[0][0]), []
+    if not observed:
+        return DC.ProcessQuiescence("unverifiable", "owner-process-unverifiable"), []
+    remaining = DC.attempt_tagged_descendants(meta, preserved=set(preserved))
+    if remaining.state == "populated":
+        return DC.ProcessQuiescence("live", "attempt-descendant-live", remaining.members[0][0]), []
+    if remaining.state != "empty":
+        return DC.ProcessQuiescence("unverifiable", "attempt-descendant-unverifiable"), []
+    # Locations are recovery context, not another admission condition. Only
+    # records with actually preserved positive identities appear in this list.
+    records = {}
+    for resource in preserved.values():
+        pointer = {key: resource[key] for key in ("kind", "run_id", "registry", "record") if key in resource}
+        records[(pointer["kind"], pointer["run_id"])] = pointer
+    return DC.ProcessQuiescence("quiescent", "registered-resources-preserved"), [
+        records[key] for key in sorted(records)]
 
 
 def _signal(pid, start, signum):

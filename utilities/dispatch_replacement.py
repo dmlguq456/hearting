@@ -347,7 +347,8 @@ def death_proof(fields, meta, *, jobs=None, lines=None):
     kind = death_kind(fields, meta, jobs=jobs, lines=lines)
     if kind is None:
         raise DC.DispatchContractError('replacement-not-silent-death')
-    proof = DC.attempt_process_quiescence(meta, terminal_receipt=True)
+    from route_parent_close import owner_continuation_processes
+    proof, preserved = owner_continuation_processes(meta, jobs)
     if proof.state != 'quiescent':
         raise _process_error(proof, meta)
     if kind not in {'parked', 'unlaunched', CORRECTED} and not _terminal_absent(
@@ -356,6 +357,8 @@ def death_proof(fields, meta, *, jobs=None, lines=None):
     result = {'state': proof.state, 'reason': proof.reason, 'death_kind': kind,
               'note': meta.get('note', ''), 'cleanup_receipt_digest': meta.get('cleanup_receipt_digest', ''),
               'cancellation_receipt_digest': meta.get('cancellation_receipt_digest', '')}
+    if preserved:
+        result['preserved_resources'] = preserved
     if kind == 'parked':
         parked = owner_parked_gate(jobs, meta.get('attempt_id'), lines=lines)
         if not parked:
@@ -1852,6 +1855,15 @@ def recovery_instructions(args):
             + rerun +
             'Keep existing human answers and gate releases; do not ask the same scope again. '
             'Preserve the original failure and report any second failure as needs-attention.\n')
+    preserved = (record.get('proof') or {}).get('preserved_resources', [])
+    if preserved:
+        text += ('Registered payloads from the previous owner are preserved under their existing '
+                 'run records. Continue supervising those runs; do not relaunch a resource node '
+                 'because its owner changed. Inspect these records for their current identities '
+                 'and state; this list is not completion or launch authority.\n')
+        for resource in preserved:
+            text += ('- ' + resource['kind'] + ' ' + resource['run_id'] + ': '
+                     + (resource.get('registry') or resource.get('record') or '') + '\n')
     if check_fix:
         text += ('The failed checks this fix answers ('
                  + ', '.join(answers) +
