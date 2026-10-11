@@ -544,11 +544,13 @@ def owner_continuation_processes(meta, jobs):
     try:
         binding, _ = OWNER.resolve_owner_route_lifecycle(jobs, owner_attempt_id=meta["attempt_id"])
         if binding is None:
-            return DC.ProcessQuiescence("unverifiable", "owner-route-binding-absent"), []
+            return proof, []
         _, route = OWNER._verified_binding(binding)
         resources = linked_resources(route, Path(binding.route_file), Path(jobs), {meta["attempt_id"]})
     except (OWNER.OwnerRouteBindingError, OSError, ValueError, KeyError, TypeError):
-        return DC.ProcessQuiescence("unverifiable", "owner-resource-binding-unverifiable"), []
+        # Without resource evidence, retain the already observed live residue.
+        # Failed classification cannot grant continuation or erase that positive.
+        return proof, []
     agents, observed, preserved = _classify_agent_processes(meta, resources)
     if agents:
         return DC.ProcessQuiescence("live", "attempt-descendant-live", agents[0][0]), []

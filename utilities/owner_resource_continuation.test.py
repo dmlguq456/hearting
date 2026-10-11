@@ -144,6 +144,13 @@ class OwnerResourceContinuationTest(unittest.TestCase):
         path.write_text(json.dumps(data))
         self.assertEqual(CLOSE.owner_continuation_processes(meta, self.jobs)[0].state, 'live')
         self.assertIsNone(payload.poll())
+        import owner_route_binding as OWNER
+        for result in ({'return_value': (None, [])}, {'side_effect': OSError('unreadable route')}):
+            with self.subTest(result=result), mock.patch.object(OWNER, 'resolve_owner_route_lifecycle', **result):
+                proof, preserved = CLOSE.owner_continuation_processes(meta, self.jobs)
+                self.assertEqual((proof.state, proof.reason), ('live', 'attempt-descendant-live'))
+                self.assertEqual(preserved, [])
+                self.assertIsNone(payload.poll())
 
     def test_resource_only_id_is_not_registered_compute_protection(self):
         meta = self.ended_owner()
