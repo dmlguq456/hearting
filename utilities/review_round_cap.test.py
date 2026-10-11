@@ -274,7 +274,7 @@ class RecoveryFieldsTest(unittest.TestCase):
 
     def test_exhausted_non_review_points_at_continuation(self):
         fields = CAP.recovery_fields("pipeline-stage")
-        self.assertEqual(fields["recovery_surface"], "capability-route continue")
+        self.assertEqual(fields["recovery_surface"], "capability-route continuation")
 
     def test_verdictless_bound_review_worker_names_native_subagent(self):
         fields = CAP.recovery_fields("review-worker", "verdictless-bound")
@@ -284,6 +284,8 @@ class RecoveryFieldsTest(unittest.TestCase):
     def test_verdictless_bound_non_review_names_owner_inline(self):
         fields = CAP.recovery_fields("pipeline-stage", "verdictless-bound")
         self.assertEqual(fields["next_action"], "owner-inline")
+        self.assertEqual(fields["recovery_surface"], "capability-route complete --inline")
+        self.assertIn("checks first", fields["recovery_hint"])
 
 
 class RoundBudgetParityTest(unittest.TestCase):

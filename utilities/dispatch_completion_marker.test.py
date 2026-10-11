@@ -1965,6 +1965,33 @@ class CompletionMarkerTest(unittest.TestCase):
             "closure_class": "owner-run-verdictless",
         })
 
+    def test_inline_cli_inherits_census_without_relabeling_failed_registered_rows(self):
+        route = self.compile_route(intensity="standard")
+        route_path = self.write_route(route, "route-inline-inherited-census.json")
+        self.current_route = route
+        self.write_row("done", "test-fail", "att-test-fail",
+                       "worker_type=test,note=dead-worker-fail,failure_class=fail", node_id="test")
+        for round_no in (1, 2):
+            self.write_row("done", f"test-blocked-{round_no}", f"att-test-blocked-{round_no}",
+                           "worker_type=test,note=dead-worker-blocked,failure_class=blocked", node_id="test")
+        before = self.jobs.read_bytes()
+        evidence = self.base / "test-inline-passing-ledger.md"
+        evidence.write_text("actual owner-run checks passed; prior failed checks remain historical\n")
+        env = {**self.base_env(), "AGENT_DISPATCH_JOBS": str(self.jobs),
+               "AGENT_DISPATCH_ATTEMPT_ID": "att-owner"}
+        result = subprocess.run([sys.executable, str(ROOT / "utilities/capability-route.py"), "complete",
+                                 "--inline", "--route", str(route_path), "--node", "test",
+                                 "--evidence", str(evidence)], env=env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        marker = json.loads(result.stdout.splitlines()[0])
+        self.assertEqual(marker["round_census"], {
+            "verdict_rounds": 1, "verdictless_rounds": 2, "cap": 2,
+            "closure_class": "owner-run-verdictless",
+        })
+        self.assertFalse(marker["registered_worker"])
+        self.assertEqual(marker["attempt_id"], "att-owner-test-inline")
+        self.assertEqual(self.jobs.read_bytes(), before)
+
     def test_a_sd153_5e_inline_override_over_unresolved_fail_with_budget_remaining(self):
         """An inline completion landing over ONE unresolved blocking FAIL,
         with budget still open (`verdict_rounds=1 < cap=2`) -- SD-153 rule 5

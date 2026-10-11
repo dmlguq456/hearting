@@ -1667,7 +1667,7 @@ class ReplacementTest(unittest.TestCase):
         R._reuse_snapshot.return_value['completed'] = [pin]
         self.assertTrue(self._answer(text='approved fix: both failed checks', request_id='fix-1')['retained'])
         # v3.27.5 omitted this completed-marker FAIL; preserve its immutable claim as written.
-        with mock.patch.object(RA, 'fix_answers', return_value=(['att-test-2'], [])):
+        with mock.patch.object(RA, 'fix_answer_plan', return_value=(['att-test-2'], [], {})):
             record = self.claim()
         self.assertEqual(record['proof']['answers'], ['att-test-2'])
         before = {p: p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
@@ -1737,8 +1737,8 @@ class ReplacementTest(unittest.TestCase):
         R._reuse_snapshot.return_value['completed'] = [{'node': 'impl-review',
             'attempt_id': closed['attempt_id'], 'marker_digest': R._digest(marker)}]
         self.assertTrue(self._answer(text='approved fix: unfinished report', request_id='fix-1')['retained'])
-        with mock.patch.object(RA, 'fix_answers', return_value=(
-                [f'att-test-{test_fails}'] if test_fails else [], [])):
+        with mock.patch.object(RA, 'fix_answer_plan', return_value=(
+                [f'att-test-{test_fails}'] if test_fails else [], [], {})):
             record = self.claim()  # A v3.27.5 claim that omitted the owner-closed review.
         return record, node
 
@@ -1917,6 +1917,52 @@ class ReplacementTest(unittest.TestCase):
                         'failure_class': 'blocked', 'parent_attempt_id': 'att-source'}, append=True)
         self.assertEqual(RA.fix_answers(self.route, self.jobs.read_text().splitlines(), self.jobs),
                          ([], ['test:verdictless-bound']))
+
+    def test_bound_check_with_sealed_inline_hop_continues_answered_owner_not_check_round(self):
+        import route_authority as RA
+        import review_round_cap as CAP
+        self.test_a_fix_does_not_answer_a_check_bound_by_blocked_rounds()
+        self.route['nodes'][0]['fallback_hops'] = [{'fallback_hop': 'inline'}]
+        lines = self.jobs.read_text().splitlines()
+        original_rows = [line for line in lines if 'route_node=test,' in line]
+        self.assertEqual(RA.fix_answer_plan(self.route, lines, self.jobs),
+                         (['att-test-1'], [], {'test': 'att-test-1'}))
+        self.assertTrue(self._answer(text='approved: finish only pending owner-inline checks')['retained'])
+        result, commands = self._launch()
+        self.assertEqual((len(commands), result['reason']), (1, 'replacement-launch-pending'), result)
+        record = result['record']
+        self.assertEqual(record['proof']['inline_checks'], {'test': 'att-test-1'})
+        self.assertEqual(R.claim(self.jobs, 'att-source'), record)
+        self.assertEqual([line for line in self.jobs.read_text().splitlines() if 'route_node=test,' in line],
+                         original_rows)
+        text = R.recovery_instructions(SimpleNamespace(automatic_retry_of='att-source', worker_type='owner',
+                                       jobs_path=self.jobs, attempt_id=record['replacement_attempt_id']))
+        self.assertIn('Continue only unfinished work', text)
+        self.assertIn('do not register another check round', text)
+        self.assertIn('complete --inline', text)
+        self.assertIn('finish only pending owner-inline checks', text)
+        self.assertNotIn('each get one more verdict round', text)
+        rows = [(fields[1], meta) for fields, meta in R._rows(self.jobs.read_text().splitlines()).values()
+                if meta.get('route_node') == 'test']
+        budget = CAP.round_budget(self.route, self.route['nodes'][0], rows,
+                                  revisions=R.answered_fix_revisions(self.jobs, 'rt-test'))
+        self.assertEqual((budget.state, budget.verdict_rounds, budget.verdictless_streak, budget.cap),
+                         ('verdictless-bound', 1, 2, 2))
+
+    def test_bound_check_inline_hop_does_not_admit_over_live_or_unsettled_round(self):
+        import route_authority as RA
+        self.test_a_fix_does_not_answer_a_check_bound_by_blocked_rounds()
+        self.route['nodes'][0]['fallback_hops'] = [{'fallback_hop': 'inline'}]
+        lines = self.jobs.read_text().splitlines()
+        for status, extra, expected in (
+                ('open', {}, 'blocked-live'),
+                ('done', {'classifier_source': 'registered-wrapper-completion-transient-v1'}, 'blocked-unsettled')):
+            with self.subTest(status=status):
+                meta = {'attempt_id': 'att-unfinished', 'route_id': 'rt-test', 'route_node': 'test',
+                        'worker_type': 'stage', 'note': 'completion-deferred', **extra}
+                row = 'now\t' + status + '\twt\troot\ttask\t' + ','.join(f'{k}={v}' for k, v in meta.items())
+                self.assertEqual(RA.fix_answers(self.route, lines + [row], self.jobs),
+                                 ([], ['test:' + expected]))
 
     def test_an_owner_whose_fail_is_not_readable_keeps_no_answer(self):
         import dispatch_owner_input as I

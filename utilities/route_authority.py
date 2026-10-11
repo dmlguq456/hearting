@@ -1106,18 +1106,18 @@ def answerable_owner_end(status, meta) -> str:
     return "FAIL" if readable_result(meta) == "FAIL" else ""
 
 
-def fix_answers(route, lines, jobs=None) -> tuple[list[str], list[str]]:
-    """What a person's approved fix for a FAIL-ended owner answers: `(answers, spent)`.
+def fix_answer_plan(route, lines, jobs=None):
+    """An approved FAIL fix's `(answers, spent, inline_checks)` from the shared budget.
 
     For every round-capped node whose last full-stage verdict round is a blocking FAIL, the
     fix answers that FAIL attempt, which gives the node the one closure-check round SD-154
     admits for a revision that answers its last FAIL, within the verdict ceiling cap + 1
-    (SD-161). A node whose closure-check that answer would not admit (already at the ceiling,
-    or bound by BLOCKED rounds without progress) is `spent` as `<node>:<state>`: the fix makes
-    no round for it. A review already disposed by owner-closure gets no further round,
+    (SD-161). A bound non-review check may instead use its sealed inline hop; its answer
+    admits the owner, never another registered round. Other inadmissible checks are
+    `spent` as `<node>:<state>`. A review already disposed by owner-closure gets no further round,
     but does not prevent an approved answer continuing other unfinished work."""
     from dispatch_contract import parse_registry_metadata, owner_closure_shape
-    answers, spent = [], []
+    answers, spent, inline_nodes = [], [], {}
     for node in route.get("nodes") or []:
         if not is_round_capped_node(node):
             continue
@@ -1140,11 +1140,24 @@ def fix_answers(route, lines, jobs=None) -> tuple[list[str], list[str]]:
         # Admission's own rule decides: the fix answers this FAIL only when that answer is
         # what admits the closure-check round (not at cap + 1, not bound by BLOCKED rounds).
         budget = round_budget(route, node, rows, revisions=[{"answers": [failed]}])
+        if (failed and budget.state == "verdictless-bound"
+                and node.get("kind") == "pipeline-stage"
+                and any(hop.get("fallback_hop") == "inline" for hop in node.get("fallback_hops") or [])):
+            # The bound stops registered checks, not their owner. The sealed inline
+            # hop can finish the approved remainder without admitting another round.
+            answers.append(failed)
+            inline_nodes[node["id"]] = failed
+            continue
         if not failed or budget.round_kind != "closure-check":
             if owner_closure_shape(verdicts[-1]) != "registered-review":
                 spent.append(f"{node.get('id')}:{budget.state}")
             continue
         answers.append(failed)
+    return answers, spent, inline_nodes
+
+
+def fix_answers(route, lines, jobs=None) -> tuple[list[str], list[str]]:
+    answers, spent, _ = fix_answer_plan(route, lines, jobs)
     return answers, spent
 
 

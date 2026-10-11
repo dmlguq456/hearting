@@ -7088,14 +7088,15 @@ def write_completion_marker(
     round_census=None
     if REVIEW_ROUND_CAP.is_round_capped_node(node):
         rows=()
-        if jobs is not None:
-            jobs_path=Path(jobs)
+        census_jobs=jobs or os.environ.get("AGENT_DISPATCH_JOBS")
+        if census_jobs is not None:
+            jobs_path=Path(census_jobs)
             if jobs_path.is_file():
                 lines=jobs_path.read_text(encoding="utf-8",errors="replace").splitlines()
                 generations = (review_lineage_routes(route, node_id)
                                if node.get("kind") == "review-worker" else [route])
                 rows = [row for generation in reversed(generations)
-                        for row in _review_round_rows(lines, generation["route_id"], node_id, jobs=jobs)]
+                        for row in _review_round_rows(lines, generation["route_id"], node_id, jobs=census_jobs)]
         if owner_override:
             site="owner-closure"
         elif axes.get("registered_worker"):

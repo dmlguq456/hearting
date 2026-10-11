@@ -884,10 +884,12 @@ def claim(jobs: Path, aid: str) -> dict:
         if proof.get('death_kind') == CORRECTED and route_authority.answerable_owner_end(fields[1], meta) == 'FAIL':
             # The approved fix answers each failed check's last FAIL: one closure-check round each,
             # within the verdict ceiling cap + 1. A check that already used it gets no new round.
-            answers, spent = route_authority.fix_answers(route, lines, jobs)
+            answers, spent, inline_nodes = route_authority.fix_answer_plan(route, lines, jobs)
             if not answers and spent:
                 raise DC.DispatchContractError('replacement-fix-round-spent', ','.join(spent))
             proof['answers'] = answers
+            if inline_nodes:
+                proof['inline_checks'] = inline_nodes
             proof['source_result'] = 'FAIL'
         logical = _logical_key(route, meta)
         if capacity:
@@ -1845,9 +1847,11 @@ def recovery_instructions(args):
     else:
         opening = f'You replace exact-dead attempt {prior} once, on the existing route {record["route_id"]}.\n'
     answers = _approved_fix_answers(record, jobs) if fix else []
+    inline_checks = record.get('proof', {}).get('inline_checks') or {}
+    registered_answers = [answer for answer in answers if answer not in inline_checks.values()]
     check_fix = fix and bool(answers)
     rerun = ('Rerun the stage that makes the approved fix and every check after it; reuse everything '
-             'else. ' if check_fix else
+             'else. ' if check_fix and registered_answers else
              'Continue only unfinished work. Do not rerun completed nodes, successful siblings, or completed prefixes. ')
     text = ('\n\n## Verified recovery context\n'
             + opening +
@@ -1864,11 +1868,20 @@ def recovery_instructions(args):
         for resource in preserved:
             text += ('- ' + resource['kind'] + ' ' + resource['run_id'] + ': '
                      + (resource.get('registry') or resource.get('record') or '') + '\n')
-    if check_fix:
+    if check_fix and registered_answers:
         text += ('The failed checks this fix answers ('
-                 + ', '.join(answers) +
+                 + ', '.join(registered_answers) +
                  ') each get one more verdict round (closure-check) once the fix is in; there is no '
                  'further round after it.\n')
+    if inline_checks:
+        text += ('The approved unfinished checks ' + ', '.join(inline_checks)
+                 + ' remain verdictless-bound. Run their already sealed owner-inline fallback; '
+                 'do not register another check round. Preserve B=2, the verdict ceiling and all '
+                 'original FAIL/BLOCKED evidence. After the actual gate passes, use '
+                 '`capability-route complete --inline --node <node> --evidence <actual-cycle-ledger>` '
+                 'under the inherited route and canonical AGENT_DISPATCH_JOBS; omit --jobs and '
+                 '--attempt-id on this unregistered completion. Then continue unfinished downstream '
+                 'stages normally. If any check fails, preserve its result and return it.\n')
     # A replacement that never started showed its answers and gate to no model,
     # so the attempt that takes its place carries them as they were.
     carried = _unstarted_replacement_claim(jobs, prior) if kind == 'unlaunched' else None

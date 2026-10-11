@@ -178,10 +178,13 @@ def _base_recovery_fields(node_kind, state="exhausted"):
         return {
             "next_action": "owner-inline",
             "recovery_owner": "owner",
-            "recovery_surface": "capability-route continue",
+            "recovery_surface": "capability-route complete --inline",
             "recovery_hint": "Two rounds in a row ended with no verdict. Hand the remaining verification to "
                 "the owner-inline fallback hop instead of spending a third registered round on the same "
-                "silence; preserve the exact failing evidence for that hop.",
+                "silence; preserve the exact failing evidence for that hop. Run only the approved "
+                "unfinished checks first; complete --inline records actual passing evidence afterwards, "
+                "not permission to run checks or an independent PASS. Inherit canonical "
+                "AGENT_DISPATCH_JOBS for the census; omit --jobs and --attempt-id for owner-inline completion.",
         }
     if node_kind == "review-worker":
         return {"required_action": "resolve-review-findings", "recovery_owner": "owner",
@@ -191,7 +194,7 @@ def _base_recovery_fields(node_kind, state="exhausted"):
                     "completion path. This records owner judgment, not independent PASS. If findings remain "
                     "unresolved, hand them to the parent with the existing artifacts; a fresh route is not required."}
     return {"required_action": "report-unresolved-verification", "recovery_owner": "owner",
-            "recovery_surface": "capability-route continue",
+            "recovery_surface": "capability-route continuation",
             "recovery_hint": "Preserve the completed stages and exact failing verification evidence. "
                 "Hand back the remaining verification for an explicit continuation; do not infer PASS from a corrected plan."}
 
