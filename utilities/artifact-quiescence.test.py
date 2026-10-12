@@ -327,6 +327,64 @@ class QuiescenceTest(unittest.TestCase):
                 self.assertFalse(value["observation_valid"])
                 self.assertEqual(value["unattributable_open_items"], 1)
 
+    def test_resource_row_whose_process_left_its_exit_sentinel_is_not_open(self):
+        # The registry row still says `running` until an observer settles it;
+        # its process and recorded group are gone and the exit sentinel exists.
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); config = self.fixture(base)
+            root = Path(config["artifact_root"])
+            _, path = self.sealed_route(root, "eval-run")
+            sentinel = base / "driver.log.exit"
+            run = {"status": "running", "route": str(path), "node": "eval-run",
+                   "pid": 4194304, "starttime": "1", "command_hash": "0" * 64,
+                   "process_group": 4194304, "pid_namespace": os.readlink("/proc/self/ns/pid"),
+                   "sentinel": str(sentinel)}
+            for ended in (False, True):
+                with self.subTest(ended=ended):
+                    if ended:
+                        sentinel.write_text("0", encoding="utf-8")
+                    self.write_resource_runs(config, base, {"run": dict(run)})
+                    with mock.patch.object(Q.GROUPS, "process_group_observation",
+                                           return_value=Q.GROUPS.ProcessGroupObservation("empty")):
+                        value = Q.collect(config)
+                    self.assertTrue(value["observation_valid"], value.get("source_diagnostics"))
+                    self.assertEqual(value["open_jobs"], 0 if ended else 1, value)
+
+    def test_resource_exit_sentinel_keeps_live_or_unobservable_group_open(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); config = self.fixture(base)
+            sentinel = base / "driver.log.exit"
+            sentinel.write_text("0")
+            run = {"status": "running", "artifact_root": config["artifact_root"],
+                   "pid": 4194304, "starttime": "1", "command_hash": "0" * 64,
+                   "process_group": 4194304, "pid_namespace": os.readlink("/proc/self/ns/pid"),
+                   "sentinel": str(sentinel)}
+            self.write_resource_runs(config, base, {"run": run})
+            for state in ("populated", "unverifiable", "empty"):
+                with self.subTest(group_state=state), mock.patch.object(
+                        Q.GROUPS, "process_group_observation",
+                        return_value=Q.GROUPS.ProcessGroupObservation(state)):
+                    value = Q.collect(config)
+                    self.assertTrue(value["observation_valid"], value)
+                    self.assertEqual(value["open_jobs"], 0 if state == "empty" else 1)
+                    self.assertEqual(value["proven"], state == "empty")
+            for change in ({"process_group": None}, {"process_group": True},
+                           {"process_group": 4194303}, {"pid_namespace": None},
+                           {"pid_namespace": "pid:[foreign]"}):
+                with self.subTest(change=change):
+                    self.write_resource_runs(config, base, {"run": {**run, **change}})
+                    self.assertEqual(Q.collect(config)["open_jobs"], 1)
+
+    def test_resource_prior_boot_end_does_not_scan_the_current_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sentinel = Path(directory) / "driver.log.exit"
+            sentinel.write_text("0")
+            row = {"registry_status": "running", "liveness": "exited", "sentinel": str(sentinel),
+                   "state_evidence": {"reason": "host-reboot"}}
+            with mock.patch.object(Q.GROUPS, "process_group_observation",
+                                   side_effect=AssertionError("past-boot group is not current")):
+                self.assertFalse(Q._resource_is_open(row))
+
     def test_review_real_resource_route_remains_attributable_when_stale(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory); config = self.fixture(base)

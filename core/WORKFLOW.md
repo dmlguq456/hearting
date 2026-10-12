@@ -867,6 +867,9 @@ declare completion from an intermediate success.
 Committed success and remaining cleanup are separate facts. A marker does not
 make a live descendant quiescent: the execution boundary retains cleanup,
 and the common supervisor retains the wait or recovery notice until it ends.
+For an open resource row, an exit sentinel has the same boundary: a populated
+or unobservable recorded process group remains pending; exact prior-boot
+evidence or a complete empty-group observation can establish execution end.
 Exact inspection reads the worker's result; requesting more failure detail is
 optional and cannot become a second completion gate.
 The runtime acknowledges a delivered notification after its receiving turn

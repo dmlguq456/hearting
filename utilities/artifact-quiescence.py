@@ -35,6 +35,7 @@ def _load(name: str, filename: str):
 
 ROUTES = _load("artifact_quiescence_routes", "capability-route.py")
 RESOURCES = _load("artifact_quiescence_resources", "resource_run_registry.py")
+GROUPS = _load("artifact_quiescence_groups", "model-worker-governor.py")
 DISPATCH = _load("artifact_quiescence_dispatch", "dispatch-registry.py")
 CONTRACT = _load("artifact_quiescence_contract", "dispatch_contract.py")
 
@@ -390,10 +391,27 @@ def _attribute_open_item(kind: str, row: dict, target: dict) -> dict:
 
 
 def _resource_is_open(row: dict) -> bool:
-    return (
-        row.get("liveness") == "working"
-        or str(row.get("registry_status", "")).lower() in RESOURCE_OPEN
-    )
+    if row.get("liveness") == "working":
+        return True
+    if str(row.get("registry_status", "")).lower() not in RESOURCE_OPEN:
+        return False
+    sentinel = row.get("sentinel")
+    if not (row.get("liveness") == "exited" and isinstance(sentinel, str)
+            and sentinel and os.path.exists(sentinel)):
+        return True
+    # The sentinel records payload exit, not descendant drain (WORKFLOW §0.6).
+    evidence = row.get("state_evidence")
+    if isinstance(evidence, dict) and evidence.get("reason") == "host-reboot":
+        return False
+    try:
+        pid, group = row.get("pid"), row.get("process_group")
+        if (type(pid) not in (int, str) or type(group) not in (int, str)
+                or int(pid) <= 0 or int(group) != int(pid)
+                or row.get("pid_namespace") != os.readlink("/proc/self/ns/pid")):
+            return True
+        return GROUPS.process_group_observation(int(group)).state != "empty"
+    except (OSError, TypeError, ValueError):
+        return True
 
 
 def _attribution_snapshot(config: dict, resource_rows: list[dict], dispatch_rows: list[dict]) -> dict:
@@ -405,7 +423,8 @@ def _attribution_snapshot(config: dict, resource_rows: list[dict], dispatch_rows
     }
     for kind, values in (("dispatch", dispatch_rows), ("resource", resource_rows)):
         for row in values:
-            opened = row["status"] in DISPATCH.OPEN if kind == "dispatch" else _resource_is_open(row)
+            opened = (row["status"] in DISPATCH.OPEN if kind == "dispatch" else
+                      row["_quiescence_open"] if "_quiescence_open" in row else _resource_is_open(row))
             if not opened:
                 result = {
                     "kind": kind,
@@ -640,6 +659,10 @@ def collect(config: dict, now: datetime | None = None) -> dict:
     scanned = _snapshot([_file_row(Path(config["resource_index"])), *scanned_sources])
     if scanned != before["jobs"]:
         raise ValueError("source-changed-during-observation")
+    # Consume one group observation, like the PID observation already in each
+    # normalized row; recounts must not rescan unrelated changing /proc entries.
+    for row in resource_rows:
+        row["_quiescence_open"] = _resource_is_open(row)
     dispatch_rows = _dispatch_rows(Path(config["dispatch_jobs"]))
     attribution_before = _attribution_snapshot(config, resource_rows, dispatch_rows)
     after = _source_snapshots(config)
@@ -663,7 +686,7 @@ def collect(config: dict, now: datetime | None = None) -> dict:
         "authority": after["authority"],
         "routes": {"reader": "capability-route.py:route_status", "count": counts["open_routes"], **after["routes"]},
         "jobs": {"reader": "resource_run_registry.py:scan", "count": counts["open_jobs"],
-                 "global_open_count": sum(_resource_is_open(row) for row in resource_rows),
+                 "global_open_count": sum(row["_quiescence_open"] for row in resource_rows),
                  "diagnostics": resource_diagnostics, **after["jobs"]},
         "dispatch": {"reader": "dispatch-registry.py:current(read_rows)",
                      "count": counts["open_dispatch_attempts"],
