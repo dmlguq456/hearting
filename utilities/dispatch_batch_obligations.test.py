@@ -66,6 +66,23 @@ class BatchObligationTest(unittest.TestCase):
         self.assertEqual(command[command.index("--jobs") + 1], str(self.jobs))
         self.assertEqual(obligations.read(self.jobs, duty_id)["identity"]["attempt_ids"], ["att-child"])
 
+    def test_observer_does_not_inherit_the_callers_attempt_tag(self):
+        from dispatch_contract import ATTEMPT_DESCENDANT_ENV
+        obligations.create(self.args)
+        calls = []
+
+        class Launched:
+            pid = 901234
+
+        with mock.patch.dict(os.environ, {ATTEMPT_DESCENDANT_ENV: "att-worker", "HEARTING_FIXTURE_KEEP": "1"}), \
+                mock.patch.object(obligations.subprocess, "Popen",
+                                  side_effect=lambda *a, **k: calls.append((a, k)) or Launched()):
+            self.assertEqual(obligations.ensure_observers(self.jobs), 1)
+            env = dict(calls[0][1].get("env", os.environ))
+        self.assertNotIn(ATTEMPT_DESCENDANT_ENV, env.keys())
+        self.assertEqual(env.get("HEARTING_FIXTURE_KEEP"), "1")
+        self.assertEqual(env.get("PATH"), os.environ.get("PATH"))
+
     def test_complete_duty_is_not_replayed(self):
         duty_id, _record = obligations.create(self.args)
         obligations.update(self.jobs, duty_id, state="complete", outcome={"state": "ready"},

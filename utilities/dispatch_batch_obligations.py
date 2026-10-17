@@ -292,6 +292,15 @@ def ensure_observers(jobs: str | Path | None = None) -> int:
     jobs_paths = _jobs_paths(jobs)
     if jobs_paths:
         _resume_owner_settlements(jobs_paths[0])
+    from dispatch_contract import ATTEMPT_DESCENDANT_ENV
+    # The observer is governance machinery, not part of whichever attempt's
+    # session resumed it. A retained tag would follow every generation and
+    # keep that unrelated attempt's descendant scan live forever.
+    observer_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key != ATTEMPT_DESCENDANT_ENV
+    }
     for jobs_path in jobs_paths:
         try:
             root = _root(jobs_path)
@@ -322,6 +331,7 @@ def ensure_observers(jobs: str | Path | None = None) -> int:
                         command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL, close_fds=True, pass_fds=(fd,),
                         start_new_session=True, cwd=str(jobs_path.parent),
+                        env=observer_env,
                     )
                     update(jobs_path, duty_id, observer={
                         "pid": process.pid,
