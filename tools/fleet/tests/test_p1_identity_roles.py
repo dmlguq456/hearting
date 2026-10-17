@@ -361,6 +361,12 @@ class ProcessRolesTest(unittest.TestCase):
             self.assertEqual(process_identity.process_role(tty="?", invocation=mode,
                                                            native_session=True), "conversation")
 
+    def test_hidden_yolo_alias_keeps_a_codex_conversation(self):
+        for argv in (["codex", "--yolo"], ["codex", "--yolo", "-m", "gpt-6.1-sol"],
+                     ["codex", "--dangerously-bypass-approvals-and-sandbox"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(procscan.invocation_mode("codex", argv), "session")
+
     def test_unknown_option_arity_cannot_hide_a_conversation_as_a_service(self):
         for harness, command in (("claude", "daemon"), ("codex", "app-server"),
                                  ("opencode", "serve")):

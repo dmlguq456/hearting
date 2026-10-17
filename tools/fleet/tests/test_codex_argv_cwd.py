@@ -54,6 +54,13 @@ class CodexArgvCwdTest(unittest.TestCase):
             ["codex", "--no-alt-screen", "--cd", "/tmp/flag-target"], "/tmp/shell"),
             "/tmp/flag-target")
 
+    def test_hidden_yolo_alias_is_a_flag_like_its_long_name(self):
+        for flag in ("--dangerously-bypass-approvals-and-sandbox", "--yolo"):
+            with self.subTest(flag=flag):
+                self.assertEqual(codex_effective_cwd(
+                    ["codex", flag, "-C", "/tmp/yolo-target"], "/tmp/shell"),
+                    "/tmp/yolo-target")
+
     def test_attached_and_equals_value_options_are_consumed(self):
         self.assertEqual(codex_effective_cwd(
             ["codex", "--model=gpt-6.1-sol", "-C/tmp/attached-model"], "/tmp/shell"),

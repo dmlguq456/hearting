@@ -3795,11 +3795,12 @@ def _pane_readiness(target, state, *, expected_harness=None, expected_sid=None, 
                     native_session_id=None):
     """Use the shared projection with exact native identity and registered bindings.
 
-    Before a harness's first input herdr reports no session. The session the
-    pane's foreground process proves is then the pane's own (Codex 0.162 opens
-    its thread at start) and keeps the bound-work checks; a pane with neither
-    is exact by pane and shell birth: nothing can be bound to it, so its native
-    turn decides. A caller holding a session still needs it."""
+    Before a harness's first input herdr reports no session, and for a Codex TUI
+    on the shared app-server it may never report one. The session the pane's
+    foreground process proves is then the pane's own (Codex 0.162 opens its
+    thread at start) and keeps the bound-work checks; a pane with neither is
+    exact by pane and shell birth: nothing can be bound to it, so its native
+    turn decides. A caller holding a session needs that proof to name it."""
     try:
         if target_observation is None:
             observed_state, ident, _code, _reason = _retire_target(target)
@@ -3808,9 +3809,9 @@ def _pane_readiness(target, state, *, expected_harness=None, expected_sid=None, 
         harness, sid, pane = ident.get("harness"), ident.get("session_id"), ident.get("pane")
         info = (pane_info if pane_info is not None else
                 _retire_pane_info(pane) if pane and pane != "-" else None)
-        if sid == "-" and expected_sid in {None, "-"} and isinstance(info, dict):
+        if sid == "-" and isinstance(info, dict):
             proven = _proven_session(info["foreground_processes"], harness)
-            if proven:
+            if proven and expected_sid in {None, "-", proven}:
                 sid, expected_sid = proven, None
         if isinstance(native_session_id, str) and peer_message.usable_session_id(native_session_id):
             sid = native_session_id
@@ -4085,6 +4086,9 @@ def _resume_message_obligation(duty, store):
             return
         if pane_bound:
             observed_sid = ident.get("session_id")
+            if observed_sid in (None, "", "-") and recipient.get("harness") == "codex":
+                # The same foreground-TUI proof `prompt` uses while herdr names no thread.
+                observed_sid = _process_session(expected_pane or ident.get("pane"), "codex") or observed_sid
             if observed_sid in (None, "", "-"):
                 store.update(duty["id"], state="pending",
                              observation={"ref": ref, "reason": "target-session-unresolved",
@@ -4456,10 +4460,17 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None):
     from_identity = (from_sid, from_harness, _project_of(os.getcwd()))
     from_name = _from_name(from_harness, from_sid)
     t_harness, t_sid, t_name = _resolve_target(args.target)
+    target_state = None
+    if t_harness == "codex" and not peer_message.usable_session_id(t_sid):
+        # herdr names a Codex thread only once a hook reports it, and a TUI attached to the
+        # shared app-server may never be reported; the pane's foreground TUI still proves it.
+        target_state = _agent_state(args.target)
+        if target_state[1]:
+            t_sid = _process_session(target_state[1], "codex") or t_sid
     if expected_recipient is not None and (t_harness, t_sid) != expected_recipient:
         print("prompted=false reason=target-identity-changed")
         return 5
-    state_before, target_pane = _agent_state(args.target)
+    state_before, target_pane = target_state or _agent_state(args.target)
     recipient = {"harness": t_harness, "session_id": peer_message.usable_session_id(t_sid),
                  "name": t_name}
     if target_pane:

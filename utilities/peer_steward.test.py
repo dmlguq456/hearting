@@ -166,6 +166,26 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
                     peer_steward._resume_message_obligation(duty, store)
             self.assertEqual(peer_steward._HERDR_SESSION, "caller")
 
+    def test_herdr_sidless_readiness_accepts_only_the_session_its_process_proves(self):
+        observed = ("idle", {"harness": "codex", "session_id": "-", "pane": "w1:pX"})
+        info = {"shell_pid": 123, "foreground_processes": [{"pid": 456}]}
+        obligations = peer_steward.peer_obligations
+        for expected, verified, session in ((None, True, "proven-thread"),
+                                            ("proven-thread", True, "proven-thread"),
+                                            ("other-thread", False, "-")):
+            with self.subTest(expected=expected), \
+                 mock.patch.object(peer_steward, "_proven_session", return_value="proven-thread"), \
+                 mock.patch.object(peer_steward, "_proc_start_ticks", return_value="birth"), \
+                 mock.patch.object(obligations, "execution_attempts_for_processes", return_value=()), \
+                 mock.patch.object(obligations, "bound_work_for_pane", return_value=((), "observed")), \
+                 mock.patch.object(obligations, "pane_readiness", side_effect=lambda **kw: kw):
+                readiness = peer_steward._pane_readiness(
+                    "w1:pX", "idle", expected_harness="codex", expected_sid=expected,
+                    purpose="input", target_observation=observed, pane_info=info)
+            self.assertEqual(dict(readiness["provenance"])["observed_state"], "idle")
+            self.assertEqual((readiness["identity_verified"], readiness["session_id"]),
+                             (verified, session))
+
     def test_delay_notice_is_minted_once_across_replaced_checkpoints(self):
         store = peer_steward.peer_obligations.ObligationStore()
         sender = {"harness": "codex", "session_id": "sid-sender", "name": None}
@@ -2551,6 +2571,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
              mock.patch.object(peer_steward.subprocess, "run", side_effect=self._fake_run(payload, calls)), \
              mock.patch.object(peer_steward, "_proven_session", return_value=None), \
+             mock.patch.object(peer_steward, "_process_session", return_value=None), \
              mock.patch("builtins.print") as printed:
             rc = peer_steward.main(["prompt", "fresh", "wait for the exact thread"])
         self.assertEqual(rc, 3)
@@ -2559,6 +2580,64 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual((row["state"], row["to"]["session_id"], row["to"]["pane_id"]),
                          ("pending", None, "w1:pX"))
         self.assertEqual(self._pane_io_calls(calls), [])
+
+    def test_sidless_codex_target_uses_the_thread_its_pane_tui_proves(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
+        calls, queued = [], []
+        payload = _agent_json("codex", None, "fresh", status="idle")
+
+        def accept(ref, *, timeout=1.0):
+            queued.append(peer_steward.peer_message._read_pending(ref)["to"]["session_id"])
+            return {"status": "queued", "reason": "native-queue-accepted"}
+
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run", side_effect=self._fake_run(payload, calls)), \
+             mock.patch.object(peer_steward, "_process_session", return_value="proven-thread") as proof, \
+             mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=accept), \
+             mock.patch("builtins.print") as printed:
+            rc = peer_steward.main(["prompt", "fresh", "[steer] reach the proven thread"])
+        self.assertEqual(rc, 3)
+        proof.assert_called_once_with("w1:pX", "codex")
+        self.assertEqual(queued, ["proven-thread"])
+        self.assertIn("verify=native-queue-queued", printed.call_args[0][0])
+        self.assertNotIn("target-session-unresolved", printed.call_args[0][0])
+        row = peer_steward.peer_message._read_pending(self._all_records()[-1]["transfer_ref"])
+        self.assertEqual((row["state"], row["to"]["session_id"]), ("pending", "proven-thread"))
+        self.assertEqual(self._pane_io_calls(calls), [])
+
+    def test_sidless_codex_obligation_binds_the_thread_its_pane_tui_proves(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
+        payload = _agent_json("codex", None, "fresh", status="idle")
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run", side_effect=self._fake_run(payload)), \
+             mock.patch.object(peer_steward, "_process_session", return_value=None), \
+             mock.patch("builtins.print"):
+            self.assertEqual(peer_steward.main(["prompt", "fresh", "[steer] after the proof"]), 3)
+        ref = self._all_records()[-1]["transfer_ref"]
+        store = peer_steward.peer_obligations.ObligationStore()
+        duty_id = "message-" + ref
+        sidless = {"harness": "codex", "session_id": "-", "pane": "w1:pX", "name": "fresh"}
+        delivered = []
+
+        def deliver(ref_, *, timeout=1.0):
+            row = peer_steward.peer_message._read_pending(ref_)
+            delivered.append(peer_steward.peer_message.pending_delivery_recipient(row)["session_id"])
+            return {"status": "queued"}
+
+        for proof, reason in ((None, "target-session-unresolved"), ("proven-thread", None)):
+            with self.subTest(proof=proof), \
+                 mock.patch.object(peer_steward, "_retire_target",
+                                   return_value=("idle", sidless, 0, None)), \
+                 mock.patch.object(peer_steward, "_process_session", return_value=proof) as resolver, \
+                 mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=deliver):
+                peer_steward._resume_message_obligation(store.get(duty_id), store)
+                resolver.assert_called_once_with("w1:pX", "codex")
+                if reason:
+                    self.assertEqual(store.get(duty_id)["observation"]["reason"], reason)
+        self.assertEqual(delivered, ["proven-thread"])
+        row = peer_steward.peer_message._read_pending(ref)
+        self.assertEqual(row["bound_to"], {"harness": "codex", "session_id": "proven-thread",
+                                           "pane_id": "w1:pX"})
 
     def test_same_sender_recipient_body_retry_reuses_the_same_ref(self):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"

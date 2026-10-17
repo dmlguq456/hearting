@@ -39,7 +39,8 @@ _COMMANDS = {
 _SESSION_COMMANDS = {"claude": set(), "codex": {"exec", "review", "resume", "fork"},
                      "opencode": {"run", "attach", "tui"}}
 _VALUE_OPTIONS = set("--model -m --effort --config -c --enable --disable --remote --remote-auth-token-env --local-provider --profile -p --sandbox -s --add-dir --ask-for-approval -a --cd -C --image -i --session-id --resume -r --agent --permission-mode --allowedTools --disallowedTools --mcp-config --settings --append-system-prompt --system-prompt --cwd --port --hostname --log-level".split())
-_FLAG_OPTIONS = set("--oss --strict-config --approve-for-me --dangerously-bypass-approvals-and-sandbox --dangerously-bypass-hook-trust --worktree --no-alt-screen --no-daemon --search --help -h --version -V --dangerously-skip-permissions --allow-dangerously-skip-permissions --verbose --debug --continue --no-session-persistence --print-logs".split())
+# `--yolo` is Codex's hidden alias of `--dangerously-bypass-approvals-and-sandbox`.
+_FLAG_OPTIONS = set("--oss --strict-config --approve-for-me --dangerously-bypass-approvals-and-sandbox --yolo --dangerously-bypass-hook-trust --worktree --no-alt-screen --no-daemon --search --help -h --version -V --dangerously-skip-permissions --allow-dangerously-skip-permissions --verbose --debug --continue --no-session-persistence --print-logs".split())
 
 
 def invocation_mode(harness, argv):
@@ -149,7 +150,8 @@ def codex_effective_cwd(argv, observed_cwd, launch_cwd=None):
     if not tokens or os.path.basename(str(tokens[0])) != "codex":
         return observed_cwd
     target = None
-    # Keep this list in step with the installed root-level `codex --help`.
+    # Keep this list in step with the installed root-level `codex --help`, plus
+    # the hidden `--yolo` alias it does not list.
     # Values must be consumed as argv tokens: a model/config/image value can
     # itself resemble an option and must never be reinterpreted as one.
     value_options = {
@@ -160,7 +162,7 @@ def codex_effective_cwd(argv, observed_cwd, launch_cwd=None):
     }
     flag_options = {
         "--oss", "--strict-config", "--approve-for-me",
-        "--dangerously-bypass-approvals-and-sandbox",
+        "--dangerously-bypass-approvals-and-sandbox", "--yolo",
         "--dangerously-bypass-hook-trust", "--worktree", "--no-alt-screen",
         "--no-daemon", "--search", "--help", "-h", "--version", "-V",
     }
