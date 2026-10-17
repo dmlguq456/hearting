@@ -64,7 +64,8 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         with contextlib.redirect_stdout(io.StringIO()):
             return SUP.main(argv)
 
-    def launch(self, route, path, jobs, registry, output, body, *, controller=None, close_at=None, exit_code=0):
+    def launch(self, route, path, jobs, registry, output, body, *, controller=None, close_at=None,
+               exit_code=0, expected_exit_codes=None, real_registration=False, real_arm=False):
         import artifact_producer
         runner = SUP.runner()
         args = SimpleNamespace(jobs=str(jobs), run_id=body['run_id'], node=body['node'])
@@ -93,15 +94,22 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                 mock.patch.object(WAIT, 'supervisor', return_value=SUP), \
                 mock.patch.object(artifact_producer, 'prepare_route_artifact_env',
                     return_value={'AGENT_ARTIFACT_OUTPUT_DIR': str(output)}), \
-                mock.patch.object(runner, 'register_registry'), \
-                mock.patch.object(runner, 'start_watch', return_value=(watch, SUP.RR.proc_identity(os.getpid()))), \
-                mock.patch.object(runner.subprocess, 'run', side_effect=arm), \
-                mock.patch.object(runner.subprocess, 'Popen', side_effect=popen), \
-                contextlib.redirect_stdout(io.StringIO()) as out:
+                contextlib.ExitStack() as stack:
+            if not real_registration:
+                stack.enter_context(mock.patch.object(runner, 'register_registry'))
+            stack.enter_context(mock.patch.object(
+                runner, 'start_watch', return_value=(watch, SUP.RR.proc_identity(os.getpid()))))
+            if not real_arm:
+                stack.enter_context(mock.patch.object(runner.subprocess, 'run', side_effect=arm))
+            stack.enter_context(mock.patch.object(runner.subprocess, 'Popen', side_effect=popen))
+            stdout = stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
             runner.start_verified(registry, args, route, path, dict(body), controller=controller)
-        for proc in payloads:
-            self.assertEqual(proc.wait(timeout=5), exit_code)
-        return payloads, json.loads(out.getvalue().splitlines()[-1])
+        expected_codes = (expected_exit_codes if expected_exit_codes is not None
+                          else [exit_code] * len(payloads))
+        self.assertEqual(len(payloads), len(expected_codes))
+        for proc, expected in zip(payloads, expected_codes):
+            self.assertEqual(proc.wait(timeout=5), expected)
+        return payloads, json.loads(stdout.getvalue().splitlines()[-1])
 
     def test_guard_exit_same_route_resume_preserves_checkpoint_and_advances_to_run_verify(self):
         import dispatch_owner_input as INPUT
@@ -827,6 +835,531 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         self.assertEqual(ledger.state()['nodes']['full-run']['state'], 'STAGE_SUCCEEDED')
         self.assertEqual(registry.read_bytes(), registry_bytes)
         self.assertEqual(ledger.claims(), {})
+
+    def _closed_late_lab_fixture(self, *, pending_handoff=False, payload_exit=0,
+                                 abandon_reason="route-unrecoverable"):
+        import route_identity as ROUTE_IDENTITY
+        import artifact_producer as AP
+        route = FIX.compile_fixture("autopilot-lab", "setup", str(self.base), ["resource-run"])
+        route.update(artifact_root=str(self.base),
+                     owner_dispatch_depth=0, max_dispatch_depth=0, effective_intensity="direct",
+                     work_request={"text": "late result acceptance fixture", "owner_harness": "codex"})
+        route.setdefault("selection", {}).update(transport="interactive", inline_reason="fixture-inline")
+        run = {"id": "full-run", "kind": "resource-runner", "depends_on": [],
+               "outputs": ["run.json"], "write_scope": ["run.json"],
+               "completion_gate": "resource-exit", "continuation": {"kind": "supervised"}}
+        verify = {"id": "run-verify", "kind": "review-worker", "depends_on": ["full-run"],
+                  "outputs": ["reviews/run-verdict.json"], "write_scope": ["reviews/**"],
+                  "completion_gate": "lab-run-verify", "dispatch_depth": 0,
+                  "execution_surface": "inline", "terminal": not pending_handoff}
+        route["nodes"] = [run, verify]
+        run.update(id="full-run", outputs=["run.json"], write_scope=["run.json"],
+                   completion_gate="resource-exit", continuation={"kind": "supervised"})
+        if pending_handoff:
+            verify.pop("terminal_gate", None)
+            route["nodes"].append({"id": "handoff", "kind": "review-worker",
+                "depends_on": ["run-verify"], "outputs": ["setup-handoff.json"],
+                "write_scope": ["setup-handoff.json"], "completion_gate": "lab-setup-handoff",
+                "dispatch_depth": 0, "terminal": True, "terminal_gate": "lab-setup-handoff"})
+        else:
+            verify["terminal_gate"] = "lab-run-verify"
+        route["route_hash"] = ROUTE_IDENTITY.route_hash(route)
+        route["route_id"] = ROUTE_IDENTITY.route_id_from_hash(route["route_hash"])
+        path = SUP.route_module().canonical_route_path(self.base, route["route_id"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(route, indent=2), encoding="utf-8")
+        AP.activate(self.base, repository_id="repo_" + "a" * 32,
+                    artifact_root_id="root_" + "b" * 32,
+                    w7={"campaign_id": "camp_" + "c" * 32})
+        producer_cycle = AP.begin(self.base, route_file=path, capability="autopilot-lab",
+                                  intensity="direct")
+        output = Path(producer_cycle["env"]["AGENT_ARTIFACT_OUTPUT_DIR"])
+        jobs = self.base / "jobs.log"
+        jobs.write_text("", encoding="utf-8")
+        os.environ["AGENT_DISPATCH_JOBS"] = str(jobs)
+        registry = self.base / "resource-runs.json"
+        registry.write_text(json.dumps({"schema_version": 1, "runs": {}}), encoding="utf-8")
+        original_path = output / "experiments" / "original" / "run.json"
+        _verdict_path, original_run, _original_verdict = self._write_late_lab_record(
+            route, {"run_id": "late-run"}, output, run_path=original_path,
+            write_verdict=False, return_documents=True)
+        original_json = json.dumps(original_run, indent=2, sort_keys=True)
+        payload_code = (f"from pathlib import Path; p=Path({str(original_path)!r}); "
+                        f"p.parent.mkdir(parents=True, exist_ok=True); "
+                        f"p.write_text({original_json!r}, encoding='utf-8')")
+        if payload_exit:
+            payload_code += f"; raise SystemExit({payload_exit})"
+        body = {"run_id": "late-run", "route": str(path), "node": "full-run",
+                "jobs": str(jobs), "cwd": str(self.base), "log": str(self.base / "late-run.log"),
+                "sentinel": str(self.base / "late-run.log.exit"),
+                "command": [sys.executable, "-c", payload_code], "status": "launching",
+                "workflow_state": "READY"}
+        payloads, receipt = self.launch(route, path, jobs, registry, output, body,
+                                        expected_exit_codes=(0, payload_exit),
+                                        real_registration=True, real_arm=True)
+        ledger = SUP.ledger_for(route, jobs)
+        self.assertTrue(receipt["payload_spawned"])
+        import resource_run_evidence as RUN_EVIDENCE
+        initial_poll = SUP.poll_once(route, ledger)[0]
+        runtime_document, _ = RUN_EVIDENCE.read_document(output / "run.json")
+        expected_action = "halt-missing-artifact" if payload_exit == 0 else "halt-failed"
+        self.assertEqual(initial_poll["action"], expected_action,
+                         {"poll": initial_poll, "runtime_document": runtime_document})
+        if payload_exit == 0:
+            self.assertTrue(RUN_EVIDENCE.runtime_only(runtime_document))
+        failed = next(entry for entry in reversed(ledger.journal())
+                      if entry.get("node") == "full-run" and entry.get("state") == "FAILED_RETRYABLE")
+        if payload_exit == 0:
+            self.assertTrue(failed["evidence"].get("runtime_only_output"))
+            self.assertTrue(RUN_EVIDENCE.runtime_only(
+                RUN_EVIDENCE.read_document(output / "run.json")[0]))
+        else:
+            self.assertFalse(failed["evidence"].get("succeeded"))
+        closed, _ = SUP.route_module().close_route(route, path, allow_unproven=True, jobs=jobs)
+        self.assertFalse(closed["terminal_gate_proven"])
+        AP.finalize(self.base, cycle_id=producer_cycle["cycle_id"], state="abandoned",
+                    abandon_reason=abandon_reason)
+        return route, path, jobs, registry, output, ledger, payloads
+
+    def _write_late_lab_record(self, route, row, output, *, missing_arm=None, alter_checkpoint=False,
+                               run_path=None, write_verdict=True, return_documents=False):
+        import hashlib
+        arms = {}
+        verdict_arms = {}
+        for index, arm_id in enumerate(("t", "b"), 1):
+            run_id = f"{route['route_id']}-{arm_id}-run"
+            config_ref = f"config:{arm_id}.json"
+            config_raw = f"config bytes {arm_id}".encode()
+            config_sha = hashlib.sha256(config_raw).hexdigest()
+            config_dir = output / "experiments" / "late-result" / "_internal" / "configs"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            snapshot = config_dir / f"{config_sha}.json"
+            snapshot.write_bytes(config_raw)
+            manifest = config_dir / f"{run_id}.manifest.json"
+            manifest.write_text(json.dumps({"run_id": run_id, "config_ref": config_ref,
+                "source_sha256": config_sha, "snapshot_sha256": config_sha,
+                "snapshot_path": str(snapshot)}), encoding="utf-8")
+            checkpoint = output / "checkpoints" / f"{arm_id}.pt"
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            checkpoint.write_bytes(f"CPU checkpoint {arm_id}".encode())
+            checkpoint_sha = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+            per_arm = output / "reviews" / "run" / f"run-verify-{arm_id}.json"
+            per_arm.parent.mkdir(parents=True, exist_ok=True)
+            counters = {"attempt": 400000, "successful": 399857 - index, "skipped": 143 + index}
+            run_dir = str(output / "runs" / arm_id)
+            compute_id = f"cpu-{arm_id}-execution"
+            per_arm_doc = {"arm": arm_id, "status": "PASS",
+                "run_dir": run_dir,
+                "selected_checkpoint": {"path": str(checkpoint), "sha256": checkpoint_sha},
+                "checks": {"status-complete": {"ok": True, "status": {"status": "complete", **counters}},
+                           "provenance-continuity": {"ok": True}}}
+            per_arm.write_text(json.dumps(per_arm_doc, sort_keys=True), encoding="utf-8")
+            per_arm_sha = hashlib.sha256(per_arm.read_bytes()).hexdigest()
+            identity_hash = hashlib.sha256(f"{route['route_id']}-{arm_id}".encode()).hexdigest()
+            arms[arm_id] = {"run_id": run_id, "compute_run_id": compute_id,
+                "compute_run_dir": str(output / ".compute-runs" / compute_id),
+                "run_dir": run_dir, "run_verify": str(per_arm), "counters": counters,
+                "compute_exit_code": 0, "config_ref": config_ref, "config_sha256": config_sha,
+                "config_manifest": str(manifest), "trainer_status": {"status": "complete"},
+                "trainer_identity": {"pid": 30000 + index, "starttime": str(40000 + index),
+                                     "cmdline_sha256": identity_hash},
+                "wrapper_identity": {"pid": 31000 + index, "starttime": str(41000 + index),
+                                     "cmdline_sha256": identity_hash},
+                "ckpt_path": str(checkpoint), "best": {"checkpoint": str(checkpoint),
+                                                            "sha256": checkpoint_sha}}
+            verdict_arms[arm_id] = {"status": "PASS", "evidence": str(per_arm),
+                "evidence_sha256": per_arm_sha, "counters": counters,
+                "selected_checkpoint": {"path": str(checkpoint), "sha256": checkpoint_sha}}
+        if missing_arm:
+            verdict_arms.pop(missing_arm, None)
+        resource = {key: row.get(key) for key in
+                    ("run_id", "pid", "starttime", "command_hash", "sentinel", "log", "exit_code")}
+        run_document = {"route": route["route_id"], "status": "complete",
+                        "source_commit": row.get("source_commit"), "resource": resource, "arms": arms}
+        run_path = Path(run_path) if run_path is not None else output / "run.json"
+        run_path.parent.mkdir(parents=True, exist_ok=True)
+        run_path.write_text(json.dumps(run_document, indent=2, sort_keys=True), encoding="utf-8")
+        verdict_path = output / "reviews" / "run-verdict.json"
+        verdict_path.parent.mkdir(parents=True, exist_ok=True)
+        verdict_document = {"run_verified": True, "verdict": "diagnosed",
+                            "resource": {"run_id": row["run_id"]}, "arms": verdict_arms}
+        if write_verdict:
+            verdict_path.write_text(json.dumps(verdict_document, indent=2, sort_keys=True), encoding="utf-8")
+        if alter_checkpoint:
+            (output / "checkpoints" / "b.pt").write_bytes(b"altered checkpoint")
+        return (verdict_path, run_document, verdict_document) if return_documents else verdict_path
+
+    def _publish_late_verification(self, route, jobs, verdict_path):
+        verify = next(node for node in route["nodes"] if node["id"] == "run-verify")
+        SUP.route_module().write_completion_marker(
+            route, verify, "run-verify", verdict_path, jobs=jobs)
+
+    def _artifact_tree(self):
+        import hashlib
+        rows = {}
+        for path in sorted(self.base.rglob("*")):
+            if path.is_file():
+                rows[path.relative_to(self.base).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return rows
+
+    def test_closed_late_success_accepts_all_bound_arms_and_keeps_handoff_pending(self):
+        import hashlib
+        import dispatch_notice_state as NOTICE
+        import work_start as WORK_START
+        import artifact_lifecycle as AL
+        import artifact_producer as AP
+        import late_resource_result as LATE
+        route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture(
+            pending_handoff=True)
+        raw_outcome = SUP.route_module().outcome_path(path).read_bytes()
+        original_journal = ledger.journal_path.read_bytes()
+        cycle = AP.route_cycle_for(Path(route["artifact_root"]), route)
+        closure = LATE._abandoned_cycle_snapshot(route, cycle)
+        self.assertIsNotNone(closure)
+        manifest_path = Path(closure["manifest_path"])
+        initial_manifest = manifest_path.read_bytes()
+        source_snapshot = AL.manifest_snapshot_path(
+            Path(route["artifact_root"]), cycle["cycle_id"], closure["snapshot_revision_id"])
+        source_snapshot_bytes = source_snapshot.read_bytes()
+        row = json.loads(registry.read_text())["runs"]["late-run"]
+        verdict = self._write_late_lab_record(route, row, output)
+        self._publish_late_verification(route, jobs, verdict)
+
+        result = WORK_START.start_work(route, path, jobs)
+        self.assertEqual(result["reason"], "resource-result-accepted-terminal-gates-pending", result)
+        projection = NOTICE.closed_outcome(path, route, jobs=jobs)
+        self.assertTrue(projection["resource_result_accepted"])
+        self.assertFalse(projection["terminal_gate_proven"])
+        self.assertEqual(projection["resource_result_nodes"], ["full-run"])
+        self.assertEqual(len(projection["accepted_resource_results"][0]["executions"][0]["lab_arms"]
+                             ["required_arms"]), 2)
+        self.assertEqual({arm["arm"] for arm in projection["accepted_resource_results"][0]
+                          ["executions"][0]["lab_arms"]["arms"]}, {"t", "b"})
+        self.assertTrue(ledger.journal_path.read_bytes().startswith(original_journal))
+        self.assertEqual(ledger.state()["nodes"]["full-run"]["state"], "FAILED_RETRYABLE")
+        self.assertEqual(SUP.route_module().outcome_path(path).read_bytes(), raw_outcome)
+        self.assertEqual(ledger.claims(), {})
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+        self.assertEqual(len(payloads), 2)
+        publication = result["resource_adjudication"]["producer_publication"]
+        self.assertEqual(publication["status"], "emitted", publication)
+        current_manifest = json.loads(manifest_path.read_bytes())
+        self.assertEqual(current_manifest["cycle"]["state"], "abandoned")
+        self.assertNotEqual(manifest_path.read_bytes(), initial_manifest)
+        self.assertEqual(source_snapshot.read_bytes(), source_snapshot_bytes)
+        published_proof = next(item for item in current_manifest["artifact_revisions"]
+                               if item["locator"]["path"] ==
+                               f"artifacts/late-results/{result['resource_adjudication']['proof']['idempotency_key']}.json")
+        self.assertEqual(published_proof["content_digest"].removeprefix("sha256:"),
+                         hashlib.sha256(Path(publication["proof_path"]).read_bytes()).hexdigest())
+
+        before = self._artifact_tree()
+        gates = SUP.route_module().terminal_gate_observation(route, jobs=jobs)
+        self.assertFalse(SUP._closed_terminal_projection(
+            route, path, gates, ledger.read_only_state()["nodes"], ledger.claims(), jobs=jobs))
+        self.assertEqual(NOTICE.closed_outcome(path, route, jobs=jobs)["resource_result_accepted"], True)
+        self.assertEqual(self._artifact_tree(), before)
+
+        journal_size = ledger.journal_path.stat().st_size
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            repeated = list(pool.map(lambda _: WORK_START.start_work(route, path, jobs), range(2)))
+        self.assertTrue(all(item["reason"] == "resource-result-accepted-terminal-gates-pending"
+                            for item in repeated))
+        self.assertEqual(ledger.journal_path.stat().st_size, journal_size)
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+
+    def test_closed_late_acceptance_projection_is_current_when_producer_refresh_is_off(self):
+        import dispatch_notice_state as NOTICE
+        import work_start as WORK_START
+        import artifact_producer as AP
+        route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture(
+            pending_handoff=True)
+        row = json.loads(registry.read_text())["runs"]["late-run"]
+        verdict = self._write_late_lab_record(route, row, output)
+        self._publish_late_verification(route, jobs, verdict)
+        cycle = AP.route_cycle_for(Path(route["artifact_root"]), route)
+        manifest_path = AP._record_cycle_manifest_path(Path(route["artifact_root"]), cycle)
+        manifest_before = manifest_path.read_bytes()
+        xdg = self.base / "xdg-refresh-off"
+        refresh_off = xdg / "hearting" / AP.CLOSED_CYCLE_REFRESH_OFF_FILE
+        refresh_off.parent.mkdir(parents=True)
+        refresh_off.write_text("off\n", encoding="utf-8")
+
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}):
+            result = WORK_START.start_work(route, path, jobs)
+            projection = NOTICE.closed_outcome(path, route, jobs=jobs)
+
+        self.assertEqual(result["reason"], "resource-result-accepted-terminal-gates-pending", result)
+        self.assertTrue(projection["resource_result_accepted"])
+        self.assertFalse(projection["terminal_gate_proven"])
+        proof = projection["accepted_resource_results"][-1]
+        self.assertTrue((output / "late-results" / f"{proof['idempotency_key']}.json").is_file())
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+        self.assertEqual(len(payloads), 2)
+
+    def test_closed_late_success_can_complete_only_when_every_terminal_gate_passes(self):
+        import work_start as WORK_START
+        route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture()
+        raw_outcome = SUP.route_module().outcome_path(path).read_bytes()
+        row = json.loads(registry.read_text())["runs"]["late-run"]
+        verdict = self._write_late_lab_record(route, row, output)
+        self._publish_late_verification(route, jobs, verdict)
+        result = WORK_START.start_work(route, path, jobs)
+        self.assertEqual(result["state"], "completed", result)
+        self.assertTrue(result["outcome"]["terminal_gate_proven"])
+        self.assertTrue(result["outcome"]["resource_result_accepted"])
+        self.assertEqual(SUP.route_module().outcome_path(path).read_bytes(), raw_outcome)
+        self.assertEqual(ledger.state()["nodes"]["full-run"]["state"], "FAILED_RETRYABLE")
+        self.assertEqual(ledger.claims(), {})
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+        self.assertEqual(len(payloads), 2)
+
+    def test_closed_late_result_rejects_missing_or_altered_required_arm(self):
+        import work_start as WORK_START
+        for missing_arm, alter_checkpoint in (("b", False), (None, True)):
+            with self.subTest(missing_arm=missing_arm, alter_checkpoint=alter_checkpoint), self.subfixture():
+                route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture()
+                raw_outcome = SUP.route_module().outcome_path(path).read_bytes()
+                row = json.loads(registry.read_text())["runs"]["late-run"]
+                verdict = self._write_late_lab_record(route, row, output,
+                    missing_arm=missing_arm, alter_checkpoint=alter_checkpoint)
+                self._publish_late_verification(route, jobs, verdict)
+                result = WORK_START.start_work(route, path, jobs)
+                self.assertEqual(result["reason"], "route-closed-unproven")
+                self.assertNotIn("resource_result_accepted", result)
+                self.assertEqual(SUP.route_module().outcome_path(path).read_bytes(), raw_outcome)
+                self.assertFalse(any(entry.get("actor") == "late-resource-result"
+                                     for entry in ledger.journal()))
+                self.assertEqual(ledger.state()["nodes"]["full-run"]["state"], "FAILED_RETRYABLE")
+                self.assertEqual(ledger.claims(), {})
+                self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+                self.assertEqual(len(payloads), 2)
+
+    def test_closed_late_result_rejects_matching_subset_against_immutable_producer_roster(self):
+        """The verifier marker is current; only the immutable close-time roster catches this subset."""
+        import hashlib
+        import work_start as WORK_START
+        import late_resource_result as LATE
+        import artifact_producer as AP
+
+        route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture()
+        row = json.loads(registry.read_text())["runs"]["late-run"]
+        original_path = output / "experiments" / "original" / "run.json"
+        original_bytes = original_path.read_bytes()
+        cycle = AP.route_cycle_for(Path(route["artifact_root"]), route)
+        manifest_path = AP._record_cycle_manifest_path(Path(route["artifact_root"]), cycle)
+        original_manifest = manifest_path.read_bytes()
+
+        verdict, run_document, verdict_document = self._write_late_lab_record(
+            route, row, output, return_documents=True)
+        run_document["arms"].pop("b")
+        verdict_document["arms"].pop("b")
+        (output / "run.json").write_text(
+            json.dumps(run_document, indent=2, sort_keys=True), encoding="utf-8")
+        verdict.write_text(json.dumps(verdict_document, indent=2, sort_keys=True), encoding="utf-8")
+        self._publish_late_verification(route, jobs, verdict)
+
+        node = next(item for item in route["nodes"] if item["id"] == "full-run")
+        marker = LATE._marker_proofs(route, node, jobs, LATE._route_module())
+        self.assertEqual(marker[0]["evidence_sha256"], hashlib.sha256(verdict.read_bytes()).hexdigest())
+        self.assertEqual(set(json.loads((output / "run.json").read_text())["arms"]), {"t"})
+        self.assertEqual(set(json.loads(verdict.read_text())["arms"]), {"t"})
+        self.assertEqual(original_path.read_bytes(), original_bytes)
+
+        result = WORK_START.start_work(route, path, jobs)
+
+        self.assertEqual(result["reason"], "route-closed-unproven", result)
+        self.assertNotIn("resource_result_accepted", result)
+        self.assertEqual(original_path.read_bytes(), original_bytes)
+        self.assertEqual(manifest_path.read_bytes(), original_manifest)
+        self.assertFalse(any(entry.get("actor") == "late-resource-result"
+                             for entry in ledger.journal()))
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+        self.assertEqual(len(payloads), 2)
+
+    def test_closed_late_entry_preserves_explicit_user_abandon(self):
+        """Mechanical and explicit abandon use the same normal start entry."""
+        import dispatch_notice_state as NOTICE
+        import work_start as WORK_START
+        import artifact_producer as AP
+        route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture(
+            abandon_reason="operator-decision")
+        raw_outcome = SUP.route_module().outcome_path(path).read_bytes()
+        row = json.loads(registry.read_text())["runs"]["late-run"]
+        verdict = self._write_late_lab_record(route, row, output)
+        self._publish_late_verification(route, jobs, verdict)
+        cycle = AP.route_cycle_for(Path(route["artifact_root"]), route)
+        manifest_path = AP._record_cycle_manifest_path(Path(route["artifact_root"]), cycle)
+        manifest_before = manifest_path.read_bytes()
+
+        result = WORK_START.start_work(route, path, jobs)
+
+        self.assertEqual(result["reason"], "route-closed-unproven", result)
+        self.assertNotIn("resource_result_accepted", result)
+        projection = NOTICE.closed_outcome(path, route, jobs=jobs)
+        self.assertFalse(projection.get("resource_result_accepted", False))
+        self.assertFalse(projection["terminal_gate_proven"])
+        self.assertEqual(SUP.route_module().outcome_path(path).read_bytes(), raw_outcome)
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        self.assertFalse(any(entry.get("actor") == "late-resource-result"
+                             for entry in ledger.journal()))
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+        self.assertEqual(len(payloads), 2)
+
+    def test_closed_late_boundary_rejects_live_unknown_identity_and_parent_stop(self):
+        """Controlled liveness observations and a constructed intent are boundary tests, not E2E."""
+        import work_start as WORK_START
+        import late_resource_result as LATE
+        route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture()
+        row = json.loads(registry.read_text())["runs"]["late-run"]
+        verdict = self._write_late_lab_record(route, row, output)
+        self._publish_late_verification(route, jobs, verdict)
+        observer = LATE._supervisor()
+        actual_observation = observer.resource_evidence
+        for liveness in ("live", "unknown"):
+            with mock.patch.object(observer, "resource_evidence",
+                    side_effect=lambda armed, value=liveness: {
+                        **actual_observation(armed), "liveness": value}):
+                result = WORK_START.start_work(route, path, jobs)
+            self.assertEqual(result["reason"], "route-closed-unproven", result)
+            self.assertNotIn("resource_result_accepted", result)
+
+        ledger._append({"at": WS.now_iso(), "route_id": route["route_id"],
+                        "route_hash": route["route_hash"], "actor": "parent-close",
+                        "evidence": {"parent_close": {
+                            "route": route, "route_file": str(path.resolve()),
+                            "owner_attempt_id": "att-fixture-stop", "attempts": [],
+                            "resources": [], "protected_resources": [], "stop_resources": False,
+                            "resource_branches": {}, "workflow_processes": [],
+                            "observer_namespace": {}, "summary": "explicit stop", "head_commit": None}},
+                        "pid": os.getpid()})
+        stopped = WORK_START.start_work(route, path, jobs)
+        self.assertEqual(stopped["reason"], "cancelled-by-parent", stopped)
+        self.assertNotIn("resource_result_accepted", stopped)
+        self.assertFalse(any(entry.get("actor") == "late-resource-result"
+                             for entry in ledger.journal()))
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+        self.assertEqual(len(payloads), 2)
+
+    def test_mechanical_failed_terminal_accepts_resource_only_and_keeps_gate_unproven(self):
+        """Constructed legacy FAILED_TERMINAL provenance can admit exact evidence, not completion."""
+        import work_start as WORK_START
+        route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture()
+        raw_outcome = SUP.route_module().outcome_path(path).read_bytes()
+        ledger.record("run-verify", "FAILED_TERMINAL",
+                      evidence={"reason": "terminal-gate-unproven"}, actor="workflow-supervisor")
+        ledger.set_workflow_state("FAILED_TERMINAL",
+                                  evidence={"reason": "terminal-gate-unproven"},
+                                  actor="workflow-supervisor")
+        row = json.loads(registry.read_text())["runs"]["late-run"]
+        verdict = self._write_late_lab_record(route, row, output)
+        self._publish_late_verification(route, jobs, verdict)
+
+        result = WORK_START.start_work(route, path, jobs)
+
+        self.assertEqual(result["reason"], "resource-result-accepted-terminal-gates-pending", result)
+        self.assertTrue(result["outcome"]["resource_result_accepted"])
+        self.assertFalse(result["outcome"]["terminal_gate_proven"])
+        self.assertEqual(ledger.state()["workflow_state"], "FAILED_TERMINAL")
+        self.assertEqual(ledger.state()["nodes"]["run-verify"]["state"], "FAILED_TERMINAL")
+        self.assertEqual(SUP.route_module().outcome_path(path).read_bytes(), raw_outcome)
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+        self.assertEqual(len(payloads), 2)
+
+    def test_closed_late_result_rejects_foreign_identity_exit_failed_verification_and_binding(self):
+        import work_start as WORK_START
+        cases = ("foreign-identity", "nonzero-exit", "altered-exit-sentinel",
+                 "failed-verification", "foreign-binding", "config-binding",
+                 "unrelated-terminal-failure", "untrusted-terminal-failure")
+        for case in cases:
+            with self.subTest(case=case), self.subfixture():
+                payload_exit = 7 if case == "nonzero-exit" else 0
+                route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture(
+                    payload_exit=payload_exit)
+                raw_outcome = SUP.route_module().outcome_path(path).read_bytes()
+                row = json.loads(registry.read_text())["runs"]["late-run"]
+                verdict = self._write_late_lab_record(route, row, output)
+                if case in {"unrelated-terminal-failure", "untrusted-terminal-failure"}:
+                    # Constructed legacy states: unrelated causes and untrusted actors stay blocked.
+                    failure_reason = ("terminal-gate-unproven" if case == "untrusted-terminal-failure"
+                                      else "verification-failed")
+                    failure_actor = ("review-worker" if case == "untrusted-terminal-failure"
+                                     else "workflow-supervisor")
+                    ledger.record("run-verify", "FAILED_TERMINAL",
+                                  evidence={"reason": failure_reason}, actor=failure_actor)
+                    ledger.set_workflow_state("FAILED_TERMINAL",
+                                              evidence={"reason": failure_reason},
+                                              actor="workflow-supervisor")
+                elif case == "foreign-identity":
+                    run_path = output / "run.json"
+                    run_document = json.loads(run_path.read_text())
+                    run_document["resource"]["run_id"] = "foreign-resource-run"
+                    run_path.write_text(json.dumps(run_document, indent=2, sort_keys=True))
+                elif case == "altered-exit-sentinel":
+                    Path(row["sentinel"]).write_text("7\n")
+                elif case == "config-binding":
+                    run_path = output / "run.json"
+                    run_document = json.loads(run_path.read_text())
+                    run_document["arms"]["t"]["config_ref"] = "config:foreign.json"
+                    run_path.write_text(json.dumps(run_document, indent=2, sort_keys=True))
+                elif case == "failed-verification":
+                    document = json.loads(verdict.read_text())
+                    document["arms"]["t"]["status"] = "FAIL"
+                    verdict.write_text(json.dumps(document, indent=2, sort_keys=True))
+                elif case == "foreign-binding":
+                    armed_path = ledger.root / "armed" / "full-run.json"
+                    armed = json.loads(armed_path.read_text())
+                    armed["route_hash"] = "sha256:" + "0" * 64
+                    armed_path.write_text(json.dumps(armed, sort_keys=True))
+                self._publish_late_verification(route, jobs, verdict)
+
+                result = WORK_START.start_work(route, path, jobs)
+
+                self.assertEqual(result["reason"], "route-closed-unproven", result)
+                self.assertNotIn("resource_result_accepted", result)
+                self.assertEqual(SUP.route_module().outcome_path(path).read_bytes(), raw_outcome)
+                self.assertFalse(any(entry.get("actor") == "late-resource-result"
+                                     for entry in ledger.journal()))
+                self.assertEqual(ledger.claims(), {})
+                self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+                self.assertEqual(len(payloads), 2)
+
+    def test_closed_late_result_lost_append_reply_replays_one_proof(self):
+        import work_start as WORK_START
+        route, path, jobs, registry, output, ledger, payloads = self._closed_late_lab_fixture(
+            pending_handoff=True)
+        raw_outcome = SUP.route_module().outcome_path(path).read_bytes()
+        row = json.loads(registry.read_text())["runs"]["late-run"]
+        verdict = self._write_late_lab_record(route, row, output)
+        self._publish_late_verification(route, jobs, verdict)
+
+        append = WS.WorkflowLedger._append
+        def append_then_lose_reply(instance, entry):
+            append(instance, entry)
+            if entry.get("actor") == "late-resource-result":
+                raise OSError("reply lost after durable late-result append")
+
+        with mock.patch.object(WS.WorkflowLedger, "_append", append_then_lose_reply):
+            interrupted = WORK_START.start_work(route, path, jobs)
+        self.assertEqual(interrupted["state"], "needs-attention", interrupted)
+        self.assertIn("reply lost after durable", interrupted["detail"])
+        self.assertEqual(sum(entry.get("actor") == "late-resource-result"
+                             for entry in ledger.journal()), 1)
+        journal_size = ledger.journal_path.stat().st_size
+        self.assertEqual(SUP.route_module().outcome_path(path).read_bytes(), raw_outcome)
+
+        replay = WORK_START.start_work(route, path, jobs)
+
+        self.assertEqual(replay["reason"], "resource-result-accepted-terminal-gates-pending", replay)
+        self.assertEqual(sum(entry.get("actor") == "late-resource-result"
+                             for entry in ledger.journal()), 1)
+        self.assertEqual(ledger.journal_path.stat().st_size, journal_size)
+        self.assertEqual(SUP.route_module().outcome_path(path).read_bytes(), raw_outcome)
+        self.assertEqual(ledger.state()["nodes"]["full-run"]["state"], "FAILED_RETRYABLE")
+        self.assertEqual(ledger.claims(), {})
+        self.assertEqual(set(json.loads(registry.read_text())["runs"]), {"late-run"})
+        self.assertEqual(len(payloads), 2)
 
 
 if __name__ == '__main__':

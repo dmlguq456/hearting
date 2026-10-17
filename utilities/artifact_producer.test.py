@@ -3064,6 +3064,67 @@ class AbandonReasonTest(ProducerTestBase):
         self.assertEqual(abandoned_events[0]["payload"]["abandon_reason"], "operator-override-live-review")
 
 
+class LateResultProducerRevisionTest(ProducerTestBase):
+    def test_late_result_proof_is_published_by_the_existing_cycle_revision_writer(self):
+        import late_resource_result
+        xdg = Path(self._tmp.name) / "xdg"
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}):
+            self.activate()
+            route, route_file, result = self.begin()
+            self.write_output(result)
+            cycle_id = result["cycle_id"]
+            sealed = P.finalize(self.root, cycle_id=cycle_id, allow_open_route=True)
+            self.assertEqual(sealed["cycle_state"], "active")
+            cycle_dir = Path(result["cycle_dir"])
+            manifest_path = cycle_dir / "manifest.json"
+            original = manifest_path.read_bytes()
+            original_document = json.loads(original)
+            original_revision = original_document["manifest_revision_id"]
+            original_snapshot = L.manifest_snapshot_path(self.root, cycle_id, original_revision)
+            original_snapshot_bytes = original_snapshot.read_bytes()
+            proof = {"schema": "late-terminal-result-test/v1", "idempotency_key": "a" * 64,
+                     "route_id": route["route_id"], "route_hash": route["route_hash"],
+                     "verdict": "fixture-proof"}
+
+            published = late_resource_result._producer_publication(route, proof)
+            self.assertEqual(published["status"], "emitted", published)
+            self.assertTrue(Path(published["proof_path"]).is_file())
+            current_raw = manifest_path.read_bytes()
+            current = json.loads(current_raw)
+            self.assertNotEqual(current["manifest_revision_id"], original_revision)
+            self.assertEqual(current["cycle"]["state"], "active")
+            self.assertEqual(original_snapshot.read_bytes(), original_snapshot_bytes)
+            row = next(row for row in current["artifact_revisions"]
+                       if row["locator"]["path"] ==
+                       f"artifacts/late-results/{proof['idempotency_key']}.json")
+            self.assertEqual(row["content_digest"], m.digest_bytes(Path(published["proof_path"]).read_bytes()))
+            replay = late_resource_result._producer_publication(route, proof)
+            self.assertEqual(replay["status"], "skipped", replay)
+            self.assertEqual(replay["reason"], "min-interval")
+            self.assertEqual(manifest_path.read_bytes(), current_raw)
+
+    def test_late_result_producer_publication_respects_refresh_off(self):
+        import late_resource_result
+        xdg = Path(self._tmp.name) / "xdg"
+        off = xdg / "hearting" / P.CLOSED_CYCLE_REFRESH_OFF_FILE
+        off.parent.mkdir(parents=True)
+        off.write_text("off\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(xdg)}):
+            self.activate()
+            route, route_file, result = self.begin()
+            self.write_output(result)
+            P.finalize(self.root, cycle_id=result["cycle_id"], allow_open_route=True)
+            manifest_path = Path(result["cycle_dir"]) / "manifest.json"
+            before = manifest_path.read_bytes()
+            proof = {"schema": "late-terminal-result-test/v1", "idempotency_key": "b" * 64,
+                     "route_id": route["route_id"], "route_hash": route["route_hash"]}
+            publication = late_resource_result._producer_publication(route, proof)
+            self.assertEqual(publication["status"], "skipped", publication)
+            self.assertEqual(publication["reason"], "refresh-off")
+            self.assertTrue(Path(publication["proof_path"]).is_file())
+            self.assertEqual(manifest_path.read_bytes(), before)
+
+
 class FinalizeStateConflictTest(ProducerTestBase):
     """Sealed storage is not task completion: a request whose `state` does not
     match the *published* `manifest.json` cycle state is a typed conflict,
@@ -3141,12 +3202,10 @@ class FinalizeStateConflictTest(ProducerTestBase):
         original = R.outcome_path(route_file).read_bytes()
         self._complete_inline_for_latch(route, evidence)
         completed_outcome, created = R.close_route(route, route_file, jobs=self.jobs)
-        self.assertTrue(created)
+        self.assertFalse(created)
         self.assertTrue(completed_outcome["terminal_gate_proven"])
-        retained = list(Path(route_file).parent.glob(
-            f"{Path(route_file).stem}.historical-false-*.outcome.json"))
-        self.assertEqual(len(retained), 1)
-        self.assertEqual(retained[0].read_bytes(), original)
+        self.assertTrue(completed_outcome.get("terminal_adjudication"))
+        self.assertEqual(R.outcome_path(route_file).read_bytes(), original)
         sealed = P.finalize(self.root, cycle_id=cycle_id)
         self.assertEqual(sealed["cycle_state"], "completed")
         document = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_text())
@@ -3165,10 +3224,12 @@ class FinalizeStateConflictTest(ProducerTestBase):
         first, created = R.close_route(route, route_file, jobs=self.jobs)
         self.assertTrue(created)
         self.assertFalse(first["terminal_gate_proven"])
+        original_outcome = R.outcome_path(route_file).read_bytes()
         self._complete_inline_for_latch(route, evidence)
         promoted, created = R.close_route(route, route_file, jobs=self.jobs)
-        self.assertTrue(created)
+        self.assertFalse(created)
         self.assertTrue(promoted["terminal_gate_proven"])
+        self.assertEqual(R.outcome_path(route_file).read_bytes(), original_outcome)
         result = P.finalize(self.root, cycle_id=cycle_id, state="completed")
         self.assertEqual(result["cycle_state"], "completed")
         after = manifest_path.read_bytes()
@@ -3220,11 +3281,13 @@ class FinalizeStateConflictTest(ProducerTestBase):
         P.finalize(self.root, cycle_id=cycle_id, allow_open_route=True)
         before = (Path(result["cycle_dir"]) / "manifest.json").read_bytes()
         R.close_route(route, route_file, jobs=self.jobs)
+        original_outcome = R.outcome_path(route_file).read_bytes()
         self._complete_inline_for_latch(route, evidence)
         closed, created = R.close_route(route, route_file, jobs=self.jobs)
-        self.assertTrue(created); self.assertTrue(closed["terminal_gate_proven"])
+        self.assertFalse(created); self.assertTrue(closed["terminal_gate_proven"])
+        self.assertEqual(R.outcome_path(route_file).read_bytes(), original_outcome)
         refreshed = P.refresh_cycle(self.root, cycle_id, trigger="explicit")
-        self.assertEqual(refreshed["status"], "emitted", refreshed)
+        self.assertIn(refreshed["status"], {"emitted", "unchanged"}, refreshed)
         current = json.loads((Path(result["cycle_dir"]) / "manifest.json").read_text())
         self.assertEqual(current["cycle"]["state"], "completed")
         index = adm.load_index(self.root)

@@ -152,7 +152,10 @@ continuation and can never be the workflow terminal: the continuation supervisor
 observes its exact termination and advances to `run-verify`, and only `handoff`
 is terminal. `handoff`'s gate is satisfied by *recording the successor* — a
 registered evaluation route or attempt, or an explicit human gate — so a run that
-finishes with "evaluate it later" written in prose is not complete. The
+finishes with "evaluate it later" written in prose is not complete. A late
+acceptance of an exact, verified resource result does not satisfy this
+successor-registration gate; status keeps the handoff pending until its existing
+evidence is recorded. The
 `full-run` carries `start_approval: full-run`; the route card obtains approval
 for this part before the route starts. Leave `full-run` out when the approval
 or executable environment is absent, and compose it separately after approval.

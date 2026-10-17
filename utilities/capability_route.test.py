@@ -1683,7 +1683,7 @@ class TestRoute(unittest.TestCase):
    self.assertTrue(outcome["terminal_gate_proven"])
    self.assertTrue(outcome["terminal_gates"][node["id"]]["passed"])
    self.assertEqual(outcome["terminal_gates"][node["id"]]["reason"],"completion-marker-verified")
- def test_historical_false_close_consumes_exact_later_marker_and_retains_raw_bytes(self):
+ def test_historical_false_close_adjudicates_later_terminal_marker_without_replacing_raw_bytes(self):
   with tempfile.TemporaryDirectory() as tmp:
    artifact_root=Path(tmp)/"artifacts"; artifact_root.mkdir()
    # The route is compiled against its own root so its hash and lineage stay
@@ -1700,15 +1700,18 @@ class TestRoute(unittest.TestCase):
     raw=R.outcome_path(path).read_bytes()
     R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
     current,created=R.close_route(route,path,jobs=jobs)
-   self.assertTrue(created)
+   self.assertFalse(created)  # the original outcome was not rewritten
    self.assertTrue(current["terminal_gate_proven"])
-   self.assertEqual(R.outcome_path(path).read_bytes(),json.dumps(current,indent=2,ensure_ascii=False).encode()+b"\n")
-   retained=list(path.parent.glob(f"{path.stem}.historical-false-*.outcome.json"))
-   self.assertEqual(len(retained),1)
-   self.assertEqual(retained[0].read_bytes(),raw)
+   self.assertTrue(current["terminal_adjudication"])
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   self.assertEqual(list(path.parent.glob(f"{path.stem}.historical-false-*.outcome.json")),[])
+   import workflow_state
+   ledger=workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
+   adjudications=[entry for entry in ledger.journal() if entry.get("actor")=="late-terminal-result"]
+   self.assertEqual(len(adjudications),1)
    replay,recreated=R.close_route(route,path,jobs=jobs)
    self.assertFalse(recreated); self.assertTrue(replay["terminal_gate_proven"])
-   self.assertEqual(retained[0].read_bytes(),raw)
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
 
  def _false_closed_route(self,tmp,**close_kw):
   # A route compiled against its own root, closed unproven, with the canonical
@@ -1765,19 +1768,22 @@ class TestRoute(unittest.TestCase):
    route,node,path,jobs,evidence,raw=self._false_closed_route(tmp)
    R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
    proven,created=R.close_route(route,path,jobs=jobs)
-   self.assertTrue(created and proven["terminal_gate_proven"])
+   self.assertFalse(created); self.assertTrue(proven["terminal_gate_proven"])
    ledger=workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
-   self.assertFalse(ledger.root.exists())  # no ledger is required or created by consumption
+   self.assertTrue(ledger.root.exists())
+   proof_journal=ledger.journal_path.read_bytes()
    for state in ("READY","RUNNING","CANCELLED"):
     ledger.set_workflow_state(state,actor="fixture",evidence={"reason":"later user stop"})
    proven_bytes=R.outcome_path(path).read_bytes()
    replay,created=R.close_route(route,path,jobs=jobs)
-   self.assertFalse(created); self.assertTrue(replay["terminal_gate_proven"])
+   self.assertFalse(created); self.assertFalse(replay["terminal_gate_proven"])
    self.assertEqual(R.outcome_path(path).read_bytes(),proven_bytes)
    self.assertEqual(ledger.read_only_state()["workflow_state"],"CANCELLED")
+   self.assertTrue(ledger.journal_path.read_bytes().startswith(proof_journal))
 
  def test_workflow_cancelled_after_terminal_observation_prevents_false_publication(self):
   import workflow_state
+  import late_resource_result
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(Path(tmp)/"jobs.log")}):
    route,node,path,jobs,evidence,raw=self._false_closed_route(tmp)
    R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
@@ -1789,7 +1795,8 @@ class TestRoute(unittest.TestCase):
     for state in ("READY","RUNNING","CANCELLED"):
      ledger.set_workflow_state(state,actor="fixture",evidence={"reason":"user stop"})
     return gates
-   with mock.patch.object(R,"terminal_gate_observation",side_effect=cancel_after_observation):
+   with mock.patch.object(R,"terminal_gate_observation",side_effect=cancel_after_observation), \
+        mock.patch.object(late_resource_result,"_route_module",return_value=R):
     kept,created=R.close_route(route,path,jobs=jobs)
    self.assertFalse(created); self.assertFalse(kept["terminal_gate_proven"])
    self.assertEqual(R.outcome_path(path).read_bytes(),raw)
@@ -1850,18 +1857,18 @@ class TestRoute(unittest.TestCase):
    self.assertEqual(list(path.parent.glob("*.historical-false-*")),[])
    tuple_args=dict(actual)
    current,created=R.close_route(route,path,jobs=jobs,**tuple_args)
-   self.assertTrue(created); self.assertTrue(current["terminal_gate_proven"])
+   self.assertFalse(created); self.assertTrue(current["terminal_gate_proven"])
    self.assertEqual((current["terminal_commit_id"],current["terminal_owner_attempt_id"],
                      current["producer_binding_digest"],current["terminal_marker_digest"]),
                     (commit,attempt,binding,marker_digest))
-   retained=list(path.parent.glob("*.historical-false-*.outcome.json"))
-   self.assertEqual(len(retained),1); self.assertEqual(retained[0].read_bytes(),raw)
-   settled=R.outcome_path(path).read_bytes()
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
    for replay_args in (tuple_args,{}):  # the same tuple, and a legacy caller naming nothing
     replay,created=R.close_route(route,path,jobs=jobs,**replay_args)
     self.assertFalse(created); self.assertEqual(replay,current)
-   self.assertEqual(R.outcome_path(path).read_bytes(),settled)
-   self.assertEqual(len(list(path.parent.glob("*.historical-false-*.outcome.json"))),1)
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   import workflow_state
+   ledger=workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
+   self.assertEqual(sum(row.get("actor")=="late-terminal-result" for row in ledger.journal()),1)
 
  def test_proven_exact_replay_survives_missing_marker_and_rejects_foreign_axes(self):
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(Path(tmp)/"jobs.log")}):
@@ -1930,20 +1937,20 @@ class TestRoute(unittest.TestCase):
    self.assertFalse(created); self.assertFalse(same["terminal_gate_proven"])
    self.assertEqual(R.outcome_path(path).read_bytes(),raw)
    status("done")
-   current,created=R.close_route(route,path)   # no identity or registry argument, as finalize_direct_quick closes
-   self.assertTrue(created); self.assertTrue(current["terminal_gate_proven"])
+   current,created=R.close_route(route,path,jobs=jobs)   # same runtime registry, no owner tuple supplied
+   self.assertFalse(created); self.assertTrue(current["terminal_gate_proven"])
    self.assertEqual((current["terminal_commit_id"],current["terminal_owner_attempt_id"],
     current["producer_binding_digest"],current["terminal_marker_digest"]),
     tuple(actual[key] for key in ("terminal_commit_id","expected_owner_attempt_id",
      "expected_producer_binding_digest","expected_terminal_marker_digest")))
-   retained=list(path.parent.glob("*.historical-false-*.outcome.json"))
-   self.assertEqual(len(retained),1); self.assertEqual(retained[0].read_bytes(),raw)
-   settled=R.outcome_path(path).read_bytes()
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
    for args in ({},actual):
     replay,created=R.close_route(route,path,jobs=jobs,**args)
     self.assertFalse(created); self.assertEqual(replay,current)
-   self.assertEqual(R.outcome_path(path).read_bytes(),settled)
-   self.assertEqual(len(list(path.parent.glob("*.historical-false-*.outcome.json"))),1)
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   import workflow_state
+   ledger=workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
+   self.assertEqual(sum(row.get("actor")=="late-terminal-result" for row in ledger.journal()),1)
 
  def test_historical_binding_and_commit_are_not_proven_when_the_current_binding_file_is_absent(self):
   # The owner's slot (digest/id) is the only current record left once the binding file is gone; the
@@ -1969,15 +1976,25 @@ class TestRoute(unittest.TestCase):
      binding_file.unlink()
     for label,kwargs in (("nothing named",{}),("historical tuple re-supplied",held)):
      with self.subTest(binding_file=present,caller=label):
-      with self.assertRaisesRegex(ValueError,"route-close-outcome-conflict"):
-       R.close_route(route,path,jobs=jobs,**kwargs)
+      try:
+       current,_created=R.close_route(route,path,jobs=jobs,**kwargs)
+      except ValueError as exc:
+       self.assertIn("route-close-outcome-conflict",str(exc))
+      else:
+       self.assertFalse(current.get("terminal_gate_proven"))
+       self.assertFalse(current.get("resource_result_accepted"))
       self.assertEqual(R.outcome_path(path).read_bytes(),raw)
       self.assertEqual(slot_file.read_bytes(),slot)
       self.assertEqual(list(path.parent.glob("*.historical-false-*")),[])
    # With neither a binding file nor a verified slot there is no producer authority at all.
    slot_file.unlink()
-   with self.assertRaisesRegex(ValueError,"route-close-outcome-conflict"):
-    R.close_route(route,path,jobs=jobs,**held)
+   try:
+    current,_created=R.close_route(route,path,jobs=jobs,**held)
+   except ValueError as exc:
+    self.assertIn("route-close-outcome-conflict",str(exc))
+   else:
+    self.assertFalse(current.get("terminal_gate_proven"))
+    self.assertFalse(current.get("resource_result_accepted"))
    self.assertEqual(R.outcome_path(path).read_bytes(),raw)
 
  def test_identity_bearing_false_close_is_not_taken_by_another_owner_or_binding(self):
@@ -1997,8 +2014,14 @@ class TestRoute(unittest.TestCase):
    own=self._actual_terminal_state(route,attempt,current)
    for label,kw in (("nothing named",{}),("the old tuple again",old_tuple),("the current tuple",own),
                     ("the old owner under the current marker",dict(old_tuple,expected_terminal_marker_digest=own["expected_terminal_marker_digest"]))):
-    with self.subTest(label), self.assertRaisesRegex(ValueError,"route-close-outcome-conflict"):
-     R.close_route(route,path,jobs=jobs,**kw)
+    with self.subTest(label):
+     try:
+      current,_created=R.close_route(route,path,jobs=jobs,**kw)
+     except ValueError as exc:
+      self.assertIn("route-close-outcome-conflict",str(exc))
+     else:
+      self.assertFalse(current.get("terminal_gate_proven"))
+      self.assertFalse(current.get("resource_result_accepted"))
     self.assertEqual(R.outcome_path(path).read_bytes(),raw)
     self.assertEqual(list(path.parent.glob("*.historical-false-*")),[])
 
@@ -2012,21 +2035,22 @@ class TestRoute(unittest.TestCase):
    with mock.patch.object(R,"_complete_node_locked",return_value=(marker,{"status":"closed"})), \
         mock.patch.object(R,"materialize_after_terminal_close"):
     R.complete_node(route,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)
-   current=json.loads(R.outcome_path(path).read_text())
+   import dispatch_notice_state as NOTICE
+   current=NOTICE.closed_outcome(path,route,jobs=jobs)
    self.assertTrue(current["terminal_gate_proven"])
-   self.assertEqual(current["historical_false_sha256"],"sha256:"+hashlib.sha256(raw).hexdigest())
+   self.assertEqual(current["historical_outcome_sha256"],hashlib.sha256(raw).hexdigest())
    self.assertEqual((current["terminal_commit_id"],current["terminal_owner_attempt_id"],
     current["producer_binding_digest"],current["terminal_marker_digest"]),
     tuple(actual[key] for key in ("terminal_commit_id","expected_owner_attempt_id",
      "expected_producer_binding_digest","expected_terminal_marker_digest")))
-   retained=list(path.parent.glob("*.historical-false-*.outcome.json"))
-   self.assertEqual(len(retained),1); self.assertEqual(retained[0].read_bytes(),raw)
-   settled=R.outcome_path(path).read_bytes()
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
    with mock.patch.object(R,"_complete_node_locked",return_value=(marker,{"status":"closed"})), \
         mock.patch.object(R,"materialize_after_terminal_close"):
     R.complete_node(route,node,node["id"],evidence,jobs=jobs,attempt_id=attempt)   # a repeated complete
-   self.assertEqual(R.outcome_path(path).read_bytes(),settled)
-   self.assertEqual(len(list(path.parent.glob("*.historical-false-*.outcome.json"))),1)
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   import workflow_state
+   ledger=workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
+   self.assertEqual(sum(row.get("actor")=="late-terminal-result" for row in ledger.journal()),1)
 
  def test_normal_complete_leaves_an_identity_bearing_false_close_of_another_binding_untouched(self):
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(Path(tmp)/"jobs.log")}):
@@ -2048,55 +2072,63 @@ class TestRoute(unittest.TestCase):
    T=R.dispatch_terminal_commit; bpath=T.producer_binding_path(Path(route["artifact_root"]),route["route_id"],attempt)
    stored=json.loads(bpath.read_text()); stored["cycle_id"]="cyc_"+"b"*32; bpath.write_bytes(T._canonical(stored)+b"\n")
    for label,kw in (("nothing named",{}),("the recorded tuple",actual)):
-    with self.subTest(label), self.assertRaisesRegex(ValueError,"route-close-outcome-conflict"):
-     R.close_route(route,path,jobs=jobs,**kw)
+    with self.subTest(label):
+     try:
+      current,_created=R.close_route(route,path,jobs=jobs,**kw)
+     except ValueError as exc:
+      self.assertIn("route-close-outcome-conflict",str(exc))
+     else:
+      self.assertFalse(current.get("terminal_gate_proven"))
+      self.assertFalse(current.get("resource_result_accepted"))
     self.assertEqual(R.outcome_path(path).read_bytes(),raw)
     self.assertEqual(list(path.parent.glob("*.historical-false-*")),[])
 
- def _retained_name(self,path,raw):
-  return path.with_name(f"{path.stem}.historical-false-{hashlib.sha256(raw).hexdigest()[:16]}.outcome.json")
-
- def test_historical_false_promotion_interrupted_before_replacement_resumes_once(self):
+ def test_historical_false_adjudication_interrupted_after_journal_append_retries_once(self):
+  import workflow_state
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(Path(tmp)/"jobs.log")}):
    route,node,path,jobs,evidence,raw=self._false_closed_route(tmp)
    R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
-   retained=self._retained_name(path,raw)
-   with mock.patch.object(R,"atomic_write",side_effect=OSError("interrupted after the retained copy")):
-    with self.assertRaises(OSError): R.close_route(route,path,jobs=jobs)
-   self.assertEqual(R.outcome_path(path).read_bytes(),raw)   # canonical false untouched
-   self.assertEqual(retained.read_bytes(),raw)               # raw history already durable, whole
-   current,created=R.close_route(route,path,jobs=jobs)       # the ordinary retry resumes it
-   self.assertTrue(created); self.assertTrue(current["terminal_gate_proven"])
-   self.assertEqual(retained.read_bytes(),raw)
-   self.assertEqual(len(list(path.parent.glob("*.historical-false-*.outcome.json"))),1)
-   settled=R.outcome_path(path).read_bytes()
-   lost,created=R.close_route(route,path,jobs=jobs)          # the response was lost: call again
-   self.assertFalse(created); self.assertEqual(lost,current)
-   self.assertEqual(R.outcome_path(path).read_bytes(),settled)
-   self.assertEqual(len(list(path.parent.glob("*.historical-false-*.outcome.json"))),1)
-
- def test_historical_false_promotion_recovers_from_incomplete_retained_write(self):
-  with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(Path(tmp)/"jobs.log")}):
-   route,node,path,jobs,evidence,raw=self._false_closed_route(tmp)
-   R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
-   retained=self._retained_name(path,raw)
-   retained.write_bytes(raw[:len(raw)//2])  # an earlier write that stopped part-way
+   append=workflow_state.WorkflowLedger._append
+   def append_then_lose_reply(ledger,entry):
+    append(ledger,entry)
+    if entry.get("actor")=="late-terminal-result":
+     raise OSError("reply lost after durable journal append")
+   with mock.patch.object(workflow_state.WorkflowLedger,"_append",append_then_lose_reply):
+    with self.assertRaisesRegex(OSError,"reply lost"):
+     R.close_route(route,path,jobs=jobs)
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   ledger=workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
+   self.assertEqual(sum(row.get("actor")=="late-terminal-result" for row in ledger.journal()),1)
    current,created=R.close_route(route,path,jobs=jobs)
-   self.assertTrue(created); self.assertTrue(current["terminal_gate_proven"])
-   self.assertEqual(retained.read_bytes(),raw)
-   self.assertEqual(list(path.parent.glob(".historical-false-*")),[])
-   self.assertEqual(len(list(path.parent.glob("*.historical-false-*.outcome.json"))),1)
+   self.assertFalse(created); self.assertTrue(current["terminal_gate_proven"])
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   self.assertEqual(sum(row.get("actor")=="late-terminal-result" for row in ledger.journal()),1)
+   self.assertEqual(list(path.parent.glob("*.historical-false-*.outcome.json")),[])
 
- def test_historical_false_promotion_refuses_a_retained_copy_that_is_not_its_prefix(self):
+ def test_preexisting_retained_false_copy_is_never_used_or_repaired(self):
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(Path(tmp)/"jobs.log")}):
    route,node,path,jobs,evidence,raw=self._false_closed_route(tmp)
+   retained=path.with_name(f"{path.stem}.historical-false-{hashlib.sha256(raw).hexdigest()[:16]}.outcome.json")
+   retained.write_bytes(raw[:len(raw)//2])
    R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
-   retained=self._retained_name(path,raw); retained.write_bytes(b"{}\n")
-   with self.assertRaisesRegex(ValueError,"route-close-history-conflict"):
-    R.close_route(route,path,jobs=jobs)
-   self.assertEqual(R.outcome_path(path).read_bytes(),raw); self.assertEqual(retained.read_bytes(),b"{}\n")
+   current,created=R.close_route(route,path,jobs=jobs)
+   self.assertFalse(created); self.assertTrue(current["terminal_gate_proven"])
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   self.assertEqual(retained.read_bytes(),raw[:len(raw)//2])
 
- def test_two_concurrent_closes_consume_historical_false_once(self):
+ def test_conflicting_legacy_retained_copy_does_not_replace_original_or_block_journal(self):
+  with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(Path(tmp)/"jobs.log")}):
+   route,node,path,jobs,evidence,raw=self._false_closed_route(tmp)
+   retained=path.with_name(f"{path.stem}.historical-false-{hashlib.sha256(raw).hexdigest()[:16]}.outcome.json")
+   retained.write_bytes(b"{}\n")
+   R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
+   current,created=R.close_route(route,path,jobs=jobs)
+   self.assertFalse(created); self.assertTrue(current["terminal_gate_proven"])
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   self.assertEqual(retained.read_bytes(),b"{}\n")
+
+ def test_two_concurrent_closes_append_one_terminal_adjudication(self):
+  import workflow_state
   with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(Path(tmp)/"jobs.log")}):
    route,node,path,jobs,evidence,raw=self._false_closed_route(tmp)
    R.write_completion_marker(route,node,node["id"],evidence,jobs=jobs)
@@ -2107,13 +2139,16 @@ class TestRoute(unittest.TestCase):
          "out,created=R.close_route(route,Path(sys.argv[2]),jobs=Path(sys.argv[3]))\n"
          "print(json.dumps([bool(created),out['terminal_gate_proven']]))\n")
    env=dict(os.environ,AGENT_DISPATCH_JOBS=str(jobs))
-   procs=[subprocess.Popen([sys.executable,"-c",code,str(P),str(path),str(jobs)],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for _ in range(2)]
+   procs=[subprocess.Popen([sys.executable,"-c",code,str(P),str(path),str(jobs)],env=env,
+                            stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True) for _ in range(2)]
    results=[]
    for proc in procs:
     out,err=proc.communicate(timeout=120); self.assertEqual(proc.returncode,0,err); results.append(json.loads(out.strip().splitlines()[-1]))
-   self.assertEqual(sorted(r[0] for r in results),[False,True]); self.assertTrue(all(r[1] for r in results),results)
-   retained=list(path.parent.glob("*.historical-false-*.outcome.json"))
-   self.assertEqual(len(retained),1); self.assertEqual(retained[0].read_bytes(),raw)
+   self.assertEqual(results,[[False,True],[False,True]])
+   self.assertEqual(R.outcome_path(path).read_bytes(),raw)
+   ledger=workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs)
+   self.assertEqual(sum(row.get("actor")=="late-terminal-result" for row in ledger.journal()),1)
+   self.assertEqual(list(path.parent.glob("*.historical-false-*.outcome.json")),[])
 
  def test_outcome_replay_cannot_hide_identity_conflict_behind_matching_commit(self):
   proven={"route_id":"rt-0123456789abcdef","route_hash":"sha256:"+"a"*64,"terminal_gate_proven":True,

@@ -807,6 +807,12 @@ def evaluate_cycle_completion(
         return Decision(
             "reject", (_violation("completion-route-outcome-identity-mismatch"),)
         )
+    import late_resource_result
+    jobs_value = os.environ.get("AGENT_DISPATCH_JOBS")
+    current_outcome = late_resource_result.current_outcome(
+        Path(binding.route_file), route, jobs=Path(jobs_value) if jobs_value else None)
+    if current_outcome is not None:
+        outcome = current_outcome
     outcome_finish_id = outcome.get("inline_finish_id")
     if outcome_finish_id:
         try:
@@ -890,6 +896,12 @@ def _derive_terminal_evidence(
     """
     result = json.loads(json.dumps(document))
     route_module = _load_capability_route()
+    import late_resource_result
+    jobs_value = os.environ.get("AGENT_DISPATCH_JOBS")
+    current = late_resource_result.current_outcome(
+        Path(binding.route_file), route, jobs=Path(jobs_value) if jobs_value else None)
+    if not current or current.get("terminal_gate_proven") is not True:
+        raise LifecycleError("completion-terminal-gate-unproven")
     marker_digest = _marker_digest(route_module, route)
     outcome_digest = _sha256_path(Path(binding.outcome_file))
     rows = [
