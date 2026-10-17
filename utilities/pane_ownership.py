@@ -17,6 +17,14 @@ import sys
 import time
 
 
+# Every entry (hook, CLI script, import) resolves `fleet.collectors` here, not
+# only after `_native_session` has run. Appended so `tools/` never shadows a
+# caller's own modules.
+_TOOLS_DIR = str(Path(__file__).resolve().parents[1] / "tools")
+if _TOOLS_DIR not in sys.path:
+    sys.path.append(_TOOLS_DIR)
+
+
 _THREAD_ID_RE = re.compile(
     r"(?<![0-9A-Za-z-])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9A-Za-z-])"
 )

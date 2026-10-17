@@ -248,6 +248,45 @@ class RouteAutocloseTest(unittest.TestCase):
         self.assertIs(self.outcome(route_file)["terminal_gate_proven"], False)
         self.assertEqual(self.cycle_record(record["cycle_id"])["state"], "abandoned")
 
+    def test_compose_closes_overdue_idle_route_from_another_campaign(self):
+        other_file, other = self.compose("other-idle", "opencode", "other-session", campaign="other-idle")
+        self.write_artifact(other)
+        self.age(other_file, "opencode", "other-session")
+        self.later()
+        self.sweep()   # a compose in begun campaign `k1`: its sweep is scoped to k1
+        self.assertEqual(self.outcome(other_file)["autoclose"]["reason"], "idle")
+
+    def test_decision_protection_expires_and_stops_when_first_leg_closes(self):
+        import route_plan
+        import route_autoclose as RA
+        frame_id, leg_id = "rt-" + "a" * 16, "rt-" + "b" * 16
+        cycle_home = self.root / "campaigns" / "test" / "cycles" / "frame"
+        record_path = cycle_home / "artifacts" / route_plan.RECORD_RELATIVE
+        record_path.parent.mkdir(parents=True)
+        record_path.write_text("{}", encoding="utf-8")
+        leg_path = self.root / ".runtime" / "routes" / f"{leg_id}.json"
+        leg_path.parent.mkdir(parents=True, exist_ok=True)
+        leg_path.write_text("{}", encoding="utf-8")
+        route = {"route_id": frame_id}
+        record = {"first_leg": {"route": {"route_id": leg_id}}}
+        with mock.patch.object(route_plan, "is_framed_route", return_value=True), \
+                mock.patch.object(route_plan, "read_record", return_value=record):
+            self.assertTrue(RA._decision_unfinished(route, lambda: cycle_home, self.root, time.time()))
+            old = time.time() - RA.IDLE_SECONDS - 1
+            os.utime(record_path, (old, old))
+            self.assertFalse(RA._decision_unfinished(route, lambda: cycle_home, self.root, time.time()))
+            os.utime(record_path, (time.time(), time.time()))
+            leg_path.with_name(f"{leg_id}.outcome.json").write_text("{}", encoding="utf-8")
+            self.assertFalse(RA._decision_unfinished(route, lambda: cycle_home, self.root, time.time()))
+            # A record whose metadata cannot be read keeps its protection.
+            real_stat = Path.stat
+            def failing_stat(path, *args, **kwargs):
+                if path == record_path:
+                    raise PermissionError("metadata unavailable")
+                return real_stat(path, *args, **kwargs)
+            with mock.patch.object(Path, "stat", failing_stat):
+                self.assertTrue(RA._decision_unfinished(route, lambda: cycle_home, self.root, time.time()))
+
     def test_crashed_claude_session_closes_after_an_hour_of_quiet(self):
         self.claude_crashed("claude-crashed")
         route_file, route = self.compose("orphan", "claude", "claude-crashed")
@@ -685,16 +724,12 @@ class RouteAutocloseTest(unittest.TestCase):
             "k": {"path": str(registry)}}}))
         return log
 
-    def test_n2_run_on_another_host_counts_as_live_until_it_records_an_end(self):
+    def test_n2_incomplete_old_resource_identity_does_not_protect_an_idle_route(self):
         route_file, route = self.compose("remote-training", "codex", "session-b")
         log = self.remote_run(route_file)
         self.age(route_file, "codex", "session-b")
         old = time.time() - EIGHT_DAYS
         os.utime(log, (old, old))
-        self.sweep()
-        self.assertIsNone(self.outcome(route_file))
-        Path(str(log) + ".exit").write_text("0")   # the wrapper's exit sentinel
-        self.later()
         self.sweep()
         self.assertEqual(self.outcome(route_file)["autoclose"]["reason"], "idle")
 

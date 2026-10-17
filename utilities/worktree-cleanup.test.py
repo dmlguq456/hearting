@@ -2,15 +2,20 @@
 from __future__ import annotations
 
 import os
+import importlib.util
 from pathlib import Path
 import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "utilities" / "worktree-cleanup.py"
+_CLEANUP_SPEC = importlib.util.spec_from_file_location("worktree_cleanup_for_test", SCRIPT)
+CLEANUP = importlib.util.module_from_spec(_CLEANUP_SPEC)
+_CLEANUP_SPEC.loader.exec_module(CLEANUP)
 
 
 def run(argv: list[str], cwd: Path | None = None, check: bool = True):
@@ -110,6 +115,20 @@ class WorktreeCleanupTests(unittest.TestCase):
 
     def tearDown(self):
         self.fx.close()
+
+    def test_read_only_status_passes_optional_lock_setting(self):
+        path = self.fx.add_worktree("readonly-status")
+        original_run = CLEANUP.subprocess.run
+        observed = []
+
+        def capture_status(argv, **kwargs):
+            if argv[:3] == ["git", "-C", str(path)] and "status" in argv:
+                observed.append(kwargs.get("env", {}).get("GIT_OPTIONAL_LOCKS"))
+            return original_run(argv, **kwargs)
+
+        with mock.patch.object(CLEANUP.subprocess, "run", side_effect=capture_status):
+            CLEANUP.evaluate(path, self.fx.jobs, "main")
+        self.assertEqual(observed, ["0"])
 
     def test_eligible_removes_worktree_preserves_branch_and_reconciles(self):
         path = self.fx.add_worktree("eligible", with_commit=True)

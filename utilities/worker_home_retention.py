@@ -34,6 +34,7 @@ import os
 import re
 import stat
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 IDLE_SECONDS = 7 * 86400
@@ -308,6 +309,32 @@ class _Row:
             from dispatch_contract import parse_registry_metadata
             self._meta = parse_registry_metadata(self.fields[5])
         return self._meta
+
+
+def _ended_ns(row: _Row) -> int | None:
+    """Return the best wall-clock completion estimate carried by a registry row."""
+    try:
+        ended = datetime.fromisoformat(row.fields[0].replace("Z", "+00:00"))
+        if ended.tzinfo is None:
+            ended = ended.replace(tzinfo=timezone.utc)
+        ended = ended.astimezone(timezone.utc)
+        delta = ended - datetime(1970, 1, 1, tzinfo=timezone.utc)
+        registry_ns = ((delta.days * 86400 + delta.seconds) * 10**9
+                       + delta.microseconds * 1000)
+    except (AttributeError, IndexError, OverflowError, TypeError, ValueError):
+        return None
+
+    log_file = row.meta.get("log_file", "")
+    if log_file and os.path.isabs(log_file):
+        try:
+            _track(log_file)
+            st = os.stat(log_file, follow_symlinks=False)
+        except (OSError, ValueError):
+            pass
+        else:
+            if stat.S_ISREG(st.st_mode):
+                registry_ns = max(registry_ns, st.st_mtime_ns)
+    return registry_ns
 
 
 class _Snapshot:
@@ -1167,6 +1194,9 @@ def _detach(ctx: _Context, key: str, ident: list[int], attempt: str, raw: str,
             if verdict.kind == "unknown":
                 return "defer:" + verdict.reason
             return "activity:row-changed"
+        ended = _ended_ns(row)
+        if ended is not None:
+            first_ns = max(first_ns, ended)
         try:
             home = os.open(key, _DIR_FLAGS, dir_fd=layout.workers_fd)
         except OSError:
@@ -1382,21 +1412,23 @@ def _pass(jobs: Path, root: Path, layout: _Layout, state: dict, now_ns: int, sta
                     continue
                 result["eligible"] += 1
                 first = since.setdefault(key, now_ns)
+                ended = _ended_ns(snapshot.rows[verdict.attempt])
+                start = ended if ended is not None else first
                 mark = _stat_mtime(key, dir_fd=layout.views_fd, follow_symlinks=False)
-                idle_from = max(first, verdict.activity_ns, mark, ident[3])
+                idle_from = max(start, verdict.activity_ns, mark, ident[3])
                 if now_ns - idle_from >= IDLE_SECONDS * 10**9:
-                    due.append((key, ident[:3], verdict, first))
+                    due.append((key, ident[:3], verdict, start))
                 else:
                     _count(result["kept"], "within-window")
         finally:
             scan.close()
         result["due"] = len(due)
-        for key, ident, verdict, first in due:
+        for key, ident, verdict, start in due:
             if budget <= 0 or time.monotonic() > deadline:
                 _count(result["kept"], "deferred")
                 continue
             budget -= 1
-            outcome = _detach(ctx, key, ident, verdict.attempt, verdict.raw, first)
+            outcome = _detach(ctx, key, ident, verdict.attempt, verdict.raw, start)
             if not outcome.startswith("detached:"):
                 if (outcome.startswith("protected:") or outcome in ("home-gone", "identity-changed")
                         or (outcome == "late-evidence-changed" and

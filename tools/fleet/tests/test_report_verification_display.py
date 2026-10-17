@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from fleet import projection, render, route  # noqa: E402
 from fleet.model import DispatchJob  # noqa: E402
-from utilities import report_verification_projection  # noqa: E402
+# The same module object the Fleet projection resolves, so the patches below reach it.
+report_verification_projection = projection._report_verification()
 
 
 COMPOSED = os.path.join(os.path.dirname(__file__), "fixtures", "route",
@@ -19,6 +20,20 @@ COMPOSED = os.path.join(os.path.dirname(__file__), "fixtures", "route",
 
 
 class ReportVerificationDisplayTests(unittest.TestCase):
+    def test_report_projection_import_resolves_with_fleet_sys_path(self):
+        # The real entry (tools/fleet/fleet.py) puts only `tools/` on sys.path.
+        tools = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        script = (
+            "import sys; "
+            f"sys.path[:0] = [{tools!r}]; "
+            "from fleet import projection; "
+            "module = projection._report_verification(); "
+            "assert callable(module.project_route) and callable(module.report_detail_payload)"
+        )
+        result = __import__("subprocess").run(
+            [sys.executable, "-I", "-c", script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def setUp(self):
         self.record = route.load(COMPOSED)
         self.job = DispatchJob(

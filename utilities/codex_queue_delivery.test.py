@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import stat
 from pathlib import Path
+import sqlite3
 import struct
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -28,6 +31,72 @@ CLIENT_ID = "delivery-test-0001"
 ITEM_ID = "01a0e1c1-fdb8-7190-8524-6812c28b3f9a"
 ITEM = {"id": ITEM_ID, "clientUserMessageId": CLIENT_ID,
         "input": [{"type": "text", "text": "fixture"}]}
+
+
+def native_fixture(root, *, entries=(), turn_ids=(), thread_id=THREAD,
+                   rollout_bytes=b"", projected_offset=None,
+                   projected_ordinal=10000, rollout_mode=0o600):
+    home = Path(root) / "codex"
+    control = home / "app-server-control"
+    sessions = home / "sessions"
+    control.mkdir(parents=True)
+    sessions.mkdir()
+    home.chmod(0o700)
+    control.chmod(0o700)
+    sessions.chmod(0o700)
+    rollout = sessions / "fixture.jsonl"
+    rollout.write_bytes(rollout_bytes)
+    rollout.chmod(rollout_mode)
+
+    state_path = home / "state_5.sqlite"
+    state = sqlite3.connect(state_path)
+    state.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, history_mode TEXT)")
+    state.execute("INSERT INTO threads VALUES (?, ?, 'paginated')",
+                  (thread_id, str(rollout)))
+    state.commit()
+    state.close()
+    state_path.chmod(0o600)
+
+    history_path = home / "thread_history_1.sqlite"
+    history = sqlite3.connect(history_path)
+    history.executescript("""
+        CREATE TABLE thread_turns (
+            thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, status TEXT,
+            PRIMARY KEY(thread_id, turn_id)
+        );
+        CREATE TABLE thread_items (
+            thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, item_id TEXT NOT NULL,
+            item_json TEXT NOT NULL, item_type TEXT NOT NULL, rollout_ordinal INTEGER,
+            PRIMARY KEY(thread_id, turn_id, item_id)
+        );
+        CREATE INDEX idx_thread_items_user_messages
+            ON thread_items(thread_id, rollout_ordinal) WHERE item_type='userMessage';
+        CREATE TABLE thread_history_projection_state (
+            thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER,
+            next_rollout_ordinal INTEGER
+        );
+    """)
+    all_turns = {(thread_id, value) for value in turn_ids}
+    all_turns.update((entry.get("thread_id", thread_id), entry["turn_id"])
+                     for entry in entries)
+    history.executemany("INSERT INTO thread_turns(thread_id, turn_id, status) VALUES (?, ?, 'completed')",
+                        sorted(all_turns))
+    history.executemany(
+        "INSERT INTO thread_items(thread_id, turn_id, item_id, item_json, item_type, rollout_ordinal) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        [(entry.get("thread_id", thread_id), entry["turn_id"], entry["item_id"],
+          entry.get("item_json", json.dumps(entry["item"])), entry["item_type"],
+          entry["ordinal"]) for entry in entries],
+    )
+    history.execute(
+        "INSERT INTO thread_history_projection_state VALUES (?, ?, ?)",
+        (thread_id, len(rollout_bytes) if projected_offset is None else projected_offset,
+         projected_ordinal),
+    )
+    history.commit()
+    history.close()
+    history_path.chmod(0o600)
+    return home, control / "app-server-control.sock", state_path, history_path, rollout
 
 
 class QueueDeliveryTest(unittest.TestCase):
@@ -286,171 +355,288 @@ class PeerQueuePolicy(unittest.TestCase):
         rpc.assert_not_called()
 
 
-class StrictPeerHistory(unittest.TestCase):
-    def test_history_failure_and_page_budget_never_add(self):
-        for rpc_result in (QUEUE.QueueDeliveryError("history-unavailable"),
-                           {"data": [], "nextCursor": "next"}):
-            with self.subTest(rpc_result=rpc_result):
-                kwargs = {"side_effect": rpc_result} if isinstance(rpc_result, Exception) else {"return_value": rpc_result}
-                with mock.patch.object(QUEUE, "_rpc", **kwargs) as rpc:
-                    with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "history-unavailable"):
-                        QUEUE.send_at_least_once(SOCKET, thread_id=THREAD, client_message_id=CLIENT_ID,
-                            message="peer", allow_restart=False, retry_ambiguous=False, require_message_match=True)
-                self.assertTrue(all(call.args[1] == "thread/turns/list" for call in rpc.call_args_list))
+class NativePeerObservationTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
 
-    def test_actual_schema_empty_text_elements_and_body_mismatch(self):
-        for message, count in (("peer", 1), ("other", 0)):
-            turn = {"id": "fixture-turn", "items": [{"type": "userMessage", "clientId": CLIENT_ID,
-                              "content": [{"type": "text", "text": message, "text_elements": []}]}]}
-            with mock.patch.object(QUEUE, "_rpc", return_value={"data": [turn]}) as rpc:
-                if count:
-                    result = QUEUE.send_at_least_once(SOCKET, thread_id=THREAD,
-                        client_message_id=CLIENT_ID, message="peer", require_message_match=True)
-                    self.assertEqual(result["status"], "consumed")
-                else:
-                    with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "history-mismatch"):
-                        QUEUE.send_at_least_once(SOCKET, thread_id=THREAD,
-                            client_message_id=CLIENT_ID, message="peer", require_message_match=True)
-            self.assertEqual([c.args[1] for c in rpc.call_args_list], ["thread/turns/list"])
+    def send(self, endpoint, *, message="peer"):
+        return QUEUE.send_at_least_once(
+            endpoint, thread_id=THREAD, client_message_id=CLIENT_ID,
+            message=message, timeout=3, allow_restart=False,
+            retry_ambiguous=False, require_message_match=True,
+        )
 
-    def test_duplicate_client_or_changed_pending_content_is_unverified(self):
-        for items in ([dict(ITEM, input=[{"type": "text", "text": "other"}])],
-                      [dict(ITEM, input=[{"type": "text", "text": "peer"}])] * 2):
-            with mock.patch.object(QUEUE, "_known_consumed", return_value=None), \
-                 mock.patch.object(QUEUE, "list_queue", return_value=items), \
-                 mock.patch.object(QUEUE, "_rpc") as rpc:
-                with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "pending-mismatch"):
-                    QUEUE.send_at_least_once(SOCKET, thread_id=THREAD,
-                        client_message_id=CLIENT_ID, message="peer", require_message_match=True)
-                rpc.assert_not_called()
+    @staticmethod
+    def entry(turn_id, item_id, ordinal, client_id, *, message="peer",
+              json_type="userMessage", item_type="userMessage", thread_id=None):
+        item = {"type": json_type, "clientId": client_id,
+                "content": [{"type": "text", "text": message, "text_elements": []}]}
+        result = {"turn_id": turn_id, "item_id": item_id, "ordinal": ordinal,
+                  "item_type": item_type, "item": item}
+        if thread_id is not None:
+            result["thread_id"] = thread_id
+        return result
 
-
-class BoundedPeerHistory(unittest.TestCase):
-    def send(self):
-        return QUEUE.send_at_least_once(SOCKET, thread_id=THREAD,
-            client_message_id=CLIENT_ID, message="peer", timeout=3,
-            allow_restart=False, retry_ambiguous=False, require_message_match=True)
-
-    def test_large_aggregate_pages_complete_before_one_enqueue(self):
-        # A real serialized-size fixture reproduces full-page overflow without
-        # changing the socket cap; each individual turn is well below it.
-        turns = [{"id": f"turn-{i}", "items": [{"type": "commandExecution",
-                  "aggregatedOutput": "x" * (1024 * 1024)}]} for i in range(5)]
-        reads, adds = [], []
-
-        def rpc(path, method, params, *, timeout):
-            if method == "thread/queue/add":
-                adds.append(params)
-                return {"queuedSubmission": ITEM}
-            self.assertEqual(method, "thread/turns/list")
-            self.assertEqual(params["threadId"], THREAD)
-            self.assertEqual((params["itemsView"], params["sortDirection"]), ("full", "desc"))
-            start = int(params.get("cursor", 0))
-            end = min(len(turns), start + params["limit"])
-            response = {"data": turns[start:end], "nextCursor": str(end) if end < len(turns) else None}
-            size = len(json.dumps(response).encode())
-            reads.append((start, params["limit"], size))
-            if size > 4 * 1024 * 1024:
-                raise QUEUE.QueueDeliveryError("queue-websocket-message-oversized")
-            return response
-
-        with mock.patch.object(QUEUE, "_rpc", side_effect=rpc), \
-             mock.patch.object(QUEUE, "list_queue", return_value=[]):
-            result = self.send()
-        self.assertEqual(result["status"], "queued")
-        self.assertEqual(len(adds), 1)
-        self.assertEqual([limit for start, limit, _ in reads[:4]], [16, 8, 4, 2])
-        self.assertEqual(sum(start == 2 for start, _, size in reads if size < 4 * 1024 * 1024), 2)
-        self.assertEqual(QUEUE.MAX_FRAME_BYTES, 4 * 1024 * 1024)
-
-    def item_rpc(self, tail, *, error=None):
-        # The matching user item occurs after tools and the first user; summary
-        # would miss it. A second matching item can occupy a later item page.
-        items = [{"type": "userMessage", "clientId": "other", "content": []},
-                 {"type": "commandExecution"},
-                 {"type": "userMessage", "clientId": CLIENT_ID,
-                  "content": [{"type": "text", "text": "peer"}]}] + tail
-        calls = []
-
-        def rpc(path, method, params, *, timeout):
-            calls.append((method, params))
-            self.assertEqual(params["threadId"], THREAD)
-            if method == "thread/turns/list":
-                self.assertEqual(params["sortDirection"], "desc")
-                if params["itemsView"] == "full":
-                    raise QUEUE.QueueDeliveryError("queue-websocket-message-oversized")
-                self.assertEqual((params["itemsView"], params["limit"]), ("notLoaded", 1))
-                return {"data": [{"id": "large-turn", "items": []}], "nextCursor": None}
-            self.assertEqual(method, "thread/items/list")
-            self.assertEqual((params["turnId"], params["sortDirection"]), ("large-turn", "asc"))
-            if error:
-                raise error
-            start = int(params.get("cursor", 0))
-            end = min(len(items), start + 2)
-            return {"data": [{"turnId": "large-turn", "item": item} for item in items[start:end]],
-                    "nextCursor": str(end) if end < len(items) else None}
-        return rpc, calls
-
-    def test_singleton_item_pagination_finds_middle_user_with_exact_body(self):
-        rpc, calls = self.item_rpc([{"type": "agentMessage"}])
-        with mock.patch.object(QUEUE, "_rpc", side_effect=rpc):
-            result = self.send()
+    def test_1601_turn_oldest_second_user_message_is_consumed_without_rpc(self):
+        turn_ids = [f"turn-{index}" for index in range(1601)]
+        entries = [self.entry("turn-0", "old-first", 1, "other-client"),
+                   self.entry("turn-0", "old-second", 2, CLIENT_ID)]
+        entries.extend(self.entry(f"turn-{index}", f"item-{index}", index + 2,
+                                  f"other-{index}") for index in range(1, 1601))
+        _home, endpoint, _state, _history, _rollout = native_fixture(
+            self.root, entries=entries, turn_ids=turn_ids, projected_ordinal=2000)
+        with mock.patch.object(QUEUE, "_rpc") as rpc:
+            result = self.send(endpoint)
         self.assertEqual(result["status"], "consumed")
-        self.assertEqual([params.get("cursor") for method, params in calls if method == "thread/items/list"], [None, "2"])
+        rpc.assert_not_called()
 
-    def test_matching_item_requires_rest_of_turn_duplicate_check(self):
-        duplicate = {"type": "userMessage", "clientId": CLIENT_ID,
-                     "content": [{"type": "text", "text": "changed"}]}
-        rpc, calls = self.item_rpc([{"type": "agentMessage"}, duplicate])
-        with mock.patch.object(QUEUE, "_rpc", side_effect=rpc):
-            with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "history-mismatch"):
-                self.send()
-        self.assertEqual([params.get("cursor") for method, params in calls if method == "thread/items/list"], [None, "2", "4"])
+    def test_owned_group_writable_rollout_is_exactly_observable(self):
+        entry = self.entry("turn-1", "item-1", 1, CLIENT_ID)
+        _home, endpoint, _state, _history, rollout = native_fixture(
+            self.root, entries=[entry], projected_ordinal=10, rollout_mode=0o664)
+        self.assertEqual(stat.S_IMODE(rollout.stat().st_mode), 0o664)
 
-    def test_unsupported_item_api_and_single_item_overflow_never_enqueue(self):
-        for reason in ("queue-rpc-refused:thread/items/list:-32601:unsupported",
-                       "queue-websocket-message-oversized"):
-            rpc, calls = self.item_rpc([], error=QUEUE.QueueDeliveryError(reason))
-            with self.subTest(reason=reason), mock.patch.object(QUEUE, "_rpc", side_effect=rpc):
-                with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "history-unavailable"):
-                    self.send()
-            self.assertNotIn("thread/queue/add", [method for method, _ in calls])
+        observation = QUEUE._observe_peer_message(
+            endpoint, THREAD, CLIENT_ID, timeout=1, expected_message="peer")
+        self.assertEqual(observation.status, "matched")
+        with mock.patch.object(QUEUE, "_rpc") as rpc:
+            result = self.send(endpoint)
+        self.assertEqual(result["status"], "consumed")
+        rpc.assert_not_called()
 
-    def test_foreign_items_and_repeated_cursors_are_unavailable(self):
-        for entries, cursor in (([{"turnId": "foreign", "item": {"type": "agentMessage"}}], None),
-                                ([{"turnId": "large-turn", "item": {"type": "agentMessage"}}], "same"),
-                                ([{"turnId": "large-turn", "item": None}], None)):
-            rpc, calls = self.item_rpc([])
-            def wrong(path, method, params, *, timeout):
-                if method == "thread/items/list":
-                    return {"data": entries, "nextCursor": cursor}
-                return rpc(path, method, params, timeout=timeout)
-            with self.subTest(entries=entries), mock.patch.object(QUEUE, "_rpc", side_effect=wrong):
-                with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "history-unavailable"):
-                    self.send()
+    def test_rollout_and_native_control_safety_checks_remain_strict(self):
+        cases = []
 
-    def test_turn_request_and_time_budgets_never_become_absence(self):
-        def rpc(path, method, params, *, timeout):
-            index = int(params.get("cursor", 0))
-            return {"data": [{"id": f"turn-{index}", "items": []}], "nextCursor": str(index + 1)}
-        for bounds in ({"MAX_QUEUE_PAGES": 1, "MAX_PAGE_SIZE": 2},
-                       {"MAX_PEER_HISTORY_REQUESTS": 2}):
-            with self.subTest(bounds=bounds), mock.patch.multiple(QUEUE, **bounds), \
-                 mock.patch.object(QUEUE, "_rpc", side_effect=rpc) as calls:
-                with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "history-budget-exhausted"):
-                    self.send()
-                self.assertTrue(all(call.args[1] == "thread/turns/list" for call in calls.call_args_list))
-        with mock.patch.object(QUEUE.time, "monotonic", side_effect=[0, 100]), mock.patch.object(QUEUE, "_rpc") as calls:
-            with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "history-budget-exhausted"):
-                self.send()
-            calls.assert_not_called()
+        home, endpoint, _state, _history, rollout = native_fixture(
+            self.root / "world-write-rollout")
+        rollout.chmod(0o666)
+        cases.append(("world-write-rollout", endpoint, "native-rollout-unbound"))
 
-    def test_item_budget_exhaustion_never_accepts_a_partial_match(self):
-        rpc, _ = self.item_rpc([{"type": "agentMessage"}])
-        with mock.patch.object(QUEUE, "MAX_PEER_HISTORY_ITEMS", 2), \
-             mock.patch.object(QUEUE, "_rpc", side_effect=rpc):
-            with self.assertRaisesRegex(QUEUE.QueueDeliveryError, "item-history-budget-exhausted"):
-                self.send()
+        home, endpoint, _state, _history, rollout = native_fixture(
+            self.root / "symlink-rollout")
+        outside = self.root / "symlink-target.jsonl"
+        outside.write_bytes(b"")
+        outside.chmod(0o600)
+        rollout.unlink()
+        rollout.symlink_to(outside)
+        cases.append(("symlink-rollout", endpoint, "native-rollout-unbound"))
+
+        _home, endpoint, state_path, _history, _rollout = native_fixture(
+            self.root / "outside-rollout")
+        outside = self.root / "outside-home.jsonl"
+        outside.write_bytes(b"")
+        outside.chmod(0o600)
+        connection = sqlite3.connect(state_path)
+        try:
+            connection.execute("UPDATE threads SET rollout_path=? WHERE id=?",
+                               (str(outside), THREAD))
+            connection.commit()
+        finally:
+            connection.close()
+        cases.append(("outside-rollout", endpoint, "native-rollout-unbound"))
+
+        _home, endpoint, state_path, _history, _rollout = native_fixture(
+            self.root / "group-write-database")
+        state_path.chmod(0o664)
+        cases.append(("group-write-database", endpoint, "native-history-unavailable"))
+
+        home, endpoint, _state, _history, _rollout = native_fixture(
+            self.root / "group-write-home")
+        home.chmod(0o770)
+        cases.append(("group-write-home", endpoint, "native-home-unsafe"))
+
+        home, endpoint, _state, _history, _rollout = native_fixture(
+            self.root / "group-write-control")
+        (home / "app-server-control").chmod(0o770)
+        cases.append(("group-write-control", endpoint, "native-home-unsafe"))
+
+        for name, endpoint, reason in cases:
+            with self.subTest(source=name):
+                observation = QUEUE._observe_peer_message(
+                    endpoint, THREAD, CLIENT_ID, timeout=1, expected_message="peer")
+                self.assertEqual(observation.status, "unknown")
+                self.assertEqual(observation.reason, reason)
+
+    def test_1601_turn_never_attempted_pending_with_large_tool_items_queues_once(self):
+        turn_ids = [f"turn-{index}" for index in range(1601)]
+        entries = []
+        ordinal = 0
+        for index, turn_id in enumerate(turn_ids):
+            ordinal += 1
+            entries.append(self.entry(turn_id, f"user-{index}", ordinal, f"other-{index}"))
+            if index % 100 == 0:
+                ordinal += 1
+                entries.append({"turn_id": turn_id, "item_id": f"tool-{index}",
+                                "ordinal": ordinal, "item_type": "commandExecution",
+                                "item": {"type": "commandExecution",
+                                         "aggregatedOutput": "x" * (256 * 1024)}})
+        tool_bytes = sum(len(json.dumps(entry["item"]).encode()) for entry in entries
+                         if entry["item_type"] == "commandExecution")
+        self.assertGreater(tool_bytes, 4 * 1024 * 1024)
+        _home, endpoint, _state, history_path, _rollout = native_fixture(
+            self.root, entries=entries, turn_ids=turn_ids,
+            projected_ordinal=ordinal + 1)
+        queue_item = dict(ITEM, clientUserMessageId=CLIENT_ID,
+                          input=[{"type": "text", "text": "peer"}])
+        with mock.patch.object(QUEUE, "list_queue", side_effect=[[], [queue_item]]) as listing, \
+             mock.patch.object(QUEUE, "_rpc", return_value={"queuedSubmission": ITEM}) as rpc:
+            first = self.send(endpoint)
+            replay = self.send(endpoint)
+        self.assertEqual(first["status"], "queued")
+        self.assertFalse(first["already_pending"])
+        self.assertEqual(replay["status"], "queued")
+        self.assertTrue(replay["already_pending"])
+        self.assertEqual(listing.call_count, 2)
+        self.assertEqual([call.args[1] for call in rpc.call_args_list], ["thread/queue/add"])
+        connection = sqlite3.connect(history_path)
+        try:
+            plan = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT ti.item_json FROM thread_items AS ti "
+                "WHERE ti.thread_id=? AND ti.item_type='userMessage' "
+                "AND json_extract(ti.item_json, '$.clientId')=? ORDER BY ti.rollout_ordinal LIMIT 2",
+                (THREAD, CLIENT_ID),
+            ).fetchall()
+        finally:
+            connection.close()
+        self.assertTrue(any("idx_thread_items_user_messages" in row[3] for row in plan), plan)
+
+    def test_exact_body_type_and_same_or_cross_turn_duplicates_are_conflicts(self):
+        cases = (
+            ([self.entry("turn-1", "item-1", 1, CLIENT_ID, message="different")],
+             "candidate-content-conflict"),
+            ([self.entry("turn-1", "item-1", 1, CLIENT_ID, json_type="agentMessage")],
+             "candidate-binding-conflict"),
+            ([self.entry("turn-1", "item-1", 1, CLIENT_ID),
+              self.entry("turn-1", "item-2", 2, CLIENT_ID)], "duplicate-client-id"),
+            ([self.entry("turn-1", "item-1", 1, CLIENT_ID),
+              self.entry("turn-2", "item-2", 2, CLIENT_ID)], "duplicate-client-id"),
+        )
+        for index, (entries, reason) in enumerate(cases):
+            with self.subTest(reason=reason, index=index):
+                _home, endpoint, *_ = native_fixture(
+                    self.root / str(index), entries=entries,
+                    turn_ids=[entry["turn_id"] for entry in entries], projected_ordinal=10)
+                observation = QUEUE._observe_peer_message(
+                    endpoint, THREAD, CLIENT_ID, timeout=1, expected_message="peer")
+                self.assertEqual(observation.status, "conflict")
+                self.assertEqual(observation.reason, reason)
+                with mock.patch.object(QUEUE, "_rpc") as rpc:
+                    with self.assertRaisesRegex(QUEUE.QueueDeliveryError,
+                                                "queue-peer-history-conflict"):
+                        self.send(endpoint)
+                    rpc.assert_not_called()
+
+    def test_sqlite_json5_candidate_that_python_cannot_decode_is_unknown(self):
+        json5 = ("{type: 'userMessage', clientId: '" + CLIENT_ID
+                 + "', content: [{type: 'text', text: 'peer', text_elements: []}]}")
+        entry = self.entry("turn-1", "item-1", 1, CLIENT_ID)
+        entry["item_json"] = json5
+        _home, endpoint, _state, history_path, _rollout = native_fixture(
+            self.root, entries=[entry], projected_ordinal=10)
+        connection = sqlite3.connect(history_path)
+        try:
+            self.assertEqual(connection.execute(
+                "SELECT json_extract(?, '$.clientId')", (json5,)
+            ).fetchone()[0], CLIENT_ID)
+        finally:
+            connection.close()
+        with self.assertRaises(json.JSONDecodeError):
+            json.loads(json5)
+
+        observation = QUEUE._observe_peer_message(
+            endpoint, THREAD, CLIENT_ID, timeout=1, expected_message="peer")
+        self.assertEqual(observation.status, "unknown")
+        self.assertEqual(observation.reason, "candidate-json-invalid")
+
+    def test_foreign_thread_id_is_not_target_consumption(self):
+        entry = self.entry("foreign-turn", "foreign-item", 1, CLIENT_ID,
+                           thread_id="foreign-thread")
+        _home, endpoint, *_ = native_fixture(self.root, entries=[entry], projected_ordinal=10)
+        observation = QUEUE._observe_peer_message(
+            endpoint, THREAD, CLIENT_ID, timeout=1, expected_message="peer")
+        self.assertEqual(observation.status, "not_observed")
+        with mock.patch.object(QUEUE, "list_queue", return_value=[]), \
+             mock.patch.object(QUEUE, "_rpc", return_value={"queuedSubmission": ITEM}) as rpc:
+            result = self.send(endpoint)
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual([call.args[1] for call in rpc.call_args_list], ["thread/queue/add"])
+
+    def test_consumption_between_queue_miss_and_second_observation_wins(self):
+        _home, endpoint, _state, history_path, rollout = native_fixture(
+            self.root, turn_ids=["turn-1"], projected_ordinal=10)
+
+        def consume_after_queue_miss(*_args, **_kwargs):
+            rollout.write_bytes(b"consumed")
+            connection = sqlite3.connect(history_path)
+            try:
+                item = self.entry("turn-1", "consumed-item", 2, CLIENT_ID)["item"]
+                connection.execute(
+                    "INSERT INTO thread_items VALUES (?, ?, ?, ?, ?, ?)",
+                    (THREAD, "turn-1", "consumed-item", json.dumps(item), "userMessage", 2),
+                )
+                connection.execute(
+                    "UPDATE thread_history_projection_state SET next_rollout_byte_offset=8 "
+                    "WHERE thread_id=?", (THREAD,),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            return []
+
+        with mock.patch.object(QUEUE, "list_queue", side_effect=consume_after_queue_miss), \
+             mock.patch.object(QUEUE, "_rpc") as rpc:
+            result = self.send(endpoint)
+        self.assertEqual(result["status"], "consumed")
+        rpc.assert_not_called()
+
+    def test_missing_unbound_corrupt_incomplete_and_timed_out_sources_are_unknown(self):
+        _home, endpoint, _state, _history, _rollout = native_fixture(
+            self.root / "incomplete", rollout_bytes=b"x", projected_offset=0)
+        cases = (
+            QUEUE._observe_peer_message(Path("/tmp/managed/app-server.sock"), THREAD,
+                                        CLIENT_ID, timeout=1),
+            QUEUE._observe_peer_message(endpoint, THREAD, CLIENT_ID, timeout=0),
+            QUEUE._observe_peer_message(endpoint, THREAD, CLIENT_ID, timeout=1),
+            QUEUE._observe_peer_message(self.root / "missing" / "app-server-control" /
+                                        "app-server-control.sock", THREAD, CLIENT_ID, timeout=1),
+        )
+        self.assertTrue(all(result.status == "unknown" for result in cases), cases)
+
+        bad_entry = dict(self.entry("bad-turn", "bad-item", 1, CLIENT_ID),
+                         item_json="{broken-json")
+        _home, corrupt_endpoint, *_ = native_fixture(
+            self.root / "corrupt", entries=[bad_entry], projected_ordinal=10)
+        corrupt = QUEUE._observe_peer_message(
+            corrupt_endpoint, THREAD, CLIENT_ID, timeout=1, expected_message="peer")
+        self.assertEqual(corrupt.status, "unknown")
+
+        _home, schema_endpoint, _state, schema_path, _rollout = native_fixture(
+            self.root / "schema", projected_ordinal=10)
+        connection = sqlite3.connect(schema_path)
+        try:
+            connection.execute("DROP TABLE thread_turns")
+            connection.commit()
+        finally:
+            connection.close()
+        schema_mismatch = QUEUE._observe_peer_message(
+            schema_endpoint, THREAD, CLIENT_ID, timeout=1, expected_message="peer")
+        self.assertEqual(schema_mismatch.status, "unknown")
+
+    def test_native_database_lock_is_unknown_and_bounded(self):
+        _home, endpoint, state_path, *_ = native_fixture(self.root)
+        writer = sqlite3.connect(state_path, timeout=1)
+        try:
+            writer.execute("BEGIN EXCLUSIVE")
+            writer.execute("UPDATE threads SET history_mode=history_mode WHERE id=?", (THREAD,))
+            started = QUEUE.time.monotonic()
+            observation = QUEUE._observe_peer_message(endpoint, THREAD, CLIENT_ID, timeout=0.2)
+            self.assertLess(QUEUE.time.monotonic() - started, 0.5)
+            self.assertEqual(observation.status, "unknown")
+        finally:
+            writer.rollback()
+            writer.close()
 
 
 if __name__ == "__main__":

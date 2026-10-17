@@ -410,8 +410,11 @@ def live_stage(jcwd, slug, fb):
     except Exception: pass
     try:   # 워크트리 소스 dirty = execute 중 (디자인팀 직접편집 등 dev_logs 미경유 흐름)
         import subprocess
+        # GIT_OPTIONAL_LOCKS=0: the 2 s timeout SIGKILLs a slow status, and one killed
+        # mid index refresh leaves a holderless index.lock that blocks every later commit there.
         if subprocess.run(["git", "-C", jcwd, "status", "--porcelain", "--untracked-files=no"],
-                          capture_output=True, text=True, timeout=2).stdout.strip():
+                          capture_output=True, text=True, timeout=2,
+                          env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}).stdout.strip():
             return "exec"
     except Exception: pass
     if os.path.exists(pd + "/plan/plan.md"): return "plan"

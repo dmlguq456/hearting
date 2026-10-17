@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import os
 from pathlib import Path
 import shlex
@@ -488,6 +489,42 @@ console.log(JSON.stringify({{ output: output.output, metadata: output.metadata,
                 self.assertEqual(result["originalMetadata"], metadata)
                 self.assertEqual(result["output"], output)
                 self.assertEqual(result["originalOutput"], output)
+
+
+
+class ReadOnlyStatusCallersTest(unittest.TestCase):
+    """A timed read-only `git status` must not take the optional index lock.
+
+    Killed by its timeout while refreshing the index, such a status leaves a
+    holderless 0-byte index.lock that refuses every later add/commit in that
+    worktree (2026-10-17: the Claude statusline's 2 s status on a dispatch
+    worktree, and route-presence-gate's 20 s one)."""
+
+    STATUS = re.compile(r'"status",\s*"--porcelain')
+    MARKERS = ("GIT_OPTIONAL_LOCKS", "git_optional_locks_env", "_readonly_git_env", "--no-optional-locks")
+
+    def sources(self):
+        yield ROOT / "adapters" / "claude" / "statusline.sh"
+        for directory in (ROOT / "utilities", ROOT / "hooks"):
+            for path in sorted(directory.glob("*.py")):
+                if not path.name.endswith(".test.py"):
+                    yield path
+
+    def test_every_read_only_status_caller_skips_the_optional_index_lock(self):
+        checked, missing = 0, []
+        for path in self.sources():
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            wrapper_env = any(marker in "\n".join(lines) for marker in self.MARKERS)
+            for number, line in enumerate(lines):
+                if not self.STATUS.search(line):
+                    continue
+                checked += 1
+                window = "\n".join(lines[number:number + 8])
+                via_wrapper = "_git(" in line and wrapper_env
+                if not via_wrapper and not any(marker in window for marker in self.MARKERS):
+                    missing.append(f"{path.relative_to(ROOT)}:{number + 1}")
+        self.assertGreaterEqual(checked, 6)
+        self.assertEqual(missing, [])
 
 
 if __name__ == "__main__":

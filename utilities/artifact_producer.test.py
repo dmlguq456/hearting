@@ -110,6 +110,9 @@ def compile_for(intensity, root, capability="autopilot-code", mode="dev", *,
 
 class ProducerTestBase(unittest.TestCase):
     def setUp(self):
+        gates = mock.patch.dict(os.environ, {"HEARTING_GATES": "on"})
+        gates.start()
+        self.addCleanup(gates.stop)
         self._tmp = tempfile.TemporaryDirectory()
         self.root = Path(self._tmp.name) / "artifact-root"
         self.root.mkdir(parents=True, exist_ok=True)

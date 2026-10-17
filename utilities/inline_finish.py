@@ -39,6 +39,7 @@ def _unscoped_tracked_dirt(cwd: str, scope: Sequence[str]) -> list[str]:
     status = subprocess.run(
         ["git", "-C", cwd, "status", "--porcelain=v1", "-z", "--untracked-files=no"],
         capture_output=True,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
     )
     if status.returncode:
         raise InlineFinishError("finish-git-status-unavailable")

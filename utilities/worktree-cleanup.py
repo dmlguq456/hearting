@@ -26,6 +26,7 @@ from dispatch_contract import (
     resolve_agent_home as _resolve_agent_home,
     resolve_dispatch_state_root,
     validate_attempt_metadata,
+    git_optional_locks_env,
 )
 
 OPEN_STATES = {"open", "running"}
@@ -83,6 +84,7 @@ def run(
     *,
     cwd: Path | None = None,
     check: bool = True,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         argv,
@@ -91,6 +93,7 @@ def run(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        env=env,
     )
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout or "command failed").strip()
@@ -294,7 +297,8 @@ def evaluate(
         return verdict
 
     dirty = run(
-        ["git", "-C", str(target), "status", "--porcelain=v1", "--untracked-files=all"]
+        ["git", "-C", str(target), "status", "--porcelain=v1", "--untracked-files=all"],
+        env={**os.environ, **git_optional_locks_env()},
     ).stdout
     if dirty.strip():
         verdict.reasons.append("dirty")

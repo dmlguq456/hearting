@@ -99,7 +99,10 @@ class OwnerGrantStartTest(unittest.TestCase):
         self.worker.write_text(
             "import os,pathlib,sys,time\n"
             "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
-            "while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)\n"
+            # A backstop at the suite timeout: a worker orphaned by a timed-out
+            # run must not poll forever, but it must outlive any one test.
+            "deadline=time.monotonic()+600\n"
+            "while not pathlib.Path(sys.argv[2]).exists() and time.monotonic()<deadline: time.sleep(.05)\n"
         )
         self.processes = []
         self.addCleanup(self.stop_workers)

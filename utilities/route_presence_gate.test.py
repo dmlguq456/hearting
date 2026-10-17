@@ -83,16 +83,23 @@ class Fixture(unittest.TestCase):
 
 
 class EditTriggerTest(Fixture):
+    def test_read_only_status_disables_optional_index_refresh(self):
+        result = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(G.subprocess, "run", return_value=result) as run:
+            self.assertFalse(G._has_source_change(self.repo, str(self.root), self.env))
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+
     def test_first_source_edit_is_refused_with_the_compose_line(self):
         reason = self.judge(self.edit(self.repo / "src" / "engine.py"))
         self.assertIn(f"no route for {self.root}", reason)
         line = reason.splitlines()[1]
         self.assertTrue(line.startswith("python3 "), line)
-        self.assertIn("capability-route.py compose --shape direct", line)
+        self.assertIn("capability-route.py compose --start --shape direct --prompt-file '<task>'", line)
         self.assertIn("--campaign-key new-stream", line)
         self.assertIn("--slug engine --cwd", line)  # the cycle folder carries the date
         self.assertIn(f"--cwd {self.repo}", line)
         self.assertIn("For one atomic, reversible inline change", reason)
+        self.assertIn("make the edit in the worktree it prints", reason)
         self.assertIn("For other new work, omit --shape", reason)
         self.assertIn("the frame decides the route", reason)
         self.assertIn("person-specified route", reason)
@@ -180,6 +187,11 @@ class EditTriggerTest(Fixture):
 class ShellTriggerTest(Fixture):
     def test_commit_with_source_change_is_refused(self):
         (self.repo / "src" / "engine.py").write_text("x = 2\n")
+        reason = self.judge(self.bash("git commit -am fix"))
+        guidance = reason.splitlines()[1]
+        self.assertIn("compose --shape direct", guidance)
+        self.assertNotIn("--start", guidance)
+        self.assertIn("records the route for changes already made in place", reason)
         for command in ("git commit -am fix", "git -C src commit -m 'a; b'",
                         f"cd {self.repo} && git add -A && git commit -m x",
                         "GIT_EDITOR=true git --no-pager commit", "echo hi\ngit commit -m x"):
@@ -284,7 +296,7 @@ class ModeTest(Fixture):
     def test_claude_mode_exit_2_with_reason_on_stderr(self):
         result = self.run_mode("--claude", self.edit(self.repo / "src" / "engine.py"))
         self.assertEqual(result.returncode, 2)
-        self.assertIn("capability-route.py compose --shape direct", result.stderr)
+        self.assertIn("capability-route.py compose --start --shape direct", result.stderr)
         self.assertEqual(result.stdout, "")
         self.ledger_line(self.root)
         self.assertEqual(self.run_mode("--claude", self.edit(self.repo / "src" / "engine.py")).returncode, 0)

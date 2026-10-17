@@ -3110,13 +3110,14 @@ def _tag_access_observation(entry: Path, start: str = "") -> tuple[str, str]:
     try:
         raw = (entry / "stat").read_text(encoding="utf-8")
         tail = raw[raw.rfind(")") + 2:].split()
-        if tail[0] == "Z":
-            # exit_mm can revoke environ between the walk's stat read and
-            # this adjacent observation. A zombie cannot run or fork.
+        flags = int(tail[6], 10)
+        if tail[0] == "Z" or flags & 0x4:  # PF_EXITING
+            # exit_mm can revoke environ before the process becomes a zombie.
+            # A PF_EXITING task cannot run or fork either.
             return "", ""
         current = tail[19]
         stable = start if start.isdigit() and current == start else ""
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return "", ""
     except (OSError, IndexError, ValueError):
         stable, tail = "", None

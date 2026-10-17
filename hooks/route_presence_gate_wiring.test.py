@@ -158,7 +158,7 @@ class ClaudeWiringTest(WiringFixture):
         first = subprocess.run(["python3", str(hook)], input=payload, capture_output=True,
                                text=True, env=self.env)
         self.assertEqual(first.returncode, 2)
-        self.assertIn("capability-route.py compose --shape direct", first.stderr)
+        self.assertIn("capability-route.py compose --start --shape direct", first.stderr)
         self.ledger_line("claude", SID)
         second = subprocess.run(["python3", str(hook)], input=payload, capture_output=True,
                                 text=True, env=self.env)

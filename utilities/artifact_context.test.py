@@ -216,6 +216,25 @@ class ArtifactContextTest(unittest.TestCase):
         state, commit = C.source_git_state(self.base)
         self.assertEqual((state, commit), ("unknown-no-git", None))
 
+    def test_source_status_disables_optional_git_index_locks(self):
+        repo = self.base / "git-status-env"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        # source_git_state reads status only once HEAD resolves.
+        subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t",
+                        "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+        original_run = subprocess.run
+        observed = []
+
+        def capture_status(argv, **kwargs):
+            if argv[:3] == ["git", "-C", str(repo)] and "status" in argv:
+                observed.append(kwargs.get("env", {}).get("GIT_OPTIONAL_LOCKS"))
+            return original_run(argv, **kwargs)
+
+        with mock.patch.object(C.subprocess, "run", side_effect=capture_status):
+            C.source_git_state(repo)
+        self.assertEqual(observed, ["0"])
+
 
 class BoundTerminalArtifactTest(PRODUCER_FIXTURE.ProducerTestBase):
     """Exercise issued cycle outputs through the shared terminal and reconcile path."""

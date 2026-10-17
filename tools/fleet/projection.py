@@ -682,6 +682,32 @@ def _artifact_reader():
     return _ARTIFACT_READER or None
 
 
+_REPORT_VERIFICATION = None
+
+
+def _report_verification():
+    """`utilities/report_verification_projection.py`, loaded like `_artifact_reader`.
+
+    The Fleet entry puts only `tools/` on `sys.path` and `utilities/` is not a
+    package, so `from utilities.report_verification_projection import ...`
+    never resolved in a real Fleet and the detail stayed empty. Raises when the
+    module is unavailable; the caller keeps its detail-only fallback."""
+    global _REPORT_VERIFICATION
+    if _REPORT_VERIFICATION is None:
+        for candidate in Path(__file__).resolve().parents:
+            utilities_dir = candidate / "utilities"
+            if not (utilities_dir / "report_verification_projection.py").is_file():
+                continue
+            if str(utilities_dir) not in sys.path:
+                sys.path.insert(0, str(utilities_dir))
+            import report_verification_projection
+            _REPORT_VERIFICATION = report_verification_projection
+            break
+        else:
+            raise ImportError("report_verification_projection")
+    return _REPORT_VERIFICATION
+
+
 def _artifact_candidates(entity, artifact_root=None):
     # A matching basename is never a session/work binding. Registered jobs
     # retain their scoped compatibility lookup; anonymous processes do not.
@@ -1762,9 +1788,8 @@ def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
                     cache_key = (str(root), work.route_id, work.route_hash, str(jobs_path or ""))
                     if cache_key not in report_verification_cache:
                         try:
-                            from utilities.report_verification_projection import (
-                                project_route, report_detail_payload)
-                            report_verification_cache[cache_key] = report_detail_payload(project_route(
+                            rvp = _report_verification()
+                            report_verification_cache[cache_key] = rvp.report_detail_payload(rvp.project_route(
                                 root, work.route_id, work.route_hash, jobs=jobs_path))
                         except Exception:
                             report_verification_cache[cache_key] = None

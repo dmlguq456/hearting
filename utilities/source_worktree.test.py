@@ -196,8 +196,55 @@ class SourceWorktreeFixture(unittest.TestCase):
         self.assertEqual(self.start_calls[0][0]["artifact_root"], str(self.artifact_root.resolve()))
 
 class ComposeStartPreparationRetryTest(SourceWorktreeFixture):
+    def test_read_only_changed_file_status_disables_optional_index_refresh(self):
+        result = subprocess.CompletedProcess([], 0, stdout="", stderr="")
+        with mock.patch.object(R.subprocess, "run", return_value=result) as run:
+            self.assertEqual(R._git_changed_files(self.primary), set())
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+
     def test_compose_start_fetch_failure_retries_same_request_once(self):
         self.assert_failure_then_retry("fetch")
+
+    def test_repository_without_remotes_uses_primary_head_and_reuses_reservation(self):
+        git(self.primary, "remote", "remove", "origin")
+        before = self.primary_fingerprint()
+        real_git = R._worktree_git
+        calls = []
+
+        def record_git(cwd, *args):
+            calls.append(args)
+            return real_git(cwd, *args)
+
+        with mock.patch.object(R, "_worktree_git", side_effect=record_git):
+            self.assertEqual(self.main(self.argv()), 0)
+        route, _ = self.start_calls[0]
+        self.assertEqual(git(route["cwd"], "rev-parse", "HEAD"), git(self.primary, "rev-parse", "HEAD"))
+        self.assertNotIn(("ls-remote", "--symref", "origin", "HEAD"), calls)
+        self.assertFalse(any(args[:1] == ("fetch",) for args in calls))
+        self.assertEqual(self.primary_fingerprint(), before)
+        allocated = route["cwd"]
+
+        calls.clear()
+        with mock.patch.object(R, "_worktree_git", side_effect=record_git):
+            self.assertEqual(self.main(self.argv()), 0)
+        self.assertEqual(len(self.route_files()), 1)
+        self.assertEqual(self.start_calls[-1][0]["cwd"], allocated)
+        self.assertNotIn(("ls-remote", "--symref", "origin", "HEAD"), calls)
+        self.assertFalse(any(args[:1] == ("fetch",) for args in calls))
+
+    def test_repository_without_remotes_or_commit_fails_before_publication(self):
+        empty = Path(self.tmp.name) / "empty-repo"
+        empty.mkdir()
+        git(empty, "init", "-q", "-b", "main")
+        base, reason, _ = R._remote_default_base(empty)
+        self.assertIsNone(base)
+        self.assertEqual(reason, "local-default-unresolved")
+        argv = self.argv()
+        argv[argv.index("--cwd") + 1] = str(empty)
+        self.evidence.write_text(json.dumps({"tuples": [{"checked_worktree": str(empty)}]}), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "source-worktree-preparation-failed"):
+            self.main(argv)
+        self.assertEqual((self.route_files(), self.start_calls, self.owner_attempt_rows()), ([], [], []))
 
     def test_compose_start_worktree_add_failure_retries_same_request_once(self):
         self.assert_failure_then_retry("add")

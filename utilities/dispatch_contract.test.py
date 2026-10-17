@@ -260,6 +260,26 @@ class FrameLaunchGateTest(unittest.TestCase):
 
 
 class DispatchContractTest(unittest.TestCase):
+ def test_access_observation_exempts_exiting_and_vanished_processes_only(self):
+  entry=Path("/proc/4242")
+  stat_tail=lambda state,flags: "4242 (fixture) %s 1 2 3 4 5 %d 7 8 9 10 11 12 13 14 15 16 17 18 99" % (state,flags)
+  with mock.patch.object(Path,"stat",return_value=types.SimpleNamespace(st_uid=os.getuid())), \
+       mock.patch.object(Path,"read_text",side_effect=lambda *a,**k: stat_tail("S",4)), \
+       mock.patch.object(D,"_forked_across_uid_boundary",return_value=False):
+   self.assertEqual(D._tag_access_observation(entry,"99"),("", ""))
+
+  for error in (FileNotFoundError(), ProcessLookupError()):
+   with self.subTest(error=type(error).__name__), \
+        mock.patch.object(Path,"stat",return_value=types.SimpleNamespace(st_uid=os.getuid())), \
+        mock.patch.object(Path,"read_text",side_effect=error):
+    self.assertEqual(D._tag_access_observation(entry,"99"),("", ""))
+
+  with mock.patch.object(Path,"stat",return_value=types.SimpleNamespace(st_uid=os.getuid())), \
+       mock.patch.object(Path,"read_text",return_value=stat_tail("S",0)), \
+       mock.patch.object(D,"_forked_across_uid_boundary",return_value=False):
+   self.assertEqual(D._tag_access_observation(entry,"99"),
+                    ("99", "procfs-environ:4242:same-uid-unobservable"))
+
  def test_cancel_closes_witness_only_on_cancelled_receipt(self):
   with tempfile.TemporaryDirectory() as td:
    root=Path(td)

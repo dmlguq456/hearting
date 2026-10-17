@@ -52,6 +52,12 @@ class GpuOwnerResourceStartTest(unittest.TestCase):
         self.c = self.f.wrappers["codex"]
         self.r = self.f.route_api
         self.launches = []
+        fakebin = self.f.root / "fake-bin"
+        fakebin.mkdir()
+        smi = fakebin / "nvidia-smi"
+        smi.write_text("#!/bin/sh\nprintf '0, GPU-TEST, NVIDIA Test GPU, 0, 40960, 0\\n'\n")
+        smi.chmod(0o755)
+        self.f.env["PATH"] = str(fakebin) + os.pathsep + self.f.env.get("PATH", "")
         inventory = self.f.root / "compute-hosts.yaml"
         inventory.write_text(f"schema_version: 1\nrun_root: {self.f.data}\nhosts:\n  fixture:\n    ssh_host: local\n")
         self.f.env["COMPUTE_HOSTS_CONFIG"] = str(inventory)

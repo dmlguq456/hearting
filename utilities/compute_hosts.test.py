@@ -24,6 +24,45 @@ ROOT = Path(__file__).resolve().parent
 TOOL = ROOT / "compute-hosts.py"
 
 
+class ReparentedFixtureProcess:
+    def __init__(self, pid):
+        self.pid = pid
+
+    def terminate(self):
+        try:
+            os.kill(self.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+    def wait(self, timeout=None):
+        timeout = timeout or 5
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with open(f"/proc/{self.pid}/stat", encoding="utf-8") as proc:
+                    if proc.read().rsplit(")", 1)[1].split()[0] == "Z":
+                        return
+            except OSError:
+                return
+            time.sleep(.01)
+        raise subprocess.TimeoutExpired("fixture", timeout)
+
+
+def start_reparented_fixture(env, *, stdout=None):
+    """Launch via a short lived clean-env parent; the runner is not an ancestor."""
+    launcher = (
+        "import json,subprocess,sys; "
+        "out=open(sys.argv[2],'ab') if sys.argv[2] else subprocess.DEVNULL; "
+        "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(10)'], "
+        "env=json.loads(sys.argv[1]),stdout=out,stderr=out,start_new_session=True); "
+        "print(child.pid)"
+    )
+    result = subprocess.run([sys.executable, "-c", launcher, json.dumps(env),
+                             str(stdout) if stdout else ""],
+                            text=True, capture_output=True, check=True)
+    return ReparentedFixtureProcess(int(result.stdout.strip()))
+
+
 def load_module():
     spec = importlib.util.spec_from_file_location("compute_hosts", TOOL)
     module = importlib.util.module_from_spec(spec)
@@ -844,28 +883,18 @@ class ComputeHostsTest(unittest.TestCase):
         try:
             log = self.root / "train.log"
             log.write_text("Epoch 3/200\nTRAIN: 50% loss=0.5\n")
-            with log.open("ab") as output:
-                run_proc = subprocess.Popen(
-                    [sys.executable, "-c", "import time; time.sleep(10)"],
-                    env={**clean, "HEARTING_COMPUTE_RUN_ID": "cnn-run-7",
-                         "HEARTING_COMPUTE_HOST": "cnn"},
-                    stdout=output, stderr=output,
-                )
-            ambiguous_proc = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(10)"],
-                env={**clean, "CODEX_THREAD_ID": "same-session-token",
-                     "CLAUDE_CODE_SESSION_ID": "same-session-token"},
-            )
-            job_proc = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(10)"],
-                env={**clean, "AGENT_DISPATCH_ATTEMPT_ID": "att-42",
-                     "AGENT_DISPATCH_SELF_SLUG": "train-test",
-                     "HEARTING_COMPUTE_RUN_ID": "shadowed-run"},
-            )
-            session_proc = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(10)"],
-                env={**clean, "CODEX_THREAD_ID": "codex-exact-session"},
-            )
+            run_proc = start_reparented_fixture(
+                {**clean, "HEARTING_COMPUTE_RUN_ID": "cnn-run-7",
+                 "HEARTING_COMPUTE_HOST": "cnn"}, stdout=log)
+            ambiguous_proc = start_reparented_fixture(
+                {**clean, "CODEX_THREAD_ID": "same-session-token",
+                 "CLAUDE_CODE_SESSION_ID": "same-session-token"})
+            job_proc = start_reparented_fixture(
+                {**clean, "AGENT_DISPATCH_ATTEMPT_ID": "att-42",
+                 "AGENT_DISPATCH_SELF_SLUG": "train-test",
+                 "HEARTING_COMPUTE_RUN_ID": "shadowed-run"})
+            session_proc = start_reparented_fixture(
+                {**clean, "CODEX_THREAD_ID": "codex-exact-session"})
             processes = [run_proc, ambiguous_proc, job_proc, session_proc]
             env = {
                 **clean,

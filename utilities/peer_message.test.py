@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import shlex
+import sqlite3
 import stat
 import sys
 import tempfile
@@ -678,6 +679,60 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
 
     def pending(self, body="original peer body", **kwargs):
         return self.prepare_reference(body, defer=True, **kwargs)
+
+    def install_native_observation(self, ref, text, *, item_json=None):
+        home = Path(os.environ["CODEX_HOME"])
+        control = home / "app-server-control"
+        sessions = home / "sessions"
+        control.mkdir(parents=True)
+        sessions.mkdir()
+        home.chmod(0o700)
+        control.chmod(0o700)
+        sessions.chmod(0o700)
+        rollout = sessions / "fixture.jsonl"
+        rollout.write_bytes(b"")
+        rollout.chmod(0o600)
+
+        state_path = home / "state_5.sqlite"
+        state = sqlite3.connect(state_path)
+        state.execute("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, history_mode TEXT)")
+        state.execute("INSERT INTO threads VALUES (?, ?, 'paginated')",
+                      (self.recipient["session_id"], str(rollout)))
+        state.commit()
+        state.close()
+        state_path.chmod(0o600)
+
+        item = {"type": "userMessage", "clientId": "delivery-peer-" + ref,
+                "content": [{"type": "text", "text": text, "text_elements": []}]}
+        serialized_item = item_json if item_json is not None else json.dumps(item)
+        history_path = home / "thread_history_1.sqlite"
+        history = sqlite3.connect(history_path)
+        history.executescript("""
+            CREATE TABLE thread_turns (
+                thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, status TEXT,
+                PRIMARY KEY(thread_id, turn_id)
+            );
+            CREATE TABLE thread_items (
+                thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, item_id TEXT NOT NULL,
+                item_json TEXT NOT NULL, item_type TEXT NOT NULL, rollout_ordinal INTEGER,
+                PRIMARY KEY(thread_id, turn_id, item_id)
+            );
+            CREATE INDEX idx_thread_items_user_messages
+                ON thread_items(thread_id, rollout_ordinal) WHERE item_type='userMessage';
+            CREATE TABLE thread_history_projection_state (
+                thread_id TEXT PRIMARY KEY, next_rollout_byte_offset INTEGER,
+                next_rollout_ordinal INTEGER
+            );
+        """)
+        thread_id = self.recipient["session_id"]
+        history.execute("INSERT INTO thread_turns VALUES (?, 'turn-1', 'completed')", (thread_id,))
+        history.execute("INSERT INTO thread_items VALUES (?, 'turn-1', 'item-1', ?, 'userMessage', 1)",
+                        (thread_id, serialized_item))
+        history.execute("INSERT INTO thread_history_projection_state VALUES (?, 0, 2)",
+                        (thread_id,))
+        history.commit()
+        history.close()
+        history_path.chmod(0o600)
 
     def test_recipient_scan_only_checks_settlement_for_exact_receiver_or_sender(self):
         _text, wanted = self.pending()
@@ -1369,6 +1424,191 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
             self.assertEqual(send.call_count, 1)
             self.assertEqual(repair_ack.call_count, 2)
         self.assertEqual(self._ledger_file("sender").read_bytes(), original)
+
+    def test_actual_native_observer_to_pending_delivery_ack_and_replay(self):
+        import codex_queue_delivery as queue
+        text, ref = self.pending()
+        self.install_native_observation(ref, text)
+        with mock.patch.object(queue, "_rpc") as rpc:
+            result = peer_message.deliver_pending_codex(ref)
+            replay = peer_message.deliver_pending_codex(ref)
+        self.assertEqual(result, {"status": "received", "reason": "exact-native-history"})
+        self.assertEqual(replay["status"], "received")
+        self.assertEqual(rpc.call_count, 0)
+        row = peer_message._read_pending(ref)
+        self.assertEqual(row["state"], "received")
+        self.assertIsNone(row["text"])
+        records = [json.loads(line) for line in self._ledger_file("sender").read_text().splitlines()]
+        self.assertEqual(sum(ref in record.get("refs", []) for record in records), 1)
+
+    def test_unknown_new_pending_queues_once_then_only_observes(self):
+        import codex_queue_delivery as queue
+        text, ref = self.pending()
+        calls = []
+
+        def rpc(_path, method, _params, *, timeout):
+            calls.append(method)
+            if method == "thread/queue/list":
+                return {"data": [], "nextCursor": None}
+            if method == "thread/queue/add":
+                return {"queuedSubmission": {"id": "native-item"}}
+            self.fail(f"unexpected native RPC: {method}")
+
+        with mock.patch.object(queue, "_rpc", side_effect=rpc):
+            first = peer_message.deliver_pending_codex(ref)
+            second = peer_message.deliver_pending_codex(ref)
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(second["status"], "unverified")
+        self.assertEqual(calls, ["thread/queue/list", "thread/queue/add", "thread/queue/list"])
+        row = peer_message._read_pending(ref)
+        self.assertEqual(row["state"], "unverified")
+        self.assertEqual(row["receipt"], "native-queue-accepted")
+        self.assertEqual(row["text"], text)
+        self.assertFalse(self._ledger_file("sender").exists())
+
+    def test_json5_observation_unknown_uses_exact_claimed_add_once_without_ack(self):
+        import codex_queue_delivery as queue
+        text, ref = self.pending("json5 parser disagreement")
+        client_id = "delivery-peer-" + ref
+        item_json = ("{type: 'userMessage', clientId: '" + client_id
+                     + "', content: [{type: 'text', text: 'json5 parser disagreement', "
+                     + "text_elements: []}]}")
+        self.install_native_observation(ref, text, item_json=item_json)
+        calls = []
+
+        def rpc(_path, method, params, *, timeout):
+            calls.append((method, params))
+            if method == "thread/queue/list":
+                return {"data": [], "nextCursor": None}
+            if method == "thread/queue/add":
+                self.assertEqual(params["threadId"], self.recipient["session_id"])
+                self.assertEqual(params["clientUserMessageId"], client_id)
+                row = peer_message._read_pending(ref)
+                self.assertEqual(row["state"], "unverified")
+                self.assertEqual(row["receipt"], "native-queue-inflight")
+                claim = row.get("rpc_claim")
+                self.assertIsInstance(claim, dict)
+                self.assertEqual(claim.get("pid"), os.getpid())
+                self.assertTrue(claim.get("token"))
+                return {"queuedSubmission": {"id": "native-item"}}
+            self.fail(f"unexpected native RPC: {method}")
+
+        with mock.patch.object(queue, "_rpc", side_effect=rpc):
+            first = peer_message.deliver_pending_codex(ref)
+            replay = peer_message.deliver_pending_codex(ref)
+
+        self.assertEqual(first["status"], "queued")
+        self.assertEqual(replay["status"], "unverified")
+        self.assertEqual([method for method, _params in calls],
+                         ["thread/queue/list", "thread/queue/add", "thread/queue/list"])
+        self.assertTrue(all(params["threadId"] == self.recipient["session_id"]
+                            for _method, params in calls))
+        add_params = next(params for method, params in calls if method == "thread/queue/add")
+        self.assertEqual(add_params["input"], [{"type": "text", "text": text}])
+        self.assertEqual(peer_message._read_pending(ref)["state"], "unverified")
+        self.assertEqual(peer_message._read_pending(ref)["text"], text)
+        self.assertFalse(self._ledger_file("sender").exists())
+
+    def test_actual_observer_path_reclaims_dead_claim_and_preserves_live_claim_boundary(self):
+        import codex_queue_delivery as queue
+        from dispatch_contract import process_start_ticks
+        _text, ref = self.pending()
+        old_claim = {"token": "old-token", "pid": os.getpid(),
+                     "start": process_start_ticks(os.getpid())}
+        with peer_message.pending_lock(ref):
+            peer_message._save_pending(dict(peer_message._read_pending(ref), rpc_claim=old_claim))
+        calls = []
+
+        def rpc(_path, method, _params, *, timeout):
+            calls.append(method)
+            if method == "thread/queue/list":
+                return {"data": [], "nextCursor": None}
+            if method == "thread/queue/add":
+                return {"queuedSubmission": {"id": "native-item"}}
+            self.fail(f"unexpected native RPC: {method}")
+
+        with mock.patch("dispatch_contract.process_identity_disposition", return_value="dead"), \
+             mock.patch.object(queue, "_rpc", side_effect=rpc):
+            result = peer_message.deliver_pending_codex(ref)
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(calls, ["thread/queue/list", "thread/queue/add"])
+        self.assertEqual(peer_message._read_pending(ref)["state"], "queued")
+
+    def test_actual_observer_publish_failure_keeps_attempt_unverified_without_readd(self):
+        import codex_queue_delivery as queue
+        _text, ref = self.pending("accepted then unpublishable")
+        calls = []
+
+        def rpc(_path, method, _params, *, timeout):
+            calls.append(method)
+            if method == "thread/queue/list":
+                return {"data": [], "nextCursor": None}
+            if method == "thread/queue/add":
+                return {"queuedSubmission": {"id": "native-item"}}
+            self.fail(f"unexpected native RPC: {method}")
+
+        save_pending = peer_message._save_pending
+
+        def fail_queued_publish(row):
+            if row["state"] == "queued":
+                raise OSError("fixture-publish-failure")
+            save_pending(row)
+
+        with mock.patch.object(queue, "_rpc", side_effect=rpc), \
+             mock.patch.object(peer_message, "_save_pending", side_effect=fail_queued_publish):
+            with self.assertRaisesRegex(OSError, "fixture-publish-failure"):
+                peer_message.deliver_pending_codex(ref)
+        after_failure = peer_message._read_pending(ref)
+        self.assertEqual(after_failure["state"], "unverified")
+        self.assertIsInstance(after_failure.get("rpc_claim"), dict)
+
+        with mock.patch("dispatch_contract.process_identity_disposition", return_value="dead"), \
+             mock.patch.object(queue, "_rpc", side_effect=rpc):
+            replay = peer_message.deliver_pending_codex(ref)
+        self.assertEqual(replay["status"], "unverified")
+        self.assertEqual(calls, ["thread/queue/list", "thread/queue/add", "thread/queue/list"])
+        self.assertEqual(peer_message._read_pending(ref)["state"], "unverified")
+        self.assertFalse(self._ledger_file("sender").exists())
+
+    def test_actual_observer_concurrent_claim_other_ref_and_receiver_ack_race(self):
+        import codex_queue_delivery as queue
+        text, ref = self.pending("first exact peer body")
+        _other_text, other_ref = self.pending("second independent peer body")
+        entered, release = threading.Event(), threading.Event()
+        calls = []
+        results = []
+
+        def rpc(_path, method, params, *, timeout):
+            client_id = params.get("clientUserMessageId")
+            calls.append((method, client_id))
+            if method == "thread/queue/list":
+                return {"data": [], "nextCursor": None}
+            if method == "thread/queue/add":
+                if client_id == "delivery-peer-" + ref:
+                    entered.set()
+                    self.assertTrue(release.wait(3))
+                return {"queuedSubmission": {"id": "native-item-" + client_id[-4:]}}
+            self.fail(f"unexpected native RPC: {method}")
+
+        worker = threading.Thread(
+            target=lambda: results.append(peer_message.deliver_pending_codex(ref)))
+        with mock.patch.object(queue, "_rpc", side_effect=rpc):
+            worker.start()
+            try:
+                self.assertTrue(entered.wait(3))
+                inflight = peer_message.deliver_pending_codex(ref)
+                other = peer_message.deliver_pending_codex(other_ref)
+                self.assertEqual(inflight["reason"], "peer-native-inflight")
+                self.assertEqual(other["status"], "queued")
+                self.assertEqual(peer_message.receive_peer_message(text, self.recipient), 0)
+            finally:
+                release.set()
+                worker.join(3)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(results[0]["status"], "received")
+        self.assertEqual(peer_message._read_pending(ref)["state"], "received")
+        self.assertIsNone(peer_message._read_pending(ref)["text"])
+        self.assertEqual(sum(method == "thread/queue/add" for method, _ in calls), 2)
 
     def test_stale_or_unsupported_callback_retains_pending(self):
         _text, ref = self.pending()

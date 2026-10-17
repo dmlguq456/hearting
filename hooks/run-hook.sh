@@ -13,6 +13,17 @@ dir=$(dirname -- "$0")
 if [ -n "${AGENT_HOME:-}" ] && [ -f "$AGENT_HOME/core/CORE.md" ]; then
   dir=$AGENT_HOME/hooks
 fi
+if [ -z "${PYTHONPYCACHEPREFIX:-}" ] && [ -z "${PYTHONDONTWRITEBYTECODE:-}" ]; then
+  _state_root=${HARNESS_STATE_ROOT:-${XDG_STATE_HOME:+$XDG_STATE_HOME/hearting}}
+  if [ -z "$_state_root" ] && [ -n "${HOME:-}" ]; then
+    _state_root=$HOME/.local/state/hearting
+  fi
+  if [ -n "$_state_root" ]; then
+    PYTHONPYCACHEPREFIX=$_state_root/pycache
+    export PYTHONPYCACHEPREFIX
+  fi
+  unset _state_root
+fi
 if [ "$interpreter" = exec ]; then
   exec "$dir/$hook" "$@"
 fi

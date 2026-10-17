@@ -42,6 +42,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterable
@@ -884,6 +885,61 @@ def reap_process_group(proc: subprocess.Popen) -> tuple[str, str]:
         proc.kill()
         out, err = "", ""
     return out or "", err or ""
+
+
+def reap_suite_tmp_processes(tmp_root: Path, *, timeout: float = 5.0) -> list[int]:
+    """Reap detached suite fixtures only when procfs positively names this temp root."""
+    marker = os.fsencode(str(tmp_root))
+    own_pid = os.getpid()
+    killed: dict[int, str] = {}
+    deadline = time.monotonic() + timeout
+    for _ in range(2):
+        for name in os.listdir("/proc"):
+            if not name.isdigit() or int(name) == own_pid:
+                continue
+            pid = int(name)
+            base = Path("/proc") / name
+            try:
+                fields = (base / "stat").read_bytes().rsplit(b")", 1)[1].split()
+                if fields[0] == b"Z":
+                    continue
+                carries_root = any(
+                    marker in (base / source).read_bytes()
+                    for source in ("cmdline", "environ")
+                )
+                if not carries_root:
+                    carries_root = marker in os.fsencode(os.readlink(base / "cwd"))
+                if not carries_root:
+                    continue
+                ticks = fields[19].decode()
+                if (base / "stat").read_bytes().rsplit(b")", 1)[1].split()[19].decode() != ticks:
+                    continue
+                # Only the process that carries the marker: a group it shares
+                # may hold processes this run never started. Descendants inherit
+                # the suite environment and are matched on their own.
+                os.kill(pid, signal.SIGKILL)
+                killed[pid] = ticks
+            except (OSError, IndexError):
+                continue
+        if not killed:
+            break
+        while time.monotonic() < deadline:
+            alive = []
+            for pid, ticks in killed.items():
+                try:
+                    fields = Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()
+                    if fields[19].decode() == ticks and fields[0] != b"Z":
+                        alive.append(pid)
+                except (OSError, IndexError):
+                    pass
+            if not alive:
+                break
+            time.sleep(.01)
+        else:
+            # Cleanup runs in a `finally`: report, never replace the run's verdict.
+            print(f"suite-fixture-survived-cleanup: {sorted(alive)} root={tmp_root}", file=sys.stderr)
+            break
+    return sorted(killed)
 
 
 def last_nonempty_line(text: str) -> str:
@@ -1794,6 +1850,7 @@ def run_profile(
             results_by_index[idx] = run_suite(suite, root, env, profile, timeout)
     finally:
         for tmp in tmp_roots:
+            reap_suite_tmp_processes(tmp)
             shutil.rmtree(tmp, ignore_errors=True)
     return [results_by_index[idx] for idx in range(len(suites))]
 
@@ -1990,7 +2047,15 @@ def main(argv: list[str]) -> int:
         # attempt; --retry-budget bounds the sum (P3).
         retry_budget = args.retry_budget if args.retry_budget is not None else args.timeout
         retry_spent = 0.0
-        for suite in selected:
+        retry_order = sorted(
+            selected,
+            key=lambda suite: (
+                min((row.duration_s for row in results_by_suite.get(
+                    suite_relpath(root, suite), [])), default=float("inf")),
+                selected.index(suite),
+            ),
+        )
+        for suite in retry_order:
             rel = suite_relpath(root, suite)
             rows = [row for (sp, _), row in baseline.items() if sp == rel]
             # A foreign row cannot select a suite for retry aggregation either.

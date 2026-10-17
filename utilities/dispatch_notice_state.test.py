@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """H6/H7: stale obligations are retired, real completion and gates survive."""
 import json
+import builtins
 import importlib.util
 import os
 from pathlib import Path
@@ -34,6 +35,31 @@ class NoticeTest(unittest.TestCase):
                          route_file=str(self.path), route_hash=self.route["route_hash"],
                          parent_sid="parent", parent_completion_delivery="claude-parent-runtime")
         self.write_row()
+
+    def test_hyphenated_capability_route_fallback_is_loaded_once(self):
+        original_import = builtins.__import__
+        calls = []
+        loader = mock.Mock()
+        spec = SimpleNamespace(loader=loader)
+        module = SimpleNamespace()
+        notice._CAPABILITY_ROUTE_CACHE = None
+
+        def import_without_capability_route(name, *args, **kwargs):
+            if name == "capability_route":
+                raise ImportError(name)
+            return original_import(name, *args, **kwargs)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=import_without_capability_route), \
+                    mock.patch.object(notice.importlib.util, "spec_from_file_location",
+                                      side_effect=lambda *args: calls.append(args) or spec), \
+                    mock.patch.object(notice.importlib.util, "module_from_spec", return_value=module):
+                self.assertIs(notice._capability_route_reader(), module)
+                self.assertIs(notice._capability_route_reader(), module)
+            self.assertEqual(len(calls), 1)
+            loader.exec_module.assert_called_once_with(module)
+        finally:
+            notice._CAPABILITY_ROUTE_CACHE = None
 
     def write_row(self):
         self.jobs.write_text("now\tdone\t/r\t/w\ttask\t" + ",".join(k+"="+v for k,v in self.meta.items()) + "\n")

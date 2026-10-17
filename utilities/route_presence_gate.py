@@ -170,7 +170,7 @@ def artifact_root(top: Path, env) -> str:
 def _has_source_change(top: Path, root: str, env) -> bool:
     result = subprocess.run(["git", "-C", str(top), "status", "--porcelain", "-z"],
                             capture_output=True, text=True, timeout=20, check=False,
-                            env=dict(env))
+                            env={**env, "GIT_OPTIONAL_LOCKS": "0"})
     if result.returncode != 0:
         return False
     entries = [entry for entry in result.stdout.split("\0") if entry]
@@ -433,12 +433,22 @@ def refusal(root: str, top: Path, kind: str, target: str, env) -> str:
     from parent_next_directive import entrypoint
 
     stem = Path(target).stem if kind == "edit" and target else kind
-    command = " ".join([
+    command_parts = [
         "python3", shlex.quote(entrypoint(_agent_home(env), "utilities/capability-route.py")),
-        "compose", "--shape", "direct", "--campaign-key", shlex.quote(_campaign_key(root, top)),
+        "compose"]
+    if kind == "edit":
+        command_parts.extend(["--start", "--shape", "direct", "--prompt-file", shlex.quote("<task>")])
+    else:
+        command_parts.extend(["--shape", "direct"])
+    command_parts.extend([
+        "--campaign-key", shlex.quote(_campaign_key(root, top)),
         "--slug", shlex.quote(_slug_word(stem)), "--cwd", shlex.quote(str(top))])
+    command = " ".join(command_parts)
+    task_guidance = ("It prepares an isolated worktree; make the edit in the worktree it prints."
+                     if kind == "edit" else "It records the route for changes already made in place.")
     return (f"hearting: this session has no route for {root} yet (core/WORKFLOW.md §0.4). "
             f"For one atomic, reversible inline change, run this once, then retry:\n{command}\n"
+            f"{task_guidance} "
             "For other new work, omit --shape and use compose --start --prompt-file <task>; the frame decides the route. "
             "Follow an already-decided frame or person-specified route under core/WORKFLOW.md §0.2.1. "
             "To continue a route you already have: capability-route.py start --route <route-file>.")

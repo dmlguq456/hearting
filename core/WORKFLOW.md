@@ -244,14 +244,18 @@ An entry's recipe is an assembly preset: the default when nothing else is
 chosen and an example of how its parts fit together. The route is the sealed
 stage list, assembled from the part catalog (`capabilities/topologies.json`
 recipes plus `part_catalog`, SD-165).
-The main session decides only whether the work is direct. For one atomic,
-reversible inline change, use `compose --shape direct`. Otherwise use
-`compose --start --prompt-file <task>` with no `--shape`; the frame chooses
-the capability, stages, and solo or staged shape.
+The main session decides only whether the work is direct. Before making one
+atomic, reversible direct source change, use
+`compose --start --shape direct --prompt-file <task>` so preparation creates
+the isolated worktree first. If the source change was already made in place,
+`compose --shape direct` records its route without preparing a worktree.
+Otherwise use `compose --start --prompt-file <task>` with no `--shape`; the
+frame chooses the capability, stages, and solo or staged shape.
 
 | Main decision | Command | Result |
 |---|---|---|
-| One atomic, reversible inline change | `compose --shape direct` | inline node, dispatch depth 0 |
+| One atomic, reversible direct source change, before editing | `compose --start --shape direct --prompt-file <task>` | isolated worktree, inline node, dispatch depth 0 |
+| One atomic, reversible change already made in place | `compose --shape direct` | records the in-place change as an inline node |
 | Other new work | `compose --start --prompt-file <task>` | framed; frame proposes the smallest route and the existing interview confirms it |
 
 `solo` means one registered owner; `staged` means separate stages. Shape
@@ -427,7 +431,9 @@ remain binding contracts for the selected work.
 to obtain a complete recipe. `compose` fills omitted flags from the checkout: cwd (for a
 source-changing `--start` from a primary checkout, the worktree
 `<repo>-wt/<slug>` on a collision-free branch and path, based on the commit SHA
-resolved by a successful fetch of the current remote default; this applies
+resolved by a successful fetch of the current remote default. If the repository
+has no remotes, preparation uses the primary worktree's current `HEAD` commit
+without fetching; an unresolved `HEAD` fails before publication. This applies
 regardless of shape, explicit cwd, or supplied dispatch evidence. An explicitly
 approved task linked worktree is reused with its changes, and exact saved route
 snapshots/cursors/receipts and official continuations resume before any new

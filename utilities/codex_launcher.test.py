@@ -138,6 +138,13 @@ class CodexLauncherRuntimeTest(LauncherTestCase):
             ["exec", "task"],
             ["--model", "gpt-test", "exec", "task"],
             ["plugin", "list"],
+            # Non-interactive subcommands of codex 0.162.1/0.163.0. Managed entry
+            # would run them against a private `--remote` server: `migrate-rollouts`
+            # refuses `--remote`, `queue` would write to the wrong server, and
+            # `agents` would list an empty one.
+            ["agents"],
+            ["queue", "list"],
+            ["migrate-rollouts"],
             ["app-server", "--help"],
             ["--help"],
             ["resume", "--help"],

@@ -10,6 +10,48 @@ import resource_run_registry as registry
 
 
 class ResourceRegistryTest(unittest.TestCase):
+    def test_never_started_without_identity_is_exited_but_partial_identity_stays_stale(self):
+        row = {
+            "resource_policy": "supervised-owner", "status": "failed",
+            "workflow_state": "FAILED_RETRYABLE", "failure_class": "resource-launch-incomplete",
+            "exit_code": None, "sentinel": "/missing/sentinel", "launch_state": "not-started",
+            "pid": None, "starttime": None, "command_hash": None,
+        }
+        self.assertEqual(registry.classify_identity(row),
+                         ("exited", None, "launcher-recorded-not-started"))
+        partial = {**row, "pid": 123}
+        self.assertEqual(registry.classify_identity(partial),
+                         ("stale", None, "recorded-identity-incomplete"))
+
+    def test_legacy_jobs_identity_is_memoized_until_file_signature_changes(self):
+        with tempfile.TemporaryDirectory() as td:
+            jobs = Path(td) / "jobs.log"
+            row = {"jobs": str(jobs), "parent_attempt_id": "att-owner",
+                   "route": str(Path(td) / "route.json"), "pid_namespace": "pid:[fixture]",
+                   "owner_wait": {"parent_attempt_id": "att-owner", "jobs": str(jobs),
+                                  "owner_pid": 123, "owner_start": "456",
+                                  "route_id": "rt-test", "route_hash": "hash"}}
+            line = ("now\tdone\tx\tx\towner\tattempt_id=att-owner,worker_type=owner,"
+                    f"owner_route_file={row['route']},owner_route_id=rt-test,"
+                    "owner_route_hash=hash,pid=123,pid_start=456,pid_ns=pid:[fixture]\n")
+            jobs.write_text(line)
+            registry._LEGACY_RESOURCE_IDENTITY_CACHE.pop(str(jobs), None)
+            original_read = Path.read_text
+            reads = []
+
+            def count_read(path, *args, **kwargs):
+                if path == jobs:
+                    reads.append(path)
+                return original_read(path, *args, **kwargs)
+
+            with mock.patch.object(Path, "read_text", count_read):
+                registry.legacy_resource_identity(row)
+                registry.legacy_resource_identity(row)
+                self.assertEqual(len(reads), 1)
+                jobs.write_text(line + "\n")
+                registry.legacy_resource_identity(row)
+            self.assertEqual(len(reads), 2)
+
     def test_empty_log_has_no_output_timestamp_but_nonempty_log_does(self):
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / "resource.log"

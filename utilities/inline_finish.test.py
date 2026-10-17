@@ -925,6 +925,12 @@ class PublicInlineFinishTest(unittest.TestCase):
                 with self.assertRaisesRegex(inline_finish.InlineFinishError, "finish-scoped-tracked-dirt"):
                     inline_finish._unscoped_tracked_dirt(str(self.repo), ["source-scoped", scope])
 
+    def test_read_only_status_disables_optional_index_refresh(self):
+        result = subprocess.CompletedProcess([], 0, stdout=b"")
+        with unittest.mock.patch.object(inline_finish.subprocess, "run", return_value=result) as run:
+            self.assertEqual(inline_finish._unscoped_tracked_dirt(str(self.repo), []), [])
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+
     def test_fresh_scope_judgment_rejects_concrete_dirt_added_after_the_first_scan(self):
         scope = ["source-scoped", "README.md"]
         self.assertEqual(inline_finish._unscoped_tracked_dirt(str(self.repo), scope), [])
@@ -1195,7 +1201,10 @@ class NextLegFinishTest(PublicInlineFinishTest):
         `ahead` moves that branch one commit past this checkout; returns origin's tip."""
         origin = self.base / "origin.git"
         subprocess.run(["git", "clone", "--bare", "-q", str(self.repo), str(origin)], check=True)
-        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin", str(origin)], check=True)
+        remotes = subprocess.run(["git", "-C", str(self.repo), "remote"], check=True,
+                                 capture_output=True, text=True).stdout.split()
+        verb = "set-url" if "origin" in remotes else "add"
+        subprocess.run(["git", "-C", str(self.repo), "remote", verb, "origin", str(origin)], check=True)
         if ahead:
             writer = self.base / "writer"
             subprocess.run(["git", "clone", "-q", str(origin), str(writer)], check=True)
@@ -1280,8 +1289,12 @@ class NextLegFinishTest(PublicInlineFinishTest):
     def test_a_next_leg_without_its_worktree_keeps_the_plan_and_the_same_start_retries(self):
         next_leg = json.loads(self.finish().stdout)["next_leg"]
         published = lambda: sorted(p.name for p in (self.root / ".runtime/routes").glob("rt-*.json"))
+        # A repository with no remote starts from its own branch; an origin that
+        # cannot be reached is the retryable failure this test exercises.
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin",
+                        str(self.base / "unreachable.git")], check=True)
         routes, before = published(), self.checkout_state()
-        failed = self.start_finished()           # this checkout has no origin to take the base from
+        failed = self.start_finished()           # this checkout's origin cannot be fetched
         self.assertEqual((failed["state"], failed["reason"]),
                          ("needs-attention", "source-worktree-preparation-failed"), failed)
         self.assertEqual((failed["plan_advance"]["state"], failed["plan_advance"]["leg"]),

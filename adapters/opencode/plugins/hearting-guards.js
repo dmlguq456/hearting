@@ -4,6 +4,13 @@ import { spawnSync, spawn } from "node:child_process"
 import { existsSync, mkdirSync, writeFileSync, renameSync, utimesSync, openSync, readSync, closeSync, realpathSync, readFileSync, readdirSync } from "node:fs"
 import { createHash } from "node:crypto"
 
+if (!process.env.PYTHONPYCACHEPREFIX && !process.env.PYTHONDONTWRITEBYTECODE) {
+  const stateRoot = process.env.HARNESS_STATE_ROOT ||
+    (process.env.XDG_STATE_HOME && path.join(process.env.XDG_STATE_HOME, "hearting")) ||
+    (process.env.HOME && path.join(process.env.HOME, ".local", "state", "hearting"))
+  if (stateRoot) process.env.PYTHONPYCACHEPREFIX = path.join(stateRoot, "pycache")
+}
+
 const pluginDir = path.dirname(fileURLToPath(import.meta.url))
 const pluginRoot = path.resolve(pluginDir, "../../..")
 const python3 = existsSync("/usr/bin/python3") ? "/usr/bin/python3" : "python3"

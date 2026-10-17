@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover
 
 
 PASSTHROUGH_COMMANDS = {
+    "agents",
     "app",
     "app-server",
     "apply",
@@ -36,7 +37,9 @@ PASSTHROUGH_COMMANDS = {
     "logout",
     "mcp",
     "mcp-server",
+    "migrate-rollouts",
     "plugin",
+    "queue",
     "remote-control",
     "review",
     "sandbox",

@@ -7,11 +7,34 @@ This is not a second delivery queue or a workflow outcome writer.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 
 from route_identity import route_hash
+
+
+_CAPABILITY_ROUTE_CACHE = None
+
+
+def _capability_route_reader():
+    """Load the hyphenated route module once when it is not importable by name."""
+    global _CAPABILITY_ROUTE_CACHE
+    try:
+        import capability_route
+        return capability_route
+    except ImportError:
+        if _CAPABILITY_ROUTE_CACHE is not None:
+            return _CAPABILITY_ROUTE_CACHE
+        module_path = Path(__file__).with_name("capability-route.py")
+        spec = importlib.util.spec_from_file_location("notice_capability_route", module_path)
+        if spec is None or spec.loader is None:
+            raise ValueError("notice-terminal-gate-reader-unavailable")
+        capability_route = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(capability_route)
+        _CAPABILITY_ROUTE_CACHE = capability_route
+        return capability_route
 
 
 def closed_outcome(path: Path, route: dict, jobs: Path | None = None) -> dict | None:
@@ -38,19 +61,6 @@ def closed_outcome(path: Path, route: dict, jobs: Path | None = None) -> dict | 
         if pending.get("state") != "finished":
             outcome = dict(outcome, finish_pending=True, finish_state=pending.get("state"),
                            terminal_gate_proven=False)
-    from workflow_state import WorkflowLedger
-    import route_parent_close
-    ledger = WorkflowLedger(route["route_id"], route["route_hash"],
-                            jobs=Path(jobs_value) if jobs_value else None)
-    close_intent = route_parent_close.ledger_intent(route, ledger)
-    close_result = route_parent_close.settled_result(route, ledger)
-    if close_result and close_result.get("state") == "cancelled":
-        outcome = dict(outcome, state="cancelled", disposition="cancelled",
-                       cancellation_settled=True, parent_close_result=close_result,
-                       terminal_gate_proven=False)
-    elif close_intent:
-        outcome = dict(outcome, state="cancellation-pending", cancellation_requested=True,
-                       terminal_gate_proven=False)
     return outcome
 
 
@@ -112,15 +122,9 @@ def framed_decision_consumed(record: dict, metadata: dict, jobs: Path) -> bool:
         import route_plan
         if not route_plan.is_framed_route(route):
             return False
-        import capability_route
     except ImportError:
-        import importlib.util
-        module_path = Path(__file__).with_name("capability-route.py")
-        spec = importlib.util.spec_from_file_location("notice_capability_route", module_path)
-        if spec is None or spec.loader is None:
-            raise ValueError("notice-terminal-gate-reader-unavailable")
-        capability_route = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(capability_route)
+        pass
+    capability_route = _capability_route_reader()
     # route-decision is the existing depth-0 runtime terminal, with no
     # registered process/attempt link. Read its semantic marker, then bind
     # those exact bytes below; the two frame workers still require the full

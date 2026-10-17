@@ -9751,6 +9751,7 @@ def _git_changed_files(worktree):
             # The audit compares files, so it has to be given files.
             ["git", "-C", str(worktree), "status", "--porcelain", "-uall"],
             text=True, capture_output=True, check=False,
+            env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
         )
     except (OSError, ValueError):
         return set()
@@ -10337,6 +10338,12 @@ def _prepared_record_worktree(record, common, relative):
 
 def _remote_default_base(top):
     """Fetch origin's current default (origin/HEAD, then main fallback) and pin the fetched SHA."""
+    remotes = _worktree_git(top, "remote")
+    if remotes.returncode == 0 and not remotes.stdout.strip():
+        head = _worktree_git(top, "rev-parse", "--verify", "HEAD^{commit}")
+        if head.returncode != 0 or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", head.stdout.strip()):
+            return None, "local-default-unresolved", (head.stderr or "HEAD did not resolve to a commit").strip()
+        return {"branch": None, "sha": head.stdout.strip()}, None, None
     advertised = _worktree_git(top, "ls-remote", "--symref", "origin", "HEAD")
     if advertised.returncode != 0:
         return None, "remote-default-fetch-failed", (advertised.stderr or "git ls-remote failed").strip()

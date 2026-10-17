@@ -3,11 +3,9 @@
 A compiled route is a lease the runtime holds for the session that composed
 it, not homework that session must remember.  `compose` and `campaign-status`
 run one bounded background sweep that closes an open route only when time says
-nobody works on it.  `compose` sweeps only the composed route's own campaign,
-and finds that campaign's cycles from its folder's `.cycle.json` bindings
-without listing the root-wide cycle records; `campaign-status` sweeps the whole
-root.  So `compose` never begins another campaign's cleanup, and killing a slow
-`compose` cannot leave another campaign's seal half-done.  The rules:
+nobody works on it.  `compose` scopes cycle work to its campaign, while overdue
+idle routes from other campaigns can still be closed after the same protections
+are checked; `campaign-status` sweeps the whole root.  The rules:
 
 * session-ended -- this host holds positive evidence that the composing Claude
   session is gone (its own session record, whose process is dead) and nothing
@@ -57,6 +55,7 @@ import functools
 import io
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -277,10 +276,11 @@ def _waits_on_human(route_id: str, roots: list[Path]) -> bool:
 
 
 def _resource_runs() -> tuple[set[str], list[str], dict]:
-    """(route ids a resource run without an end record is bound to, the paths
-    such runs log into, route id -> newest bound log write).  A run counts as
-    live until its registry row or exit sentinel records an end: a run started
-    on another host has no process here to ask."""
+    """(route ids a still-live resource run is bound to, the paths such runs log
+    into, route id -> newest bound log write).  A run with an end record, or one
+    the registry proves exited here, no longer protects its route.  A run this
+    host cannot verify (another host or namespace, an incomplete identity) stays
+    protected until its log has been silent past the idle limit."""
     try:
         import resource_run_registry
         rows, diagnostics = resource_run_registry.scan()
@@ -303,7 +303,10 @@ def _resource_runs() -> tuple[set[str], list[str], dict]:
         ended = (row.get("ended_at") is not None or row.get("exit_code") is not None
                  or (status and status not in _RESOURCE_OPEN)
                  or (isinstance(sentinel, str) and sentinel and os.path.exists(sentinel)))
-        if ended:
+        liveness = row.get("liveness")
+        if ended or liveness == "exited":
+            continue
+        if liveness != "working" and written and time.time() - written >= IDLE_SECONDS:
             continue
         routes |= bound
         if log:
@@ -904,14 +907,40 @@ def _campaign_members(root: Path, records: list[dict], campaign_id: str | None, 
     return members
 
 
-def _decision_unfinished(route: Mapping[str, Any], home) -> bool:
+def _decision_unfinished(route: Mapping[str, Any], home, root: Path | None = None,
+                         now: float | None = None) -> bool:
     """A framed route whose decision record is fixed while the route is still open: the
-    runtime is between fixing the decision and closing, so the sweep leaves it alone."""
+    runtime is between fixing the decision and closing (the same start resumes it), so
+    the sweep leaves it alone -- while that record is recent.  A decision older than
+    the idle limit, or one whose recorded first leg has already closed, no longer
+    protects the frame (it protected forever and kept decided frames open for weeks)."""
     import route_plan
     if not route_plan.is_framed_route(route):
         return False
     directory = home()
-    return bool(directory) and (Path(directory) / "artifacts" / route_plan.RECORD_RELATIVE).is_file()
+    if not directory:
+        return False
+    record_path = Path(directory) / "artifacts" / route_plan.RECORD_RELATIVE
+    try:
+        written = record_path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True   # an unreadable record is not an expired one
+    if (time.time() if now is None else now) - written >= IDLE_SECONDS:
+        return False
+    if root is None:
+        return True
+    try:
+        record = route_plan.read_record(record_path)
+    except (OSError, ValueError):
+        return True
+    first_leg = record.get("first_leg") if isinstance(record, dict) else None
+    leg = first_leg.get("route") if isinstance(first_leg, dict) else None
+    leg_id = leg.get("route_id") if isinstance(leg, dict) else None
+    if not isinstance(leg_id, str) or not re.fullmatch(r"rt-[0-9a-f]{8,64}", leg_id):
+        return True
+    return not (Path(root) / ".runtime" / "routes" / f"{leg_id}.outcome.json").exists()
 
 
 class _Evidence:
@@ -925,7 +954,8 @@ class _Evidence:
         self.gate_roots = _gate_ledger_roots(registries)
         self.open_paths = _open_paths(root)
 
-    def kept(self, route_id: str, home, route: Mapping[str, Any] | None = None) -> str | None:
+    def kept(self, route_id: str, home, route: Mapping[str, Any] | None = None,
+             now: float | None = None) -> str | None:
         """Why this route stays open whatever the time; `home` yields its cycle
         directory and is asked only when the cheaper evidence is silent."""
         import inline_finish
@@ -941,7 +971,8 @@ class _Evidence:
             return "finish-pending"
         if _waits_on_human(route_id, self.gate_roots):
             return "human-gate"
-        if route is not None and _decision_unfinished(route, home):
+        if route is not None and _decision_unfinished(route, home, self.root,
+                                                       time.time() if now is None else now):
             return "decision-pending"
         if route_id in self.resource_routes:
             return "resource-run"
@@ -1020,9 +1051,9 @@ def _pass(summary, root: Path, api, memory: _Memory, *, trigger, campaign_id, no
             kept(why)
             continue
         raw = None
-        if scope is not None and route_id not in cycles:
-            # No cycle of this campaign: a route that is due is read once to see whose it is, and a
-            # foreign one is left to `campaign-status`.  Not asked again within RECHECK_SECONDS.
+        if scope is not None and route_id not in cycles and reason != "idle":
+            # Session-ended cleanup remains campaign-scoped. Overdue idle routes
+            # proceed through the shared protection checks below.
             if memory.recently_kept("foreign:" + route_id, now):
                 kept("other-campaign")
                 continue
@@ -1043,7 +1074,7 @@ def _pass(summary, root: Path, api, memory: _Memory, *, trigger, campaign_id, no
             continue
         record = cycles.get(route_id)
         home = _cycle_home(root, record) if record else None
-        why = gather().kept(route_id, lambda: home, raw)
+        why = gather().kept(route_id, lambda: home, raw, now=now)
         if why is None:
             reason, why = _decide(holder, idle_since=_last_activity(
                 root, path, raw, holder, api, record, now, deep=True,

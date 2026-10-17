@@ -64,6 +64,9 @@ framed first legs, successors, printed next-leg commands, and `direct` routes;
 an explicit primary cwd or supplied dispatch evidence is not an exemption.
 From a primary checkout, preparation fetches the remote default branch and
 creates the worktree from the commit SHA observed after that successful fetch.
+When the repository has no remotes, preparation uses the primary worktree's
+current `HEAD` commit without a fetch; if `HEAD` does not resolve to a commit,
+preparation fails before publication.
 An explicitly approved task linked worktree is kept with its existing changes
 and HEAD. Exact saved snapshots, cursors, receipts, and official continuations
 are resumed before new preparation, so resuming an existing task does not

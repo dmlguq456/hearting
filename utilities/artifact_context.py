@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
@@ -43,6 +44,15 @@ _ROLE_OUTPUTS = {
     "run-record": ("run.json",),
     "spec-output": ("spec/**",),
 }
+
+
+def _readonly_git_env() -> dict[str, str]:
+    """Disable optional index refreshes for a read-only Git observation."""
+    env = os.environ.copy()
+    contract = sys.modules.get("dispatch_contract")
+    helper = getattr(contract, "git_optional_locks_env", None) if contract else None
+    env.update(helper() if callable(helper) else {"GIT_OPTIONAL_LOCKS": "0"})
+    return env
 
 _ROLE_DEFAULT_LEAF = {
     "test-report": "test_logs/run-tests-report.tsv",
@@ -511,6 +521,7 @@ def source_git_state(worktree: str | Path | None) -> tuple[str, str | None]:
         ["git", "-C", str(worktree), "status", "--porcelain=v1", "-z",
          "--untracked-files=all", "--ignored=matching"],
         capture_output=True,
+        env=_readonly_git_env(),
     )
     if result.returncode != 0:
         return "unknown-no-git", head

@@ -23,6 +23,19 @@ import session_tidy as st
 
 
 class PaneOwnershipTest(unittest.TestCase):
+    def test_import_adds_tools_path_for_isolated_utilities_entrypoint(self):
+        utilities = str(ROOT / "utilities")
+        script = (
+            "import sys; "
+            f"sys.path.insert(0, {utilities!r}); "
+            "import pane_ownership; "
+            "from fleet.collectors import procscan; "
+            "assert procscan.__name__ == 'fleet.collectors.procscan'"
+        )
+        result = subprocess.run([sys.executable, "-I", "-c", script],
+                                capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="pane-ownership-")
         self.addCleanup(self.temp.cleanup)

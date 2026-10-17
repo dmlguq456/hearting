@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -44,6 +45,7 @@ class Fixture(unittest.TestCase):
         self.outside.mkdir()
         self.addCleanup(lambda: __import__("shutil").rmtree(self.outside, ignore_errors=True))
         self.rows = {}
+        self.timestamps = {}
         self.now = time.time_ns()
 
     # --- builders --------------------------------------------------------
@@ -57,8 +59,15 @@ class Fixture(unittest.TestCase):
         lines = []
         for attempt, (status, meta) in self.rows.items():
             pipe = ",".join(f"{k}={v}" for k, v in meta.items())
-            lines.append(f"2026-10-01T00:00:00Z\t{status}\t/repo\t/wt\t{attempt}\t{pipe}")
+            timestamp = self.timestamps.get(attempt)
+            if timestamp is None:
+                timestamp = datetime.fromtimestamp(self.now / 10**9, timezone.utc).isoformat().replace("+00:00", "Z")
+            lines.append(f"{timestamp}\t{status}\t/repo\t/wt\t{attempt}\t{pipe}")
         self.jobs.write_text("\n".join(lines) + ("\n" if lines else ""))
+
+    def set_timestamp(self, attempt, timestamp):
+        self.timestamps[attempt] = timestamp
+        self.write_rows()
 
     def row(self, attempt, status="done", **meta):
         base = {"attempt_id": attempt, "harness": "claude", "worker_type": "stage",
@@ -172,7 +181,7 @@ class Expiry(Fixture):
         again = self.sweep(9)
         self.assertEqual((again["examined"], again["removed"]), (0, 0))
 
-    def test_protection_resets_the_clock(self):
+    def test_protection_holds_until_existing_completion_clock_expires(self):
         path = self.add("att-a2")
         self.sweep(0)
         self.set_status("att-a2", "open")
@@ -180,9 +189,78 @@ class Expiry(Fixture):
         self.assertEqual(self.kept(mid, "not-terminal"), 1)
         self.assertNotIn(self.key("att-a2"), self.state()["eligible_since"])
         self.set_status("att-a2", "done")
-        self.assertEqual(self.sweep(8)["removed"], 0)
+        self.assertEqual(self.sweep(8)["removed"], 1)
+        self.assertFalse(path.exists())
+
+    def test_old_completion_is_removed_on_first_sweep(self):
+        old = self.now - 10 * DAY
+        log = self.root / "finished.log"
+        log.write_text("finished")
+        path = self.add("att-old-completion", log_file=str(log))
+        self.set_timestamp("att-old-completion", datetime.fromtimestamp(old / 10**9, timezone.utc).isoformat().replace("+00:00", "Z"))
+        os.utime(log, ns=(old, old))
+        os.utime(path, ns=(old, old))
+
+        result = self.sweep(0)
+
+        self.assertEqual(result["removed"], 1)
+        self.assertFalse(path.exists())
+
+    def test_recent_log_mtime_keeps_old_registry_timestamp_within_window(self):
+        old = self.now - 10 * DAY
+        recent = self.now - 2 * DAY
+        log = self.root / "recent-finish.log"
+        log.write_text("finished")
+        path = self.add("att-recent-log", log_file=str(log))
+        self.set_timestamp("att-recent-log", datetime.fromtimestamp(old / 10**9, timezone.utc).isoformat().replace("+00:00", "Z"))
+        os.utime(log, ns=(recent, recent))
+        os.utime(path, ns=(old, old))
+
+        result = self.sweep(0)
+
+        self.assertEqual(result["removed"], 0)
+        self.assertEqual(self.kept(result, "within-window"), 1)
         self.assertTrue(path.is_dir())
-        self.assertEqual(self.sweep(16)["removed"], 1)
+
+    def test_unparseable_completion_uses_first_seen_clock(self):
+        path = self.add("att-unparseable-completion")
+        self.set_timestamp("att-unparseable-completion", "not-a-timestamp")
+
+        first = self.sweep(0)
+
+        self.assertEqual(first["removed"], 0)
+        self.assertEqual(self.state()["eligible_since"][path.name], self.now)
+        self.assertEqual(self.sweep(8)["removed"], 1)
+        self.assertFalse(path.exists())
+
+    def test_recent_activity_extends_old_completion_window(self):
+        old = self.now - 10 * DAY
+        for suffix in ("supervisor", "view", "home"):
+            with self.subTest(activity=suffix):
+                attempt = "att-old-activity-" + suffix
+                path = self.add(attempt)
+                self.set_timestamp(attempt, datetime.fromtimestamp(old / 10**9, timezone.utc).isoformat().replace("+00:00", "Z"))
+                recent = self.now - DAY
+                if suffix == "supervisor":
+                    state = self.root / "supervisor-state" / f"{attempt}.json"
+                    state.parent.mkdir(exist_ok=True)
+                    state.write_text("{}")
+                    os.utime(state, ns=(recent, recent))
+                elif suffix == "view":
+                    views = self.root / "homes" / "worker-retention" / "views"
+                    views.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    marker = views / path.name
+                    marker.write_text("")
+                    os.utime(marker, ns=(recent, recent))
+                else:
+                    os.utime(path, ns=(recent, recent))
+
+                first = self.sweep(0)
+
+                self.assertEqual(first["removed"], 0)
+                self.assertEqual(self.kept(first, "within-window"), 1)
+                self.assertEqual(self.sweep(5)["removed"], 0)
+                self.assertEqual(self.sweep(8)["removed"], 1)
 
     def test_running_and_unknown_status_are_kept(self):
         paths = [self.add("att-open", "open"), self.add("att-run", "running"), self.add("att-odd", "weird")]
@@ -197,8 +275,8 @@ class Expiry(Fixture):
         self.assertEqual(self.kept(result, "open-reference"), 1)
         self.assertTrue(path.is_dir())
         self.set_status("att-child", "done")
-        self.sweep(9)
-        self.assertEqual(self.sweep(18)["removed"], 1)
+        self.assertEqual(self.sweep(9)["removed"], 1)
+        self.assertFalse(path.exists())
 
     def test_recent_activity_extends_the_window(self):
         path = self.add("att-view")
@@ -230,9 +308,72 @@ class Expiry(Fixture):
         self.assertFalse(linked.exists())
         self.assertEqual(main.read_text(), '{"synthetic": "main"}')
         (split / ".credentials.json").unlink()
-        self.sweep(9)
-        self.assertEqual(self.sweep(17)["removed"], 1)
+        self.assertEqual(self.sweep(9)["removed"], 1)
         self.assertFalse(split.exists())
+
+
+class EndedTimestamp(Fixture):
+    def _row(self, timestamp, log_file=""):
+        metadata = f"log_file={log_file}" if log_file else ""
+        return R._Row("", [timestamp, "done", "/repo", "/wt", "att-clock", metadata])
+
+    def test_iso_timestamp_formats_use_utc_and_preserve_zero(self):
+        expected = int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()) * 10**9
+        for timestamp in (
+            "2026-10-01T00:00:00Z",
+            "2026-10-01T03:00:00+03:00",
+            "2026-10-01T00:00:00",
+        ):
+            with self.subTest(timestamp=timestamp):
+                self.assertEqual(R._ended_ns(self._row(timestamp)), expected)
+        self.assertEqual(R._ended_ns(self._row("1970-01-01T00:00:00Z")), 0)
+
+    def test_unparseable_or_unrepresentable_timestamp_returns_none(self):
+        for timestamp in ("bad", "9999-12-31T23:59:59-23:59"):
+            with self.subTest(timestamp=timestamp):
+                self.assertIsNone(R._ended_ns(self._row(timestamp)))
+        self.assertIsNone(R._ended_ns(self._row(None)))
+
+    def test_regular_log_mtime_only_moves_end_time_later(self):
+        log = self.root / "attempt.log"
+        log.write_text("log")
+        registry_ns = int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()) * 10**9
+        later_ns = registry_ns + 123456789
+        os.utime(log, ns=(later_ns, later_ns))
+        self.assertEqual(R._ended_ns(self._row("2026-10-01T00:00:00Z", str(log))), later_ns)
+        earlier_ns = registry_ns - DAY
+        os.utime(log, ns=(earlier_ns, earlier_ns))
+        self.assertEqual(R._ended_ns(self._row("2026-10-01T00:00:00Z", str(log))), registry_ns)
+
+    def test_missing_relative_symlink_and_directory_logs_are_ignored(self):
+        target = self.root / "target.log"
+        target.write_text("target")
+        link = self.root / "linked.log"
+        link.symlink_to(target)
+        directory = self.root / "log-directory"
+        directory.mkdir()
+        absent = self.root / "absent.log"
+        registry_ns = int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()) * 10**9
+        paths = (str(absent), "relative.log", str(link), str(directory),
+                 str(self.root / "invalid\x00.log"))
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertEqual(R._ended_ns(self._row("2026-10-01T00:00:00Z", path)), registry_ns)
+
+    def test_unreadable_log_and_unparseable_registry_do_not_supply_time(self):
+        log = self.root / "unreadable.log"
+        log.write_text("log")
+        registry_ns = int(datetime(2026, 10, 1, tzinfo=timezone.utc).timestamp()) * 10**9
+        original_stat = os.stat
+
+        def deny_log(path, *args, **kwargs):
+            if os.fspath(path) == str(log):
+                raise PermissionError("fixture permission denial")
+            return original_stat(path, *args, **kwargs)
+
+        with mock.patch.object(os, "stat", side_effect=deny_log):
+            self.assertEqual(R._ended_ns(self._row("2026-10-01T00:00:00Z", str(log))), registry_ns)
+        self.assertIsNone(R._ended_ns(self._row("invalid", str(log))))
 
 
 class Routes(Fixture):
@@ -255,8 +396,8 @@ class Routes(Fixture):
         self.assertTrue(home.is_dir())
         (self.root / "rt-one.outcome.json").write_text(
             json.dumps({"route_id": "rt-one", "route_hash": record["route_hash"]}))
-        self.sweep(9)
-        self.assertEqual(self.sweep(17)["removed"], 1)
+        self.assertEqual(self.sweep(9)["removed"], 1)
+        self.assertFalse(home.exists())
 
     def test_route_closed_exactly_one_generation_only(self):
         path, record = self.route(hash_ok=False)
@@ -453,8 +594,7 @@ class Deliveries(Fixture):
         self.delivery_record(record, "att-d2", state="pending")
         self.assertEqual(self.expire()["kept"].get("delivery-open"), 1)
         self.delivery_record(record, "att-d2")
-        self.sweep(9)
-        self.assertEqual(self.sweep(18)["removed"], 1)
+        self.assertEqual(self.sweep(9)["removed"], 1)
         self.assertFalse(home.exists())
 
     def test_tombstone_releases(self):
@@ -549,8 +689,8 @@ class Deliveries(Fixture):
         folder = self.root / "pending-delivery" / digest
         folder.mkdir(parents=True)
         self.delivery_record(folder / (delivery + ".json"), "att-kid", "att-d8")
-        self.sweep(9)
-        self.assertEqual(self.sweep(17)["removed"], 1)
+        self.assertEqual(self.sweep(9)["removed"], 1)
+        self.assertFalse(home.exists())
 
     def test_unattributable_corrupt_record_remains_unknown(self):
         home = self.add("att-d6")
@@ -693,8 +833,8 @@ class Liveness(Fixture):
             self.assertTrue(home.is_dir())
         finally:
             os.close(fd)
-        self.sweep(9)
-        self.assertEqual(self.sweep(17)["removed"], 1)
+        self.assertEqual(self.sweep(9)["removed"], 1)
+        self.assertFalse(home.exists())
 
     def test_lease_payload_mismatch_does_not_hide_a_holder(self):
         # supervisor_lease_is_held() answers False for any payload it does not
@@ -827,6 +967,46 @@ class Races(Fixture):
     def two(self):
         return self.add("att-x1"), self.add("att-x2")
 
+    def test_log_activity_before_preparation_or_lock_extends_window(self):
+        for phase in ("preparation", "lock"):
+            with self.subTest(phase=phase):
+                old = self.now - 10 * DAY
+                recent = self.now - DAY
+                log = self.root / (phase + ".log")
+                log.write_text("finished")
+                attempt = "att-late-log-" + phase
+                home = self.add(attempt, log_file=str(log))
+                self.set_timestamp(attempt, datetime.fromtimestamp(
+                    old / 10**9, timezone.utc).isoformat())
+                os.utime(log, ns=(old, old))
+                os.utime(home, ns=(old, old))
+
+                def advance():
+                    os.utime(log, ns=(recent, recent))
+
+                if phase == "preparation":
+                    original = R._detach
+
+                    def detach(*args, **kwargs):
+                        advance()
+                        return original(*args, **kwargs)
+
+                    with mock.patch.object(R, "_detach", detach):
+                        result = self.sweep(0)
+                    reason = "late-activity"
+                else:
+                    with self.landing(advance, key=home.name) as fired:
+                        result = self.sweep(0)
+                    self.assertTrue(fired)
+                    reason = "late-evidence-changed"
+
+                self.assertEqual(result["removed"], 0)
+                self.assertEqual(self.kept(result, reason), 1)
+                self.assertTrue(home.is_dir())
+                self.assertEqual(self.sweep(5)["removed"], 0)
+                self.assertEqual(self.sweep(8)["removed"], 1)
+                self.assertFalse(home.exists())
+
     def test_unrelated_append_defers_without_restarting_established_clock(self):
         home = self.add("att-append")
         self.sweep(0)
@@ -873,15 +1053,15 @@ class Races(Fixture):
         self.assertEqual(result["kept"].get("late-evidence-changed"), 1)
         self.assertTrue(home.is_dir())
 
-    def test_renewed_reference_restarts_clock_after_fresh_observation(self):
+    def test_renewed_reference_keeps_home_until_completion_clock_expires(self):
         home = self.add("att-renewed")
         self.sweep(0)
         with self.landing(lambda: self.row("att-ref", "open", parent_attempt_id="att-renewed")):
             self.assertEqual(self.sweep(8)["removed"], 0)
         self.assertNotIn(home.name, self.state()["eligible_since"])
         self.set_status("att-ref", "done")
-        self.assertEqual(self.sweep(8.1)["removed"], 0)
-        self.assertEqual(self.sweep(15.2)["removed"], 1)
+        self.assertEqual(self.sweep(8.1)["removed"], 1)
+        self.assertFalse(home.exists())
 
     def test_unreadable_preparation_preserves_established_clock(self):
         home = self.add("att-unreadable-prep")
@@ -1296,6 +1476,10 @@ class Containment(Fixture):
         self.assertEqual(result["removed"], 0)
         self.assertTrue(home.is_dir())
         self.set_status("att-canonical", "done")
+        completion = datetime.fromtimestamp(
+            (self.now + int(8.1 * DAY)) / 10**9, timezone.utc
+        ).isoformat().replace("+00:00", "Z")
+        self.set_timestamp("att-canonical", completion)
         R.sweep(alias, now_ns=self.now + int(8.1 * DAY), force=True)
         fd = os.open(str(self.jobs) + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
         try:
@@ -1858,12 +2042,21 @@ class Bounds(Fixture):
         self.assertEqual(self.sweep(8)["removed"], 1)
         self.assertFalse(home.exists())
 
-    def test_corrupt_state_starts_clocks_over_and_removes_nothing(self):
+    def test_corrupt_state_preserves_valid_completion_clock(self):
         home = self.add("att-k1")
+        self.sweep(0)
+        (self.root / "homes/worker-retention/state.json").write_text("{corrupt")
+        self.assertEqual(self.sweep(8)["removed"], 1)
+        self.assertFalse(home.exists())
+
+    def test_corrupt_state_restarts_unparseable_completion_clock(self):
+        home = self.add("att-k1-unparseable")
+        self.set_timestamp("att-k1-unparseable", "invalid")
         self.sweep(0)
         (self.root / "homes/worker-retention/state.json").write_text("{corrupt")
         self.assertEqual(self.sweep(8)["removed"], 0)
         self.assertTrue(home.is_dir())
+        self.assertEqual(self.state()["eligible_since"][home.name], self.now + 8 * DAY)
         self.assertEqual(self.sweep(16)["removed"], 1)
 
     def test_oversized_registry_and_unreadable_registry_skip_the_pass(self):

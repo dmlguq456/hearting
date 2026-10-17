@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import sqlite3
 import stat
 import struct
 import time
@@ -26,9 +27,6 @@ from typing import Any
 MAX_FRAME_BYTES = 4 * 1024 * 1024
 MAX_QUEUE_PAGES = 16
 MAX_PAGE_SIZE = 100
-PEER_HISTORY_PAGE_SIZE = 16
-MAX_PEER_HISTORY_REQUESTS = 256
-MAX_PEER_HISTORY_ITEMS = 160000
 
 
 class QueueDeliveryError(RuntimeError):
@@ -396,8 +394,11 @@ def find_turn_by_client_message_id(
 ) -> dict[str, Any] | None:
     """Find the turn that consumed an exact queued client message id."""
     if strict_history:
-        return _find_peer_turn(path, thread_id, client_message_id, timeout=timeout,
-                               **_session_kwargs(session))
+        observation = _observe_peer_message(path, thread_id, client_message_id,
+                                            timeout=timeout)
+        if observation.status == "conflict":
+            raise QueueDeliveryError("queue-peer-history-conflict")
+        return observation.turn if observation.status == "matched" else None
     cursor = None
     for _ in range(MAX_QUEUE_PAGES):
         params: dict[str, Any] = {
@@ -421,126 +422,164 @@ def find_turn_by_client_message_id(
         cursor = response.get("nextCursor")
         if not cursor:
             return None
-    # A bounded history miss is ambiguous, not a reason to strand a new
-    # receipt in a long conversation. At-least-once permits another send;
-    # the independent exact pending-queue check still suppresses duplicates.
+    # Completion delivery keeps its existing bounded at-least-once behavior.
     return None
 
 
-def _find_peer_turn(path, thread_id, client_message_id, *, timeout, session=None):
-    """Read complete peer history in small pages; a summary miss proves nothing.
+class _PeerObservation:
+    __slots__ = ("status", "turn", "reason")
 
-    v0.160 summary includes only the first user item. Full turn pages are reduced
-    after a read-only frame overflow; a singleton uses thread/items/list instead.
-    Both paths retain the original 1600-turn ceiling and fail closed on gaps.
-    """
-    requests = 0
-    inspected_items = 0
-    deadline = time.monotonic() + timeout * MAX_QUEUE_PAGES
+    def __init__(self, status: str, turn: dict[str, Any] | None = None,
+                 reason: str | None = None):
+        self.status = status
+        self.turn = turn
+        self.reason = reason
 
-    def read(method, params):
-        nonlocal requests
-        requests += 1
+
+def _native_file(path: Path, *, directory: bool = False) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    kind_ok = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    return (kind_ok and info.st_uid == os.geteuid() and not info.st_mode & 0o022)
+
+
+def _native_rollout_file(path: Path, *, trusted_home: Path) -> bool:
+    """Validate a regular owned rollout under the already trusted native home."""
+    try:
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o002):
+            return False
+        path.resolve(strict=True).relative_to(trusted_home.resolve(strict=True))
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _observe_peer_message(path, thread_id, client_message_id, *, timeout,
+                          expected_message=None):
+    """Observe an exact userMessage in the native projection without writing it."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    state_db = history_db = None
+
+    def unknown(reason):
+        return _PeerObservation("unknown", reason=reason)
+
+    def open_readonly(db_path):
         remaining = deadline - time.monotonic()
-        if requests > MAX_PEER_HISTORY_REQUESTS or remaining <= 0:
-            raise QueueDeliveryError("queue-peer-history-budget-exhausted")
-        return _rpc(path, method, params, timeout=min(timeout, remaining),
-                    **_session_kwargs(session))
+        if remaining <= 0:
+            raise TimeoutError
+        connection = sqlite3.connect(db_path.as_uri() + "?mode=ro", uri=True,
+                                     timeout=min(0.05, remaining))
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.set_progress_handler(
+            lambda: int(time.monotonic() >= deadline), 200)
+        connection.execute("BEGIN")
+        return connection
 
-    def page(method, params, limit):
-        while True:
-            try:
-                result = read(method, dict(params, limit=limit))
-                values = result.get("data")
-                cursor = result.get("nextCursor")
-                if (not isinstance(values, list) or len(values) > limit
-                        or (cursor is not None and (not isinstance(cursor, str) or not cursor))
-                        or (not values and cursor is not None)):
-                    raise QueueDeliveryError("queue-peer-history-page-invalid")
-                return values, cursor, limit
-            except QueueDeliveryError as exc:
-                # Only a definite read overflow authorizes a smaller read.
-                if exc.reason != "queue-websocket-message-oversized" or exc.ambiguous or limit == 1:
-                    raise
-                limit = max(1, limit // 2)
+    try:
+        endpoint = Path(path)
+        if (not endpoint.is_absolute() or endpoint.name != "app-server-control.sock"
+                or endpoint.parent.name != "app-server-control"):
+            return unknown("native-home-unbound")
+        home = endpoint.parent.parent
+        control_dir = endpoint.parent
+        if not _native_file(home, directory=True) or not _native_file(control_dir, directory=True):
+            return unknown("native-home-unsafe")
 
-    def count_items(items):
-        nonlocal inspected_items
-        inspected_items += len(items)
-        if inspected_items > MAX_PEER_HISTORY_ITEMS:
-            raise QueueDeliveryError("queue-peer-item-history-budget-exhausted")
+        state_path = home / "state_5.sqlite"
+        history_path = home / "thread_history_1.sqlite"
+        if not _native_file(state_path) or not _native_file(history_path):
+            return unknown("native-history-unavailable")
 
-    def turn_items(turn_id):
-        cursor = None
-        seen = set()
-        matches = []
-        limit = PEER_HISTORY_PAGE_SIZE
-        while True:
-            params = {"threadId": thread_id, "turnId": turn_id, "sortDirection": "asc"}
-            if cursor is not None:
-                params["cursor"] = cursor
-            values, next_cursor, limit = page("thread/items/list", params, limit)
-            count_items(values)
-            for entry in values:
-                item = entry.get("item") if isinstance(entry, dict) else None
-                if (not isinstance(entry, dict) or entry.get("turnId") != turn_id
-                        or not isinstance(item, dict) or not isinstance(item.get("type"), str)):
-                    raise QueueDeliveryError("queue-peer-item-history-invalid")
-                if item.get("clientId") == client_message_id:
-                    matches.append(item)
-            if next_cursor is None:
-                return matches
-            if next_cursor in seen:
-                raise QueueDeliveryError("queue-peer-history-cursor-invalid")
-            seen.add(next_cursor)
-            cursor = next_cursor
+        state_db = open_readonly(state_path)
+        native = state_db.execute(
+            "SELECT rollout_path, history_mode FROM threads WHERE id = ?",
+            (thread_id,),
+        ).fetchone()
+        if (native is None or native["history_mode"] != "paginated"
+                or not isinstance(native["rollout_path"], str)):
+            return unknown("native-thread-unbound")
 
-    cursor = None
-    seen_cursors = set()
-    seen_turns = set()
-    checked = 0
-    limit = PEER_HISTORY_PAGE_SIZE
-    maximum = MAX_QUEUE_PAGES * MAX_PAGE_SIZE
-    while checked < maximum:
-        items_counted = False
-        params = {"threadId": thread_id, "sortDirection": "desc", "itemsView": "full"}
-        if cursor is not None:
-            params["cursor"] = cursor
+        rollout = Path(native["rollout_path"])
+        if (not rollout.is_absolute()
+                or not _native_rollout_file(rollout, trusted_home=home)):
+            return unknown("native-rollout-unbound")
         try:
-            turns, next_cursor, limit = page("thread/turns/list", params, min(limit, maximum - checked))
-        except QueueDeliveryError as exc:
-            if exc.reason != "queue-websocket-message-oversized" or exc.ambiguous:
-                raise
-            # page() has already reduced to one. Read the shell, then every item
-            # of that same turn; a huge individual item still refuses enqueue.
-            turns, next_cursor, limit = page("thread/turns/list", dict(params, itemsView="notLoaded"), 1)
-            if (len(turns) != 1 or not isinstance(turns[0], dict)
-                    or not isinstance(turns[0].get("id"), str) or not turns[0]["id"]
-                    or turns[0].get("items") != []):
-                raise QueueDeliveryError("queue-peer-history-shell-invalid")
-            turns = [dict(turns[0], items=turn_items(turns[0]["id"]))]
-            items_counted = True
-        for turn in turns:
-            if (not isinstance(turn, dict) or not isinstance(turn.get("id"), str) or not turn["id"]
-                    or turn["id"] in seen_turns or not isinstance(turn.get("items"), list)
-                    or any(not isinstance(item, dict) or not isinstance(item.get("type"), str)
-                           for item in turn["items"])):
-                raise QueueDeliveryError("queue-peer-turn-history-invalid")
-            seen_turns.add(turn["id"])
-            if not items_counted:
-                count_items(turn["items"])
-        for turn in turns:
-            if any(item.get("clientId") == client_message_id for item in turn["items"]):
-                return turn
-        checked += len(turns)
-        if next_cursor is None:
-            return None
-        if next_cursor in seen_cursors:
-            raise QueueDeliveryError("queue-peer-history-cursor-invalid")
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-        limit = min(PEER_HISTORY_PAGE_SIZE, limit * 2)
-    raise QueueDeliveryError("queue-peer-history-budget-exhausted")
+            rollout_size = rollout.stat().st_size
+        except (OSError, ValueError):
+            return unknown("native-rollout-unbound")
+
+        history_db = open_readonly(history_path)
+        projection = history_db.execute(
+            "SELECT next_rollout_byte_offset, next_rollout_ordinal "
+            "FROM thread_history_projection_state WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        if projection is None:
+            return unknown("native-projection-missing")
+        projected_offset = projection["next_rollout_byte_offset"]
+        projected_ordinal = projection["next_rollout_ordinal"]
+        if (type(projected_offset) is not int or type(projected_ordinal) is not int
+                or projected_offset < 0 or projected_ordinal < 0):
+            return unknown("native-projection-invalid")
+
+        item_state = history_db.execute(
+            "SELECT COUNT(*) AS total, COUNT(rollout_ordinal) AS ordered, "
+            "MAX(rollout_ordinal) AS maximum FROM thread_items WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchone()
+        if (item_state["total"] != item_state["ordered"]
+                or (item_state["maximum"] is not None
+                    and item_state["maximum"] >= projected_ordinal)):
+            return unknown("native-projection-incomplete")
+        projection_complete = projected_offset == rollout_size
+
+        rows = history_db.execute(
+            "SELECT ti.turn_id, ti.item_id, ti.item_type, ti.item_json, "
+            "tt.turn_id AS confirmed_turn_id "
+            "FROM thread_items AS ti "
+            "LEFT JOIN thread_turns AS tt "
+            "ON tt.thread_id = ti.thread_id AND tt.turn_id = ti.turn_id "
+            "WHERE ti.thread_id = ? AND ti.item_type = 'userMessage' "
+            "AND json_extract(ti.item_json, '$.clientId') = ? "
+            "ORDER BY ti.rollout_ordinal LIMIT 2",
+            (thread_id, client_message_id),
+        ).fetchall()
+        if len(rows) > 1:
+            return _PeerObservation("conflict", reason="duplicate-client-id")
+        if rows:
+            row = rows[0]
+            try:
+                item = json.loads(row["item_json"])
+            except (TypeError, json.JSONDecodeError):
+                return unknown("candidate-json-invalid")
+            turn_id = row["turn_id"]
+            if (not isinstance(item, dict) or not isinstance(turn_id, str) or not turn_id
+                    or row["confirmed_turn_id"] != turn_id
+                    or item.get("clientId") != client_message_id
+                    or row["item_type"] != "userMessage"
+                    or item.get("type") != "userMessage"):
+                return _PeerObservation("conflict", reason="candidate-binding-conflict")
+            if (expected_message is not None
+                    and not _peer_text_input(item.get("content"), expected_message)):
+                return _PeerObservation("conflict", reason="candidate-content-conflict")
+            if not projection_complete:
+                return unknown("native-projection-incomplete")
+            return _PeerObservation("matched", {"id": turn_id, "items": [item]})
+        if not projection_complete:
+            return unknown("native-projection-incomplete")
+        return _PeerObservation("not_observed")
+    except (OSError, sqlite3.Error, TimeoutError, TypeError, ValueError):
+        return unknown("native-history-unavailable")
+    finally:
+        if history_db is not None:
+            history_db.close()
+        if state_db is not None:
+            state_db.close()
 
 
 def _start_interrupted_owned_item(
@@ -577,19 +616,19 @@ def _pending_item(items, client_message_id):
 
 
 def _known_consumed(path, thread_id, client_message_id, *, timeout, strict_history=False,
-                    session: DeliverySession | None = None):
+                    session: DeliverySession | None = None, expected_message=None):
+    if strict_history:
+        observation = _observe_peer_message(
+            path, thread_id, client_message_id, timeout=timeout,
+            expected_message=expected_message,
+        )
+        if observation.status == "conflict":
+            raise QueueDeliveryError("queue-peer-history-conflict")
+        return observation.turn if observation.status == "matched" else None
     try:
-        if strict_history:
-            return find_turn_by_client_message_id(path, thread_id, client_message_id,
-                                                 timeout=timeout, strict_history=True,
-                                                 **_session_kwargs(session))
         return find_turn_by_client_message_id(path, thread_id, client_message_id, timeout=timeout,
                                               **_session_kwargs(session))
     except QueueDeliveryError as exc:
-        if strict_history:
-            # A read failure permits a later normal read, never an add now.
-            raise QueueDeliveryError("queue-peer-history-unavailable:" + exc.reason,
-                                     ambiguous=exc.ambiguous) from exc
         # History can be unavailable or oversized on a long coding turn.
         # That is an ambiguous result under the accepted at-least-once policy,
         # never evidence of consumption. Exact pending lookup still follows.
@@ -628,6 +667,7 @@ def send_at_least_once(
     for retry in range(2):
         consumed = _known_consumed(path, thread_id, client_message_id, timeout=timeout,
                                    strict_history=require_message_match,
+                                   expected_message=message if require_message_match else None,
                                    **_session_kwargs(session))
         if consumed is not None:
             if require_message_match and not _exact_peer_content(consumed, client_message_id, message):
@@ -651,6 +691,7 @@ def send_at_least_once(
         # writer may still win after this read; accepted duplicates are benign.
         consumed = _known_consumed(path, thread_id, client_message_id, timeout=timeout,
                                    strict_history=require_message_match,
+                                   expected_message=message if require_message_match else None,
                                    **_session_kwargs(session))
         if consumed is not None:
             if require_message_match and not _exact_peer_content(consumed, client_message_id, message):

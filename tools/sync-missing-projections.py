@@ -51,7 +51,10 @@ def gitignored(path: Path) -> bool:
 
 def walk(domain: Path):
     for path in sorted((ROOT / domain).rglob("*")):
-        if any(part.startswith(".") for part in path.relative_to(ROOT / domain).parts):
+        parts = path.relative_to(ROOT / domain).parts
+        if (any(part.startswith(".") for part in parts)
+                or "__pycache__" in parts
+                or path.suffix in {".pyc", ".pyo"}):
             continue
         if gitignored(path):
             continue

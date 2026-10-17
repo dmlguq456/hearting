@@ -23,6 +23,7 @@ from dispatch_contract import resolve_dispatch_state_root as _resolve_dispatch_s
 INDEX_SCHEMA = 1
 REGISTRY_SCHEMA = 1
 IDENTITY_KEYS = ("pid", "starttime", "command_hash")
+_LEGACY_RESOURCE_IDENTITY_CACHE: dict[str, tuple[tuple[str, int, int], dict[str, list[dict]]]] = {}
 
 
 def agent_home() -> Path:
@@ -154,13 +155,28 @@ def legacy_resource_identity(run: dict) -> dict | None:
         if (wait.get('parent_attempt_id') != aid or wait.get('jobs') != run['jobs']
                 or not wait.get('owner_pid') or not wait.get('owner_start')):
             return None
-        owners = []
-        for line in Path(run['jobs']).read_text().splitlines():
-            fields = line.split('\t')
-            if len(fields) == 6:
-                meta = parse_registry_metadata(fields[5])
-                if meta.get('attempt_id') == aid:
-                    owners.append(meta)
+        jobs_path = Path(run['jobs'])
+        path = str(jobs_path)
+        try:
+            info = jobs_path.stat()
+            signature = (path, info.st_size, info.st_mtime_ns)
+        except OSError:
+            signature = None
+        cached = _LEGACY_RESOURCE_IDENTITY_CACHE.get(path)
+        if signature is not None and cached is not None and cached[0] == signature:
+            owners_by_attempt = cached[1]
+        else:
+            owners_by_attempt: dict[str, list[dict]] = {}
+            for line in jobs_path.read_text().splitlines():
+                fields = line.split('\t')
+                if len(fields) == 6:
+                    meta = parse_registry_metadata(fields[5])
+                    attempt_id = meta.get('attempt_id')
+                    if attempt_id:
+                        owners_by_attempt.setdefault(attempt_id, []).append(meta)
+            if signature is not None:
+                _LEGACY_RESOURCE_IDENTITY_CACHE[path] = (signature, owners_by_attempt)
+        owners = owners_by_attempt.get(aid, [])
         if len(owners) != 1:
             return None
         owner = owners[0]
@@ -252,7 +268,12 @@ def _owned_wrapper_awaiting_reap(run, pid, identity_reader):
 
 def classify_identity(run: dict, identity_reader=proc_identity) -> tuple[str, dict | None, str]:
     """Return working/reaping/exited/stale without trusting registry status."""
-    if not isinstance(run, dict) or any(run.get(key) in (None, "") for key in IDENTITY_KEYS):
+    if not isinstance(run, dict):
+        return "stale", None, "recorded-identity-incomplete"
+    if (not any(run.get(key) is not None for key in IDENTITY_KEYS)
+            and resource_never_started(run)):
+        return "exited", None, "launcher-recorded-not-started"
+    if any(run.get(key) in (None, "") for key in IDENTITY_KEYS):
         return "stale", None, "recorded-identity-incomplete"
     try:
         pid = int(run["pid"])
