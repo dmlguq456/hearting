@@ -28,6 +28,10 @@ TERMINAL_ACTOR = "late-terminal-result"
 TERMINAL_SCHEMA = "late-terminal-result/v1"
 _OUTPUT_FAILURE = "declared-artifact-missing"
 _SHA256 = re.compile(r"(?:sha256:)?([0-9a-f]{64})\Z")
+_MECHANICAL_GATE_REASONS = frozenset({
+    "completion-marker-absent", "declared-artifact-missing", "missing-terminal-gate",
+    "owner-terminal-not-pass", "terminal-gate-unproven",
+})
 
 
 def _canonical(value: Any) -> bytes:
@@ -208,14 +212,122 @@ def _marker_proofs(route: Mapping[str, Any], node: Mapping[str, Any], jobs: Path
     return result
 
 
+def _abandoned_cycle_snapshot(route: Mapping[str, Any], record: Mapping[str, Any]) -> dict | None:
+    """Read the immutable producer snapshot that records this cycle's abandon event."""
+    try:
+        import artifact_lifecycle as AL
+        import artifact_manifest as AM
+        import artifact_producer as AP
+
+        if (record.get("state") != "sealed" or record.get("deleted_at")
+                or record.get("abandon_reason") not in (None, "route-unrecoverable")):
+            return None
+        root = Path(route["artifact_root"]).resolve(strict=True)
+        manifest_path = AP._record_cycle_manifest_path(root, record)
+        current_raw = _read_regular(manifest_path)
+        current = json.loads(current_raw)
+        if (current.get("cycle", {}).get("cycle_id") != record.get("cycle_id")
+                or current.get("cycle", {}).get("state") != "abandoned"
+                or AM.manifest_digest(current) != record.get("manifest_digest")):
+            return None
+        events = [event for event in current.get("events", [])
+                  if isinstance(event, dict) and event.get("event_type") == "cycle.abandoned"
+                  and event.get("target_id") == record.get("cycle_id")]
+        if len(events) != 1:
+            return None
+        event = events[0]
+        provenance = event.get("provenance") or {}
+        revision_id = provenance.get("source_revision_id")
+        event_reason = (event.get("payload") or {}).get("abandon_reason")
+        if (event_reason != "route-unrecoverable"
+                or (record.get("abandon_reason") is not None
+                    and event_reason != record.get("abandon_reason"))
+                or (event.get("actor") or {}).get("id") != record.get("producer_id")
+                or not isinstance(revision_id, str)):
+            return None
+        snapshots = AL.read_manifest_snapshots(root, record["cycle_id"])
+        matches = [(raw, document) for raw, document in snapshots
+                   if document.get("manifest_revision_id") == revision_id]
+        if len(matches) != 1:
+            return None
+        snapshot_raw, document = matches[0]
+        if (document.get("cycle", {}).get("cycle_id") != record.get("cycle_id")
+                or document.get("cycle", {}).get("state") != "abandoned"
+                or not any(item.get("event_id") == event.get("event_id")
+                           and item.get("payload") == event.get("payload")
+                           for item in document.get("events", []) if isinstance(item, dict))):
+            return None
+        if not any(row.get("route_id") == route.get("route_id")
+                   and row.get("route_hash") == route.get("route_hash")
+                   for row in document.get("routes", []) if isinstance(row, dict)):
+            return None
+        cycle_dir = manifest_path.parent.resolve(strict=True)
+        artifact_base = (cycle_dir / "artifacts").resolve(strict=True)
+        artifact_digests = {}
+        for item in document.get("artifact_revisions", []) or []:
+            if not isinstance(item, dict):
+                continue
+            locator = (item.get("locator") or {}).get("path")
+            digest = item.get("content_digest")
+            if (not isinstance(locator, str) or not locator.startswith("artifacts/")
+                    or not isinstance(digest, str) or not _SHA256.fullmatch(digest)):
+                continue
+            candidate = (cycle_dir / locator).resolve(strict=False)
+            if candidate.is_relative_to(artifact_base):
+                artifact_digests[str(candidate)] = digest.removeprefix("sha256:")
+        return {"record": record, "manifest_path": str(manifest_path),
+                "snapshot_revision_id": revision_id, "snapshot_sha256": _sha(snapshot_raw),
+                "cycle_dir": str(cycle_dir), "artifact_base": str(artifact_base),
+                "artifact_digests": artifact_digests, "document": document}
+    except (ImportError, OSError, ValueError, KeyError, TypeError, AttributeError,
+            json.JSONDecodeError):
+        return None
+
+
+def _original_lab_run(route: Mapping[str, Any], arm: Mapping[str, Any],
+                      row: Mapping[str, Any]) -> tuple[dict, dict]:
+    """Find the exact run record retained by the producer snapshot at mechanical close."""
+    import artifact_producer as AP
+
+    root = Path(route["artifact_root"]).resolve(strict=True)
+    record = AP.route_cycle_for(root, route)
+    closure = _abandoned_cycle_snapshot(route, record) if record else None
+    base = Path(str(arm.get("artifact_base") or "")).resolve(strict=True)
+    if not closure or base != Path(closure["artifact_base"]):
+        raise ValueError("late-result-lab-original-roster-unproven")
+    cycle_dir = Path(closure["cycle_dir"])
+    candidates = []
+    for item in closure["document"].get("artifact_revisions", []) or []:
+        if not isinstance(item, dict):
+            continue
+        locator = (item.get("locator") or {}).get("path")
+        if not isinstance(locator, str) or Path(locator).name != "run.json":
+            continue
+        path = (cycle_dir / locator).resolve(strict=True)
+        if not path.is_relative_to(base):
+            continue
+        expected_sha = str(item.get("content_digest") or "").removeprefix("sha256:")
+        if not isinstance(expected_sha, str) or _file_digest(path) != expected_sha:
+            continue
+        document = json.loads(_read_regular(path))
+        if not isinstance(document, dict):
+            continue
+        resource = document.get("resource")
+        if (document.get("route") == route.get("route_id") and isinstance(resource, dict)
+                and resource.get("run_id") == row.get("run_id")):
+            candidates.append((path, expected_sha, document))
+    if not candidates or len({item[1] for item in candidates}) != 1:
+        raise ValueError("late-result-lab-original-roster-unproven")
+    source_path, source_sha, source_document = candidates[0]
+    if (not isinstance(source_document.get("arms"), dict) or not source_document["arms"]
+            or source_document.get("status") != "complete"):
+        raise ValueError("late-result-lab-original-roster-unproven")
+    return source_document, {"closure": closure, "path": str(source_path), "sha256": source_sha}
+
+
 def _lab_arm_proofs(route: Mapping[str, Any], arm: Mapping[str, Any], row: Mapping[str, Any],
                     run_path: Path, verification: list[dict]) -> dict | None:
-    """Recheck every bound arm in the existing autopilot-lab run-verify record.
-
-    The arm set comes from run.json. The existing run-verdict and per-arm
-    verification records remain the judgment authority; this only revalidates
-    their exact identities, provenance and bytes.
-    """
+    """Recheck the close-time producer roster against late run and verifier records."""
     if route.get("capability") != "autopilot-lab":
         return None
     try:
@@ -235,12 +347,24 @@ def _lab_arm_proofs(route: Mapping[str, Any], arm: Mapping[str, Any], row: Mappi
             or (row.get("source_commit") and run_document.get("source_commit")
                 and row.get("source_commit") != run_document.get("source_commit"))):
         raise ValueError("late-result-lab-run-record-binding-mismatch")
+    original_document, roster_source = _original_lab_run(route, arm, row)
+    original_arms = original_document["arms"]
+    original_resource = original_document.get("resource") or {}
+    if (not isinstance(original_resource, dict)
+            or (original_document.get("source_commit") is not None
+                and original_document.get("source_commit") != run_document.get("source_commit"))
+            or any(not isinstance(original_arms.get(arm_id), dict) for arm_id in original_arms)
+            or set(arms) != set(original_arms)
+            or any(original_resource.get(key) is not None
+                   and original_resource.get(key) != resource.get(key) for key in (
+                "run_id", "pid", "starttime", "command_hash", "sentinel", "log", "exit_code"))):
+        raise ValueError("late-result-lab-original-required-arms-mismatch")
     verdict_markers = [item for item in verification
                        if item.get("node") == "run-verify"
                        or Path(str(item.get("evidence_path") or "")).name == "run-verdict.json"]
     if not verdict_markers:
         raise ValueError("late-result-lab-run-verify-marker-absent")
-    required_arms = set(arms)
+    required_arms = set(original_arms)
     arm_proofs = []
     checked = []
     base = Path(str(arm.get("artifact_base") or "")).resolve(strict=True)
@@ -257,7 +381,22 @@ def _lab_arm_proofs(route: Mapping[str, Any], arm: Mapping[str, Any], row: Mappi
         seen_run_ids, seen_compute_ids, seen_trainers, seen_wrappers = set(), set(), set(), set()
         for arm_id in sorted(required_arms):
             execution = arms[arm_id]
+            original_execution = original_arms[arm_id]
             arm_verdict = verdict_arms[arm_id]
+            fixed_fields = ("run_id", "compute_run_id", "config_ref", "config_sha256",
+                            "config_manifest", "run_dir", "run_verify", "counters",
+                            "trainer_identity", "wrapper_identity", "ckpt_path", "best")
+            if any(execution.get(key) != original_execution.get(key) for key in fixed_fields):
+                raise ValueError("late-result-lab-original-arm-binding-mismatch:" + str(arm_id))
+            if (not isinstance(arm_verdict, dict)
+                    or any(key in arm_verdict and arm_verdict.get(key) != original_execution.get(source_key)
+                           for key, source_key in (("run_id", "run_id"),
+                                                   ("compute_run_id", "compute_run_id"),
+                                                   ("config_ref", "config_ref"),
+                                                   ("config_sha256", "config_sha256"),
+                                                   ("run_dir", "run_dir"),
+                                                   ("run_verify", "run_verify")))):
+                raise ValueError("late-result-lab-verdict-arm-binding-mismatch:" + str(arm_id))
             trainer = execution.get("trainer_identity")
             wrapper = execution.get("wrapper_identity")
             best = execution.get("best")
@@ -287,6 +426,11 @@ def _lab_arm_proofs(route: Mapping[str, Any], arm: Mapping[str, Any], row: Mappi
             if not per_arm_path.is_absolute():
                 per_arm_path = base / per_arm_path
             per_arm_path = per_arm_path.resolve(strict=True)
+            expected_artifacts = roster_source["closure"]["artifact_digests"]
+            for trusted_path in (config_manifest_path, snapshot_path, per_arm_path):
+                trusted_sha = expected_artifacts.get(str(trusted_path))
+                if trusted_sha is None or _file_digest(trusted_path) != trusted_sha:
+                    raise ValueError("late-result-lab-original-input-changed:" + str(arm_id))
             trainer_pid, trainer_start = trainer_key
             wrapper_pid, wrapper_start = wrapper_key
             positive_identity = lambda value: ((type(value) is int and value > 0)
@@ -365,7 +509,11 @@ def _lab_arm_proofs(route: Mapping[str, Any], arm: Mapping[str, Any], row: Mappi
             seen_compute_ids.add(compute_id)
             seen_trainers.add(trainer_key)
             seen_wrappers.add(wrapper_key)
-    return {"required_arms": sorted(required_arms), "run_verdict_path": str(verdict_markers[0]["evidence_path"]),
+    return {"required_arms": sorted(required_arms),
+            "original_roster": {"path": roster_source["path"], "sha256": roster_source["sha256"],
+                                "manifest_revision_id": roster_source["closure"]["snapshot_revision_id"],
+                                "manifest_snapshot_sha256": roster_source["closure"]["snapshot_sha256"]},
+            "run_verdict_path": str(verdict_markers[0]["evidence_path"]),
             "run_verdict_sha256": str(verdict_markers[0]["evidence_sha256"]),
             "arms": arm_proofs, "checked_files": checked}
 
@@ -586,7 +734,7 @@ def _verify_terminal_proof(proof: Mapping[str, Any], route_file: Path, route: Ma
                     if key not in {"idempotency_key", "proof_sha256"}}
         if proof.get("idempotency_key") != _sha(_canonical(key_body)):
             return False
-        if not _eligible(route, json.loads(outcome_raw)):
+        if not _eligible(route, json.loads(outcome_raw), jobs=jobs):
             return False
         module = _route_module()
         terminal = module.terminal_gate_observation(
@@ -617,7 +765,7 @@ def _verify_terminal_proof(proof: Mapping[str, Any], route_file: Path, route: Ma
             if current_identity != identity:
                 return False
         return True
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
         return False
 
 
@@ -705,9 +853,11 @@ def _verify_proof(proof: Mapping[str, Any], route_file: Path, route: Mapping[str
                 return False
         if verified_jobs is None:
             return False
-        failure_rows = {node["id"]: failure for node, failure in
-                        _failure_rows(route, WS.WorkflowLedger(route["route_id"],
-                                                               route["route_hash"], jobs=verified_jobs))}
+        verified_ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=verified_jobs)
+        current_outcome = json.loads(outcome_raw)
+        if not _eligible(route, current_outcome, jobs=verified_jobs, ledger=verified_ledger):
+            return False
+        failure_rows = {node["id"]: failure for node, failure in _failure_rows(route, verified_ledger)}
         proof_nodes = {execution.get("node") for execution in proof.get("executions") or []}
         if (set(failure_rows) != proof_nodes
                 or any(execution.get("original_failure") != failure_rows.get(execution.get("node"))
@@ -717,7 +867,7 @@ def _verify_proof(proof: Mapping[str, Any], route_file: Path, route: Mapping[str
             if _file_digest(Path(item["path"])) != item.get("sha256"):
                 return False
         return bool(proof.get("executions"))
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
         return False
 
 
@@ -728,9 +878,16 @@ def _producer_publication(route: Mapping[str, Any], proof: Mapping[str, Any]) ->
         record = AP.route_cycle_for(root, route)
         if not record:
             return {"status": "not-bound"}
-        if record.get("abandon_reason") or record.get("deleted_at"):
-            return {"status": "refused", "reason": "producer-cycle-explicitly-abandoned-or-deleted"}
-        directory = AP._record_cycle_manifest_path(root, record).parent.resolve(strict=True)
+        if record.get("deleted_at"):
+            return {"status": "refused", "reason": "producer-cycle-deleted"}
+        manifest_path = AP._record_cycle_manifest_path(root, record)
+        manifest = AP._read_json(manifest_path) if manifest_path.is_file() else None
+        abandoned = (isinstance(manifest, dict)
+                     and (manifest.get("cycle") or {}).get("state") == "abandoned")
+        if ((record.get("abandon_reason") or abandoned)
+                and not _abandoned_cycle_snapshot(route, record)):
+            return {"status": "refused", "reason": "producer-cycle-explicitly-abandoned-or-ambiguous"}
+        directory = manifest_path.parent.resolve(strict=True)
         artifacts_dir = directory / "artifacts"
         if artifacts_dir.is_symlink() or not artifacts_dir.is_dir():
             raise ValueError("late-result-producer-artifacts-dir-invalid")
@@ -777,21 +934,105 @@ def _producer_publication(route: Mapping[str, Any], proof: Mapping[str, Any]) ->
         return {"status": "pending", "reason": str(exc)}
 
 
-def _eligible(route: Mapping[str, Any], outcome: Mapping[str, Any]) -> bool:
+def _mechanical_terminal_failure(route: Mapping[str, Any], outcome: Mapping[str, Any], ledger,
+                                 state: Mapping[str, Any]) -> bool:
+    failed = {node for node, row in (state.get("nodes") or {}).items()
+              if row.get("state") == "FAILED_TERMINAL"}
+    terminal = set(WS.route_terminal_nodes(route))
+    gates = outcome.get("terminal_gates") or {}
+    if not isinstance(gates, dict) or not failed or not failed <= terminal:
+        return False
+    journal = ledger.journal()
+    for node in failed:
+        gate = gates.get(node) or {}
+        if (not isinstance(gate, dict) or gate.get("passed") is not False
+                or gate.get("reason") not in _MECHANICAL_GATE_REASONS):
+            return False
+        entry = next((item for item in reversed(journal)
+                      if item.get("node") == node and item.get("state") == "FAILED_TERMINAL"), None)
+        evidence = (entry or {}).get("evidence") or {}
+        artifacts = evidence.get("artifacts") or {}
+        reason = evidence.get("reason") or evidence.get("failure_class") or evidence.get("code")
+        missing_output = (artifacts.get("reason") == _OUTPUT_FAILURE
+                          and isinstance(artifacts.get("missing"), list) and bool(artifacts["missing"]))
+        if (entry is None or entry.get("actor") not in {"workflow-supervisor", "completion-controller"}
+                or evidence.get("decision") in {"stop", "revise"}
+                or (reason not in _MECHANICAL_GATE_REASONS and not missing_output)):
+            return False
+    return True
+
+
+def _mechanical_missing_record_close(route: Mapping[str, Any], outcome: Mapping[str, Any],
+                                     ledger, state: Mapping[str, Any]) -> bool:
+    failures = _failure_rows(route, ledger)
+    if (outcome.get("terminal_gate_proven") is not False or not failures
+            or state.get("journal_unreadable")):
+        return False
+    gates = outcome.get("terminal_gates") or {}
+    if not any(row.get("passed") is False and row.get("reason") in _MECHANICAL_GATE_REASONS
+               for row in gates.values() if isinstance(row, dict)):
+        return False
+    failure_nodes = {node["id"] for node, _ in failures}
+    mechanical_terminal_nodes = set()
+    has_failed_terminal_node = any(row.get("state") == "FAILED_TERMINAL"
+                                   for row in (state.get("nodes") or {}).values())
+    if has_failed_terminal_node:
+        if not _mechanical_terminal_failure(route, outcome, ledger, state):
+            return False
+        mechanical_terminal_nodes = {node for node, row in (state.get("nodes") or {}).items()
+                                     if row.get("state") == "FAILED_TERMINAL"}
+    failure_states = WS.vocabulary().get("failure_states", ())
+    return all(row.get("state") not in failure_states
+               or node in failure_nodes | mechanical_terminal_nodes
+               for node, row in (state.get("nodes") or {}).items())
+
+
+def _has_explicit_user_decision(route: Mapping[str, Any], ledger) -> bool:
+    try:
+        import route_parent_close
+        if route_parent_close.ledger_intent(route, ledger):
+            return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return True
+    return any(entry.get("actor") == "release"
+               and (entry.get("evidence") or {}).get("decision") in {"stop", "revise"}
+               for entry in ledger.journal())
+
+
+def _eligible(route: Mapping[str, Any], outcome: Mapping[str, Any], *, jobs=None, ledger=None) -> bool:
     if (outcome.get("terminal_gate_proven") is not False or outcome.get("autoclose") is not None
             or outcome.get("disposition") in {"abandoned", "operator-decision", "cancelled"}
             or route.get("stop_reason") is not None or route.get("workflow_state") == "CANCELLED"):
+        return False
+    if ledger is None:
+        ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
+    state = ledger.read_only_state()
+    if (state.get("journal_unreadable")
+            or state.get("workflow_state") in {"CANCELLED", "COMPLETE", "BLOCKED_HUMAN_GATE"}
+            or _has_explicit_user_decision(route, ledger)):
+        return False
+    has_failed_terminal_node = any(row.get("state") == "FAILED_TERMINAL"
+                                   for row in (state.get("nodes") or {}).values())
+    if (has_failed_terminal_node
+            and not _mechanical_terminal_failure(route, outcome, ledger, state)):
         return False
     try:
         import artifact_producer as AP
         record = AP.route_cycle_for(Path(route["artifact_root"]).resolve(), route)
         if record:
-            if record.get("abandon_reason") or record.get("deleted_at"):
+            if record.get("deleted_at"):
                 return False
             if record.get("state") == "sealed":
                 manifest_path = AP._record_cycle_manifest_path(Path(route["artifact_root"]), record)
                 manifest = AP._read_json(manifest_path) if manifest_path.is_file() else None
-                if not isinstance(manifest, dict) or (manifest.get("cycle") or {}).get("state") == "abandoned":
+                cycle_state = (manifest.get("cycle") or {}).get("state") if isinstance(manifest, dict) else None
+                if cycle_state == "abandoned":
+                    if (not _abandoned_cycle_snapshot(route, record)
+                            or not _mechanical_missing_record_close(route, outcome, ledger, state)):
+                        return False
+                elif record.get("abandon_reason"):
+                    return False
+                elif not isinstance(manifest, dict):
                     return False
     except (ImportError, KeyError, OSError, ValueError, TypeError):
         return False
@@ -809,18 +1050,22 @@ def adjudicate(route: Mapping[str, Any], route_file: Path, jobs: Path, *, lock_h
         outcome = json.loads(outcome_raw)
     except (OSError, ValueError, UnicodeError) as exc:
         return {"accepted": False, "reason": "closed-outcome-unreadable", "detail": str(exc)}
-    if not isinstance(outcome, dict) or not _eligible(route, outcome):
-        return {"accepted": False, "reason": "closed-outcome-not-eligible"}
     ledger = WS.WorkflowLedger(route["route_id"], route["route_hash"], jobs=jobs)
+    if not isinstance(outcome, dict) or not _eligible(route, outcome, jobs=jobs, ledger=ledger):
+        return {"accepted": False, "reason": "closed-outcome-not-eligible"}
     before = ledger.read_only_state()
     if before.get("journal_unreadable"):
         return {"accepted": False, "reason": "workflow-journal-unreadable"}
-    if before.get("workflow_state") in {"CANCELLED", "FAILED_TERMINAL", "COMPLETE", "BLOCKED_HUMAN_GATE"}:
+    if before.get("workflow_state") in {"CANCELLED", "COMPLETE", "BLOCKED_HUMAN_GATE"}:
+        return {"accepted": False, "reason": "workflow-terminal-condition-preserved"}
+    if (before.get("workflow_state") == "FAILED_TERMINAL"
+            and not _mechanical_terminal_failure(route, outcome, ledger, before)):
         return {"accepted": False, "reason": "workflow-terminal-condition-preserved"}
     if not before.get("journal_exists"):
         try:
             _terminal_candidate(route, route_file, outcome_raw, ledger, jobs)
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError,
+                json.JSONDecodeError) as exc:
             return {"accepted": False, "reason": str(exc)}
     try:
         import route_parent_close
@@ -831,9 +1076,14 @@ def adjudicate(route: Mapping[str, Any], route_file: Path, jobs: Path, *, lock_h
 
     def run_locked() -> dict:
         state = ledger.read_only_state()
-        if (state.get("workflow_state") in {"CANCELLED", "FAILED_TERMINAL", "COMPLETE", "BLOCKED_HUMAN_GATE"}
+        if (state.get("workflow_state") in {"CANCELLED", "COMPLETE", "BLOCKED_HUMAN_GATE"}
                 or state.get("journal_unreadable")):
             return {"accepted": False, "reason": "workflow-terminal-condition-preserved"}
+        if (state.get("workflow_state") == "FAILED_TERMINAL"
+                and not _mechanical_terminal_failure(route, outcome, ledger, state)):
+            return {"accepted": False, "reason": "workflow-terminal-condition-preserved"}
+        if not _eligible(route, outcome, jobs=jobs, ledger=ledger):
+            return {"accepted": False, "reason": "closed-outcome-not-eligible"}
         try:
             import route_parent_close
             if route_parent_close.ledger_intent(route, ledger):
@@ -871,7 +1121,8 @@ def adjudicate(route: Mapping[str, Any], route_file: Path, jobs: Path, *, lock_h
             return {"accepted": True, "created": True, "proof": proof}
         try:
             proof = _candidate(route, route_file, outcome_raw, ledger, jobs)
-        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError, AttributeError,
+                json.JSONDecodeError) as exc:
             return {"accepted": False, "reason": str(exc)}
         if not _verify_proof(proof, route_file, route, outcome_raw, jobs):
             return {"accepted": False, "reason": "late-result-snapshot-changed-before-append"}
@@ -929,7 +1180,7 @@ def current_outcome(route_file: Path, route: Mapping[str, Any], jobs: Path | Non
         row.get("state") not in WS.vocabulary().get("failure_states", ())
         or node in accepted_nodes
         for node, row in state.get("nodes", {}).items())
-    complete = bool(terminal_proofs) or (_eligible(route, outcome)
+    complete = bool(terminal_proofs) or (_eligible(route, outcome, jobs=jobs, ledger=ledger)
                 and _route_module().terminal_gate_proven(terminal) is True
                 and no_other_failures and state.get("workflow_state") != "CANCELLED"
                 and route.get("stop_reason") is None)
