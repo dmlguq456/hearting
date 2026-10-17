@@ -1017,7 +1017,6 @@ def _closed_unexecuted_continuation(root: Path, route: Mapping[str, Any]) -> boo
     if (not isinstance(outcome, dict)
             or outcome.get("route_id") != route["route_id"]
             or outcome.get("route_hash") != route["route_hash"]
-            or outcome.get("terminal_gate_proven") is not False
             or _indexed_route_children(root, route["route_id"], route["route_hash"])):
         return False
     try:
@@ -1029,6 +1028,14 @@ def _closed_unexecuted_continuation(root: Path, route: Mapping[str, Any]) -> boo
         if resolution.status not in ("exact", "aliased"):
             return False
         jobs = resolution.jobs_path
+        import late_resource_result
+        current = late_resource_result.current_outcome(
+            route_lineage.canonical_route_path(root, route["route_id"]), route, jobs=jobs)
+        if (current and (current.get("terminal_gate_proven") is True
+                         or current.get("resource_result_accepted") is True)):
+            return False
+        if current is None or current.get("terminal_gate_proven") is not False:
+            return False
         before = jobs.stat()
         lines = jobs.read_text(encoding="utf-8").splitlines()
         after = jobs.stat()
@@ -5886,6 +5893,14 @@ def _verify_sealed_cycle_locked(root: Path, record: Mapping[str, Any],
             raise ProducerError("already-sealed-mismatch", "historical-route-identity")
         outcome_path = artifact_lifecycle.canonical_outcome_path(root, rows[0]["route_id"])
         outcome = json.loads(outcome_path.read_text())
+        import late_resource_result
+        jobs_value = os.environ.get("AGENT_DISPATCH_JOBS")
+        current_outcome = late_resource_result.current_outcome(
+            route_path, route, jobs=Path(jobs_value) if jobs_value else None)
+        if current_outcome is not None:
+            outcome = current_outcome
+        if outcome.get("terminal_gate_proven") is not True:
+            raise ProducerError("already-sealed-mismatch", "historical-terminal-unproven")
         marker_digest = artifact_lifecycle._marker_digest(dispatch_terminal_commit._route_module(), route,
             recorded=True, recorded_gates=outcome.get("terminal_gates"))
         events = [e for e in document.get("events", [])
@@ -6191,6 +6206,12 @@ def _provisional_completion_context(root: Path, record: Mapping[str, Any],
         outcome_raw = Path(binding.outcome_file).read_bytes()
         outcome = json.loads(outcome_raw.decode("utf-8"))
         route_module = artifact_lifecycle._load_capability_route()
+        import late_resource_result
+        jobs_value = os.environ.get("AGENT_DISPATCH_JOBS")
+        current_outcome = late_resource_result.current_outcome(
+            Path(binding.route_file), sealed_route, jobs=Path(jobs_value) if jobs_value else None)
+        if current_outcome is not None:
+            outcome = current_outcome
         gates = route_module.terminal_gate_observation(
             sealed_route, exact_terminal=outcome.get("terminal_commit_id") is not None)
         from workflow_state import WorkflowLedger

@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 from route_identity import route_hash
 
 
-def closed_outcome(path: Path, route: dict) -> dict | None:
+def closed_outcome(path: Path, route: dict, jobs: Path | None = None) -> dict | None:
     """Only the exact route generation's closure is evidence of resolution."""
     try:
         outcome = json.loads(path.with_name(path.stem + ".outcome.json").read_text())
@@ -23,6 +24,12 @@ def closed_outcome(path: Path, route: dict) -> dict | None:
             or outcome.get("route_id") != route.get("route_id")
             or outcome.get("route_hash") != route.get("route_hash")):
         raise ValueError("notice-route-outcome-mismatch")
+    import late_resource_result
+    jobs_value = jobs if jobs is not None else os.environ.get("AGENT_DISPATCH_JOBS")
+    current = late_resource_result.current_outcome(
+        path, route, jobs=Path(jobs_value) if jobs_value else None)
+    if current is not None:
+        outcome = current
     if outcome.get("inline_finish_id"):
         import inline_finish
         pending = inline_finish.pending_state(Path(route.get("artifact_root", "")), route["route_id"])
@@ -31,6 +38,19 @@ def closed_outcome(path: Path, route: dict) -> dict | None:
         if pending.get("state") != "finished":
             outcome = dict(outcome, finish_pending=True, finish_state=pending.get("state"),
                            terminal_gate_proven=False)
+    from workflow_state import WorkflowLedger
+    import route_parent_close
+    ledger = WorkflowLedger(route["route_id"], route["route_hash"],
+                            jobs=Path(jobs_value) if jobs_value else None)
+    close_intent = route_parent_close.ledger_intent(route, ledger)
+    close_result = route_parent_close.settled_result(route, ledger)
+    if close_result and close_result.get("state") == "cancelled":
+        outcome = dict(outcome, state="cancelled", disposition="cancelled",
+                       cancellation_settled=True, parent_close_result=close_result,
+                       terminal_gate_proven=False)
+    elif close_intent:
+        outcome = dict(outcome, state="cancellation-pending", cancellation_requested=True,
+                       terminal_gate_proven=False)
     return outcome
 
 
@@ -58,7 +78,7 @@ def bound_route(metadata: dict, jobs: Path, expected_id: str = "", *, observer=N
 
 def route_obligation_closed(metadata: dict, jobs: Path) -> bool:
     bound = bound_route(metadata, jobs)
-    outcome = closed_outcome(*bound) if bound else None
+    outcome = closed_outcome(*bound, jobs=jobs) if bound else None
     return bool(outcome and not outcome.get("finish_pending"))
 
 
@@ -226,7 +246,7 @@ def _legacy_gate_current(record: dict, jobs: Path, child: dict, metadata: dict) 
     if bound is None:
         raise ValueError("notice-gate-route-unbound")
     path, route = bound
-    if closed_outcome(path, route):
+    if closed_outcome(path, route, jobs=jobs):
         return False
     gate = child["required_action"].removeprefix("human-gate:")
     node = next((n for n in route.get("nodes", []) if n.get("id") == record.get("route_node")), {})

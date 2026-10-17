@@ -1233,6 +1233,17 @@ Earlier FAIL journal entries survive; execution failure, cancellation and
 unknown identity remain unproven after a late file. Owner settlement uses
 the same resource output reconciliation without payload replay.
 
+The same exact evidence check may run during ordinary start, poll, or close after
+the route has already closed for that missing output. A proven result is appended
+to the existing workflow journal with the original failure and output digests;
+the raw outcome and historical producer revisions remain byte-for-byte intact.
+Every required execution, output, and existing verification binding must be
+rechecked. The current pure reader folds that adjudication with the original
+closure and all remaining terminal obligations. A result may be accepted while
+a successor handoff remains pending; that is not route completion. Explicit
+stop, cancellation, operator abandon, nonzero exit, live or unknown identity,
+foreign binding, and incomplete or failed verification remain unresolved.
+
 Registration and supervisor arming share the terminal-execution judgment for
 same-route/node retries. They retain the old row and predecessor binding;
 only that resource's failed/retryable state returns to running.

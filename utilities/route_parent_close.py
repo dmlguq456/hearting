@@ -6,6 +6,7 @@ outside producer artifacts. The journal is not an artifact protection scheme.
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -199,8 +200,14 @@ def request(route, path, *, jobs=None, stop_resources=False, summary=None, commi
         if existing:
             return existing
         outcome = path.with_suffix(".outcome.json")
-        if outcome.exists() and json.loads(outcome.read_text()).get("terminal_gate_proven") is True:
-            return None
+        if outcome.exists():
+            try:
+                import late_resource_result
+                current = late_resource_result.current_outcome(path, route, jobs=jobs)
+            except (OSError, ValueError, TypeError):
+                current = None
+            if current and current.get("terminal_gate_proven") is True:
+                return None
         jobs.parent.mkdir(parents=True, exist_ok=True)
         with Path(str(jobs) + ".lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
@@ -772,6 +779,15 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
     if prior:
         _finish_existing_cycle(route)
         return prior
+    try:
+        import late_resource_result
+        current = late_resource_result.current_outcome(path, route, jobs=jobs)
+    except (OSError, ValueError, TypeError):
+        current = None
+    if current and current.get("terminal_gate_proven") is True:
+        return current
+    outcome_target = path.with_suffix(".outcome.json")
+    original_outcome_raw = outcome_target.read_bytes() if outcome_target.is_file() else None
     resources = _resources_for_close(value, jobs)
     protected = {(r["kind"], r["run_id"], r.get("registry")): r
                  for r in value.get("protected_resources", [])}
@@ -876,7 +892,7 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
                 ledger.record(node["id"], "CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
         if ledger.state()["workflow_state"] != "CANCELLED":
             ledger.set_workflow_state("CANCELLED", evidence={"reason": NOTE}, actor="parent-close")
-        target = path.with_suffix(".outcome.json")
+        target = outcome_target
         if target.exists():
             existing = json.loads(target.read_text())
             if existing.get("terminal_gate_proven") is True:
@@ -893,10 +909,17 @@ def continue_close(value, *, jobs=None, grace=0.3, kill_wait=0.5):
                    "terminal_gate_proven": False, "state": "cancelled", "reason": NOTE,
                    "disposition": "cancelled", "summary": value.get("summary"), "head_commit": value.get("head_commit"),
                    "owner_attempt_id": value["owner_attempt_id"], "resources": resource_states}
+        if original_outcome_raw is not None:
+            outcome["historical_outcome_sha256"] = hashlib.sha256(original_outcome_raw).hexdigest()
         ledger._append({"at": WS.now_iso(), "route_id": route["route_id"],
                         "route_hash": route["route_hash"], "actor": "parent-close",
                         "evidence": {"parent_close_result": outcome}})
-        WS._atomic_write(target, json.dumps(outcome, indent=2) + "\n")
+        if original_outcome_raw is None:
+            if target.exists():
+                raise ValueError("route-parent-close-outcome-conflict")
+            WS._atomic_write(target, json.dumps(outcome, indent=2) + "\n")
+        elif target.read_bytes() != original_outcome_raw:
+            raise ValueError("route-parent-close-outcome-conflict")
     _finish_existing_cycle(route)
     return outcome
 

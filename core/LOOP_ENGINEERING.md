@@ -105,6 +105,15 @@ consumption but never overwrites a past result. Follow-up work connects exact
 lineage and current evidence instead of rewriting the original. Reusing existing
 work is distinct from producing a new verification PASS.
 
+When an exact successful execution was closed only because its declared output
+was missing, a later ordinary start, poll, or close may recheck that same
+execution and its required output and verification evidence. Record any accepted
+result as an append-only adjudication tied to the original failure and execution;
+keep the original outcome and producer revisions unchanged. A pure current-state
+reader folds that adjudication with the existing terminal gates and pending
+handoffs. It cannot turn an unmet handoff, explicit stop, unknown identity, or
+failed verification into completion.
+
 ## 5. Remove duplicated decisions before stacking exceptions
 
 A repair does not end at letting the one failing branch pass. Find the writers,
