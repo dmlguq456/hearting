@@ -368,13 +368,15 @@ check_non_claude_adapter_symlink_boundaries() {
         adapters/codex/utilities/token-budget.py:../../../utilities/token-budget.py|\
         adapters/codex/utilities/token-budget-experiment.py:../../../utilities/token-budget-experiment.py|\
         adapters/codex/utilities/worker_bootstrap.py:../../../utilities/worker_bootstrap.py|\
+        adapters/codex/utilities/late_resource_result.py:../../../utilities/late_resource_result.py|\
         adapters/opencode/utilities/agent-worklog-state.sh:../../../utilities/agent-worklog-state.sh|\
         adapters/opencode/utilities/artifact-root.sh:../../../utilities/artifact-root.sh|\
         adapters/opencode/utilities/harness-status.sh:../../../utilities/harness-status.sh|\
         adapters/opencode/utilities/worktree-cleanup.py:../../../utilities/worktree-cleanup.py|\
         adapters/opencode/utilities/dispatch-route.sh:../../../utilities/dispatch-route.sh|\
         adapters/opencode/utilities/dispatch-defaults.py:../../../utilities/dispatch-defaults.py|\
-        adapters/opencode/utilities/worker_bootstrap.py:../../../utilities/worker_bootstrap.py)
+        adapters/opencode/utilities/worker_bootstrap.py:../../../utilities/worker_bootstrap.py|\
+        adapters/opencode/utilities/late_resource_result.py:../../../utilities/late_resource_result.py)
           ;;
         *)
           fail_msg "$link points to $target; $adapter adapter symlinks must be explicitly allowlisted portable projections"
@@ -1259,7 +1261,7 @@ check_codex_utility_projection() {
     fail_msg "adapters/codex/utilities/agent-home.sh must support the Codex runtime hearting pointer"
   fi
 
-  for p in artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py token-budget.py token-budget-experiment.py worker_bootstrap.py; do
+  for p in artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py token-budget.py token-budget-experiment.py worker_bootstrap.py late_resource_result.py; do
     if [ ! -L "adapters/codex/utilities/$p" ]; then
       fail_msg "adapters/codex/utilities/$p must be a selective portable utility projection"
       continue
@@ -1270,7 +1272,7 @@ check_codex_utility_projection() {
     fi
   done
 
-  extra=$(find adapters/codex/utilities -mindepth 1 -maxdepth 1 ! -name __pycache__ ! -path '*/__pycache__/*' ! -name '*.py[co]' ! \( -name agent-home.sh -o -name artifact-root.sh -o -name agent-worklog-state.sh -o -name harness-status.sh -o -name worktree-cleanup.py -o -name dispatch-route.sh -o -name dispatch-defaults.py -o -name token-budget.py -o -name token-budget-experiment.py -o -name worker_bootstrap.py \) -print 2>/dev/null || true)
+  extra=$(find adapters/codex/utilities -mindepth 1 -maxdepth 1 ! -name __pycache__ ! -path '*/__pycache__/*' ! -name '*.py[co]' ! \( -name agent-home.sh -o -name artifact-root.sh -o -name agent-worklog-state.sh -o -name harness-status.sh -o -name worktree-cleanup.py -o -name dispatch-route.sh -o -name dispatch-defaults.py -o -name token-budget.py -o -name token-budget-experiment.py -o -name worker_bootstrap.py -o -name late_resource_result.py \) -print 2>/dev/null || true)
   if [ -n "$extra" ]; then
     fail_msg "adapters/codex/utilities contains unapproved entries:"
     printf '%s\n' "$extra"
@@ -1285,7 +1287,7 @@ check_codex_utility_projection() {
   # codex-adapter-parity audit P-40 (2026-07-04): derived under-projection completeness pair — every
   # top-level utilities/* entry must be classified projected or deferred, else fail loud (closes the
   # leak window where a newly added utility silently has no projection decision).
-  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py token-budget.py token-budget-experiment.py worker_bootstrap.py codex_tui_config.py"
+  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py token-budget.py token-budget-experiment.py worker_bootstrap.py late_resource_result.py codex_tui_config.py"
   UTILITY_DEFERRED=$(census utility-deferred)
   utility_count=0
   for f in utilities/*; do
@@ -2293,7 +2295,7 @@ check_opencode_utility_projection() {
     fail_msg "adapters/opencode/utilities/agent-home.sh must support the OpenCode runtime hearting pointer"
   fi
 
-  for p in artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py worker_bootstrap.py; do
+  for p in artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py worker_bootstrap.py late_resource_result.py; do
     if [ ! -L "adapters/opencode/utilities/$p" ]; then
       fail_msg "adapters/opencode/utilities/$p must be a selective portable utility projection"
       continue
@@ -2304,7 +2306,7 @@ check_opencode_utility_projection() {
     fi
   done
 
-  extra=$(find adapters/opencode/utilities -mindepth 1 -maxdepth 1 ! -name __pycache__ ! -path '*/__pycache__/*' ! -name '*.py[co]' ! \( -name agent-home.sh -o -name artifact-root.sh -o -name agent-worklog-state.sh -o -name harness-status.sh -o -name worktree-cleanup.py -o -name dispatch-route.sh -o -name dispatch-defaults.py -o -name worker_bootstrap.py \) -print 2>/dev/null || true)
+  extra=$(find adapters/opencode/utilities -mindepth 1 -maxdepth 1 ! -name __pycache__ ! -path '*/__pycache__/*' ! -name '*.py[co]' ! \( -name agent-home.sh -o -name artifact-root.sh -o -name agent-worklog-state.sh -o -name harness-status.sh -o -name worktree-cleanup.py -o -name dispatch-route.sh -o -name dispatch-defaults.py -o -name worker_bootstrap.py -o -name late_resource_result.py \) -print 2>/dev/null || true)
   if [ -n "$extra" ]; then
     fail_msg "adapters/opencode/utilities contains unapproved entries:"
     printf '%s\n' "$extra"
@@ -2319,7 +2321,7 @@ check_opencode_utility_projection() {
   # codex-adapter-parity audit P-40 (2026-07-04): derived under-projection completeness pair — every
   # top-level utilities/* entry must be classified projected or deferred, else fail loud (closes the
   # leak window where a newly added utility silently has no projection decision).
-  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py worker_bootstrap.py codex_tui_config.py"
+  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py worker_bootstrap.py late_resource_result.py codex_tui_config.py"
   UTILITY_DEFERRED=$(census utility-deferred)
   utility_count=0
   for f in utilities/*; do

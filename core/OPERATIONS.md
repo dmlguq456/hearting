@@ -1237,8 +1237,8 @@ The same exact evidence check may run during ordinary start, poll, or close afte
 the route has already closed for that missing output. A proven result is appended
 to the existing workflow journal with the original failure and output digests;
 the raw outcome and historical producer revisions remain byte-for-byte intact.
-Every required execution, output, and existing verification binding must be
-rechecked. The current pure reader folds that adjudication with the original
+The adjudicator rechecks every required execution, output, and existing
+verification binding. The current pure reader folds that result with the original
 closure and all remaining terminal obligations. A result may be accepted while
 a successor handoff remains pending; that is not route completion. Explicit
 stop, cancellation, operator abandon, nonzero exit, live or unknown identity,
