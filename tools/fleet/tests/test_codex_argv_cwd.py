@@ -13,6 +13,15 @@ class CodexArgvCwdTest(unittest.TestCase):
         ):
             self.assertEqual(codex_effective_cwd(argv, observed), "/tmp/project")
 
+    def test_hidden_yolo_alias_does_not_stop_root_option_parsing(self):
+        # `--yolo` is the valueless hidden alias of
+        # --dangerously-bypass-approvals-and-sandbox; a cwd option after it applies.
+        for argv in (
+            ["codex", "--yolo", "-C", "/tmp/project"],
+            ["codex", "--yolo", "--cd=/tmp/project"],
+        ):
+            self.assertEqual(codex_effective_cwd(argv, "/tmp/shell"), "/tmp/project")
+
     def test_relative_uses_launch_cwd_and_unknown_keeps_observed(self):
         self.assertEqual(codex_effective_cwd(
             ["codex", "-C", "project"], "/tmp/start/project", "/tmp/start"),

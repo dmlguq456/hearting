@@ -50,7 +50,7 @@ class PaneOwnershipTest(unittest.TestCase):
         self.thread_env.start()
         self.addCleanup(self.thread_env.stop)
 
-    def runtime(self, harness="claude"):
+    def runtime(self, harness="claude", *extra_argv):
         master, slave = pty.openpty()
         env = os.environ.copy()
         for name in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
@@ -63,7 +63,7 @@ class PaneOwnershipTest(unittest.TestCase):
             os.setsid()
             fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
-        proc = subprocess.Popen([harness, "-c", "import time; time.sleep(60)"],
+        proc = subprocess.Popen([harness, "-c", "import time; time.sleep(60)", *extra_argv],
                                 executable=sys.executable, stdin=slave,
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
                                 preexec_fn=terminal)
@@ -173,6 +173,29 @@ class PaneOwnershipTest(unittest.TestCase):
                 mock.patch.object(po, "_read_codex_footer_threads", return_value={"different-thread"}), \
                 mock.patch.object(po, "_registered_worker", return_value=False):
             self.assertEqual(self.verify(foreground.pid, "codex", current), "")
+
+    def test_yolo_tui_proves_its_thread_and_refuses_a_foreign_one(self):
+        from fleet.collectors import codex, procscan
+        foreground = self.runtime("codex", "--yolo")
+        self.foreground(foreground)
+        current = "019facc9-fe83-7480-89f6-9e64fbebf0ca"
+        foreign = "019facc9-fe83-7480-89f6-9e64fbebf0cb"
+        owner_env = {"HERDR_PANE_ID": "wB:p3N", "HERDR_SOCKET_PATH": ""}
+        # Only the daemon's origin/listener facts are faked; the foreground
+        # argv gate (procscan.invocation_mode) runs for real.
+        with mock.patch.object(procscan, "read_environ", return_value=owner_env), \
+                mock.patch.object(procscan, "_comm_of", return_value="codex"), \
+                mock.patch.object(codex, "_proc_rollout", return_value=None), \
+                mock.patch.object(codex, "_daemon_thread_origins",
+                                  return_value={current: (41301, "user")}), \
+                mock.patch.object(codex, "_tcp_listener_snapshot",
+                                  return_value=(frozenset({"1"}), frozenset({foreground.pid}))), \
+                mock.patch.object(codex, "_daemon_endpoint_current", return_value=True), \
+                mock.patch.object(codex, "_listener_unchanged", return_value=True), \
+                mock.patch.object(po, "_read_codex_footer_threads", return_value=set()), \
+                mock.patch.object(po, "_registered_worker", return_value=False):
+            self.assertEqual(self.verify(foreground.pid, "codex", current), "wB:p3N")
+            self.assertEqual(self.verify(foreground.pid, "codex", foreign), "")
 
     def test_loader_pane_and_endpoint_stay_paired_for_later_actions(self):
         from fleet.collectors import procscan

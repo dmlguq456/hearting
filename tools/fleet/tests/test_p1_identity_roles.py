@@ -367,6 +367,14 @@ class ProcessRolesTest(unittest.TestCase):
             self.assertEqual(procscan.invocation_mode(harness, [harness, "--unknown-option", command]),
                              "unknown")
 
+    def test_codex_yolo_alias_is_a_session_flag(self):
+        self.assertEqual(procscan.invocation_mode("codex", ["codex", "--yolo"]), "session")
+        # A valueless flag must not swallow the word after it.
+        self.assertEqual(procscan.invocation_mode("codex", ["codex", "--yolo", "resume"]), "session")
+        self.assertEqual(procscan.invocation_mode("codex", ["codex", "--yolo", "app-server"]), "command")
+        for argv in (["codex", "--yolo-not-a-flag"], ["codex", "--unknown-option"]):
+            self.assertEqual(procscan.invocation_mode("codex", argv), "unknown")
+
     def test_native_rollout_fd_keeps_a_headless_session_command(self):
         s = Session(harness="codex", pid=994241, proc_start="777", cwd="/proj",
                     session_id="0f5d1a7e-5b1c-4d2e-9f3a-2b6c8d0e1f47", app_server=True)
