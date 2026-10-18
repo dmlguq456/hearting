@@ -1098,6 +1098,11 @@ def _settled_gate_rows(route_module, route, request, gates, *, historical=False)
     nodes = {node.get("id"): node for node in route.get("nodes", []) if isinstance(node, dict)}
     try:
         outcome = json.loads(route_module.outcome_path(request.route_file).read_text(encoding="utf-8"))
+        import late_resource_result
+        current = late_resource_result.current_outcome(
+            request.route_file, route, jobs=request.jobs)
+        if current is not None:
+            outcome = current
     except (OSError, ValueError, TypeError, AttributeError):
         outcome = None
     recorded = outcome.get("terminal_gates") if isinstance(outcome, Mapping) else None
@@ -1540,6 +1545,10 @@ def _read_sealed_owner_envelope(request, commit_id):
 
 def _verify_settled_outputs(request, route, commit_id, binding, *, historical=False):
     outcome = json.loads(_route_module().outcome_path(request.route_file).read_text())
+    import late_resource_result
+    current = late_resource_result.current_outcome(request.route_file, route, jobs=request.jobs)
+    if current is not None:
+        outcome = current
     if (outcome.get("terminal_commit_id") != commit_id
             or outcome.get("terminal_gate_proven") is not True
             or outcome.get("route_id") != route["route_id"]

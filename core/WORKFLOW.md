@@ -941,6 +941,14 @@ and the now-present output and records that resolved observation in the journal.
 It neither reruns the resource nor launches a successor; actual resource failure,
 changed evidence, and missing outputs remain unresolved.
 
+The same exact recheck is available after a route closed on that missing output.
+An ordinary start, poll, or close may append an adjudication to the existing
+workflow journal when the original exit, every required output, and existing
+verification gates still prove. The original failure and outcome remain at their
+original paths and bytes. Current readers fold the added proof with remaining
+terminal obligations; accepting a resource result does not satisfy a pending
+successor handoff or complete the route by itself.
+
 **Every non-terminal stage declares exactly one continuation.** A stage graph
 that leaves a stage with no way to reach the next one is the defect this
 contract exists to prevent, so the declaration is mechanical, not editorial:

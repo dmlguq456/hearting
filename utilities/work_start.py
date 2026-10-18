@@ -1247,7 +1247,7 @@ def _first_leg_state(root, decision_record, jobs, receipt):
     from dispatch_notice_state import closed_outcome
     import inline_finish
     pending = inline_finish.pending_state(root, leg_route["route_id"])
-    if closed_outcome(leg_path, leg_route) or (pending and pending.get("state") != "finished"):
+    if closed_outcome(leg_path, leg_route, jobs=jobs) or (pending and pending.get("state") != "finished"):
         return start_work(leg_route, leg_path, jobs)
     aid = receipt.get("owner_attempt_id")
     row = _rows(jobs).get(aid) if aid else None
@@ -1286,7 +1286,7 @@ def _framed_settle(route, path, jobs, result, *, closed=None, wait=False, run=su
             if closed is None:
                 # A start that waited on the lock may find the decision already ended.
                 from dispatch_notice_state import closed_outcome
-                closed = closed_outcome(Path(path), route)
+                closed = closed_outcome(Path(path), route, jobs=jobs)
                 if closed and closed.get("terminal_gate_proven") is not True:
                     return {**result, "state": "needs-attention", "reason": "route-closed-unproven",
                             "required_action": "inspect-closed-route", "outcome": closed}
@@ -1586,7 +1586,14 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
     if pending and pending.get("state") != "finished":
         return {**result, "state":"needs-attention", "reason":"finish-pending",
                 "required_action":"resume-inline-finish", "finish_state":pending.get("state")}
-    closed = closed_outcome(path, route)
+    try:
+        raw_outcome = json.loads(_route_module().outcome_path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        raw_outcome = None
+    if isinstance(raw_outcome, dict) and raw_outcome.get("terminal_gate_proven") is False:
+        import late_resource_result
+        result["resource_adjudication"] = late_resource_result.adjudicate(route, path, jobs)
+    closed = closed_outcome(path, route, jobs=jobs)
     if closed and closed.get("autoclose"):
         # The runtime closed this route after it sat unused (route_autoclose.py).
         # Nothing to repair: the same work starts again as a new route.
@@ -1603,6 +1610,15 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         # Replaying a finished request cannot prepare frames or reopen a cycle.
         # A closure with an explicitly unproven gate is not successful work.
         if closed.get("terminal_gate_proven") is not True:
+            if closed.get("resource_result_accepted"):
+                return {**result, "state": "needs-attention",
+                        "reason": "resource-result-accepted-terminal-gates-pending",
+                        "required_action": "inspect-closed-route", "outcome": closed,
+                        "resource_result_accepted": True,
+                        "pending_terminal_gates": [node for node, row in
+                                                   (closed.get("terminal_gates") or {}).items()
+                                                   if row.get("passed") is not True],
+                        "pending_terminal_conditions": closed.get("terminal_completion_pending", [])}
             return {**result, "state": "needs-attention", "reason": "route-closed-unproven",
                     "required_action": "inspect-closed-route", "outcome": closed}
         if RP.is_framed_route(route):

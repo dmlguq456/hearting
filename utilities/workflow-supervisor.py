@@ -683,7 +683,9 @@ def reopen_resource_output_failure(route, ledger, armed):
             or (stage.get("state") != "FAILED_RETRYABLE" and not recovering)
             or previous.get("succeeded") is not True or previous.get("exit_code") != 0
             or not previous.get("resource_sha256")
-            or (previous.get("artifacts") or {}).get("reason") != "declared-artifact-missing"):
+            or not (((previous.get("artifacts") or {}).get("reason") == "declared-artifact-missing"
+                     and (previous.get("artifacts") or {}).get("missing"))
+                    or previous.get("runtime_only_output") is True)):
         return False
     if any(row.get("state") in WS.vocabulary()["failure_states"]
            for node, row in ledger.state()["nodes"].items() if node != armed["node"]):
@@ -698,6 +700,12 @@ def reopen_resource_output_failure(route, ledger, armed):
         resource_output_evidence(route, armed, current)
         if artifact_evidence(armed).get("missing"):
             return False
+        if previous.get("runtime_only_output") is True:
+            import resource_run_evidence as RUN_EVIDENCE
+            output = RUN_EVIDENCE.paths(armed).get("runtime_output")
+            document, _preimage = RUN_EVIDENCE.read_document(output) if output else ({}, None)
+            if RUN_EVIDENCE.runtime_only(document):
+                return False
     except (OSError, ValueError, SupervisorError, KeyError):
         return False
     state = ledger.state()
@@ -926,8 +934,13 @@ def _evaluate(route, ledger, armed, results):
         results.append(row)
         return
     runtime_only = runtime_output.get("runtime_only") is True
-    if ((artifacts.get("checked") and artifacts.get("missing")) or
-            (runtime_only and row_data is not None and row_data.get("resource_policy") == "supervised-owner")):
+    concrete_outputs = RUN_EVIDENCE.outputs(armed)
+    runtime_only_required = bool(runtime_only and (
+        (row_data is not None and row_data.get("resource_policy") == "supervised-owner")
+        or (route.get("capability") == "autopilot-lab" and concrete_outputs == ["run.json"])))
+    if runtime_only_required:
+        evidence["runtime_only_output"] = True
+    if ((artifacts.get("checked") and artifacts.get("missing")) or runtime_only_required):
         if row_data is not None and row_data.get("resource_policy") == "supervised-owner":
             evidence["awaiting_next_resource"] = True
             evidence["runtime_only_output"] = runtime_only
@@ -1045,6 +1058,32 @@ def _poll_once_locked(route, ledger):
 
 
 def poll_once(route, ledger):
+    # A closed false outcome is observed through the same normal poll entry. The
+    # adjudicator only appends exact proof; polling a closed route never resumes
+    # its failed node or claims a successor.
+    armed_rows = read_armed(ledger)
+    route_file = next((Path(row["route_file"]) for row in armed_rows.values()
+                       if row.get("route_file")), None)
+    jobs = next((Path(row["jobs"]) for row in armed_rows.values() if row.get("jobs")), None)
+    if route_file is None:
+        try:
+            route_file = route_module().canonical_route_path(Path(route["artifact_root"]), route["route_id"])
+        except (KeyError, TypeError, ValueError):
+            route_file = None
+    import route_parent_close
+    closing = route_parent_close.ledger_intent(route, ledger)
+    if route_file is not None and not closing:
+        try:
+            outcome_raw = route_module().outcome_path(route_file).read_bytes()
+            outcome = json.loads(outcome_raw)
+        except (OSError, ValueError, UnicodeError):
+            outcome = None
+        if isinstance(outcome, dict) and outcome.get("terminal_gate_proven") is False:
+            import late_resource_result
+            adjudication = late_resource_result.adjudicate(route, route_file, jobs)
+            current = late_resource_result.current_outcome(route_file, route, jobs=jobs)
+            return [{"action": "resource-result-accepted" if current and current.get("resource_result_accepted")
+                     else "closed-route-preserved", "adjudication": adjudication, "outcome": current or outcome}]
     with ledger.lock():
         results = _poll_once_locked(route, ledger)
         import route_parent_close
@@ -2503,20 +2542,23 @@ def _stage_projection(route, node_states):
     return running, next_stage
 
 
-def _closed_terminal_projection(route, route_file, gates, node_states, claims):
+def _closed_terminal_projection(route, route_file, gates, node_states, claims, jobs=None):
     """Read-only proof that a closed route's exact terminal gate is current."""
     if not route_file or not gates:
         return False
-    if any(str(row.get("state", "")).startswith("FAILED")
-           or row.get("state") == "RUNNING" for row in node_states.values()):
-        return False
     try:
-        outcome = json.loads(route_module().outcome_path(route_file).read_text(encoding="utf-8"))
+        from dispatch_notice_state import closed_outcome
+        outcome = closed_outcome(Path(route_file), route, jobs=jobs)
     except (OSError, ValueError, TypeError):
         return False
+    if not isinstance(outcome, dict):
+        return False
+    accepted = set(outcome.get("resource_result_nodes") or [])
+    if any((str(row.get("state", "")).startswith("FAILED") and node not in accepted)
+           or row.get("state") == "RUNNING" for node, row in node_states.items()):
+        return False
     return bool(
-        isinstance(outcome, dict)
-        and outcome.get("route_id") == route.get("route_id")
+        outcome.get("route_id") == route.get("route_id")
         and outcome.get("route_hash") == route.get("route_hash")
         and outcome.get("terminal_gate_proven") is True
         and route_module().terminal_gate_proven(gates) is True
@@ -2535,7 +2577,8 @@ def cmd_status(args):
     failed = {node: row for node, row in node_states.items()
               if str(row.get("state", "")).startswith("FAILED")}
     running, next_stage = _stage_projection(route, node_states)
-    closed_complete = _closed_terminal_projection(route, args.route, gates, node_states, claims)
+    closed_complete = _closed_terminal_projection(
+        route, args.route, gates, node_states, claims, jobs=getattr(args, "jobs", None))
     derived = WS.derive_workflow_state(
         node_states, terminal_nodes,
         terminal_gates_passed=bool(gates) and all(row["passed"] for row in gates.values()),

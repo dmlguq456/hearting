@@ -111,6 +111,15 @@ consumption nor absence. First-send eligibility comes from the existing pending
 record and its claim boundary; after an attempt, the existing delivery lineage
 owns further observation. Do not turn uncertain history into a new retry rule.
 
+For an exact successful execution closed only because its declared output was
+missing, a later ordinary start, poll, or close may recheck that same execution,
+its required output, and existing verification evidence. Record any accepted
+result as an append-only adjudication tied to the original failure and execution;
+keep the original outcome and producer revisions unchanged. A pure current-state
+reader folds that adjudication with the existing terminal gates and pending
+handoffs. It cannot turn an unmet handoff, explicit stop, unknown identity, or
+failed verification into completion.
+
 ## 5. Remove duplicated decisions before stacking exceptions
 
 A repair does not end at letting the one failing branch pass. Find the writers,

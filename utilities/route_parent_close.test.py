@@ -903,6 +903,24 @@ class ParentCloseTest(unittest.TestCase):
         self.assertEqual(replay.returncode, 0, replay.stderr)
         self.assertEqual(json.loads(replay.stdout), json.loads(first.stdout))
 
+    def test_explicit_parent_cancel_preserves_an_existing_false_outcome(self):
+        outcome, _created = ROUTE.close_route(
+            self.route, self.path, allow_unproven=True, jobs=self.jobs)
+        self.assertFalse(outcome["terminal_gate_proven"])
+        original = self.path.with_suffix(".outcome.json").read_bytes()
+        owner = self.process("att-owner")
+        self.row("att-owner", process=owner)
+
+        cancelled = self.close()
+
+        self.assertEqual(cancelled["state"], "cancelled")
+        self.assertEqual(self.path.with_suffix(".outcome.json").read_bytes(), original)
+        import dispatch_notice_state as NOTICE
+        current = NOTICE.closed_outcome(self.path, self.route, jobs=self.jobs)
+        self.assertEqual(current["state"], "cancelled")
+        self.assertTrue(current["cancellation_settled"])
+        self.assertFalse(current["terminal_gate_proven"])
+
     def test_resource_in_owner_group_survives_and_missing_output_does_not_change_replay(self):
         pidfile = self.base / "child.pid"
         script = ("import os,time; p=os.fork(); "
