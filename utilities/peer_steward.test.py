@@ -45,6 +45,7 @@ peer_steward = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(peer_steward)
 sys.path.insert(0, str(_HERE.parent / "tools"))
 import fixture_processes  # noqa: E402
+terminal_surface = peer_steward.terminal_surface
 
 
 class _TmpRootMixin:
@@ -5848,6 +5849,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
 
 
 class GridStartTest(_TmpRootMixin, unittest.TestCase):
+    """Start through the shared pane opener; its placement cases live in terminal_surface.test.py."""
     FULL = [(10, 2, 200, 100)]
     TWO = [(10, 2, 100, 100), (110, 2, 100, 100)]
     THREE = [(10, 2, 100, 100), (110, 2, 100, 50), (110, 52, 100, 50)]
@@ -5859,136 +5861,22 @@ class GridStartTest(_TmpRootMixin, unittest.TestCase):
                 "panes": [{"pane_id": f"w1:p{i}", "rect": dict(zip(("x", "y", "width", "height"), rect))}
                           for i, rect in enumerate(rects)]}
 
-    def decision(self, layout, free=None, foreground=None, prompt=True):
-        free = free or set()
-        def run(argv, **kwargs):
-            key = "tabs" if argv[1:3] == ["tab", "list"] else "layout"
-            return _herdr_json({"result": {key: [] if key == "tabs" else layout}})
-        with mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
-             mock.patch.object(peer_steward, "_pane_has_agent", side_effect=lambda p: None if p in free else "pane-occupied"), \
-             mock.patch.object(peer_steward, "_pane_foreground_shell", return_value=foreground), \
-             mock.patch.object(peer_steward, "_wait_for_shell_prompt", return_value=prompt):
-            return peer_steward._start_placement("w1:p0")
-
-    def workspace_decision(self, rects_by_tab, free=()):
-        """Live inventory order differs from creation order; names are user-owned."""
-        layouts, panes, tabs = {}, [], []
-        for number, (tab, rects) in enumerate(rects_by_tab, 1):
-            layout = self.layout(rects)
-            layout["tab_id"] = tab
-            for i, pane in enumerate(layout["panes"]):
-                pane["pane_id"] = f"w1:p{number}-{i}"
-                panes.append({"pane_id": pane["pane_id"], "tab_id": tab, "workspace_id": "w1"})
-                layouts[pane["pane_id"]] = layout
-            tabs.append({"tab_id": tab, "workspace_id": "w1", "number": number,
-                         "label": f"직접 정한 이름 {number}"})
-        calls = []
-        def run(argv, **kwargs):
-            calls.append(argv)
-            if argv[1:3] == ["tab", "list"]:
-                return _herdr_json({"result": {"tabs": tabs}})
-            if argv[1:3] == ["pane", "list"]:
-                return _herdr_json({"result": {"panes": panes}})
-            if argv[1:3] == ["pane", "layout"]:
-                return _herdr_json({"result": {"layout": layouts[argv[-1]]}})
-            raise AssertionError(argv)
-        with mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
-             mock.patch.object(peer_steward, "_pane_has_agent", side_effect=lambda p: None if p in free else "pane-occupied"), \
-             mock.patch.object(peer_steward, "_pane_foreground_shell", return_value=None), \
-             mock.patch.object(peer_steward, "_wait_for_shell_prompt", return_value=True):
-            decision = peer_steward._start_placement("w1:p1-0")
-        return decision, calls
-
-    def test_full_caller_fills_the_newest_other_partial_grid(self):
-        decision, calls = self.workspace_decision([
-            ("w1:tCaller", self.FOUR), ("w1:tOlder", self.TWO), ("w1:tNewest", self.FULL)])
-        self.assertEqual(decision, ("split", "w1:p3-0", "right"))
-        self.assertNotIn(["herdr", "pane", "layout", "--pane", "w1:p2-0"], calls)
-        self.assertTrue(all(argv[1:3] in (["pane", "layout"], ["pane", "list"], ["tab", "list"])
-                            for argv in calls))
-
-    def test_all_workspace_tabs_full_create_a_new_tab(self):
-        decision, _ = self.workspace_decision([
-            ("w1:tCaller", self.FOUR), ("w1:tOther", self.FOUR)])
-        self.assertEqual(decision, ("tab", "w1", None))
-
-    def test_other_full_tab_with_an_empty_shell_is_reused(self):
-        decision, _ = self.workspace_decision([
-            ("w1:tCaller", self.FOUR), ("w1:tOther", self.FOUR)], free={"w1:p2-3"})
-        self.assertEqual(decision, ("reuse", "w1:p2-3", None))
-
-    def test_full_newest_tab_does_not_hide_an_older_partial_tab(self):
-        decision, _ = self.workspace_decision([
-            ("w1:tCaller", self.FOUR), ("w1:tOlder", self.THREE), ("w1:tNewest", self.FOUR)])
-        self.assertEqual(decision, ("split", "w1:p2-0", "down"))
-
-    def test_unreadable_or_foreign_tab_inventory_never_allocates(self):
-        for inventory in ({"error": {"code": "unavailable"}}, {"result": {"tabs": None}},
-                          {"result": {"tabs": [{"workspace_id": "w2", "tab_id": "w2:t1", "number": 9}]}}):
-            calls = []
-            def run(argv, **kwargs):
-                calls.append(argv)
-                return _herdr_json({"result": {"layout": self.layout(self.FOUR)}}
-                                   if argv[1:3] == ["pane", "layout"] else inventory)
-            with mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
-                 mock.patch.object(peer_steward, "_pane_has_agent", return_value="pane-occupied"):
-                self.assertIsNone(peer_steward._start_placement("w1:p0"))
-            self.assertEqual([a[1:3] for a in calls], [["pane", "layout"], ["tab", "list"]])
-
-    def test_one_two_three_fill_the_grid_even_when_the_reference_is_in_the_other_column(self):
-        for rects, expected in ((self.FULL, ("split", "w1:p0", "right")),
-                                (self.TWO, ("split", "w1:p1", "down")),
-                                (self.THREE, ("split", "w1:p0", "down")),
-                                ([(10, 2, 100, 50), (10, 52, 100, 50), (110, 2, 100, 100)],
-                                 ("split", "w1:p2", "down"))):
-            with self.subTest(rects=rects):
-                self.assertEqual(self.decision(self.layout(rects)), expected)
-
-    def test_horizontal_rows_fill_the_equivalent_grid(self):
-        for rects, target in (([(10, 2, 200, 50), (10, 52, 200, 50)], "w1:p0"),
-                              ([(10, 2, 100, 50), (10, 52, 200, 50), (110, 2, 100, 50)], "w1:p1"),
-                              ([(10, 2, 200, 50), (10, 52, 100, 50), (110, 52, 100, 50)], "w1:p0")):
-            self.assertEqual(self.decision(self.layout(rects)), ("split", target, "right"))
-
-    def test_odd_terminal_dimensions_use_the_actual_half_cells(self):
-        rects = [(23, 1, 138, 76), (161, 1, 137, 38), (161, 39, 137, 38)]
-        self.assertEqual(self.decision(self.layout(rects, (23, 1, 275, 76))), ("split", "w1:p0", "down"))
-
-    def test_user_resized_dividers_still_fill_the_same_tab(self):
-        # The user drags column and row dividers; a 0.465 split is still the same grid.
-        for rects, area, expected in (
-                ([(0, 0, 125, 76), (125, 0, 143, 76)], (0, 0, 268, 76), ("split", "w1:p1", "down")),
-                ([(10, 2, 93, 100), (103, 2, 107, 40), (103, 42, 107, 60)], None, ("split", "w1:p0", "down")),
-                ([(10, 2, 140, 30), (10, 32, 140, 70), (150, 2, 60, 100)], None, ("split", "w1:p2", "down")),
-                ([(10, 2, 200, 30), (10, 32, 200, 70)], None, ("split", "w1:p0", "right"))):
-            with self.subTest(rects=rects):
-                self.assertEqual(self.decision(self.layout(rects, area)), expected)
-        # Two different row dividers are not one grid.
-        uneven = [(10, 2, 100, 30), (10, 32, 100, 70), (110, 2, 100, 60)]
-        self.assertEqual(self.decision(self.layout(uneven)), ("tab", "w1", None))
-
-    def test_full_tab_reuses_only_an_empty_foreground_shell_otherwise_creates_a_tab(self):
-        layout = self.layout(self.FOUR)
-        self.assertEqual(self.decision(layout), ("tab", "w1", None))
-        self.assertEqual(self.decision(layout, {"w1:p3"}), ("reuse", "w1:p3", None))
-        self.assertEqual(self.decision(layout, {"w1:p0"}), ("reuse", "w1:p0", None))
-        for state, prompt in (("pane-busy", True), ("pane-unknown", True), (None, False)):
-            self.assertEqual(self.decision(layout, {"w1:p3"}, state, prompt), ("tab", "w1", None))
-
-    def test_irregular_or_overfull_tab_never_splits(self):
-        for rects in ([(10, 2, 50, 100), (60, 2, 50, 100), (110, 2, 100, 100)],
-                      self.FOUR + [(60, 52, 50, 50)]):
-            self.assertEqual(self.decision(self.layout(rects)), ("tab", "w1", None))
-
-    def test_missing_duplicate_or_foreign_layout_never_allocates(self):
-        missing = self.layout(self.FULL)
-        missing["panes"][0]["pane_id"] = "w1:pElse"
-        duplicate = self.layout(self.TWO)
-        duplicate["panes"][1]["pane_id"] = "w1:p0"
-        foreign = self.layout(self.FOUR)
-        foreign["workspace_id"] = "w2"
-        for layout in (None, {}, missing, duplicate, foreign):
-            self.assertIsNone(self.decision(layout))
+    def test_start_takes_the_existing_peer_start_claim_file(self):
+        """Pinned older releases take this exact file; the shared opener must take the same one."""
+        seen = []
+        def launch(args):
+            seen.extend(path.name for path in terminal_surface._HELD)
+            return 0
+        args = peer_steward.build_parser().parse_args(["start", "grid", "--kind", "codex", "--beside", "w1:p0"])
+        for session in (None, "work"):
+            with self.subTest(session=session), \
+                 mock.patch.object(peer_steward, "_start_in_pane", side_effect=launch):
+                seen.clear()
+                peer_steward._HERDR_SESSION = session
+                self.assertEqual(peer_steward.cmd_start(args), 0)
+                key = hashlib.sha256(f"{session or 'default'}:w1".encode()).hexdigest()
+                self.assertEqual(seen, [f"{key}.lock"])
+                self.assertTrue((peer_steward.peer_message.peer_state_root() / "peer-starts" / f"{key}.lock").exists())
 
     def test_layout_read_failure_does_not_start_or_type(self):
         with mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
@@ -6071,6 +5959,19 @@ class GridStartTest(_TmpRootMixin, unittest.TestCase):
                                                           {"pane_id": "w1:pNew", "focused": False}}})
                         if argv[1:3] == ["agent", "start"]:
                             return _herdr_json({"result": {"agent": {"agent": kind, "name": "grid"}}})
+                        if argv[1:3] == ["pane", "get"]:
+                            return _herdr_json({"result": {"pane": {"pane_id": argv[3],
+                                                                    "agent": None if argv[3] == free else "codex"}}})
+                        if argv[1:3] == ["pane", "process-info"]:
+                            return _herdr_json({"result": {"process_info": {
+                                "pane_id": argv[-1], "shell_pid": 7, "foreground_process_group_id": 7,
+                                "foreground_processes": [{"pid": 7}]}}})
+                        if argv[1:3] == ["pane", "wait-output"]:
+                            return _herdr_json({"result": {}})
+                        if argv[1:3] == ["pane", "list"]:
+                            return _herdr_json({"result": {"panes": [
+                                {"pane_id": p["pane_id"], "workspace_id": "w1", "tab_id": "w1:tGrid"}
+                                for p in self.layout(rects)["panes"]]}})
                         raise AssertionError(argv)
                     with mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
                          mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
@@ -6126,6 +6027,15 @@ class ProjectStartTest(_TmpRootMixin, unittest.TestCase):
                 return _herdr_json({"result": {"root_pane": {"pane_id": "w1:pNew", "focused": False}}})
             if action == ["agent", "start"]:
                 return _herdr_json({"result": {"agent": {"agent": kind, "name": "project-peer"}}})
+            if action == ["pane", "get"]:
+                return _herdr_json({"result": {"pane": {"pane_id": argv[3],
+                                                        "agent": None if argv[3] == free else "codex"}}})
+            if action == ["pane", "process-info"]:
+                return _herdr_json({"result": {"process_info": {
+                    "pane_id": argv[-1], "shell_pid": 7, "foreground_process_group_id": 7,
+                    "foreground_processes": [{"pid": 7}]}}})
+            if action == ["pane", "wait-output"]:
+                return _herdr_json({"result": {}})
             raise AssertionError(argv)
 
         with mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:pHint"}), \
@@ -6196,24 +6106,19 @@ class ProjectStartTest(_TmpRootMixin, unittest.TestCase):
             del pane["foreground_cwd"]
             self.assertIsNone(peer_steward._project_start_workspace())
 
-    def test_unreadable_duplicate_or_foreign_workspace_inventory_never_allocates(self):
-        own = {"pane_id": "w1:pEmpty", "workspace_id": "w1"}
-        for panes in (None, [], [own, own], [{**own, "workspace_id": "w2"}], [{}]):
-            with self.subTest(panes=panes), \
-                 mock.patch.object(peer_steward, "_placement_result", return_value={"panes": panes}), \
-                 mock.patch.object(peer_steward, "_empty_shell_placement") as empty:
-                self.assertIsNone(peer_steward._start_workspace_placement("w1"))
-                empty.assert_not_called()
-
 
 class BesideStartTest(_TmpRootMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        # These tests own startup/readiness; GridStartTest owns live layout selection.
-        placement = mock.patch.object(peer_steward, "_start_placement",
-                                      side_effect=lambda pane: ("split", pane, "right"))
+        # These tests own startup/readiness; terminal_surface.test.py owns layout selection.
+        placement = mock.patch.object(terminal_surface, "place",
+                                      side_effect=lambda surface, pane=None, workspace=None:
+                                      ("split", pane, "right"))
         placement.start()
         self.addCleanup(placement.stop)
+        census = mock.patch.object(terminal_surface.HerdrSurface, "pane_ids", return_value=None)
+        census.start()
+        self.addCleanup(census.stop)
         self.resolve_primary = peer_steward.INSTALL_PATHS.primary_checkout
         patch = mock.patch.object(peer_steward.INSTALL_PATHS, "primary_checkout",
                                   side_effect=lambda cwd: Path(cwd))

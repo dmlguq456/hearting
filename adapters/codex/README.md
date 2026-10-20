@@ -454,14 +454,19 @@ remains a durable pending obligation.
 
 Session and prompt bridges retain `hookSpecificOutput.additionalContext` for optional memory and lifecycle context.
 
-## Peer start placement
+## Window contract
 
-`hearting run peer-steward start <name> --kind <harness>` fills the calling
-tab's 2×2 grid without focus: right, right-column down, then remaining-column
-down, each at ratio 0.5. `--beside` selects the reference tab; `--pane` keeps
-explicit pane reuse. A full or irregular tab reuses an agent-free, idle shell
-with an empty prompt, or opens a tab in the same workspace. No pane move or
-extra flag is needed. The shared placement contract is `core/OPERATIONS.md §5.14`.
+Every pane Hearting opens comes from `open_pane` in `utilities/terminal_surface.py`:
+`hearting run peer-steward start <name> --kind <harness>` for another session,
+`hearting run pane open <command>` for a command output pane, main recovery, and
+Fleet `--window`. It uses the caller's verified Herdr pane, then the tmux server
+`$TMUX` names, and otherwise opens nothing and prints the command line (exit 0).
+It fills the calling tab's 2×2 grid without focus: right, right-column down,
+then remaining-column down, each at ratio 0.5. A full or irregular tab reuses
+an agent-free, idle shell with an empty prompt, then the newest other tab with
+room, then opens one unfocused tab. `--beside` selects the reference tab;
+`--pane` keeps explicit pane reuse. No pane move or extra flag is needed. The
+shared contract is `core/OPERATIONS.md §5.14`.
 
 ## Fleet background shell rows
 

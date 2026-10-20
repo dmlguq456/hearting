@@ -2093,21 +2093,39 @@ it; unknown identity does not make a successful launch fail, and the start path
 does not infer identity from newly appearing rollouts or elapsed time. Resume and
 fork keep their explicit thread targets.
 
+Window contract: every pane Hearting opens comes from
+`utilities/terminal_surface.py:open_pane`, reached through `peer-steward start`
+(another session), `hearting run pane open <command>` (a command output pane),
+`interactive-main-recovery --start` and Fleet `--window`. The surface is the
+caller's Herdr pane when the shared live ownership proof holds, then the tmux
+server `$TMUX` names when it answers, else none: nothing opens and the result
+carries the command line to run by hand (exit 0). Registered workers get no
+surface, and an inherited pane label alone opens no Herdr pane. On all three
+harnesses it reads the
+tab's layout (for tmux, the union of its pane rects; a zoomed window counts as
+irregular) and fills a 2×2 grid without focus: one pane splits right, two
+side-by-side panes split the right column down, and three panes split the
+remaining full column down. Each split uses ratio 0.5. Existing horizontal rows
+fill the equivalent grid by splitting right. A full or irregular tab first
+reuses an agent-free foreground shell with an empty visible prompt there, then
+checks the other tabs in the same workspace, newest first, using the same
+grid-split and empty-shell decision. Only when none has room does it create one
+unfocused tab. Existing tab names, layouts and sizes are preserved apart from
+filling an available grid cell. Openings in one workspace serialize on the
+peer-start claim `peer-starts/<sha256(session:workspace)>.lock`, the file pinned
+releases also take; tmux keys its claim apart in the same directory. The result
+`{surface, pane, placement, notes, view_command}` states failures as notes and
+the pane list read once right after opening (`pane-exited`,
+`pane-list-unconfirmed`); nothing is retried or closed. A person in an
+agentless Herdr shell keeps running Fleet in the current terminal.
+
 Same-seat succession uses `peer-steward.py start <name> --kind <harness>`,
 which with no `--pane` or `--beside` uses the calling pane (`HERDR_PANE_ID`)
 as its placement reference, in the Git primary checkout (the calling cwd outside
-Git) unless `--cwd` names another. On all three harnesses, `start` reads
-`herdr pane layout` and fills a 2×2 grid without focus: one pane splits right,
-two side-by-side panes split the right column down, and three panes split the
-remaining full column down. Each split uses ratio 0.5. Existing horizontal
-rows fill the equivalent grid by splitting right. `--beside` selects the reference
-tab/pane, not the direction; `--pane` retains explicit reuse. Placement in a full
-or irregular tab first reuses an agent-free foreground shell with an empty visible
-prompt there, then checks the other tabs in the same workspace, newest first,
-using the same grid-split and empty-shell decision. Only when none has room does
-it create a tab. Existing tab names and layouts are preserved apart from filling
-an available grid cell. Concurrent starts serialize placement
-through launch so they cannot claim the same shell or subdivide a stale layout.
+Git) unless `--cwd` names another. `--beside` selects the reference tab/pane,
+not the direction; `--pane` retains explicit reuse. Placement follows the window
+contract above, and `start` holds the workspace claim through launch so
+concurrent starts cannot claim the same shell or subdivide a stale layout.
 Names longer than Herdr's 32-character limit are explained before any placement
 or launch action, so a refused name leaves no extra pane.
 The start completes placement without a post-start pane move. The new pane's

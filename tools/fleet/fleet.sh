@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # fleet.sh — current-terminal launcher for fleet.py.
 #   Default: run directly in the current full-size terminal, inside or outside tmux.
-#   --window: open a new full-size tmux window when inside tmux; otherwise run directly.
+#   --window: open in a free cell of the caller's Herdr or tmux tab, focus unchanged
+#             (utilities/pane.py); without one, run directly.
 #   Keyboard scrolling is the default; mouse toggles are opt-in via `tmux set -g mouse on`.
 #   Pass all fleet.py options through unchanged; only --window is consumed here.
 set -euo pipefail
@@ -67,13 +68,21 @@ if [ "$direct" = "1" ]; then
 fi
 
 if [ "$want_window" = "1" ]; then
-  if [ -n "${TMUX:-}" ]; then
-    cmd="$(printf '%q' "$PY") $(printf '%q' "$FLEET_PY")"
-    for a in ${ARGS[@]+"${ARGS[@]}"}; do cmd="$cmd $(printf '%q' "$a")"; done
-    tmux new-window "$cmd"
-    exit 0
+  # The shared pane opener prints one JSON line and exits 0 when it opened the
+  # pane or found no surface; only then is the answer read. Nothing is retried.
+  if opened=$("$PY" "$HARNESS_ROOT/utilities/pane.py" open --title fleet -- \
+      "$PY" "$FLEET_PY" ${ARGS[@]+"${ARGS[@]}"}); then
+    where=$(printf '%s' "$opened" | "$PY" -c 'import json, sys
+r = json.load(sys.stdin)
+print(r["surface"] + " pane " + r["pane"] if r.get("pane") else "")' 2>/dev/null || true)
+    if [ -n "$where" ]; then
+      echo "fleet: opened in $where." >&2
+      exit 0
+    fi
+    echo "fleet: no Herdr or tmux pane to open; running in the current terminal." >&2
+  else
+    echo "fleet: the pane did not open; running in the current terminal." >&2
   fi
-  echo "fleet: ignoring --window outside tmux and running in the current terminal." >&2
   run_direct ${ARGS[@]+"${ARGS[@]}"}
 fi
 

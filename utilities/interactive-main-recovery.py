@@ -3,9 +3,9 @@
 
 This utility deliberately has one host integration: Herdr's pane/agent API.
 It never searches for or falls back to tmux. ``--check`` only reads the current
-pane inventory; ``--start`` repeats that proof, creates a visible pane through
-the same native workspace/tab host, and asks Herdr to start the protected
-managed Codex launcher there.
+pane inventory; ``--start`` repeats that proof, opens a pane in the same Herdr
+workspace through the shared pane opener on the checked socket, leaves focus
+where it is, and asks Herdr to start the protected managed Codex launcher there.
 """
 
 from __future__ import annotations
@@ -21,6 +21,9 @@ import stat
 import subprocess
 import sys
 from typing import Any, Callable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from terminal_surface import HerdrSurface, Near, open_pane  # noqa: E402
 
 
 EXIT_INVALID = 64
@@ -205,8 +208,9 @@ def checked_pane(
 
 
 def start(args: argparse.Namespace, *, runner=_run, which=shutil.which) -> dict[str, Any]:
-    # Re-read the source pane at the mutation boundary, then use only this
-    # host's native visible-pane API. Headless workers use a different path.
+    # Re-read the source pane at the mutation boundary, then place the new pane
+    # with the shared opener on this checked host. Focus stays where it is; the
+    # result names the pane. Headless workers use a different path.
     workspace = str(Path(args.workspace).expanduser().resolve())
     source_pane = checked_pane(
         args.pane, workspace=workspace, socket_path=args.socket,
@@ -214,56 +218,55 @@ def start(args: argparse.Namespace, *, runner=_run, which=shutil.which) -> dict[
     )
     runner = host_runner(args.socket, runner)
     launcher = protected_launcher(Path(args.launcher_state).expanduser())
-    split = runner([
-        "herdr", "pane", "split", "--pane", args.pane, "--direction", "right",
-        "--cwd", workspace, "--focus",
-    ])
-    if split.returncode != 0:
-        raise RecoveryError("herdr-pane-split-failed", (split.stderr or split.stdout).strip())
-    try:
-        split_payload = json.loads(split.stdout or "")
-        split_pane = (split_payload.get("result") or {}).get("pane")
-        created_pane = _field(split_pane, "pane_id", "paneId", "id")
-    except (ValueError, AttributeError, TypeError):
-        created_pane = ""
-    if not created_pane:
-        raise RecoveryError("herdr-pane-split-malformed", "Herdr returned no created pane ID")
-    try:
-        pane = herdr_pane(created_pane, runner=runner, which=which)
-        if _field(pane, "workspace_id", "workspaceId") != source_pane["workspace_id"]:
-            raise RecoveryError("workspace-mismatch", "the created pane left the source workspace")
-        if _field(pane, "tab_id", "tabId") != source_pane["tab_id"]:
-            raise RecoveryError("tab-mismatch", "the created pane left the source tab")
-        created_cwd = _field(pane, "cwd", "working_directory", "workingDirectory")
-        if not created_cwd or Path(created_cwd).expanduser().resolve() != Path(workspace):
-            raise RecoveryError("pane-cwd-mismatch", f"expected created pane cwd {workspace}")
-    except RecoveryError as exc:
-        raise RecoveryError(
-            exc.reason, exc.detail, created_pane=created_pane
-        ) from exc
-    # `agent start --kind codex -- ...` accepts Codex arguments, not an
-    # executable override. Run the verified executable through pane run.
-    command = ["herdr", "pane", "run", created_pane,
-               shlex.join([str(launcher), "--cd", workspace, *args.agent_args])]
-    try:
-        result = runner(command)
-    except RecoveryError as exc:
-        raise RecoveryError(exc.reason, exc.detail, created_pane=created_pane) from exc
-    if result.returncode != 0:
-        raise RecoveryError(
-            "herdr-agent-start-failed", (result.stderr or result.stdout).strip(),
-            created_pane=created_pane,
-        )
-    try:
-        payload = json.loads(result.stdout or "{}")
-    except ValueError:
-        payload = {}
-    if isinstance(payload, dict) and payload.get("error"):
-        raise RecoveryError(
-            "herdr-agent-start-rejected", str(payload["error"]), created_pane=created_pane
-        )
+    launched: dict[str, Any] = {}
+
+    def launch(target: str, created: bool) -> bool:
+        # A reused empty shell was not created here, so it is never reported as such.
+        mine = target if created else ""
+        try:
+            pane = herdr_pane(target, runner=runner, which=which)
+            if _field(pane, "workspace_id", "workspaceId") != source_pane["workspace_id"]:
+                raise RecoveryError("workspace-mismatch", "the new pane left the source workspace")
+            target_cwd = _field(pane, "cwd", "working_directory", "workingDirectory")
+            if created and (not target_cwd or Path(target_cwd).expanduser().resolve() != Path(workspace)):
+                raise RecoveryError("pane-cwd-mismatch", f"expected created pane cwd {workspace}")
+        except RecoveryError as exc:
+            raise RecoveryError(exc.reason, exc.detail, created_pane=mine) from exc
+        # `agent start --kind codex -- ...` accepts Codex arguments, not an
+        # executable override. Run the verified executable through pane run;
+        # its `--cd` also moves a reused shell into the workspace.
+        command = ["herdr", "pane", "run", target,
+                   shlex.join([str(launcher), "--cd", workspace, *args.agent_args])]
+        try:
+            result = runner(command)
+        except RecoveryError as exc:
+            raise RecoveryError(exc.reason, exc.detail, created_pane=mine) from exc
+        if result.returncode != 0:
+            raise RecoveryError(
+                "herdr-agent-start-failed", (result.stderr or result.stdout).strip(),
+                created_pane=mine,
+            )
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except ValueError:
+            payload = {}
+        if isinstance(payload, dict) and payload.get("error"):
+            raise RecoveryError(
+                "herdr-agent-start-rejected", str(payload["error"]), created_pane=mine
+            )
+        launched.update(pane=pane, herdr=payload)
+        return True
+
+    opened = open_pane(launch=launch, near=Near(HerdrSurface(runner), pane=args.pane), cwd=workspace)
+    if opened.pane is None:
+        note = opened.notes[0] if opened.notes else ""
+        reason = {"pane-split-failed": "herdr-pane-split-failed",
+                  "pane-tab-create-failed": "herdr-tab-create-failed"}.get(
+                      note, "herdr-pane-layout-unavailable")
+        raise RecoveryError(reason, "Herdr opened no pane for the recovery")
     # Submission proves neither native readiness nor a managed binding.
-    return {"status": "launch-requested", "pane": pane, "workspace": workspace, "herdr": payload}
+    return {"status": "launch-requested", "pane": launched["pane"], "workspace": workspace,
+            "placement": opened.placement, "notes": opened.notes, "herdr": launched["herdr"]}
 
 
 def parser() -> argparse.ArgumentParser:
