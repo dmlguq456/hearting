@@ -395,20 +395,19 @@ class SurfaceChoiceTest(_IsolatedMixin, unittest.TestCase):
             self.assertIsNone(ts.caller_surface())
             self.assertEqual(ts.open_pane(["true"]).surface, "none")
 
+    # These two run as a non-worker caller whatever session runs the suite.
     def test_inherited_herdr_pane_without_live_proof_opens_nothing(self):
         os.environ["HERDR_PANE_ID"] = "w1:p0"
-        for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH"):
-            os.environ.pop(key, None)
-        with mock.patch("pane_ownership.verified_pane", return_value="") as verified, \
+        with mock.patch("session_tidy.is_worker", return_value=False), \
+             mock.patch("pane_ownership.verified_pane", return_value="") as verified, \
              mock.patch.object(ts, "_run", side_effect=AssertionError("terminal touched")):
             self.assertIsNone(ts.caller_surface())
         verified.assert_called_once()
 
     def test_proven_herdr_pane_comes_before_tmux(self):
         os.environ.update({"HERDR_PANE_ID": "w1:p0", "TMUX": "/tmp/x,1,0", "TMUX_PANE": "%0"})
-        for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH"):
-            os.environ.pop(key, None)
-        with mock.patch("pane_ownership.verified_pane", return_value="w1:p0"):
+        with mock.patch("session_tidy.is_worker", return_value=False), \
+             mock.patch("pane_ownership.verified_pane", return_value="w1:p0"):
             near = ts.caller_surface()
         self.assertEqual((near.surface.name, near.pane), ("herdr", "w1:p0"))
 
