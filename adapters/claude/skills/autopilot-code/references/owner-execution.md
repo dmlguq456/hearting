@@ -27,7 +27,7 @@ Code-work entrypoint. Detect spec context and close the `plan → execute → te
 Defaults:
 
 - `--mode`: default to `dev`; infer `debug` when the request is centered on an error log or traceback.
-- `--intensity`: choose from scope and risk. Use `direct` for a one-line task, `quick` for a small scoped change, and `standard+` for multi-stage or multi-file work. Verification rigor is derived from intensity rather than selected separately (CONVENTIONS §1.1).
+- `--intensity`: choose from scope and risk. Use `direct` for a one-line task, `quick` for a small scoped change, and `standard+` for multi-stage or multi-file work. Verification rigor is derived from intensity rather than selected separately (CONVENTIONS §1.1). Quick shortens procedure, not the requested results: preserve the approved endpoint and assigned scope, and do not substitute a small example or concise report for explicitly requested investigation, deliverables, or verification.
 - `--user-refine`: enable only when the user explicitly requests a review or note-taking pause.
 
 ## Default Stage Graph

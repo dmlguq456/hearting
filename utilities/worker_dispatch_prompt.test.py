@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
-import os
 import json
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -16,8 +16,6 @@ import workflow_state as WS
 import worker_bootstrap as WB
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
 def _clean_test_env():
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(("AGENT_DISPATCH_", "AGENT_ROUTE_", "AGENT_REVIEW_",
@@ -210,6 +208,69 @@ class WorkerDispatchPromptTest(unittest.TestCase):
                 self.assertIn("TASK",prompt)
 
 
+    def test_completion_scope_and_original_request_reach_all_adapter_prompts(self):
+        for harness, (wrapper, model, _suffix) in ADAPTERS.items():
+            spec = importlib.util.spec_from_file_location("completion_" + harness, wrapper)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            for worker_type, intensity, depth, unit in (
+                ("owner", "quick", "1", "_kernel/owner"),
+                ("stage", "standard", "2", "dev/backend"),
+            ):
+                for endpoint in ("complete", "report"):
+                    for with_done_when in (False, True):
+                        with self.subTest(harness=harness, worker_type=worker_type,
+                                          endpoint=endpoint, done_when=with_done_when), \
+                                tempfile.TemporaryDirectory() as tmp:
+                            root = Path(tmp)
+                            node_id = "one-shot" if worker_type == "owner" else "execute"
+                            output_dir = root / "cycle" / "artifacts"
+                            output_dir.mkdir(parents=True)
+                            route = {
+                                "route_id": "rt-prompt-completion",
+                                "cwd": str(root),
+                                "artifact_root": str(root / "reports"),
+                                "nodes": [{
+                                    "id": node_id, "unit": unit, "worker_type": worker_type,
+                                    "outputs": ["dev_logs/result.md"],
+                                    "write_scope": ["source/**", "dev_logs/**"],
+                                }],
+                            }
+                            route_file = root / "route.json"
+                            route_file.write_text(json.dumps(route), encoding="utf-8")
+                            task = ("Original request: O1 calculate and record the first result; "
+                                    "O2 calculate every group total; O3 inspect every named file "
+                                    f"and report all results. Execution scope: {endpoint}.")
+                            axes = ["--worktree", str(root), "--slug", "completion",
+                                    "--capability", "autopilot-code", "--capability-mode", "dev",
+                                    "--intensity", intensity, "--dispatch-depth", depth,
+                                    "--worker-type", worker_type, "--unit", unit,
+                                    "--prompt-text", task, "--jobs", str(root / "jobs.log"), *model]
+                            args = module.parser().parse_args(axes)
+                            args.route_file = str(route_file)
+                            args.route_node = node_id
+                            args.artifact_root = str(root / "reports")
+                            args.agent_home = module.resolve_agent_home()
+                            render = module.prompt if harness == "opencode" else module.dispatch_prompt
+                            plan = ("Plan for this leg (approved in the frame interview):\n"
+                                    "Done when (sealed ids, in this order):\n- fixture: retain optional plan duties\n\n") \
+                                if with_done_when else ""
+                            # Exercise both optional plan shapes at the existing rendering seam.
+                            with mock.patch.object(WB, "plan_leg_prompt", return_value=plan), \
+                                    mock.patch.dict(os.environ, {"AGENT_ARTIFACT_OUTPUT_DIR": str(output_dir)}):
+                                prompt, _ = render(args)
+                            self.assertIn(task, prompt)
+                            self.assertIn("Completion precedence:", prompt)
+                            self.assertIn("approved endpoint and this node's assigned scope", prompt)
+                            self.assertIn("Stop at an approved report endpoint", prompt)
+                            self.assertIn("outputs=[", prompt)
+                            self.assertIn(str(output_dir / "dev_logs" / "result.md"), prompt)
+                            self.assertEqual("Done when (sealed ids" in prompt, with_done_when)
+                            if endpoint == "report":
+                                self.assertIn("Execution scope: report.", prompt)
+                                self.assertIn("bounded stage completes only its assigned portion", prompt)
+
+
 class FrameAssignmentPromptTest(unittest.TestCase):
     def test_real_adapter_prompts_distinguish_goal_report_from_current_frame_output(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -247,11 +308,13 @@ class FrameAssignmentPromptTest(unittest.TestCase):
                     self.assertNotIn("Read only the exposed autopilot-code",text)
                     self.assertNotIn("skills/autopilot-code/SKILL.md",text)
 
-    def test_legacy_frame_keeps_its_callers_path_and_nonframe_assignment_is_unchanged(self):
+    def test_legacy_frame_keeps_its_path_and_nonframe_assignment_gets_completion_precedence(self):
         frame=WB.assignment_prompt(SimpleNamespace(worker_type="frame"),"Analyze this work; output /tmp/brief.md",{})
         self.assertIn("/tmp/brief.md",frame)
         for kind in ("owner","stage","review","support"):
-            self.assertEqual(WB.assignment_prompt(SimpleNamespace(worker_type=kind),"TASK",{}),"Assignment:\nTASK\n\n")
+            text = WB.assignment_prompt(SimpleNamespace(worker_type=kind),"TASK",{})
+            self.assertTrue(text.startswith("Assignment:\nTASK\n\nCompletion precedence:"))
+            self.assertIn("approved endpoint and this node's assigned scope", text)
 
 
 class ReleasedTaskPromptTest(unittest.TestCase):
@@ -309,6 +372,8 @@ class ReleasedTaskPromptTest(unittest.TestCase):
                 context = WB.released_task_prompt(self.args())
                 self.assertIn("actor_kind: " + (kind or "unknown"), context)
                 self.assertIn("The recorded scope and decisions below govern this work.", context)
+                self.assertIn("role and intensity defaults neither expand nor shrink it", context)
+                self.assertIn("Quick examples and concise reporting are procedure defaults", context)
                 self.assertNotIn("The recorded user scope", context)
                 self.assertEqual(self.ledger.journal_path.read_bytes(), before)
                 self.assertNotIn("actor_kind", legacy)

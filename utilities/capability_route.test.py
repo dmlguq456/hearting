@@ -8915,6 +8915,25 @@ class ComposeRouteTest(TestRoute):
   self.assertNotIn("frame-review",route["human_gates"])
   self.assertEqual(route["selection"]["shape"],"solo"); self.assertEqual(route["selection"]["route_origin"],"compose")
   R.verify_route(route,R.ROOT)
+ def test_solo_retains_request_and_complete_or_report_endpoint_without_done_when(self):
+  cands={"candidates":[
+   {"harness":"claude","transport":"headless","surface":"registered-headless","status":"supported","probe_source":"fixture","probe_time":"2026-09-07T00:00:00Z"},
+   {"harness":"codex","transport":"headless","surface":"registered-headless","status":"supported","probe_source":"fixture","probe_time":"2026-09-07T00:00:00Z"}]}
+  task="O1 calculate the first value; O2 compute all group totals; O3 inspect every file and report."
+  for endpoint in ("complete", "report"):
+   with self.subTest(endpoint=endpoint):
+    route=self.compose(shape="solo",graph=None,dispatch_evidence=None,
+                       registered_headless_evidence=cands,execution_scope=endpoint,
+                       work_request={"text":task,"owner_harness":"codex"},slug="solo-"+endpoint)
+    self.assertEqual(route["effective_intensity"],"quick")
+    self.assertEqual([n["id"] for n in route["nodes"]],["one-shot"])
+    self.assertEqual(route["entry_execution_scope"],endpoint)
+    self.assertIn(task,route["work_request"]["text"])
+    if endpoint == "report":
+     self.assertIn("Execution scope: report",route["work_request"]["text"])
+    self.assertFalse(any("done_when" in n for n in route["nodes"]))
+    self.assertNotIn("route_plan",route)
+    R.verify_route(route,R.ROOT)
  def test_staged_accepts_strong_and_expands_declared_groups(self):
   route=self.compose(graph="plan,plan-check,execute",intensity="strong")
   self.assertEqual(route["effective_intensity"],"strong")

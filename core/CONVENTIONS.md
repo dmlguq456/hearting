@@ -32,6 +32,8 @@ Intensity supplies the default recipe below; an explicit graph selects its stage
 | `thorough` | Strong groups plus deeper synthesis/verification | A declared group may add a third implementation-risk, failure-mode, or contrarian leg; unchanged groups remain width two | The base recipe realizes only registry-declared 2–4-way siblings; composed routes may add other bounded dispatch-depth-2 perspectives | thorough |
 | `adversarial` | Thorough plus adversarial failure-mode/security verification | Use the route-declared width and adversarial perspective; no undeclared fan-out | Bounded declared group or composed adversary/verifier; dispatch depth remains at most 2 | adversarial |
 
+Intensity controls procedure and default rigor; the recorded request, released decisions, approved endpoint, and node scope control delivery. Quick examples and concise procedures do not replace requested investigation, deliverables, or verification. Complete feasible assigned work, honor report endpoints, and report unfinished duties with the existing outcome semantics. A bounded stage stops at its assigned portion.
+
 Stage gates check whether output can feed the next stage. Independent QA runs only where selected, using a separate execution with a different declared persona or perspective. Same-harness review is independent (allocation order in §2.1). Further legs retain declared profile and perspective diversity. Final verification remains capability-specific. Never add an omitted plan-check or report an unexecuted check as passed.
 
 Dispatch depth is portable route topology, not process ancestry, runtime-native

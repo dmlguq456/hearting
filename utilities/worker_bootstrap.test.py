@@ -318,6 +318,37 @@ class NodeScopeTest(unittest.TestCase):
             )
             self.assertIn(str(cycle_dir / "artifacts" / "shards" / "research" / "notes.md"), prompt)
 
+    def test_completion_precedence_applies_without_route_or_done_when(self):
+        task = ("Original request: O1 record the first result; O2 calculate all group totals; "
+                "O3 inspect every file and report the findings. Execution scope: report.")
+        for worker_type in ("owner", "stage", "review", "support"):
+            with self.subTest(worker_type=worker_type):
+                prompt = W.assignment_prompt(SimpleNamespace(worker_type=worker_type), task, {})
+                self.assertTrue(prompt.startswith("Assignment:\n" + task + "\n\n"))
+                self.assertIn("Completion precedence:", prompt)
+                self.assertIn("within the approved endpoint and this node's assigned scope", prompt)
+                self.assertIn("Stop at an approved report endpoint", prompt)
+                self.assertIn("a bounded stage completes only its assigned portion", prompt)
+                self.assertIn("report it with the existing outcome semantics", prompt)
+                self.assertIn("presenting the whole request as complete", prompt)
+                self.assertNotIn("Done when (sealed ids", prompt)
+
+    def test_bounded_stage_keeps_its_scope_and_report_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            route_file = self._route(root)
+            task = "Original request: O1, O2, O3. Execution scope: report."
+            cycle_dir = root / "artifact_root" / "campaigns" / "camp1" / "cyc1"
+            prompt = W.assignment_prompt(
+                SimpleNamespace(worker_type="stage", route_file=str(route_file), route_node="research"),
+                task,
+                {"AGENT_ARTIFACT_CYCLE_ID": "cyc1", "AGENT_ARTIFACT_CYCLE_DIR": str(cycle_dir)},
+            )
+            self.assertTrue(prompt.startswith("Assignment:\n" + task + "\n\nCompletion precedence:"))
+            self.assertIn(str(cycle_dir / "artifacts" / "shards" / "research" / "notes.md"), prompt)
+            self.assertIn("approved report endpoint", prompt)
+            self.assertNotIn("Done when (sealed ids", prompt)
+
     def test_child_prompt_uses_child_node_and_preserves_exact_review_cycle_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -746,7 +777,8 @@ class OwnerInlineMarkerPromptTest(OPA.OwnerRefineBase):
         self.assertIn("first finish stage review", texts[0])
 
     def test_no_text_without_a_route_or_for_a_stage_worker(self):
-        self.assertEqual(W.assignment_prompt(SimpleNamespace(worker_type="owner"), "T", {}), "Assignment:\nT\n\n")
+        prompt = W.assignment_prompt(SimpleNamespace(worker_type="owner"), "T", {})
+        self.assertIn("Assignment:\nT\n\nCompletion precedence:", prompt)
         self.assertEqual(W.owner_inline_marker_prompt(SimpleNamespace(worker_type="stage", route_file="x")), "")
 
     def test_a_code_owner_gets_the_marker_line_and_no_gate_line(self):

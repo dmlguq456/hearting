@@ -444,6 +444,21 @@ def node_scope_prompt(scope: "NodeScope") -> str:
     return " ".join(lines) + "\n"
 
 
+def completion_scope_prompt() -> str:
+    """Keep procedure defaults subordinate to the approved request and node scope."""
+    return (
+        "Completion precedence:\n"
+        "Complete feasible remaining duties in the recorded request within the "
+        "approved endpoint and this node's assigned scope. Quick examples, concise "
+        "reports, and role or intensity defaults do not replace requested "
+        "investigation, deliverables, or verification. Stop at an approved report "
+        "endpoint; a bounded stage completes only its assigned portion and leaves "
+        "deferred stages to their owners. If assigned work remains unfinished or "
+        "blocked, report it with the existing outcome semantics instead of "
+        "presenting the whole request as complete.\n\n"
+    )
+
+
 def released_task_prompt(args) -> str:
     """Carry the same released task across owner/stage and runtime boundaries.
 
@@ -493,7 +508,9 @@ def released_task_prompt(args) -> str:
     return (
         "Released task context (frame-review):\n"
         "The recorded scope and decisions below govern this work. Apply the "
-        "assigned stage within that scope; role defaults do not expand it. Cite "
+        "assigned stage within that scope; role and intensity defaults neither "
+        "expand nor shrink it. Quick examples and concise reporting are procedure "
+        "defaults, not scope changes. Cite "
         "applicable decision ids in the output.\n\n"
         f"{intent}\n"
     )
@@ -739,7 +756,8 @@ def assignment_prompt(args, task: str, environ) -> str:
     if getattr(args, "worker_type", None) != "frame":
         route_file = getattr(args, "route_file", None)
         if not route_file:
-            return f"Assignment:\n{task.rstrip()}\n\n{owner_gate_prompt(args)}{owner_inline_marker_prompt(args)}{owner_close_prompt(args)}"
+            return (f"Assignment:\n{task.rstrip()}\n\n{completion_scope_prompt()}"
+                    f"{owner_gate_prompt(args)}{owner_inline_marker_prompt(args)}{owner_close_prompt(args)}")
         route = json.loads(Path(route_file).read_text(encoding="utf-8"))
         source_worktree = _linked_slice_source_worktree(args, route)
         scope_environment = _child_scope_environment(args, route, environ, source_worktree)
@@ -750,7 +768,8 @@ def assignment_prompt(args, task: str, environ) -> str:
             source_worktree=source_worktree,
             source_worktree_verified=source_worktree is not None,
         )
-        return (f"Assignment:\n{task.rstrip()}\n\n{plan_leg_prompt(route, getattr(args, 'route_node', None))}"
+        return (f"Assignment:\n{task.rstrip()}\n\n{completion_scope_prompt()}"
+                f"{plan_leg_prompt(route, getattr(args, 'route_node', None))}"
                 f"{node_scope_prompt(scope)}{input_sources_prompt(route, getattr(args, 'route_node', None))}\n"
                 f"{automatic_consumer_prompt(route, getattr(args, 'route_node', None))}"
                 f"{owner_gate_prompt(args)}{owner_inline_marker_prompt(args)}{owner_close_prompt(args)}")
