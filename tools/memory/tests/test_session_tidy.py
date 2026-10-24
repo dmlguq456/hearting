@@ -2764,7 +2764,7 @@ class TidyOneCallTest(TidyCase):
         self.assertEqual(code, 0)
         self.assertTrue(lines[0].startswith("card="), lines)
         self.assertRegex(lines[1], r"^enqueue=\S+ seat=\S+ status=queued clear=scheduled$")
-        self.assertEqual(lines[-1], "say=곧 이 창이 자동으로 비워지고, 새 세션이 카드를 받아 이어서 진행합니다.")
+        self.assertEqual(lines[-1], "say=입력창이 비어 있으면 곧 이 창을 비우고, 새 세션이 카드를 받아 이어서 진행합니다. 그 전에 입력하시면 비우지 않습니다.")
         with self.iso.patched_environ():
             self.assertEqual(st.read_latest_card(seat)["body"], "진행 중: 한 번에\n다음 할 일: 기다림")
         self.assertEqual(len(self.queued()), 1)
@@ -2798,7 +2798,7 @@ class TidyOneCallTest(TidyCase):
         self.assertIsNone(self.reservation(seat))
         _code, lines, seat = self.tidy("카드 2", no_continue=True)
         self.assertTrue(lines[1].endswith("clear=scheduled continue=off"), lines)
-        self.assertEqual(lines[-1], "say=곧 이 창이 자동으로 비워집니다.")
+        self.assertEqual(lines[-1], "say=입력창이 비어 있으면 곧 이 창을 비웁니다. 그 전에 입력하시면 비우지 않습니다.")
 
     def test_handoff_runs_after_the_queue_and_keeps_its_own_line_and_exit_code(self):
         self.hook("claude", "prompt", "sid-A")
@@ -2813,7 +2813,7 @@ class TidyOneCallTest(TidyCase):
         self.assertEqual(code, 1)
         self.assertEqual(calls, [(1, "reserved", "peer-x")])
         self.assertEqual(lines[2], "prompted=failed target=peer-x")
-        self.assertEqual(lines[-1], "say=곧 이 창이 자동으로 비워집니다.")
+        self.assertEqual(lines[-1], "say=입력창이 비어 있으면 곧 이 창을 비웁니다. 그 전에 입력하시면 비우지 않습니다.")
         self.assertEqual(self.reservation(seat)["status"], "reserved")     # a failed handoff keeps the clear
 
     def test_an_older_card_and_prompt_do_not_block_the_new_one_call_card(self):
@@ -2825,7 +2825,7 @@ class TidyOneCallTest(TidyCase):
 
     def test_report_line_for_each_outcome(self):
         line = st.tidy_report_line
-        self.assertEqual(line("clear=scheduled", origin="idle"), "곧 이 창이 자동으로 비워집니다.")
+        self.assertEqual(line("clear=scheduled", origin="idle"), "입력창이 비어 있으면 곧 이 창을 비웁니다. 그 전에 입력하시면 비우지 않습니다.")
         self.assertEqual(line("clear=manual hint=/new", harness="opencode"), "이제 /new 하거나 닫아도 됩니다.")
         self.assertEqual(line("clear=skipped reason=new-input", harness="opencode"), "이제 /new 하거나 닫아도 됩니다.")
         self.assertEqual(line("clear=skipped reason=new-input", harness="codex"), "이제 /clear 하거나 닫아도 됩니다.")

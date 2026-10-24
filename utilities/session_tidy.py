@@ -2610,9 +2610,11 @@ def tidy_report_line(booked: str, *, handoff: bool = False, origin: str = "", ha
     fields = str(booked or "").split()
     outcome = next((field for field in fields if field.startswith("clear=")), "")
     if outcome == "clear=scheduled":
+        # The clear waits for this turn to end with an empty input box; typing first keeps the window.
         if handoff or origin == "idle" or "continue=off" in fields:
-            return "곧 이 창이 자동으로 비워집니다."
-        return "곧 이 창이 자동으로 비워지고, 새 세션이 카드를 받아 이어서 진행합니다."
+            return "입력창이 비어 있으면 곧 이 창을 비웁니다. 그 전에 입력하시면 비우지 않습니다."
+        return ("입력창이 비어 있으면 곧 이 창을 비우고, 새 세션이 카드를 받아 이어서 진행합니다. "
+                "그 전에 입력하시면 비우지 않습니다.")
     command = "/new" if harness == "opencode" else "/clear"
     if outcome == "clear=off":
         return f"이 창은 그대로 둡니다. 이제 {command} 하거나 닫아도 됩니다."
