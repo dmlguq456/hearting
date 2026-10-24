@@ -12,10 +12,9 @@ This is adapter-owned output generated from `capabilities/analyze-project.md`, n
    `tool_contract_check`, and obey `runtime_surface` / `fallback` before
    claiming full support. For `unsupported`, stop or use the reported
    `fallback`.
-3. Before edits, run `adapters/opencode/bin/preflight.sh write <file> [session-id]`.
-4. Before spec-changing work, run
+3. Before spec-changing work, run
    `adapters/opencode/bin/preflight.sh capability analyze-project [cwd] [session-id]`.
-5. If the command receives arguments, map them to the portable argument shape:
+4. If the command receives arguments, map them to the portable argument shape:
    `[--mode code|paper|doc] [<scope/target/input-folder>] [--skip-qa]`.
 
 Portable contract excerpt:

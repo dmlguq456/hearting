@@ -160,6 +160,12 @@ class ManagedReleaseMigrationTest(unittest.TestCase):
         self.managed = mock.patch.object(distribution, "is_managed", return_value=False)
         self.managed.start()
         self.addCleanup(self.managed.stop)
+        # The installer finds its data home through XDG_DATA_HOME first, which the test
+        # runner sets; keep it on this fixture's home so the release above is the one seen.
+        self.data_home = mock.patch.dict(
+            os.environ, {"XDG_DATA_HOME": str(self.home / ".local" / "share")})
+        self.data_home.start()
+        self.addCleanup(self.data_home.stop)
 
     def _link_all_to_release(self):
         for name, rel in bootstrap.LAUNCHERS:

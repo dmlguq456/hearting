@@ -147,6 +147,14 @@ def resolve_artifact_root(worktree: str) -> str:
     return value
 
 
+def prepare_runtime_root(artifact_root: str, environ=None) -> str:
+    """Best-effort runtime home setup; failure only suppresses the optional root."""
+    import worker_bootstrap
+    values = os.environ if environ is None else environ
+    candidate = worker_bootstrap.runtime_dir_candidate(artifact_root, values)
+    return worker_bootstrap.prepare_runtime_dir(candidate)
+
+
 def is_report_bundle_publish_stage(route_file: str | None, route_node: str | None) -> bool:
     if not route_file or route_node != "publish":
         return False

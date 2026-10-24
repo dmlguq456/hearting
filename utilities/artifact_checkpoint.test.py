@@ -90,6 +90,19 @@ class InterimManifestTest(CheckpointTestBase):
         self.assertEqual(result["status"], "emitted", result)
         self.assertEqual(set(_ids_by_path(self.interim())), {"artifacts/plans/report.md"})
 
+    def test_checkpoint_uses_structural_runtime_signals_and_interim_weight_suffixes(self):
+        cycle = Path(self.result["cycle_dir"])
+        checkout = cycle / "artifacts/dev_logs/runtime/external-source"
+        (checkout / ".git/objects").mkdir(parents=True)
+        (checkout / ".git/objects/pack").write_bytes(b"ignored")
+        self.write_output(self.result, "dev_logs/model.nemo", b"nemo")
+        self.write_output(self.result, "dev_logs/model.gguf", b"gguf")
+        self.write_output(self.result, "reports/summary.md", b"report")
+        scan = P._checkpoint_scan(cycle, {}, P.CheckpointLimits())
+        self.assertEqual([row[0] for row in scan["facts"]], ["artifacts/reports/summary.md"])
+        self.assertEqual(scan["excluded_roots"], ["artifacts/dev_logs/runtime/external-source"])
+        self.assertEqual(scan["excluded"]["binary"], 2)
+
     def test_checkpoint_prunes_raw_results_before_walk_and_byte_limits(self):
         cycle = Path(self.result["cycle_dir"])
         raw = cycle / "artifacts" / "raw-results"

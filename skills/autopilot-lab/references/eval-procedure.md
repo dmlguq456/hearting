@@ -36,7 +36,7 @@ Do not let stages write the same file concurrently without the OPERATIONS §5.8 
 ```text
 === Eval Spec ===
 Experiment:     <date>_<slug> or parent: <slug>
-Checkpoint:     experiments/<slug>/runs/run-001/ckpt/best.pt
+Checkpoint:     $AGENT_RUNTIME_DIR/experiments/<slug>/runs/run-001/ckpt/best.pt
 Mode:           eval
 Evaluation data:<existing test set or new data>
 Metrics:        <PSNR, SSIM, SI-SDR, ...>

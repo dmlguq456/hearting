@@ -2322,6 +2322,16 @@ def start_work(route, path, jobs, *, wait=False, interview=None, answers=None,
               "advisories": OWNER_WRITE_ADVISORY.advisories(route),
               "resume_command": resume_command(Path(path).resolve(), Path(jobs).resolve(), agent_home=ROOT)}
     try:
+        outcome = _route_module().restore_consumed_tombstones(route, jobs=jobs)
+    except Exception as exc:
+        outcome = {"restored": [], "errors": [f"{type(exc).__name__}:{exc}"]}
+    if outcome.get("restored"):
+        result["restored"] = [row["node"] for row in outcome["restored"]]
+    if outcome.get("errors"):
+        result["restore_errors"] = outcome["errors"]
+        print("capability-route: restore-consumed-tombstones error=" + ";".join(outcome["errors"]),
+              file=sys.stderr)
+    try:
         result = _advance(route, path, jobs, result, wait=wait, interview=interview,
                           answers=answers, decision=decision, run=run, sleep=sleep, clock=clock)
     except (OSError, ValueError) as exc:

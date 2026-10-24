@@ -1,0 +1,1 @@
+../../../hooks/spec_sync_nudge_wiring.test.py

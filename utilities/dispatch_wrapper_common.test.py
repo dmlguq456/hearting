@@ -48,6 +48,23 @@ def load(harness: str):
 
 
 class WrapperCommonTest(unittest.TestCase):
+    def test_runtime_root_preparation_is_optional_and_marker_is_private(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            artifact = base / "project" / ".agent_reports"
+            artifact.mkdir(parents=True)
+            runtime = base / "dedicated-runtime"
+            prepared = C.prepare_runtime_root(str(artifact), {"AGENT_RUNTIME_DIR": str(runtime)})
+            self.assertEqual(prepared, str(runtime))
+            self.assertEqual((runtime / ".gitignore").read_bytes(), b"*\n")
+            self.assertFalse((runtime / "CACHEDIR.TAG").exists())
+            conflict = base / "conflict"
+            conflict.mkdir()
+            (conflict / ".gitignore").write_text("leave alone\n")
+            self.assertEqual(C.prepare_runtime_root(str(artifact), {"AGENT_RUNTIME_DIR": str(conflict)}), "")
+            self.assertEqual((conflict / ".gitignore").read_text(), "leave alone\n")
+            self.assertEqual(C.prepare_runtime_root(str(artifact), {"AGENT_RUNTIME_DIR": "relative"}), "")
+
     def make_release(self, root: Path):
         root.mkdir(parents=True)
         (root / ".hearting-release.json").write_text(

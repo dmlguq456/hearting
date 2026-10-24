@@ -274,6 +274,47 @@ function targetFiles(ctx, tool, args) {
   return []
 }
 
+function specSyncNudgeText(ctx, input, output, harnessRoot) {
+  const args = input.args || output.args || {}
+  const toolName = typeof input.tool === "string" ? input.tool : input.tool?.name || ""
+  if ((toolName !== "edit" && toolName !== "apply_patch") || typeof output?.output !== "string") return Promise.resolve("")
+  return new Promise((resolve) => {
+    let settled = false
+    let stdout = ""
+    let child
+    let timer
+    const finish = (code) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      resolve(code === 0 ? stdout.trim() : "")
+    }
+    const cwd = typeof args.workdir === "string" ? path.resolve(baseDir(ctx), args.workdir) : baseDir(ctx)
+    try {
+      child = spawn("bash", [path.join(harnessRoot, "hooks", "spec-sync-nudge.sh"), "--format", "text"], {
+        cwd, env: { ...process.env, AGENT_HOME: harnessRoot }, stdio: ["pipe", "pipe", "ignore"],
+      })
+      child.stdout?.setEncoding("utf8")
+      child.stdout?.on("data", (chunk) => { stdout += chunk })
+      child.once("error", () => finish(null))
+      child.once("close", (code) => finish(code))
+      timer = setTimeout(() => {
+        try { child.kill("SIGKILL") } catch { /* fail-open timeout */ }
+        finish(null)
+      }, 8000)
+      child.stdin.end(JSON.stringify({ hook_event_name: "PostToolUse", cwd, tool_name: toolName, tool_input: args }))
+    } catch {
+      finish(null)
+    }
+  })
+}
+
+function appendSpecSyncNudge(ctx, input, output, harnessRoot) {
+  return specSyncNudgeText(ctx, input, output, harnessRoot).then((text) => {
+    if (text && typeof output?.output === "string") output.output += "\n" + text
+  })
+}
+
 function isDesignHtml(file) {
   return /\.html?$/i.test(file) && designPattern.test(file.replaceAll(path.sep, "/"))
 }
@@ -938,13 +979,23 @@ async function setupOpenCodeV2(ctx) {
     await hooks["tool.execute.before"]?.(input, output)
   }))
   await ctx.tool.hook("execute.after", async (event) => withSession(event.sessionID, async () => {
-    if (v2WorkerSessions.has(event.sessionID)) return
     const content = event.status === "completed" ? event.result?.content : []
     const output = { output: Array.isArray(content)
       ? content.map((part) => part?.text || "").filter(Boolean).join("\n") : "",
       metadata: event.status === "error" ? { exit: 1 } : {} }
-    await hooks["tool.execute.after"]?.(
-      { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output)
+    const originalText = output.output
+    if (v2WorkerSessions.has(event.sessionID)) {
+      await appendSpecSyncNudge(ctx, { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output, root)
+    } else {
+      await hooks["tool.execute.after"]?.(
+        { tool: event.tool, sessionID: event.sessionID, args: event.input || {} }, output)
+    }
+    if (event.status === "completed" && Array.isArray(content) &&
+        output.output.startsWith(originalText) && output.output.length > originalText.length) {
+      // V2 consumes the native result, not the legacy adapter's temporary string.
+      const text = output.output.slice(originalText.length).replace(/^\n/, "")
+      event.result = { ...event.result, content: [...content, { type: "text", text }] }
+    }
   }))
   await ctx.shell.hook("create.before", async (event) => {
     const env = event.env || {}
@@ -2555,6 +2606,11 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     }
   },
   "tool.execute.after": async (input, output) => {
+    const workerSession = isWorkerSession()
+    // Start the general-session helper before the existing synchronous post-tool work.
+    // Its text is appended once at the end, after all other output additions.
+    const specSyncNudge = workerSession ? null : specSyncNudgeText(ctx, input, output, root)
+    if (workerSession) await appendSpecSyncNudge(ctx, input, output, root)
     observePaneCallback(ctx, "tool.execute.after", input.sessionID || "")
     const args = input.args || output.args || {}
     const toolName = typeof input.tool === "string" ? input.tool : input.tool?.name || ""
@@ -2620,6 +2676,10 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
                                 answers: output?.metadata?.answers || [] }),
         encoding: "utf8",
       })
+    }
+    if (specSyncNudge && typeof output?.output === "string") {
+      const text = await specSyncNudge
+      if (text) output.output += "\n" + text
     }
   },
   })

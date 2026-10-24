@@ -61,7 +61,8 @@ or enforces it, since `run.json` is a user-script-owned surface (see
 ```json
 { "id": "2026-06-23_lr_sweep", "parent": null, "skill_mode": "setup", "status": "done",
   "config_ref": "experiments/2026-06-23_lr_sweep/config.yaml",
-  "ckpt_path": "experiments/2026-06-23_lr_sweep/runs/run-001/ckpt/best.pt",
+  "ckpt_path": "$AGENT_RUNTIME_DIR/experiments/2026-06-23_lr_sweep/runs/run-001/ckpt/best.pt",
+  "ckpt_sha256": "<sha256 once the checkpoint exists>", "ckpt_byte_size": 123456,
   "started_at": "2026-06-23T09:00:00Z", "ended_at": "2026-06-23T14:30:00Z",
   "best": { "name": "psnr", "value": 28.7, "step": 18000 } }
 ```
@@ -73,6 +74,7 @@ or enforces it, since `run.json` is a user-script-owned surface (see
 | `skill_mode` | `setup` or `eval` from `pipeline_state.mode`; never hardcode it |
 | `status` | `running`, `done`, or `failed`, mirrored by `_RUNLOG` status |
 | `config_ref`, `ckpt_path` | Config and best-checkpoint pointers |
+| `ckpt_sha256`, `ckpt_byte_size` | Optional checkpoint digest and byte size, recorded after creation and verified at handoff/evaluation; absent while running |
 | `started_at`, `ended_at` | Birth and completion timestamps in ISO 8601 |
 | `best` | `{name,value,step}` from evaluation; source for completion dispatch and summary cards |
 

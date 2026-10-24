@@ -1536,8 +1536,7 @@ def _completion_unproven(route, node, marker, currency):
     judged = (f"Completed node {node_id} reads {currency.state} ({currency.reason}); "
               "running the same start again cannot change that.")
     if action != '-':
-        error.next_step = (f"{judged} Run: {action} (outside an owner add "
-                           "--author-attempt-id <attempt that made the change>), then resume.")
+        error.next_step = f"{judged} Run: {action}, then resume."
     else:
         error.next_step = f"{judged} Inspect that node's completion marker and evidence, then resume."
     return error
@@ -1561,16 +1560,30 @@ def _reuse_snapshot(jobs, route, lines):
         if merge_unobservable:
             import commit_policy
             merge_unobservable = commit_policy.git_operation(route.get('cwd', '')) == 'merge'
-        if currency.state not in {'current', 'superseded'} and not merge_unobservable:
+        gates_off_edit = (currency.state == 'revised-unrecorded'
+                          and currency.reason == 'completion-evidence-revised-unrecorded'
+                          and not DC.gates_on())
+        if currency.state not in {'current', 'superseded'} and not merge_unobservable and not gates_off_edit:
             raise _completion_unproven(route, node, marker, currency)
         ready = DC.completion_attempt_readiness(route, node, marker, Path(jobs), registry_lines=lines)
         if ready.state != 'ready':
             raise DC.DispatchContractError('replacement-completion-unsettled', str(node['id']))
-        observations[str(node['id'])] = (node, path, marker, currency)
+        restored_from = None
+        revision = marker.get('revision') if isinstance(marker.get('revision'), dict) else {}
+        if (marker.get('stage_authority') == 'revision'
+                and revision.get('basis') == 'upstream-revision-consumed'):
+            try:
+                restored_from = _digest(_read(directory / f"{node['id']}.{revision['of_sequence']}.json"))
+            except (OSError, ValueError, KeyError, TypeError):
+                raise DC.DispatchContractError('replacement-restored-predecessor-unreadable', str(node['id']))
+        # Keep the predecessor digest with its own observation; the reuse
+        # rows below are built in a second pass over every node.
+        observations[str(node['id'])] = (node, path, marker, currency, restored_from)
         if currency.state == 'superseded' or merge_unobservable:
             invalidated[str(node['id'])] = {
                 'node': node['id'], 'marker_digest': _digest(marker),
                 'attempt_id': marker.get('attempt_id', ''),
+                **({'restored_from': restored_from} if restored_from else {}),
                 'currency': currency.state, 'currency_reason': currency.reason,
                 'depends_on_invalid': [],
             }
@@ -1580,7 +1593,7 @@ def _reuse_snapshot(jobs, route, lines):
     changed = True
     while changed:
         changed = False
-        for node_id, (node, _path, marker, currency) in observations.items():
+        for node_id, (node, _path, marker, currency, _restored_from) in observations.items():
             if node_id in invalidated:
                 continue
             invalid_parents = sorted(set(str(parent) for parent in node.get('depends_on') or ())
@@ -1598,12 +1611,13 @@ def _reuse_snapshot(jobs, route, lines):
         observation = observations.get(node_id)
         if observation is None or node_id in invalidated:
             continue
-        _node, path, marker, _currency = observation
+        _node, path, marker, _currency, restored_from = observation
         # A gates-off evidence edit is recorded only when this completion is
         # actually part of the successor's reusable evidence.
         DC.note_evidence_change(route, node, path, marker)
         completed.append({'node': node['id'], 'marker_digest': _digest(marker),
-                          'attempt_id': marker.get('attempt_id', '')})
+                          'attempt_id': marker.get('attempt_id', ''),
+                          **({'restored_from': restored_from} if restored_from else {})})
     pending = [str(node.get('id')) for node in route.get('nodes', [])
                if str(node.get('id')) not in {row['node'] for row in completed}]
     root = Path(route['artifact_root'])
@@ -1671,9 +1685,12 @@ def _reuse_preserved(previous, current):
                 return False
             continue
         if (not old_invalid or old_invalid.get('marker_digest') != row.get('marker_digest')
-                or old_invalid.get('attempt_id', '') != row.get('attempt_id', '')
-                or not reobserved_invalidation(old_invalid)):
-            return False
+                or old_invalid.get('attempt_id', '') != row.get('attempt_id', '')):
+            restored = (old_invalid and old_invalid.get('currency') == 'superseded'
+                        and row.get('restored_from') == old_invalid.get('marker_digest')
+                        and not row.get('depends_on_invalid'))
+            if not restored and (not old_invalid or not reobserved_invalidation(old_invalid)):
+                return False
     invalidated = {row.get('node'): row for row in current.get('invalidated', [])}
     if len(invalidated) != len(current.get('invalidated', [])):
         return False
@@ -1704,9 +1721,13 @@ def _reuse_preserved(previous, current):
             continue
         now_current = now.get(node)
         if (not now_current
-                or now_current.get('marker_digest') != old.get('marker_digest')
-                or now_current.get('attempt_id', '') != old.get('attempt_id', '')
-                or not reobserved_invalidation(old)):
+                or now_current.get('attempt_id', '') != old.get('attempt_id', '')):
+            return False
+        restored = (old.get('currency') == 'superseded'
+                    and now_current.get('restored_from') == old.get('marker_digest')
+                    and not now_current.get('depends_on_invalid'))
+        if not restored and (now_current.get('marker_digest') != old.get('marker_digest')
+                             or not reobserved_invalidation(old)):
             return False
     if any(node not in previous_completed and node not in previous_invalidated
            for node in invalidated):
@@ -2288,6 +2309,14 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
                 or rows[binding[1]][1].get('launch_claimed') == '1')):
             # Nothing is launched yet: limit, drift and cleanup are judged before anything durable is written.
             _, current_route = _route(jobs, aid, source)
+            try:
+                restore = DC._route_module().restore_consumed_tombstones(current_route, jobs=Path(jobs))
+                if restore.get("errors"):
+                    print("capability-route: restore-consumed-tombstones error=" + ";".join(restore["errors"]),
+                          file=sys.stderr)
+            except Exception as exc:
+                print(f"capability-route: restore-consumed-tombstones error={type(exc).__name__}:{exc}",
+                      file=sys.stderr)
             moved = (route_authority.moved_owner_harness(current_route, launch_input(jobs, aid, source).get('harness'))
                      if source.get('worker_type') == 'owner' else None)
             hold_source = {**source, 'harness': moved, 'model': None} if moved else source

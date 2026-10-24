@@ -1258,7 +1258,9 @@ class OpenCodeContextTest(unittest.TestCase):
             # Without observed native compaction policy the catalogue window proves nothing.
             sess = Session(harness="opencode", pid=4242, cwd="/repo", proc_start="55")
             with mock.patch.dict(os.environ, {"OPENCODE_DB": db}, clear=True), \
-                 mock.patch.object(opencode, "_process_started_ms", return_value=None), \
+                 mock.patch.object(opencode, "session_of_process",
+                                   return_value=("sid", "opencode-tui-selection")), \
+                 mock.patch.object(opencode, "_proc_start_ticks", return_value="55"), \
                  mock.patch.object(opencode, "_model_ctx_limit", return_value=2_000_000):
                 opencode.enrich(sess)
             self.assertEqual(sess.active_context_tokens, 182740)   # input+output+cache
@@ -1270,7 +1272,9 @@ class OpenCodeContextTest(unittest.TestCase):
             state = os.path.join(tmp, "state")
             env = {"OPENCODE_DB": db, "XDG_STATE_HOME": state}
             with mock.patch.dict(os.environ, env, clear=True), \
-                 mock.patch.object(opencode, "_process_started_ms", return_value=None):
+                 mock.patch.object(opencode, "session_of_process",
+                                   return_value=("sid", "opencode-tui-selection")), \
+                 mock.patch.object(opencode, "_proc_start_ticks", return_value="55"):
                 path = policy_path("opencode", pid=4242, proc_start="55")
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(json.dumps({
@@ -1309,8 +1313,11 @@ class OpenCodeContextTest(unittest.TestCase):
     def test_opencode_enrich_ignores_native_title_when_column_present(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = self._make_db(tmp, with_title_col=True)
-            sess = Session(harness="opencode", pid=1, cwd="/repo")
-            with mock.patch.dict(os.environ, {"OPENCODE_DB": db}, clear=True):
+            sess = Session(harness="opencode", pid=1, proc_start="1", cwd="/repo")
+            with mock.patch.dict(os.environ, {"OPENCODE_DB": db}, clear=True), \
+                 mock.patch.object(opencode, "session_of_process",
+                                   return_value=("sid", "opencode-tui-selection")), \
+                 mock.patch.object(opencode, "_proc_start_ticks", return_value="1"):
                 opencode.enrich(sess)
         self.assertIsNone(sess.title)
         self.assertEqual(sess.slug, "shiny-wizard")
@@ -1318,8 +1325,11 @@ class OpenCodeContextTest(unittest.TestCase):
     def test_opencode_enrich_tolerates_missing_title_column(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = self._make_db(tmp, with_title_col=False)
-            sess = Session(harness="opencode", pid=1, cwd="/repo")
-            with mock.patch.dict(os.environ, {"OPENCODE_DB": db}, clear=True):
+            sess = Session(harness="opencode", pid=1, proc_start="1", cwd="/repo")
+            with mock.patch.dict(os.environ, {"OPENCODE_DB": db}, clear=True), \
+                 mock.patch.object(opencode, "session_of_process",
+                                   return_value=("sid", "opencode-tui-selection")), \
+                 mock.patch.object(opencode, "_proc_start_ticks", return_value="1"):
                 opencode.enrich(sess)
         self.assertIsNone(sess.title)
         self.assertEqual(sess.slug, "shiny-wizard")

@@ -3058,6 +3058,43 @@ class Orphans(Fixture):
                     child.kill()
                 child.wait()
 
+    def test_process_scan_resolves_handed_paths_once_per_pass_and_link_targets_never(self):
+        attempts = ("att-orphan-scan-1", "att-orphan-scan-2", "att-orphan-scan-3")
+        homes = [self.add(attempt) for attempt in attempts]
+        self._remove_registry_rows(*attempts)
+        link = self.outside / "home-link"
+        link.symlink_to(homes[0])
+        held = self.outside / "held"
+        held.mkdir()
+        fds = [os.open(held / str(index), os.O_RDONLY | os.O_CREAT, 0o600) for index in range(64)]
+        try:
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                env={**os.environ, "HEARTING_WORKER_HOME": str(link)}, pass_fds=fds)
+        finally:
+            for fd in fds:
+                os.close(fd)
+        realpath = os.path.realpath
+        resolved = []
+
+        def counted(path, *args, **kwargs):
+            resolved.append(os.fspath(path))
+            return realpath(path, *args, **kwargs)
+
+        try:
+            with mock.patch.object(DC, "_current_observer_is_host_like", return_value=True), \
+                    mock.patch.object(os.path, "realpath", counted):
+                result = self.sweep(0)
+            # The symlinked HOME is still found, the link is resolved once for three
+            # homes, and the child's open files are compared as the kernel names them.
+            self.assertEqual(self.kept(result, "not-quiescent"), 1)
+            self.assertEqual(resolved.count(str(link)), 1)
+            self.assertEqual([path for path in resolved if path.startswith(str(held) + os.sep)], [])
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+
 
 class Mapping(Fixture):
     def test_schema_two_manifest_binds_without_a_runtime_home_row(self):

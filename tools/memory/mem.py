@@ -1608,7 +1608,7 @@ def _logical_project_namespace(con, serving_project):
 def _capture_v2_operation(con, kind, *, post_ids=(), tombstones=None,
                           edges=None, target_ops=None, reason=None,
                           prior_states=None, project_namespace=None,
-                          source_namespace=None):
+                          source_namespace=None, lineage_access=None):
     """Capture one semantic command in the caller's open transaction.
 
     Semantic rows/derived mirrors must already hold their final state. The
@@ -1628,8 +1628,9 @@ def _capture_v2_operation(con, kind, *, post_ids=(), tombstones=None,
     edges = dict(edges or {})
     target_ops = dict(target_ops or {})
     prior_states = dict(prior_states or {})
-    lineage = _lineage_access_times(
-        con, set(prior_states) | set(post_ids) | set(tombstones))
+    lineage = (dict(lineage_access) if lineage_access is not None else
+               _lineage_access_times(
+                   con, set(prior_states) | set(post_ids) | set(tombstones)))
     prior_states = {
         rid: _with_lineage_access(_canonical_record_state(state), rid, lineage)
         for rid, state in prior_states.items()
@@ -4988,40 +4989,99 @@ def graduate(rid, to="durable"):
         con.close()
 
 
-def reattribute(rid):
-    """Reattribute an orphan record to the current project without data loss."""
+def _emit_reattribute_result(result, json_output):
+    state = result.get("state")
+    if json_output:
+        output = dict(result)
+        record_ids = output.get("record_ids")
+        if (isinstance(record_ids, list)
+                and (len(record_ids) > protocol_v2.MAX_DIAGNOSTIC_IDS
+                     or sum(len(str(value).encode("utf-8")) for value in record_ids) > 8192)):
+            output.setdefault("record_ids_digest", _repository_rekey_ids_digest(record_ids))
+            output.pop("record_ids", None)
+        for field in ("operation_ids", "inverse_operation_ids"):
+            values = output.get(field)
+            if isinstance(values, list) and len(values) > protocol_v2.MAX_DIAGNOSTIC_IDS:
+                output[field + "_count"] = len(values)
+                output[field + "_digest"] = _repository_rekey_ids_digest(values)
+                output[field] = values[:protocol_v2.MAX_DIAGNOSTIC_IDS]
+        encoded = json.dumps(output, sort_keys=True, ensure_ascii=False)
+        if len(encoded.encode("utf-8")) > 64 * 1024:
+            output.pop("record_ids", None)
+            encoded = json.dumps(output, sort_keys=True, ensure_ascii=False)
+        print(encoded)
+    elif state == "applied" and "migration_id" in result:
+        pass
+    elif state == "reattributed":
+        print(f"[reattribute] {result.get('record_id')} "
+              f"{result.get('from')}→{result.get('to')}")
+    elif state == "applied":
+        print(f"[reattribute] {result.get('record_count', 1)} record(s) moved")
+    elif state == "already-applied":
+        print(f"[reattribute] migration {result.get('migration_id')} already applied")
+    elif state == "undone":
+        print(f"[reattribute] migration {result.get('migration_id')} undone")
+    elif state == "already-undone":
+        print(f"[reattribute] migration {result.get('migration_id')} already undone")
+    else:
+        sys.stderr.write(f"[reattribute] {state or 'refused'}: "
+                         f"{result.get('reason') or 'not eligible'}\n")
+    return state in ("applied", "reattributed", "already-applied",
+                     "undone", "already-undone")
+
+
+def reattribute(rid=None, *, undo_migration=None, json_output=False):
+    """Reattribute an orphan or perform an exact repository-migration undo."""
+    if bool(rid) == bool(undo_migration):
+        return _emit_reattribute_result(
+            {"state": "refused", "reason": "provide-one-record-or-migration-id"},
+            json_output)
+    if undo_migration:
+        return _emit_reattribute_result(
+            _undo_repository_rekey(undo_migration), json_output)
     con = get_con()
     try:
         row = con.execute("SELECT scope,type,cwd_origin FROM records WHERE id=?", (rid,)).fetchone()
         pkey = project_key(Path.cwd(), seed=True)
         if row and row[0] == "project" and row[1] != "profile" \
                 and (row[2] or "").startswith("git:") and row[2] != pkey:
-            evidence = _repository_rename_evidence(row[2], pkey)
+            evidence, reason = _repository_rename_evidence_status(row[2], pkey)
             if evidence:
                 con.close()
-                return bool(_rekey_project(row[2], pkey, evidence))
+                result = _rekey_project(row[2], pkey, evidence, return_result=True)
+                if result["state"] == "no-op":
+                    result = _repository_apply_receipt_for_record(rid, pkey) or result
+                return _emit_reattribute_result(result, json_output)
+            if json_output:
+                return _emit_reattribute_result(
+                    {"state": "deferred", "reason": reason, "from": row[2],
+                     "to": pkey, "record_count": 0, "record_ids": [],
+                     "operation_ids": []}, True)
         con.execute("BEGIN IMMEDIATE")
         row = con.execute(
             "SELECT scope, type, cwd_origin FROM records WHERE id=?", (rid,)).fetchone()
         if row is None:
-            print(f"[reattribute] refused nonexistent record: {rid}")
-            return False
+            return _emit_reattribute_result(
+                {"state": "refused", "reason": "nonexistent-record"}, json_output)
         scope, rtype, cwd_origin = row
         if rtype == "profile" or scope != "project":
-            print(f"[reattribute] refused profile/non-project scope={scope}: {rid}")
-            return False
+            return _emit_reattribute_result(
+                {"state": "refused", "reason": "profile-or-non-project-scope"}, json_output)
         pkey = project_key(Path.cwd(), seed=True)
         if cwd_origin == pkey:
-            print(f"[reattribute] refused; already in current project: {rid}")
-            return False
+            receipt = _repository_apply_receipt_for_record(rid, pkey)
+            if receipt is not None:
+                return _emit_reattribute_result(receipt, json_output)
+            return _emit_reattribute_result(
+                {"state": "refused", "reason": "already-in-current-project"}, json_output)
         # Only a bare encoded cwd that no longer resolves qualifies as orphaned.
         if not (cwd_origin or "").startswith("-"):
-            print(f"[reattribute] refused non-bare encoded cwd (live unknown): {rid}")
-            return False
+            return _emit_reattribute_result(
+                {"state": "refused", "reason": "non-bare-encoded-cwd"}, json_output)
         d = _decode_enc_cwd(cwd_origin)
         if d is not None and d.is_dir():
-            print(f"[reattribute] refused record belonging to a live project: {rid}")
-            return False
+            return _emit_reattribute_result(
+                {"state": "refused", "reason": "record-belongs-to-live-project"}, json_output)
         frontier_projects = {
             row[0] for row in con.execute(
                 "SELECT DISTINCT project_key FROM sync_frontier WHERE record_id=?",
@@ -5029,18 +5089,20 @@ def reattribute(rid):
             )
         }
         if frontier_projects and frontier_projects != {pkey}:
-            print(f"[reattribute] refused (v2-frontier-cutover-required): {rid}")
-            return False
+            return _emit_reattribute_result(
+                {"state": "refused", "reason": "v2-frontier-cutover-required"}, json_output)
         con.execute("UPDATE records SET cwd_origin=? WHERE id=?", (pkey, rid))
-        _capture_v2_operation(
+        operation = _capture_v2_operation(
             con, "put", post_ids=[rid], project_namespace=pkey,
             reason="reattribute",
         )
         con.commit()
-        print(f"[reattribute] {rid} {cwd_origin}→{pkey}")
         _append_write_event("reattribute", rid, scope=scope, rtype=rtype,
                              snippet=f"{cwd_origin}→{pkey}")
-        return True
+        result = {"state": "reattributed", "record_id": rid,
+                  "from": cwd_origin, "to": pkey,
+                  "operation_ids": [operation["op_id"]]}
+        return _emit_reattribute_result(result, json_output)
     finally:
         con.close()
 
@@ -5075,55 +5137,535 @@ def _repository_rename_evidence(old, current, current_repository=None):
     return None
 
 
-def _rekey_project(old, current, evidence):
-    """Preserve an entire renamed project's records in one normal v2 transaction."""
+_REPOSITORY_REKEY_FORMAT = "repository-rekey-v1"
+_REPOSITORY_REKEY_EVIDENCE = re.compile(r"^github-repository-id:[1-9][0-9]*$")
+
+
+def _repository_rekey_reason(metadata):
+    return json.dumps(metadata, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False)
+
+
+def _repository_rekey_metadata(payload):
+    """Return only canonical, structurally valid migration metadata."""
+    try:
+        reason = payload["provenance"]["reason"]
+        metadata = json.loads(reason)
+    except (KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(metadata, dict) or metadata.get("format") != _REPOSITORY_REKEY_FORMAT:
+        return None
+    phase = metadata.get("phase")
+    required = {"format", "phase", "migration_id", "old", "current", "evidence",
+                "batch_index", "batch_count", "backup_sha256"}
+    if phase == "undo":
+        required.add("apply_op_ids")
+    if set(metadata) != required:
+        return None
+    if reason != _repository_rekey_reason(metadata):
+        return None
+    if (phase not in ("apply", "undo")
+            or not isinstance(metadata.get("migration_id"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", metadata["migration_id"])
+            or not isinstance(metadata.get("old"), str)
+            or not metadata["old"].startswith("git:github.com/")
+            or not isinstance(metadata.get("current"), str)
+            or not metadata["current"].startswith("git:github.com/")
+            or metadata["old"] == metadata["current"]
+            or not isinstance(metadata.get("evidence"), str)
+            or not _REPOSITORY_REKEY_EVIDENCE.fullmatch(metadata["evidence"])
+            or not isinstance(metadata.get("backup_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", metadata["backup_sha256"])):
+        return None
+    index, count = metadata.get("batch_index"), metadata.get("batch_count")
+    if (type(index) is not int or type(count) is not int
+            or count < 1 or count > 1000000 or not 0 <= index < count):
+        return None
+    if phase == "undo":
+        targets = metadata.get("apply_op_ids")
+        if (not isinstance(targets, list) or len(targets) != 1
+                or not isinstance(targets[0], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", targets[0])):
+            return None
+    return metadata
+
+
+def _repository_rekey_manifest_id(old, current, evidence, records):
+    """Hash sorted IDs and their exact pre-migration frontier sets."""
+    records = sorted((str(rid), tuple(sorted(heads))) for rid, heads in records)
+    digest = hashlib.sha256()
+    digest.update(protocol_v2.canonical_bytes({
+        "format": "repository-rekey-manifest-v1", "old": old,
+        "current": current, "evidence": evidence, "record_count": len(records),
+    }))
+    for rid, heads in records:
+        digest.update(protocol_v2.canonical_bytes({"record_id": rid, "heads": list(heads)}))
+    return digest.hexdigest()
+
+
+def _repository_rekey_ids_digest(record_ids):
+    digest = hashlib.sha256()
+    values = sorted(set(record_ids))
+    digest.update(protocol_v2.canonical_bytes({"record_count": len(values)}))
+    for rid in values:
+        digest.update(protocol_v2.canonical_bytes({"record_id": rid}))
+    return digest.hexdigest()
+
+
+def _repository_rekey_objects(con, migration_id=None, phase=None):
+    rows = con.execute(
+        "SELECT o.op_id,o.payload_bytes,o.kind,o.project_key,a.result FROM sync_objects o "
+        "LEFT JOIN sync_applied a ON a.op_id=o.op_id WHERE o.kind='rekey' "
+        "ORDER BY o.op_id").fetchall()
+    objects = []
+    for op_id, raw, stored_kind, stored_project, result in rows:
+        try:
+            payload = protocol_v2.canonical_loads(bytes(raw))
+            rebuilt = protocol_v2.build_operation(payload)
+            validated = protocol_v2.validate_operation(rebuilt)
+        except Exception:
+            continue
+        if (rebuilt["op_id"] != op_id or payload.get("kind") != stored_kind
+                or payload.get("project_key") != stored_project
+                or getattr(validated, "supported", None) is not True):
+            continue
+        metadata = _repository_rekey_metadata(payload)
+        if metadata is None:
+            continue
+        if migration_id is not None and metadata["migration_id"] != migration_id:
+            continue
+        if phase is not None and metadata["phase"] != phase:
+            continue
+        objects.append({"op_id": op_id, "payload": payload,
+                        "result": result, "metadata": metadata})
+    return objects
+
+
+def _repository_frontier_heads(payload, record_id):
+    for frontier in payload.get("frontiers", ()):
+        if frontier.get("record_id") == record_id:
+            return list(frontier.get("heads", ()))
+    return None
+
+
+def _repository_prior_state(con, record_id, head_id, cache=None):
+    cache = cache if cache is not None else {}
+    if head_id not in cache:
+        row = con.execute(
+            "SELECT o.payload_bytes,a.result FROM sync_objects o "
+            "LEFT JOIN sync_applied a ON a.op_id=o.op_id WHERE o.op_id=?", (head_id,)
+        ).fetchone()
+        if row is None or row[1] not in ("local", "folded"):
+            cache[head_id] = None
+        else:
+            try:
+                payload = protocol_v2.canonical_loads(bytes(row[0]))
+                envelope = protocol_v2.build_operation(payload)
+                validated = protocol_v2.validate_operation(envelope)
+            except Exception:
+                cache[head_id] = None
+            else:
+                if (envelope["op_id"] != head_id
+                        or getattr(validated, "supported", None) is not True):
+                    cache[head_id] = None
+                else:
+                    cache[head_id] = {
+                        mutation["record_id"]: dict(mutation["post_state"])
+                        for mutation in payload.get("mutations", ())
+                        if isinstance(mutation.get("post_state"), dict)
+                    }
+    states = cache.get(head_id)
+    return dict(states[record_id]) if states and record_id in states else None
+
+
+def _repository_state_is_rekey(prior, post, *, old, current):
+    if not isinstance(prior, dict) or not isinstance(post, dict):
+        return False
+    if prior.get("scope") != "project" or prior.get("type") == "profile":
+        return False
+    if prior.get("cwd_origin") != old:
+        return False
+    expected = dict(prior)
+    expected["cwd_origin"] = current
+    return post == expected
+
+
+def _validate_repository_apply_group(con, migration_id):
+    objects = _repository_rekey_objects(con, migration_id, "apply")
+    if not objects:
+        return None
+    first = objects[0]["metadata"]
+    common = {key: first[key] for key in
+              ("migration_id", "old", "current", "evidence", "batch_count", "phase",
+               "backup_sha256")}
+    batches = {}
+    all_records = []
+    all_ids = set()
+    logical_project = None
+    prior_cache = {}
+    for obj in objects:
+        metadata, payload = obj["metadata"], obj["payload"]
+        if any(metadata[key] != value for key, value in common.items()):
+            return None
+        index = metadata["batch_index"]
+        if index in batches or obj["result"] not in ("local", "folded"):
+            return None
+        if (payload.get("kind") != "rekey" or payload.get("schema_minor") != 1
+                or protocol_v2.serving_project(payload) != common["current"]):
+            return None
+        if logical_project is None:
+            logical_project = payload.get("project_key")
+        elif payload.get("project_key") != logical_project:
+            return None
+        mutations = payload.get("mutations", ())
+        mutation_ids = [item.get("record_id") for item in mutations]
+        if (not mutation_ids or mutation_ids != sorted(mutation_ids)
+                or len(mutation_ids) != len(set(mutation_ids))
+                or len(mutation_ids) > protocol_v2.MAX_MUTATIONS
+                or set(mutation_ids) & all_ids):
+            return None
+        frontiers = {}
+        prior_states, post_states = {}, {}
+        for mutation in mutations:
+            rid = mutation["record_id"]
+            heads = _repository_frontier_heads(payload, rid)
+            if not heads or len(heads) != 1:
+                return None
+            prior = _repository_prior_state(con, rid, heads[0], prior_cache)
+            post = mutation.get("post_state")
+            if not _repository_state_is_rekey(
+                    prior, post, old=common["old"], current=common["current"]):
+                return None
+            frontiers[rid] = heads
+            prior_states[rid] = prior
+            post_states[rid] = dict(post)
+            all_records.append((rid, heads))
+        all_ids.update(mutation_ids)
+        batches[index] = {**obj, "record_ids": mutation_ids,
+                          "frontiers": frontiers,
+                          "prior_states": prior_states,
+                          "post_states": post_states}
+    if set(batches) != set(range(common["batch_count"])):
+        return None
+    if _repository_rekey_manifest_id(
+            common["old"], common["current"], common["evidence"], all_records
+    ) != migration_id:
+        return None
+    ordered = [batches[index] for index in range(common["batch_count"])]
+    return {**common, "batches": ordered,
+            "project_key": logical_project,
+            "record_ids": sorted(all_ids),
+            "record_ids_digest": _repository_rekey_ids_digest(all_ids),
+            "operation_ids": [item["op_id"] for item in ordered]}
+
+
+def _validate_repository_undo_group(con, apply_group):
+    objects = _repository_rekey_objects(con, apply_group["migration_id"], "undo")
+    if not objects:
+        return None
+    batches = {}
+    backup_sha256 = None
+    for obj in objects:
+        metadata, payload = obj["metadata"], obj["payload"]
+        index = metadata["batch_index"]
+        if (metadata["batch_count"] != len(apply_group["batches"])
+                or metadata["old"] != apply_group["old"]
+                or metadata["current"] != apply_group["current"]
+                or metadata["evidence"] != apply_group["evidence"]
+                or index in batches or obj["result"] not in ("local", "folded")):
+            return None
+        if backup_sha256 is None:
+            backup_sha256 = metadata["backup_sha256"]
+        elif metadata["backup_sha256"] != backup_sha256:
+            return None
+        target = apply_group["batches"][index]
+        if (metadata["apply_op_ids"] != [target["op_id"]]
+                or payload.get("kind") != "rekey" or payload.get("schema_minor") != 1
+                or protocol_v2.serving_project(payload) != apply_group["old"]
+                or payload.get("project_key") != apply_group["project_key"]):
+            return None
+        mutations = payload.get("mutations", ())
+        mutation_ids = [item.get("record_id") for item in mutations]
+        if mutation_ids != target["record_ids"]:
+            return None
+        for mutation in mutations:
+            rid = mutation["record_id"]
+            if (_repository_frontier_heads(payload, rid) != [target["op_id"]]
+                    or mutation.get("post_state") != target["prior_states"][rid]):
+                return None
+        batches[index] = {**obj, "record_ids": mutation_ids}
+    if set(batches) != set(range(len(apply_group["batches"]))):
+        return None
+    ordered = [batches[index] for index in range(len(batches))]
+    return {"batches": ordered, "operation_ids": [item["op_id"] for item in ordered],
+            "record_ids": list(apply_group["record_ids"]),
+            "backup_sha256": backup_sha256}
+
+
+def _repository_operation_is_ancestor(con, ancestor, descendant):
+    if ancestor == descendant:
+        return True
+    return con.execute(
+        "WITH RECURSIVE ancestors(op_id) AS ("
+        "SELECT parent_op_id FROM sync_parents WHERE op_id=? UNION "
+        "SELECT p.parent_op_id FROM sync_parents p JOIN ancestors a ON p.op_id=a.op_id) "
+        "SELECT 1 FROM ancestors WHERE op_id=? LIMIT 1", (descendant, ancestor)
+    ).fetchone() is not None
+
+
+def _repository_reapply_descends_undo(con, undo_group, apply_group):
+    mutations = {}
+    for batch in apply_group["batches"]:
+        for mutation in batch["payload"]["mutations"]:
+            mutations[mutation["record_id"]] = (batch, mutation)
+    for undo_batch in undo_group["batches"]:
+        for rid in undo_batch["record_ids"]:
+            target = mutations.get(rid)
+            if target is None:
+                return False
+            batch, _mutation = target
+            heads = _repository_frontier_heads(batch["payload"], rid) or []
+            if not any(_repository_operation_is_ancestor(con, undo_batch["op_id"], head)
+                       for head in heads):
+                return False
+    return True
+
+
+def _repository_auto_rekey_suppressed(con, old, current, evidence):
+    objects = [item for item in _repository_rekey_objects(con)
+               if (item["metadata"]["old"], item["metadata"]["current"],
+                   item["metadata"]["evidence"]) == (old, current, evidence)]
+    migration_ids = sorted({item["metadata"]["migration_id"] for item in objects})
+    groups = []
+    for migration_id in migration_ids:
+        group = _validate_repository_apply_group(con, migration_id)
+        if group is not None:
+            groups.append(group)
+    for group in groups:
+        if (group["old"], group["current"], group["evidence"]) != (old, current, evidence):
+            continue
+        undo = _validate_repository_undo_group(con, group)
+        if undo is None:
+            continue
+        reapplied = any(
+            other["migration_id"] != group["migration_id"]
+            and (other["old"], other["current"], other["evidence"])
+                == (old, current, evidence)
+            and _repository_reapply_descends_undo(con, undo, other)
+            for other in groups
+        )
+        if not reapplied:
+            return True
+    return False
+
+
+def _repository_apply_receipt_for_record(record_id, current):
     con = get_con()
     try:
+        migration_ids = sorted({item["metadata"]["migration_id"]
+                                for item in _repository_rekey_objects(con, phase="apply")
+                                if item["metadata"]["current"] == current})
+        for migration_id in migration_ids:
+            group = _validate_repository_apply_group(con, migration_id)
+            if (group is None or group["current"] != current
+                    or record_id not in group["record_ids"]):
+                continue
+            return {"state": "already-applied", "migration_id": migration_id,
+                    "from": group["old"], "to": group["current"],
+                    "evidence": group["evidence"],
+                    "record_count": len(group["record_ids"]),
+                    "record_ids": group["record_ids"],
+                    "record_ids_digest": group["record_ids_digest"],
+                    "operation_ids": group["operation_ids"],
+                    "backup": _repository_find_backup(group["backup_sha256"])}
+        return None
+    finally:
+        con.close()
+
+
+def _repository_rekey_backup(con):
+    fd, name = tempfile.mkstemp(prefix="memory-rekey-", suffix=".bak", dir=STORE)
+    os.close(fd)
+    target = None
+    try:
+        target = sqlite3.connect(name)
+        con.backup(target)
+        target.close()
+        target = None
+        check = sqlite3.connect(Path(name).resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            integrity = check.execute("PRAGMA integrity_check").fetchone()
+        finally:
+            check.close()
+        if integrity is None or integrity[0] != "ok":
+            raise sync_v2.SyncInvariantError("repository rekey backup failed integrity_check")
+        digest = hashlib.sha256()
+        with open(name, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return {"path": str(Path(name).resolve()), "sha256": digest.hexdigest(),
+                "integrity": "ok"}
+    except Exception:
+        if target is not None:
+            target.close()
+        try:
+            os.unlink(name)
+        except OSError:
+            pass
+        raise
+
+
+def _repository_find_backup(digest_value):
+    for path in STORE.glob("memory-rekey-*.bak"):
+        try:
+            if not stat.S_ISREG(path.lstat().st_mode):
+                continue
+            digest = hashlib.sha256()
+            with open(path, "rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            if digest.hexdigest() != digest_value:
+                continue
+            check = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                integrity = check.execute("PRAGMA integrity_check").fetchone()
+            finally:
+                check.close()
+            if integrity is not None and integrity[0] == "ok":
+                return {"path": str(path.resolve()), "sha256": digest_value,
+                        "integrity": "ok"}
+        except (OSError, sqlite3.Error):
+            continue
+    return {"path": None, "sha256": digest_value, "integrity": "not-found"}
+
+
+def _repository_rekey_batches(record_ids, states, frontiers):
+    batches, current, parent_ids, estimated = [], [], set(), 2048
+    for rid in sorted(record_ids):
+        heads = frontiers[rid]
+        if not heads or len(heads) > protocol_v2.MAX_FRONTIER:
+            raise sync_v2.SyncInvariantError("repository rekey has an unresolved frontier")
+        encoded = len(protocol_v2.canonical_bytes(states[rid]))
+        record_estimate = encoded + len(rid.encode("utf-8")) + 512 + 66 * len(heads)
+        next_parents = parent_ids | set(heads)
+        if current and (len(current) >= protocol_v2.MAX_MUTATIONS
+                        or len(next_parents) > protocol_v2.MAX_PARENTS
+                        or estimated + record_estimate > protocol_v2.MAX_ENVELOPE_BYTES):
+            batches.append(current)
+            current, parent_ids, estimated = [], set(), 2048
+            next_parents = set(heads)
+        if (len(next_parents) > protocol_v2.MAX_PARENTS
+                or estimated + record_estimate > protocol_v2.MAX_ENVELOPE_BYTES):
+            raise sync_v2.SyncInvariantError(
+                "one repository record exceeds the bounded v2 rekey envelope")
+        current.append(rid)
+        parent_ids = next_parents
+        estimated += record_estimate
+    if current:
+        batches.append(current)
+    return batches
+
+
+def _rekey_project(old, current, evidence, *, return_result=False, automatic=False):
+    """Preserve a renamed project's records in one bounded v2 transaction."""
+    con = get_con()
+    try:
+        if automatic and _repository_auto_rekey_suppressed(con, old, current, evidence):
+            result = {"state": "suppressed", "from": old, "to": current,
+                      "evidence": evidence, "record_count": 0, "record_ids": [],
+                      "operation_ids": []}
+            return result if return_result else 0
         if not con.execute("SELECT 1 FROM records WHERE scope='project' AND cwd_origin=?",
                            (old,)).fetchone():
-            return 0
-        # SQLite's backup API includes committed WAL state. A plain file copy
-        # would omit it. Keep the backup outside the synchronized operation tree.
-        fd, name = tempfile.mkstemp(prefix="memory-rekey-", suffix=".bak", dir=STORE)
-        os.close(fd)
-        with sqlite3.connect(name) as backup:
-            con.backup(backup)
+            result = {"state": "no-op", "from": old, "to": current,
+                      "evidence": evidence, "record_count": 0, "record_ids": [],
+                      "operation_ids": []}
+            return result if return_result else 0
+        try:
+            backup = _repository_rekey_backup(con)
+        except (OSError, sqlite3.Error, sync_v2.SyncError):
+            result = {"state": "deferred", "reason": "backup-failed",
+                      "from": old, "to": current, "evidence": evidence,
+                      "record_count": 0, "record_ids": [], "operation_ids": []}
+            return result if return_result else 0
         con.execute("BEGIN IMMEDIATE")
         rows = con.execute("SELECT id,type FROM records WHERE scope='project' AND cwd_origin=? ORDER BY id",
                            (old,)).fetchall()
         ids = [row[0] for row in rows]
         if not ids:
             con.rollback()
-            return 0
+            result = {"state": "no-op", "from": old, "to": current,
+                      "evidence": evidence, "record_count": 0, "record_ids": [],
+                      "operation_ids": [], "backup": backup}
+            return result if return_result else 0
         if any(row[1] == "profile" for row in rows):
             raise sync_v2.SyncInvariantError("repository rekey cannot move profiles")
+        frontiers = {}
         for rid in ids:
             heads = con.execute("SELECT project_key,op_id FROM sync_frontier WHERE record_id=?", (rid,)).fetchall()
-            if not heads or any(key != old for key, _ in heads) \
+            if len(heads) != 1 or any(key != old for key, _ in heads) \
                     or con.execute("SELECT 1 FROM sync_conflicts WHERE record_id=? AND resolved_by IS NULL", (rid,)).fetchone():
                 # Let ordinary sync reconcile or expose these variants first.
                 # A rename must never prevent the sync needed to settle them.
                 con.rollback()
-                return 0
+                result = {"state": "deferred", "reason": "unsettled-frontier",
+                          "from": old, "to": current, "evidence": evidence,
+                          "record_count": 0, "record_ids": [], "operation_ids": [],
+                          "backup": backup}
+                return result if return_result else 0
+            frontiers[rid] = [heads[0][1]]
         prior = {rid: _record_state(con, rid) for rid in ids}
-        # Protocol bounds determine batches, all within this one transaction.
-        for start in range(0, len(ids), protocol_v2.MAX_MUTATIONS):
-            batch = ids[start:start + protocol_v2.MAX_MUTATIONS]
+        batches = _repository_rekey_batches(ids, prior, frontiers)
+        manifest_records = [(rid, frontiers[rid]) for rid in ids]
+        migration_id = _repository_rekey_manifest_id(old, current, evidence, manifest_records)
+        operation_ids = []
+        for batch_index, batch in enumerate(batches):
             con.executemany("UPDATE records SET cwd_origin=? WHERE id=?", ((current, rid) for rid in batch))
-            _capture_v2_operation(con, "rekey", post_ids=batch, prior_states=prior,
-                                  project_namespace=current, source_namespace=old, reason=evidence)
+            metadata = {"format": _REPOSITORY_REKEY_FORMAT, "phase": "apply",
+                        "migration_id": migration_id, "old": old, "current": current,
+                        "evidence": evidence, "batch_index": batch_index,
+                        "batch_count": len(batches),
+                        "backup_sha256": backup["sha256"]}
+            # Snapshot only this batch's lineage. Passing every moved record
+            # repeatedly decodes earlier batches without affecting this operation.
+            _capture_v2_operation(con, "rekey", post_ids=batch,
+                                  prior_states={rid: prior[rid] for rid in batch},
+                                  project_namespace=current, source_namespace=old,
+                                  reason=_repository_rekey_reason(metadata))
+            operation_ids.append(con.execute(
+                "SELECT op_id FROM sync_frontier WHERE project_key=? AND record_id=?",
+                (current, batch[0])).fetchone()[0])
         con.commit()
-        sys.stderr.write(f"[rekey] {len(ids)} records {old}→{current}; backup={name}\n")
-        return len(ids)
+        result = {"state": "applied", "migration_id": migration_id,
+                  "from": old, "to": current, "evidence": evidence,
+                  "record_count": len(ids), "record_ids": ids,
+                  "record_ids_digest": _repository_rekey_ids_digest(ids),
+                  "operation_ids": operation_ids, "backup": backup}
+        sys.stderr.write(f"[rekey] {len(ids)} records {old}→{current}; backup={backup['path']}\n")
+        return result if return_result else len(ids)
     finally:
         con.close()
 
 
-def _follow_repository_rename():
-    """Foreground sync follows verified renames without another operator command."""
-    current = project_key()
+def _repository_rename_evidence_status(old, current, current_repository=None):
+    before = _github_repository(old)
+    after = current_repository or _github_repository(current)
+    if not before or not after:
+        return None, "repository-evidence-unavailable"
+    if before["id"] != after["id"]:
+        return None, "different-repository"
+    if (before["full_name"] != after["full_name"]
+            or "git:github.com/" + after["full_name"] != current):
+        return None, "canonical-name-unconfirmed"
+    return "github-repository-id:" + str(after["id"]), None
+
+
+def _follow_repository_rename(current_project=None, *, detailed=False):
+    """Repair one caller's verified repository address through the normal rekey path."""
+    current = current_project or project_key()
     if not current.startswith("git:github.com/"):
-        return 0
+        outcome = {"project_key": current, "state": "no-op", "migrations": []}
+        return [outcome] if detailed else 0
     con = get_con()
     try:
         owner = current.rsplit("/", 1)[0] + "/"
@@ -5133,16 +5675,151 @@ def _follow_repository_rename():
     finally:
         con.close()
     if not candidates:
-        return 0
+        outcome = {"project_key": current, "state": "no-op", "migrations": []}
+        return [outcome] if detailed else 0
     repository = _github_repository(current)
     if not repository:
-        return 0
-    moved = 0
+        outcome = {"project_key": current, "state": "deferred",
+                   "reason": "repository-evidence-unavailable", "migrations": []}
+        return [outcome] if detailed else 0
+    migrations = []
     for old in candidates:
-        evidence = _repository_rename_evidence(old, current, repository)
+        evidence, reason = _repository_rename_evidence_status(old, current, repository)
         if evidence:
-            moved += _rekey_project(old, current, evidence)
-    return moved
+            migration = _rekey_project(old, current, evidence,
+                                       return_result=True, automatic=True)
+            if migration["state"] != "no-op":
+                migrations.append(migration)
+        elif reason != "different-repository":
+            migrations.append({"state": "deferred", "reason": reason,
+                               "from": old, "to": current})
+    if any(item["state"] == "deferred" for item in migrations):
+        state = "deferred"
+    elif any(item["state"] == "applied" for item in migrations):
+        state = "applied"
+    elif any(item["state"] == "suppressed" for item in migrations):
+        state = "suppressed"
+    else:
+        state = "no-op"
+    outcome = {"project_key": current, "state": state, "migrations": migrations}
+    if detailed:
+        return [outcome]
+    return sum(item.get("record_count", 0) for item in migrations
+               if item.get("state") == "applied")
+
+
+def _repository_undo_refusal(migration_id, reason, apply_group=None):
+    return {"state": "refused", "reason": reason, "migration_id": migration_id,
+            "record_count": len(apply_group["record_ids"]) if apply_group else 0,
+            "record_ids": apply_group["record_ids"] if apply_group else [],
+            "inverse_operation_ids": []}
+
+
+def _undo_repository_rekey(migration_id):
+    if not isinstance(migration_id, str) or not re.fullmatch(r"[0-9a-f]{64}", migration_id):
+        return _repository_undo_refusal(str(migration_id or ""), "invalid-migration-id")
+    con = get_con()
+    try:
+        apply_group = _validate_repository_apply_group(con, migration_id)
+        if apply_group is None:
+            return _repository_undo_refusal(migration_id, "migration-unverified")
+        undo_objects = _repository_rekey_objects(con, migration_id, "undo")
+        undo_group = _validate_repository_undo_group(con, apply_group)
+        if undo_group is not None:
+            return {"state": "already-undone", "migration_id": migration_id,
+                    "record_count": len(apply_group["record_ids"]),
+                    "record_ids": apply_group["record_ids"],
+                    "inverse_operation_ids": undo_group["operation_ids"],
+                    "backup": _repository_find_backup(undo_group["backup_sha256"])}
+        if undo_objects:
+            return _repository_undo_refusal(
+                migration_id, "incomplete-or-invalid-undo", apply_group)
+        try:
+            backup = _repository_rekey_backup(con)
+        except (OSError, sqlite3.Error, sync_v2.SyncError):
+            return _repository_undo_refusal(migration_id, "backup-failed", apply_group)
+        con.execute("BEGIN IMMEDIATE")
+        # Re-read the immutable group and every affected frontier after the
+        # backup; no writer between those observations may be overwritten.
+        current_undo_objects = _repository_rekey_objects(con, migration_id, "undo")
+        current_undo_group = _validate_repository_undo_group(con, apply_group)
+        if current_undo_group is not None:
+            con.rollback()
+            return {"state": "already-undone", "migration_id": migration_id,
+                    "record_count": len(apply_group["record_ids"]),
+                    "record_ids": apply_group["record_ids"],
+                    "inverse_operation_ids": current_undo_group["operation_ids"],
+                    "backup": _repository_find_backup(current_undo_group["backup_sha256"])}
+        if current_undo_objects:
+            con.rollback()
+            return _repository_undo_refusal(
+                migration_id, "incomplete-or-invalid-undo", apply_group)
+        if any((row := con.execute(
+                "SELECT result FROM sync_applied WHERE op_id=?", (batch["op_id"],)
+        ).fetchone()) is None or row[0] not in ("local", "folded")
+                for batch in apply_group["batches"]):
+            con.rollback()
+            return _repository_undo_refusal(migration_id, "migration-changed", None)
+        for batch in apply_group["batches"]:
+            for rid in batch["record_ids"]:
+                heads = con.execute(
+                    "SELECT project_key,op_id FROM sync_frontier WHERE record_id=? ORDER BY op_id",
+                    (rid,),
+                ).fetchall()
+                live = _record_state(con, rid)
+                expected = batch["post_states"][rid]
+                if isinstance(live, dict):
+                    live = {**live, "last_accessed": expected.get("last_accessed")}
+                conflict = con.execute(
+                    "SELECT 1 FROM sync_conflicts WHERE record_id=? AND resolved_by IS NULL",
+                    (rid,),
+                ).fetchone()
+                if (heads != [(apply_group["current"], batch["op_id"])]
+                        or conflict or live != expected):
+                    con.rollback()
+                    return _repository_undo_refusal(
+                        migration_id, "affected-record-changed", apply_group)
+        inverse_operation_ids = []
+        for index, batch in enumerate(apply_group["batches"]):
+            target = batch["op_id"]
+            con.executemany(
+                "UPDATE records SET cwd_origin=? WHERE id=?",
+                ((apply_group["old"], rid) for rid in batch["record_ids"]))
+            metadata = {"format": _REPOSITORY_REKEY_FORMAT, "phase": "undo",
+                        "migration_id": migration_id, "old": apply_group["old"],
+                        "current": apply_group["current"],
+                        "evidence": apply_group["evidence"],
+                        "batch_index": index, "batch_count": len(apply_group["batches"]),
+                        "apply_op_ids": [target],
+                        "backup_sha256": backup["sha256"]}
+            _capture_v2_operation(
+                con, "rekey", post_ids=batch["record_ids"],
+                prior_states=batch["post_states"],
+                project_namespace=apply_group["old"],
+                source_namespace=apply_group["current"],
+                reason=_repository_rekey_reason(metadata),
+                lineage_access={rid: batch["post_states"][rid].get("last_accessed")
+                                for rid in batch["record_ids"]})
+            inverse_operation_ids.append(con.execute(
+                "SELECT op_id FROM sync_frontier WHERE project_key=? AND record_id=?",
+                (apply_group["old"], batch["record_ids"][0])).fetchone()[0])
+        con.commit()
+        sys.stderr.write(
+            f"[rekey] undo {len(apply_group['record_ids'])} records "
+            f"{apply_group['current']}→{apply_group['old']}; backup={backup['path']}\n")
+        return {"state": "undone", "migration_id": migration_id,
+                "from": apply_group["current"], "to": apply_group["old"],
+                "record_count": len(apply_group["record_ids"]),
+                "record_ids": apply_group["record_ids"],
+                "record_ids_digest": apply_group["record_ids_digest"],
+                "inverse_operation_ids": inverse_operation_ids,
+                "backup": backup}
+    except Exception:
+        if con.in_transaction:
+            con.rollback()
+        raise
+    finally:
+        con.close()
 
 
 def _snap_label(body):
@@ -6673,6 +7350,27 @@ def _emit_sync(status, json_output):
     return int(status.get("exit_code", 2))
 
 
+def _repository_rekey_status(outcomes):
+    summary = []
+    for outcome in outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        entries = outcome.get("migrations")
+        if not isinstance(entries, list):
+            entries = [outcome]
+        item = {"project_key": outcome.get("project_key"),
+                "state": outcome.get("state")}
+        item["migrations"] = [
+            {key: migration[key] for key in
+             ("state", "reason", "migration_id", "from", "to", "evidence",
+              "record_count", "record_ids_digest", "operation_ids")
+             if key in migration}
+            for migration in entries if isinstance(migration, dict)
+        ]
+        summary.append(item)
+    return summary
+
+
 def _record_outbox_exchange_phase(phase, commit, op_ids):
     """Persist a Git-proved outbox phase immediately after its durable evidence."""
     con = get_con()
@@ -6733,13 +7431,6 @@ def _sync_process_lock(timeout=30.0):
 def sync(json_output=False):
     try:
         with _sync_process_lock():
-            con = get_con()
-            try:
-                remote_enabled = sync_v2.remote_policy(_sync_environment(), connection=con)["enabled"]
-            finally:
-                con.close()
-            if not remote_enabled:
-                _follow_repository_rename()
             return _sync_locked(json_output=json_output)
     except _SyncLockBusy as exc:
         return _emit_sync({
@@ -6765,7 +7456,8 @@ def sync(json_output=False):
         }, json_output)
 
 
-def _sync_locked(json_output=False, routine=False, apply_expiry=False):
+def _sync_locked(json_output=False, routine=False, apply_expiry=False,
+                 routine_projects=()):
     """Run local maintenance and an optional, safety-gated immutable exchange.
 
     ``routine`` is the background exchange: it takes the same safety path
@@ -6782,8 +7474,22 @@ def _sync_locked(json_output=False, routine=False, apply_expiry=False):
             installation_fingerprint=_installation_fingerprint(),
         )
         identity_con.commit()
+        early_policy = sync_v2.remote_policy(_sync_environment(), connection=identity_con)
     finally:
         identity_con.close()
+    routine_projects = tuple(dict.fromkeys(
+        key for key in routine_projects
+        if isinstance(key, str) and key and len(key) <= protocol_v2.MAX_IDENTIFIER_BYTES
+        and not re.search(r"[\x00-\x1f\x7f]", key))) if routine else ()
+    repair_outcomes = []
+    # Local-only exchange keeps the same verified repair behavior, with
+    # explicit caller identities for detached routine workers.
+    if not early_policy.get("enabled") and not early_policy.get("reason"):
+        targets = routine_projects if routine else (_exchange_caller_project(),)
+        for key in targets:
+            if key:
+                repair_outcomes.extend(_follow_repository_rename(
+                    current_project=key, detailed=True))
     if not json_output:
         print("# sync (local store + immutable operation exchange)")
     sink = io.StringIO() if json_output else sys.stdout
@@ -6843,7 +7549,8 @@ def _sync_locked(json_output=False, routine=False, apply_expiry=False):
         con.close()
     common = {"status_schema": 1,
               "warning": policy.get("warning"), "migration_count": n,
-              "transport": "v2", "dump_push": False, "phases": phases}
+              "transport": "v2", "dump_push": False, "phases": phases,
+              "repository_rekeys": _repository_rekey_status(repair_outcomes)}
     if any(outcome == "failed" for outcome in phases.values()):
         for phase in phases:
             if phase.startswith("remote-") and phases[phase] == "pending":
@@ -6918,8 +7625,16 @@ def _sync_locked(json_output=False, routine=False, apply_expiry=False):
         phases["remote-fold"] = "ok"
         # Observe the current shared state before authoring an automatic rename;
         # otherwise a stale local row can race a peer's ordinary resolution.
-        if not routine and not result.quarantined and not result.deferred:
-            if _follow_repository_rename():
+        if not result.quarantined and not result.deferred:
+            targets = routine_projects if routine else (_exchange_caller_project(),)
+            for key in targets:
+                if key:
+                    repair_outcomes.extend(_follow_repository_rename(
+                        current_project=key, detailed=True))
+            common["repository_rekeys"] = _repository_rekey_status(repair_outcomes)
+            if any(migration.get("state") == "applied"
+                   for outcome in repair_outcomes
+                   for migration in outcome.get("migrations", ())):
                 pending = pending_operations()
                 exchange.render_operations(pending, phase_callback=record_phase)
                 result = _ingest_and_fold_snapshot(snapshot, ref)
@@ -7036,10 +7751,16 @@ def _sync_locked(json_output=False, routine=False, apply_expiry=False):
         finally:
             con.close()
         if isinstance(exc, git_exchange_v2.ExchangeUnavailable):
-            if not routine:
-                _follow_repository_rename()
+            targets = routine_projects if routine else (_exchange_caller_project(),)
+            for key in targets:
+                if key:
+                    repair_outcomes.extend(_follow_repository_rename(
+                        current_project=key, detailed=True))
+            common["repository_rekeys"] = _repository_rekey_status(repair_outcomes)
+            if targets:
                 with contextlib.redirect_stdout(sink):
                     export_dump()
+                    _commit_dump()
                 con = get_con()
                 try:
                     status = sync_v2.sync_status(con, policy=policy)
@@ -7218,6 +7939,28 @@ def _exchange_state_load():
     return data if isinstance(data, dict) else {}
 
 
+def _exchange_caller_project():
+    """Capture the foreground cwd identity before the worker changes cwd to STORE."""
+    try:
+        value = project_key(Path.cwd())
+    except Exception:
+        return None
+    if (not isinstance(value, str) or not value or len(value) > protocol_v2.MAX_IDENTIFIER_BYTES
+            or re.search(r"[\x00-\x1f\x7f]", value)):
+        return None
+    return value
+
+
+def _exchange_repair_intents(state):
+    raw = state.get("repair_intents")
+    if not isinstance(raw, dict):
+        return {}
+    return {key: generation for key, generation in raw.items()
+            if (isinstance(key, str) and key and len(key) <= protocol_v2.MAX_IDENTIFIER_BYTES
+                and not re.search(r"[\x00-\x1f\x7f]", key)
+                and type(generation) is int and generation > 0)}
+
+
 def _exchange_state_save(state):
     """Atomically replace the state file (caller holds the schedule lock)."""
     temp = None
@@ -7338,6 +8081,7 @@ def _schedule_exchange(kind):
                 return
         except Exception:
             return
+    caller_project = _exchange_caller_project()
     spawn = False
     with _exchange_schedule_lock() as held:
         if not held:
@@ -7345,14 +8089,23 @@ def _schedule_exchange(kind):
         state = _exchange_state_load()
         starting = now - _exchange_num(state, "worker_spawned_at") < EXCHANGE_SPAWN_GRACE_SECONDS
         busy = _exchange_run_lock_busy()
+        intents = _exchange_repair_intents(state)
         if kind == "write":
             state["dirty_gen"] = int(_exchange_num(state, "dirty_gen")) + 1
             if busy:
                 state["rerun_requested"] = True
-        elif busy or starting or not _exchange_read_due(state, now):
-            return
         else:
+            if not _exchange_read_due(state, now):
+                return
             state["last_receive_attempt"] = now
+        if caller_project is not None:
+            generation = int(_exchange_num(state, "repair_gen")) + 1
+            state["repair_gen"] = generation
+            intents[caller_project] = generation
+            state["repair_intents"] = intents
+        if kind == "read" and (busy or starting):
+            _exchange_state_save(state)
+            return
         if not busy and not starting:
             spawn = True
             state["worker_spawned_at"] = now
@@ -7414,13 +8167,14 @@ def _exchange_consume_notice():
         pass
 
 
-def _exchange_run_once(apply_expiry):
+def _exchange_run_once(apply_expiry, repair_projects=()):
     """One routine pass. Returns ``(ok, reason)``; ok is None when merely busy."""
     global _LAST_SYNC_STATUS
     _LAST_SYNC_STATUS = None
     try:
         with _sync_process_lock():
-            _sync_locked(json_output=True, routine=True, apply_expiry=apply_expiry)
+            _sync_locked(json_output=True, routine=True, apply_expiry=apply_expiry,
+                         routine_projects=repair_projects)
     except _SyncLockBusy:
         return None, "local sync busy"
     except (OSError, sync_v2.SyncError) as exc:
@@ -7432,6 +8186,28 @@ def _exchange_run_once(apply_expiry):
     if int(status.get("exit_code", 2)) == 0:
         return True, None
     return False, status.get("reason") or status.get("status")
+
+
+def _exchange_ack_repair_intents(snapshot, outcomes):
+    by_project = {item.get("project_key"): item for item in outcomes
+                  if isinstance(item, dict) and isinstance(item.get("project_key"), str)}
+    resolved = {key for key, item in by_project.items()
+                if item.get("state") in ("applied", "no-op", "suppressed")}
+    if not snapshot or not resolved:
+        return
+    try:
+        with _exchange_schedule_lock(wait=2.0) as held:
+            if not held:
+                return
+            state = _exchange_state_load()
+            intents = _exchange_repair_intents(state)
+            for key, generation in snapshot.items():
+                if key in resolved and intents.get(key) == generation:
+                    intents.pop(key, None)
+            state["repair_intents"] = intents
+            _exchange_state_save(state)
+    except Exception:
+        pass
 
 
 def _exchange_worker_run(window):
@@ -7455,17 +8231,22 @@ def _exchange_worker_run(window):
         runs = 0
         while True:
             runs += 1
+            repair_snapshot = {}
             with _exchange_schedule_lock(wait=5.0) as held:
                 state = _exchange_state_load()
                 started_gen = int(_exchange_num(state, "dirty_gen"))
                 write_triggered = started_gen > int(_exchange_num(state, "done_gen"))
                 if held:
+                    repair_snapshot = _exchange_repair_intents(state)
                     state["last_receive_attempt"] = time.time()
                     state["rerun_requested"] = False
                     state["worker_spawned_at"] = 0
                     state["run_count"] = int(_exchange_num(state, "run_count")) + 1
                     _exchange_state_save(state)
-            ok, reason = _exchange_run_once(write_triggered)
+            ok, reason = _exchange_run_once(write_triggered, tuple(repair_snapshot))
+            sync_status = _LAST_SYNC_STATUS or {}
+            _exchange_ack_repair_intents(
+                repair_snapshot, sync_status.get("repository_rekeys", ()))
             again = False
             with _exchange_schedule_lock(wait=5.0) as held:
                 if held:
@@ -7484,8 +8265,13 @@ def _exchange_worker_run(window):
                                   < EXCHANGE_NOTICE_REPEAT_SECONDS)
                         if not repeat:
                             state["failure_notice"] = {"reason": clean, "at": time.time()}
+                    pending_intents = _exchange_repair_intents(state)
+                    new_repair_generation = any(
+                        generation > repair_snapshot.get(key, 0)
+                        for key, generation in pending_intents.items())
                     again = bool(ok and runs < EXCHANGE_MAX_RUNS
-                                 and int(_exchange_num(state, "dirty_gen")) > started_gen)
+                                 and (int(_exchange_num(state, "dirty_gen")) > started_gen
+                                      or new_repair_generation))
                     _exchange_state_save(state)
                     if not again:
                         # Free the run lock while still holding the reservation
@@ -10197,8 +10983,10 @@ def _cli_main():
     gr.add_argument("id")
     gr.add_argument("--to", choices=["durable"], default="durable")
 
-    ra = sub.add_parser("reattribute", help="Reattribute an orphan record to the current project")
-    ra.add_argument("id")
+    ra = sub.add_parser("reattribute", help="Reattribute a record or undo one repository migration")
+    ra.add_argument("id", nargs="?")
+    ra.add_argument("--undo", dest="undo_migration", metavar="MIGRATION_ID")
+    ra.add_argument("--json", dest="json_output", action="store_true")
 
     sub.add_parser("curate-snapshot",
                    help="Read-only current-project durable/working snapshot and signals")
@@ -10383,7 +11171,12 @@ def _cli_main():
     elif args.cmd == "graduate":
         sys.exit(0 if graduate(args.id, to=args.to) else 1)
     elif args.cmd == "reattribute":
-        sys.exit(0 if reattribute(args.id) else 1)
+        if bool(args.id) == bool(args.undo_migration):
+            print("[reattribute] provide exactly one record ID or --undo MIGRATION_ID",
+                  file=sys.stderr)
+            sys.exit(2)
+        sys.exit(0 if reattribute(args.id, undo_migration=args.undo_migration,
+                                  json_output=args.json_output) else 1)
     elif args.cmd == "tidy-apply":
         import tidy_apply
         sys.exit(tidy_apply.apply_command(sys.modules[__name__], args))

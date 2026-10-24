@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,7 +34,10 @@ class StatusParityTest(unittest.TestCase):
             registry.register_registry(runs, index)
             env = {**os.environ, "AGENT_RESOURCE_RUN_INDEX": str(index)}
             jobs = base / "jobs.log"
-            jobs.write_text("2026-10-07T00:00:00Z\tqueued\t/r\t/w\tunknown\tattempt_id=att-" + "a"*32 +
+            # Liveness is read from every process on the host, and other suites tag
+            # their live processes with fixed attempt ids; this row must name no process.
+            attempt = "att-" + uuid.uuid4().hex
+            jobs.write_text("2026-10-07T00:00:00Z\tqueued\t/r\t/w\tunknown\tattempt_id=" + attempt +
                             ",owner_route_id=rt-" + "b"*16 + ",worker_type=owner\n")
             env["AGENT_DISPATCH_JOBS"] = str(jobs)
             commands = {

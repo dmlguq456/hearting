@@ -3078,7 +3078,10 @@ def route_state_next_action(reason: str, detail: str, route_file: str | None,
         return (
             f"capability-route.py revise {route_arg} --node {target} "
             f"--evidence {evidence_arg} "
-            "--basis review-findings|user-direction|owner-correction"
+            "--basis <review-findings|user-direction|owner-correction> "
+            "[--answers <downstream review/test verdict attempt ids>] "
+            "[--direction <gate-release-id|memo-path>] [--reason <text>] "
+            "--author-attempt-id <attempt that made the change>"
         )
     if reason == "completion-marker-missing":
         return (
@@ -8647,14 +8650,7 @@ def record_evidence_change(
                     and previous.get("marker_sequence") == marker.get("sequence")
                     and previous.get("change_kind", "edited") == change_kind):
                 return
-            changed_at = None
-            evidence_path = Path(str(evidence.get("path") or ""))
-            try:
-                changed_at = datetime.fromtimestamp(
-                    evidence_path.stat().st_mtime, tz=timezone.utc,
-                ).isoformat().replace("+00:00", "Z")
-            except (OSError, ValueError):
-                pass
+            changed_at = _evidence_mtime_text(Path(str(evidence.get("path") or "")))
             command = [Path(sys.argv[0]).name] if sys.argv and sys.argv[0] else []
             command += [arg for arg in sys.argv[1:] if not arg.startswith("-")][:1]
             record = {
@@ -8710,6 +8706,21 @@ def note_evidence_change(
     elif (currency.state == "current" and currency.evidence_digest
           and currency.evidence_digest != evidence.get("sha256")):
         record_evidence_change(route, node, marker_path, marker, currency.evidence_digest)
+    elif (currency.state == "current" and currency.evidence_digest
+          and currency.evidence_digest == evidence.get("sha256")):
+        history = evidence_change_history(marker_path, str(node.get("id")))
+        if (history and history[-1].get("marker_sequence") == marker.get("sequence")
+                and history[-1].get("sha256") != evidence.get("sha256")):
+            record_evidence_change(route, node, marker_path, marker, str(evidence.get("sha256")),
+                                   change_kind="reverted")
+
+
+def _evidence_mtime_text(path: Path) -> str | None:
+    """Return evidence mtime in the exact UTC format used by evidence history."""
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OSError, ValueError):
+        return None
 
 
 def evidence_change_history(marker_path: Path, node_id: str) -> list[dict[str, object]]:

@@ -12,10 +12,9 @@ This is adapter-owned output generated from `capabilities/session-tidy.md`, not 
    `tool_contract_check`, and obey `runtime_surface` / `fallback` before
    claiming full support. For `unsupported`, stop or use the reported
    `fallback`.
-3. Before edits, run `adapters/opencode/bin/preflight.sh write <file> [session-id]`.
-4. Before spec-changing work, run
+3. Before spec-changing work, run
    `adapters/opencode/bin/preflight.sh capability session-tidy [cwd] [session-id]`.
-5. If the command receives arguments, map them to the portable argument shape:
+4. If the command receives arguments, map them to the portable argument shape:
    `[정리] | 정리만 | 인계 <받을 세션>`.
 
 Portable contract excerpt:

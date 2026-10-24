@@ -693,7 +693,7 @@
     "analyze": "9f42b556b4a4ffe10b73",
     "qa": "5cb7a6211989225f4a45"
    },
-   "card": "[경로] analyze-project · staged(standard) analyze · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] analyze-project · staged(standard) analyze→qa · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "34d2e1645d095787daf1",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -716,7 +716,7 @@
     "analyze": "522a0ec22075431fea5c",
     "qa": "ab89a388588d8411510e"
    },
-   "card": "[경로] analyze-project · staged(strong) analyze · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] analyze-project · staged(strong) analyze→qa · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "34d2e1645d095787daf1",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -739,7 +739,7 @@
     "analyze": "47d86b30b971aff3c738",
     "qa": "122f14498cb5d629dfce"
    },
-   "card": "[경로] analyze-project · staged(thorough) analyze · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] analyze-project · staged(thorough) analyze→qa · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "34d2e1645d095787daf1",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -762,7 +762,7 @@
     "profile": "ff982376d8cd37478a83",
     "verify": "837823a9efbbce0071ab"
    },
-   "card": "[경로] analyze-user · staged(standard) profile · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] analyze-user · staged(standard) profile→verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "882ab1192e3b127b154f",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -785,7 +785,7 @@
     "profile": "cfc86b1342107de96c20",
     "verify": "8e7e13c29c5f6ce1dab1"
    },
-   "card": "[경로] analyze-user · staged(strong) profile · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] analyze-user · staged(strong) profile→verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "882ab1192e3b127b154f",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -808,7 +808,7 @@
     "profile": "6bfd61603142d2495964",
     "verify": "d74f92f54239094c1f04"
    },
-   "card": "[경로] analyze-user · staged(thorough) profile · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] analyze-user · staged(thorough) profile→verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "882ab1192e3b127b154f",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -831,7 +831,7 @@
     "inspect": "826d2ab829f2208d6091",
     "report": "b5a57dc06512246abdf7"
    },
-   "card": "[경로] audit · staged(standard) inspect · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] audit · staged(standard) inspect→report · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "dce35550d538e4b1de2b",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -854,7 +854,7 @@
     "inspect": "048019ff412baa403efa",
     "report": "13c9db1a6e3cf840c910"
    },
-   "card": "[경로] audit · staged(strong) inspect · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] audit · staged(strong) inspect→report · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "dce35550d538e4b1de2b",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -877,7 +877,7 @@
     "inspect": "d814bcd28444635e379e",
     "report": "d5cfc647ac2ad3539f8e"
    },
-   "card": "[경로] audit · staged(thorough) inspect · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] audit · staged(thorough) inspect→report · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "dce35550d538e4b1de2b",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -901,7 +901,7 @@
     "handback": "29c3e4fa300dc2fdf950",
     "verify": "eb11a084071e1903729c"
    },
-   "card": "[경로] autopilot-apply · staged(standard) apply · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 handback (autopilot-apply:handback)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-apply · staged(standard) apply→verify→handback · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 handback (autopilot-apply:handback)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "461249f5ae79aa45cd39",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -928,7 +928,7 @@
     "verify": "ae7fdbd6eba9bc2879da",
     "verify-alternative": "38d97499ac72598ca5be"
    },
-   "card": "[경로] autopilot-apply · staged(strong) apply · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 handback (autopilot-apply:handback)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-apply · staged(strong) apply→verify→verify-alternative→handback · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 handback (autopilot-apply:handback)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "461249f5ae79aa45cd39",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -957,7 +957,7 @@
     "verify": "20dc84f37d3eeff9778d",
     "verify-alternative": "3cdb06797476bd886974"
    },
-   "card": "[경로] autopilot-apply · staged(thorough) apply · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 handback (autopilot-apply:handback)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-apply · staged(thorough) apply→verify→verify-alternative→handback · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 handback (autopilot-apply:handback)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "461249f5ae79aa45cd39",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -990,7 +990,7 @@
     "report": "546c565ee919d334bcc3",
     "test": "843bc09c1933578d4b05"
    },
-   "card": "[경로] autopilot-code · staged(standard) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-code · staged(standard) frame→frame-alternative→plan→plan-check→execute→impl-review→test→report · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "77b96d149e2aad4b1825",
    "conditional_extensions": "1c35f287e42041098273",
    "human_gate_bindings": "5c42bb7fed19a3bc080e",
@@ -1034,7 +1034,7 @@
     "report": "5d7fbdae44ce9e653b53",
     "test": "3d5e842c01aadf879bbc"
    },
-   "card": "[경로] autopilot-code · staged(strong) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-code · staged(strong) frame→frame-alternative→plan→plan-alternative→plan-check→plan-check-alternative→execute→impl-review→impl-review-alternative→test→report · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "77b96d149e2aad4b1825",
    "conditional_extensions": "1c35f287e42041098273",
    "human_gate_bindings": "5c42bb7fed19a3bc080e",
@@ -1087,7 +1087,7 @@
     "report": "39b8ec3702d00334c04f",
     "test": "69ae06fe22f6ba37ae42"
    },
-   "card": "[경로] autopilot-code · staged(thorough) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-code · staged(thorough) frame→frame-alternative→plan→plan-alternative→plan-implementation-risk→plan-check→plan-check-alternative→plan-check-simplicity→execute→impl-review→impl-review-alternative→impl-review-failure-mode→test→report · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "77b96d149e2aad4b1825",
    "conditional_extensions": "1c35f287e42041098273",
    "human_gate_bindings": "5c42bb7fed19a3bc080e",
@@ -1140,7 +1140,7 @@
     "refs-alternative": "fa5f70fbd9c8a3db5fcb",
     "visual-verify": "75a641c18060fdc2f81f"
    },
-   "card": "[경로] autopilot-design · staged(standard) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-design · staged(standard) frame→frame-alternative→refs→refs-alternative→build→visual-verify→critic-review→handoff · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "4fb32a3fc3c7c2f1a70f",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "2b60d578c2167df7eb77",
@@ -1183,7 +1183,7 @@
     "visual-verify": "4369d926753a69df19e1",
     "visual-verify-alternative": "eaaa2b7e9b0f16cb071b"
    },
-   "card": "[경로] autopilot-design · staged(strong) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-design · staged(strong) frame→frame-alternative→refs→refs-alternative→build→visual-verify→visual-verify-alternative→critic-review→critic-review-alternative→handoff · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "4fb32a3fc3c7c2f1a70f",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "2b60d578c2167df7eb77",
@@ -1230,7 +1230,7 @@
     "visual-verify": "2f690fa1c42593b55e19",
     "visual-verify-alternative": "3397306638ad3e0674b8"
    },
-   "card": "[경로] autopilot-design · staged(thorough) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-design · staged(thorough) frame→frame-alternative→refs→refs-alternative→build→visual-verify→visual-verify-alternative→critic-review→critic-review-alternative→handoff · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "4fb32a3fc3c7c2f1a70f",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "2b60d578c2167df7eb77",
@@ -1276,7 +1276,7 @@
     "quality-review": "775193712e2803f9f636",
     "strategy-review": "a34c0e9931a3535d8b25"
    },
-   "card": "[경로] autopilot-draft · staged(standard) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-draft · staged(standard) frame→frame-alternative→material-strategy→material-strategy-alternative→strategy-review→draft-production→quality-review→fact-verify→finalize · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "64b72e6172ef2c500741",
    "conditional_extensions": "b056b9625be214a20b3f",
    "human_gate_bindings": "53860b3d0e843b01a100",
@@ -1323,7 +1323,7 @@
     "strategy-review": "4974620c2ea7516426f3",
     "strategy-review-alternative": "674e58fdb4b55080bb85"
    },
-   "card": "[경로] autopilot-draft · staged(strong) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-draft · staged(strong) frame→frame-alternative→material-strategy→material-strategy-alternative→strategy-review→strategy-review-alternative→draft-production→quality-review→quality-review-alternative→fact-verify→fact-verify-alternative→finalize · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "64b72e6172ef2c500741",
    "conditional_extensions": "b056b9625be214a20b3f",
    "human_gate_bindings": "53860b3d0e843b01a100",
@@ -1377,7 +1377,7 @@
     "strategy-review": "0d66303c62f19e833773",
     "strategy-review-alternative": "ad622b1770f7f37e87be"
    },
-   "card": "[경로] autopilot-draft · staged(thorough) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-draft · staged(thorough) frame→frame-alternative→material-strategy→material-strategy-alternative→strategy-review→strategy-review-alternative→draft-production→quality-review→quality-review-alternative→quality-review-assumption→fact-verify→fact-verify-alternative→finalize · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "64b72e6172ef2c500741",
    "conditional_extensions": "b056b9625be214a20b3f",
    "human_gate_bindings": "53860b3d0e843b01a100",
@@ -1427,7 +1427,7 @@
     "report": "f83bf68f0ae4fd5d7907",
     "sync": "0b5c4791b8a64412c1ee"
    },
-   "card": "[경로] autopilot-lab · staged(standard) eval-run · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-lab · staged(standard) eval-run→metrics→media→report→independent-verify→publish→sync · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "304fc82d7682dab2b229",
    "conditional_extensions": "a72ac988a99a64e7987a",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1466,7 +1466,7 @@
     "report": "6fdecc1ce9a68121b5b2",
     "sync": "6475c28da93e3d36d00c"
    },
-   "card": "[경로] autopilot-lab · staged(strong) eval-run · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-lab · staged(strong) eval-run→metrics→media→report→independent-verify→independent-verify-alternative→publish→sync · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "304fc82d7682dab2b229",
    "conditional_extensions": "a72ac988a99a64e7987a",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1507,7 +1507,7 @@
     "report": "c4bf31cf3ebc5b5cb029",
     "sync": "110ae796bb18c0cfc3b9"
    },
-   "card": "[경로] autopilot-lab · staged(thorough) eval-run · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-lab · staged(thorough) eval-run→metrics→media→report→independent-verify→independent-verify-alternative→publish→sync · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "304fc82d7682dab2b229",
    "conditional_extensions": "a72ac988a99a64e7987a",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1545,7 +1545,7 @@
     "scaffold": "e774b31ac4da498c2729",
     "smoke": "84e1a3236dfaa5a9b1f7"
    },
-   "card": "[경로] autopilot-lab · staged(standard) scaffold · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 full-run (autopilot-lab:full-run)",
+   "card": "[경로] autopilot-lab · staged(standard) scaffold→smoke→full-run→run-verify→handoff · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 full-run (autopilot-lab:full-run)",
    "completion_gates": "902bca21725b7585bda7",
    "conditional_extensions": "8eaf2f0bb49917e3599e",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1579,7 +1579,7 @@
     "smoke": "749de089161d84e50ff2",
     "smoke-alternative": "fd8d2323e0b96610e3ca"
    },
-   "card": "[경로] autopilot-lab · staged(strong) scaffold · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 full-run (autopilot-lab:full-run)",
+   "card": "[경로] autopilot-lab · staged(strong) scaffold→smoke→smoke-alternative→full-run→run-verify→run-verify-alternative→handoff · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 full-run (autopilot-lab:full-run)",
    "completion_gates": "902bca21725b7585bda7",
    "conditional_extensions": "8eaf2f0bb49917e3599e",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1617,7 +1617,7 @@
     "smoke": "868c615832bddfa8c9fe",
     "smoke-alternative": "c84f2c82cf17f048f264"
    },
-   "card": "[경로] autopilot-lab · staged(thorough) scaffold · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 full-run (autopilot-lab:full-run)",
+   "card": "[경로] autopilot-lab · staged(thorough) scaffold→smoke→smoke-alternative→full-run→run-verify→run-verify-alternative→handoff · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 full-run (autopilot-lab:full-run)",
    "completion_gates": "902bca21725b7585bda7",
    "conditional_extensions": "8eaf2f0bb49917e3599e",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1652,7 +1652,7 @@
     "review": "4eb9dda5f8ce9fb5ee9c",
     "transaction": "d4edf84572c47178d810"
    },
-   "card": "[경로] autopilot-refine · staged(standard) frame · route <rt> · origin compose · 사람 게이트 frame-review,preview-disposition\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 preview (autopilot-refine:transaction)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-refine · staged(standard) frame→frame-alternative→review→transaction · route <rt> · origin compose · 사람 게이트 frame-review,preview-disposition\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 preview (autopilot-refine:transaction)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "7be6ed6dacc44f9abedd",
    "conditional_extensions": "1c90d16dc25b0339d09a",
    "human_gate_bindings": "b017ed0c89377f6fbe31",
@@ -1682,7 +1682,7 @@
     "review-alternative": "f4ad5f9eb828e02f1cad",
     "transaction": "08e75147fdec0cd109d9"
    },
-   "card": "[경로] autopilot-refine · staged(strong) frame · route <rt> · origin compose · 사람 게이트 frame-review,preview-disposition\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 preview (autopilot-refine:transaction)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-refine · staged(strong) frame→frame-alternative→review→review-alternative→transaction · route <rt> · origin compose · 사람 게이트 frame-review,preview-disposition\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 preview (autopilot-refine:transaction)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "7be6ed6dacc44f9abedd",
    "conditional_extensions": "1c90d16dc25b0339d09a",
    "human_gate_bindings": "b017ed0c89377f6fbe31",
@@ -1714,7 +1714,7 @@
     "review-alternative": "591a53644c0f0b072a5c",
     "transaction": "fe38c1c8a602e549ba2a"
    },
-   "card": "[경로] autopilot-refine · staged(thorough) frame · route <rt> · origin compose · 사람 게이트 frame-review,preview-disposition\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 preview (autopilot-refine:transaction)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
+   "card": "[경로] autopilot-refine · staged(thorough) frame→frame-alternative→review→review-alternative→transaction · route <rt> · origin compose · 사람 게이트 frame-review,preview-disposition\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 preview (autopilot-refine:transaction)\n  자동 선택에서 Codex owner의 workspace-write가 선택되면: <WORKTREE-SCOPE-ADVISORY>.",
    "completion_gates": "7be6ed6dacc44f9abedd",
    "conditional_extensions": "1c90d16dc25b0339d09a",
    "human_gate_bindings": "b017ed0c89377f6fbe31",
@@ -1746,7 +1746,7 @@
     "retrieval-alternative": "0bca4352f7dca3293d9a",
     "synthesis": "9d8ff0c31160f1ba778e"
    },
-   "card": "[경로] autopilot-research · staged(standard) retrieval · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-research · staged(standard) retrieval→retrieval-alternative→synthesis→report→claim-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "6bdc481f4c654eca8905",
    "conditional_extensions": "3190e5c9e1ee25d039c9",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1779,7 +1779,7 @@
     "retrieval-alternative": "50a44a6a3df7064e0b6c",
     "synthesis": "c47c41179fa8b9ebc1da"
    },
-   "card": "[경로] autopilot-research · staged(strong) retrieval · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-research · staged(strong) retrieval→retrieval-alternative→synthesis→report→claim-verify→claim-verify-alternative · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "6bdc481f4c654eca8905",
    "conditional_extensions": "3190e5c9e1ee25d039c9",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1815,7 +1815,7 @@
     "retrieval-assumption": "a35ad8eedb11dafe8666",
     "synthesis": "69c0eb10e1d8fa26beef"
    },
-   "card": "[경로] autopilot-research · staged(thorough) retrieval · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-research · staged(thorough) retrieval→retrieval-alternative→retrieval-assumption→synthesis→report→claim-verify→claim-verify-alternative · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "6bdc481f4c654eca8905",
    "conditional_extensions": "3190e5c9e1ee25d039c9",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1851,7 +1851,7 @@
     "release-setup": "5ac999289585bb51342d",
     "security-review": "3a713a36ce62774b1b45"
    },
-   "card": "[경로] autopilot-ship · staged(standard) release-setup · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
+   "card": "[경로] autopilot-ship · staged(standard) release-setup→security-review→release-review→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
    "completion_gates": "aedc0f6552c23e404645",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1885,7 +1885,7 @@
     "security-review": "f9e039ccc64b1e6ba411",
     "security-review-alternative": "4f90a1a186a22809fcb3"
    },
-   "card": "[경로] autopilot-ship · staged(strong) release-setup · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
+   "card": "[경로] autopilot-ship · staged(strong) release-setup→security-review→security-review-alternative→release-review→release-review-alternative→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
    "completion_gates": "aedc0f6552c23e404645",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -1923,7 +1923,7 @@
     "security-review": "9d97ea803c93f39e9b0e",
     "security-review-alternative": "3cfc2cd80ebbf13814d6"
    },
-   "card": "[경로] autopilot-ship · staged(thorough) release-setup · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
+   "card": "[경로] autopilot-ship · staged(thorough) release-setup→security-review→security-review-alternative→release-review→release-review-alternative→deploy→post-deploy-verify · route <rt> · origin compose · 사람 게이트 없음\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개\n  시작 승인 deploy (autopilot-ship:deploy)",
    "completion_gates": "aedc0f6552c23e404645",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "4f53cda18c2baa0c0354",
@@ -2020,7 +2020,7 @@
     "research-alternative": "c1d836ad538ab8be81c6",
     "review": "01eb217123e829c8086a"
    },
-   "card": "[경로] autopilot-spec · staged(standard) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-spec · staged(standard) frame→frame-alternative→research→research-alternative→review→prd-transaction · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "96bf3ba93e2efb023cc9",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "7df3a80b44df5c5f4921",
@@ -2056,7 +2056,7 @@
     "review": "9fb52c8be950a18b7342",
     "review-alternative": "9edfbf3e7e858f8d7d57"
    },
-   "card": "[경로] autopilot-spec · staged(strong) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-spec · staged(strong) frame→frame-alternative→research→research-alternative→review→review-alternative→prd-transaction · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "96bf3ba93e2efb023cc9",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "7df3a80b44df5c5f4921",
@@ -2096,7 +2096,7 @@
     "review-alternative": "759231d68bb0d309af20",
     "review-test-gap": "310ec0e3f47812abe55b"
    },
-   "card": "[경로] autopilot-spec · staged(thorough) frame · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
+   "card": "[경로] autopilot-spec · staged(thorough) frame→frame-alternative→research→research-alternative→research-assumption→review→review-alternative→review-test-gap→prd-transaction · route <rt> · origin compose · 사람 게이트 frame-review\n  cwd <ROOT> · slug sd165\n  캠페인 미배정 (_unassigned, degraded) · 활성 캠페인 0개",
    "completion_gates": "96bf3ba93e2efb023cc9",
    "conditional_extensions": "4f53cda18c2baa0c0354",
    "human_gate_bindings": "7df3a80b44df5c5f4921",

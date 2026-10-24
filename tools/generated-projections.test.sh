@@ -81,6 +81,65 @@ fi
 grep -q '^name: session-tidy$' "$ROOT/adapters/codex/skills/session-tidy/SKILL.md"
 grep -q '^name: session-tidy$' "$ROOT/adapters/opencode/skills/session-tidy/SKILL.md"
 
+# The shared code-execute recovery procedure must reach each native skill that
+# projects it, while Claude keeps the canonical Skill reference in every mirror.
+RECOVERY_CONTRACT="$ROOT/capabilities/code-execute.md"
+cp "$RECOVERY_CONTRACT" "$TMP/code-execute-contract.md"
+python3 - "$RECOVERY_CONTRACT" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8")
+heading = "## Portable Procedure\n"
+if heading not in text:
+    raise SystemExit("not ok - code-execute Portable Procedure is missing")
+sentinel = "\nProjection fixture: PORTABLE_RECOVERY_PROCEDURE_SENTINEL.\n"
+start = text.index(heading) + len(heading)
+next_heading = re.search(r"^## ", text[start:], re.MULTILINE)
+end = start + next_heading.start() if next_heading else len(text)
+path.write_text(text[:end].rstrip() + sentinel + text[end:], encoding="utf-8")
+PY
+python3 "$ROOT/tools/generate.py" >/dev/null
+python3 - \
+  "$RECOVERY_CONTRACT" \
+  "$ROOT/adapters/codex/skills/code-execute/SKILL.md" \
+  "$ROOT/adapters/codex/plugins/hearting-codex/skills/code-execute/SKILL.md" \
+  "$ROOT/adapters/opencode/skills/code-execute/SKILL.md" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+def portable_section(path):
+    text = Path(path).read_text(encoding="utf-8")
+    match = re.search(r"(?ms)^## Portable Procedure\n(.*?)(?=^## |\Z)", text)
+    if not match:
+        raise SystemExit(f"not ok - Portable Procedure missing from {path}")
+    return match.group(1).strip()
+
+expected = portable_section(sys.argv[1])
+if "PORTABLE_RECOVERY_PROCEDURE_SENTINEL" not in expected:
+    raise SystemExit("not ok - recovery projection fixture was not inserted")
+for path in sys.argv[2:]:
+    if portable_section(path) != expected:
+        raise SystemExit(f"not ok - Portable Procedure differs in {path}")
+PY
+for claude_copy in \
+  "$ROOT/skills/code-execute/SKILL.md" \
+  "$ROOT/adapters/claude/skills/code-execute/SKILL.md" \
+  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/code-execute/SKILL.md"; do
+  grep -Fq 'capabilities/code-execute.md#portable-procedure' "$claude_copy" || {
+    echo "not ok - Claude recovery-contract reference missing from $claude_copy" >&2
+    exit 1
+  }
+done
+cmp -s "$ROOT/skills/code-execute/SKILL.md" "$ROOT/adapters/claude/skills/code-execute/SKILL.md"
+cmp -s "$ROOT/skills/code-execute/SKILL.md" \
+  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/code-execute/SKILL.md"
+cp "$TMP/code-execute-contract.md" "$RECOVERY_CONTRACT"
+python3 "$ROOT/tools/generate.py" >/dev/null
+
 python3 - "$MANIFEST" <<'PY'
 import json, sys
 path=sys.argv[1]

@@ -34,6 +34,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
@@ -533,6 +534,334 @@ PROVENANCE_AGENT_HOME_BYTES_MAX = 4096
 # `os.environ[...]` must not die before its first step (BC 2026-10-06). Only these
 # two keys are set here; the rest of the ambient environment is left untouched.
 PROVENANCE_CLEAR_KEYS = ("AGENT_HOME", "AGENT_DISPATCH_ATTEMPT_ID")
+
+RELEASE_CACHE_NAME = ".hearting-releases"
+RELEASE_CACHE_LOCK = ".publish.lock"
+RELEASE_GC_STAMP = ".gc.last"
+RELEASE_MARKER_NAME = "marker.json"
+RELEASE_META_MAX_BYTES = 1024 * 1024
+RELEASE_GC_AGE_SECONDS = 14 * 24 * 60 * 60
+RELEASE_GC_INTERVAL_SECONDS = 24 * 60 * 60
+RELEASE_STAGE_AGE_SECONDS = 24 * 60 * 60
+_RELEASE_IDENTITY_MODULE = None
+_RELEASE_IGNORE_NAMES = {
+    ".git", ".dispatch", ".agent_reports", ".capability-grounding",
+    ".claude_reports", ".core-grounding", ".route-grounding",
+    ".spec-grounding", ".harness", ".venv", "__pycache__", "node_modules",
+}
+
+
+def _release_identity_module():
+    """Load the shared immutable-release verifier only for managed publishing."""
+    global _RELEASE_IDENTITY_MODULE
+    if _RELEASE_IDENTITY_MODULE is not None:
+        return _RELEASE_IDENTITY_MODULE
+    utilities = Path(__file__).resolve().parent
+    for path in (str(utilities), str(utilities.parent / "tools")):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    path = utilities / "capability-route.py"
+    spec = importlib.util.spec_from_file_location("_hearting_compute_release_identity", path)
+    module = importlib.util.module_from_spec(spec)
+    old = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = old
+    _RELEASE_IDENTITY_MODULE = module
+    return module
+
+
+def _verified_release_identity(path, *, fresh=False):
+    """Use capability-route's canonical managed-release identity check."""
+    try:
+        root = Path(path).expanduser().resolve(strict=True)
+        module = _release_identity_module()
+        if fresh:
+            key = str(root)
+            for name in ("_LAUNCH_ROOT_IDENTITY_CACHE", "_LAUNCH_SOURCE_REVISION_CACHE",
+                         "_LAUNCH_CONTENT_DIGEST_CACHE"):
+                getattr(module, name, {}).pop(key, None)
+        return module._verified_immutable_release_identity(root)
+    except (OSError, RuntimeError, ValueError, ImportError):
+        return None
+
+
+def _release_key(identity):
+    if (not isinstance(identity, dict)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", str(identity.get("version", "")))
+            or not re.fullmatch(r"release:[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[0-9a-f]{12}", str(identity.get("release_id", "")))
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(identity.get("content_digest", "")))):
+        return None
+    return f"{identity['version']}-{identity['release_id'][-12:]}-{identity['content_digest'][7:]}"
+
+
+def _release_marker_read(path):
+    try:
+        marker = Path(path) / RELEASE_MARKER_NAME
+        if marker.is_symlink() or not marker.is_file() or marker.stat().st_size > 16384:
+            return None
+        value = json.loads(marker.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else None
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def _release_entry_valid(entry, key, identity):
+    try:
+        if entry.is_symlink() or not entry.is_dir():
+            return False
+        entry.resolve(strict=True).relative_to(entry.parent.resolve(strict=True))
+        source = entry / "source"
+        if source.is_symlink() or not source.is_dir():
+            return False
+        marker = _release_marker_read(entry)
+        if (marker is None or marker.get("schema") != 1
+                or marker.get("kind") != "hearting-compute-release"
+                or marker.get("key") != key or marker.get("identity") != identity):
+            return False
+        version = source / "RELEASE_VERSION"
+        release_marker = source / ".hearting-release.json"
+        if (version.is_symlink() or release_marker.is_symlink()
+                or version.read_text(encoding="utf-8").strip() != identity.get("version")):
+            return False
+        for relative in ("core/CORE.md", "harness-manifest.json",
+                         "capabilities/topologies.json", "manifest.json"):
+            candidate = source / relative
+            if candidate.is_symlink() or not candidate.is_file():
+                return False
+        data = json.loads(release_marker.read_text(encoding="utf-8"))
+        return (isinstance(data, dict) and data.get("schema") == identity.get("schema") == 1
+                and data.get("version") == identity.get("version")
+                and _release_tree_safe(source)
+                and _verified_release_identity(source, fresh=True) == identity)
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _atomic_json(path, value):
+    path = Path(path)
+    temp = path.with_name(path.name + f".tmp-{os.getpid()}-{time.time_ns()}")
+    try:
+        with temp.open("x", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _release_live_references(run_root, cache):
+    """Collect names found in bounded metadata of live non-dot run dirs."""
+    if Path(run_root).is_symlink() or Path(cache).is_symlink():
+        return None
+    refs = set()
+    names = [child.name.encode("utf-8") for child in cache.iterdir()
+             if not child.name.startswith(".")]
+    for run in Path(run_root).iterdir():
+        if (run.name.startswith(".") or run.is_symlink() or not run.is_dir()
+                or (run / "exit_code").exists()):
+            continue
+        meta = run / "meta.json"
+        try:
+            meta_info = meta.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        if meta.is_symlink() or not meta.is_file():
+            return None
+        try:
+            if meta_info.st_size > RELEASE_META_MAX_BYTES:
+                return None
+            data = meta.read_bytes()
+        except OSError:
+            return None
+        refs.update(name.decode("utf-8") for name in names if name in data)
+    return refs
+
+
+def _release_tree_safe(root):
+    """Reject absolute or escaping symlinks before publishing a tree."""
+    root = Path(root).resolve(strict=True)
+    try:
+        for current, dirs, files in os.walk(root, followlinks=False):
+            base = Path(current)
+            dirs[:] = [name for name in dirs if name not in _RELEASE_IGNORE_NAMES]
+            for name in dirs + files:
+                item = base / name
+                if not item.is_symlink():
+                    continue
+                target = os.readlink(item)
+                if os.path.isabs(target):
+                    return False
+                resolved = (item.parent / target).resolve(strict=False)
+                resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _release_gc(run_root, cache, current_key, *, now=None):
+    """Rate-limited conservative cleanup; unclear metadata skips public GC."""
+    now = time.time() if now is None else now
+    stamp = cache / RELEASE_GC_STAMP
+    try:
+        if stamp.exists():
+            try:
+                prior = json.loads(stamp.read_text(encoding="utf-8"))["timestamp"]
+            except (ValueError, KeyError, TypeError):
+                prior = 0
+            if now - float(prior) < RELEASE_GC_INTERVAL_SECONDS:
+                return "throttled"
+        refs = _release_live_references(run_root, cache)
+        _atomic_json(stamp, {"timestamp": now})
+        if refs is None:
+            return "skipped-live-metadata"
+        for entry in cache.iterdir():
+            if entry.name.startswith(".stage-"):
+                marker = _release_marker_read(entry)
+                try:
+                    created = datetime.datetime.fromisoformat(marker["created_at"]).timestamp()
+                    stage_key = marker.get("key") if marker else None
+                    stage_name_ok = (isinstance(stage_key, str)
+                                     and entry.name.startswith(f".stage-{stage_key}-")
+                                     and bool(entry.name[len(f".stage-{stage_key}-"):]))
+                    if (stage_name_ok and marker.get("schema") == 1
+                            and marker.get("kind") == "hearting-compute-release"
+                            and _release_key(marker.get("identity")) == marker.get("key")
+                            and marker.get("staging") is True
+                            and now - created > RELEASE_STAGE_AGE_SECONDS
+                            and not entry.is_symlink() and entry.is_dir()):
+                        shutil.rmtree(entry)
+                except (KeyError, TypeError, ValueError, OSError):
+                    pass
+                continue
+            if entry.name == current_key or entry.name in refs:
+                continue
+            marker = _release_marker_read(entry)
+            try:
+                if (marker is None or marker.get("schema") != 1
+                        or marker.get("kind") != "hearting-compute-release"
+                        or marker.get("key") != entry.name
+                        or _release_key(marker.get("identity")) != entry.name
+                        or entry.is_symlink() or not entry.is_dir()
+                        or (entry / "source").is_symlink()
+                        or not (entry / "source").is_dir()):
+                    continue
+                last_used = datetime.datetime.fromisoformat(marker["last_used_at"]).timestamp()
+                if now - last_used > RELEASE_GC_AGE_SECONDS and not entry.is_symlink():
+                    shutil.rmtree(entry)
+            except (KeyError, TypeError, ValueError, OSError):
+                continue
+        return "complete"
+    except (OSError, ValueError, OverflowError):
+        return "skipped-error"
+
+
+def _publish_managed_agent_home(source, run_root, *, now=None):
+    """Publish/reuse one validated release under run_root; failure is non-blocking."""
+    source, root = Path(source).expanduser(), Path(run_root)
+    try:
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            return "", "publish-failed", "unsafe run_root"
+        identity = _verified_release_identity(source, fresh=True)
+        if identity is None or not _release_tree_safe(source):
+            return "", "publish-failed", "managed release identity could not be verified"
+        key = _release_key(identity)
+        if not key:
+            return "", "publish-failed", "managed release identity has no safe cache key"
+        cache = root / RELEASE_CACHE_NAME
+        if cache.is_symlink():
+            return "", "publish-failed", "release cache path is a symlink"
+        cache.mkdir(parents=True, exist_ok=True)
+        if cache.resolve(strict=True).parent != root.resolve(strict=True):
+            return "", "publish-failed", "release cache escaped run_root"
+        with (cache / RELEASE_CACHE_LOCK).open("a+b") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            entry = cache / key
+            if _release_entry_valid(entry, key, identity):
+                marker = _release_marker_read(entry)
+                marker["last_used_at"] = datetime.datetime.fromtimestamp(
+                    time.time() if now is None else now, datetime.timezone.utc).isoformat()
+                _atomic_json(entry / RELEASE_MARKER_NAME, marker)
+                status = "present"
+            else:
+                if entry.exists() or entry.is_symlink():
+                    raise OSError("cache entry exists but is not reusable")
+                stamp = f"{os.getpid()}-{time.time_ns()}"
+                stage = cache / f".stage-{key}-{stamp}"
+                stage.mkdir(mode=0o700)
+                _atomic_json(stage / RELEASE_MARKER_NAME, {
+                    "schema": 1, "kind": "hearting-compute-release", "key": key,
+                    "identity": identity, "staging": True,
+                    "created_at": datetime.datetime.fromtimestamp(
+                        time.time() if now is None else now, datetime.timezone.utc).isoformat()})
+                try:
+                    shutil.copytree(source, stage / "source", symlinks=True,
+                        copy_function=shutil.copy2,
+                        ignore=lambda _directory, names: [n for n in names if n in _RELEASE_IGNORE_NAMES])
+                    if (not _release_tree_safe(stage / "source")
+                            or _verified_release_identity(stage / "source", fresh=True) != identity):
+                        raise OSError("copied release identity changed during publication")
+                    _atomic_json(stage / RELEASE_MARKER_NAME, {
+                        "schema": 1, "kind": "hearting-compute-release", "key": key,
+                        "identity": identity, "last_used_at": datetime.datetime.fromtimestamp(
+                            time.time() if now is None else now, datetime.timezone.utc).isoformat()})
+                    if entry.exists() or entry.is_symlink():
+                        raise OSError("cache entry exists but is not reusable")
+                    os.rename(stage, entry)
+                    status = "published"
+                except Exception:
+                    shutil.rmtree(stage, ignore_errors=True)
+                    raise
+            note = _release_gc(root, cache, key, now=time.time() if now is None else now)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        return str((entry / "source").resolve()), status, note
+    except (OSError, RuntimeError, ValueError, ImportError, TypeError) as exc:
+        return "", "publish-failed", f"{type(exc).__name__}: {exc}"
+
+
+def _select_payload_agent_home(provenance, host, run_root, *, dry_run=False):
+    """Choose the payload path without changing the launcher's recorded pin."""
+    original = provenance.get("AGENT_HOME") or ""
+    if not original:
+        return "", "unknown", "launcher AGENT_HOME is unavailable"
+    if is_self(host):
+        return original, "self", "self host keeps its pinned release path"
+    source = Path(original)
+    try:
+        marker = source / ".hearting-release.json"
+        if not marker.exists():
+            return original, "unmanaged-forwarded", "unmanaged checkout forwarded; remote visibility is not guaranteed"
+        identity = _verified_release_identity(source, fresh=True)
+        key = _release_key(identity)
+        if not key:
+            return "", "publish-failed", "managed launcher release failed immutable identity validation"
+        if not _release_tree_safe(source):
+            return "", "publish-failed", "managed release identity could not be verified"
+        entry = Path(run_root) / RELEASE_CACHE_NAME / key
+        if dry_run:
+            cache = entry.parent
+            if (cache.is_symlink() or (cache.exists() and not cache.is_dir())):
+                return "", "publish-failed", "unsafe release cache path"
+            if _release_entry_valid(entry, key, identity):
+                return str((entry / "source").resolve()), "present", "verified cached release is present"
+            if entry.exists() or entry.is_symlink():
+                return "", "publish-failed", "cache entry exists but is not reusable"
+            return str(entry / "source"), "would-publish", "validated release would be copied under run_root"
+        payload, status, note = _publish_managed_agent_home(source, run_root)
+        if status == "publish-failed":
+            return "", status, note
+        return payload, status, note
+    except (OSError, RuntimeError, ValueError, ImportError) as exc:
+        return "", "publish-failed", f"{type(exc).__name__}: {exc}"
 
 
 def _valid_agent_home(candidate):
@@ -1996,12 +2325,22 @@ def cmd_run(args):
     rendered = " ".join(shlex.quote(part) for part in command)
 
     provenance = _launcher_provenance()
+    payload_agent_home, agent_home_status, agent_home_reason = _select_payload_agent_home(
+        provenance, host, config["run_root"], dry_run=args.dry_run)
+    payload_provenance = dict(provenance)
+    if provenance.get("AGENT_HOME"):
+        payload_provenance["AGENT_HOME"] = payload_agent_home
+    run_provenance = {"agent_home": provenance.get("AGENT_HOME"),
+                      "payload_agent_home": payload_agent_home,
+                      "agent_home_status": agent_home_status,
+                      "agent_home_reason": agent_home_reason,
+                      "attempt_id": provenance.get("AGENT_DISPATCH_ATTEMPT_ID"),
+                      "session": None, "route": None}
     owner = _launcher_session_owner()
     session = ({"harness": owner["harness"], "id": owner["id"]}
                if owner else None)
-    run_provenance = {"agent_home": provenance.get("AGENT_HOME"),
-                      "attempt_id": provenance.get("AGENT_DISPATCH_ATTEMPT_ID"),
-                      "session": session, "route": _launcher_route()}
+    run_provenance["session"] = session
+    run_provenance["route"] = _launcher_route()
     if str(os.environ.get("AGENT_DISPATCH_DEPTH") or "0") != "0":
         run_provenance["notify"] = session
     # Provenance rides the same preamble as the compute identity, so it
@@ -2010,7 +2349,7 @@ def cmd_run(args):
     # so a stale tmux server or remote shell cannot leak a foreign value and a
     # strict read in the payload finds the key.
     setup = (_launcher_session_setup(owner=owner)
-             + ["export %s=%s" % (key, shlex.quote(provenance.get(key, "")))
+             + ["export %s=%s" % (key, shlex.quote(payload_provenance.get(key, "")))
                 for key in PROVENANCE_CLEAR_KEYS]
              + [
                  f"export HEARTING_COMPUTE_RUN_ID={shlex.quote(run_id)}",
@@ -2052,7 +2391,7 @@ def cmd_run(args):
         key: resolved_session_env.get(key, "")
         for key in gpu_leases.session_environment_keys()
     }
-    tmux_environment.update({key: provenance.get(key, "")
+    tmux_environment.update({key: payload_provenance.get(key, "")
                              for key in PROVENANCE_CLEAR_KEYS})
     tmux_environment.update({
         "HEARTING_COMPUTE_RUN_ID": run_id,
@@ -2073,6 +2412,8 @@ def cmd_run(args):
             raise ConfigError(str(exc)) from exc
         preamble = preamble.replace("__HEARTING_GPU_SETUP__", "export CUDA_VISIBLE_DEVICES=" + ",".join(selected))
         print(f"run_id: {run_id}\nrun_dir: {run_dir}\nhost: {name}\n"
+              f"agent_home_status: {agent_home_status}\n"
+              f"agent_home_reason: {agent_home_reason}\n"
               f"would run: {rendered}\nsetup: {preamble}")
         _print_run_gpu_observation(gpu_observation)
         return 0
@@ -2089,6 +2430,8 @@ def cmd_run(args):
                            launch_function) % (options, payload_source)
     launch = "python3 -c " + shlex.quote(script)
     result = remote(host, launch)
+    if agent_home_status in {"unmanaged-forwarded", "publish-failed", "unknown"}:
+        print(f"note: AGENT_HOME {agent_home_status}: {agent_home_reason}", file=sys.stderr)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         print(f"launch failed on {name}: {detail}", file=sys.stderr)
@@ -2334,7 +2677,7 @@ def cmd_runs(args):
         return 0
     rows = []
     for entry in sorted(root.iterdir(), reverse=True):
-        if not entry.is_dir():
+        if entry.name.startswith(".") or not entry.is_dir():
             continue
         state = _run_state(config, entry.name)
         if args.host and state["meta"].get("host") != args.host:

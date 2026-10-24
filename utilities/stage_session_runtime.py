@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -16,6 +19,102 @@ from dispatch_contract import DispatchContractError, validate_attempt_metadata
 from route_authority import declared_subsession as declared  # noqa: F401
 
 STATE_BUCKET = (".runtime", "stage-sessions")
+_BRIEF_PATH_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9._~+*/?{}\[\]!@#$%^&=:-])"
+    r"[A-Za-z0-9._~+*/?{}\[\]!@#$%^&=:-]*"
+    r"/[A-Za-z0-9._~+*/?{}\[\]!@#$%^&=:-]*"
+)
+
+
+def _artifact_fence(args, worktree: Path) -> tuple[list[str], list[str]] | None:
+    """Derive an artifact-only sub-session fence from its bound route and brief."""
+    route_file = getattr(args, "route_file", None)
+    if not route_file:
+        return None
+    route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+    import artifact_context
+    if any(artifact_context.classify_scope(value) != "artifact"
+           for value in (next((node.get("write_scope", []) for node in route.get("nodes", [])
+                               if node.get("id") == args.route_node), []))):
+        return None
+    from worker_bootstrap import (
+        _child_scope_environment, _linked_slice_source_worktree, resolve_node_scope,
+    )
+    source_worktree = _linked_slice_source_worktree(args, route)
+    environ = _child_scope_environment(args, route, os.environ, source_worktree)
+    scope = resolve_node_scope(
+        route, args.route_node, environ,
+        parent_attempt_id=getattr(args, "parent_attempt_id", None),
+        route_file=route_file, source_worktree=source_worktree,
+        source_worktree_verified=source_worktree is not None,
+    )
+    if not scope.output_dir or not scope.write_scope:
+        return None
+    if any(artifact_context.classify_scope(value) != "artifact" for value in scope.write_scope):
+        return None
+
+    output_dir = Path(scope.output_dir).resolve(strict=False)
+    artifact_scopes = []
+    for value in scope.write_scope:
+        path = Path(value)
+        if path.is_absolute():
+            try:
+                value = path.relative_to(output_dir).as_posix()
+            except ValueError:
+                continue
+        artifact_scopes.append(value)
+
+    def exact_outputs(values):
+        found = set()
+        for value in values:
+            if not isinstance(value, str) or not value or artifact_context.is_semantic_output(value):
+                continue
+            if (any(char in value for char in "*?[]<>{}") or value.endswith("/")
+                    or "://" in value):
+                continue
+            candidate = Path(value)
+            if not candidate.is_absolute():
+                candidate = output_dir / candidate
+            candidate = candidate.resolve(strict=False)
+            if candidate.is_dir():
+                continue
+            try:
+                relative = candidate.relative_to(output_dir).as_posix()
+            except ValueError:
+                continue
+            if relative and artifact_context.scope_matches(relative, artifact_scopes):
+                found.add(str(candidate))
+        return found
+
+    brief = Path(args.phase_brief).read_text(encoding="utf-8")
+    def strip_emphasis(value):
+        for delimiter in ("**", "__", "*", "_"):
+            if (value.startswith(delimiter) and value.endswith(delimiter)
+                    and len(value) > 2 * len(delimiter)):
+                return value[len(delimiter):-len(delimiter)]
+        return value
+
+    tokens = [strip_emphasis(match.group(0).rstrip("."))
+              for match in _BRIEF_PATH_TOKEN.finditer(brief)]
+    outputs = exact_outputs(tokens)
+    declared_outputs = exact_outputs(args.fixed_file)
+    effective = outputs | declared_outputs
+    if not effective:
+        effective = exact_outputs(scope.outputs)
+    if not effective:
+        # With no concrete brief or output paths, carry the node's declared
+        # artifact write patterns into the ledger as bounded directory fences.
+        effective = {
+            str(output_dir / value)
+            for value in artifact_scopes
+            if (not artifact_context.is_semantic_output(value)
+                and not value.endswith("/")
+                and (value.endswith("/**")
+                     or not any(char in value for char in "*?[]<>{}")))
+        }
+    effective = sorted(effective)
+    readonly = sorted(set(args.fixed_file) - declared_outputs)
+    return effective, readonly
 
 
 def default_state_dir(artifact_root: Path, route_id: str) -> Path:
@@ -115,6 +214,13 @@ def bind(args: argparse.Namespace, *, artifact_root: str | Path, action: str) ->
     args.fixed_files_sha256 = _sha_files(args.fixed_file)
     args.narrow_verify_sha256 = _sha_text(args.narrow_verify)
     args.phase_brief_sha256 = hashlib.sha256(phase_brief.read_bytes()).hexdigest()
+    try:
+        fence = _artifact_fence(args, worktree)
+    except (OSError, ValueError, KeyError, TypeError, DispatchContractError):
+        # Fence derivation is optional. Preserve the pre-existing declared-file
+        # behavior if route loading or its scope resolver cannot complete.
+        fence = None
+    args.effective_fixed_files, args.readonly_input_files = fence or (args.fixed_file, [])
     axes = {
         "attempt_schema_version": 2,
         "dispatch_depth": args.dispatch_depth,
@@ -152,8 +258,10 @@ def bind(args: argparse.Namespace, *, artifact_root: str | Path, action: str) ->
         "--next-action", f"read {args.phase_brief}",
         "--invariant", f"one stage gate remains owned by {args.capability_owner or 'depth-1 owner'}",
     ]
-    for file in args.fixed_file:
+    for file in args.effective_fixed_files:
         command += ["--fixed-file", file]
+    for file in args.readonly_input_files:
+        command += ["--forbidden-file", file]
     result = subprocess.run(command, text=True, capture_output=True, check=False)
     if result.returncode:
         raise DispatchContractError(
@@ -203,7 +311,10 @@ def environment(args: argparse.Namespace) -> dict[str, str]:
 def prompt_fragment(args: argparse.Namespace) -> str:
     if not getattr(args, "subsession_id", None):
         return ""
-    files = "\n".join(f"  - {file}" for file in args.fixed_file)
+    files = "\n".join(f"  - {file}" for file in getattr(args, "effective_fixed_files", args.fixed_file))
+    readonly = getattr(args, "readonly_input_files", [])
+    readonly_line = ("- declared worktree inputs are read-only (forbidden files):\n"
+                     + "\n".join(f"  - {file}" for file in readonly) + "\n") if readonly else ""
     context = (Path(__file__).resolve().parents[1] / "roles/worker-contexts/subsession.md").read_text(encoding="utf-8")
     return (
         context + "\n"
@@ -216,6 +327,7 @@ def prompt_fragment(args: argparse.Namespace) -> str:
         f"- final handoff: `artifact: {args.state_ledger}` (this ledger, never a source file you edited)\n"
         "- fixed files (exhaustive; out-of-list work stops with a handoff):\n"
         f"{files}\n"
+        f"{readonly_line}"
         f"- after at most three edits or one verify round trip, update: python3 {Path(__file__).resolve().parent / 'worker-state-ledger.py'} update --path {args.state_ledger} --attempt-id {args.attempt_id} ...\n"
         "- read the phase brief, prior bounded handoff, and ledger; do not reload the full spec unless the brief names it\n\n"
     )

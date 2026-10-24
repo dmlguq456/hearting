@@ -18,6 +18,11 @@ You are a bounded worker, not the user-facing main session.
   Write under the cycle output directory supplied in dispatch metadata and
   use the sealed node's declared outputs and write scope under the supplied
   cycle output directory. Source scopes stay in the route worktree.
+- Put environments, caches, downloaded models, external checkouts and training
+  checkpoints under the supplied `runtime_dir` (or an established external
+  project location). Keep reports, configs and small provenance in artifacts;
+  checkpoint records point to the runtime path and may include SHA256 and byte
+  size. Use `runtime_dir` or system temporary storage for pytest/tool temp data.
 - Put changed files, commands, results, warnings, reasoning, and unsupported
   runtime-contract details in the canonical artifact. File handoff must be
   sufficient for the next stage without conversation history.

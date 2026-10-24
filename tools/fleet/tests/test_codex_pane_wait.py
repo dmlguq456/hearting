@@ -1,5 +1,4 @@
 """Full refresh waits for cold Codex pane identity; fast refresh reuses it."""
-import inspect
 import os
 from pathlib import Path
 import sys
@@ -34,7 +33,7 @@ class CodexPaneWaitTest(unittest.TestCase):
         modules = {
             ".claude": SimpleNamespace(enrich=lambda *_args, **_kwargs: None),
             ".codex": SimpleNamespace(prepare_tick=stop, enrich=lambda *_args, **_kwargs: None),
-            ".opencode": SimpleNamespace(prepare_tick=stop, enrich=lambda *_args, **_kwargs: None),
+            ".opencode": SimpleNamespace(enrich=stop),
         }
         def load(name, _package):
             return modules[name]
@@ -47,11 +46,13 @@ class CodexPaneWaitTest(unittest.TestCase):
                 pass
         return calls
 
-    def test_collect_all_passes_full_and_fast_wait_only_to_codex_prepare(self):
+    def test_collect_all_waits_only_for_codex_prepare_and_enriches_opencode_directly(self):
         self.assertEqual(self._collect_until_prepare("codex", False)[0][1], {"wait_timeout": 0.2})
         self.assertEqual(self._collect_until_prepare("codex", True)[0][1], {"wait_timeout": 0.0})
-        self.assertEqual(self._collect_until_prepare("opencode", False)[0][1], {})
-        self.assertEqual(inspect.signature(opencode.prepare_tick).parameters.keys(), {"sessions"})
+        args, kwargs = self._collect_until_prepare("opencode", False)[0]
+        self.assertEqual(len(args), 1)
+        self.assertEqual(kwargs, {})
+        self.assertFalse(hasattr(opencode, "prepare_tick"))
 
     def test_cold_full_prepare_wait_can_attach_current_pane_sid(self):
         sid = "01a0c233-96b3-7cf3-871b-7beb1fc71679"

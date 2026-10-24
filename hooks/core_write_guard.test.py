@@ -55,6 +55,22 @@ class CoreWriteGuardTest(unittest.TestCase):
         self.assertEqual(G.violation(str(self.primary / "utilities/a.py"), str(self.primary)), "")
         self.assertEqual(G.violation("relative.py", str(self.worktree)), "")
 
+    def test_exact_primary_runtime_directory_is_writable(self):
+        self.assertEqual(G.violation(str(self.primary / ".agent_runtime" / "job" / "run.py"),
+                                     str(self.worktree)), "")
+        reason = G.violation(str(self.primary / ".agent_runtime-cache" / "run.py"), str(self.worktree))
+        self.assertIn("shared checkout", reason)
+
+    def test_runtime_write_exception_remains_narrow_and_external_targets_are_allowed(self):
+        target = self.tmp / "external-runtime" / "job.py"
+        self.assertFalse(G._runtime_override_allowed(self.home / "cache", self.primary))
+        self.assertFalse(G._runtime_override_allowed(self.primary / "cache", self.primary))
+        self.assertTrue(G._runtime_override_allowed(target.parent, self.primary))
+        self.assertEqual(G.violation(str(self.primary / ".agent_runtime/job.py"),
+                                     str(self.worktree)), "")
+        with mock.patch.dict(os.environ, {"AGENT_RUNTIME_DIR": str(target.parent)}, clear=False):
+            self.assertEqual(G.violation(str(target), str(self.worktree)), "")
+
     def test_registered_unversioned_worker_scopes_to_sealed_route_cwd(self):
         route_cwd = self.tmp / "recordish"
         route_cwd.mkdir()

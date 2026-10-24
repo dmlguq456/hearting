@@ -74,6 +74,51 @@ class WorkerBootstrapTest(unittest.TestCase):
         self.assertNotIn("AGENT_ARTIFACT_OUTPUT_DIR", env)
         self.assertEqual(W.artifact_context_prompt({}), "")
 
+    def test_runtime_candidate_and_best_effort_preparation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            project = base / "project"
+            artifacts = project / ".agent_reports"
+            artifacts.mkdir(parents=True)
+            primary = W.runtime_dir_candidate(artifacts, {})
+            self.assertEqual(primary, str(project / ".agent_runtime"))
+            self.assertEqual(W.runtime_dir_candidate(artifacts, {"AGENT_RUNTIME_DIR": primary}), primary)
+            explicit = base / "dedicated-runtime"
+            self.assertEqual(W.runtime_dir_candidate(artifacts, {"AGENT_RUNTIME_DIR": str(explicit)}),
+                             str(explicit))
+            self.assertEqual(W.runtime_dir_candidate(artifacts, {"AGENT_RUNTIME_DIR": "relative"}), "")
+            self.assertEqual(W.runtime_dir_candidate(artifacts, {"AGENT_RUNTIME_DIR": str(project / "cache")}), "")
+            home_override = Path.home() / "unsafe-runtime-override"
+            self.assertEqual(W.runtime_dir_candidate(artifacts, {"AGENT_RUNTIME_DIR": str(home_override)}), "")
+            prepared = W.prepare_runtime_dir(str(explicit))
+            self.assertEqual(prepared, str(explicit))
+            self.assertEqual((explicit / ".gitignore").read_bytes(), b"*\n")
+            self.assertFalse((explicit / "CACHEDIR.TAG").exists())
+            conflict = base / "conflict"
+            conflict.mkdir()
+            (conflict / ".gitignore").write_text("keep-me\n")
+            self.assertEqual(W.prepare_runtime_dir(str(conflict)), "")
+            self.assertEqual((conflict / ".gitignore").read_text(), "keep-me\n")
+            prompt = W.artifact_context_prompt({"AGENT_ARTIFACT_OUTPUT_DIR": "/out",
+                                               "AGENT_RUNTIME_DIR": str(explicit)})
+            self.assertIn(f"- runtime_dir: {explicit}", prompt)
+            self.assertIn("checkpoints under runtime_dir", prompt)
+
+    def test_nested_producer_environment_and_child_prompt_keep_default_runtime(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project = Path(tmp) / "project"
+            artifact_root = project / ".agent_reports"
+            artifact_root.mkdir(parents=True)
+            runtime = project / ".agent_runtime"
+            record = {"campaign_id": "camp_test", "cycle_id": "cyc_test", "producer_id": "prod_test"}
+            with mock.patch.dict(os.environ, {"AGENT_RUNTIME_DIR": str(runtime)}, clear=False), \
+                    mock.patch.object(AP, "cycle_dir", return_value=project / "child-cycle"), \
+                    mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
+                child_env = AP._env_for(artifact_root, record)
+            self.assertEqual(child_env["AGENT_RUNTIME_DIR"], str(runtime))
+            self.assertEqual(W.runtime_dir_candidate(artifact_root, child_env), str(runtime))
+            self.assertIn(f"- runtime_dir: {runtime}", W.artifact_context_prompt(child_env))
+
     def test_deterministic_fallback_types(self):
         self.assertEqual(W.resolve_worker_type(explicit=None, dispatch_depth=1), "owner")
         self.assertEqual(

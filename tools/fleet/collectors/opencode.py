@@ -1,15 +1,11 @@
 """opencode enrichment — passive, read-only SQLite (01_tap_mechanics.md §3).
 
 State lives in ~/.local/share/opencode/opencode.db (WAL; opened mode=ro). The `session` table
-carries per-session model/cwd/cost/tokens live. argv has no session id, so pid↔session is
-matched by /proc/cwd == session.directory, narrowed to the session THIS process created: the
-earliest top-level (parent_id IS NULL) session in that directory whose time_created is at/after
-the process start (/proc/<pid>/stat field 22 against /proc/stat btime — the same derivation
-Codex already trusts). That narrowing matters because several opencode sessions can share one
-directory: without it every process in a shared directory collapsed onto whichever session was
-most recently updated, so the panes rendered as one. A process that attached to a pre-existing
-session has no such candidate and takes the older binding (most recently updated top-level in
-that directory) unchanged.
+carries per-session model/cwd/cost/tokens live. Session data is attached only when the pane's
+current TUI selection record proves its session id for the exact PID/start pair. The `--session`
+argument is only where the process started; cwd, creation windows, and update recency do not
+prove which conversation the pane currently displays. The process scan remains the source of
+live row existence when no current selection can be observed.
 
 Structurally missing (render '—', PRD §2/§4): rate-limit (no column). effort = model.variant.
 Active context is the latest request's input + cache.read + cache.write. Its display
@@ -422,6 +418,117 @@ def _attempt_sidecar_fallback(sess):
             attempt_sid, harness="opencode")
 
 
+def _resolve_current_identity(sess):
+    """Use only the exact live TUI selection as the current conversation claim."""
+    from ..process_identity import resolve_session_claims
+
+    pid = getattr(sess, "pid", None)
+    expected_start = getattr(sess, "proc_start", None)
+    observed_sid, source, rejected_selection = None, "", None
+    if pid and expected_start is not None:
+        before = _proc_start_ticks(pid)
+        if before is not None and str(before) == str(expected_start):
+            candidate_sid, candidate_source = session_of_process(pid)
+            after = _proc_start_ticks(pid)
+            if (after is not None and str(after) == str(expected_start)
+                    and str(after) == str(before)):
+                observed_sid, source = candidate_sid, candidate_source
+            elif candidate_sid and candidate_source == "opencode-tui-selection":
+                rejected_selection = candidate_sid
+    previous_sid = getattr(sess, "session_id", None)
+    claims = {}
+    current_source = None
+    if observed_sid and source == "opencode-tui-selection":
+        claims[source] = observed_sid
+        current_source = source
+    sid, evidence = resolve_session_claims(claims, current_source=current_source)
+    if source == "opencode-tui-selection" and previous_sid and previous_sid != sid:
+        # A prior projection is diagnostic history, not an exact identity claim.
+        evidence["prior_projection"] = previous_sid
+    if observed_sid and source == "opencode-argv":
+        evidence["started_on"] = observed_sid
+    if rejected_selection:
+        evidence["rejected_selection"] = rejected_selection
+    evidence.update(pid=getattr(sess, "pid", None),
+                    proc_start=getattr(sess, "proc_start", None))
+    sess.session_id = sid
+    sess.session_identity_evidence = evidence
+    return sid
+
+
+def _clear_session_enrichment(sess):
+    """Clear conversation-derived fields while leaving process and attempt data intact."""
+    for name, value in (
+        ("slug", None), ("title", None), ("title_ts", None),
+        ("summary", None), ("summary_ts", None), ("model", None),
+        ("effort", None), ("effort_default", False), ("cost", None),
+        ("tokens", None), ("session_input_tokens", None),
+        ("session_output_tokens", None), ("session_reasoning_output_tokens", None),
+        ("session_total_tokens", None), ("active_context_tokens", None),
+        ("context_window_tokens", None), ("context_display_window_tokens", None),
+        ("context_policy", None), ("ctx_pct", None), ("_context_evidence", None),
+        ("_refresh_source", None), ("subagents", None), ("is_child", False),
+        ("mtime", None), ("shell_jobs", []), ("shell_job_observation", None),
+        ("_opencode_provider_id", None),
+        # These fields are populated only from the session registry for OpenCode.
+        # Clear them on every pass so an old or rejected record cannot survive a
+        # selection change on the same Session object.
+        ("status", None), ("kind", None), ("started_at", None), ("updated_at", None),
+        ("registry_proc_start", None), ("registry_name", None), ("runtime_name", None),
+    ):
+        setattr(sess, name, value)
+    if not getattr(sess, "session_id", None):
+        sess.session_tag = None
+        sess._opencode_bind_kind = None
+    else:
+        sess._opencode_bind_kind = "process"
+        from fleet.session_handle import resolve_tag
+        sess.session_tag = resolve_tag("opencode", sess.session_id)
+
+
+def _current_registry_record(sess, sid):
+    """Return registry data only when it names this exact live PID/start/SID."""
+    pid = getattr(sess, "pid", None)
+    expected_start = getattr(sess, "proc_start", None)
+    if not sid or pid is None or isinstance(pid, bool) or expected_start is None:
+        return None
+    try:
+        expected_pid = int(pid)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    before = _proc_start_ticks(pid)
+    if before is None or str(before) != str(expected_start):
+        return None
+    try:
+        record = session_registry.read("opencode", pid)
+    except Exception:
+        return None
+    after = _proc_start_ticks(pid)
+    if after is None or str(after) != str(expected_start) or str(after) != str(before):
+        return None
+    if not isinstance(record, dict):
+        return None
+    record_pid = record.get("pid")
+    if (isinstance(record_pid, bool)
+            or not isinstance(record_pid, (int, str))
+            or (isinstance(record_pid, str)
+                and (not record_pid.isascii() or not record_pid.isdigit()))):
+        return None
+    try:
+        if int(record_pid) != expected_pid:
+            return None
+    except (TypeError, ValueError, OverflowError):
+        return None
+    record_start = record.get("procStart")
+    if record_start is None or isinstance(record_start, bool) or str(record_start) != str(expected_start):
+        return None
+    # Registry display fields are session-bound. A PID/start match alone cannot
+    # attach a prior conversation's name or status to the current TUI selection.
+    if record.get("sessionId") != sid:
+        return None
+    return record
+
+
 def _opencode_v2_runtime():
     utilities = Path(__file__).resolve().parents[3] / "utilities"
     if str(utilities) not in sys.path:
@@ -431,50 +538,22 @@ def _opencode_v2_runtime():
 
 
 def _enrich_v2(sess, tick, db):
-    """Exact V2 sid reader; a cwd/time fallback is accepted only when unique."""
+    """Read V2 data for the already-resolved current TUI selection."""
     runtime = _opencode_v2_runtime()
     if not runtime.credential_store_present(db_path=db):
         return False
-    sid, binding_source = session_of_process(sess.pid) if getattr(sess, "pid", None) else (None, "")
-    shell_cursor = (None if getattr(sess, "_fast_first", False)
-                    else _v2_shell_cursor(db, sid, getattr(sess, "attempt_id", None))
-                    if sid else 0)
-    shell_refresh_seqs = (_v2_shell_refresh_seqs(db, sid, getattr(sess, "attempt_id", None))
-                          if sid and not getattr(sess, "_fast_first", False) else [])
-    generation = None
-    if sid:
-        observed = runtime.read_session_observation(
-            sid, db_path=db, shell_after_seq=shell_cursor,
-            shell_refresh_seqs=shell_refresh_seqs)
-        if observed.get("state") == "observed":
-            generation = observed.get("generation")
-    else:
-        started = _process_started_ms(sess)
-        if started is not None and sess.cwd:
-            candidates = runtime.list_session_candidates(
-                sess.cwd, db_path=db, after_created=started,
-                before_created=(tick or {}).get(sess.pid), limit=2)
-            if len(candidates) > 1:
-                _attempt_sidecar_fallback(sess)
-                return True
-            if len(candidates) == 1:
-                sid = candidates[0].get("id")
-                generation = candidates[0].get("generation")
-                binding_source = "unique-process-window"
-                shell_cursor = (None if getattr(sess, "_fast_first", False)
-                                else _v2_shell_cursor(db, sid, getattr(sess, "attempt_id", None)))
-                shell_refresh_seqs = (
-                    _v2_shell_refresh_seqs(db, sid, getattr(sess, "attempt_id", None))
-                    if not getattr(sess, "_fast_first", False) else [])
-                observed = runtime.read_session_observation(
-                    sid, db_path=db, generation=generation,
-                    shell_after_seq=shell_cursor,
-                    shell_refresh_seqs=shell_refresh_seqs)
+    sid = getattr(sess, "session_id", None)
     if not sid:
-        sess.shell_jobs = []
-        sess.shell_job_observation = {"state": "unavailable", "reason": "exact-session-id-unresolved"}
         _attempt_sidecar_fallback(sess)
         return True
+    shell_cursor = (None if getattr(sess, "_fast_first", False)
+                    else _v2_shell_cursor(db, sid, getattr(sess, "attempt_id", None)))
+    shell_refresh_seqs = (_v2_shell_refresh_seqs(db, sid, getattr(sess, "attempt_id", None))
+                          if not getattr(sess, "_fast_first", False) else [])
+    observed = runtime.read_session_observation(
+        sid, db_path=db, shell_after_seq=shell_cursor,
+        shell_refresh_seqs=shell_refresh_seqs)
+    generation = observed.get("generation") if observed.get("state") == "observed" else None
     if generation != "v2":
         sess.shell_jobs = []
         if generation == "v1":
@@ -484,11 +563,10 @@ def _enrich_v2(sess, tick, db):
             sess.shell_job_observation = {
                 "state": observed.get("state", "unknown"),
                 "reason": observed.get("reason", "runtime-generation-unresolved")}
+        if observed.get("state") == "observed" and generation == "v1":
+            return False
+        _attempt_sidecar_fallback(sess)
         return True
-    if "observed" not in locals():
-        observed = runtime.read_session_observation(
-            sid, db_path=db, generation="v2", shell_after_seq=shell_cursor,
-            shell_refresh_seqs=shell_refresh_seqs)
     if observed.get("state") != "observed" or observed.get("generation") != "v2":
         sess.shell_jobs = []
         sess.shell_job_observation = {"state": observed.get("state", "unknown"),
@@ -499,11 +577,7 @@ def _enrich_v2(sess, tick, db):
                            tree=getattr(sess, "_proc_tree", None),
                            kids=getattr(sess, "_proc_kids", None))
     native = observed.get("session") or {}
-    if native.get("directory") and sess.cwd and os.path.realpath(native["directory"]) != os.path.realpath(sess.cwd):
-        # The process/session binding is exact, but a mismatched directory is
-        # not allowed to reattribute session activity to this pane.
-        return True
-    sess._opencode_bind_kind = "process" if binding_source == "opencode-tui-selection" else "window"
+    sess._opencode_bind_kind = "process"
     sess._refresh_source = {"kind": "opencode-db-v2", "harness": "opencode",
                             "db_path": db, "session_id": sid,
                             "table": "session_message",
@@ -658,30 +732,6 @@ def _db():
     return str(_opencode_v2_runtime().opencode_db_path())
 
 
-def _process_started_ms(sess):
-    """This process's start as epoch MILLIseconds, or None when unknown.
-
-    ``Session.proc_start`` is ``/proc/<pid>/stat`` field 22 — clock ticks since boot.
-    ``/proc/stat``'s ``btime`` is that same boot epoch in seconds, so the pair converts
-    exactly; the same derivation Codex already trusts for its own process-start match
-    (``collectors/codex.py`` ``_process_started_at``). Missing/non-Linux/unreadable
-    evidence stays None so the caller keeps the previous, weaker binding.
-    """
-    try:
-        ticks = int(sess.proc_start)
-        clock_ticks = int(os.sysconf("SC_CLK_TCK"))
-        if ticks < 0 or clock_ticks <= 0:
-            return None
-        with open("/proc/stat", encoding="ascii", errors="replace") as handle:
-            boot = next(
-                int(line.split()[1]) for line in handle
-                if line.startswith("btime ")
-            )
-    except (AttributeError, OSError, StopIteration, TypeError, ValueError):
-        return None
-    return int((boot + ticks / clock_ticks) * 1000)
-
-
 SESSION_ID_RE = re.compile(r"^ses_[A-Za-z0-9]{1,252}$")
 TUI_SELECTION_SCHEMA = "hearting-tui-selection-v1"
 TUI_SELECTION_MAX_BYTES = 1024
@@ -810,34 +860,8 @@ def session_id_of_process(pid, environ=None):
     return session_of_process(pid, environ)[0]
 
 
-def prepare_tick(sessions):
-    """`{pid: next same-directory opencode start (ms) | None}` for this tick.
-
-    A process owns the top-level sessions created between its own start and the next
-    same-directory opencode process's start; that window is what separates panes that
-    share a checkout without pinning a pane to the first session it ever opened.
-    """
-    starts = {}
-    for sess in sessions:
-        if getattr(sess, "harness", None) != "opencode" or not getattr(sess, "cwd", None):
-            continue
-        started = _process_started_ms(sess)
-        if started is not None:
-            starts.setdefault(sess.cwd, []).append((started, sess.pid))
-    until = {}
-    for rows in starts.values():
-        rows.sort()
-        for index, (_started, pid) in enumerate(rows):
-            until[pid] = rows[index + 1][0] if index + 1 < len(rows) else None
-    return until
-
-
 def _keeper_key(sess):
-    """Sort key for one member of a shared session id: a row its own process proved
-    (its TUI selection record) first, then window-bound rows that created the
-    session (exact ownership), then earliest process start (the creator
-    started before any attacher or helper), then lowest pid. Missing evidence
-    sorts last — never used as a fact."""
+    """Prefer an exact TUI selection, then earliest process start and lowest PID."""
     kind = getattr(sess, "_opencode_bind_kind", None)
     try:
         started = int(getattr(sess, "proc_start", None))
@@ -848,7 +872,7 @@ def _keeper_key(sess):
     except (TypeError, ValueError):
         pid = None
     return (
-        {"process": 0, "window": 1}.get(kind, 2),
+        {"process": 0}.get(kind, 1),
         started if started is not None and started >= 0 else float("inf"),
         pid if pid is not None else float("inf"),
     )
@@ -888,19 +912,22 @@ def _unbind_shadow(sess):
     sess._context_evidence = None
     sess._refresh_source = None
     sess._opencode_bind_kind = None
+    sess.title_ts = None
+    sess.shell_jobs = []
+    sess.shell_job_observation = None
+    sess.is_child = False
+    sess._opencode_provider_id = None
+    # A dispatch attempt is a separate exact identity. Restore only its own
+    # sidecar after clearing the conversation-bound fields above.
+    _attempt_sidecar_fallback(sess)
 
 
 def collapse_duplicate_sids(sessions):
     """One session id → one row.
 
-    Measured 2026-10-05: a session leader plus its arg-less helper child bound
-    the same sid through the directory fallback and rendered as two identical
-    working rows (issue #158). The 2026-09-29 window binding only separates
-    processes that each created a session; every other process in the directory
-    shares the one fallback guess, so the losers must be unbound here, after
-    all bindings are known — a per-row claim inside enrich cannot do this,
-    because a lower-pid fallback row enriches before the higher-pid process
-    that actually owns the session through its window.
+    If multiple rows arrive with the same SID, keep the row with the strongest
+    current-selection evidence. This runs after enrichment and before exact
+    herdr/steward/peer joins, all of which key on session_id.
     """
     groups = {}
     for sess in sessions:
@@ -916,54 +943,6 @@ def collapse_duplicate_sids(sessions):
         members.sort(key=_keeper_key)
         for loser in members[1:]:
             _unbind_shadow(loser)
-
-
-def _query_window(cur, cwd, proc_start_ms, until_ms=None):
-    """The exact branch: the top-level session this process created.
-
-    Most recently updated among the sessions created inside this process's
-    window [own start, next same-directory start). Returns None when this
-    process created nothing (attached to a pre-existing session, or its own
-    session row does not exist yet) — the caller then falls back.
-    """
-    bound = "AND time_created<? " if until_ms is not None else ""
-    args = (cwd, proc_start_ms) + ((until_ms,) if until_ms is not None else ())
-    return cur.execute(
-        "SELECT %s FROM session WHERE directory=? AND parent_id IS NULL "
-        "AND time_created>=? %sORDER BY time_updated DESC LIMIT 1" % (_COLS, bound),
-        args,
-    ).fetchone()
-
-
-def _query_fallback(cur, cwd):
-    """The guess branch: most recently updated top-level session in the
-    directory, else any session there. Shared by every process that created
-    nothing itself — which is exactly why two such processes can land on one
-    session id (see collapse_duplicate_sids)."""
-    for extra in ("AND parent_id IS NULL ", ""):
-        row = cur.execute(
-            "SELECT %s FROM session WHERE directory=? %s"
-            "ORDER BY time_updated DESC LIMIT 1" % (_COLS, extra),
-            (cwd,),
-        ).fetchone()
-        if row:
-            return row
-    return None
-
-
-def _query(cur, cwd, proc_start_ms=None, until_ms=None):
-    # N opencode processes can share one directory, and one process can open several
-    # sessions over its life (/new). Bind to the most recently updated top-level session
-    # created inside this process's window [own start, next same-directory start): the
-    # window keeps panes apart, and "most recently updated" follows the session the pane
-    # is on now instead of the first one it ever created. A process that attached to a
-    # pre-existing session has no candidate here and keeps the older binding below.
-    if proc_start_ms is not None:
-        row = _query_window(cur, cwd, proc_start_ms, until_ms)
-        if row:
-            return row
-    # prefer a top-level session; fall back to any session in the directory
-    return _query_fallback(cur, cwd)
 
 
 def _context_tokens_from_payload(payload):
@@ -1049,14 +1028,18 @@ def enrich(sess, tick=None):
     # "not-implemented"`), so this always reads None today — the call is here so the
     # harness-parity contract (D) and a future writer both have one call site, matching
     # claude/codex's tier-1 read at the top of their own `enrich`.
-    try:
-        rec = session_registry.read("opencode", sess.pid)
-        if rec:
-            session_registry.apply_to_session(sess, rec, "opencode")
-    except Exception:
-        pass
+    sess._session_cwd = (None, None)
+    sid = _resolve_current_identity(sess)
+    _clear_session_enrichment(sess)
+    rec = _current_registry_record(sess, sid)
+    if rec:
+        session_registry.apply_to_session(sess, rec, "opencode")
+    if not sid:
+        _attempt_sidecar_fallback(sess)
+        return
     db = _db()
-    if not sess.cwd or not os.path.exists(db):
+    if not os.path.exists(db):
+        _attempt_sidecar_fallback(sess)
         return
     if _enrich_v2(sess, tick, db):
         return
@@ -1066,25 +1049,15 @@ def enrich(sess, tick=None):
     try:
         con = sqlite3.connect("file:%s?mode=ro" % db, uri=True, timeout=1.0)
         cur = con.cursor()
-        start_ms = _process_started_ms(sess)
-        row, sess._opencode_bind_kind = None, None
-        proven, source = session_of_process(sess.pid) if getattr(sess, "pid", None) else (None, "")
-        if proven and source == "opencode-tui-selection":
-            row = cur.execute("SELECT %s FROM session WHERE id=? LIMIT 1" % _COLS, (proven,)).fetchone()
-            if row:
-                sess._opencode_bind_kind = "process"
-                directory = cur.execute("SELECT directory FROM session WHERE id=? LIMIT 1", (proven,)).fetchone()
-                if directory:
-                    from .. import session_cwd
-                    session_cwd.observe(sess, directory[0], proven)
-        if row is None and start_ms is not None:
-            row = _query_window(cur, sess.cwd, start_ms, (tick or {}).get(sess.pid))
-            if row:
-                sess._opencode_bind_kind = "window"
-        if row is None:
-            row = _query_fallback(cur, sess.cwd)
-            if row:
-                sess._opencode_bind_kind = "fallback"
+        row = cur.execute("SELECT %s FROM session WHERE id=? LIMIT 1" % _COLS,
+                          (sid,)).fetchone()
+        if row:
+            sess._opencode_bind_kind = "process"
+            directory = cur.execute("SELECT directory FROM session WHERE id=? LIMIT 1",
+                                    (sid,)).fetchone()
+            if directory:
+                from .. import session_cwd
+                session_cwd.observe(sess, directory[0], sid)
         if row and row[0]:
             table = _message_table(con)
             cursor = _observed_cursor(con, table, row[0])
@@ -1096,11 +1069,12 @@ def enrich(sess, tick=None):
             }
             last_ctx = _last_request_context(con, row[0])
             # R3-2: only query children when `row` is genuinely top-level (parent_id IS NULL,
-            # row[-1] here) — the `_query` fallback clause can hand back a CHILD session, and
-            # querying ITS children would surface grandchildren under the wrong parent.
+            # row[-1] here), or querying ITS children would surface grandchildren under the
+            # wrong parent.
             if row[-1] is None:
                 subagents = _child_sessions(con, row[0])
     except Exception:
+        _attempt_sidecar_fallback(sess)
         return
     finally:
         if con is not None:

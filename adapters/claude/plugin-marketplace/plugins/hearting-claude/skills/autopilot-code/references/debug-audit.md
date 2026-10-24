@@ -47,9 +47,9 @@ Invoke `code-test`, then reproduce the original scenario:
 
 If verification fails or the original error persists:
 
-1. Read `Safety commit: {hash}` from `checklist.md` and restore only changed paths with `git checkout <safety-commit> -- <changed paths>`.
-2. Write `pipeline_summary.md` with `status: unresolved` before user output.
-3. Report the diagnosis, attempted fix, why it failed, and manual investigation steps.
+1. Apply the shared content-ownership recovery procedure in `capabilities/code-execute.md#portable-procedure` to the failed fix. Reverse only clearly attributable edits from its existing log; preserve ambiguous edits and unrelated contents, including changes in the same file.
+2. Write `pipeline_summary.md` with `status: unresolved` before user output. Record the attempted fix, what was recovered and what remains, the reason for uncertainty, and the observed index/worktree state. Run only verification independent of the unresolved edits; record other checks as skipped.
+3. Report the diagnosis, attempted fix, why it failed, the remaining state, and manual investigation steps only where needed to explain the unresolved cause.
 
 ### Step 6: Report
 

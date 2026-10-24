@@ -20,6 +20,8 @@ metadata:
 
 > **Language rule**: Follow the audience and artifact language contract in [arguments-and-decisions.md#language-rule](../autopilot-code/references/arguments-and-decisions.md). Do not infer a fixed execution-log or report language from this skill file.
 
+> **Recovery boundary**: Follow the shared content-ownership procedure in `capabilities/code-execute.md#portable-procedure` for phase failures, total failure, cascading errors, and retry termination. These recovery instructions do not make every changed path task-owned.
+
 ## Slice Mode
 
 If the assignment is a parallel sub-session slice (a phase brief, fixed files, `stage_authority=0`), this is all you do: edit only the fixed files, run only the slice's verify command, and report the changed files and the verify result. Skip the Git Safety Checkpoint, phase commits and rollback below — a slice makes no git writes (no add, commit, checkout, restore, stash, reset), reads git state with `GIT_OPTIONAL_LOCKS=0`, and leaves `checklist.md` and the dev log to the owner. If a file outside the list is needed, stop and hand off.
@@ -94,7 +96,7 @@ Before selecting Adversarial, use the active adapter's external-adversary availa
 
 ## Change Logs and Phase Review
 
-Each implementation step writes its own step log under `{log_dir}/dev_logs/`. Record exact old/new edits and a `Decision:` field explaining the rationale.
+Each implementation step writes its own step log under `{log_dir}/dev_logs/`. Record exact old/new edits, file path, edit order, enough location or surrounding context to distinguish the edit, and a `Decision:` field explaining the rationale. Use the existing log to record any recovery and remaining edits.
 
 At the end of each phase:
 
@@ -107,26 +109,16 @@ At the end of each phase:
 3. Read the review files and act:
    - Advisory-only findings: record them in the checklist and continue.
    - Critical findings that do not require rollback: re-enter the execute boundary **once** and fix every 🔴 of the review together (plus the follow-on gaps it named); then re-review to `phase_{NN}_fix{M}.md` as a closure check that names the round and the prior review path — never a fresh full audit, and never a full `execute` redispatch. Treat a critical finding still open after that single batched fix as major. If the impl-review budget is spent while the last round still reports blocking findings, the conductor records `{log_dir}/_internal/dev_reviews/phase_{NN}.owner-closure.md` (frontmatter `verdict: closed-by-owner`, `node: impl-review`; body naming every blocking attempt id, its review artifact, and each finding's disposition) and completes `impl-review` with that record as `--evidence`.
-   - Major critical finding: roll back the phase automatically and continue under the family autonomy policy.
-     1. Restore every `old_string` recorded in the phase logs.
-     2. If rollback fails, read `$SAFETY_COMMIT`, run `git checkout .`, mark all steps `[FAIL]` with `Reverted by git checkout due to rollback failure in Phase N`, and stop at Final Report.
-     3. If rollback succeeds, mark the phase steps `[FAIL]` with the reason.
-     4. Continue to the next independent phase; mark dependent steps `[SKIP-DEP]`.
+   - Major critical finding: mark the phase steps `[FAIL]` and apply the shared recovery boundary. Compare logged edits with their current location and context, then reverse only clearly attributable edits in reverse order. Never broaden recovery to a whole file or worktree when an edit cannot be reversed safely. Record recovered and remaining edits and the reason for any uncertainty; mark dependent steps `[SKIP-DEP]`, continue only with independent phases, or stop at Final Report when safe continuation is unclear.
 
-Record every rollback as a Decision Point for the pipeline summary. For plans with at most three steps, skip phase grouping and review once after all steps.
+Record each recovery and any remaining edits in the existing step log and pipeline summary. For plans with at most three steps, skip phase grouping and review once after all steps.
 
-If every step ends as `[FAIL]` or `[SKIP-DEP]`, roll source changes back to the safety commit without touching the artifact root:
-
-```text
-git diff --name-only $SAFETY_COMMIT HEAD -- ':!<artifact-root>'
-git checkout $SAFETY_COMMIT -- <changed files>
-git status
-```
+If every step ends as `[FAIL]` or `[SKIP-DEP]`, apply the shared recovery boundary across the failed task's logged edits, including clearly attributable uncommitted edits. A safety commit or changed-path list is not proof that a whole file belongs to the task. Preserve unrelated and ambiguous contents, record any remaining state in the existing logs and summary, and report failure without claiming a complete rollback.
 
 ## Critical Safety Rules
 
 - Signature-change safety (find every call site, update every caller, inspect implicit contracts) is owned by the dev unit contract — the `dev/*` unit common rules and `roles/units/dev/refactor.md` — and by `plan/plan-author` call-site coverage; hold workers to it through phase review instead of restating it per step.
-- If a step causes cascading errors beyond plan scope, mark it `[FAIL]`, roll it back from the step log, and continue only with independent steps.
+- If a step causes cascading errors beyond plan scope, mark it `[FAIL]`, apply the shared recovery boundary to its logged edits, and continue only with independent steps. Preserve ambiguous edits and hand off their state in the existing logs and summary.
 - Do not change code outside plan scope except where a required contract change makes a caller update unavoidable.
 
 ## Plan Status

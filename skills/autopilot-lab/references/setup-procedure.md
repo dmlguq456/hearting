@@ -116,7 +116,7 @@ Launching requires the route-start approval to include this environment and part
 
 **S3-2. Append one pending row before the run** to `<artifact-root>/experiments/_RUNLOG.md`, leaving the result as `—`. This makes in-flight work and duplicate setup visible during long queues and mirrors `pipeline_state.run: in_progress`.
 
-At the same point, create `experiments/{date}_{slug}/run.json` with `status: "running"`, `skill_mode: "setup"` from `pipeline_state.mode`, `parent`, current ISO 8601 `started_at`, scaffold config path in `config_ref`, and the expected best-checkpoint path in `ckpt_path`. Omit `best` and `ended_at` while running. E3-4 updates them on completion.
+At the same point, create `experiments/{date}_{slug}/run.json` with `status: "running"`, `skill_mode: "setup"` from `pipeline_state.mode`, `parent`, current ISO 8601 `started_at`, scaffold config path in `config_ref`, and the expected best-checkpoint path in `ckpt_path` under `$AGENT_RUNTIME_DIR/experiments/{slug}/runs/{run}/ckpt/`. Omit `best`, `ended_at`, `ckpt_sha256` and `ckpt_byte_size` while running. Once the checkpoint exists, record its optional SHA256 and byte size and verify its digest at handoff and parent evaluation. E3-4 updates completion fields.
 
 ```markdown
 | 2026-05-26 | lr_sweep | TF_Restormer base, lr 1e-3→3e-4 | ⏳ 대기 | — |

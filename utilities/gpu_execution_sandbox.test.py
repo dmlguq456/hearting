@@ -98,8 +98,8 @@ class GpuSandboxTest(unittest.TestCase):
         self.assertEqual(G.select(self.route)["sandbox"], "danger-full-access")
         self.assertFalse(G.select(self.route, owner=False, node="scaffold")["gpu_scope"])
         for cap in ("autopilot-code", "route-frame"):
-            route = {**self.route, "capability": cap}
-            self.assertEqual(G.select(route)["sandbox"], "workspace-write")
+            route = {**self.route, "capability": cap, "selection": {}}
+            self.assertEqual(G.select_fresh(route)["sandbox"], "workspace-write")
         route = {**self.route, "nodes": [self.route["nodes"][0]], "selection": {},
                  "work_request": {"text": "GPU NVIDIA training"}}
         self.assertFalse(G.select(route)["gpu_scope"])
@@ -142,8 +142,60 @@ class GpuSandboxTest(unittest.TestCase):
                   "codex_execution_sandbox": choice, "nodes": [self.route["nodes"][0]]}
         self.assertEqual(G.select(suffix), choice)
         self.assertFalse(G.select(suffix, owner=False, node="scaffold")["gpu_scope"])
-        self.assertEqual(G.select({**suffix, "capability": "autopilot-code"})["sandbox"], "workspace-write")
+        self.assertEqual(G.select({**suffix, "capability": "autopilot-code"})["sandbox"], "danger-full-access")
         self.assertEqual(G.select(suffix, requested="read-only")["sandbox"], "read-only")
+
+    def test_catalog_compute_scope_covers_eval_resume_borrowed_and_parallel_parts(self):
+        for stage in ("eval-smoke", "eval-run", "resume-run", "smoke", "full-run", "run-verify"):
+            route = {"capability": "autopilot-lab", "nodes": [
+                {"id": stage, "kind": "resource-runner"}], "selection": {}}
+            with self.subTest(stage=stage):
+                self.assertEqual(G.fresh_gpu_resource_nodes(route), [stage])
+        borrowed = {"capability": "autopilot-code", "selection": {}, "nodes": [
+            {"id": "borrowed-smoke", "part": "autopilot-lab:smoke", "kind": "resource-runner"},
+            {"id": "borrowed-parallel", "part": "autopilot-lab:smoke",
+             "parallel_anchor": "smoke", "kind": "review-worker"},
+            {"id": "plain", "part": "autopilot-code:test", "kind": "pipeline-stage"},
+            {"id": "frame", "part": "autopilot-lab:smoke", "kind": "frame-worker"},
+            {"id": "frame-unit", "part": "autopilot-lab:smoke", "kind": "review-worker",
+             "unit": "plan/frame"},
+        ]}
+        self.assertEqual(G.fresh_gpu_resource_nodes(borrowed), ["borrowed-smoke", "borrowed-parallel"])
+
+    def test_historical_seal_and_tuple_prevent_catalog_reselection(self):
+        nodes = [{"id": "old", "part": "autopilot-code:test"},
+                 {"id": "new-compute", "part": "autopilot-lab:eval-run"}]
+        old = {"capability": "autopilot-code", "nodes": nodes,
+               "codex_execution_sandbox": {"sandbox": "workspace-write", "source": "old-seal",
+                   "gpu_scope": False, "gpu_resource_nodes": []}}
+        self.assertEqual(G.fresh_gpu_resource_nodes(old), ["new-compute"])
+        self.assertEqual(G.gpu_resource_nodes(old), [])
+        self.assertEqual(G.select(old)["sandbox"], "workspace-write")
+        self.assertFalse(G.select(old)["gpu_scope"])
+        historical = {"capability": "autopilot-code", "nodes": nodes,
+            "dispatch_evidence": {"tuples": [{"parent_harness": "codex",
+                "parent_sandbox": "workspace-write"}, {"parent_harness": "codex",
+                "parent_sandbox": "danger-full-access"}]}}
+        self.assertEqual(G.select(historical)["source"], "default")
+        self.assertEqual(G.select(historical)["sandbox"], "workspace-write")
+        self.assertFalse(G.select(historical)["gpu_scope"])
+        self.assertEqual(G.gpu_resource_nodes(historical), [])
+
+    def test_preseal_eval_route_keeps_owner_sandbox_and_does_not_add_gpu_or_lease(self):
+        self.route["nodes"] = [{"id": "eval-run", "part": "autopilot-lab:eval-run",
+                                "kind": "resource-runner"}]
+        self.route["dispatch_evidence"] = {"tuples": [
+            {"parent_harness": "codex", "parent_sandbox": "danger-full-access"},
+            {"parent_harness": "codex", "parent_sandbox": "workspace-write"}]}
+        args = self.args()
+        original_sandbox = args.sandbox
+        original = self.route_file.read_bytes()
+        C.apply_gpu_execution_sandbox(args)
+        self.assertEqual(original_sandbox, args.sandbox)
+        self.assertFalse(args.gpu_execution_scope)
+        self.assertIsNone(args.gpu_execution_selection)
+        self.assertEqual([], G.gpu_resource_nodes(self.route))
+        self.assertEqual(original, self.route_file.read_bytes())
 
     def test_existing_override_precedence_is_shared(self):
         choice = G.select(self.route, requested="read-only", environ={
@@ -208,8 +260,11 @@ class GpuSandboxTest(unittest.TestCase):
         with self.assertRaisesRegex(D.DispatchNodeError, "dispatch-evidence-parent-runtime-mismatch"):
             D.resolve_checked_tuple(self.route, node, "codex", {"parent_harness": "codex",
                 "parent_transport": "headless", "parent_sandbox": "danger-full-access"})
+        self.route["codex_execution_sandbox"] = G.select_fresh(self.route)
+        args = self.args(sandbox="danger-full-access",
+                         replacement_input_argv=["--sandbox", "danger-full-access"])
         with self.assertRaises(C.DispatchContractError) as raised:
-            C.apply_gpu_execution_sandbox(self.args())
+            C.apply_gpu_execution_sandbox(args)
         self.assertEqual(raised.exception.reason, "dispatch-evidence-parent-runtime-mismatch")
 
     def test_normal_compose_seals_the_same_gpu_choice_used_by_readiness(self):
@@ -234,6 +289,62 @@ class GpuSandboxTest(unittest.TestCase):
         args = self.args()
         C.apply_gpu_execution_sandbox(args)
         self.assertEqual(args.sandbox, "danger-full-access")
+
+    def test_compose_borrowed_and_extra_compute_parts_match_readiness_seal_and_launch(self):
+        cases = [
+            ("plan,execute,test,autopilot-lab:smoke,report", None, "autopilot-lab:smoke"),
+            ("plan,execute,test,report", [{"id": "gpu-check", "unit": "qa/ml-debug",
+                "after": "test", "verify": "read-only GPU query"}], "autopilot-lab:smoke"),
+        ]
+        for index, (graph, extra_stages, origin) in enumerate(cases):
+            observed = []
+            def readiness(cwd, jobs, parent, children, *, gpu_route=None, owner_harnesses=None):
+                choice = G.select_fresh(gpu_route)
+                observed.append(choice)
+                return self.evidence(choice)
+            with self.subTest(graph=graph), mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}), \
+                 mock.patch.object(R, "_compose_readiness", side_effect=readiness):
+                route = R.compose_route(capability="autopilot-code", capability_mode="dev",
+                    shape="staged", graph=graph, slug=f"gpu-borrowed-{index}", cwd=str(self.worktree),
+                    artifact_root=str(self.artifact), signals=[], spec_read="fixture",
+                    campaign_key=f"gpu-borrowed-{index}", parent_harness="codex", children=["codex"],
+                    jobs=self.state / "jobs.log", extra_stages=extra_stages)
+            self.assertEqual(len(observed), 1)
+            target = next(item for item in route["nodes"] if item["id"] in observed[0]["gpu_resource_nodes"])
+            self.assertEqual(origin, target.get("part"))
+            self.assertEqual(observed[0], route["codex_execution_sandbox"])
+            self.assertEqual("danger-full-access", route["dispatch_evidence"]["tuples"][0]["parent_sandbox"])
+            with mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}):
+                R.verify_route(route, self.worktree)
+            self.route = route
+            args = self.args()
+            C.apply_gpu_execution_sandbox(args)
+            self.assertEqual("danger-full-access", args.sandbox)
+
+    def test_parallel_catalog_compute_leg_matches_readiness_seal_and_launch(self):
+        observed = []
+        def readiness(cwd, jobs, parent, children, *, gpu_route=None, owner_harnesses=None):
+            choice = G.select_fresh(gpu_route)
+            observed.append(choice)
+            return self.evidence(choice)
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}), \
+             mock.patch.object(R, "_compose_readiness", side_effect=readiness):
+            route = R.compose_route(capability="autopilot-lab", capability_mode="setup",
+                shape="staged", graph=None, slug="gpu-parallel", cwd=str(self.worktree),
+                artifact_root=str(self.artifact), intensity="strong", signals=[], spec_read="fixture",
+                campaign_key="gpu-parallel", parent_harness="codex", children=["codex"],
+                jobs=self.state / "jobs.log")
+        self.assertEqual(len(observed), 1)
+        parallel = next(node for node in route["nodes"] if node.get("parallel_anchor") == "smoke"
+                        and node["id"] != "smoke")
+        self.assertIn(parallel["id"], observed[0]["gpu_resource_nodes"])
+        self.assertEqual(observed[0], route["codex_execution_sandbox"])
+        with mock.patch.dict(os.environ, {"AGENT_HOME": str(ROOT)}):
+            R.verify_route(route, self.worktree)
+        self.route = route
+        args = self.args(dispatch_depth=2, worker_type="review", route_node=parallel["id"])
+        C.apply_gpu_execution_sandbox(args)
+        self.assertEqual("danger-full-access", args.sandbox)
 
     def compose_with_evidence(self, evidence, **changes):
         values = dict(capability="autopilot-lab", capability_mode="setup", shape="staged",
@@ -373,7 +484,7 @@ class GpuSandboxTest(unittest.TestCase):
             rows = A.advisories(self.route, owner_harness="codex",
                 sandbox="danger-full-access" if applied else None, gpu_selection=G.select(self.route))
             row = next(r for r in rows if r["code"] == G.RECEIPT_CODE)
-            self.assertIn("OS enforcement 없음", row["message"])
+            self.assertIn("OS enforcement가 없습니다", row["message"])
             self.assertEqual(row["file_enforcement"], "none")
             self.assertEqual(A.receipt_advisories(A.RECEIPT_KEY + json.dumps(row)), [row])
 

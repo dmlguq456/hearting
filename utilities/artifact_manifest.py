@@ -13,7 +13,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Collection, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence, Tuple
 
 from artifact_identity import is_well_formed, kind_of
 
@@ -869,6 +869,38 @@ def validate_shape(document: Any) -> ValidationReport:
     return _report(violations)
 
 
+def dispensable_retired_recording_ids(events: Sequence[Mapping[str, Any]],
+                                      retired_artifact_ids: Iterable[str]) -> set[str]:
+    """Return retired recording IDs removable without breaking evidence or stream prefixes."""
+    retired = set(retired_artifact_ids)
+    rows = [row for row in events if isinstance(row, Mapping)]
+    removable = {row.get("event_id") for row in rows
+                 if row.get("event_type") == "artifact.revision.recorded"
+                 and row.get("target_id") in retired}
+    by_stream: Dict[Any, List[Mapping[str, Any]]] = {}
+    for row in rows:
+        by_stream.setdefault(row.get("stream_id"), []).append(row)
+    while True:
+        restore = {event_id for row in rows if row.get("event_id") not in removable
+                   for event_id in (row.get("evidence_ids") or []) if event_id in removable}
+        # Keep a stream's earlier events whenever a later event survives.
+        for stream_rows in by_stream.values():
+            retained_sequences = [row.get("stream_sequence") for row in stream_rows
+                                  if row.get("event_id") not in removable
+                                  and isinstance(row.get("stream_sequence"), int)
+                                  and not isinstance(row.get("stream_sequence"), bool)]
+            if retained_sequences:
+                last = max(retained_sequences)
+                restore.update(row.get("event_id") for row in stream_rows
+                               if row.get("event_id") in removable
+                               and isinstance(row.get("stream_sequence"), int)
+                               and not isinstance(row.get("stream_sequence"), bool)
+                               and row.get("stream_sequence") < last)
+        if not restore:
+            return removable
+        removable.difference_update(restore)
+
+
 # ---------------------------------------------------------------------------
 # locator safety
 # ---------------------------------------------------------------------------
@@ -1269,14 +1301,16 @@ def validate_lineage(
             outcome = cycle.get("outcome_criterion")
             outcome = outcome if isinstance(outcome, dict) else {}
             required_roles = outcome.get("required_artifact_roles") or []
-            roles_present = set()
-            for rev in artifact_revisions:
-                art = next(
-                    (a for a in artifacts if a.get("artifact_id") == rev.get("artifact_id")),
-                    None,
-                )
-                if art is not None:
-                    roles_present.add(art.get("role"))
+            # The first artifacts[] row per id, as a per-revision scan would
+            # find it; one table keeps a cycle with many files linear.
+            role_by_artifact: Dict[Any, Any] = {}
+            for art in artifacts:
+                role_by_artifact.setdefault(art.get("artifact_id"), art.get("role"))
+            roles_present = {
+                role_by_artifact[rev.get("artifact_id")]
+                for rev in artifact_revisions
+                if rev.get("artifact_id") in role_by_artifact
+            }
             for role in required_roles if first_close else ():
                 if role not in roles_present:
                     violations.append(
@@ -1576,6 +1610,7 @@ def validate_update(
     previous: Optional[Mapping[str, Any]] = None,
     published: bool = False,
     changeable_cycle_fields: Sequence[str] = (),
+    retired_artifact_ids: Iterable[str] = (),
 ) -> ValidationReport:
     """§45 D-124: a document the runtime published after the cycle closed.
 
@@ -1610,10 +1645,16 @@ def validate_update(
     before_cycle = previous.get("cycle") if isinstance(previous.get("cycle"), dict) else {}
     after_cycle = document.get("cycle") if isinstance(document.get("cycle"), dict) else {}
     provisional_completion = before_cycle.get("state") == "active" and after_cycle.get("state") == "completed"
+    retired_ids = set(retired_artifact_ids)
     for key in ("events", "routes"):
         before = [r for r in previous.get(key, []) or []]
         after = [r for r in document.get(key, []) or []]
-        if after[: len(before)] != before and not (key == "routes" and provisional_completion):
+        retained_before = before
+        if key == "events" and retired_ids:
+            dispensable = dispensable_retired_recording_ids(before, retired_ids)
+            retained_before = [row for row in before if not (
+                isinstance(row, dict) and row.get("event_id") in dispensable)]
+        if after[: len(retained_before)] != retained_before and not (key == "routes" and provisional_completion):
             violations.append(Violation(
                 "update-earlier-%s-changed" % key, "$.%s" % key,
                 "a refreshed document keeps every earlier %s exactly" % key))
@@ -1621,7 +1662,7 @@ def validate_update(
             allowed = {"artifact.revision.recorded", "route.terminal.recorded"}
             if provisional_completion:
                 allowed.add("cycle.completed")
-            for row in after[len(before):]:
+            for row in after[len(retained_before):]:
                 if not isinstance(row, dict) or row.get("event_type") not in allowed:
                     violations.append(Violation(
                         "update-event-type-not-allowed", "$.events",

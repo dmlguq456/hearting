@@ -374,13 +374,19 @@ def _walk_cycle_files(directory: Path, *, marker_observations: Optional[Dict[str
                 out.append(path)
                 dirs.remove(name)
                 continue
+            if _is_payload_directory(rel) and (name.startswith(".") or name == "__pycache__"):
+                if rel + "/" not in excluded_paths:
+                    excluded_paths.append(rel + "/")
+                dirs.remove(name)
+                continue
             if rel in skipped:
                 dirs.remove(name)
                 continue
             if _is_payload_directory(rel):
                 observation = observations.get(rel)
                 if observation is None and read_markers:
-                    observation = artifact_payload.observe_directory(path)
+                    payload_root = directory / rel.split("/", 1)[0]
+                    observation = artifact_payload.observe_directory(path, payload_root=payload_root)
                     observations[rel] = observation
                 if observation is not None and observation[0]:
                     if rel not in roots:
@@ -2097,6 +2103,10 @@ def _env_for(root: Path, record: Mapping[str, Any], route: Optional[Mapping[str,
         "AGENT_ARTIFACT_CYCLE_DIR": str(directory),
         "AGENT_ARTIFACT_OUTPUT_DIR": str(directory / "artifacts"),
     }
+    import worker_bootstrap
+    runtime_candidate = worker_bootstrap.runtime_dir_candidate(root)
+    if runtime_candidate:
+        env["AGENT_RUNTIME_DIR"] = runtime_candidate
     # This is an already-declared producer context. Carrying it through the
     # existing artifact env lets the next explicit same-campaign cycle join
     # without an agent remembering a group ID or changing route lineage.
@@ -3141,7 +3151,7 @@ def _observe_marker_directory(directory: Path, path: Path, marker_observations: 
     rel = path.relative_to(directory).as_posix()
     observation = marker_observations.get(rel)
     if observation is None:
-        observation = artifact_payload.observe_directory(path)
+        observation = artifact_payload.observe_directory(path, payload_root=directory / "artifacts")
         marker_observations[rel] = observation
     if observation[0]:
         if rel not in excluded_roots:
@@ -3999,6 +4009,7 @@ CHECKPOINT_EXCLUDED_SUFFIXES = frozenset({
     ".pt", ".pth", ".ckpt", ".safetensors", ".bin", ".onnx", ".h5", ".hdf5", ".pkl",
     ".pickle", ".joblib", ".npy", ".npz", ".tflite", ".pb", ".tar", ".zip", ".gz", ".tgz",
     ".xz", ".bz2", ".7z", ".zst", ".tfrecord", ".arrow", ".parquet", ".lmdb", ".mdb",
+    ".nemo", ".gguf",
 })
 _STALE_TEMP_SECONDS = 3600.0
 
@@ -4365,6 +4376,7 @@ def _checkpoint_scan(directory: Path, previous: Mapping[str, Any], limits: Check
         return {"skip": "artifacts-dir-missing"}
     excluded = {"hidden": 0, "binary": 0, "oversize": 0, "non-regular": 0,
                 "invalid-locator": 0, "self-excluded": 0}
+    excluded_roots: List[str] = []
     payload_roots = [("artifacts", artifacts)]
     internal = directory / "_internal"
     if internal.is_symlink():
@@ -4376,9 +4388,10 @@ def _checkpoint_scan(directory: Path, previous: Mapping[str, Any], limits: Check
     visited = total = 0
     newest = 0.0
     for payload_root, top in payload_roots:
-        root_excluded, _root_snapshot = artifact_payload.observe_directory(top)
+        root_excluded, _root_snapshot = artifact_payload.observe_directory(top, payload_root=top)
         if root_excluded:
             excluded["self-excluded"] += 1
+            excluded_roots.append(payload_root)
             continue
         for current, dirs, files in os.walk(str(top), followlinks=False):
             kept_dirs = []
@@ -4393,9 +4406,10 @@ def _checkpoint_scan(directory: Path, previous: Mapping[str, Any], limits: Check
                     excluded["non-regular"] += 1
                 else:
                     child = Path(current) / name
-                    marker_excluded, _snapshot = artifact_payload.observe_directory(child)
+                    marker_excluded, _snapshot = artifact_payload.observe_directory(child, payload_root=top)
                     if marker_excluded:
                         excluded["self-excluded"] += 1
+                        excluded_roots.append(child.relative_to(directory).as_posix())
                     else:
                         kept_dirs.append(name)
             dirs[:] = kept_dirs
@@ -4454,7 +4468,8 @@ def _checkpoint_scan(directory: Path, previous: Mapping[str, Any], limits: Check
             digest, size = _digest(data), len(data)
         facts.append((rel, digest, size))
         stats[rel] = [size, info.st_mtime_ns, digest]
-    return {"facts": facts, "stats": stats, "excluded": excluded, "newest_mtime": newest,
+    return {"facts": facts, "stats": stats, "excluded": excluded,
+            "excluded_roots": excluded_roots, "newest_mtime": newest,
             "total_bytes": sum(size for _rel, _digest_value, size in facts)}
 
 
@@ -4641,7 +4656,7 @@ def _checkpoint_commit(
         bookkeeping.update({"last_status": status, "last_reason": reason})
         bookkeeping.update({key: value for key, value in extra.items() if key in {
             "stats", "excluded", "artifact_count", "total_bytes", "output_digest",
-            "last_emitted_at", "manifest_id", "manifest_revision_id"}})
+            "last_emitted_at", "manifest_id", "manifest_revision_id", "excluded_roots"}})
         _ensure_dir(state_path.parent)
         _write_atomic(state_path, _json_bytes(bookkeeping), 0o644)
         result = {"status": status, **base, **{k: v for k, v in extra.items() if k != "stats"}}
@@ -4654,6 +4669,7 @@ def _checkpoint_commit(
         return settle("skipped", scan["skip"], limit_detail=detail)
     facts = scan["facts"]
     common = {"stats": scan["stats"], "excluded": scan["excluded"],
+              "excluded_roots": scan.get("excluded_roots", []),
               "artifact_count": len(facts), "total_bytes": scan["total_bytes"]}
     if not had_interim and not facts:
         return settle("skipped", "no-output", scanned=False, **common)
@@ -4700,9 +4716,27 @@ def _checkpoint_commit(
 
 def _remove_empty_cycle(root: Path, record: Mapping[str, Any]) -> None:
     directory = cycle_dir(root, record["campaign_id"], record["cycle_id"], record)
-    artifact_locator.prepare_index_update(root, [record["campaign_id"]])
     artifacts = directory / "artifacts"
     binding = directory / artifact_locator.CYCLE_BINDING
+    # A payload-only cycle has no manifest lineage, but its excluded files are
+    # user-owned. Keep the locator, binding, campaign membership and tree so a
+    # later normal operation can still find them; never remove contents here.
+    try:
+        with os.scandir(artifacts) as entries:
+            if next(entries, None) is not None:
+                return
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return
+    try:
+        with os.scandir(directory) as entries:
+            if any(entry.name not in {"artifacts", artifact_locator.CYCLE_BINDING}
+                   for entry in entries):
+                return
+    except OSError:
+        return
+    artifact_locator.prepare_index_update(root, [record["campaign_id"]])
     if binding.is_file() and not binding.is_symlink():
         binding.unlink()
     for path in (artifacts, directory):
@@ -5797,11 +5831,12 @@ def finalize(
         if manifest_path.exists():
             raise ProducerError("manifest-already-present", str(manifest_path))
         cycle_path = os.path.relpath(str(directory), str(root))
-        if excluded_symlinks:
+        if excluded_symlinks or (prescan and prescan.excluded_roots):
             # Written before the manifest is published so a crash after the commit
             # point recovers from the on-disk record without losing the exclusion.
             record = dict(record)
             record["excluded_symlinks"] = excluded_symlinks
+            record["excluded_roots"] = sorted(set(prescan.excluded_roots if prescan else ()))
             _write_cycle_record(root, record, exclusive=False)
         manifest_bytes = artifact_manifest.canonical_bytes(document)
         _write_journal(root, cycle_id, state="sealing", manifest_digest=digest, cycle_path=cycle_path,
@@ -5816,7 +5851,8 @@ def finalize(
             _write_journal(root, cycle_id, state="published", manifest_digest=digest, cycle_path=cycle_path)
             # The admission lock has been held since `index` was read, so it is still current.
             _commit_sealed(root, record, document, digest, now=now, index=index,
-                           excluded_count=len(excluded_hidden) + len(excluded_symlinks))
+                           excluded_count=len(excluded_hidden) + len(excluded_symlinks),
+                           excluded_roots=prescan.excluded_roots if prescan else ())
         except BaseException as exc:
             raise artifact_admission.AdmissionRecoveryRequired(
                 f"cycle {cycle_id} manifest published but post-publish update failed; run recover"
@@ -6241,7 +6277,10 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
     declared = {row.get("locator", {}).get("path"): row
                 for row in document.get("artifact_revisions", []) or [] if isinstance(row, dict)}
     present = {rel: (digest, size) for rel, digest, size in facts}
-    changes: Dict[str, List[str]] = {"added": [], "modified": [], "removed": []}
+    changes: Dict[str, List[str]] = {"added": [], "modified": [], "removed": [], "reclassified": []}
+    for rel in sorted(declared):
+        if _excluded_by_roots(rel, excluded_roots):
+            changes["reclassified"].append(rel)
     for rel, (digest, size) in sorted(present.items()):
         row = declared.get(rel)
         if row is None:
@@ -6267,15 +6306,20 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
                 "schema_version": 1, "source_digest": digest}
 
     removed = set(changes["removed"])
+    reclassified = set(changes["reclassified"])
     gone_artifacts = {row["artifact_id"] for rel, row in declared.items() if rel in removed}
+    retired_artifacts = {row["artifact_id"] for rel, row in declared.items() if rel in reclassified}
     modified = set(changes["modified"])
     artifacts = [dict(row) for row in document.get("artifacts", []) or []
-                 if isinstance(row, dict) and row.get("artifact_id") not in gone_artifacts]
+                 if isinstance(row, dict) and row.get("artifact_id") not in (gone_artifacts | retired_artifacts)]
     revisions: List[Dict[str, Any]] = []
-    events = [dict(row) for row in document.get("events", []) or []]
+    candidate_events = [dict(row) for row in document.get("events", []) or []]
+    removed_event_ids = artifact_manifest.dispensable_retired_recording_ids(
+        candidate_events, retired_artifacts)
+    events = [row for row in candidate_events if row.get("event_id") not in removed_event_ids]
     for row in document.get("artifact_revisions", []) or []:
         rel = row.get("locator", {}).get("path")
-        if rel in removed:
+        if rel in removed or rel in reclassified:
             continue
         if rel in modified:
             digest, size = present[rel]
@@ -6310,6 +6354,13 @@ def _refreshed_document(root: Path, record: Mapping[str, Any], document: Mapping
     refreshed.update(manifest_revision_id=revision_id, artifacts=artifacts, artifact_revisions=revisions,
                      events=events)
     return refreshed, changes
+
+
+def _reclassified_artifact_ids(document: Mapping[str, Any], changes: Mapping[str, Sequence[str]]) -> set[str]:
+    paths = set(changes.get("reclassified", []))
+    return {row["artifact_id"] for row in document.get("artifact_revisions", []) or []
+            if isinstance(row, dict) and row.get("locator", {}).get("path") in paths
+            and isinstance(row.get("artifact_id"), str)}
 
 
 def _drop_unpublished_snapshot(root: Path, cycle_id: str, journal: Optional[Mapping[str, Any]]) -> None:
@@ -6847,7 +6898,7 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
             root, cycle_id, manifest_digest=record.get("manifest_digest"))
         if previous is None or not isinstance(row, dict) or row.get("manifest_digest") != record.get("manifest_digest"):
             return {"status": "already-sealed", "cycle_id": cycle_id, "refreshed": False,
-                    "manifest_digest": record.get("manifest_digest"), "changes": {"added": [], "modified": [], "removed": []}}
+                    "manifest_digest": record.get("manifest_digest"), "changes": {"added": [], "modified": [], "removed": [], "reclassified": []}}
         # The current file is ordinary editable material. Continue observing
         # payloads against the recorded revision without changing past proof.
         document = previous
@@ -6872,7 +6923,7 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
         excluded, excluded_symlinks, refreshed = [], [], None
         facts = [(r["locator"]["path"], r["content_digest"], r["byte_size"])
                  for r in document.get("artifact_revisions", []) or [] if isinstance(r, dict)]
-        changes = {"added": [], "modified": [], "removed": []}
+        changes = {"added": [], "modified": [], "removed": [], "reclassified": []}
     revision_id = refreshed["manifest_revision_id"] if refreshed is not None else alloc.allocate("manifest_revision")
     provisional = _provisional_completion_projection(root, record, refreshed or document, facts,
                                                      revision_id=revision_id, allocator=alloc, now=now)
@@ -6905,7 +6956,8 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
         return result
     artifact_lifecycle.preserve_manifest_snapshot(root, cycle_id, raw)
     earlier = _earlier_documents(root, cycle_id, refreshed)
-    report = artifact_manifest.validate_update(refreshed, preserved=earlier, previous=document)
+    report = artifact_manifest.validate_update(refreshed, preserved=earlier, previous=document,
+        retired_artifact_ids=_reclassified_artifact_ids(document, changes))
     if not report.ok:
         raise ProducerError("manifest-invalid", ";".join(v.code for v in report.violations))
     new_digest = artifact_manifest.manifest_digest(refreshed)
@@ -6922,6 +6974,7 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
     # recorder that is not there (or fails) leaves them in the record, so the explicit command
     # still publishes current bytes and the next trigger hands the lines over.
     lines = _refresh_history_lines(root, record, directory, document, refreshed, changes, trigger=trigger,
+                                   excluded_roots=prescan.excluded_roots if prescan else (),
                                    now=time.time() if now is None else float(now))
     pending = _merge_pending(record.get("history_pending") or [], lines)
     if _history_deliver_locked(root, pending):
@@ -6936,7 +6989,7 @@ def _refresh_cycle_locked(root: Path, record: Mapping[str, Any], *, now: Optiona
         raise artifact_admission.AdmissionRecoveryRequired("simulated crash after manifest refresh")
     try:
         _commit_sealed(root, _with_pending(record, pending), refreshed, new_digest, now=now, index=index,
-                       previous_digest=digest)
+                       previous_digest=digest, excluded_roots=prescan.excluded_roots if prescan else ())
     except BaseException as exc:
         raise artifact_admission.AdmissionRecoveryRequired(
             f"cycle {cycle_id} manifest refreshed but post-publish update failed; run recover") from exc
@@ -7175,7 +7228,7 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
     scan = _RefreshScan(from_top=after is None)
     roots_to_walk = []
     for root_name, top in roots:
-        observation = artifact_payload.observe_directory(top)
+        observation = artifact_payload.observe_directory(top, payload_root=top)
         scan.marker_observations[root_name] = observation
         if observation[0]:
             scan.excluded_roots.append(root_name)
@@ -7195,7 +7248,8 @@ def _bounded_scan(directory: Path, *, cursor: Optional[str], known: Mapping[str,
 
     def inspect_marker(path: str, parts: Tuple[str, ...]) -> bool:
         rel = "/".join(parts)
-        observation = artifact_payload.observe_directory(Path(path))
+        root_name = parts[0]
+        observation = artifact_payload.observe_directory(Path(path), payload_root=directory / root_name)
         scan.marker_observations[rel] = observation
         if observation[0]:
             scan.excluded_roots.append(rel)
@@ -7291,7 +7345,8 @@ def _confirmed_absent(directory: Path, document: Mapping[str, Any], scan: _Refre
                         return gone
                     allowance -= 1
                     budget.walked += 1
-                    observation = artifact_payload.observe_directory(directory / parent)
+                    observation = artifact_payload.observe_directory(
+                        directory / parent, payload_root=directory / parts[0])
                     scan.marker_observations[parent] = observation
                     if observation[0]:
                         scan.excluded_roots.append(parent)
@@ -7372,6 +7427,7 @@ def _history_file_ref(row: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
 def _refresh_history_lines(root: Path, record: Mapping[str, Any], directory: Path,
                            previous: Mapping[str, Any], refreshed: Mapping[str, Any],
                            changes: Mapping[str, Sequence[str]], *, trigger: str,
+                           excluded_roots: Sequence[str] = (),
                            now: float) -> List[Dict[str, Any]]:
     """One `make_event` argument set for each file added, changed or removed since the close.
 
@@ -7399,6 +7455,22 @@ def _refresh_history_lines(root: Path, record: Mapping[str, Any], directory: Pat
                 "reason": trigger, "transaction_id": transaction_id,
                 "event_id": _history_id("hevt", "refresh", cycle_id, revision_id, operation, rel),
                 "now": now, **actor})
+    retired = set(changes.get("reclassified", []))
+    for rel_root in sorted(set(excluded_roots)):
+        paths = [rel for rel in retired if rel == rel_root or rel.startswith(rel_root + "/")]
+        if not paths:
+            continue
+        rows = [old_rows[rel] for rel in paths if rel in old_rows]
+        declared_bytes = sum(int(row.get("byte_size", 0)) for row in rows)
+        before = {"value": {"kind": "runtime", "rows": len(rows), "declared_bytes": declared_bytes}}
+        after = {"value": {"kind": "runtime", "rows": 0, "declared_bytes": 0}}
+        lines.append({
+            "kind": "artifact", "target_type": "cycle", "target_id": cycle_id,
+            "target_path": f"{cycle_rel}/{rel_root}", "operation": "update",
+            "field": "excluded_payload", "before": before, "after": after,
+            "reason": trigger, "transaction_id": _history_id("htxn", "excluded-payload", cycle_id),
+            "event_id": _history_id("hevt", "excluded-payload", cycle_id, rel_root),
+            "now": now, **actor})
     return lines
 
 
@@ -7619,10 +7691,12 @@ def _refresh_cycle_observed(root: Path, cycle_id: str, *, trigger: str, clock: f
     new_digest = artifact_manifest.manifest_digest(refreshed)
     earlier = {old.get("manifest_revision_id"): old for old in _earlier_documents(root, cycle_id, refreshed)}
     earlier[document.get("manifest_revision_id")] = document
-    report = artifact_manifest.validate_update(refreshed, preserved=list(earlier.values()), previous=document)
+    report = artifact_manifest.validate_update(refreshed, preserved=list(earlier.values()), previous=document,
+        retired_artifact_ids=_reclassified_artifact_ids(document, changes))
     if not report.ok:
         return skipped("manifest-invalid", detail=";".join(v.code for v in report.violations))
-    lines = _refresh_history_lines(root, record, directory, document, refreshed, changes, trigger=trigger, now=clock)
+    lines = _refresh_history_lines(root, record, directory, document, refreshed, changes, trigger=trigger,
+                                   excluded_roots=scan.excluded_roots, now=clock)
     with _refresh_lock(root, cycle_id, timeout=0.0):
         outcome = _publish_refresh(
             root, cycle_id, manifest_path, raw, digest, refreshed, new_digest, scan, changes, lines,
@@ -7698,7 +7772,7 @@ def _publish_refresh(root: Path, cycle_id: str, manifest_path: Path, raw: bytes,
             raise artifact_admission.AdmissionRecoveryRequired("simulated crash after manifest refresh")
         try:
             _commit_sealed(root, _with_pending(record, pending), refreshed, new_digest, now=now,
-                           index=index, previous_digest=digest)
+                           index=index, previous_digest=digest, excluded_roots=scan.excluded_roots)
         except BaseException as exc:
             raise artifact_admission.AdmissionRecoveryRequired(
                 f"cycle {cycle_id} manifest refreshed but post-publish update failed; run recover") from exc
@@ -7909,7 +7983,7 @@ def verify_finalized_cycle(root: Path, *, cycle_id: str, expected_binding: Mappi
 def _commit_sealed(
     root: Path, record: Mapping[str, Any], document: Mapping[str, Any], digest: str, *, now: Optional[float],
     index: Optional[artifact_index.IndexDocument] = None, previous_digest: Optional[str] = None,
-    excluded_count: Optional[int] = None,
+    excluded_count: Optional[int] = None, excluded_roots: Sequence[str] = (),
 ) -> None:
     """Apply a published manifest to the index and the cycle record.
 
@@ -7943,6 +8017,8 @@ def _commit_sealed(
         sealed["sealed_on"] = _rfc3339(now)
     sealed["manifest_digest"] = digest
     sealed["cycle_state"] = document["cycle"]["state"]
+    excluded_roots = tuple(excluded_roots or record.get("excluded_roots") or ())
+    sealed["excluded_roots"] = sorted(set(excluded_roots))
     if not already_closed:
         # §45 D-125: a first close leaves one history line.  A recorder that is not there (or
         # fails) leaves the line in the record for the next trigger; it never fails the close.
@@ -7950,7 +8026,19 @@ def _commit_sealed(
             root, sealed, document, digest, directory, now=now,
             excluded=excluded_count if excluded_count is not None
             else len(record.get("excluded_symlinks") or []))
-        pending = _merge_pending(sealed.get("history_pending") or [], [line])
+        root_lines = []
+        cycle_rel = Path(os.path.relpath(str(directory), str(root))).as_posix()
+        for rel_root in sorted(set(excluded_roots)):
+            root_lines.append({
+                "kind": "artifact", "target_type": "cycle", "target_id": record["cycle_id"],
+                "target_path": f"{cycle_rel}/{rel_root}", "operation": "update",
+                "field": "excluded_payload", "before": {"value": {"kind": "runtime"}},
+                "after": {"value": {"kind": "runtime"}},
+                "reason": "finalize", "transaction_id": _history_id("htxn", "excluded-payload", record["cycle_id"]),
+                # Stable cycle+root identity intentionally records one line per root across reclassification.
+                "event_id": _history_id("hevt", "excluded-payload", record["cycle_id"], rel_root),
+                "now": now, **_history_actor("rule")})
+        pending = _merge_pending(sealed.get("history_pending") or [], [line, *root_lines])
         sealed = _with_pending(sealed, [] if _history_deliver_locked(root, pending) else pending)
     _write_cycle_record(root, sealed, exclusive=False)
     _write_journal(root, record["cycle_id"], state="committed", manifest_digest=digest,

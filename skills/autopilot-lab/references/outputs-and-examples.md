@@ -15,7 +15,6 @@
 │   ├── train.py / eval.py / config.yaml  [T1] Setup scaffold
 │   ├── runs/                       [T2] User-produced run results
 │   │   └── run-001/
-│   │       ├── ckpt/
 │   │       ├── log.txt
 │   │       └── eval_result.json    Optional one-off result; never name it metrics.json(l)
 │   ├── figures/                    [T2] Plots from the `material/figure-gen` unit
@@ -29,6 +28,10 @@
 │       ├── plan_reviews/           `research/plan-review` unit logs
 │       └── debug_reviews/          `qa/ml-debug` unit logs
 ```
+
+New checkpoints live at `$AGENT_RUNTIME_DIR/experiments/<slug>/runs/<run>/ckpt/`;
+the artifact-side `run.json` keeps compatible `ckpt_path` plus optional
+`ckpt_sha256` and `ckpt_byte_size` after the file exists.
 
 When project convention keeps variants beside each model, as with TF_Restormer, use:
 

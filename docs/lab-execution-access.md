@@ -83,16 +83,25 @@ Child 요청이 부모의 실제 파일 또는 네트워크 범위를 넘으면 
 
 ## 적용 수준과 현재 한계
 
-### GPU lab의 실행 sandbox
+### GPU compute 부품의 실행 sandbox
 
-GPU resource를 선언한 lab route는 Codex owner와 그 GPU resource에 기존
-`danger-full-access`를 선택한다. 기준은 `resource_class=gpu`, 또는 기존
-compose `--signal gpu`와 resource runner이며 작업 설명의 자연어는 해석하지 않는다.
-기존 signal은 정상 route 선택에서 재사용한다. 일반 code·frame과 다른 lab child의
-기본값은 그대로다. Caller의 기존 `--sandbox`·`CODEX_DISPATCH_SANDBOX`와
-`CODEX_DISPATCH_SANDBOX_FORCE`가 우선하며 사용자 전역 설정은 수정하지 않는다.
-같은 선택을 prospective readiness, sealed parent sandbox tuple, exec/App Server
-실행이 소비한다. Owner 내부에서 env를 붙이고 다시 probe/compile할 필요가 없다.
+카탈로그 부품이 `execution_needs: compute-hosts`를 선언하면 Codex owner와 그
+compute 부품에 기존 `danger-full-access`를 선택한다. 이 범위에는 lab의 smoke,
+full-run, run-verify뿐 아니라 eval/resume과 code route가 빌려 쓴 compute 부품,
+extra stage, parallel leg도 포함된다. 카탈로그 선언이 compute 판단의 기준이다.
+기존 명시 `resource_class=gpu`와 resource-runner의 `gpu` promotion signal도
+호환 선택으로 유지하며 작업 설명의 자연어는 해석하지 않는다. 일반 code, frame,
+계획·metrics·report 같은 비-compute child는 기본값을 유지한다.
+
+새 route의 한 선택은 prospective readiness, sealed `codex_execution_sandbox`,
+실제 exec/App Server 실행, GPU lease admission에 함께 쓰인다. 이미 봉인된 route는
+seal의 GPU 범위와 sandbox를 유지한다. seal이 없는 역사 route는 기존 owner sandbox
+선택을 유지하며, checked Codex parent tuple만으로 sandbox를 바꾸거나 compute 접근과
+GPU lease를 소급해서 만들지 않는다. 같은
+cycle의 lab 또는 code suffix owner는 완료 prefix의 seal을 이어받으며 그 아래
+비-compute child는 기본값을 유지한다. Caller의 기존 `--sandbox`,
+`CODEX_DISPATCH_SANDBOX`, `CODEX_DISPATCH_SANDBOX_FORCE` precedence는 보존하고
+사용자 전역 설정은 수정하지 않는다.
 
 Codex 0.160.0의 Linux sandbox에서 NVIDIA 장치가 숨겨지는 것을 실제 조회로
 확인했다. `/dev` read로 해결되지 않았고 장치 write profile은 bwrap panic으로

@@ -1705,6 +1705,22 @@ def _tree_digest(directory: Path) -> Dict[str, Any]:
             "tree_sha256": hashlib.sha256(payload).hexdigest()}
 
 
+def _hidden_excluded_row(directory: Path, rel: str) -> Dict[str, Any]:
+    """Durable trace of one path the manifest leaves out.
+
+    The producer lists a pruned hidden directory once, as `<dir>/`, instead of every file
+    below it. Such a row carries the tree digest and total size of the untouched directory."""
+    target = directory / rel
+    row: Dict[str, Any] = {"path": rel, "reason": P._unmanifestable_reason(rel)}
+    if rel.endswith("/") and target.is_dir() and not target.is_symlink():
+        witness = _tree_digest(target)
+        row.update({"kind": "directory", "sha256": witness["tree_sha256"],
+                    "byte_size": witness["byte_count"], "file_count": witness["file_count"]})
+    else:
+        row.update({"sha256": _sha(target), "byte_size": target.stat().st_size})
+    return row
+
+
 def seal_legacy_cycle(root: Path, *, cycle_dir: Path, route_file: Path, capability: str = "autopilot-code",
                       title: Optional[str] = None, started_on: Optional[str] = None,
                       primary: Optional[str] = None, exclude_hidden: bool = False,
@@ -1774,8 +1790,7 @@ def seal_legacy_cycle(root: Path, *, cycle_dir: Path, route_file: Path, capabili
         # Durable trace of what the manifest deliberately does not list.
         sealed_record = P.read_cycle_record(root, cycle_id) or {}
         sealed_record.setdefault("adopted", {})["hidden_excluded"] = [
-            {"path": rel, "reason": P._unmanifestable_reason(rel), "sha256": _sha(directory / rel),
-             "byte_size": (directory / rel).stat().st_size} for rel in excluded]
+            _hidden_excluded_row(directory, rel) for rel in excluded]
         P._write_cycle_record(root, sealed_record, exclusive=False)
     return {"status": "sealed", "cycle_id": cycle_id, "campaign_id": campaign_id, "route_id": route["route_id"],
             "producer_id": record["producer_id"], "manifest_digest": sealed["manifest_digest"],

@@ -6,6 +6,7 @@ launch, log, exit code, listing — is exercised without a network.
 
 import importlib.util
 import io
+import datetime
 import json
 import os
 import signal
@@ -454,10 +455,15 @@ class ComputeHostsTest(unittest.TestCase):
             "    ssh_port: 2222\n"
             "    ssh_user: someone\n",
             encoding="utf-8")
+        self.fakebin = self.root / "fake-tmux-bin"
+        install_fake_tmux(self.fakebin)
         # A run's completion watch notifies through the dispatch state root; keep it here.
         self.env = {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
-                    "HARNESS_STATE_ROOT": str(self.root / "state")}
+                    "HARNESS_STATE_ROOT": str(self.root / "state"),
+                    "PATH": str(self.fakebin) + os.pathsep + os.environ.get("PATH", "")}
         self.env.pop("AGENT_DISPATCH_JOBS", None)
+        for key in ("AGENT_ROUTE_FILE", "AGENT_OWNER_ROUTE_FILE", "AGENT_DISPATCH_DEPTH"):
+            self.env.pop(key, None)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -482,6 +488,19 @@ class ComputeHostsTest(unittest.TestCase):
         self.assertEqual({h["host"] for h in payload["hosts"]},
                          {"here", "elsewhere"})
         self.assertEqual(payload["run_root"], str(self.run_root))
+
+    def test_runs_skips_dot_directories_before_state_or_remote_probe(self):
+        module = load_module()
+        cache = self.run_root / ".hearting-releases"
+        cache.mkdir(parents=True)
+        (cache / "fake-entry").mkdir()
+        output = io.StringIO()
+        with mock.patch.object(module, "load_config", return_value={"run_root": self.run_root}), \
+                mock.patch.object(module, "_refuse_namespace_self"), \
+                mock.patch.object(module, "_run_state", side_effect=AssertionError("dot-dir scanned")), \
+                mock.patch("sys.stdout", output):
+            self.assertEqual(module.cmd_runs(SimpleNamespace(limit=10, host=None, json=True)), 0)
+        self.assertEqual(output.getvalue().strip(), "[]")
 
     def test_unknown_host_is_rejected(self):
         result = self.run_tool("list", "--static", "nope")
@@ -1322,10 +1341,13 @@ class ComputeHostsTest(unittest.TestCase):
     def test_stop_records_sigterm_exit_and_reason(self):
         # `stop` kills the tmux session before the run shell can write its
         # own exit code; the stop itself must leave 143 + a reason behind.
-        if shutil.which("tmux") is None:
+        env = {**self.env, "PATH": os.pathsep.join(
+            entry for entry in self.env["PATH"].split(os.pathsep)
+            if Path(entry) != self.fakebin)}
+        if shutil.which("tmux", path=env["PATH"]) is None:
             self.skipTest("tmux is not installed")
         result = self.run_tool("run", "here", "--name", "stopme", "--",
-                               "bash", "-c", "sleep 30")
+                               "bash", "-c", "sleep 30", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         run_id = result.stdout.split()[1]
         meta = json.loads((self.run_root / run_id / "meta.json").read_text())
@@ -1336,11 +1358,11 @@ class ComputeHostsTest(unittest.TestCase):
             for _ in range(50):
                 check = subprocess.run(
                     ["tmux", "-L", server, "has-session", "-t", run_id],
-                    capture_output=True, timeout=5)
+                    capture_output=True, timeout=5, env=env)
                 if check.returncode == 0:
                     break
                 time.sleep(0.1)
-            stopped = self.run_tool("stop", run_id)
+            stopped = self.run_tool("stop", run_id, env=env)
             self.assertEqual(stopped.returncode, 0, stopped.stderr)
             self.assertIn("stopped", stopped.stdout)
             run_dir = self.run_root / run_id
@@ -1354,20 +1376,20 @@ class ComputeHostsTest(unittest.TestCase):
             self.assertEqual(
                 (run_dir / "stop_reason").read_text(encoding="utf-8").strip(),
                 "stopped")
-            listed = self.run_tool("runs")
+            listed = self.run_tool("runs", env=env)
             self.assertIn("exit 143 (stopped)", listed.stdout)
-            payload = json.loads(self.run_tool("runs", "--json").stdout)
+            payload = json.loads(self.run_tool("runs", "--json", env=env).stdout)
             row = next(item for item in payload if item["run_id"] == run_id)
             self.assertEqual(row["exit_code"], 143)
             self.assertEqual(row["stop_reason"], "stopped")
             self.assertEqual(row["state"], "finished")
-            tail = self.run_tool("tail", run_id)
+            tail = self.run_tool("tail", run_id, env=env)
             self.assertIn("exit 143 (stopped)", tail.stdout)
         finally:
             subprocess.run(["tmux", "-L", server, "kill-session", "-t", run_id],
-                           capture_output=True, timeout=5)
+                           capture_output=True, timeout=5, env=env)
             subprocess.run(["tmux", "-L", server, "kill-server"],
-                           capture_output=True, timeout=5)
+                           capture_output=True, timeout=5, env=env)
 
     def test_tmux_transport_probes_only_the_recorded_managed_server(self):
         module = load_module()
@@ -1520,6 +1542,8 @@ class LauncherProvenanceTest(unittest.TestCase):
         self.env = {**os.environ, "COMPUTE_HOSTS_CONFIG": str(self.config),
                     "HARNESS_STATE_ROOT": str(self.root / "state")}
         self.env.pop("AGENT_DISPATCH_JOBS", None)
+        for key in ("AGENT_ROUTE_FILE", "AGENT_OWNER_ROUTE_FILE", "AGENT_DISPATCH_DEPTH"):
+            self.env.pop(key, None)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -1558,6 +1582,368 @@ class LauncherProvenanceTest(unittest.TestCase):
                 return exit_path
             time.sleep(0.1)
         self.fail(f"no exit code for {run_id}")
+
+    def test_remote_missing_launcher_release_runs_preflight(self):
+        """A managed release copied to run_root stays usable after its source vanishes."""
+        module = load_module()
+        source = self.root / "launcher-release"
+        (source / "core").mkdir(parents=True)
+        (source / "capabilities").mkdir()
+        (source / "adapters/codex/bin").mkdir(parents=True)
+        (source / "adapters/codex/utilities").mkdir()
+        (source / "utilities").mkdir()
+        (source / "roles").mkdir()
+        (source / "claude_setting").mkdir()
+        (source / "core/CORE.md").write_text("# fixture root\n", encoding="utf-8")
+        for name, payload in (("harness-manifest.json", "{}\n"),
+                              ("manifest.json", "{}\n"),
+                              ("capabilities/topologies.json", "{}\n"),
+                              ("roles/README.md", "fixture roles\n")):
+            (source / name).write_text(payload, encoding="utf-8")
+        preflight_source = ROOT / "../" / "adapters/codex/bin/preflight.sh"
+        shutil.copy2(preflight_source, source / "adapters/codex/bin/preflight.sh")
+        (source / "utilities/agent-home.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (source / "utilities/agent-home.sh").chmod(0o755)
+        (source / "adapters/codex/utilities/agent-home.sh").symlink_to(
+            "../../../utilities/agent-home.sh")
+        (source / "claude_setting/commands").symlink_to(
+            "../adapters/claude/commands")
+        (source / "utilities/artifact-root.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (source / "utilities/artifact-root.sh").chmod(0o755)
+        (source / "RELEASE_VERSION").write_text("vfixture.1\n", encoding="utf-8")
+        (source / ".hearting-release.json").write_text(json.dumps({
+            "schema": 1, "version": "vfixture.1", "archive_sha256": "a" * 64,
+            "published_at": "fixture",
+        }), encoding="utf-8")
+        identity = module._verified_release_identity(source)
+        self.assertIsNotNone(identity, "active release must satisfy the managed identity")
+        provenance = {"AGENT_HOME": str(source)}
+        non_self = {"ssh_host": "fixture-remote"}
+        before = list(self.run_root.iterdir()) if self.run_root.exists() else []
+        dry_path, dry_status, _ = module._select_payload_agent_home(
+            provenance, non_self, self.run_root, dry_run=True)
+        self.assertEqual(dry_status, "would-publish")
+        self.assertFalse(self.run_root.exists())
+        self.assertEqual(before, [])
+        self.assertEqual(module._select_payload_agent_home(
+            provenance, {"ssh_host": module.LOCAL}, self.run_root, dry_run=True)[0],
+            str(source.resolve()))
+        payload_home, status, reason = module._publish_managed_agent_home(
+            source, self.run_root)
+        self.assertIn(status, {"published", "present"}, reason)
+        self.assertTrue(payload_home.startswith(str(self.run_root / ".hearting-releases")))
+        copied = Path(payload_home)
+        self.assertEqual(module._verified_release_identity(copied), identity)
+        self.assertEqual((copied / "adapters/codex/utilities/agent-home.sh").readlink(),
+                         (source / "adapters/codex/utilities/agent-home.sh").readlink())
+        self.assertEqual((copied / "claude_setting/commands").readlink(),
+                         Path("../adapters/claude/commands"))
+        self.assertEqual((copied / "utilities/agent-home.sh").stat().st_mode & 0o777,
+                         (source / "utilities/agent-home.sh").stat().st_mode & 0o777)
+        reused, reuse_status, _ = module._publish_managed_agent_home(source, self.run_root)
+        self.assertEqual((reused, reuse_status), (payload_home, "present"))
+        self.assertEqual(module._select_payload_agent_home(
+            provenance, non_self, self.run_root, dry_run=True)[:2], (payload_home, "present"))
+        # Ownership/version markers survive a content change. Warm identity caches
+        # must not let either real reuse or its dry-run trust that changed copy.
+        core = copied / "core/CORE.md"
+        original_core = core.read_bytes()
+        marker_path = copied.parent / module.RELEASE_MARKER_NAME
+        marker_before = marker_path.read_bytes()
+        try:
+            core.write_bytes(original_core + b"# changed cached content\n")
+            key = module._release_key(identity)
+            self.assertFalse(module._release_entry_valid(copied.parent, key, identity))
+            dry_home, dry_status, dry_reason = module._select_payload_agent_home(
+                provenance, non_self, self.run_root, dry_run=True)
+            self.assertEqual((dry_home, dry_status), ("", "publish-failed"), dry_reason)
+            self.assertEqual(marker_path.read_bytes(), marker_before)
+            failed_home, failed_status, failed_reason = module._publish_managed_agent_home(
+                source, self.run_root)
+            self.assertEqual((failed_home, failed_status), ("", "publish-failed"), failed_reason)
+            self.assertIn("cache entry exists but is not reusable", failed_reason)
+            self.assertEqual(core.read_bytes(), original_core + b"# changed cached content\n")
+            self.assertEqual(marker_path.read_bytes(), marker_before)
+        finally:
+            core.write_bytes(original_core)
+        self.assertEqual(module._publish_managed_agent_home(source, self.run_root)[:2],
+                         (payload_home, "present"))
+        hidden = source.with_name(source.name + ".hidden-for-test")
+        source.rename(hidden)
+        self.addCleanup(lambda: hidden.rename(source) if hidden.exists() else None)
+        campaign = self.root / "campaigns" / "fixture" / "artifacts" / "raw-results"
+        campaign.mkdir(parents=True)
+        preflight = Path(payload_home) / "adapters/codex/bin/preflight.sh"
+        result = subprocess.run([str(preflight), "write", str(campaign)],
+                                text=True, capture_output=True, env=self.env)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(list(campaign.iterdir()), [])
+        hidden.rename(source)
+
+        # Absolute and escaping links are rejected by real and dry-run paths.
+        for name, target in (("absolute", str(source / "core/CORE.md")),
+                             ("escaping", "../../outside")):
+            bad_link = source / f"unsafe-{name}"
+            bad_link.symlink_to(target)
+            rejected_run_root = self.root / f"runs-{name}"
+            with mock.patch.object(module, "_verified_release_identity", return_value=identity):
+                dry_home, dry_status, dry_reason = module._select_payload_agent_home(
+                    provenance, non_self, rejected_run_root, dry_run=True)
+                payload, publish_status, publish_reason = module._publish_managed_agent_home(
+                    source, rejected_run_root)
+            self.assertEqual((dry_home, dry_status), ("", "publish-failed"), dry_reason)
+            self.assertEqual((payload, publish_status), ("", "publish-failed"), publish_reason)
+            self.assertFalse(rejected_run_root.exists())
+            bad_link.unlink()
+
+        # Exercise cmd_run's serialized remote launch through a fake SSH client.
+        hosts = self.config.read_text(encoding="utf-8").replace(
+            "    note: local fixture\n",
+            "    note: local fixture\n"
+            "  remote:\n"
+            "    ssh_host: fixture-remote\n")
+        self.config.write_text(hosts, encoding="utf-8")
+        fakebin = self.root / "fake-remote-bin"
+        install_fake_tmux(fakebin)
+        ssh = fakebin / "ssh"
+        ssh.write_text(
+            "#!/bin/sh\n"
+            "set +e\n"
+            "while [ \"$#\" -gt 0 ]; do\n"
+            "  case \"$1\" in -o|-p|-F) shift 2 ;; -*) shift ;; *) shift; break ;; esac\n"
+            "done\n"
+            "src=$FAKE_HIDE_SOURCE\n"
+            "if [ -n \"$src\" ]; then mv \"$src\" \"$src.hidden\" || exit 90; fi\n"
+            "bash -lc \"$*\"\n"
+            "status=$?\n"
+            "if [ -n \"$src\" ]; then mv \"$src.hidden\" \"$src\" || exit 91; fi\n"
+            "exit $status\n", encoding="utf-8")
+        ssh.chmod(0o755)
+        remote_env = self.scrubbed_env(
+            AGENT_HOME=str(source), PATH=str(fakebin) + os.pathsep + os.environ.get("PATH", ""),
+            FAKE_HIDE_SOURCE=str(source))
+        remote_env["COMPUTE_HOSTS_CONFIG"] = str(self.config)
+        launched = self.run_tool("run", "remote", "--name", "payload-write", "--",
+                                 "bash", "-c",
+                                 f'"$AGENT_HOME/adapters/codex/bin/preflight.sh" write {shlex.quote(str(campaign))}',
+                                 env=remote_env)
+        self.assertEqual(launched.returncode, 0, launched.stderr + launched.stdout)
+        run_id = launched.stdout.split()[1]
+        self.wait_exit(run_id)
+        self.assertEqual((self.run_root / run_id / "exit_code").read_text().strip(), "0")
+        meta = json.loads((self.run_root / run_id / "meta.json").read_text())
+        self.assertEqual(meta["provenance"]["agent_home"], str(source))
+        self.assertIn(meta["provenance"]["agent_home_status"], {"published", "present"})
+        self.assertEqual(meta["provenance"]["payload_agent_home"], payload_home)
+
+        invalid_source = self.root / "invalid-managed-launcher"
+        (invalid_source / "core").mkdir(parents=True)
+        (invalid_source / "core/CORE.md").write_text("# root\n", encoding="utf-8")
+        (invalid_source / ".hearting-release.json").write_text("not-json", encoding="utf-8")
+        failed_env = self.scrubbed_env(
+            AGENT_HOME=str(invalid_source), PATH=remote_env["PATH"], FAKE_HIDE_SOURCE="")
+        failed_env["COMPUTE_HOSTS_CONFIG"] = str(self.config)
+        failed_launch = self.run_tool("run", "remote", "--name", "invalid-managed", "--",
+                                      "bash", "-c", 'printf "<%s>" "$AGENT_HOME"',
+                                      env=failed_env)
+        self.assertEqual(failed_launch.returncode, 0,
+                         failed_launch.stderr + failed_launch.stdout)
+        self.assertIn("AGENT_HOME publish-failed", failed_launch.stderr)
+        failed_id = failed_launch.stdout.split()[1]
+        self.wait_exit(failed_id)
+        self.assertEqual((self.run_root / failed_id / "log").read_text().strip(), "<>")
+        failed_meta = json.loads((self.run_root / failed_id / "meta.json").read_text())
+        self.assertEqual(failed_meta["provenance"]["agent_home_status"], "publish-failed")
+        self.assertEqual(failed_meta["provenance"]["payload_agent_home"], "")
+
+        concurrent_root = self.root / "concurrent-runs"
+        worker = (
+            "import importlib.util,json,sys; "
+            "spec=importlib.util.spec_from_file_location('compute_hosts',sys.argv[1]); "
+            "m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m); "
+            "print(json.dumps(m._publish_managed_agent_home(sys.argv[2],sys.argv[3])))")
+        procs = [subprocess.Popen([sys.executable, "-c", worker, str(TOOL), str(source),
+                                   str(concurrent_root)], text=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE) for _ in range(2)]
+        outcomes = []
+        for process in procs:
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, stderr)
+            outcomes.append(json.loads(stdout))
+        self.assertEqual(outcomes[0][0], outcomes[1][0])
+        self.assertEqual(sorted(row[1] for row in outcomes), ["present", "published"])
+        concurrent_cache = concurrent_root / module.RELEASE_CACHE_NAME
+        self.assertEqual([p.name for p in concurrent_cache.iterdir()
+                          if p.name.startswith(".stage-")], [])
+
+    def test_gc_handles_real_run_root_shape_and_deletes_only_unreferenced_old_entry(self):
+        module = load_module()
+        cache = self.run_root / module.RELEASE_CACHE_NAME
+        cache.mkdir(parents=True)
+        now = time.time()
+
+        def add_entry(version, last_used):
+            identity = {"schema": 1, "version": version,
+                        "release_id": f"release:{version}:0123456789ab",
+                        "content_digest": "sha256:" + "a" * 64,
+                        "archive_sha256": "b" * 64}
+            key = module._release_key(identity)
+            entry = cache / key
+            entry.mkdir()
+            (entry / "source").mkdir()
+            (entry / "marker.json").write_text(json.dumps({
+                "schema": 1, "kind": "hearting-compute-release", "key": key,
+                "identity": identity,
+                "last_used_at": datetime.datetime.fromtimestamp(
+                    last_used, datetime.timezone.utc).isoformat(),
+            }), encoding="utf-8")
+            return entry
+
+        unreferenced = add_entry("v3.1", now - 15 * 86400)
+        referenced = add_entry("v3.2", now - 20 * 86400)
+        current = add_entry("v3.3", now - 30 * 86400)
+        for name in ("ami-eval-smoke-20261020", "asr-coresidence-20261007"):
+            (self.run_root / name).mkdir(parents=True)
+        local_only = self.run_root / "old-local-path-run"
+        local_only.mkdir()
+        (local_only / "meta.json").write_bytes(b'{"agent_home":"/launcher/release"}')
+        naming = self.run_root / "old-cache-run"
+        naming.mkdir()
+        (naming / "meta.json").write_bytes(b"malformed-but-names-" + referenced.name.encode())
+
+        self.assertEqual(module._release_gc(self.run_root, cache, current.name, now=now),
+                         "complete")
+        self.assertFalse(unreferenced.exists())
+        self.assertTrue(referenced.exists())
+        self.assertTrue(current.exists())
+        (naming / "exit_code").write_text("0\n", encoding="utf-8")
+        self.assertEqual(module._release_gc(self.run_root, cache, current.name,
+                                            now=now + 25 * 3600), "complete")
+        self.assertFalse(referenced.exists())
+        self.assertTrue(current.exists())
+
+    def test_gc_is_stamped_at_most_once_per_day(self):
+        module = load_module()
+        cache = self.run_root / module.RELEASE_CACHE_NAME
+        cache.mkdir(parents=True)
+        key = "v3.1-0123456789ab-" + "a" * 64
+        entry = cache / key
+        entry.mkdir()
+        (entry / "source").mkdir()
+        identity = {"schema": 1, "version": "v3.1",
+                    "release_id": "release:v3.1:0123456789ab",
+                    "content_digest": "sha256:" + "a" * 64,
+                    "archive_sha256": "b" * 64}
+        (entry / "marker.json").write_text(json.dumps({
+            "schema": 1, "kind": "hearting-compute-release", "key": entry.name,
+            "identity": identity,
+            "last_used_at": datetime.datetime.fromtimestamp(
+                time.time() - 20 * 86400, datetime.timezone.utc).isoformat(),
+        }), encoding="utf-8")
+        now = time.time()
+        (cache / module.RELEASE_GC_STAMP).write_text(
+            json.dumps({"timestamp": now - 23 * 3600}), encoding="utf-8")
+        self.assertEqual(module._release_gc(self.run_root, cache, "current", now=now),
+                         "throttled")
+        self.assertTrue(entry.exists())
+        self.assertEqual(module._release_gc(self.run_root, cache, "current", now=now + 2 * 3600),
+                         "complete")
+        self.assertFalse(entry.exists())
+
+    def test_gc_skips_ambiguous_metadata_and_removes_only_marked_old_staging(self):
+        module = load_module()
+        cache = self.run_root / module.RELEASE_CACHE_NAME
+        cache.mkdir(parents=True)
+        now = time.time()
+        identity = {"schema": 1, "version": "v3.7",
+                    "release_id": "release:v3.7:0123456789ab",
+                    "content_digest": "sha256:" + "c" * 64,
+                    "archive_sha256": "d" * 64}
+        key = module._release_key(identity)
+        old = cache / key
+        old.mkdir()
+        (old / "source").mkdir()
+        (old / "marker.json").write_text(json.dumps({
+            "schema": 1, "kind": "hearting-compute-release", "key": key,
+            "identity": identity,
+            "last_used_at": datetime.datetime.fromtimestamp(
+                now - 20 * 86400, datetime.timezone.utc).isoformat(),
+        }), encoding="utf-8")
+        live = self.run_root / "oversized-live-meta"
+        live.mkdir()
+        (live / "meta.json").write_bytes(b"x" * (module.RELEASE_META_MAX_BYTES + 1))
+        self.assertEqual(module._release_gc(self.run_root, cache, "current", now=now),
+                         "skipped-live-metadata")
+        self.assertTrue(old.exists())
+
+        (live / "meta.json").unlink()
+        unreadable = live / "meta.json"
+        unreadable.write_text("{}", encoding="utf-8")
+        original_read_bytes = Path.read_bytes
+        def fail_meta_read(path):
+            if path == unreadable:
+                raise PermissionError("fixture unreadable metadata")
+            return original_read_bytes(path)
+        with mock.patch.object(Path, "read_bytes", fail_meta_read):
+            self.assertEqual(module._release_live_references(self.run_root, cache), None)
+        self.assertTrue(old.exists())
+
+        # The daily stamp prevents another traversal until the interval expires.
+        (live / "meta.json").unlink()
+        staging_key = {"schema": 1, "version": "v3.8",
+                       "release_id": "release:v3.8:1123456789ab",
+                       "content_digest": "sha256:" + "e" * 64,
+                       "archive_sha256": "f" * 64}
+        stage_key = module._release_key(staging_key)
+        aged = cache / f".stage-{stage_key}-123-1"
+        fresh = cache / f".stage-{stage_key}-123-2"
+        unmarked = cache / ".stage-unmarked-123-3"
+        for stage, age in ((aged, now - 2 * 86400), (fresh, now + 24 * 3600)):
+            stage.mkdir()
+            (stage / "marker.json").write_text(json.dumps({
+                "schema": 1, "kind": "hearting-compute-release", "key": stage_key,
+                "identity": staging_key, "staging": True,
+                "created_at": datetime.datetime.fromtimestamp(
+                    age, datetime.timezone.utc).isoformat(),
+            }), encoding="utf-8")
+        unmarked.mkdir()
+        self.assertEqual(module._release_gc(self.run_root, cache, "current",
+                                            now=now + 25 * 3600), "complete")
+        self.assertFalse(aged.exists())
+        self.assertTrue(fresh.exists())
+        self.assertTrue(unmarked.exists())
+
+    def test_managed_and_unmanaged_forwarding_are_distinguished(self):
+        module = load_module()
+        remote_host = {"ssh_host": "fixture-remote"}
+        unmanaged = self.make_home("unmanaged-home")
+        self.assertEqual(module._select_payload_agent_home(
+            {"AGENT_HOME": str(unmanaged)}, remote_host, self.run_root),
+            (str(unmanaged), "unmanaged-forwarded",
+             "unmanaged checkout forwarded; remote visibility is not guaranteed"))
+        invalid = self.root / "invalid-managed"
+        invalid.mkdir()
+        (invalid / ".hearting-release.json").write_text("not-json", encoding="utf-8")
+        payload, status, reason = module._select_payload_agent_home(
+            {"AGENT_HOME": str(invalid)}, remote_host, self.run_root)
+        self.assertEqual((payload, status), ("", "publish-failed"))
+        self.assertIn("identity validation", reason)
+        cache_root = self.root / "symlink-cache-run-root"
+        cache_root.mkdir()
+        outside = self.root / "outside-cache"
+        outside.mkdir()
+        (cache_root / module.RELEASE_CACHE_NAME).symlink_to(outside, target_is_directory=True)
+        valid_identity = {"schema": 1, "version": "v3.1",
+                          "release_id": "release:v3.1:0123456789ab",
+                          "content_digest": "sha256:" + "a" * 64}
+        with mock.patch.object(module, "_verified_release_identity",
+                               return_value=valid_identity), \
+                mock.patch.object(module, "_release_tree_safe", return_value=True):
+            payload, status, reason = module._publish_managed_agent_home(
+                self.root / "launcher-release", cache_root)
+        self.assertEqual((payload, status), ("", "publish-failed"))
+        self.assertIn("cache path is a symlink", reason)
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_provenance_selection_is_allowlisted_and_validated(self):
         module = load_module()
@@ -1666,6 +2052,9 @@ class LauncherProvenanceTest(unittest.TestCase):
         self.assertIn("export AGENT_HOME=''", dry.stdout)
         self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=''", dry.stdout)
         self.assertIn("export HEARTING_COMPUTE_RUN_ID=", dry.stdout)
+        fakebin = self.root / "unknown-tmux-bin"
+        install_fake_tmux(fakebin)
+        env["PATH"] = str(fakebin) + os.pathsep + os.environ.get("PATH", "")
         result = self.run_tool("run", "here", "--name", "bare", "--",
                                "bash", "-c", "echo survived", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -1677,8 +2066,10 @@ class LauncherProvenanceTest(unittest.TestCase):
         meta = json.loads(
             (self.run_root / run_id / "meta.json").read_text(encoding="utf-8"))
         self.assertEqual(meta["provenance"],
-                         {"agent_home": None, "attempt_id": None, "session": None,
-                          "route": None})
+                         {"agent_home": None, "payload_agent_home": "",
+                          "agent_home_status": "unknown",
+                          "agent_home_reason": "launcher AGENT_HOME is unavailable",
+                          "attempt_id": None, "session": None, "route": None})
         # The conda-selection field keeps its own meaning beside provenance.
         self.assertIsNone(meta["env"])
 
@@ -1709,8 +2100,10 @@ class LauncherProvenanceTest(unittest.TestCase):
             (self.run_root / run_id / "meta.json").read_text(encoding="utf-8"))
         self.assertEqual(meta["provenance"],
                          {"agent_home": str(home.resolve()),
-                          "attempt_id": attempt, "session": None,
-                          "route": None})
+                          "payload_agent_home": str(home.resolve()),
+                          "agent_home_status": "self",
+                          "agent_home_reason": "self host keeps its pinned release path",
+                          "attempt_id": attempt, "session": None, "route": None})
 
     def test_invalid_attempt_never_reaches_the_payload(self):
         home = self.make_home()
@@ -1782,8 +2175,10 @@ class LauncherProvenanceTest(unittest.TestCase):
         meta = json.loads(
             (self.run_root / run_id / "meta.json").read_text(encoding="utf-8"))
         self.assertEqual(meta["provenance"],
-                         {"agent_home": None, "attempt_id": None, "session": None,
-                          "route": None})
+                         {"agent_home": None, "payload_agent_home": "",
+                          "agent_home_status": "unknown",
+                          "agent_home_reason": "launcher AGENT_HOME is unavailable",
+                          "attempt_id": None, "session": None, "route": None})
 
     def test_invalid_attempt_clears_foreign_attempt_only(self):
         home = self.make_home()

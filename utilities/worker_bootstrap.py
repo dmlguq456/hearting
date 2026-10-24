@@ -19,7 +19,7 @@ UNIT_REF_RE = re.compile(r"^[a-z-]+/[a-z-]+$")
 RESERVED_UNITS = ("_kernel/owner", "_kernel/resource")
 ARTIFACT_PRODUCER_CYCLE_ENV = (
     "AGENT_ARTIFACT_CAMPAIGN_ID", "AGENT_ARTIFACT_CYCLE_ID", "AGENT_ARTIFACT_PRODUCER_ID",
-    "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR",
+    "AGENT_ARTIFACT_CYCLE_DIR", "AGENT_ARTIFACT_OUTPUT_DIR", "AGENT_RUNTIME_DIR",
 )
 _FRONTMATTER_RE = re.compile(r"\A---\n.*?\n---\n", re.DOTALL)
 WORKER_KIND_TYPES = {
@@ -228,13 +228,70 @@ def artifact_cycle_environment(environ) -> dict[str, str]:
     return values
 
 
+def runtime_dir_candidate(artifact_root, environ=None) -> str:
+    """Purely resolve an optional project runtime path; never create it here."""
+    import os
+    values = os.environ if environ is None else environ
+    try:
+        root = Path(artifact_root).expanduser().resolve(strict=False)
+        raw = values.get("AGENT_RUNTIME_DIR", "")
+        if raw:
+            supplied = Path(raw).expanduser()
+            if not supplied.is_absolute():
+                return ""
+            candidate = supplied.resolve(strict=False)
+            default = (root.parent / ".agent_runtime").resolve(strict=False)
+            # Nested dispatch inherits this generated default as an override.
+            # Preserve exactly that path while keeping user overrides fenced.
+            if candidate == default:
+                return str(candidate)
+            home = Path.home().resolve(strict=False)
+            project = root.parent
+            if (candidate == Path("/") or candidate == home or candidate == project
+                    or candidate.is_relative_to(root) or candidate.is_relative_to(home)
+                    or candidate.is_relative_to(project)):
+                return ""
+            if "releases" in candidate.parts or ".harness" in candidate.parts:
+                return ""
+            return str(candidate)
+        return str(root.parent / ".agent_runtime")
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ""
+
+
+def prepare_runtime_dir(candidate: str) -> str:
+    """Create only the optional runtime root and its private ignore marker."""
+    if not candidate:
+        return ""
+    try:
+        path = Path(candidate).resolve(strict=False)
+        if not path.is_absolute() or path == Path("/") or path == Path.home().resolve(strict=False):
+            return ""
+        path.mkdir(parents=True, exist_ok=True)
+        if not path.is_dir():
+            return ""
+        marker = path / ".gitignore"
+        if marker.exists() or marker.is_symlink():
+            if marker.is_symlink() or not marker.is_file() or marker.read_bytes() != b"*\n":
+                return ""
+        else:
+            marker.write_bytes(b"*\n")
+        return str(path)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ""
+
+
 def artifact_context_prompt(environ) -> str:
     values = artifact_cycle_environment(environ)
     output = values["AGENT_ARTIFACT_OUTPUT_DIR"]
     if not output:
         return ""
+    runtime = values.get("AGENT_RUNTIME_DIR", "")
+    runtime_line = (f"- runtime_dir: {runtime}\n"
+                    "- Put environments, caches, external checkouts, and checkpoints under runtime_dir; keep reports and provenance in artifacts.\n") if runtime else ""
     return (f"- artifact_cycle_id: {values['AGENT_ARTIFACT_CYCLE_ID']}\n"
             f"- artifact_output_dir: {output}\n"
+            f"{runtime_line}"
             "- Resolve relative artifact paths beneath artifact_output_dir.\n")
 
 

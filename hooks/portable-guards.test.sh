@@ -60,7 +60,7 @@ unset AGENT_DISPATCH_PARENT_SESSION_ID AGENT_DISPATCH_OWNER_HARNESS CODEX_THREAD
 unset CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
   AGENT_SESSION_ROLE AGENT_DISPATCH_CHILD AGENT_DISPATCH_DEPTH \
   AGENT_DISPATCH_JOBS \
-  AGENT_ARTIFACT_ROOT AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE \
+  AGENT_ARTIFACT_ROOT AGENT_ARTIFACT_CYCLE_DIR AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE \
   AGENT_OWNER_ROUTE_FILE AGENT_OWNER_ROUTE_ID AGENT_OWNER_ROUTE_HASH \
   CLAUDE_CODE_CHILD_SESSION OPENCODE_DISPATCH_SLUG FLEET_TITLE_REFRESH \
   MEM_DISTILL CODEX_DISPATCH_SANDBOX_FORCE
@@ -99,7 +99,8 @@ SSNPROJ="$TMP/ssnproj"
 mkdir -p "$SSNPROJ/.agent_reports/spec"
 printf 'project_name: demo\nmode: [research]\n' > "$SSNPROJ/.agent_reports/spec/pipeline_state.yaml"
 printf '# Demo Spec\n- requirement: SD-31\n- schema_version=1\n- sample rate: 48 kHz\n- optimizer: Adam\n' > "$SSNPROJ/.agent_reports/spec/prd.md"
-printf 'schema_version=1\n' > "$SSNPROJ/train.py"
+# The PostToolUse fixture represents the file after the edit has completed.
+printf 'schema_version=2\n' > "$SSNPROJ/train.py"
 # ① removed value still described in spec → nudge surfaces the stale spec line
 if AGENT_HOME="$ROOT" bash "$SSN" --file "$SSNPROJ/train.py" --old 'schema_version=1' --new 'schema_version=2' --cwd "$SSNPROJ" >"$TMP/ssn.out" 2>"$TMP/ssn.err" \
   && grep -q 'spec/prd.md' "$TMP/ssn.out" && grep -q 'schema_version=1' "$TMP/ssn.out"; then

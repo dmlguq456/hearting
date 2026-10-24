@@ -12,10 +12,9 @@ This is adapter-owned output generated from `capabilities/draft-refine.md`, not 
    `tool_contract_check`, and obey `runtime_surface` / `fallback` before
    claiming full support. For `unsupported`, stop or use the reported
    `fallback`.
-3. Before edits, run `adapters/opencode/bin/preflight.sh write <file> [session-id]`.
-4. Before spec-changing work, run
+3. Before spec-changing work, run
    `adapters/opencode/bin/preflight.sh capability draft-refine [cwd] [session-id]`.
-5. If the command receives arguments, map them to the portable argument shape:
+4. If the command receives arguments, map them to the portable argument shape:
    `<strategy or draft name or path> [--intensity direct|quick|standard|strong|thorough|adversarial]`.
 
 Portable contract excerpt:

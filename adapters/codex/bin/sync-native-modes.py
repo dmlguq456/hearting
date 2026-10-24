@@ -134,7 +134,6 @@ inventory. It is adapter-owned output, not a legacy runtime mode copy.
 ## Use
 
 - Use Codex file, terminal, approval, sandbox, hook, and skill surfaces.
-- Run `adapters/codex/bin/preflight.sh write <file> [session-id]` before edits.
 - For `tool-contract` modes, run the named contract check before claiming the tool-backed result.
 - If a required local provider or executable is unavailable, report the unavailable contract instead of silently downgrading.
 - Treat `{native_mode_path}` as the adapter-owned mode guide for this runtime.

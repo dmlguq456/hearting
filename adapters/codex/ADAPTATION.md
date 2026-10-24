@@ -320,6 +320,7 @@ Use `adapters/codex/bin/preflight.sh runtime-projection
 when hook trust must fail runtime checks.
 The lifecycle hooks provide informational context. The design hook is a console-check alert path, not a
 full render/screenshot visual harness.
+The final `PostToolUse` hook group passes Edit/Write/MultiEdit/apply_patch input to the shared `hooks/spec-sync-nudge.sh` and returns one `hookSpecificOutput.additionalContext` JSON object when canonical spec lines remain stale.
 
 Codex CLI 0.142.x exposes `codex debug prompt-input`, but not a hook listing or
 hook firing debug surface. Current tests validate `hooks.json` structure and

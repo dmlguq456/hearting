@@ -79,6 +79,13 @@ class OpenCodeProcessTest(unittest.TestCase):
         (self.dir / f"{self.pid}-{self.start}.json").write_text(" " * 2000)
         self.assertEqual(opencode.session_of_process(self.pid, self.env), (None, ""))
 
+    def test_current_selection_overrides_the_session_the_process_started_on(self):
+        self.record()
+        with unittest.mock.patch.object(
+                opencode, "_cmdline", return_value=["opencode", "--session", "ses_stale"]):
+            self.assertEqual(opencode.session_of_process(self.pid, self.env),
+                             (SID, "opencode-tui-selection"))
+
     def test_the_started_session_argument(self):
         cases = ((["opencode", "--session", SID], SID), (["opencode", f"--session={SID}"], SID),
                  (["/usr/bin/opencode", "-s", SID, "--model", "x"], SID), (["opencode"], None),

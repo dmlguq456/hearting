@@ -678,6 +678,66 @@ class TestOrphanAndCompleteness(unittest.TestCase):
         self.assertIn("cycle-completion-incomplete", _codes(m.validate_lineage(doc)))
 
 
+def _completed(doc, required_roles):
+    doc["cycle"]["state"] = "completed"
+    doc["cycle"]["outcome_criterion"]["required_artifact_roles"] = required_roles
+    for sequence, event_id, event_type, actor in (
+        (3, "evt_" + "8" * 32, "cycle.completed", {"kind": "user", "id": "u"}),
+        (4, "evt_" + "7" * 32, "route.terminal.recorded", {"kind": "producer", "id": "p"}),
+    ):
+        doc["events"].append(
+            {
+                "event_id": event_id,
+                "stream_id": doc["events"][0]["stream_id"],
+                "stream_sequence": sequence,
+                "event_type": event_type,
+                "target_id": doc["cycle"]["cycle_id"],
+                "actor": actor,
+                "recorded_at": "2026-08-11T00:0{0}:00Z".format(sequence - 1),
+                "provenance": doc["events"][0]["provenance"],
+                "evidence_ids": [],
+                "payload": {},
+            }
+        )
+    return doc
+
+
+class TestCompletedCycleRoles(unittest.TestCase):
+    def test_every_required_role_with_a_revision_completes_the_cycle(self):
+        doc = _completed(_valid_document(), ["primary", "secondary"])
+        self.assertNotIn("cycle-completion-incomplete", _codes(m.validate_lineage(doc)))
+
+    def test_a_repeated_artifact_id_keeps_the_role_of_its_first_row(self):
+        doc = _completed(_valid_document(), ["tertiary"])
+        doc["artifacts"].append(dict(doc["artifacts"][0], role="tertiary"))
+        self.assertIn("cycle-completion-incomplete", _codes(m.validate_lineage(doc)))
+
+    def test_role_lookup_reads_each_artifact_row_a_bounded_number_of_times(self):
+        # A completed cycle can hold hundreds of thousands of files; a scan of
+        # artifacts[] per revision kept such a closure busy for hours.
+        class CountingRow(dict):
+            reads = 0
+
+            def get(self, *args):
+                CountingRow.reads += 1
+                return super().get(*args)
+
+        doc = _completed(_valid_document(), ["primary"])
+        alloc = idm.IdAllocator()
+        artifact, revision = doc["artifacts"][1], doc["artifact_revisions"][1]
+        for _ in range(2000):
+            artifact_id = alloc.allocate("artifact")
+            doc["artifacts"].append(dict(artifact, artifact_id=artifact_id))
+            doc["artifact_revisions"].append(
+                dict(revision, artifact_id=artifact_id,
+                     artifact_revision_id=alloc.allocate("artifact_revision"))
+            )
+        doc["artifacts"] = [CountingRow(row) for row in doc["artifacts"]]
+        self.assertNotIn("cycle-completion-incomplete", _codes(m.validate_lineage(doc)))
+        # The per-revision scan read about two million rows here.
+        self.assertLess(CountingRow.reads, 20 * len(doc["artifacts"]))
+
+
 class TestDuplicatesAndSequence(unittest.TestCase):
     def test_rejects_duplicate_stable_id_within_manifest(self):
         doc = _valid_document()
@@ -1080,6 +1140,56 @@ class TestUpdateDocument(unittest.TestCase):
         moved["routes"][0]["terminal_marker"] = "other"
         self.assertIn("update-earlier-routes-changed",
                       _codes(m.validate_update(moved, preserved=[before], previous=before)))
+
+    def test_only_explicitly_retired_artifact_recordings_may_be_compacted(self):
+        before, after = self._pair()
+        artifact_ids = {row["artifact_id"] for row in before["artifact_revisions"]}
+        after["events"] = []
+        self.assertIn("update-earlier-events-changed",
+                      _codes(m.validate_update(after, preserved=[before], previous=before)))
+        self.assertTrue(m.validate_update(after, preserved=[before], previous=before,
+                                          retired_artifact_ids=artifact_ids).ok)
+        changed_survivor = json.loads(json.dumps(before))
+        changed_survivor["events"][1]["payload"] = {"modified": True}
+        self.assertIn("update-earlier-events-changed",
+                      _codes(m.validate_update(changed_survivor, preserved=[before], previous=before,
+                                               retired_artifact_ids={"art_" + "f" * 32})))
+        tampered = json.loads(json.dumps(before))
+        tampered["events"][1]["event_type"] = "cycle.completed"
+        self.assertTrue(
+            _codes(m.validate_update(tampered, preserved=[before], previous=before,
+                                     retired_artifact_ids={before["events"][1]["target_id"]}))
+            & {"update-earlier-events-changed", "update-event-type-not-allowed"})
+
+    def test_retired_recording_survives_evidence_closure_and_stream_prefix(self):
+        before, after = self._pair()
+        retired = before["artifact_revisions"][0]["artifact_id"]
+        first, second = before["events"][:2]
+        first.update(stream_id="strm_" + "a" * 32, stream_sequence=1, target_id=retired)
+        second.update(stream_id=first["stream_id"], stream_sequence=2,
+                      evidence_ids=[first["event_id"]])
+        after["events"] = json.loads(json.dumps(before["events"]))
+        dispensable = m.dispensable_retired_recording_ids(before["events"], {retired})
+        self.assertNotIn(first["event_id"], dispensable)
+        after["events"] = [row for row in after["events"] if row["event_id"] not in dispensable]
+        self.assertTrue(m.validate_update(after, preserved=[before], previous=before,
+                                          retired_artifact_ids={retired}).ok)
+
+    def test_compaction_keeps_prefix_needed_to_prevent_later_sequence_gap(self):
+        before, after = self._pair()
+        retired = before["artifact_revisions"][0]["artifact_id"]
+        first, second = before["events"][:2]
+        first.update(stream_id="strm_" + "b" * 32, stream_sequence=1, target_id=retired)
+        second.update(stream_id=first["stream_id"], stream_sequence=2, evidence_ids=[])
+        before["events"] = json.loads(json.dumps(before["events"]))
+        after["events"] = json.loads(json.dumps(before["events"]))
+        dispensable = m.dispensable_retired_recording_ids(before["events"], {retired})
+        self.assertNotIn(first["event_id"], dispensable)
+        self.assertTrue(m.validate_update(after, preserved=[before], previous=before,
+                                          retired_artifact_ids={retired}).ok)
+        broken = json.loads(json.dumps(after))
+        broken["events"] = [row for row in broken["events"] if row["event_id"] != first["event_id"]]
+        self.assertIn("event-sequence-gap", _codes(m.validate_update(broken, published=True)))
 
     def test_only_revision_or_later_terminal_records_may_follow(self):
         before, after = self._pair()

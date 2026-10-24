@@ -353,7 +353,7 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
             peer_steward._write_json_atomic(paths.arm, arm)
             self.watchers.append(process)
 
-    def _start_runner(self, transport_selector=None):
+    def _start_runner(self, transport_selector=None, *, reconcile_barrier=None):
         import traceback
 
         control_read, control_write = os.pipe()
@@ -374,6 +374,27 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
             try:
                 os.read(control_read, 1)
                 os.close(control_read)
+                if reconcile_barrier is not None:
+                    entered, release, snapshot_rows = reconcile_barrier
+                    original_reconcile = peer_steward._reconcile_external_obligations
+
+                    def gated_reconcile(*args, **kwargs):
+                        snapshot = kwargs.get("snapshot") or {}
+                        watch_id, _arm, _paths = self.arms[0]
+                        snapshot_arm = next((arm for selected_id, arm in
+                                             snapshot.get("watches", ())
+                                             if selected_id == watch_id), None)
+                        snapshot_rows.put({
+                            "watch_id": watch_id,
+                            "watcher": (snapshot_arm or {}).get("watcher") or {},
+                        })
+                        result = original_reconcile(*args, **kwargs)
+                        entered.set()
+                        if not release.wait(20):
+                            raise TimeoutError("runner readiness pass barrier was not released")
+                        return result
+
+                    peer_steward._reconcile_external_obligations = gated_reconcile
                 code = peer_steward.cmd_obligation_runner(SimpleNamespace(
                     lock_fd=self.runner_lock_fd, state_root=self.state_root,
                     service_current=None))
@@ -502,6 +523,158 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
             except (OSError, ValueError):
                 continue
         return records
+
+    def test_readiness_notification_uses_current_observer_after_stale_snapshot(self):
+        self._arm(0)
+        watch_id, original_arm, paths = self.arms[0]
+        original_native_wait = peer_steward._read_json(paths.observation)["native_wait"]
+        original_deadline = original_arm["deadline"]
+        store = peer_steward.peer_obligations.ObligationStore(self.state_root)
+        self._hold_runner_lock()
+
+        context = multiprocessing.get_context("fork")
+        entered = context.Event()
+        release = context.Event()
+        snapshot_rows = context.Queue()
+        self.addCleanup(release.set)
+        self._start_runner(reconcile_barrier=(entered, release, snapshot_rows))
+        self.assertTrue(entered.wait(10),
+                        "normal runner did not reach the controlled readiness boundary")
+        snapshot_row = snapshot_rows.get(timeout=2)
+        self.assertEqual(snapshot_row, {"watch_id": watch_id, "watcher": {}},
+                         "runner pass must retain its accepted-arm scheduling snapshot")
+
+        observed = {}
+
+        def current_request_is_live():
+            current_arm = peer_steward._read_json(paths.arm) or {}
+            observation = peer_steward._read_json(paths.observation) or {}
+            request = observation.get("readiness_transition")
+            watcher = current_arm.get("watcher") or {}
+            if (not isinstance(request, dict)
+                    or not request.get("token")
+                    or request.get("consumer") != watcher
+                    or request.get("identity") != peer_steward._watch_readiness_identity(
+                        current_arm, original_native_wait["agent_state"])
+                    or not shared_readiness.consumer_is_current({"consumer": watcher})):
+                return False
+            observed.update(arm=current_arm, observation=observation, request=request)
+            return True
+
+        self._wait_until(current_request_is_live,
+                         "recovered observer did not publish a current transition request",
+                         timeout=10)
+        current_watcher = observed["arm"]["watcher"]
+        self.assertNotEqual(current_watcher, snapshot_row["watcher"],
+                            "observer publication must postdate the runner snapshot")
+        self.assertTrue(peer_steward._pid_identity_ok(
+            current_watcher["pid"], current_watcher["pid_start"]))
+        self.endpoint.set_idle()
+        release.set()
+
+        token = observed["request"]["token"]
+        identity = observed["request"]["identity"]
+        response = {}
+
+        def ready_response_exists():
+            current = shared_readiness.watch_transition_result(
+                store.root, watch_id, identity, token)
+            if not current or current.get("state") != "ready":
+                return False
+            raw = peer_steward._read_json(
+                shared_readiness._watch_transition_path(store.root, watch_id)) or {}
+            response.update(result=current, raw=raw)
+            return True
+
+        self._wait_until(ready_response_exists,
+                         "normal runner did not publish the current token's ready response",
+                         timeout=10)
+        try:
+            self._wait_until(lambda: paths.receipt.exists(),
+                             "current response was published but the same detached observer was not woken",
+                             timeout=8)
+        except AssertionError as error:
+            current_arm = peer_steward._read_json(paths.arm) or {}
+            current_observation = peer_steward._read_json(paths.observation) or {}
+            observer = current_arm.get("watcher") or {}
+            proc_status = Path(f"/proc/{observer.get('pid', -1)}/status")
+            signal_fields = {}
+            try:
+                for line in proc_status.read_text(encoding="utf-8").splitlines():
+                    key, separator, value = line.partition(":")
+                    if separator and key in {"State", "SigBlk", "SigPnd", "SigCgt"}:
+                        signal_fields[key] = value.strip()
+            except OSError:
+                pass
+            try:
+                observer_wchan = Path(
+                    f"/proc/{observer.get('pid', -1)}/wchan").read_text().strip()
+            except OSError:
+                observer_wchan = None
+            lock_fd = os.open(paths.lock, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    lock_contended = False
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except BlockingIOError:
+                    lock_contended = True
+            finally:
+                os.close(lock_fd)
+            diagnostic = {
+                "watcher": observer,
+                "watcher_pid_current": peer_steward._pid_identity_ok(
+                    observer.get("pid"), observer.get("pid_start")),
+                "watcher_status": signal_fields,
+                "watcher_wchan": observer_wchan,
+                "watch_lock_contended": lock_contended,
+                "request": current_observation.get("readiness_transition"),
+                "transition_response": response["raw"],
+            }
+            raise AssertionError(f"{error}; snapshot_failure_diagnostic={diagnostic}") from error
+
+        receipt = peer_steward._read_json(paths.receipt) or {}
+        updated_arm = peer_steward._read_json(paths.arm) or {}
+        self.assertEqual(receipt.get("watch_id"), watch_id)
+        self.assertEqual(receipt.get("state"), "idle")
+        self.assertEqual(updated_arm.get("deadline"), original_deadline)
+        self.assertEqual(response["raw"].get("request_token"), token)
+        self.assertEqual(response["raw"].get("identity"), identity)
+        self.assertTrue(shared_readiness._generation_current(
+            response["raw"].get("generation")))
+        self.assertEqual(current_watcher, observed["request"]["consumer"])
+        self.assertTrue(shared_readiness.consumer_is_current(
+            {"consumer": observed["request"]["consumer"]}))
+        self.assertEqual(original_native_wait["state"], "result")
+        herdr_calls = ([json.loads(line) for line in
+                        self.herdr_log_path.read_text(encoding="utf-8").splitlines()]
+                       if self.herdr_log_path.exists() else [])
+        self.assertFalse(any(call[:2] == ["agent", "wait"] for call in herdr_calls))
+
+        notices = []
+
+        def notice_was_written():
+            notices[:] = [row for row in self._watch_notice_records()
+                          if (row.get("delivery") or {}).get("receipt") == watch_id]
+            return bool(notices)
+
+        self._wait_until(notice_was_written,
+                         "receipt was written but its one notice was not published",
+                         timeout=5)
+        self.assertEqual(len(notices), 1)
+        EVIDENCE_ROWS.append({
+            "case": "stale-runner-snapshot-wakes-current-detached-observer",
+            "watch_id": watch_id,
+            "snapshot_watcher": snapshot_row["watcher"],
+            "current_watcher": current_watcher,
+            "request_token": token,
+            "request_consumer": observed["request"]["consumer"],
+            "transition_response": response["raw"],
+            "native_wait_replayed": False,
+            "receipt_count": int(paths.receipt.exists()),
+            "notice_count": len(notices),
+            "deadline_preserved": updated_arm.get("deadline") == original_deadline,
+        })
 
     def test_runner_recovers_independent_watches_and_refreshes_without_jobs_change(self):
         previous_process = subprocess.Popen(
@@ -935,6 +1108,8 @@ def main(argv=None):
     ENDPOINT_EVIDENCE_ROWS.clear()
     SIDLESS_EVIDENCE_ROWS.clear()
     suite = unittest.TestSuite([
+        LifecycleRunnerProcessTest(
+            "test_readiness_notification_uses_current_observer_after_stale_snapshot"),
         LifecycleRunnerProcessTest(
             "test_runner_recovers_independent_watches_and_refreshes_without_jobs_change"),
         LifecycleRunnerProcessTest(

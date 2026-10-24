@@ -7520,6 +7520,67 @@ class FixtureRegistryGuardTest(unittest.TestCase):
 
 class ComposeRouteTest(TestRoute):
  """SD-135: `compose` seals a preset-free shape/subgraph through the same sealer."""
+ def test_card_lists_sealed_nodes_for_default_explicit_and_single_node_routes(self):
+  cases=[
+   dict(capability="autopilot-research",capability_mode=mode,intensity="strong",graph=None)
+   for mode in ("market","academic","technology")
+  ]+[
+   dict(capability="autopilot-research",capability_mode="market",intensity="strong",
+        graph="retrieval,synthesis,report,claim-verify"),
+   dict(capability="autopilot-lab",capability_mode="eval",intensity="strong",graph=None),
+   dict(capability="analyze-project",capability_mode="code",intensity="strong",graph=None),
+   dict(shape="direct",graph=None),
+   dict(shape="framed",graph=None),
+  ]
+  for case in cases:
+   with self.subTest(**case):
+    route=self.compose(**case)
+    before=R.canonical(route)
+    ids=[node["id"] for node in route["nodes"]]
+    if case.get("capability")=="autopilot-research" and case["graph"] is None:
+     self.assertEqual(ids,["retrieval","retrieval-alternative","synthesis","report",
+                           "claim-verify","claim-verify-alternative"])
+     self.assertFalse(route.get("composed"))
+    headline=R.compose_card(route).splitlines()[0]
+    self.assertEqual(headline.split(" · ")[1].split(" ",1)[1],"→".join(ids))
+    self.assertEqual(R.canonical(route),before)
+    R.verify_route(route,R.ROOT)
+
+ def test_graphless_research_start_passes_the_exact_sealed_graph_to_owner(self):
+  import types, work_start
+  # The compiler and emitter must observe the same runtime root with gates on.
+  with tempfile.TemporaryDirectory() as tmp, \
+       mock.patch.dict(os.environ,{"AGENT_HOME":str(R.ROOT)}):
+   route=self.compose(capability="autopilot-research",capability_mode="market",
+                      intensity="strong",graph=None,artifact_root=tmp,
+                      work_request={"text":"Verify graph preservation","owner_harness":"codex"})
+   before=R.canonical(route)
+   with contextlib.redirect_stdout(io.StringIO()),contextlib.redirect_stderr(io.StringIO()):
+    path=R._emit_compiled_route(types.SimpleNamespace(command="compose",start=True),route,tmp)
+   observed=[]
+   def launch(command,**kwargs):
+    evidence=Path(command[command.index("--route-evidence")+1])
+    observed.append(json.loads(evidence.read_text()))
+    self.assertEqual(evidence,path)
+    self.assertEqual(observed[-1],route)
+    self.assertEqual(command[command.index("--prompt-text")+1],route["work_request"]["text"])
+    return types.SimpleNamespace(returncode=0,stdout="fixture-only\n",stderr="")
+   # Exercise the production launch-command boundary, substituting only transport.
+   work_start._start(route,path,Path(tmp)/"jobs.log","owner","codex",launch)
+   self.assertEqual(len(observed),1)
+   self.assertEqual([n["id"] for n in observed[0]["nodes"]],
+                    ["retrieval","retrieval-alternative","synthesis","report",
+                     "claim-verify","claim-verify-alternative"])
+   by_id={n["id"]:n for n in observed[0]["nodes"]}
+   self.assertEqual(by_id["synthesis"]["depends_on"],["retrieval","retrieval-alternative"])
+   self.assertEqual(by_id["report"]["depends_on"],["synthesis"])
+   for name in ("claim-verify","claim-verify-alternative"):
+    self.assertEqual(by_id[name]["depends_on"],["report"])
+   self.assertEqual(observed[0]["parallel_groups"],route["parallel_groups"])
+   self.assertEqual(R.canonical(route),before)
+   self.assertEqual(json.loads(path.read_text()),route)
+   R.verify_route(observed[0],R.ROOT)
+
  def test_framed_card_marks_only_sealed_single_or_supported_pins_as_same_harness(self):
   import copy
   route = self.compose(shape="framed", graph=None, intensity=None)

@@ -37,7 +37,7 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 
 ## Portable Contract
 
-- Invocation semantics: Execute an implementation plan with progress tracking Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
+- Invocation semantics: Execute an implementation plan with progress tracking Put environments, caches, external checkouts, temporary work and training checkpoints under the supplied `runtime_dir` or an established external project location. Keep reports/configs and compact provenance in artifacts; use `runtime_dir` or system temporary storage for pytest and tool scratch data. Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
 
 
@@ -90,6 +90,22 @@ Adapters must preserve the portable invariants relevant to this capability:
 
 - resolve artifact root through `utilities/artifact-root.sh` or equivalent logic;
 - use DB memory paths, not runtime-native memory files.
+
+## Portable Procedure
+
+### Recover only edits owned by the failed work
+
+Recovery is limited to edits that the failed step, phase, or attempt actually made and that fall within its assigned source scope. A permitted path, safety commit, changed-path list, or `launch_head` comparison helps identify candidates but does not make the file or its full contents task-owned. Include uncommitted edits when evaluating recovery; do not infer ownership from the Git index or commit boundary.
+
+Use the existing old/new step logs, their edit order, and recorded file location or surrounding context to compare each edit with the current contents. Reverse only edits whose ownership and location are clear, in reverse edit order. A matching string alone is not enough when it is repeated, context has changed, or another edit overlaps it. If an edit is ambiguous or missing from the log, preserve it. Also preserve an earlier edit when reversing it would depend on an ambiguous later edit.
+
+Preserve unrelated edits in the same file and in other files, changes from earlier successful steps, staged user content, and untracked files. Do not use a whole-tree or whole-file restore, checkout, reset, stash, clean, or commit-level revert as a fallback. Do not change the index to make it match the worktree; if staged task edits may remain, say recovery is partial and hand off that state.
+
+For files created, deleted, or renamed by the task, reverse the operation only when the current state of every affected path and any surviving contents are clearly attributable to the task. Do not delete a task-created file after unrelated content was added, restore over a recreated path, or replace an untracked rename destination.
+
+When only part of the work can be reversed, or ownership is unclear, preserve the uncertain contents. Use the existing dev log, checklist, and failure summary to state what was reversed, what remains, why it could not be distinguished, the observed index/worktree state, and which dependent steps were skipped. Do not claim complete recovery. Resume by comparing the current contents with those records so an already-reversed edit is not applied again. Continue only with steps independent of the remaining changes; otherwise stop through the existing failure or partial-work handoff.
+
+Apply this procedure to phase recovery, total failure, cascading errors, failed debug verification, and an exhausted dev test retry. A parallel sub-session slice retains its no-Git-write and no-rollback boundary and hands recovery to its owner.
 
 
 ## Workflow Evidence

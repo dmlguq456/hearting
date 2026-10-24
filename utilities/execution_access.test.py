@@ -505,10 +505,11 @@ class ExecutionAccessTest(unittest.TestCase):
                 "worktree": str(self.worktree),
                 "artifact_root": str(self.artifact),
                 "report_bundle_root": None,
+                "runtime_dir": str(self.worktree.parent / "runtime"),
             },
         )()
         self.assertEqual(
-            (self.artifact, self.worktree), adapter_default_roots(args)
+            (self.artifact, self.worktree.parent / "runtime", self.worktree), adapter_default_roots(args)
         )
 
     def test_parent_monotonicity_is_fail_closed(self) -> None:

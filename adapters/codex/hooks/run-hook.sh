@@ -4,7 +4,7 @@ set -eu
 
 script="${1:-}"
 case "$script" in
-  sessionstart-lifecycle.py|sessionend-lifecycle.py|stop-lifecycle.py|userprompt-lifecycle.py|permissionrequest-lifecycle.py|posttooluse-interaction-clear.py|posttooluse-design-check.py|posttooluse-read-marker.py|posttooluse-frame-answer.py|worker-state-compact.py|core-write-guard.py|route-presence-gate.py|start-receipt-context.py)
+  sessionstart-lifecycle.py|sessionend-lifecycle.py|stop-lifecycle.py|userprompt-lifecycle.py|permissionrequest-lifecycle.py|posttooluse-interaction-clear.py|posttooluse-design-check.py|posttooluse-read-marker.py|posttooluse-frame-answer.py|posttooluse-spec-sync.py|worker-state-compact.py|core-write-guard.py|route-presence-gate.py|start-receipt-context.py)
     ;;
   *)
     printf '%s\n' "unsupported Codex hook bridge: ${script:-<empty>}" >&2

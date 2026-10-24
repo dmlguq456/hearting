@@ -63,7 +63,15 @@ fetch_hash() {
   if command -v pandoc >/dev/null 2>&1; then
     normalized=$(printf '%s' "$body" | pandoc -f html -t plain 2>/dev/null | sed '/^[[:space:]]*$/d')
   else
-    normalized=$(printf '%s' "$body" | sed 's/<[^>]*>/ /g' | tr -s '[:space:]' ' ')
+    # Without pandoc, drop <script> and <style> blocks before the tags: their text is
+    # exactly that noise. Each closing tag becomes one marker byte so a block ends at
+    # its own closing tag, never at a later one.
+    mark=$(printf '\001')
+    normalized=$(printf '%s' "$body" | tr '\n' ' ' \
+      | sed -E -e "s#</[sS][cC][rR][iI][pP][tT]([[:space:]/][^>]*)?>#$mark#g" -e "s#<[sS][cC][rR][iI][pP][tT][[:space:]/>][^$mark]*$mark# #g" \
+               -e "s#</[sS][tT][yY][lL][eE]([[:space:]/][^>]*)?>#$mark#g" -e "s#<[sS][tT][yY][lL][eE][[:space:]/>][^$mark]*$mark# #g" \
+            -e 's/<[^>]*>/ /g' \
+      | tr -d "$mark" | tr -s '[:space:]' ' ')
   fi
   fp=$(printf '%s' "$normalized" | hash_text)
   bytes=$(printf '%s' "$normalized" | wc -c | tr -d ' ')

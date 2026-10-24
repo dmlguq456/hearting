@@ -305,6 +305,11 @@ files, schedule GPU work, or dispatch remote agents. A template that still has
 no hosts is reported as `template` by `compute-hosts`, `harness verify`, and
 the Fleet COMPUTE RESOURCES panel, never as an error.
 
+For a non-self host, `compute-hosts run` places a validated managed `AGENT_HOME`
+code copy under the shared `run_root` for the payload; it does not install into
+the remote home or change the installer's `current`/activation. Self hosts keep
+their pinned release path. Unmanaged checkouts are forwarded as-is.
+
 ## User-owned config registry — `harness config status`
 
 Every user-owned configuration file the harness reads is registered in

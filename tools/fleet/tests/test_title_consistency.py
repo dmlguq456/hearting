@@ -399,9 +399,10 @@ class TitleConsistencyTest(_ConfigHomeMixin, unittest.TestCase):
         before = db.read_bytes()
         with mock.patch.object(opencode, "_db", return_value=str(db)), \
              mock.patch.object(opencode.session_registry, "read", return_value=None), \
-             mock.patch.object(opencode, "session_of_process", return_value=("ses_title", "opencode-tui-selection")), \
-             mock.patch.object(opencode, "_process_started_ms", return_value=None):
-            sess = Session(harness="opencode", pid=99999999, cwd="/fixture")
+             mock.patch.object(opencode, "session_of_process",
+                               return_value=("ses_title", "opencode-tui-selection")), \
+             mock.patch.object(opencode, "_proc_start_ticks", return_value="55"):
+            sess = Session(harness="opencode", pid=99999999, proc_start="55", cwd="/fixture")
             opencode.enrich(sess)
             self.assertIsNone(sess.title)
             titles.write("ses_title", "세션 제목 일관성", harness="opencode", now=time.time() - 90000)

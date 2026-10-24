@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -296,8 +297,11 @@ class CollectorSemanticsTest(unittest.TestCase):
                 os.environ["OPENCODE_DB"] = db
                 os.environ["OPENCODE_MODELS"] = models
                 opencode._REG.update(ts=0.0, map=None)
-                sess = Session(harness="opencode", pid=1, cwd="/repo")
-                opencode.enrich(sess)
+                sess = Session(harness="opencode", pid=1, proc_start="1", cwd="/repo")
+                with mock.patch.object(opencode, "session_of_process",
+                                       return_value=("oc-1", "opencode-tui-selection")), \
+                        mock.patch.object(opencode, "_proc_start_ticks", return_value="1"):
+                    opencode.enrich(sess)
             finally:
                 if old_db is None:
                     os.environ.pop("OPENCODE_DB", None)
@@ -337,8 +341,11 @@ class CollectorSemanticsTest(unittest.TestCase):
                 os.environ["OPENCODE_DB"] = db
                 os.environ["OPENCODE_MODELS"] = models
                 opencode._REG.update(ts=0.0, map=None, by_provider=None)
-                sess = Session(harness="opencode", pid=1, cwd="/repo")
-                opencode.enrich(sess)
+                sess = Session(harness="opencode", pid=1, proc_start="1", cwd="/repo")
+                with mock.patch.object(opencode, "session_of_process",
+                                       return_value=("oc-zero", "opencode-tui-selection")), \
+                        mock.patch.object(opencode, "_proc_start_ticks", return_value="1"):
+                    opencode.enrich(sess)
             finally:
                 if old_db is None:
                     os.environ.pop("OPENCODE_DB", None)

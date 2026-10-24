@@ -291,14 +291,27 @@ collection with any one of three independent markers: a regular, no-follow
 contents are exactly `*`, `*\n`, or `*\r\n`. Marker checks apply only to the
 exact cycle payload roots `artifacts/` and `_internal/` and directories below
 them; a marker in a repository, artifact-root, or cycle-root ancestor has no
-effect. The marked directory is pruned before descending into it, reading its
-payload, or validating descendant locators. Marker symlinks and special files
-are not markers, and their targets are not followed. A marked tree changes only
-the current candidate set: existing manifest rows remain unchanged under
-§45 D-123, actual file removal continues to follow D-124, and completion proof
-continues to describe the recorded close under D-127. Candidate bundle search
-uses this rule; validation of already-published bundle descriptors retains its
-recorded coverage behavior.
+effect. Prune marked and structurally recognized runtime trees before descent
+on first collection, checkpoint and refresh, payload reads, or descendant
+locator validation. Marker symlinks and special files
+are not markers, and their targets are not followed. Below (never at) the exact
+payload roots, the collector also recognizes nested Git checkouts (`.git`
+directory or bounded regular `gitdir:` file), conda environments
+(`conda-meta/`), exact `node_modules`, `site-packages`, and `dist-packages`
+directories, structurally complete Hugging Face `models--*`/`datasets--*` hub
+repositories, pip HTTP caches, and torch hub checkpoint caches. These checks
+use no-follow structure and bounded observations; similarly named ordinary
+result directories remain output. On the next normal refresh, current
+artifact/revision rows beneath positively recognized runtime
+roots and their dispensable artifact-recording events leave the current
+document; physical files and all previously published document snapshots
+remain untouched. Retained events, terminal proof and identity remain
+unchanged. Record one history line per excluded root, not one per retired file;
+full excluded-root details belong to the cycle record. This exception applies
+to self-exclusion markers and the structural runtime signals described here;
+historical rows remain unchanged for unrelated inclusion changes. Candidate
+bundle search uses this rule; validation of already-published bundle
+descriptors retains its recorded coverage behavior.
 
 **Cycle payload buckets.** The top-level table above closes only the names
 directly under the artifact root. Inside a cycle, the first segment below

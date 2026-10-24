@@ -35,7 +35,8 @@ This is a process log and artifact index, not change analysis; code-report owns 
 ## Safety
 
 - A catastrophic execution failure, `status: failed`, stops immediately after writing the summary.
-- Run testing on every path.
+- Record in the existing Process Log or Notes which task-owned edits were recovered, which remain, why any edit was ambiguous, the observed index/worktree state, and any dependent checks skipped. A failed status does not mean the source was fully restored.
+- Run tests only when they are safe and independent of unresolved changes. If a test depends on ambiguous or remaining edits, skip it and record why.
 - Stage-local checks stay small, independent QA runs only when selected by the graph, and final verification remains concrete.
 - In debug mode, fix only the bug; do not refactor adjacent code or change behavior that already worked.
 - Ask the user only when multiple root causes remain plausible.

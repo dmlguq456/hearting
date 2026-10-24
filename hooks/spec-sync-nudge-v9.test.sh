@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+unset AGENT_ARTIFACT_ROOT AGENT_ARTIFACT_CYCLE_DIR
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/.agent_reports/spec"

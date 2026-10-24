@@ -553,6 +553,19 @@ it does not imply a capability folder. Source scopes resolve in the route
 worktree. Explicit CLI paths retain their argument meaning, and route-free
 invocations keep the standalone defaults below.
 
+Execution environments, package/model caches, external checkouts and training
+checkpoints belong in the project runtime home, the sibling
+`.agent_runtime/` of the resolved artifact root, or an explicitly selected
+dedicated absolute runtime directory outside that root. Resolving through
+`artifact-root.sh` makes linked worktrees share the primary checkout's runtime
+home. Launch preparation creates this location lazily with its own `.gitignore`
+containing `*`; if the optional location cannot safely be prepared, the launch
+omits its runtime hint and permission and continues. This is not a write gate.
+Keep small reports, configs and provenance in artifacts; checkpoint records
+may point to runtime files with path, SHA256 and byte size. Use job-scoped cache
+variables when isolation is needed. Dataset bulk copies should generally be
+referenced by path and hash, without automatic classification or copying.
+
 ### §5.2. Tier Definitions
 
 | Tier | Meaning | Location |

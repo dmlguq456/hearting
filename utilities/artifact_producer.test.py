@@ -1207,7 +1207,10 @@ class FinalizeTest(ProducerTestBase):
                                          and P._outside_inclusion_rule(effective)):
                     # §45 D-123: a link or a hidden/temporary path is left out, not refused.
                     self.assertEqual((violations, collected), ([], []), relative)
-                    self.assertIn(effective, links if kind == "symlink" else excluded)
+                    candidates = links if kind == "symlink" else excluded
+                    self.assertTrue(any(effective == item or item.endswith("/")
+                                        and effective.startswith(item) for item in candidates),
+                                    (effective, candidates))
                     continue
                 self.assertEqual(not violations, allowed, (relative, violations))
                 if allowed:
@@ -1669,6 +1672,35 @@ class BrowserProfileCollectionTest(ProducerTestBase):
 
 
 class SelfExclusionPayloadTest(ProducerTestBase):
+    def test_structural_runtime_signals_require_payload_binding_and_exact_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "artifacts"
+            root.mkdir()
+            checkout = root / "source-tree"
+            (checkout / ".git").mkdir(parents=True)
+            self.assertFalse(artifact_payload.self_excluded_directory(checkout))
+            self.assertTrue(artifact_payload.self_excluded_directory(checkout, payload_root=root))
+            env = root / "conda-env"
+            (env / "conda-meta").mkdir(parents=True)
+            self.assertTrue(artifact_payload.self_excluded_directory(env, payload_root=root))
+            packages = root / "node_modules"
+            packages.mkdir()
+            self.assertTrue(artifact_payload.self_excluded_directory(packages, payload_root=root))
+            hf = root / "models--org--model"
+            (hf / "blobs").mkdir(parents=True)
+            (hf / "snapshots").mkdir()
+            self.assertTrue(artifact_payload.self_excluded_directory(hf, payload_root=root))
+            pip = root / "pip"
+            (pip / "http-v2").mkdir(parents=True)
+            (pip / "selfcheck").mkdir()
+            self.assertTrue(artifact_payload.self_excluded_directory(pip, payload_root=root))
+            torch = root / "torch" / "hub"
+            (torch / "checkpoints").mkdir(parents=True)
+            self.assertTrue(artifact_payload.self_excluded_directory(torch, payload_root=root))
+            ordinary = root / "models"
+            ordinary.mkdir()
+            self.assertFalse(artifact_payload.self_excluded_directory(ordinary, payload_root=root))
+
     def test_marker_predicates_are_independent_exact_and_no_follow(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp) / "payload"
@@ -1795,6 +1827,83 @@ class SelfExclusionPayloadTest(ProducerTestBase):
         self.assertNotIn("artifacts/cache/bad|locator.txt", paths)
         self.assertIn("artifacts/cache/", sealed["excluded_hidden"])
         self.assertEqual(marker.read_bytes(), marker_bytes)
+
+    def test_first_finalize_never_descends_into_nested_checkout_and_keeps_weight_pointers(self):
+        self.activate()
+        route, route_file, result = self.begin()
+        cycle = Path(result["cycle_dir"])
+        payload = cycle / "artifacts/dev_logs/runtime"
+        checkout = payload / "speech-checkout"
+        (checkout / ".git/objects/pack").mkdir(parents=True)
+        (checkout / ".git/objects/pack/huge.pack").write_bytes(b"must not scan")
+        (checkout / "bad|locator.py").write_bytes(b"must not validate or hash")
+        uv_venv = payload / "uv-venv"
+        uv_venv.mkdir(parents=True)
+        (uv_venv / "pyvenv.cfg").write_text("home = /python\n")
+        uv_cache = payload / "uv-cache"
+        uv_cache.mkdir()
+        (uv_cache / "CACHEDIR.TAG").write_bytes(artifact_payload.CACHEDIR_SIGNATURE)
+        conda = payload / "conda-env"
+        (conda / "conda-meta").mkdir(parents=True)
+        packages = payload / "node_modules"
+        packages.mkdir()
+        hf = payload / "models--fixture--large"
+        (hf / "blobs").mkdir(parents=True)
+        (hf / "snapshots").mkdir()
+        pip = payload / "pip"
+        (pip / "http-v2").mkdir(parents=True)
+        (pip / "selfcheck").mkdir()
+        torch = payload / "torch" / "hub"
+        (torch / "checkpoints").mkdir(parents=True)
+        excluded_roots = [checkout, uv_venv, uv_cache, conda, packages, hf, pip, torch]
+        for excluded_root in excluded_roots:
+            (excluded_root / "bad|locator.py").write_bytes(b"must not enter or validate")
+        weights = {"dev_logs/model.nemo": b"nemo-weight", "dev_logs/model.gguf": b"gguf-weight"}
+        for rel, content in weights.items():
+            self.write_output(result, rel, content)
+        self.write_output(result, "reports/summary.md", b"keep report")
+        self.close(route, route_file)
+        real_scandir = os.scandir
+        visited = []
+
+        def track(path):
+            text = os.fspath(path)
+            visited.append(text)
+            return real_scandir(path)
+
+        with mock.patch.object(P.os, "scandir", side_effect=track):
+            finalized = P.finalize(self.root, cycle_id=result["cycle_id"])
+        self.assertEqual(finalized["status"], "sealed")
+        self.assertFalse(any(any(Path(path) == excluded_root or excluded_root in Path(path).parents
+                                 for excluded_root in excluded_roots) for path in visited))
+        document = json.loads((cycle / "manifest.json").read_text(encoding="utf-8"))
+        paths = {row["locator"]["path"]: row for row in document["artifact_revisions"]}
+        for excluded_root in excluded_roots:
+            rel_root = excluded_root.relative_to(cycle).as_posix()
+            self.assertFalse(any(path == rel_root or path.startswith(rel_root + "/") for path in paths))
+        for rel, content in weights.items():
+            row = paths["artifacts/" + rel]
+            self.assertEqual((row["content_digest"], row["byte_size"]),
+                             ("sha256:" + hashlib.sha256(content).hexdigest(), len(content)))
+        self.assertIn("artifacts/reports/summary.md", paths)
+        expected_roots = {root.relative_to(cycle).as_posix() for root in excluded_roots}
+        self.assertEqual(set(recorded for recorded in finalized["excluded_hidden"]
+                             if recorded.endswith("/")), {root + "/" for root in expected_roots})
+        record = P.read_cycle_record(self.root, result["cycle_id"])
+        self.assertEqual(set(record["excluded_roots"]), expected_roots)
+        history_root = self.root / P.PRODUCER_REL / "history"
+        events = []
+        for history_path in history_root.glob("*/*.jsonl"):
+            for raw in history_path.read_text(encoding="utf-8").splitlines():
+                event = json.loads(raw)
+                if event.get("target", {}).get("id") == result["cycle_id"] and event.get("field") == "excluded_payload":
+                    events.append(event)
+        self.assertEqual(len(events), len(expected_roots))
+        self.assertEqual({root for event in events for root in expected_roots
+                          if event["target"]["path"].endswith("/" + root)}, expected_roots)
+        for event in events:
+            self.assertEqual(event["before"]["value"], {"kind": "runtime"})
+            self.assertEqual(event["after"]["value"], {"kind": "runtime"})
         self.assertEqual(P.artifact_lifecycle.verify_artifact_revisions(document, cycle), ())
 
     def test_marker_below_raw_results_prevents_bundle_bypass_but_keeps_sibling_leaf(self):
@@ -1827,9 +1936,9 @@ class SelfExclusionPayloadTest(ProducerTestBase):
         R.close_route(route, route_file, commit="a" * 40, summary="abandoned fixture")
         original = artifact_payload.observe_directory
 
-        def guarded_observe(path):
+        def guarded_observe(path, **kwargs):
             P.dispatch_lock_order.assert_not_held("producer-admission", "marker-predicate-test")
-            return original(path)
+            return original(path, **kwargs)
 
         with mock.patch.object(artifact_payload, "observe_directory", guarded_observe):
             result_after = P.finalize(

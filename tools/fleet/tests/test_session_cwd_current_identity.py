@@ -265,14 +265,16 @@ class SessionDirectoryTest(unittest.TestCase):
         con.commit()
         con.close()
         with mock.patch.object(opencode, "_db", return_value=str(db)), \
-                mock.patch.object(opencode, "session_of_process", return_value=("ses_selected", "opencode-tui-selection")):
-            s = Session(harness="opencode", pid=994242, cwd="/home/user")
+                mock.patch.object(opencode, "session_of_process", return_value=("ses_selected", "opencode-tui-selection")), \
+                mock.patch.object(opencode, "_proc_start_ticks", return_value="777"):
+            s = Session(harness="opencode", pid=994242, proc_start="777", cwd="/home/user")
             opencode.enrich(s)
             session_cwd.project([s])
             self.assertEqual((s.session_id, s.cwd), ("ses_selected", "/repo"))
         with mock.patch.object(opencode, "_db", return_value=str(db)), \
-                mock.patch.object(opencode, "session_of_process", return_value=("ses_selected", "opencode-argv")):
-            s = Session(harness="opencode", pid=994242, cwd="/home/user")
+                mock.patch.object(opencode, "session_of_process", return_value=("ses_selected", "opencode-argv")), \
+                mock.patch.object(opencode, "_proc_start_ticks", return_value="777"):
+            s = Session(harness="opencode", pid=994242, proc_start="777", cwd="/home/user")
             opencode.enrich(s)
             session_cwd.project([s])
             self.assertEqual(s.cwd, "/home/user")

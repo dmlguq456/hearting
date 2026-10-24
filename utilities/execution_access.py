@@ -2035,4 +2035,7 @@ def adapter_default_roots(args: object, *roots: Iterable[str | Path]) -> tuple[P
     report = getattr(args, "report_bundle_root", None)
     if report:
         values.append(Path(report).resolve(strict=False))
+    runtime = getattr(args, "runtime_dir", None)
+    if runtime:
+        values.append(Path(runtime).resolve(strict=False))
     return tuple(_unique_paths(values))

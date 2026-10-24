@@ -12,15 +12,14 @@ This is adapter-owned output generated from `capabilities/code-execute.md`, not 
    `tool_contract_check`, and obey `runtime_surface` / `fallback` before
    claiming full support. For `unsupported`, stop or use the reported
    `fallback`.
-3. Before edits, run `adapters/opencode/bin/preflight.sh write <file> [session-id]`.
-4. Before spec-changing work, run
+3. Before spec-changing work, run
    `adapters/opencode/bin/preflight.sh capability code-execute [cwd] [session-id]`.
-5. If the command receives arguments, map them to the portable argument shape:
+4. If the command receives arguments, map them to the portable argument shape:
    `<plan name or path>`.
 
 Portable contract excerpt:
 
-- Invocation semantics: Execute an implementation plan with progress tracking Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
+- Invocation semantics: Execute an implementation plan with progress tracking Put environments, caches, external checkouts, temporary work and training checkpoints under the supplied `runtime_dir` or an established external project location. Keep reports/configs and compact provenance in artifacts; use `runtime_dir` or system temporary storage for pytest and tool scratch data. Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
 
 User arguments from OpenCode: `$ARGUMENTS`

@@ -279,6 +279,225 @@ class ExchangeScheduleTest(unittest.TestCase):
         self.assertLessEqual(runs, 2, "three quick writes share one run plus one follow-up")
         self.assertGreaterEqual(runs, 1)
 
+    def test_detached_worker_preserves_each_coalesced_callers_project_identity(self):
+        old_a, old_b = self.root / "old-a", self.root / "old-b"
+        current_a, current_b = self.project, self.root / "current-b"
+
+        def init_repo(path, remote_name):
+            path.mkdir(parents=True, exist_ok=True)
+            git(path, "init")
+            git(path, "remote", "add", "origin",
+                f"https://github.com/example/{remote_name}.git")
+
+        init_repo(old_a, "old-a")
+        init_repo(old_b, "old-b")
+        git(current_a, "remote", "set-url", "origin",
+            "https://github.com/example/current-a.git")
+        init_repo(current_b, "current-b")
+
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        repositories = {
+            "repos/example/old-a": {"id": 101, "full_name": "example/current-a"},
+            "repos/example/current-a": {"id": 101, "full_name": "example/current-a"},
+            "repos/example/old-b": {"id": 202, "full_name": "example/current-b"},
+            "repos/example/current-b": {"id": 202, "full_name": "example/current-b"},
+        }
+        (bin_dir / "repos.json").write_text(json.dumps(repositories))
+        program = ("#!" + sys.executable + "\nimport json,sys,time\nfrom pathlib import Path\n"
+                   "time.sleep(1.5)\n"
+                   "data=json.loads(Path(__file__).with_name('repos.json').read_text())\n"
+                   "value=data.get(sys.argv[2])\n"
+                   "if value is None: sys.exit(1)\nprint(json.dumps(value))\n")
+        (bin_dir / "gh").write_text(program)
+        (bin_dir / "gh").chmod(0o700)
+        extra = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+                 "MEM_EXCHANGE_WINDOW_SECONDS": "1"}
+
+        def run_at(path, *args, auto="0", remote=False):
+            return subprocess.run(
+                [sys.executable, str(MEM), *args], cwd=path,
+                env=self._environment("a", remote=remote, auto=auto, extra=extra), text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+
+        old_a_row = run_at(old_a, "add", "durable", "decision", "caller a old record",
+                           "--headline", "caller a old")
+        self.assertEqual(old_a_row.returncode, 0, old_a_row.stderr + old_a_row.stdout)
+        old_a_id = self._written_id(old_a_row)
+        old_b_row = run_at(old_b, "add", "durable", "decision", "caller b old record",
+                           "--headline", "caller b old")
+        self.assertEqual(old_b_row.returncode, 0, old_b_row.stderr + old_b_row.stdout)
+        old_b_id = self._written_id(old_b_row)
+
+        caller_a = run_at(current_a, "add", "durable", "decision", "caller a trigger",
+                          "--headline", "caller a trigger", auto="on", remote=True)
+        self.assertEqual(caller_a.returncode, 0, caller_a.stderr + caller_a.stdout)
+        key_a = "git:github.com/example/current-a"
+        self.assertIn(key_a, self._state("a").get("repair_intents", {}))
+        deadline = time.monotonic() + 10
+        while self._state("a").get("run_count", 0) < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertGreaterEqual(self._state("a").get("run_count", 0), 1,
+                                "the first caller's pass did not start")
+        caller_b = run_at(current_b, "add", "durable", "decision", "caller b trigger",
+                          "--headline", "caller b trigger", auto="on", remote=True)
+        self.assertEqual(caller_b.returncode, 0, caller_b.stderr + caller_b.stdout)
+        key_b = "git:github.com/example/current-b"
+        pending_intents = self._state("a").get("repair_intents", {})
+        self.assertIn(key_a, pending_intents)
+        self.assertIn(key_b, pending_intents)
+
+        self._wait_idle("a")
+        connection = sqlite3.connect(self.stores["a"] / "memory.db")
+        try:
+            rows = dict(connection.execute("SELECT id,cwd_origin FROM records"))
+        finally:
+            connection.close()
+        self.assertEqual(rows[old_a_id], key_a)
+        self.assertEqual(rows[old_b_id], key_b)
+        self.assertEqual(self._state("a").get("repair_intents"), {})
+        self.assertEqual(self._state("a")["run_count"], 2)
+        self.assertEqual(self._state("a")["done_gen"], self._state("a")["dirty_gen"])
+        self.assertIn("protocol/v2/ops/", "\n".join(self._remote_ops()))
+        self.assertEqual(set(self._outbox_states("a")), {"confirmed"})
+
+    def test_busy_eligible_read_keeps_its_caller_identity_for_a_later_write(self):
+        import fcntl
+
+        old_project = self.root / "old-project"
+        old_project.mkdir()
+        git(old_project, "init")
+        git(old_project, "remote", "add", "origin",
+            "https://github.com/example/old-read-project.git")
+        git(self.project, "remote", "set-url", "origin",
+            "https://github.com/example/current-read-project.git")
+        bin_dir = self.root / "read-bin"
+        bin_dir.mkdir()
+        repository_file = bin_dir / "repos.json"
+        repository_file.write_text("{}")
+        program = ("#!" + sys.executable + "\nimport json,sys\nfrom pathlib import Path\n"
+                   "data=json.loads(Path(__file__).with_name('repos.json').read_text())\n"
+                   "value=data.get(sys.argv[2])\n"
+                   "if value is None: sys.exit(1)\nprint(json.dumps(value))\n")
+        (bin_dir / "gh").write_text(program)
+        (bin_dir / "gh").chmod(0o700)
+        extra = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+
+        def run_at(path, *args, remote=False, auto="0"):
+            return subprocess.run(
+                [sys.executable, str(MEM), *args], cwd=path,
+                env=self._environment("a", remote=remote, auto=auto, extra=extra),
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+
+        old = run_at(old_project, "add", "durable", "decision", "busy read repair record",
+                     "--headline", "busy read repair")
+        self.assertEqual(old.returncode, 0, old.stderr + old.stdout)
+        old_id = self._written_id(old)
+        self._set_state("a", last_success_receive=0, last_receive_attempt=0)
+        run_lock = self.stores["a"] / ".exchange-run.lock"
+        fd = os.open(run_lock, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            read = run_at(self.project, "candidates", "repair", remote=True, auto="on")
+            self.assertEqual(read.returncode, 0, read.stderr + read.stdout)
+            key = "git:github.com/example/current-read-project"
+            self.assertIn(key, self._state("a").get("repair_intents", {}))
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+        write = run_at(self.project, "add", "durable", "decision", "release busy read repair",
+                       "--headline", "release repair", auto="on")
+        self.assertEqual(write.returncode, 0, write.stderr + write.stdout)
+        self._wait_idle("a")
+        connection = sqlite3.connect(self.stores["a"] / "memory.db")
+        try:
+            rows = dict(connection.execute("SELECT id,cwd_origin FROM records"))
+        finally:
+            connection.close()
+        self.assertEqual(rows[old_id], "git:github.com/example/old-read-project")
+        self.assertIn(key, self._state("a").get("repair_intents", {}))
+
+        repositories = {
+            "repos/example/old-read-project": {
+                "id": 303, "full_name": "example/current-read-project"},
+            "repos/example/current-read-project": {
+                "id": 303, "full_name": "example/current-read-project"},
+        }
+        repository_file.write_text(json.dumps(repositories))
+        retry = run_at(self.project, "add", "durable", "decision",
+                       "retry repository evidence", "--headline", "evidence retry", auto="on")
+        self.assertEqual(retry.returncode, 0, retry.stderr + retry.stdout)
+        self._wait_idle("a")
+        connection = sqlite3.connect(self.stores["a"] / "memory.db")
+        try:
+            rows = dict(connection.execute("SELECT id,cwd_origin FROM records"))
+        finally:
+            connection.close()
+        self.assertEqual(rows[old_id], key)
+        self.assertEqual(self._state("a").get("repair_intents"), {})
+
+    def test_exchange_unavailable_fallback_uses_the_caller_identity_for_local_repair(self):
+        old_project = self.root / "offline-old-project"
+        old_project.mkdir()
+        git(old_project, "init")
+        git(old_project, "remote", "add", "origin",
+            "https://github.com/example/offline-old.git")
+        git(self.project, "remote", "set-url", "origin",
+            "https://github.com/example/offline-current.git")
+        bin_dir = self.root / "offline-bin"
+        bin_dir.mkdir()
+        repositories = {
+            "repos/example/offline-old": {
+                "id": 404, "full_name": "example/offline-current"},
+            "repos/example/offline-current": {
+                "id": 404, "full_name": "example/offline-current"},
+        }
+        (bin_dir / "repos.json").write_text(json.dumps(repositories))
+        program = ("#!" + sys.executable + "\nimport json,sys\nfrom pathlib import Path\n"
+                   "data=json.loads(Path(__file__).with_name('repos.json').read_text())\n"
+                   "value=data.get(sys.argv[2])\n"
+                   "if value is None: sys.exit(1)\nprint(json.dumps(value))\n")
+        (bin_dir / "gh").write_text(program)
+        (bin_dir / "gh").chmod(0o700)
+        extra = {"PATH": str(bin_dir) + os.pathsep + os.environ.get("PATH", "")}
+        old = subprocess.run(
+            [sys.executable, str(MEM), "add", "durable", "decision",
+             "offline fallback old memory", "--headline", "offline fallback"],
+            cwd=old_project,
+            env=self._environment("a", auto="0", extra=extra), text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(old.returncode, 0, old.stderr + old.stdout)
+        old_id = self._written_id(old)
+
+        script = f"""
+import sys
+sys.path.insert(0, {str(Path(MEM).parent)!r})
+import mem
+def offline(self):
+    raise mem.git_exchange_v2.ExchangeUnavailable("injected unavailable remote")
+mem.git_exchange_v2.GitExchange.fetch_validate = offline
+mem._schedule_exchange("write")
+"""
+        result = subprocess.run(
+            [sys.executable, "-c", script], cwd=self.project,
+            env=self._environment("a", remote=True, auto="inline", extra=extra),
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        status = json.loads(result.stdout.splitlines()[-1])
+        self.assertEqual(status["status"], "queued-offline")
+        self.assertEqual(status["repository_rekeys"][0]["migrations"][0]["state"], "applied")
+        connection = sqlite3.connect(self.stores["a"] / "memory.db")
+        try:
+            row = connection.execute(
+                "SELECT cwd_origin FROM records WHERE id=?", (old_id,)).fetchone()
+            outbox = connection.execute("SELECT state FROM sync_outbox").fetchall()
+        finally:
+            connection.close()
+        self.assertEqual(row[0], "git:github.com/example/offline-current")
+        self.assertTrue(outbox)
+        self.assertNotEqual({state for (state,) in outbox}, {"confirmed"})
+
     def test_inline_mode_runs_the_same_pass_without_a_detached_process(self):
         result = self._mem("a", "add", "durable", "lesson", "inline exchange",
                            "--headline", "inline", remote=True, auto="inline")

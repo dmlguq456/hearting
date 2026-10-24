@@ -20,7 +20,6 @@ inventory. It is adapter-owned output, not a legacy runtime mode copy.
 ## Use
 
 - Use Codex file, terminal, approval, sandbox, hook, and skill surfaces.
-- Run `adapters/codex/bin/preflight.sh write <file> [session-id]` before edits.
 - For `tool-contract` modes, run the named contract check before claiming the tool-backed result.
 - If a required local provider or executable is unavailable, report the unavailable contract instead of silently downgrading.
 - Treat `adapters/codex/modes/qa/plan-review.md` as the adapter-owned mode guide for this runtime.
@@ -83,6 +82,11 @@ smaller budget.
      in the code stage without saying why, or repeats evidence a later stage or
      leg already produces. Compare total verification time with the attempt
      budget shown in the prompt.
+   - **Runtime placement:** Check that environments, caches, large downloads,
+     external checkouts, temporary files and training checkpoints use the
+     supplied `runtime_dir` or an established external location, while reports
+     and compact provenance stay in artifacts. Dataset path/hash references are
+     guidance; this check adds no required field or gate.
    - **Judge substance:** A missing estimate or table alone is not a finding.
    - Are source ownership and stage write boundaries respected?
 4. If the working tree (or an ancestor) contains

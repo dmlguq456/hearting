@@ -222,6 +222,40 @@ class ExecutionAccessBuilderTest(unittest.TestCase):
         self.assertIn(f"--writable-root {self.scoped}", command)
         self.assertNotIn("--add-dir", command)
 
+    def test_runtime_directory_appears_in_each_adapter_write_projection(self) -> None:
+        runtime = self.artifact.parent / ".agent_runtime"
+        runtime.mkdir()
+        prompt, log = self.root / "prompt.txt", self.root / "launch.log"
+        for delivery in ("one-shot", "session-resume-supervised"):
+            args = self.claude_args(delivery)
+            args.runtime_dir = str(runtime)
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                command = shlex.split(self.claude.shell_command(args, prompt, log))
+            self.assertIn(("--add-dir", str(runtime)), list(zip(command, command[1:])))
+        for delivery, transport, flag in (
+            ("one-shot", "raw-exec", "--add-dir"),
+            ("app-server-supervised", "raw-exec", "--writable-root"),
+            ("one-shot", "app-server-one-turn", "--writable-root"),
+        ):
+            args = self.codex_args(delivery)
+            args.runtime_dir = str(runtime)
+            args.resolved_stage_telemetry_transport = transport
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                command = shlex.split(self.codex.shell_command(args, prompt, log))
+            self.assertIn((flag, str(runtime)), list(zip(command, command[1:])))
+        with mock.patch.dict(os.environ, {"OPENCODE_CONFIG_CONTENT": "{}"}, clear=True):
+            config_builds = (
+                self.opencode.scoped_external_directory_config(
+                    str(self.artifact), execution_access_roots=(runtime,),
+                    agent_home=self.agent_home, worktree=str(self.worktree), selected_agent="build"),
+                self.opencode.scoped_external_directory_config(
+                    str(self.artifact), execution_access_roots=(runtime, self.scoped),
+                    agent_home=self.agent_home, worktree=str(self.worktree), selected_agent="build"),
+            )
+        for raw in config_builds:
+            config = json.loads(raw)
+            self.assertEqual("allow", config["permission"]["external_directory"][str(runtime)])
+
     def test_lab_inventory_and_explicit_data_reach_both_codex_execution_builders(self) -> None:
         run_root = self.root / "inventory-runs"
         inventory = self.root / "compute-hosts.yaml"

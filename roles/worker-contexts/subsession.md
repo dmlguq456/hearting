@@ -5,6 +5,9 @@
   assigned `_internal/state/<attempt_id>.md`; do not reload the full specification
   unless the phase brief names it. If a required edit falls outside the fixed
   list, stop and hand the gap back to the owner instead of widening scope.
+  For a bound artifact-only node, the effective list names its in-scope outputs
+  from the phase brief; declared worktree files are read-only inputs, and brief
+  output paths are relative to the cycle output directory.
   Known approved test files belong in the initial `fixed_files`; a later simple
   omission returns as a bounded patch plus the exact-path handoff under the same
   approved owner — no new approval, no new owner, no separate repair, and no

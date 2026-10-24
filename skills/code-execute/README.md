@@ -23,9 +23,7 @@ Executes an implementation plan with progress tracking. It implements individual
 
 ## Git Safety Checkpoint
 
-1. Run `git fetch && git pull`. On a merge conflict, abort, warn the user, and stop.
-2. Run `git status`. If uncommitted changes exist, inspect the diff and create a meaningful rollback-point commit.
-3. Run `git rev-parse HEAD`, save it as `$SAFETY_COMMIT`, and record it in the checklist header.
+Follow the Git Safety Checkpoint in `SKILL.md` and the working-state rules in `core/OPERATIONS.md §5.9`. A checkpoint is a comparison point, not ownership evidence; do not absorb unrelated staged or unstaged changes into it.
 
 ## Initialization
 
@@ -59,7 +57,7 @@ The plan frontmatter's `qa_level` overrides automatic phase-level detection.
 
 ## Change Log and Phase Review
 
-Each step writes `dev_logs/step_*.md`, including old/new content and a required `Decision:` entry.
+Each step writes `dev_logs/step_*.md`, including old/new content, file path, edit order, enough location or surrounding context to distinguish the edit, and a `Decision:` entry. Record recovery and any remaining edits in these existing logs.
 
 **At phase completion**:
 
@@ -67,19 +65,15 @@ Each step writes `dev_logs/step_*.md`, including old/new content and a required 
 2. Inspect the review files:
    - 🟡: log and continue.
    - 🔴 minor: fix once in the execute boundary, then re-verify. If still 🔴, promote to major.
-   - 🔴 major: **auto-rollback and continue** without asking the user.
-3. Rollback procedure:
-   1. Roll back using the `old_string` from the step log.
-   2. If that fails, restore `$SAFETY_COMMIT` with `git checkout .` (reverting all uncommitted work, including earlier phases), mark every step `[FAIL]`, and proceed to the final report.
-   3. If rollback succeeds, mark the phase steps `[FAIL]` and continue to the next phase. Mark dependent steps `[SKIP-DEP]`.
+   - 🔴 major: mark the phase steps `[FAIL]` and apply the shared content-ownership recovery procedure in `capabilities/code-execute.md#portable-procedure`. Reverse only clearly attributable logged edits in reverse order. Preserve ambiguous and unrelated contents, record recovered and remaining edits in the existing logs and summary, and continue only with independent phases; otherwise stop at the final report with the unresolved state.
 
 - With ≤3 steps, omit phase grouping and review once after all steps finish.
-- **Total failure**: **auto-rollback to the safety commit** without asking the user.
+- **Total failure**: apply the same shared recovery boundary to clearly attributable edits from the failed task. Do not restore whole files from the safety commit or treat changed paths as ownership evidence; report any remaining or ambiguous edits.
 
 ## Safety Rules
 
 - Before changing a signature, search every call site, update every caller, and inspect implicit contracts.
-- If cascading errors exceed plan scope, mark the step `[FAIL]`, roll it back from the step log, and continue.
+- If cascading errors exceed plan scope, mark the step `[FAIL]` and apply the shared recovery procedure to its logged edits. Preserve ambiguous changes and continue only with independent steps.
 - Do not change code outside plan scope, except where a required signature change necessarily affects callers.
 
 ## Final Report

@@ -90,8 +90,11 @@ class OpenCodeSubagentTest(unittest.TestCase):
                 {"id": "parent1", "slug": "p", "directory": "/x",
                  "time_updated": 1000, "parent_id": None},
             ], with_agent_col=False)
-            with mock.patch.dict(os.environ, {"OPENCODE_DB": db}):
-                sess = Session(harness="opencode", pid=1, cwd="/x")
+            with mock.patch.dict(os.environ, {"OPENCODE_DB": db}), \
+                    mock.patch.object(opencode, "session_of_process",
+                                      return_value=("parent1", "opencode-tui-selection")), \
+                    mock.patch.object(opencode, "_proc_start_ticks", return_value="1"):
+                sess = Session(harness="opencode", pid=1, proc_start="1", cwd="/x")
                 opencode.enrich(sess)
             self.assertIsNone(sess.subagents)
 
@@ -103,8 +106,11 @@ class OpenCodeSubagentTest(unittest.TestCase):
                 {"id": "child1", "slug": "c1", "agent": "explore", "directory": "/x",
                  "time_updated": 2000, "parent_id": "parent1"},
             ])
-            with mock.patch.dict(os.environ, {"OPENCODE_DB": db}):
-                sess = Session(harness="opencode", pid=1, cwd="/x")
+            with mock.patch.dict(os.environ, {"OPENCODE_DB": db}), \
+                    mock.patch.object(opencode, "session_of_process",
+                                      return_value=("parent1", "opencode-tui-selection")), \
+                    mock.patch.object(opencode, "_proc_start_ticks", return_value="1"):
+                sess = Session(harness="opencode", pid=1, proc_start="1", cwd="/x")
                 opencode.enrich(sess)
             self.assertEqual(len(sess.subagents), 1)
             self.assertEqual(sess.subagents[0].agent_type, "explore")
@@ -122,8 +128,11 @@ class OpenCodeSubagentTest(unittest.TestCase):
                      "model": json.dumps({"id": "gpt-5.6-luna", "variant": variant}),
                      "time_updated": 1000, "parent_id": None},
                 ])
-                with mock.patch.dict(os.environ, {"OPENCODE_DB": db}):
-                    sess = Session(harness="opencode", pid=1, cwd="/x")
+                with mock.patch.dict(os.environ, {"OPENCODE_DB": db}), \
+                        mock.patch.object(opencode, "session_of_process",
+                                          return_value=("s1", "opencode-tui-selection")), \
+                        mock.patch.object(opencode, "_proc_start_ticks", return_value="1"):
+                    sess = Session(harness="opencode", pid=1, proc_start="1", cwd="/x")
                     opencode.enrich(sess)
                 return sess
 

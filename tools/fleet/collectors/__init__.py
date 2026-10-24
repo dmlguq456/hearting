@@ -385,13 +385,6 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             codex_tick = prepare(sessions, wait_timeout=0.0 if fast_first else 0.2)
     except Exception:
         pass
-    opencode_tick = None
-    try:
-        prepare = getattr(modules.get("opencode"), "prepare_tick", None)
-        if prepare and any(s.harness == "opencode" for s in sessions):
-            opencode_tick = prepare(sessions)
-    except Exception:
-        pass
     for s in sessions:
         s._fast_first = bool(fast_first)
         fn = enrichers.get(s.harness)
@@ -401,8 +394,6 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             try:
                 if s.harness == "codex" and codex_tick is not None:
                     fn(s, tick=codex_tick)
-                elif s.harness == "opencode" and opencode_tick is not None:
-                    fn(s, tick=opencode_tick)
                 else:
                     fn(s)
             except Exception:
@@ -423,10 +414,8 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             share_registry_state(sessions)
     except Exception:
         pass
-    # Issue #158: one opencode session id → one row. A session leader plus its
-    # helper child (or any two processes that created nothing themselves) share
-    # the one directory-fallback guess and would otherwise render as identical
-    # rows. Runs here, after every binding is known and before the exact
+    # One exact OpenCode session id → one row. If multiple process rows prove
+    # the same current selection, keep the strongest binding before the exact
     # herdr/steward/peer joins below, which all key on session_id.
     try:
         collapse = getattr(modules.get("opencode"), "collapse_duplicate_sids", None)

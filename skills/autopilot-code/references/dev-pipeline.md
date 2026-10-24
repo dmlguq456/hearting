@@ -381,7 +381,7 @@ Read plan frontmatter after harvest:
 
 - `done` → impl-review, then Step 4;
 - `partial` → impl-review, then Step 4 for completed work;
-- `failed` → source has been rolled back. Write failed `pipeline_summary.md`, report, and stop before test or report.
+- `failed` → execute did not complete successfully; recovery may be partial when some edits were ambiguous. Write a failed `pipeline_summary.md` with the remaining state and stop before test or report.
 
 The compiled route also contains the `impl-review` review node unconditionally (unit
 `qa/code-review`, completion gate `code-impl-review`) between `execute` and `test`; `test`
@@ -420,7 +420,7 @@ quick reports verify-lite failure without retry. Other graphs may open at most o
 4. Reset checklist marks to `[ ]`.
 5. Pause for explicit user refine, or invoke one bounded code-refine.
 6. Redispatch code-execute, then code-test.
-7. On pass, continue. On a second failure, roll back, write a failed summary noting both attempts, and stop before code-report.
+7. On pass, continue. On a second failure, apply the shared content-ownership recovery procedure in `capabilities/code-execute.md#portable-procedure` to the implementation edits recorded across the attempts. Reverse only clearly attributable edits; preserve unrelated or ambiguous contents, including same-file, staged, and untracked changes. Write a failed summary noting both attempts, recovered and remaining edits, the reason for any uncertainty, the observed index/worktree state, and checks skipped because of that state; stop before code-report.
 
 ### Step 5: code-report
 

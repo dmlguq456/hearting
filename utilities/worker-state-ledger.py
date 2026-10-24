@@ -166,7 +166,14 @@ def command(args: argparse.Namespace) -> str:
             _validate(meta, args.attempt_id)
             if args.file:
                 target = str(Path(args.file).resolve(strict=False))
-                if target not in meta.get("fixed_files", []):
+                fixed_files = meta.get("fixed_files", [])
+                allowed = target in fixed_files or any(
+                    isinstance(value, str) and value.endswith("/**")
+                    and Path(target).is_relative_to(Path(value[:-3]))
+                    and target != str(Path(value[:-3]).resolve(strict=False))
+                    for value in fixed_files
+                )
+                if not allowed:
                     raise LedgerError(f"file-outside-fixed-list:{target}")
             if args.command == "guard-edit":
                 meta["edits_since_update"] = int(meta["edits_since_update"]) + 1

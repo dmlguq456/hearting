@@ -2,6 +2,12 @@
 
 This is the portable capability contract for `autopilot-lab`. It defines runtime-neutral meaning and adapter obligations. It is not a Claude Skill file.
 
+Write new training checkpoints under `$AGENT_RUNTIME_DIR/experiments/<slug>/runs/<run>/ckpt/`.
+Keep `run.json.ckpt_path` as the compatible pointer; once a checkpoint exists,
+record optional `ckpt_sha256` and `ckpt_byte_size` and verify the digest at
+handoff and parent evaluation. While training is running, the expected path is
+valid without a hash or size. Keep configs, logs and reports in artifacts.
+
 ## Contract
 <!-- GENERATED: harness-manifest.json -->
 

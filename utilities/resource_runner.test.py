@@ -55,7 +55,8 @@ class TestProgressLaunch(unittest.TestCase):
                 return child
             with mock.patch.object(R.subprocess, "run"), mock.patch.object(R, "register_registry"), \
                  mock.patch.object(R.subprocess, "Popen", side_effect=spawn), mock.patch("sys.stdout"), \
-                 mock.patch.dict(os.environ, {"AGENT_RESOURCE_PROGRESS_FILE": str(root / "foreign.json"),
+                 mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "",
+                                             "AGENT_RESOURCE_PROGRESS_FILE": str(root / "foreign.json"),
                                              "AGENT_RESOURCE_RUN_ID": "foreign", "AGENT_RESOURCE_NODE": "other"}):
                 R.main(["--registry", str(registry), "start", "--run-id", "auto", "--cwd", str(root),
                         "--log", str(log), "--route", str(route), "--node", "eval-run",
@@ -93,7 +94,7 @@ class TestRunner(unittest.TestCase):
             from types import SimpleNamespace
             from unittest import mock
 
-            mode, base_arg, root_arg = sys.argv[1:]
+            mode, base_arg, root_arg, node_id = sys.argv[1:]
             base, root = Path(base_arg), Path(root_arg)
             utilities = root / "utilities"
             sys.path.insert(0, str(utilities))
@@ -132,13 +133,13 @@ class TestRunner(unittest.TestCase):
                              mock.patch.object(runner, "register_registry"):
                             runner.main(["--registry", str(registry), "start", "--run-id", run_id,
                                 "--cwd", str(base), "--log", str(log), "--route", str(route_file),
-                                "--node", "full-run", "--smoke-attestation", str(base / "unused-attestation"),
+                                "--node", node_id, "--smoke-attestation", str(base / "unused-attestation"),
                                 "--", *command])
                     else:
                         import artifact_producer
-                        args = SimpleNamespace(jobs=str(jobs), run_id=run_id, node="full-run", share=False)
+                        args = SimpleNamespace(jobs=str(jobs), run_id=run_id, node=node_id, share=False)
                         placeholder = {"run_id": run_id, "cwd": str(base), "log": str(log),
-                            "command": command, "route": str(route_file), "node": "full-run",
+                            "command": command, "route": str(route_file), "node": node_id,
                             "status": "launching", "workflow_state": "READY",
                             "sentinel": str(log) + ".exit", "progress_file": str(log) + ".progress.json",
                             "started_at": time.time()}
@@ -217,10 +218,13 @@ class TestRunner(unittest.TestCase):
                         "CODEX_SESSION_ID", "OPENCODE_SESSION_ID", "SSH_CONNECTION"}
         base_env = {key: value for key, value in CLEAN_ENV.items() if key not in session_keys}
 
-        for launch_path, dispatch_depth in (("main", "1"), ("verified", "1"), ("main", None)):
-            with self.subTest(launch_path=launch_path, dispatch_depth=dispatch_depth):
+        cases = [(node, part, launch, depth)
+                 for node, part in (("full-run", None), ("eval-borrowed", "autopilot-lab:eval-run"))
+                 for launch, depth in (("main", "1"), ("verified", "1"), ("main", None))]
+        for node_id, part, launch_path, dispatch_depth in cases:
+            with self.subTest(node=node_id, launch_path=launch_path, dispatch_depth=dispatch_depth):
                 depth_label = dispatch_depth or "missing-depth"
-                base = self.base / ("resource-probe-" + launch_path + "-" + depth_label)
+                base = self.base / ("resource-probe-" + node_id + "-" + launch_path + "-" + depth_label)
                 dispatch = base / "dispatch"
                 route_state = base / "route-chains"
                 dispatch.mkdir(parents=True)
@@ -235,10 +239,11 @@ class TestRunner(unittest.TestCase):
                 parent_ledger.write_text('{"event":"compose","sid":"route-parent"}\n',
                                          encoding="utf-8")
                 route_file = base / "route.json"
-                route_file.write_text(json.dumps({"capability": "autopilot-lab",
+                route_file.write_text(json.dumps({"capability": "autopilot-code" if part else "autopilot-lab",
                     "artifact_root": str(base), "route_id": "rt-resource-probe",
-                    "route_hash": "sha256:resource-probe", "nodes": [{"id": "full-run",
-                    "kind": "resource-runner", "resource_class": "gpu",
+                    "route_hash": "sha256:resource-probe", "nodes": [{"id": node_id,
+                    **({"part": part} if part else {}), "kind": "resource-runner",
+                    "resource_class": "gpu" if not part else "long-running",
                     "outputs": ["run.json"], "write_scope": ["run.json"],
                     "resource_transport": "detached-process"}]}), encoding="utf-8")
                 env = {**base_env, "AGENT_HOME": str(ROOT),
@@ -250,7 +255,7 @@ class TestRunner(unittest.TestCase):
                 if dispatch_depth is not None:
                     env["AGENT_DISPATCH_DEPTH"] = dispatch_depth
                 outcome = subprocess.run([sys.executable, "-c", harness, launch_path,
-                    str(base), str(ROOT)], text=True, capture_output=True, env=env, timeout=20)
+                    str(base), str(ROOT), node_id], text=True, capture_output=True, env=env, timeout=20)
                 self.assertEqual(outcome.returncode, 0, outcome.stderr)
                 result = json.loads(outcome.stdout)
                 lease_owner = result["row"]["gpu_lease"]["owner"]

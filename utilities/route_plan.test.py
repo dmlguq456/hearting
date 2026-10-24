@@ -196,6 +196,29 @@ class ExtractionTest(unittest.TestCase):
                 self.assertEqual(self.parse(f"{heading}\n\n```yaml\n{body}```\n")["legs"][0]["shape"], "direct")
         self.assertEqual(self.reason("## 80. Route proposal\n\nnone\n"), "section-missing")
 
+    def test_a_numbered_list_running_past_8_does_not_hide_section_8(self):
+        body = "route_proposal_v1:\n  summary: s\n  legs:\n    - {capability: autopilot-code, shape: direct}\n"
+        risks = "## 6. Open Risks\n\n" + "".join(f"{n}. risk {n}\n" for n in range(1, 10))
+        listed = "## 8. Route proposal\n\n1. first read this\n9. then this\n\n```yaml\n" + body + "```\n"
+        for text in (risks + "\n## 7. Questions\n\nnone\n\n## 8. Route proposal\n\n```yaml\n" + body + "```\n",
+                     risks + "\n8) Route\n\n```yaml\n" + body + "```\n",
+                     listed):
+            with self.subTest(text[:40]):
+                self.assertEqual(self.parse(text)["legs"][0]["shape"], "direct")
+        self.assertEqual(self.reason(risks + "\n## 8. Route proposal\n\nnone\n"), "block-missing")
+
+    def test_numbered_risks_do_not_adopt_a_proposal_from_section_7(self):
+        body = "route_proposal_v1:\n  summary: actual section 8\n  legs:\n    - {capability: autopilot-code, shape: direct}\n"
+        risks = "## 6. Open Risks\n\n" + "".join(f"{n}. risk {n}\n" for n in range(1, 10))
+        elsewhere = (risks + "\n## 7. Questions\n\n```yaml\n"
+                     + body.replace("actual section 8", "wrong section 7") + "```\n\n")
+        for heading in ("## 8. Route proposal", "## 8. 경로 조립 제안",
+                        "**8. Route proposal**", "8) Route"):
+            with self.subTest(heading):
+                self.assertEqual(self.reason(elsewhere + heading + "\n\nnone\n"), "block-missing")
+                actual = elsewhere + heading + "\n\n```yaml\n" + body + "```\n"
+                self.assertEqual(self.parse(actual)["summary"], "actual section 8")
+
     def test_a_brief_with_no_section_8_heading_is_read_whole_and_says_so(self):
         body = "route_proposal_v1:\n  summary: s\n  legs:\n    - {capability: autopilot-code, shape: direct}\n"
         proposal, _, notes = RP.parse_proposal_with_notes("## Route\n\n```yaml\n" + body + "```\n")

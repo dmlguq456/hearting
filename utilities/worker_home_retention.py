@@ -1296,7 +1296,8 @@ class _Context:
     def home_process_evidence(self, key: str) -> tuple[str, str]:
         """live | absent | unknown for a process that can address this HOME."""
         if self.home_process_scan is None:
-            refs: set[str] = set()
+            named: set[str] = set()
+            linked: set[str] = set()
             reason = ""
             try:
                 entries = tuple(Path("/proc").iterdir())
@@ -1324,10 +1325,10 @@ class _Context:
                         if sep and name in (b"HEARTING_WORKER_HOME", b"CODEX_HOME",
                                             b"CLAUDE_CONFIG_DIR", b"OPENCODE_CONFIG_DIR",
                                             b"HOME") and value:
-                            refs.add(os.fsdecode(value))
+                            named.add(os.fsdecode(value))
                     cmdline = (entry / "cmdline").read_bytes()
-                    refs.update(os.fsdecode(item) for item in cmdline.split(b"\0") if item)
-                    refs.add(os.readlink(entry / "cwd"))
+                    named.update(os.fsdecode(item) for item in cmdline.split(b"\0") if item)
+                    linked.add(os.readlink(entry / "cwd"))
                     fd_dir = entry / "fd"
                     fds = tuple(fd_dir.iterdir())
                     if len(fds) > MAX_HOME_SCAN_FDS:
@@ -1335,7 +1336,7 @@ class _Context:
                     else:
                         for fd in fds:
                             try:
-                                refs.add(os.readlink(fd))
+                                linked.add(os.readlink(fd))
                             except FileNotFoundError:
                                 continue
                     after = (entry / "stat").read_text(encoding="ascii")
@@ -1348,17 +1349,20 @@ class _Context:
                     if exc.errno in (errno.ESRCH, errno.ENOENT):
                         continue
                     reason = reason or "process-reference-unreadable"
+            # cwd and fd links already name canonical paths; only values a process was
+            # handed can reach a HOME through a symlink. Resolve those once per pass --
+            # a walk per open file per home outlasts the examine budget on network storage.
+            refs: set[str] = set()
+            for value in linked | named:
+                clean = value.removesuffix(" (deleted)")
+                if os.path.isabs(clean):
+                    refs.add(os.path.realpath(clean) if value in named else clean)
             self.home_process_scan = (refs, reason)
         refs, reason = self.home_process_scan
         home = os.path.realpath(self.workers_real + os.sep + key)
         prefix = home + os.sep
-        for value in refs:
-            clean = value.removesuffix(" (deleted)")
-            if not os.path.isabs(clean):
-                continue
-            resolved = os.path.realpath(clean)
-            if resolved == home or resolved.startswith(prefix):
-                return "live", "home-process-reference"
+        if any(ref == home or ref.startswith(prefix) for ref in refs):
+            return "live", "home-process-reference"
         from dispatch_contract import _current_observer_is_host_like
         if not _current_observer_is_host_like():
             return "unknown", "process-namespace-unverifiable"

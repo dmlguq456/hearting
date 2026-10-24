@@ -28,6 +28,10 @@ shared-scale evidence, or a hash-current visual review is a failed level.
 
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
+Put pytest basetemp and tool scratch data under the supplied `runtime_dir` or
+system temporary storage. Keep test reports and compact evidence in the declared
+artifact outputs.
+
 ## Assurance Contract
 
 `code-test` realizes the final `verify` stage for code work. It is concrete verification, not a mandatory second QA pipeline. Intensity-derived rigor changes command breadth, evidence requirements, and whether a separate test-adequacy/security/adversarial review is opened. `quick` may run one focused verify-lite command; `standard+` runs the applicable graduated levels; `thorough|adversarial` may add adequacy, runtime-observation, security, or external adversary review only when the selected intensity/risk calls for it.

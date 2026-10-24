@@ -1075,7 +1075,7 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         f"- owner_harness: {args.owner_harness or '-'}\n"
         f"- worktree: {args.worktree}\n"
         f"- artifact_root: {args.artifact_root}\n"
-        f"{artifact_context_prompt(os.environ)}"
+        f"{artifact_context_prompt({**os.environ, 'AGENT_RUNTIME_DIR': getattr(args, 'runtime_dir', '')})}"
         f"- route_state: {'consume the immutable record already validated by the wrapper' if args.route_file else 'validated dispatch metadata'}\n\n"
         "OpenCode realization:\n"
         "- The wrapper already validated capability mode, optional worker mode, QA, artifact-root access, and any route record. Use worker-route only for a safety recheck.\n"
@@ -1411,11 +1411,13 @@ def main(argv: list[str]) -> int:
         return fail(exc.reason, 65, detail=exc.detail, worktree=args.worktree, child_spawned="0")
     try:
         args.artifact_root = resolve_artifact_root(args.worktree)
+        args.runtime_dir = WRAPPER_COMMON.prepare_runtime_root(args.artifact_root)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
         if args.opencode_launch_observation_error is None:
             args.opencode_config_content = scoped_external_directory_config(
                 args.artifact_root,
                 str(args.report_bundle_root) if args.report_bundle_root is not None else None,
+                execution_access_roots=((Path(args.runtime_dir),) if args.runtime_dir else ()),
                 agent_home=args.agent_home,
                 worktree=args.worktree,
                 selected_agent=args.agent,
@@ -1648,7 +1650,8 @@ def main(argv: list[str]) -> int:
             args.opencode_config_content = scoped_external_directory_config(
                 args.artifact_root,
                 str(args.report_bundle_root) if args.report_bundle_root is not None else None,
-                grant.additional_writable_roots if grant is not None else (),
+                (*((Path(args.runtime_dir),) if args.runtime_dir else ()),
+                 *(grant.additional_writable_roots if grant is not None else ())),
                 grant.read_roots if grant is not None else (),
                 agent_home=args.agent_home,
                 contract_read_roots=args.contract_read_roots,
@@ -1862,6 +1865,7 @@ def main(argv: list[str]) -> int:
             # `campaigns/<camp>/cycles/<cyc>/artifacts/` and never issue a
             # second lineage.
             **artifact_cycle_environment(os.environ),
+            "AGENT_RUNTIME_DIR": getattr(args, "runtime_dir", ""),
             "REPORT_BUNDLE_ROOT": str(args.report_bundle_root or ""),
             "AGENT_ROUTE_FILE": (
                 args.route_file
