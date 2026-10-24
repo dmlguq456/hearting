@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import errno
 import json
 from pathlib import Path
 import select
@@ -14,7 +15,10 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
+import dispatch_contract as contract
+import review_watchdog as watchdog
 from dispatch_contract import process_launch_identity
 from dispatch_lifecycle import begin_finite_watchdog
 from review_watchdog import (
@@ -28,6 +32,82 @@ from review_watchdog import (
 
 
 class ReviewWatchdogIntegrationTest(unittest.TestCase):
+    def test_forced_raw_pidfd_signal_and_reaped_identity(self):
+        if not callable(getattr(signal, "pidfd_send_signal", None)):
+            self.skipTest("pidfd sending unavailable")
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        fd = None
+        try:
+            with mock.patch.object(os, "pidfd_open", None, create=True):
+                try:
+                    fd = contract.pidfd_open(child.pid)
+                except OSError as exc:
+                    if exc.errno == errno.ENOSYS:
+                        self.skipTest("raw pidfd syscall unavailable")
+                    raise
+                self.assertFalse(os.get_inheritable(fd))
+                signal.pidfd_send_signal(fd, 0)
+                signal.pidfd_send_signal(fd, signal.SIGTERM)
+                self.assertEqual(child.wait(timeout=5), -signal.SIGTERM)
+                with self.assertRaises(ProcessLookupError):
+                    contract.pidfd_open(child.pid)
+        finally:
+            if fd is not None:
+                os.close(fd)
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
+
+    def test_forced_raw_watchdog_drain_closes_on_identity_and_signal_error(self):
+        if not callable(getattr(signal, "pidfd_send_signal", None)):
+            self.skipTest("pidfd sending unavailable")
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        try:
+            start = contract.process_start_ticks(child.pid)
+            self.assertIsNotNone(start)
+            def group(_):
+                members = () if child.poll() is not None else ((child.pid, start, "S"),)
+                return SimpleNamespace(state="populated" if members else "empty",
+                                       reason=None, members=members)
+            empty = SimpleNamespace(state="empty", reason=None, members=())
+            opened = []
+            def open_recorded(pid):
+                fd = contract.pidfd_open(pid)
+                opened.append(fd)
+                return fd
+            with mock.patch.object(os, "pidfd_open", None, create=True), \
+                 mock.patch.object(watchdog, "process_group_observation", side_effect=group), \
+                 mock.patch.object(watchdog, "attempt_tagged_descendants", return_value=empty), \
+                 mock.patch.object(watchdog, "pidfd_open", side_effect=open_recorded):
+                try:
+                    probe = contract.pidfd_open(child.pid)
+                except OSError as exc:
+                    if exc.errno == errno.ENOSYS:
+                        self.skipTest("raw pidfd syscall unavailable")
+                    raise
+                os.close(probe)
+                with mock.patch.object(watchdog, "process_start_ticks", return_value="mismatch"):
+                    self.assertFalse(watchdog._drain_owned_residue({"pid": str(child.pid)}, "att-test", .05))
+                fd = opened[-1]
+                with self.assertRaises(OSError):
+                    os.fstat(fd)
+                with mock.patch.object(signal, "pidfd_send_signal", side_effect=OSError(errno.EPERM, "denied")):
+                    self.assertFalse(watchdog._drain_owned_residue({"pid": str(child.pid)}, "att-test", .05))
+                fd = opened[-1]
+                with self.assertRaises(OSError):
+                    os.fstat(fd)
+                self.assertIsNone(child.poll())
+                self.assertTrue(watchdog._drain_owned_residue({"pid": str(child.pid)}, "att-test", .2))
+                self.assertEqual(child.wait(timeout=5), -signal.SIGTERM)
+        finally:
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
+
     def _launch(self, marker: Path, seconds: float = 2.0, lease_release_spec=None, attempt_id="att-watchdog-integration", nonce="a" * 64, jobs=None):
         gate_read, gate_write = os.pipe()
         code = (

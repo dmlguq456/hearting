@@ -340,7 +340,8 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
         return False
     try:
         code_root = Path(root).resolve(strict=True) if root is not None else _code_root().resolve(strict=True)
-        if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        from dispatch_contract import pidfd_open
+        if not callable(getattr(signal, "pidfd_send_signal", None)):
             return False
         pid = int(pid)
         if pid <= 0:
@@ -352,7 +353,7 @@ def replace_managed_observer(pid: int, pid_start: str | None, lock_path: str | P
         expected_variants = [expected_args]
         if exact_arguments:
             expected_variants.extend(list(map(str, variant)) for variant in argument_variants)
-        pidfd = os.pidfd_open(pid)
+        pidfd = pidfd_open(pid)
         try:
             def inspect():
                 nonlocal expected_start
@@ -1701,13 +1702,14 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path, *,
         return False
     if not service_current:
         return False
+    from dispatch_contract import pidfd_open
     state_root = str(store.root.parents[1])
     for proc in Path("/proc").iterdir():
         if not proc.name.isdigit():
             continue
         pidfd = None
         try:
-            pidfd = os.pidfd_open(int(proc.name))
+            pidfd = pidfd_open(int(proc.name))
             argv = (proc / "cmdline").read_bytes().decode().rstrip("\0").split("\0")
             if (len(argv) < 3 or Path(argv[1]).name != "peer-steward.py"
                     or argv[2] != "__obligation-runner"

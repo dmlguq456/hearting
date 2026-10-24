@@ -27,6 +27,7 @@ from dispatch_contract import (
     _parse_review_metadata,
     process_group_observation,
     process_start_ticks,
+    pidfd_open,
     attempt_tagged_descendants,
     process_launch_identity,
     signal_exact_process_group,
@@ -148,7 +149,7 @@ def _drain_owned_residue(child_meta: Mapping[str, str], attempt_id: str, grace: 
             return True
         for pid, start in sorted(members, reverse=True):
             try:
-                fd = os.pidfd_open(pid)
+                fd = pidfd_open(pid)
                 try:
                     if process_start_ticks(pid) != start:
                         return False

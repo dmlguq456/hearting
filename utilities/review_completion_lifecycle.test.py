@@ -440,7 +440,7 @@ class DetachedReviewLifecycleTest(unittest.TestCase):
                 observation = contract.attempt_tagged_descendants(_row(jobs).metadata)
                 for pid, start, state in observation.members:
                     try:
-                        fd = os.pidfd_open(pid)
+                        fd = contract.pidfd_open(pid)
                         try:
                             if contract.process_start_ticks(pid) == start and state != "Z":
                                 signal.pidfd_send_signal(fd, signal.SIGKILL)

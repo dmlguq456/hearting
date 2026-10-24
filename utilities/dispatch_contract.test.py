@@ -9,6 +9,115 @@ sys.path.insert(0,str(P.parent))
 import dispatch_contract as D
 from replica_batch_contract import build_manifest
 
+
+class PidfdOpenTest(unittest.TestCase):
+ def raw(self, result=7, error=0):
+  import ctypes
+  syscall=mock.Mock(return_value=result)
+  libc=types.SimpleNamespace(syscall=syscall)
+  patches=(mock.patch.object(D.os,"pidfd_open",None,create=True),
+           mock.patch.object(D.sys,"platform","linux"),
+           mock.patch("platform.machine",return_value="x86_64"),
+           mock.patch.object(ctypes,"CDLL",return_value=libc),
+           mock.patch.object(ctypes,"get_errno",return_value=error),
+           mock.patch.object(D.os,"set_inheritable"))
+  return contextlib.ExitStack(), patches, syscall
+
+ def test_native_delegation_and_original_error(self):
+  with mock.patch.object(D.os,"pidfd_open",return_value=12,create=True) as native:
+   self.assertEqual(D.pidfd_open(123,4),12)
+   native.assert_called_once_with(123,4)
+  failure=PermissionError(errno.EPERM,"native refused")
+  with mock.patch.object(D.os,"pidfd_open",side_effect=failure,create=True):
+   with self.assertRaises(PermissionError) as caught:
+    D.pidfd_open(123)
+   self.assertIs(caught.exception,failure)
+
+ def test_raw_success_zero_and_descriptor_close_on_post_open_failure(self):
+  stack,patches,syscall=self.raw(result=0)
+  with stack:
+   for patch in patches: stack.enter_context(patch)
+   self.assertEqual(D.pidfd_open(123),0)
+   self.assertEqual([arg.value for arg in syscall.call_args.args],[434,123,0])
+   D.os.set_inheritable.assert_called_once_with(0,False)
+  stack,patches,syscall=self.raw(result=9)
+  with stack:
+   for patch in patches: stack.enter_context(patch)
+   D.os.set_inheritable.side_effect=OSError(errno.EIO,"cloexec")
+   with mock.patch.object(D.os,"close") as close:
+    with self.assertRaises(OSError): D.pidfd_open(123)
+    close.assert_called_once_with(9)
+
+ def test_absent_native_binding_uses_raw_syscall(self):
+  import ctypes
+  syscall=mock.Mock(return_value=0)
+  native=getattr(D.os,"pidfd_open",None)
+  had_native=hasattr(D.os,"pidfd_open")
+  if had_native:
+   delattr(D.os,"pidfd_open")
+  try:
+   with mock.patch.object(D.sys,"platform","linux"), \
+        mock.patch("platform.machine",return_value="x86_64"), \
+        mock.patch.object(ctypes,"CDLL",return_value=types.SimpleNamespace(syscall=syscall)), \
+        mock.patch.object(D.os,"set_inheritable") as inheritable:
+    self.assertEqual(D.pidfd_open(1),0)
+    self.assertEqual([arg.value for arg in syscall.call_args.args],[434,1,0])
+    inheritable.assert_called_once_with(0,False)
+  finally:
+   if had_native:
+    setattr(D.os,"pidfd_open",native)
+
+ def test_raw_errno_is_preserved(self):
+  for error,kind in ((errno.ESRCH,ProcessLookupError),(errno.EPERM,PermissionError),
+                     (errno.EINVAL,OSError),(errno.ENOSYS,OSError)):
+   with self.subTest(error=error):
+    stack,patches,_=self.raw(result=-1,error=error)
+    with stack:
+     for patch in patches: stack.enter_context(patch)
+     with self.assertRaises(kind) as caught: D.pidfd_open(123)
+     self.assertEqual(caught.exception.errno,error)
+
+ def test_invalid_arguments_cannot_narrow_to_another_process(self):
+  stack,patches,syscall=self.raw()
+  with stack:
+   for patch in patches: stack.enter_context(patch)
+   for pid,flags,error in ((object(),0,TypeError),(1,object(),TypeError),
+                           (1<<32,0,OverflowError),(-(1<<31)-1,0,OverflowError),
+                           (1,-1,OverflowError),(1,1<<32,OverflowError)):
+    with self.subTest(pid=pid,flags=flags):
+     with self.assertRaises(error): D.pidfd_open(pid,flags)
+   syscall.assert_not_called()
+
+ def test_unsupported_platform_abis_and_loading_fail_closed(self):
+  import ctypes
+  with mock.patch.object(D.os,"pidfd_open",None,create=True):
+   with mock.patch.object(D.sys,"platform","darwin"):
+    with self.assertRaises(OSError) as caught: D.pidfd_open(1)
+    self.assertEqual(caught.exception.errno,errno.ENOSYS)
+   with mock.patch.object(D.sys,"platform","linux"):
+    for machine in ("mips64","alpha","unknown"):
+     with mock.patch("platform.machine",return_value=machine), \
+          mock.patch.object(ctypes,"CDLL") as libc:
+      with self.assertRaises(OSError) as caught: D.pidfd_open(1)
+      self.assertEqual(caught.exception.errno,errno.ENOSYS)
+      libc.assert_not_called()
+    with mock.patch("platform.machine",return_value="x86_64"), \
+         mock.patch.object(ctypes,"sizeof",return_value=4), \
+         mock.patch.object(ctypes,"CDLL") as libc:
+     with self.assertRaises(OSError) as caught: D.pidfd_open(1)
+     self.assertEqual(caught.exception.errno,errno.ENOSYS)
+     libc.assert_not_called()
+    with mock.patch("platform.machine",return_value="x86_64"):
+     for libc in (mock.Mock(side_effect=OSError("missing libc")),
+                  mock.Mock(return_value=types.SimpleNamespace()),
+                  mock.Mock(return_value=types.SimpleNamespace(syscall=None))):
+      with mock.patch.object(ctypes,"CDLL",libc):
+       with self.assertRaises(OSError) as caught: D.pidfd_open(1)
+       self.assertEqual(caught.exception.errno,errno.ENOSYS)
+     with mock.patch.dict(sys.modules,{"ctypes":None}):
+      with self.assertRaises(OSError) as caught: D.pidfd_open(1)
+      self.assertEqual(caught.exception.errno,errno.ENOSYS)
+
 CURRENT="attempt_schema_version=2,dispatch_depth=2,transport=headless,execution_surface=registered-headless,registered_worker=1,fallback_hop=same-harness-headless"
 
 def controlled_process_scope(jobs):

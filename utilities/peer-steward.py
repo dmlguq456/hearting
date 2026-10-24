@@ -48,7 +48,7 @@ peer_message = importlib.util.module_from_spec(_PM_SPEC)
 _PM_SPEC.loader.exec_module(peer_message)
 
 sys.path.insert(0, str(_UTILITIES_DIR))
-from dispatch_contract import (process_start_ticks, resolve_agent_home,
+from dispatch_contract import (pidfd_open, process_start_ticks, resolve_agent_home,
                                resolve_dispatch_state_root)  # noqa: E402
 from parent_next_directive import steward_fields  # noqa: E402
 import peer_obligations  # noqa: E402
@@ -4229,7 +4229,7 @@ def cmd_watch_run(args):
                 if (observed_start is None or str(observed_start) != str(native.get("start"))):
                     terminal_reason = "steward-exited"
                 elif native_record and native_record.get("sessionId") == (arm.get("steward") or {}).get("session_id"):
-                    steward_pidfd = os.pidfd_open(native_pid, 0)
+                    steward_pidfd = pidfd_open(native_pid, 0)
                 elif native_record and native_record.get("sessionId"):
                     _confirmed_watch_successor(args.watch_id, arm)
             except (AttributeError, OSError, TypeError, ValueError):
@@ -4288,9 +4288,9 @@ def cmd_watch_run(args):
                     isinstance(wait_start, str) and bool(wait_start)
                     and _pid_identity_ok(wait_pid, wait_start)
                 )
-                if wait_identity_live and hasattr(os, "pidfd_open"):
+                if wait_identity_live:
                     try:
-                        wait_pidfd = os.pidfd_open(int(wait_pid), 0)
+                        wait_pidfd = pidfd_open(int(wait_pid), 0)
                     except OSError:
                         wait_pidfd = None
             elif wait_record.get("state") == "launching":
@@ -4355,9 +4355,9 @@ def cmd_watch_run(args):
                                    "reason": "native-wait-running", "native_wait": wait_record,
                                    "observed_ts": _utc_now()}
                     _write_watch_observation(paths, observation)
-                    if hasattr(os, "pidfd_open") and wait_start:
+                    if wait_start:
                         try:
-                            wait_pidfd = os.pidfd_open(int(wait_pid), 0)
+                            wait_pidfd = pidfd_open(int(wait_pid), 0)
                         except OSError:
                             wait_pidfd = None
 

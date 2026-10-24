@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import fcntl
+import errno
 import importlib.util
 import fcntl
 import json
@@ -19,6 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 import peer_obligations as obligations
+from dispatch_contract import pidfd_open
 import dispatch_batch_obligations as batch_obligations
 
 _HERE = Path(__file__).resolve().parent
@@ -26,6 +28,29 @@ _STEWARD_SPEC = importlib.util.spec_from_file_location(
     "peer_steward_under_obligation_test", str(_HERE / "peer-steward.py"))
 peer_steward = importlib.util.module_from_spec(_STEWARD_SPEC)
 _STEWARD_SPEC.loader.exec_module(peer_steward)
+
+
+def _pidfd_handoff_available():
+    if not callable(getattr(signal, "pidfd_send_signal", None)):
+        return False
+    try:
+        fd = pidfd_open(os.getpid())
+    except OSError as exc:
+        if exc.errno == errno.ENOSYS:
+            return False
+        raise
+    try:
+        signal.pidfd_send_signal(fd, 0)
+    except OSError as exc:
+        if exc.errno == errno.ENOSYS:
+            return False
+        raise
+    finally:
+        os.close(fd)
+    return True
+
+
+_PIDFD_HANDOFF = _pidfd_handoff_available()
 
 
 class ObligationStoreTest(unittest.TestCase):
@@ -838,19 +863,19 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertEqual(pending.read(self.root, "idle-parent", record["delivery_id"])["claim_owner"],
                          "other-live-carrier")
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_unsupported_observer_releases_same_lock_without_losing_accepted_duties(self):
         self._check_observer_handoff(supported=False)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_supported_observer_keeps_its_pid_and_same_lock(self):
         self._check_observer_handoff(supported=True)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_claude_only_observer_is_replaced_for_shared_activation_delivery(self):
         self._check_observer_handoff(supported=False, native_only=True)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_a_legacy_observer_keeps_its_pid_while_current_runner_starts(self):
         self._check_observer_handoff(supported=False, legacy=True)
 

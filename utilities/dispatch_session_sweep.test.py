@@ -152,23 +152,24 @@ class _SlowRecoveryBarrier:
 
 def _wait_for_child_exit(test_case, pid: int, timeout: float = 5.0):
     """Observe the detached fixture helper exit before its temporary tree is removed."""
-    if hasattr(os, "pidfd_open"):
+    from dispatch_contract import pidfd_open
+
+    try:
+        pidfd = pidfd_open(pid, 0)
+    except ProcessLookupError:
+        return
+    except OSError:
+        pidfd = None
+    if pidfd is not None:
         try:
-            pidfd = os.pidfd_open(pid, 0)
-        except ProcessLookupError:
-            return
-        except OSError:
-            pidfd = None
-        if pidfd is not None:
-            try:
-                poller = select.poll()
-                poller.register(pidfd, select.POLLIN)
-                if poller.poll(int(timeout * 1000)):
-                    return
-                test_case.fail(f"detached recovery helper pid {pid} did not exit within {timeout}s")
-            finally:
-                os.close(pidfd)
-            return
+            poller = select.poll()
+            poller.register(pidfd, select.POLLIN)
+            if poller.poll(int(timeout * 1000)):
+                return
+            test_case.fail(f"detached recovery helper pid {pid} did not exit within {timeout}s")
+        finally:
+            os.close(pidfd)
+        return
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

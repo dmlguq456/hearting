@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import io
 import json
 import os
@@ -25,12 +26,36 @@ sys.path.insert(0, str(ROOT / "utilities"))
 sys.path.insert(0, str(ROOT / "tools" / "install"))
 
 import peer_obligations as obligations  # noqa: E402
+import dispatch_contract as contract  # noqa: E402
 import runtime_activation  # noqa: E402
 
 _STEWARD_SPEC = importlib.util.spec_from_file_location(
     "peer_steward_under_runner_lifecycle_test", ROOT / "utilities/peer-steward.py")
 peer_steward = importlib.util.module_from_spec(_STEWARD_SPEC)
 _STEWARD_SPEC.loader.exec_module(peer_steward)
+
+
+def _pidfd_handoff_available():
+    if not callable(getattr(signal, "pidfd_send_signal", None)):
+        return False
+    try:
+        fd = contract.pidfd_open(os.getpid())
+    except OSError as exc:
+        if exc.errno == errno.ENOSYS:
+            return False
+        raise
+    try:
+        signal.pidfd_send_signal(fd, 0)
+    except OSError as exc:
+        if exc.errno == errno.ENOSYS:
+            return False
+        raise
+    finally:
+        os.close(fd)
+    return True
+
+
+_PIDFD_HANDOFF = _pidfd_handoff_available()
 
 
 class LifecycleBindingTest(unittest.TestCase):
@@ -596,7 +621,7 @@ console.log(JSON.stringify(calls[0]));
         self.assertIn("__obligation-runner", argv)
         self.assertEqual(argv[-2:], ["--service-current", str(self.current)])
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_takeover_signals_only_an_exact_same_install_observer_holding_its_duty_lock(self):
         self._point_current(self.b)
         script = self.a / "utilities/peer-steward.py"
@@ -632,7 +657,8 @@ console.log(JSON.stringify(calls[0]));
                                    str(self.a / "utilities/peer_obligations.py")), \
                  mock.patch.dict(os.environ, self._environment(self.a), clear=True):
                 binding = obligations.managed_service_binding(self.a)
-                with mock.patch.object(os, "pidfd_open", None):
+                with mock.patch.object(contract, "pidfd_open",
+                                       side_effect=OSError(errno.ENOSYS, "pidfd unavailable")):
                     self.assertFalse(obligations.replace_managed_observer(
                         process.pid, obligations._proc_start_identity(process.pid), lock_path,
                         "utilities/peer-steward.py", required, binding,
@@ -643,6 +669,12 @@ console.log(JSON.stringify(calls[0]));
                         "utilities/peer-steward.py", required, binding,
                         lock_fd_option="--lock-fd", root=self.a))
                 self.assertIsNone(process.poll(), "unsupported pidfd must preserve the live duty")
+                probe_fd = os.open(lock_path, os.O_RDONLY)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(probe_fd)
                 result = obligations.replace_managed_observer(
                     process.pid, obligations._proc_start_identity(process.pid), lock_path,
                     "utilities/peer-steward.py", required, binding,
@@ -654,7 +686,7 @@ console.log(JSON.stringify(calls[0]));
                 process.terminate()
             process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_pid_only_old_completion_writer_resumes_under_its_exact_locked_duty(self):
         import dispatch_batch_obligations as batch
 
@@ -754,7 +786,7 @@ console.log(JSON.stringify(calls[0]));
                     process.terminate()
                 process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_watch_takeover_accepts_complete_initial_and_advanced_legacy_argv(self):
         self._point_current(self.b)
         cases = (
@@ -788,7 +820,7 @@ console.log(JSON.stringify(calls[0]));
                         process.terminate()
                     process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open") and hasattr(os, "fork"),
+    @unittest.skipUnless(_PIDFD_HANDOFF and hasattr(os, "fork"),
                          "Linux pidfd and inherited flock handoff")
     def test_host_legacy_watch_without_agent_home_is_taken_over_under_inherited_lock(self):
         host_home = self.base / "legacy-host-home"
@@ -954,7 +986,7 @@ console.log(JSON.stringify(calls[0]));
         finally:
             os.close(probe)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_managed_runner_reuses_external_discovery_for_real_legacy_process_census(self):
         import dispatch_batch_obligations as batch
 
@@ -1205,7 +1237,7 @@ console.log(JSON.stringify(calls[0]));
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().decode().rstrip("\0").split("\0")
         return argv[argv.index("--lock-fd") + 1]
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_watch_takeover_leaves_every_full_duty_mismatch_untouched(self):
         self._point_current(self.b)
         arm = self._watch_arm(generation=3, rearm_count=17)
@@ -1279,7 +1311,7 @@ console.log(JSON.stringify(calls[0]));
                         process.terminate()
                     process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_watch_takeover_preserves_fixed_and_foreign_process_roots(self):
         self._point_current(self.b)
         arm = self._watch_arm(generation=3)
@@ -1327,7 +1359,7 @@ console.log(JSON.stringify(calls[0]));
                         process.terminate()
                     process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_takeover_keeps_stale_identity_and_unlocked_observers_untouched(self):
         self._point_current(self.b)
         arm = self._watch_arm(generation=3, rearm_count=17)
@@ -1395,7 +1427,7 @@ console.log(JSON.stringify(calls[0]));
                 process.terminate()
             process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_watch_takeover_keeps_exact_current_observer(self):
         self._point_current(self.b)
         arm = self._watch_arm(generation=3)
@@ -1420,7 +1452,7 @@ console.log(JSON.stringify(calls[0]));
                 process.terminate()
             process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_pre_signal_reinspection_keeps_same_pid_current_after_self_exec(self):
         self._point_current(self.b)
         arm = self._watch_arm(generation=3)
@@ -1496,7 +1528,7 @@ console.log(JSON.stringify(calls[0]));
                 process.terminate()
             process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_pre_signal_reinspection_uses_new_current_release_selection(self):
         self._point_current(self.a)
         arm = self._watch_arm(generation=3)
@@ -1540,7 +1572,7 @@ console.log(JSON.stringify(calls[0]));
                 process.terminate()
             process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_lifecycle_replaces_exact_legacy_runner_and_starts_current_under_same_lock(self):
         self._point_current(self.b)
         store = obligations.ObligationStore(self.state)
@@ -1596,7 +1628,7 @@ console.log(JSON.stringify(calls[0]));
                 process.terminate()
             process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_update_takes_over_live_batch_and_old_caller_cannot_duplicate_its_lease(self):
         import dispatch_batch_obligations as batch
 
@@ -1716,7 +1748,7 @@ console.log(JSON.stringify(calls[0]));
                 old_process.terminate()
             old_process.wait(timeout=5)
 
-    @unittest.skipUnless(hasattr(os, "pidfd_open"), "Linux pidfd handoff")
+    @unittest.skipUnless(_PIDFD_HANDOFF, "pidfd handoff unavailable")
     def test_base_source_finally_respawn_is_reconciled_in_both_activation_orders(self):
         import contextlib
         import dispatch_batch_obligations as batch
