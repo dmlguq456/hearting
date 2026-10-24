@@ -152,6 +152,28 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             self.assertEqual(proc.wait(timeout=5), exit_code)
         return payloads, json.loads(out.getvalue().splitlines()[-1])
 
+    def test_verified_sequential_launch_release_accepts_multidigit_fd(self):
+        with self.subfixture():
+            route, path, jobs, registry, output, ledger = self.fixture()
+            body = self.next_body(registry, 'highfd-next', output)
+            marker = self.base / 'highfd-payload'
+            body['command'] = [sys.executable, '-c',
+                'from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])',
+                str(marker), 'argv-preserved']
+            held = []
+            try:
+                for _ in range(6):
+                    held.extend(os.pipe())
+                self.assertGreaterEqual(max(held), 10)
+                payloads, receipt = self.launch(route, path, jobs, registry, output, body)
+            finally:
+                for fd in held:
+                    os.close(fd)
+            self.assertTrue(receipt['payload_spawned'])
+            self.assertEqual(len(payloads), 1)
+            self.assertEqual(marker.read_text(), 'argv-preserved')
+            self.assertEqual(SUP.runner().read_sentinel(receipt['sentinel']), 0)
+
     def test_guard_exit_same_route_resume_preserves_checkpoint_until_owner_successor_start(self):
         route, path, jobs, registry, output, ledger = self.fixture()
         registry.write_text(json.dumps({'schema_version': 1, 'runs': {}}))

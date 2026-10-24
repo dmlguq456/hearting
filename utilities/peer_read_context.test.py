@@ -22,7 +22,7 @@ class PeerReadContextTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.jobs = Path(self.tmp.name) / "jobs.log"
-        CACHE._CACHE.clear()
+        CACHE.clear_cache()
 
     def test_attempt_rows_are_indexed_once_and_keep_latest_exact_row(self):
         self.jobs.write_text("\n".join((row("att-a", "queued"), row("att-b"),

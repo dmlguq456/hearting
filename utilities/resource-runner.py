@@ -21,7 +21,7 @@ SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 RETRY = re.compile(r"^(?P<base>.+)__a(?P<n>[1-9][0-9]*)$")
 TERMINAL_STATUSES = {"succeeded", "failed"}
 
-# The payload runs under a tiny POSIX-sh sentinel wrapper so its exit status survives
+# The payload runs under a tiny shell sentinel wrapper so its exit status survives
 # every observer. A detached run whose launcher, supervisor, and session are all gone
 # must still be able to prove *how* it ended; without this, "the process is not there"
 # is indistinguishable from "the process finished successfully" (2026-08-04 BC_ResNet_tf).
@@ -301,7 +301,11 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
             with contextlib.suppress(FileNotFoundError):
                 path.unlink()
         wait_read, release = os.pipe()
-        launch_argv = ["/bin/sh", "-c", 'IFS= read -r launch <&"$AGENT_RESOURCE_LAUNCH_FD" || exit 125; '
+        # Bash is required because retained generation descriptors can be multi-digit;
+        # dash rejects dynamic fd duplication for descriptors >= 10.
+        # -p skips ambient Bash startup files/functions/options before the release
+        # fence, while leaving the payload's environment intact.
+        launch_argv = ["/bin/bash", "-p", "-c", 'IFS= read -r launch <&"$AGENT_RESOURCE_LAUNCH_FD" || exit 125; '
                        + SENTINEL_SCRIPT, "resource-runner", *(controller.command if controller else placeholder["command"])]
         environment.update(progress_environment(placeholder))
         environment.update(HEARTING_GPU_LEASE_RELEASE="")
@@ -648,7 +652,7 @@ def _main(argv=None, *, controller=None):
             locked_update(registry,lambda data:data["runs"].pop(args.run_id,None))
             raise
         wait_read, release = os.pipe()
-        launch_argv=["/bin/sh","-c",'IFS= read -r launch <&"$AGENT_RESOURCE_LAUNCH_FD" || exit 125; '
+        launch_argv=["/bin/bash","-p","-c",'IFS= read -r launch <&"$AGENT_RESOURCE_LAUNCH_FD" || exit 125; '
                      + SENTINEL_SCRIPT,"resource-runner",*command]
         environment={**os.environ,**progress_environment(placeholder),"AGENT_RESOURCE_SENTINEL":str(sentinel),
                      "HEARTING_RESOURCE_RUN_ID": args.run_id, "HEARTING_RESOURCE_REGISTRY": str(registry.resolve()),

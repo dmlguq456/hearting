@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -86,6 +87,58 @@ class PayloadSessionEnvironmentTest(unittest.TestCase):
 
 
 class TestRunner(unittest.TestCase):
+    def test_launch_release_pipe_supports_multidigit_fd_on_both_paths(self):
+        for verified in (False, True):
+            with self.subTest(verified=verified):
+                route = self._resume_route() if verified else json.loads(self.route.read_text())
+                route_path = self.resume_path if verified else self.route
+                jobs = self.jobs if verified else self.base / "plain-jobs.log"
+                jobs.parent.mkdir(parents=True, exist_ok=True)
+                jobs.write_text("")
+                run_id = "highfd-verified" if verified else "highfd-ordinary"
+                log = self.base / (run_id + ".log")
+                result_path = self.base / (run_id + ".json")
+                startup_marker = self.base / (run_id + ".startup-ran")
+                startup = self.base / (run_id + ".bash-env")
+                startup.write_text("printf startup > " + shlex.quote(str(startup_marker)) + "\n")
+                code = ("import json,os,sys; from pathlib import Path; Path(sys.argv[1]).write_text("
+                        "json.dumps({'args':sys.argv[2:], 'stdin':sys.stdin.read(), "
+                        "'bash_env':os.environ.get('BASH_ENV')}))")
+                args = ["start", "--run-id", run_id, "--cwd", str(self.repo), "--log", str(log),
+                        "--route", str(route_path), "--node", "resume-run" if verified else "full-run",
+                        "--jobs", str(jobs)]
+                command = [sys.executable, "-c", code, str(result_path), "payload-arg"]
+                if not verified:
+                    attestation = self.base / (run_id + ".smoke.json")
+                    subprocess.run([sys.executable, str(SMOKE), "attest", "--input",
+                        str(self.repo / "config"), "--cwd", str(self.repo), "--output",
+                        str(attestation), "--", *command], check=True, stdout=subprocess.DEVNULL,
+                        env=CLEAN_ENV)
+                    args.extend(["--smoke-attestation", str(attestation)])
+                args.extend(["--", *command])
+                held = []
+                try:
+                    for _ in range(6):
+                        held.extend(os.pipe())
+                    self.assertGreaterEqual(max(held), 10)
+                    outcome = self.cli(*args, pass_fds=tuple(held), extra_env={"BASH_ENV": str(startup)})
+                finally:
+                    for fd in held:
+                        os.close(fd)
+                self.assertEqual(outcome.returncode, 0, outcome.stdout + outcome.stderr)
+                row = json.loads(self.registry.read_text())["runs"][run_id]
+                sentinel = Path(row["sentinel"])
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and not sentinel.exists():
+                    time.sleep(.02)
+                self.assertEqual(R.read_sentinel(sentinel), 0)
+                # Smoke attestation also runs the command. Judge the new launch
+                # after its own sentinel, rather than reading the smoke output.
+                self.assertTrue(result_path.exists(), outcome.stdout + outcome.stderr)
+                self.assertFalse(startup_marker.exists(), "wrapper sourced BASH_ENV before the release fence")
+                self.assertEqual(json.loads(result_path.read_text()),
+                                 {"args": ["payload-arg"], "stdin": "", "bash_env": str(startup)})
+
     def test_resource_run_probe_attributes_both_gpu_spawn_paths_to_route_parent(self):
         harness = textwrap.dedent(r"""
             import contextlib, hashlib, importlib.util, io, json, os, signal, subprocess, sys, time
@@ -868,12 +921,12 @@ class TestRunner(unittest.TestCase):
                     break
                 time.sleep(0.02)
 
-    def cli(self, *args, cwd=None):
+    def cli(self, *args, cwd=None, pass_fds=(), input=None, extra_env=None):
         return subprocess.run([
             sys.executable, str(RUNNER), "--registry", str(self.registry), *args,
-        ], cwd=cwd, text=True, capture_output=True,
+        ], cwd=cwd, text=True, capture_output=True, pass_fds=pass_fds, input=input,
            env={**CLEAN_ENV, "AGENT_HOME": str(ROOT),
-                "AGENT_RESOURCE_RUN_INDEX": str(self.index)})
+                "AGENT_RESOURCE_RUN_INDEX": str(self.index), **(extra_env or {})})
 
     def start_args(self, route=None, node="full-run", smoke=None, run_id="case", config_manifest=None):
         return ("start", "--run-id", run_id, "--cwd", str(self.repo), "--log", str(self.log),

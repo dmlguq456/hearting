@@ -1226,7 +1226,9 @@ class DispatchContractTest(unittest.TestCase):
       self.assertTrue(D.parent_attempt_binding_is_live(jobs,binding))
     self.assertEqual(cache.metrics_snapshot()["content_reads"],1)
     stamp=jobs.stat()
-    jobs.write_text(row.replace("\topen\t","\tdone\t"))
+    staged=Path(td)/"jobs-replacement.log"
+    staged.write_text(row.replace("\topen\t","\tdone\t"))
+    staged.replace(jobs)
     os.utime(jobs,ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
     self.assertFalse(D.parent_attempt_binding_is_live(jobs,binding))
     jobs.unlink();jobs.write_text(row)

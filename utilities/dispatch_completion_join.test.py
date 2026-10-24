@@ -148,6 +148,67 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.live.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
         self.live.chmod(0o755)
 
+    @unittest.skipUnless(sys.platform == "linux", "namespace process evidence is Linux-specific")
+    def test_long_lived_join_refreshes_atomic_terminal_child_through_shared_cache(self):
+        attempt, parent = "att-cache-join", "att-cache-parent"
+        worker = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        self.addCleanup(lambda: worker.poll() is None and worker.kill())
+        identity = D.process_launch_identity(worker.pid)
+        namespace = D.process_namespace_identity()
+        identity.update(
+            harness="codex", worker_type="stage", fallback_hop="same-harness-headless",
+            pid_scope="namespace-local", pid_ns=namespace, pid_observer_ns=namespace,
+        )
+        original = row("open", attempt, parent, "cache-join", process_metadata=identity)
+        self.jobs.write_text(original, encoding="utf-8")
+        cache = sys.modules["dispatch_registry_cache"]
+        signature = lambda info: (info.st_dev, 676767, info.st_size, 17, 19)
+        sleeps = [0]
+
+        def publish_terminal_row(_seconds):
+            sleeps[0] += 1
+            if sleeps[0] != 1:
+                return
+            worker.terminate()
+            worker.wait(timeout=5)
+            terminal = dict(
+                identity, launch_lifecycle="foreground-scoped",
+                launch_outcome="governed-process-reaped",
+                group_reap_proof=D.GROUP_REAP_PROOF,
+                group_reap_pgid=str(identity["pgid"]),
+            )
+            replacement = self.jobs.with_name("jobs.terminal")
+            replacement.write_text(
+                row("done", attempt, parent, "cache-join", "completed-subsession",
+                    process_metadata=terminal)
+                + row("done", "att-padding", parent, "padding", "x" * 5000),
+                encoding="utf-8",
+            )
+            os.replace(replacement, self.jobs)
+
+        try:
+            with (mock.patch.object(cache, "_stat_signature", side_effect=signature),
+                  mock.patch.object(JOIN.time, "sleep", side_effect=publish_terminal_row),
+                  mock.patch.object(D, "_proc_observation", return_value=("missing", "", "")),
+                  mock.patch.object(D, "process_group_observation",
+                                    return_value=D.ProcessGroupObservation("empty")),
+                  mock.patch.object(D, "attempt_tagged_descendants",
+                                    return_value=D.ProcessGroupObservation("empty")),
+                  mock.patch.object(D, "attempt_scan_namespace_authority", return_value=True),
+                  mock.patch.object(D, "observer_namespace_extinct", return_value="present")):
+                receipt = JOIN.join_batch(
+                    jobs=self.jobs, parent_attempt_id=parent, interval=0.05, timeout=1,
+                    registry_append_only=True,
+                )
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.wait(timeout=5)
+        self.assertEqual(receipt["state"], "ready", receipt)
+        self.assertGreaterEqual(sleeps[0], 1)
+        self.assertEqual(receipt["children"][0]["status"], "done")
+        self.assertEqual(receipt["children"][0]["reason"], "registry-closed")
+
     def test_exact_attempt_row_reads_inside_a_passive_registry_scope(self):
         import dispatch_registry_cache
         self.jobs.write_text(row("open", "att-scope", "att-parent", "scope"), encoding="utf-8")
@@ -1137,8 +1198,10 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(partition.joinable, frozenset())
         self.assertEqual(partition.unstarted, frozenset())
 
+        staged = self.jobs.with_name("jobs.claimed")
         claimed = never_started.replace("launch_claimed=0", "launch_claimed=1")
-        self.jobs.write_text(claimed, encoding="utf-8")
+        staged.write_text(claimed, encoding="utf-8")
+        os.replace(staged, self.jobs)
         child = JOIN.current_children(self.jobs, parent)[0]
         partition = JOIN.partition_runtime_wait_children(
             self.jobs, parent, [child], {child.attempt_id}
@@ -1146,7 +1209,8 @@ class DispatchCompletionJoinTest(unittest.TestCase):
         self.assertEqual(partition.unstarted, frozenset())
         self.assertEqual(partition.joinable, frozenset({"att-never"}))
 
-        self.jobs.write_text(claimed.replace("\tdone\t", "\topen\t"), encoding="utf-8")
+        staged.write_text(claimed.replace("\tdone\t", "\topen\t"), encoding="utf-8")
+        os.replace(staged, self.jobs)
         child = JOIN.current_children(self.jobs, parent)[0]
         partition = JOIN.partition_runtime_wait_children(
             self.jobs, parent, [child], {child.attempt_id}

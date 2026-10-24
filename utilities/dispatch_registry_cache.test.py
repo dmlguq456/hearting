@@ -38,7 +38,7 @@ class RegistryLinesCacheTest(unittest.TestCase):
 
         self.assertFalse(second.has_invalid_utf8)
         self.assertEqual(second.lines, (prefix.decode("utf-8") + "\ufffd",))
-        self.assertEqual(CACHE.metrics_snapshot()["delta_reads"], 1)
+        self.assertEqual(CACHE.metrics_snapshot()["append_reuses"], 1)
 
     def test_invalid_utf8_replacement_generation_does_not_inherit_old_status(self):
         self.jobs.write_bytes(b"t\topen\t/repo\t/wt\towner\tnote=\xff\n")
@@ -83,6 +83,55 @@ class RegistryLinesCacheTest(unittest.TestCase):
         CACHE.clear_cache()
         CACHE.reset_metrics()
 
+    def test_scoped_stat_collision_preserves_one_consistent_generation(self):
+        # Include CRLF, a Unicode separator and malformed UTF-8: plain text
+        # lines must retain read_text(errors="replace").splitlines semantics.
+        old = b"attempt\topen\t/repo\t/wt\tworker\tattempt_id=child\r\nnotes\xe2\x80\xa8\xff\n"
+        new = old.replace(b"open", b"done")
+        self.jobs.write_bytes(old)
+        signature = lambda s: (s.st_dev, 616161, s.st_size, 17, 19)
+        with mock.patch.object(CACHE, "_stat_signature", side_effect=signature):
+            with CACHE.registry_read_scope():
+                first = CACHE.current_registry_view(self.jobs)
+                old_lines = CACHE.registry_text_lines(self.jobs)
+                self.assertEqual(old_lines, tuple(self.jobs.read_text(errors="replace").splitlines()))
+                self.jobs.write_bytes(new)
+                with CACHE.registry_read_scope():
+                    self.assertIs(CACHE.current_registry_view(self.jobs), first)
+                    self.assertEqual(CACHE.registry_text_lines(self.jobs), old_lines)
+            with CACHE.registry_read_scope():
+                second = CACHE.current_registry_view(self.jobs)
+                lines = CACHE.registry_text_lines(self.jobs)
+                self.assertEqual(lines, tuple(self.jobs.read_text(errors="replace").splitlines()))
+                self.assertEqual(second.lines[0].split("\t")[1], "done")
+                self.assertIsNot(first, second)
+                self.assertIs(CACHE.registry_view(self.jobs, append_only=True), second)
+
+    def test_scope_pins_alias_across_retarget_and_next_scope_observes_new_target(self):
+        other = self.jobs.with_name("other.log")
+        alias = self.jobs.with_name("alias.log")
+        self.jobs.write_text("old\topen\t/repo\t/wt\tworker\tf=1\n", encoding="utf-8")
+        other.write_text("new\tdone\t/repo\t/wt\tworker\tf=2\n", encoding="utf-8")
+        alias.symlink_to(self.jobs)
+        with CACHE.registry_read_scope():
+            first = CACHE.registry_view(alias)
+            first_lines = CACHE.registry_text_lines(alias)
+            alias.unlink()
+            alias.symlink_to(other)
+            with CACHE.registry_read_scope():
+                self.assertIs(CACHE.current_registry_view(alias), first)
+                self.assertEqual(CACHE.registry_text_lines(alias), first_lines)
+            self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 1)
+        with CACHE.registry_read_scope():
+            second = CACHE.current_registry_view(alias)
+            self.assertEqual(second.lines[0].split("\t")[0], "new")
+            self.assertEqual(CACHE.registry_text_lines(alias),
+                             tuple(other.read_text(errors="replace").splitlines()))
+            self.assertIsNot(first, second)
+        # Unscoped aliases still have independent lexical cache slots.
+        self.assertIsNot(CACHE.registry_view(other), second)
+        self.assertIs(CACHE.registry_view(alias), second)
+
     def test_scope_pins_one_generation_and_next_scope_observes_replacement(self):
         self.jobs.write_text("t\topen\t/repo\t/wt\tone\tattempt_id=one\n", encoding="utf-8")
         CACHE.reset_metrics()
@@ -114,7 +163,7 @@ class RegistryLinesCacheTest(unittest.TestCase):
         with self.jobs.open("ab") as stream:
             stream.write(b"t\tdone\t/repo\t/wt\ttwo\tattempt_id=two\x0cnote=x\n")
         appended = CACHE.registry_view(self.jobs, append_only=True)
-        self.assertEqual(CACHE.metrics_snapshot()["delta_reads"], 1)
+        self.assertEqual(CACHE.metrics_snapshot()["append_reuses"], 1)
         expected = tuple(self.jobs.read_bytes().decode("utf-8", errors="replace").splitlines())
         CACHE.reset_metrics()
         with CACHE.registry_read_scope():
@@ -300,25 +349,45 @@ class RegistryLinesCacheTest(unittest.TestCase):
         self.assertTrue(second.has_duplicate_attempts)
         self.assertFalse(first.has_duplicate_attempts)
 
-    def test_same_size_rewrite_and_atomic_replace_rebuild_views(self):
+    def test_atomic_replacements_rebuild_views_and_close_old_generations(self):
         original = "job\topen\t/repo\ttime\towner\tf=1\n"
         replacement = "job	done\t/repo\ttime\towner\tf=1\n"
         self.assertEqual(len(original), len(replacement))
         self.jobs.write_text(original, encoding="utf-8")
         first = CACHE.registry_view(self.jobs)
-        frozen_mtime = self.jobs.stat().st_mtime_ns
-        self.jobs.write_text(replacement, encoding="utf-8")
-        os.utime(self.jobs, ns=(frozen_mtime, frozen_mtime))
-        second = CACHE.registry_view(self.jobs)
-        self.assertNotEqual(first, second)
-        self.assertEqual(second.lines[0].split("\t")[1], "done")
+        current = first
+        for index in range(12):
+            staged = self.jobs.with_name("jobs.new")
+            body = replacement if index % 2 == 0 else original
+            staged.write_text(body, encoding="utf-8")
+            os.replace(staged, self.jobs)
+            updated = CACHE.registry_view(self.jobs, append_only=True)
+            self.assertIsNot(current, updated)
+            self.assertEqual(current._fd, -1)
+            self.assertEqual(updated.lines[0].split("\t")[1], "done" if index % 2 == 0 else "open")
+            current = updated
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 13)
 
-        staged = self.jobs.with_name("jobs.new")
-        staged.write_text(original, encoding="utf-8")
-        os.replace(staged, self.jobs)
-        third = CACHE.registry_view(self.jobs)
-        self.assertEqual(third.lines[0].split("\t")[1], "open")
-        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 3)
+    def test_generation_descriptors_close_on_clear_and_lru_eviction(self):
+        self.jobs.write_text("a\tb\tc\td\te\tf=1\n", encoding="utf-8")
+        first = CACHE.registry_view(self.jobs)
+        first_fd = first._fd
+        CACHE.clear_cache()
+        self.assertEqual(first._fd, -1)
+        with self.assertRaises(OSError):
+            os.fstat(first_fd)
+
+        paths = []
+        for number in range(CACHE._CACHE_MAX_PATHS + 1):
+            path = Path(self.tmp.name) / f"jobs-{number}.log"
+            path.write_text(f"a\tb\tc\td\te\tf={number}\n", encoding="utf-8")
+            current = CACHE.registry_view(path)
+            if number == 0:
+                evicted_fd = current._fd
+            paths.append(path)
+        self.assertEqual(CACHE.metrics_snapshot()["cache_entries"], CACHE._CACHE_MAX_PATHS)
+        with self.assertRaises(OSError):
+            os.fstat(evicted_fd)
 
     def test_partial_final_row_is_reobserved_after_append(self):
         self.jobs.write_text("a\tb\tc\td\te\tf=1", encoding="utf-8")
@@ -345,6 +414,7 @@ class RegistryLinesCacheTest(unittest.TestCase):
         self.assertIsNotNone(row)
         metrics = CACHE.metrics_snapshot()
         self.assertEqual(metrics["full_metadata_parses"], 1)
+        self.assertEqual(metrics["append_reuses"], 1)
         self.assertEqual(metrics["delta_reads"], 1)
         self.assertEqual(metrics["delta_bytes_read"], len(suffix))
         self.assertEqual(metrics["metadata_rows_parsed"], 2)
@@ -413,8 +483,18 @@ class RegistryLinesCacheTest(unittest.TestCase):
             self.jobs.write_text("large\topen\t/repo\ttime\towner\tf=1\n", encoding="utf-8")
             view = CACHE.registry_view(self.jobs)
             self.assertEqual(view.lines[0].split("\t", 1)[0], "large")
+            self.assertEqual(view._fd, -1)
             self.assertEqual(CACHE.metrics_snapshot()["cache_entries"], 0)
             self.assertEqual(CACHE.metrics_snapshot()["cache_bytes"], 0)
+
+    def test_cached_raw_content_is_included_in_budget_and_released_on_clear(self):
+        content = b"a\tb\tc\td\te\tf=1\n"
+        self.jobs.write_bytes(content)
+        CACHE.registry_view(self.jobs)
+        self.assertEqual(CACHE.metrics_snapshot()["cache_bytes"], len(content))
+        CACHE.clear_cache()
+        self.assertEqual(CACHE.metrics_snapshot()["cache_bytes"], 0)
+        self.assertEqual(CACHE.metrics_snapshot()["cache_entries"], 0)
 
     def test_append_segments_compact_indexes_without_reparsing_history(self):
         self.jobs.write_text(
@@ -434,37 +514,44 @@ class RegistryLinesCacheTest(unittest.TestCase):
         metrics = CACHE.metrics_snapshot()
         self.assertEqual(metrics["full_metadata_parses"], 1)
         self.assertEqual(metrics["metadata_rows_parsed"], 301)
+        self.assertEqual(metrics["append_reuses"], 300)
         self.assertEqual(metrics["delta_reads"], 300)
         self.assertGreater(metrics["segment_compactions"], 0)
 
-    def test_unstable_read_retries_and_returns_only_the_new_generation(self):
+    def test_atomic_replacement_during_read_retries_on_new_generation(self):
         self.jobs.write_text("old\topen\t/repo\ttime\towner\tf=1\n", encoding="utf-8")
         real_read = os.read
         changed = [False]
 
-        def rewrite_after_first_read(fd, size):
+        def replace_after_first_read(fd, size):
             data = real_read(fd, size)
             if not changed[0]:
                 changed[0] = True
-                self.jobs.write_text("new\tdone\t/repo\ttime\towner\tf=1\n", encoding="utf-8")
+                staged = self.jobs.with_name("jobs.during-read")
+                staged.write_text("new\tdone\t/repo\ttime\towner\tf=1\n", encoding="utf-8")
+                os.replace(staged, self.jobs)
             return data
 
-        with mock.patch.object(CACHE.os, "read", side_effect=rewrite_after_first_read):
+        with mock.patch.object(CACHE.os, "read", side_effect=replace_after_first_read):
             view = CACHE.registry_view(self.jobs)
         self.assertEqual(view.lines[0].split("\t", 1)[0], "new")
-        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 1)
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 2)
 
     def test_failed_observation_drops_old_view_and_recovers(self):
         self.jobs.write_text("a\tb\tc\td\te\tf=1\n", encoding="utf-8")
         first = CACHE.registry_view(self.jobs)
-        self.jobs.write_text("x\tb\tc\td\te\tf=2\n", encoding="utf-8")
+        staged = self.jobs.with_name("jobs.permission-replacement")
+        staged.write_text("x\tb\tc\td\te\tf=2\n", encoding="utf-8")
+        os.replace(staged, self.jobs)
         with mock.patch.object(CACHE.os, "open", side_effect=PermissionError("denied")):
             with self.assertRaises(OSError):
                 CACHE.registry_view(self.jobs)
         self.jobs.unlink()
         with self.assertRaises(FileNotFoundError):
             CACHE.registry_view(self.jobs)
-        self.jobs.write_text("x\tb\tc\td\te\tf=2\n", encoding="utf-8")
+        staged = self.jobs.with_name("jobs.alias-replacement")
+        staged.write_text("x\tb\tc\td\te\tf=2\n", encoding="utf-8")
+        os.replace(staged, self.jobs)
         recovered = CACHE.registry_view(self.jobs)
         self.assertIsNot(first, recovered)
         self.assertEqual(recovered.lines[0].split("\t", 1)[0], "x")
@@ -493,9 +580,157 @@ class RegistryLinesCacheTest(unittest.TestCase):
         alias_view = CACHE.registry_view(alias)
         self.assertIsNot(canonical_view, alias_view)
         self.assertEqual(canonical_view.lines, alias_view.lines)
-        self.jobs.write_text("x\tb\tc\td\te\tf=2\n", encoding="utf-8")
+        staged = self.jobs.with_name("jobs.alias-target-replacement")
+        staged.write_text("x\tb\tc\td\te\tf=2\n", encoding="utf-8")
+        os.replace(staged, self.jobs)
         self.assertEqual(CACHE.registry_view(alias).lines[0].split("\t", 1)[0], "x")
         self.assertEqual(CACHE.registry_view(self.jobs).lines[0].split("\t", 1)[0], "x")
+
+    def test_same_stat_signature_atomic_replacement_uses_new_generation(self):
+        old = b"attempt\topen\t/repo\t/wt\tworker\tattempt_id=child\n"
+        new = b"attempt\tdone\t/repo\t/wt\tworker\tattempt_id=child\n"
+        self.assertEqual(len(old), len(new))
+        self.jobs.write_bytes(old)
+        signature = lambda info: (info.st_dev, 424242, info.st_size, 7, 9)
+        with mock.patch.object(CACHE, "_stat_signature", side_effect=signature):
+            first = CACHE.registry_view(self.jobs)
+            staged = self.jobs.with_name("jobs.same-stat-replacement")
+            staged.write_bytes(new)
+            os.replace(staged, self.jobs)
+            second = CACHE.registry_view(self.jobs)
+        self.assertIsNot(first, second)
+        self.assertEqual(second.lines[0].split("\t")[1], "done")
+        self.assertEqual(CACHE.metrics_snapshot()["full_metadata_parses"], 2)
+
+    def test_inode_collision_append_reuse_requires_entire_prefix(self):
+        old_row = b"attempt\topen\t/repo\t/wt\tworker\tattempt_id=child\n"
+        new_row = old_row.replace(b"open", b"done")
+        self.assertEqual(len(old_row), len(new_row))
+        tail = b"padding\topen\t/repo\t/wt\tworker\tnote=" + b"x" * 5000 + b"\n"
+        self.jobs.write_bytes(old_row + tail)
+        signature = lambda info: (info.st_dev, 818181, info.st_size, 11, 13)
+        with mock.patch.object(CACHE, "_stat_signature", side_effect=signature):
+            first = CACHE.registry_view(self.jobs, append_only=True)
+            staged = self.jobs.with_name("jobs.replace")
+            staged.write_bytes(new_row + tail + b"extra\topen\t/repo\t/wt\tworker\tf=1\n")
+            os.replace(staged, self.jobs)
+            second = CACHE.registry_view(self.jobs, append_only=True)
+        self.assertEqual(second.lines[0].split("\t")[1], "done")
+        self.assertIsNot(first._segments[0], second._segments[0])
+        self.assertEqual(CACHE.metrics_snapshot()["append_reuses"], 0)
+        self.assertEqual(CACHE.metrics_snapshot()["metadata_rows_parsed"], 5)
+
+    def test_stable_read_retries_after_same_stat_atomic_replacement(self):
+        old = b"attempt\topen\t/repo\t/wt\tworker\tf=1\n"
+        new = b"attempt\tdone\t/repo\t/wt\tworker\tf=1\n"
+        self.assertEqual(len(old), len(new))
+        self.jobs.write_bytes(old)
+        signature = lambda info: (info.st_dev, 424242, info.st_size, 7, 9)
+        real_read = os.read
+        calls = [0]
+
+        def replace_during_read(fd, size):
+            calls[0] += 1
+            data = real_read(fd, size)
+            if calls[0] == 1:
+                staged = self.jobs.with_name("jobs.concurrent-replacement")
+                staged.write_bytes(new)
+                os.replace(staged, self.jobs)
+            return data
+
+        with mock.patch.object(CACHE, "_stat_signature", side_effect=signature), mock.patch.object(
+                CACHE.os, "read", side_effect=replace_during_read):
+            view = CACHE.registry_view(self.jobs)
+        self.assertEqual(view.lines[0].split("\t")[1], "done")
+        self.assertEqual(CACHE.metrics_snapshot()["content_reads"], 2)
+        self.assertEqual(CACHE.metrics_snapshot()["bytes_read"], len(old) + len(new))
+
+    def test_permanently_unstable_observation_invalidates_cached_view(self):
+        old = b"attempt\topen\t/repo\t/wt\tworker\tf=1\n"
+        new = b"attempt\tdone\t/repo\t/wt\tworker\tf=1\n"
+        self.assertEqual(len(old), len(new))
+        self.jobs.write_bytes(old)
+        cached = CACHE.registry_view(self.jobs)
+        staged = self.jobs.with_name("jobs.unstable-start")
+        staged.write_bytes(new)
+        os.replace(staged, self.jobs)
+        real_read = os.read
+        flip = [False]
+
+        def replace_after_each_nonempty_read(fd, size):
+            data = real_read(fd, size)
+            if data:
+                flip[0] = not flip[0]
+                staged = self.jobs.with_name("jobs.unstable-replacement")
+                staged.write_bytes(new if flip[0] else old)
+                os.replace(staged, self.jobs)
+            return data
+
+        with mock.patch.object(CACHE.os, "read", side_effect=replace_after_each_nonempty_read):
+            with self.assertRaises(OSError):
+                CACHE.registry_view(self.jobs)
+        self.assertEqual(CACHE.metrics_snapshot()["cache_entries"], 0)
+        recovered = CACHE.registry_view(self.jobs)
+        self.assertIsNot(cached, recovered)
+        self.assertEqual(recovered.lines[0].split("\t")[1], "done")
+
+    def test_validation_byte_metrics_match_independent_os_read_spy(self):
+        content = b"attempt\topen\t/repo\t/wt\tworker\tf=1\n"
+        self.jobs.write_bytes(content)
+        real_read = os.read
+        total = [0]
+
+        def counted_read(fd, size):
+            data = real_read(fd, size)
+            total[0] += len(data)
+            return data
+
+        with mock.patch.object(CACHE.os, "read", side_effect=counted_read):
+            CACHE.registry_view(self.jobs)
+        metrics = CACHE.metrics_snapshot()
+        self.assertEqual(metrics["content_reads"], 1)
+        self.assertEqual(metrics["bytes_read"], total[0])
+        self.assertEqual(total[0], len(content))
+
+    def test_symlink_alias_retarget_drops_old_alias_generation(self):
+        alias = Path(self.tmp.name) / "jobs-retarget.log"
+        other = Path(self.tmp.name) / "other-target.log"
+        self.jobs.write_text("a\tb\tc\td\te\tf=1\n", encoding="utf-8")
+        other.write_text("x\tb\tc\td\te\tf=2\n", encoding="utf-8")
+        alias.symlink_to(self.jobs)
+        first = CACHE.registry_view(alias)
+        alias.unlink()
+        alias.symlink_to(other)
+        second = CACHE.registry_view(alias)
+        self.assertIsNot(first, second)
+        self.assertEqual(second.lines[0].split("\t", 1)[0], "x")
+        self.assertEqual(CACHE.metrics_snapshot()["cache_entries"], 1)
+
+    def test_symlink_resolution_failure_invalidates_alias_and_recovers(self):
+        alias = Path(self.tmp.name) / "jobs-loop.log"
+        self.jobs.write_text("a\tb\tc\td\te\tf=1\n", encoding="utf-8")
+        alias.symlink_to(self.jobs)
+        first = CACHE.registry_view(alias)
+        alias.unlink()
+        alias.symlink_to(alias)
+        with self.assertRaises(OSError):
+            CACHE.registry_view(alias)
+        self.assertEqual(CACHE.metrics_snapshot()["cache_entries"], 0)
+        alias.unlink()
+        alias.symlink_to(self.jobs)
+        recovered = CACHE.registry_view(alias)
+        self.assertIsNot(first, recovered)
+        self.assertEqual(recovered.lines[0].split("\t", 1)[0], "a")
+
+    def test_genuine_append_keeps_prior_segment_identity(self):
+        self.jobs.write_text("a\topen\t/repo\t/wt\tworker\tf=1\n", encoding="utf-8")
+        first = CACHE.registry_view(self.jobs, append_only=True)
+        with self.jobs.open("a", encoding="utf-8") as handle:
+            handle.write("b\topen\t/repo\t/wt\tworker\tf=2\n")
+        second = CACHE.registry_view(self.jobs, append_only=True)
+        self.assertIs(first._segments[0], second._segments[0])
+        self.assertEqual(CACHE.metrics_snapshot()["append_reuses"], 1)
+        self.assertEqual(CACHE.metrics_snapshot()["metadata_rows_parsed"], 2)
 
     def test_replaced_file_same_mtime_is_still_distinguished_by_size(self):
         # A same-second rewrite with a different byte count must not be
@@ -544,7 +779,7 @@ class RegistryLinesCacheTest(unittest.TestCase):
         self.assertIs(first._segments[0], second._segments[0])
         self.assertIs(first_record, second.records[0])
         self.assertEqual(second.lines, (original[:-1].decode(), suffix[:-1].decode()))
-        self.assertEqual(CACHE.metrics_snapshot()["delta_reads"], 1)
+        self.assertEqual(CACHE.metrics_snapshot()["delta_reads"], 0)
         self.assertEqual(CACHE.metrics_snapshot()["metadata_rows_parsed"], 2)
 
     def test_scoped_full_observation_rebuilds_on_prefix_rewrite_or_rotation(self):
@@ -565,7 +800,9 @@ class RegistryLinesCacheTest(unittest.TestCase):
         CACHE.registry_view(self.jobs)
         identity = str(self.jobs.absolute())
         view_type = CACHE.RegistryView
-        self.jobs.write_bytes(b"x\topen\t/repo\t/wt\towner\tf=2\n")
+        staged = self.jobs.with_name("jobs.fresh-replacement")
+        staged.write_bytes(b"x\topen\t/repo\t/wt\towner\tf=2\n")
+        os.replace(staged, self.jobs)
         constructed = []
 
         def construct(*args, **kwargs):
@@ -583,7 +820,9 @@ class RegistryLinesCacheTest(unittest.TestCase):
         CACHE.registry_view(self.jobs)
         identity = str(self.jobs.absolute())
         view_type = CACHE.RegistryView
-        self.jobs.write_bytes(b"x\topen\t/repo\t/wt\towner\tf=2\n")
+        staged = self.jobs.with_name("jobs.scoped-replacement")
+        staged.write_bytes(b"x\topen\t/repo\t/wt\towner\tf=2\n")
+        os.replace(staged, self.jobs)
         constructed = []
 
         def construct(*args, **kwargs):
