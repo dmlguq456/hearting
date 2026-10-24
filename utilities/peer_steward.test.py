@@ -66,6 +66,9 @@ class _TmpRootMixin:
                 os.environ.pop(key, None)
         os.environ["AGENT_DISPATCH_JOBS"] = str(self.jobs_path)
         os.environ["AGENT_PEER_LEDGER_ROOT"] = str(self.tmp_root)
+        fixture_store = peer_steward.peer_obligations.ObligationStore(self.tmp_root)
+        self.assertTrue(fixture_store.ensure_directory(),
+                        "fixture starts with an existing obligations root")
         # `steward_marker_roots()`'s fleet-reader branch also adds
         # `stable_state_root(os.environ)` and every installed runtime's own root
         # (~/.codex, ~/.claude, ~/.config/opencode) as read candidates; without
@@ -5797,6 +5800,43 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
             self.assertEqual(operation.call_count, 3)
         batch_probe.assert_not_called()
 
+    def test_runner_closes_settlement_watcher_when_its_context_retires(self):
+        store = peer_steward.peer_obligations.ObligationStore(self.tmp_root)
+        lock_path = store.root / peer_steward.peer_obligations.RUNNER_LOCK_NAME
+        contexts = []
+        context_type = peer_steward.dispatch_batch_obligations.OwnerSettlementReadContext
+
+        def make_context():
+            context = context_type()
+            if not context._ensure_dependency_watcher():
+                self.skipTest("inotify is unavailable")
+            contexts.append((context, context._dependency_watch_fd))
+            return context
+
+        with lock_path.open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with mock.patch.object(
+                    peer_steward.dispatch_batch_obligations,
+                    "OwnerSettlementReadContext", side_effect=make_context), \
+                 mock.patch.object(peer_steward, "_runner_readiness_loop"), \
+                 mock.patch.object(peer_steward, "_external_obligation_snapshot",
+                                   return_value={"jobs_stamps": {}}), \
+                 mock.patch.object(peer_steward, "_external_obligation_signature",
+                                   return_value=((), ())), \
+                 mock.patch.object(peer_steward, "_external_obligation_snapshot_unchanged",
+                                   return_value=True), \
+                 mock.patch.object(peer_steward, "_reconcile_external_obligations"), \
+                 mock.patch.object(peer_steward, "_publish_watch_readiness"):
+                self.assertEqual(peer_steward.cmd_obligation_runner(SimpleNamespace(
+                    state_root=self.tmp_root, lock_fd=lock.fileno())), 0)
+
+        self.assertEqual(len(contexts), 1)
+        context, watcher_fd = contexts[0]
+        self.assertEqual(context._dependency_watch_fd, -1)
+        self.assertTrue(context._dependency_watcher_fallback)
+        with self.assertRaises(OSError):
+            os.fstat(watcher_fd)
+
     def test_runner_idle_backoff_ignores_repeated_observation_writes_and_resets_on_change(self):
         store, duty = self.pending_message()
         ticks = []
@@ -5810,9 +5850,15 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
             else:
                 current.update(row["id"], state="complete")
 
+        clock = {"now": 0.0}
+
+        def advance_sleep(delay):
+            clock["now"] += delay
+
         with (store.root / peer_steward.peer_obligations.RUNNER_LOCK_NAME).open("w") as lock, \
              mock.patch.object(peer_steward, "_resume_message_obligation", side_effect=resume), \
-             mock.patch.object(peer_steward.time, "sleep") as sleep:
+             mock.patch.object(peer_steward.time, "monotonic", side_effect=lambda: clock["now"]), \
+             mock.patch.object(peer_steward.time, "sleep", side_effect=advance_sleep) as sleep:
             fcntl.flock(lock, fcntl.LOCK_EX)
             self.assertEqual(peer_steward.cmd_obligation_runner(
                 SimpleNamespace(state_root=self.tmp_root, lock_fd=lock.fileno())), 0)
@@ -10699,6 +10745,77 @@ class NativeReceivingTurnRecoveryTest(_TmpRootMixin, unittest.TestCase):
         duty = store.update(duty_id, observation={"native_receiving_turn": binding})
         return store, duty, aid, sid
 
+    def test_present_registered_record_does_not_rematerialize(self):
+        import dispatch_completion_join as join
+        store, duty, _aid, sid = self._duty()
+        with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \
+             mock.patch("dispatch_seat_handover.effective_parent", return_value=sid), \
+             mock.patch.object(peer_steward, "_resume_native_receiving_turn", return_value=False):
+            peer_steward._resume_registered_obligation(duty, store)
+        materialize.assert_not_called()
+        self.assertEqual(store.get(duty["id"])["state"], "complete")
+
+    def test_missing_registered_record_recovers_after_transient_materialization_failure(self):
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+        store, duty, aid, sid = self._duty()
+        exact = pending.read(self.tmp_root, sid, "delivery-native-crash")
+        path = pending.record_path(self.tmp_root, sid, "delivery-native-crash")
+        path.unlink()
+        attempts = 0
+
+        def recover_once(jobs, attempt_id):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 2:
+                restored = pending.create(
+                    self.tmp_root,
+                    recipient_kind=exact["recipient_kind"], recipient_key=sid,
+                    delivery_id=exact["delivery_id"],
+                    session_generation=exact["session_generation"],
+                    session_generation_supported=exact["session_generation_supported"],
+                    attempt_ids=exact["attempt_ids"],
+                    parent_attempt_id=exact["parent_attempt_id"],
+                    route_id=exact["route_id"], route_node=exact["route_node"],
+                    receipt=exact["receipt"], receipt_digest=exact["receipt_digest"],
+                    row_revisions=exact["row_revisions"], lineage=exact.get("lineage", []))
+                pending.claim(self.tmp_root, sid, restored["delivery_id"],
+                              claim_owner="fixture", lease_seconds=30)
+                pending.ack(self.tmp_root, sid, restored["delivery_id"],
+                            acked_by="codex-native-prompt:" + sid)
+
+        with mock.patch.object(join, "materialize_after_terminal_close",
+                               side_effect=recover_once) as materialize, \
+             mock.patch("dispatch_seat_handover.effective_parent", return_value=sid), \
+             mock.patch.object(peer_steward, "_resume_native_receiving_turn", return_value=False):
+            peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
+            self.assertEqual(store.get(duty["id"])["state"], "unknown")
+            peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
+
+        self.assertEqual(materialize.call_count, 2)
+        self.assertEqual(pending.read(self.tmp_root, sid, "delivery-native-crash")["state"], "acked")
+        current = store.get(duty["id"])
+        self.assertEqual((current["state"], current["delivery"]), ("complete", "acked"))
+
+    def test_matching_terminal_tombstone_is_never_rematerialized(self):
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+        store, duty, _aid, sid = self._duty()
+        path = pending.record_path(self.tmp_root, sid, "delivery-native-crash")
+        exact = pending.read(self.tmp_root, sid, "delivery-native-crash")
+        pending._write_prune_tombstone(path, exact)
+        path.unlink()
+
+        with mock.patch.object(join, "materialize_after_terminal_close") as materialize, \
+             mock.patch("dispatch_seat_handover.effective_parent", return_value=sid):
+            peer_steward._resume_registered_obligation(duty, store)
+            peer_steward._resume_registered_obligation(store.get(duty["id"]), store)
+
+        materialize.assert_not_called()
+        self.assertIsNone(pending.read(self.tmp_root, sid, "delivery-native-crash"))
+        current = store.get(duty["id"])
+        self.assertEqual((current["state"], current["delivery"]), ("complete", "acked"))
+
     def _run_empty_native_recovery(self, request_context, native_items=()):
         import codex_queue_delivery
         import codex_queue_dispatch
@@ -11968,6 +12085,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
             jobs = dispatch_root / "jobs.log"
             jobs.write_text("fixture\n", encoding="utf-8")
             store = peer_steward.peer_obligations.ObligationStore(state_root)
+            store.root.mkdir(parents=True)
             start = str(process_start_ticks(os.getpid()))
             arms = []
             for index in range(6):
@@ -12065,6 +12183,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                                 "AGENT_PEER_LEDGER_ROOT": str(state_root)}
                 jobs_before = jobs.read_bytes()
                 store = peer_steward.peer_obligations.ObligationStore(state_root)
+                self.assertTrue(store.ensure_directory())
                 start = str(process_start_ticks(os.getpid()))
                 watch_id = f"watch-{name}"
                 arm = {
@@ -12196,6 +12315,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                             "AGENT_DISPATCH_JOBS": str(jobs),
                             "AGENT_PEER_LEDGER_ROOT": str(state_root)}
             store = peer_steward.peer_obligations.ObligationStore(state_root)
+            self.assertTrue(store.ensure_directory())
             start = str(process_start_ticks(os.getpid()))
             watch_id = "watch-boundary-race"
             endpoint = "/tmp/herdr-transition.sock"
@@ -12373,6 +12493,7 @@ class SharedReadinessRunnerTest(unittest.TestCase):
                     os.environ["AGENT_PEER_LEDGER_ROOT"] = str(jobs.parent)
                     os.environ["XDG_STATE_HOME"] = str(base / "xdg-state")
                     store = peer_steward.peer_obligations.ObligationStore(jobs.parent)
+                    self.assertTrue(store.ensure_directory())
                     watch_root = jobs.parent / "peer-watches"
                     watch_root.mkdir()
                     lines = jobs.read_text(encoding="utf-8").splitlines()

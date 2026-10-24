@@ -21,6 +21,7 @@ class SharedReadinessTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
+        (self.root / "peer-steward" / "obligations").mkdir(parents=True)
         self.start = str(process_start_ticks(os.getpid()))
         self.identity = READINESS.attempt_identity(
             self.root / "jobs.log", "att-one", parent="parent", slug="worker",
@@ -164,6 +165,19 @@ class SharedReadinessTest(unittest.TestCase):
         readable, _, _ = select.select([wake_fd], [], [], 0.1)
         self.assertEqual(readable, [wake_fd])
         self.assertEqual(os.read(wake_fd, 4096), b"\0")
+
+    def test_readiness_recovery_does_not_recreate_a_removed_state_root(self):
+        state_root = self.root / "removed-state"
+        obligations = state_root / "peer-steward" / "obligations"
+        (obligations / "readiness-v1").mkdir(parents=True)
+        state_root.rename(state_root.with_name("removed-state-held"))
+
+        with self.assertRaises(OSError):
+            READINESS.publish_runner_incarnation(obligations, os.getpid(), self.start,
+                                                 "old-runner")
+        with self.assertRaises(OSError):
+            READINESS.open_runner_wake(obligations)
+        self.assertFalse(state_root.exists())
 
     def test_unverifiable_producer_and_oversized_result_never_publish_ready(self):
         bad = self.projection(producer_start="1")

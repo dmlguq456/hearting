@@ -15,6 +15,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -24,6 +25,7 @@ import sys
 import tempfile
 import threading
 import time
+import statistics
 from pathlib import PurePosixPath
 
 
@@ -642,26 +644,20 @@ def _spawn_carrier(source, jobs, attempt, state_root, data_root, case_root):
 
 
 def _carrier_ready(consumers, candidate, state_root):
-    if candidate:
-        records = []
-        for path in (Path(state_root) / "peer-steward" / "obligations").glob("*.json"):
-            record = _read_json(path) or {}
-            intent = record.get("intent") or {}
-            observation = record.get("observation") or {}
-            if intent.get("kind") == "readiness-observation":
-                records.append(observation)
-        pending = [row for row in records
-                   if row.get("readiness_state") == "pending"
-                   and isinstance(row.get("shared_readiness"), dict)]
-        return len(pending) >= len(consumers)
-    for consumer in consumers:
-        events = _read_jsonl(consumer["helper_log"])
-        if not events or (events[-1].get("result") or {}).get("state") != "pending":
-            return False
-        stat = _proc_stat(consumer["process"].pid)
-        if stat is None or stat["cutime"] + stat["cstime"] <= 0:
-            return False
-    return True
+    # Both the measured baseline and candidate use the shared runner. Observe
+    # the same pending projection boundary on each side; the baseline carrier
+    # no longer launches a standalone readiness helper subprocess.
+    records = []
+    for path in (Path(state_root) / "peer-steward" / "obligations").glob("*.json"):
+        record = _read_json(path) or {}
+        intent = record.get("intent") or {}
+        observation = record.get("observation") or {}
+        if intent.get("kind") == "readiness-observation":
+            records.append(observation)
+    pending = [row for row in records
+               if row.get("readiness_state") == "pending"
+               and isinstance(row.get("shared_readiness"), dict)]
+    return len(pending) >= len(consumers)
 
 
 def _wait_processes(processes, timeout):
@@ -966,7 +962,7 @@ class FixtureObservationEndpoint:
                 "ok": True}
 
 
-_RUNNER_BOOTSTRAP = r'''import fcntl, importlib.util, json, os, sys, traceback
+_RUNNER_BOOTSTRAP = r'''import fcntl, importlib.util, json, os, sys, time, traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -982,6 +978,20 @@ try:
     spec.loader.exec_module(module)
     store = module.peer_obligations.ObligationStore(state_root)
     store.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    stall_root = os.environ.get("FIXTURE_RUNNER_STALL_ROOT")
+    if stall_root:
+        stall_root = Path(stall_root)
+        stall_counter = [0]
+        def stall_slow_lane(*_args, **_kwargs):
+            stall_counter[0] += 1
+            sequence = stall_counter[0]
+            entered = stall_root / ("entered-%02d" % sequence)
+            release = stall_root / ("release-%02d" % sequence)
+            entered.write_text(str(time.monotonic()), encoding="ascii")
+            while not release.exists():
+                time.sleep(0.01)
+            return 0
+        module.dispatch_batch_obligations.ensure_observers = stall_slow_lane
     lock_fd = os.open(store.root / module.peer_obligations.RUNNER_LOCK_NAME,
                       os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(lock_fd, fcntl.LOCK_EX)
@@ -1075,6 +1085,359 @@ def _start_fixture_runner(source, state_root, endpoint, env, case_root):
             f"pipe-backed shared runner failed to lock its state root; "
             f"ready={ready!r}; log_tail={log_tail}")
     return process
+
+
+def _write_legacy_attempt(jobs, attempt_id, status):
+    path = Path(jobs)
+    rows = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    rows = [row for row in rows if f"attempt_id={attempt_id}" not in row]
+    rows.append("2026-10-24T00:00:00Z\t%s\t/repo\t/wt\tlegacy-worker\tattempt_id=%s"
+                % (status, attempt_id))
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _measure_runner_readiness_stalls(source, data_root, case_root, *, sample_count=20):
+    """Measure close-to-ready latency while the real runner blocks in its slow lane."""
+    import importlib.util
+    from types import SimpleNamespace
+
+    source = Path(source).resolve(strict=True)
+    case_root = Path(case_root)
+    case_root.mkdir(parents=True, exist_ok=True)
+    state_root = case_root / "peer-state"
+    state_root.mkdir()
+    jobs = state_root / "jobs.log"
+    stall_root = case_root / "slow-lane"
+    stall_root.mkdir()
+    stall_runner_log = case_root / "stall-runner-snapshots.jsonl"
+    env = _fixture_env(source, data_root, state_root, jobs, case_root)
+    env["FIXTURE_RUNNER_STALL_ROOT"] = str(stall_root)
+
+    module_name = "fixture_shared_readiness_" + hashlib.sha256(
+        str(source).encode()).hexdigest()[:12]
+    module_path = source / "utilities" / "shared_readiness.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"shared readiness module unavailable: {module_path}")
+    readiness = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(readiness)
+
+    sys.path.insert(0, str(source / "utilities"))
+    try:
+        import peer_obligations
+        from dispatch_contract import process_start_ticks
+        import dispatch_registry_cache
+
+        store = peer_obligations.ObligationStore(state_root)
+        process = None
+        raw = []
+        try:
+            _write_legacy_attempt(jobs, "att-stall-00", "running")
+            endpoint = SimpleNamespace(snapshot_path=stall_runner_log)
+            process = _start_fixture_runner(
+                source, state_root, endpoint, env, case_root)
+            runner_stat = _proc_stat(process.pid)
+            if runner_stat is None:
+                raise RuntimeError("actual obligation runner identity is unavailable")
+            if process.stdin is None:
+                raise RuntimeError("stall runner stdin is unavailable")
+            process.stdin.write(b"go\n")
+            process.stdin.flush()
+
+            previous_duty_id = None
+            for index in range(sample_count):
+                attempt = f"att-stall-{index:02d}"
+                if index:
+                    _write_legacy_attempt(jobs, attempt, "running")
+                consumer_start = str(process_start_ticks(os.getpid()) or "")
+                identity = readiness.attempt_identity(
+                    jobs, attempt, parent="", slug="", consumer_pid=os.getpid(),
+                    consumer_start=consumer_start,
+                    request_token=f"paired-stall-{index:02d}")
+                duty_id = readiness.duty_id(identity)
+                store.create(duty_id, readiness.DUTY_KIND, identity,
+                    {"jobs": str(jobs), "attempt_id": attempt, "parent": "", "slug": ""})
+                if previous_duty_id:
+                    store.update(previous_duty_id, state="complete",
+                                 result="consumer-finished", cleanup="complete")
+                previous_duty_id = duty_id
+
+                entered_path = stall_root / f"entered-{index + 1:02d}"
+                release_path = stall_root / f"release-{index + 1:02d}"
+                deadline = time.monotonic() + 30
+                while not entered_path.is_file():
+                    if process.poll() is not None:
+                        raise RuntimeError("slow-lane runner exited before its barrier")
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"runner did not enter slow lane for sample {index + 1}")
+                    time.sleep(0.01)
+                try:
+                    entered_at = float(entered_path.read_text(encoding="ascii"))
+                except (OSError, ValueError):
+                    entered_at = time.monotonic()
+
+                _write_legacy_attempt(jobs, attempt, "done")
+                closed_at = time.monotonic()
+                dispatch_registry_cache.clear_cache()
+                view = dispatch_registry_cache.registry_view(jobs)
+                expected_generation = list(view.signature)
+                stall_end = entered_at + 20.0
+                ready_at = None
+                observed_projection = None
+
+                def observe_ready():
+                    nonlocal observed_projection
+                    current = store.get(duty_id)
+                    result = readiness.current_result(current, identity)
+                    projection = ((current.get("observation") or {}).get("shared_readiness")
+                                  if isinstance(current, dict) else None)
+                    if (result and result.get("state") == "ready"
+                            and isinstance(projection, dict)
+                            and projection.get("generation") == expected_generation):
+                        observed_projection = projection
+                        return time.monotonic()
+                    return None
+
+                while time.monotonic() < stall_end:
+                    if ready_at is None:
+                        ready_at = observe_ready()
+                    time.sleep(0.02)
+                release_path.touch()
+                released_at = time.monotonic()
+                if ready_at is None:
+                    deadline = time.monotonic() + 35
+                    while ready_at is None:
+                        if process.poll() is not None:
+                            raise RuntimeError("slow-lane runner exited before ready projection")
+                        ready_at = observe_ready()
+                        if ready_at is not None:
+                            break
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError(f"ready projection timed out for sample {index + 1}")
+                        time.sleep(0.02)
+                raw.append({
+                    "sample": index + 1,
+                    "attempt_id": attempt,
+                    "runner_pid": process.pid,
+                    "runner_start": str(runner_stat["start"]),
+                    "slow_lane_entered_monotonic": entered_at,
+                    "slow_lane_released_monotonic": released_at,
+                    "close_monotonic": closed_at,
+                    "ready_monotonic": ready_at,
+                    "close_to_ready_seconds": max(0.0, ready_at - closed_at),
+                    "runner_slow_lane_seconds": max(0.0, released_at - entered_at),
+                    "projection_observed_at": observed_projection.get("observed_at"),
+                    "projection_generation": observed_projection.get("generation"),
+                    "ready_before_slow_lane_release": ready_at < released_at,
+                })
+
+            latencies = sorted(item["close_to_ready_seconds"] for item in raw)
+            rank = max(1, math.ceil(0.95 * len(latencies)))
+            return {"sample_count": len(raw), "samples": raw,
+                    "nearest_rank_p95_seconds": latencies[rank - 1],
+                    "median_seconds": latencies[(len(latencies) - 1) // 2],
+                    "all_slowlane_stalls_seconds": [item["runner_slow_lane_seconds"]
+                                                     for item in raw],
+                    "projections_before_slow_lane_release": sum(
+                        item["ready_before_slow_lane_release"] for item in raw),
+                    "pass": len(raw) >= 20 and latencies[rank - 1] <= 10.0}
+        finally:
+            if process is not None:
+                if process.stdin is not None:
+                    with contextlib.suppress(Exception):
+                        process.stdin.close()
+                runner_cleanup = _terminate_processes([process])
+                state_cleanup = _stop_state_runners(state_root)
+                _record_fixture_cleanup("readiness-stall-" + source.name,
+                                        {"processes": runner_cleanup,
+                                         "state_runners": state_cleanup})
+    finally:
+        with contextlib.suppress(ValueError):
+            sys.path.remove(str(source / "utilities"))
+
+
+_DENSITY_PROBE = r'''import json, os, statistics, sys, time
+from pathlib import Path
+from unittest import mock
+
+source, root_text = Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve()
+sys.path.insert(0, str(source / "utilities"))
+import dispatch_batch_obligations as batch
+import dispatch_registry_cache as registry
+import dispatch_terminal_commit
+import peer_obligations
+
+def row(attempt):
+    meta = ",".join(("attempt_schema_version=2", "dispatch_depth=1",
+        "worker_type=owner", "launch_started=1", "supervisor_lease=flock-v1",
+        f"supervisor_lease_file=/fixture/{attempt}.lease",
+        f"log_file=/fixture/{attempt}.log", f"attempt_id={attempt}",
+        "workflow_completion=runtime-v1", "note=completed-supervisor"))
+    return f"2026-10-20T00:00:00Z\tdone\t/repo\t/wt\towner\t{meta}\n"
+
+cell_specs = ((0, 0), (1000, 0), (0, 1000), (1000, 1000))
+cases = {}
+dependency_roots = {}
+proof_calls = {}
+for owner_count, terminal_count in cell_specs:
+    case = root_text / f"owners-{owner_count}-terminal-{terminal_count}"
+    case.mkdir(parents=True)
+    state_root, jobs = case / "peer-state", case / "jobs.log"
+    state_root.mkdir()
+    jobs.write_text("".join(row(f"owner-{index:04d}")
+                            for index in range(owner_count)), encoding="utf-8")
+    dependencies = case / "sealed-dependencies"
+    dependencies.mkdir()
+    for index in range(owner_count):
+        (dependencies / f"owner-{index:04d}.json").write_text(
+            "settled", encoding="utf-8")
+    store = peer_obligations.ObligationStore(state_root)
+    for index in range(terminal_count):
+        duty_id = f"terminal-{index:04d}"
+        duty = store.create(duty_id, "readiness-observation",
+            {"consumer": {"pid": 2_000_000 + index, "pid_start": "1"}}, {})
+        store.update(duty["id"], state="complete", result="consumer-exited")
+    store.list()
+    store.reset_discovery_metrics()
+    context = batch.OwnerSettlementReadContext()
+    cell = f"owners-{owner_count}-terminal-{terminal_count}"
+    jobs_key = str(jobs.resolve())
+    cases[cell] = {"owner_count": owner_count, "terminal_count": terminal_count,
+                   "jobs": jobs, "store": store, "context": context,
+                   "samples": []}
+    dependency_roots[jobs_key] = dependencies
+    proof_calls[jobs_key] = 0
+
+def settled(jobs, *_args, **_kwargs):
+    proof_calls[str(Path(jobs).resolve())] += 1
+    return False
+
+def exact_dependency(jobs, _status, metadata):
+    base = dependency_roots[str(Path(jobs).resolve())]
+    suffix = metadata["attempt_id"].removeprefix("owner-")
+    return (base / f"owner-{suffix}.json",)
+
+if hasattr(batch, "_owner_settlement_dependency_paths"):
+    dependency_patch = mock.patch.object(batch,
+        "_owner_settlement_dependency_paths", side_effect=exact_dependency)
+else:
+    dependency_patch = mock.patch.object(batch, "_pending_owner_settlements",
+        wraps=batch._pending_owner_settlements)
+
+with mock.patch.object(dispatch_terminal_commit, "owner_completion_pending",
+                       side_effect=settled), dependency_patch:
+    for case in cases.values():
+        batch._resume_owner_settlements(case["jobs"], context=case["context"])
+
+    # Interleave matched cells to keep warm-up and timer drift from aligning
+    # with one density level; each repetition measures all four cells.
+    cell_names = tuple(cases)
+    for repeat in range(7):
+        order = tuple(cell_names[(repeat + offset) % len(cell_names)]
+                      for offset in range(len(cell_names)))
+        for cell_name in order:
+            case = cases[cell_name]
+            jobs, store, context = case["jobs"], case["store"], case["context"]
+            with jobs.open("a", encoding="utf-8") as handle:
+                handle.write(f"2026-10-21T00:00:00Z\tdone\t/repo\t/wt\t"
+                             f"unrelated-{repeat}\tattempt_id=unrelated-{repeat}\n")
+            jobs_key = str(jobs.resolve())
+            proof_before = proof_calls[jobs_key]
+            store.create(f"pass-active-{repeat}", "message", {}, {})
+            store.reset_discovery_metrics()
+            started = time.perf_counter()
+            batch._resume_owner_settlements(jobs, context=context)
+            active_records = store.list()
+            elapsed = time.perf_counter() - started
+            after = store.discovery_metrics()
+            terminal_stats = max(0, after.get("stat_calls", 0)
+                                - len(active_records) - 1)
+            case["samples"].append({
+                "repeat": repeat + 1,
+                "second_pass_seconds": elapsed,
+                "historical_proof_calls": proof_calls[jobs_key] - proof_before,
+                "store_stat_calls": after.get("stat_calls", 0),
+                "terminal_stat_calls": terminal_stats,
+                "terminal_cache_hits": after.get("terminal_cache_hits", 0),
+                "directory_entries": after.get("directory_entries", 0),
+                "json_reads": after.get("json_reads", 0),
+                "active_index_entries": after.get("active_index_entries", 0),
+                "active_full_scans": after.get("active_full_scans", 0),
+            })
+
+matrix = {}
+for cell_name, case in cases.items():
+    samples = case["samples"]
+    matrix[cell_name] = {
+        "owner_count": case["owner_count"],
+        "terminal_count": case["terminal_count"],
+        "repetitions": samples,
+        "mean_second_pass_seconds": statistics.mean(
+            row["second_pass_seconds"] for row in samples),
+        "stdev_second_pass_seconds": statistics.stdev(
+            row["second_pass_seconds"] for row in samples),
+    }
+print(json.dumps({"matrix": matrix}, sort_keys=True))
+'''
+
+
+def _measure_scheduler_density(source, case_root):
+    command = [sys.executable, "-c", _DENSITY_PROBE, str(source), str(case_root)]
+    result = subprocess.run(command, cwd=str(source), capture_output=True,
+                            text=True, timeout=300)
+    if result.returncode:
+        raise RuntimeError("density probe failed: " + result.stderr[-3000:])
+    try:
+        return json.loads(result.stdout.strip().splitlines()[-1])["matrix"]
+    except (IndexError, KeyError, ValueError) as exc:
+        raise RuntimeError("density probe returned invalid evidence: " +
+                           result.stdout[-1000:]) from exc
+
+
+def _density_acceptance(matrix):
+    candidate = matrix["candidate"]
+    empty = candidate["owners-0-terminal-0"]["repetitions"]
+
+    def contrast(key):
+        high = candidate[key]["repetitions"]
+        differences = [right["second_pass_seconds"] - left["second_pass_seconds"]
+                       for left, right in zip(empty, high)]
+        mean = statistics.mean(differences)
+        margin = 1.96 * statistics.stdev(differences) / math.sqrt(len(differences))
+        return {"paired_mean_change_seconds": mean,
+                "paired_95pct_ci_seconds": [mean - margin, mean + margin],
+                "no_positive_increase": mean - margin <= 0,
+                "raw_paired_deltas_seconds": differences}
+
+    owner_only = contrast("owners-1000-terminal-0")
+    terminal_only = contrast("owners-0-terminal-1000")
+    combined = contrast("owners-1000-terminal-1000")
+    owner_rows = candidate["owners-1000-terminal-1000"]["repetitions"]
+    terminal_rows = candidate["owners-0-terminal-1000"]["repetitions"]
+    candidate_terminal_discovery = []
+    for row in terminal_rows:
+        candidate_terminal_discovery.append({
+            "terminal_stat_calls": row["terminal_stat_calls"],
+            "store_stat_calls": row["store_stat_calls"],
+            "active_index_entries": row["active_index_entries"],
+            "active_full_scans": row["active_full_scans"],
+            "directory_entries": row["directory_entries"],
+        })
+    return {
+        "owner_only": owner_only,
+        "terminal_only": terminal_only,
+        "combined": combined,
+        "candidate_added_settled_owner_proof_calls": [
+            row["historical_proof_calls"] for row in owner_rows],
+        "candidate_terminal_discovery": candidate_terminal_discovery,
+        "pass": (all(row["historical_proof_calls"] == 0 for row in owner_rows)
+                 and all(row["terminal_stat_calls"] == 0
+                         and row["active_full_scans"] == 0
+                         for row in candidate_terminal_discovery)
+                 and owner_only["no_positive_increase"]
+                 and terminal_only["no_positive_increase"]
+                 and combined["no_positive_increase"]),
+    }
 
 
 _FAKE_HERDR = r'''#!/usr/bin/env python3
@@ -1654,6 +2017,8 @@ def run_measurements(baseline_root, evidence_dir):
             },
         }
         matrix = {"carrier": {}, "peer_watch": {}}
+        stall_matrix = {}
+        density_matrix = {}
         try:
             for side_name, side in sides.items():
                 for label, count in (("one_consumer", 1), ("fifteen_consumers", PENDING_ATTEMPTS)):
@@ -1691,6 +2056,12 @@ def run_measurements(baseline_root, evidence_dir):
                                     "shared-runner", {}).get("peak_processes", 0) < 1):
                             raise AssertionError(
                                 "candidate peer cold window did not sample its detached shared runner")
+            for side_name, side in sides.items():
+                stall_matrix[side_name] = _measure_runner_readiness_stalls(
+                    side["source"], side["data_root"],
+                    root / side_name / "readiness-stalls", sample_count=20)
+                density_matrix[side_name] = _measure_scheduler_density(
+                    side["source"], root / side_name / "scheduler-density")
             if workload["bytes"] < 28_000_000 or workload["bytes"] > 31_000_000:
                 raise AssertionError(f"jobs fixture is not approximately 28 MB: {workload['bytes']}")
         finally:
@@ -1730,6 +2101,16 @@ def run_measurements(baseline_root, evidence_dir):
             "Process launch totals come from real helper result records; sampled peak concurrency can miss helpers shorter than the 50 ms sampler interval.",
         ],
         "matrix": matrix,
+        "d1_slow_lane_readiness": {
+            "scenario": "actual shared runner blocked in ensure_observers for 20 seconds per sample; readiness demand and attempt close occur during the block",
+            "paired": stall_matrix,
+            "acceptance": {"samples_per_side": 20, "nearest_rank_p95_seconds": 10.0},
+        },
+        "d2_scheduler_density": {
+            "scenario": "paired real registry/store passes after unrelated registry and obligation appends; owner terminal proof is counted at its boundary, terminal duty discovery metrics are from ObligationStore",
+            "paired": density_matrix,
+            "acceptance": _density_acceptance(density_matrix),
+        },
     }
     json_path = evidence_dir / "readiness-cpu-fixture.json"
     json_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1763,6 +2144,46 @@ def _comparison_markdown(evidence):
                     cpu_text = f"{cpu:.3f}" if cpu is not None else "unknown"
                     rows.append(f"| {side} | {workload_name} | {case_name} | {label} | {peak_shape} | {cpu_text} | {rss:.1f} | {runner} |")
     rows.extend(("", "The JSON preserves start/end/peak process counts and RSS, PID/start identities, per-PID raw counters, missing readings, reaped-child deltas, exact helper launch totals, endpoint census, and post-window carrier return timing.", ""))
+    stall = evidence.get("d1_slow_lane_readiness", {}).get("paired", {})
+    rows.extend((
+        "## Runner readiness during a blocked slow lane",
+        "",
+        "The existing runner process blocks inside its batch-observer call for 20 seconds. Each attempt closes after the block begins; the fixture records the first current ready projection and keeps the slow lane blocked until the full stall ends.",
+        "",
+        "| Side | Samples | Close to ready p95 (s) | Before stall release | Slow lane hold (s) | Acceptance |",
+        "|---|---:|---:|---:|---:|",
+    ))
+    for side in ("baseline", "candidate"):
+        record = stall.get(side, {}) if isinstance(stall, dict) else {}
+        samples = record.get("samples", []) if isinstance(record, dict) else []
+        hold = (statistics.mean(item.get("runner_slow_lane_seconds", 0) for item in samples)
+                if samples else 0)
+        before = sum(bool(item.get("ready_before_slow_lane_release")) for item in samples)
+        rows.append(f"| {side} | {record.get('sample_count', 0)} | {record.get('nearest_rank_p95_seconds', 'unknown')} | {before}/{len(samples)} | {hold:.3f} | {record.get('pass', False)} |")
+    density = evidence.get("d2_scheduler_density", {}).get("paired", {})
+    rows.extend((
+        "",
+        "## Second-pass obligation density",
+        "",
+        "Each pass follows an unrelated registry append and one new active duty. The owner proof boundary and active-index terminal stat count are separate; raw repetitions and confidence intervals are in the JSON.",
+        "",
+        "| Side | Settled owners | Terminal duties | Mean pass (s) | Proof calls / pass | Terminal stat calls / pass | Active-index entries |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ))
+    for side in ("baseline", "candidate"):
+        cells = density.get(side, {}) if isinstance(density, dict) else {}
+        for cell in ("owners-0-terminal-0", "owners-1000-terminal-0",
+                     "owners-0-terminal-1000", "owners-1000-terminal-1000"):
+            record = cells.get(cell, {})
+            samples = record.get("repetitions", [])
+            proof_calls = (sum(row.get("historical_proof_calls", 0) for row in samples)
+                           / len(samples) if samples else 0)
+            terminal_stats = (sum(row.get("terminal_stat_calls", 0) for row in samples)
+                              / len(samples) if samples else 0)
+            active_entries = (sum(row.get("active_index_entries", 0) for row in samples)
+                              / len(samples) if samples else 0)
+            rows.append(f"| {side} | {record.get('owner_count', '?')} | {record.get('terminal_count', '?')} | {record.get('mean_second_pass_seconds', 'unknown')} | {proof_calls:.1f} | {terminal_stats:.1f} | {active_entries:.1f} |")
+    rows.append("")
     return "\n".join(rows)
 
 

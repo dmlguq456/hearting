@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
 import os
+from collections import deque
 from pathlib import Path
 import re
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -17,6 +20,16 @@ import time
 _ID_RE = re.compile(r"batch-[0-9a-f]{32}\Z")
 _MAX_BYTES = 128 * 1024
 _PENDING = {"observing", "delivery-pending", "unknown"}
+_SETTLED_DEPENDENCY_CHECKS_PER_PASS = 64
+_DEPENDENCY_WATCH_MASK = 0x00000002 | 0x00000004 | 0x00000008 | 0x00000040 | 0x00000080 \
+                         | 0x00000100 | 0x00000200 | 0x00000400 | 0x00000800
+_INOTIFY_EVENT_HEADER = struct.Struct("iIII")
+_IN_Q_OVERFLOW = 0x00004000
+_IN_IGNORED = 0x00008000
+_IN_WATCH_INVALID = 0x00008C00
+_LOCAL_WATCH_FILESYSTEMS = frozenset({
+    "btrfs", "ext2", "ext3", "ext4", "f2fs", "overlay", "tmpfs", "xfs", "zfs",
+})
 
 
 class BatchObligationError(ValueError):
@@ -641,24 +654,466 @@ def _directory_stamp(path: Path):
 
 
 class OwnerSettlementReadContext:
-    """Reuse unchanged settlement discovery while rechecking observed leases."""
+    """Reuse exact settled-owner observations while rechecking their dependencies."""
 
     def __init__(self):
         self._seen = {}
+        self._settled = {}
+        self._active_owners = {}
+        self._route_owners = {}
+        self._cursors = {}
+        self._invalidated_owners = set()
+        self._pass_file_generations = {}
+        self._dependency_queues = {}
+        self._dependency_queued = set()
+        self._dependency_watch_fd = None
+        self._dependency_watch_add = None
+        self._dependency_watch_remove = None
+        self._dependency_watch_dirs = {}
+        self._dependency_watch_paths = {}
+        self._dependency_watch_keys = {}
+        self._dependency_watch_fs_support = {}
+        self._dependency_dirty_paths = set()
+        self._dependency_watcher_fallback = False
+        self._metrics = {"historical_checks": 0, "settled_cache_hits": 0,
+                         "dependency_checks": 0, "dependency_invalidations": 0}
+
+    @staticmethod
+    def _fingerprint_rows(rows):
+        return tuple((row.order, row.status, row.raw) for row in rows)
+
+    @staticmethod
+    def _current_generations(paths, cache=None):
+        generations = []
+        for path in paths:
+            key = os.fspath(path)
+            if not os.path.isabs(key):
+                key = os.path.abspath(os.path.expanduser(key))
+            if cache is not None and key in cache:
+                generation = cache[key]
+            else:
+                # stat follows symlinks and captures replacement or rewrites;
+                # resolving every dependency first adds two path walks per
+                # check without changing the observed file generation.
+                info = os.stat(key)
+                generation = (key, (info.st_dev, info.st_ino, info.st_size,
+                                    info.st_mtime_ns, info.st_ctime_ns))
+                if cache is not None:
+                    cache[key] = generation
+            generations.append(generation)
+        return tuple(generations)
+
+    def _dependencies_current(self, entry, cache=None):
+        _row, _related, paths, generations, _aliases = entry
+        try:
+            current = self._current_generations(paths, cache)
+        except OSError:
+            return False
+        self._metrics["dependency_checks"] += len(paths)
+        return current == generations
+
+    def begin_dependency_pass(self):
+        self._pass_file_generations.clear()
+
+    def _ensure_dependency_watcher(self):
+        if self._dependency_watcher_fallback:
+            return False
+        if self._dependency_watch_fd is not None:
+            return self._dependency_watch_fd >= 0
+        try:
+            import ctypes
+            libc = ctypes.CDLL(None, use_errno=True)
+            init = libc.inotify_init1
+            init.argtypes = (ctypes.c_int,)
+            init.restype = ctypes.c_int
+            add = libc.inotify_add_watch
+            add.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32)
+            add.restype = ctypes.c_int
+            remove = libc.inotify_rm_watch
+            remove.argtypes = (ctypes.c_int, ctypes.c_int)
+            remove.restype = ctypes.c_int
+            fd = init(os.O_NONBLOCK | os.O_CLOEXEC)
+            if fd < 0:
+                raise OSError(ctypes.get_errno(), "inotify-init-failed")
+            self._dependency_watch_fd = fd
+            self._dependency_watch_add = add
+            self._dependency_watch_remove = remove
+            self._dependency_watch_libc = libc
+            return True
+        except (AttributeError, OSError, TypeError, ValueError):
+            self._dependency_watch_fd = -1
+            self._dependency_watcher_fallback = True
+            return False
+
+    def _clear_dependency_watch_state(self):
+        self._dependency_watch_dirs.clear()
+        self._dependency_watch_paths.clear()
+        self._dependency_watch_keys.clear()
+        self._dependency_watch_fs_support.clear()
+        self._dependency_dirty_paths.clear()
+
+    def _close_dependency_watch_descriptor(self, closed_value):
+        fd = self._dependency_watch_fd
+        self._dependency_watch_fd = closed_value
+        self._dependency_watch_add = None
+        self._dependency_watch_remove = None
+        self._dependency_watch_libc = None
+        if isinstance(fd, int) and fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _switch_dependency_watcher_to_fallback(self):
+        self._dependency_watcher_fallback = True
+        self._close_dependency_watch_descriptor(-1)
+        self._clear_dependency_watch_state()
+
+    def close(self):
+        """Retire this runner-owned read context and release its watcher."""
+        self._switch_dependency_watcher_to_fallback()
+
+    def _dependency_watch_supported(self, directory):
+        supported = self._dependency_watch_fs_support.get(directory)
+        if supported is not None:
+            return supported
+        try:
+            path = os.path.realpath(directory)
+            best_mount = ""
+            filesystem = None
+            for line in Path("/proc/self/mountinfo").read_text(
+                    encoding="utf-8").splitlines():
+                fields = line.split()
+                separator = fields.index("-")
+                mount = (fields[4].replace(r"\040", " ").replace(r"\011", "\t")
+                         .replace(r"\012", "\n").replace(r"\134", "\\"))
+                if ((path == mount or path.startswith(mount.rstrip(os.sep) + os.sep))
+                        and len(mount) >= len(best_mount)):
+                    best_mount = mount
+                    filesystem = fields[separator + 1]
+            supported = filesystem in _LOCAL_WATCH_FILESYSTEMS
+        except (OSError, ValueError, IndexError):
+            supported = False
+        self._dependency_watch_fs_support[directory] = supported
+        return supported
+
+    def _register_dependency_watch(self, key, paths):
+        if not self._ensure_dependency_watcher():
+            return
+        watched = set()
+        for path in paths:
+            targets = (path, os.path.realpath(path))
+            for target in targets:
+                directory, name = os.path.split(target)
+                directory = directory or "."
+                if not self._dependency_watch_supported(directory):
+                    self._switch_dependency_watcher_to_fallback()
+                    return
+                wd = self._dependency_watch_dirs.get(directory)
+                if wd is None:
+                    wd = self._dependency_watch_add(
+                        self._dependency_watch_fd, os.fsencode(directory),
+                        _DEPENDENCY_WATCH_MASK)
+                    if wd < 0:
+                        self._switch_dependency_watcher_to_fallback()
+                        return
+                    self._dependency_watch_dirs[directory] = wd
+                pair = (wd, name)
+                self._dependency_watch_paths.setdefault(pair, set()).add(key)
+                watched.add(pair)
+        self._dependency_watch_keys[key] = tuple(watched)
+
+    def _forget_dependency_watch(self, key):
+        for pair in self._dependency_watch_keys.pop(key, ()):
+            owners = self._dependency_watch_paths.get(pair)
+            if owners is not None:
+                owners.discard(key)
+                if not owners:
+                    self._dependency_watch_paths.pop(pair, None)
+                    self._dependency_dirty_paths.discard(pair)
+                    wd, _name = pair
+                    if not any(watched_wd == wd
+                               for watched_wd, _watched_name in self._dependency_watch_paths):
+                        self._remove_dependency_directory_watch(wd)
+
+    def _remove_dependency_directory_watch(self, wd):
+        fd = self._dependency_watch_fd
+        remove = self._dependency_watch_remove
+        if fd is None or fd < 0 or remove is None:
+            self._switch_dependency_watcher_to_fallback()
+            return
+        if remove(fd, wd) < 0 and self._dependency_watch_libc is not None:
+            import ctypes
+            if ctypes.get_errno() != errno.EINVAL:
+                self._switch_dependency_watcher_to_fallback()
+                return
+        directories = [directory for directory, watched_wd
+                       in self._dependency_watch_dirs.items() if watched_wd == wd]
+        for directory in directories:
+            self._dependency_watch_dirs.pop(directory, None)
+            self._dependency_watch_fs_support.pop(directory, None)
+        # inotify queues IN_IGNORED for an explicit removal. Drain it while the
+        # retired watch descriptor cannot be confused with a later registration.
+        self._poll_dependency_events()
+
+    def _poll_dependency_events(self):
+        fd = self._dependency_watch_fd
+        if fd is None or fd < 0 or self._dependency_watcher_fallback:
+            return
+        event_header = _INOTIFY_EVENT_HEADER
+        while True:
+            try:
+                events = os.read(fd, 65536)
+            except BlockingIOError:
+                break
+            except OSError:
+                self._switch_dependency_watcher_to_fallback()
+                break
+            if not events:
+                break
+            offset = 0
+            while offset + event_header.size <= len(events):
+                wd, mask, _cookie, name_length = event_header.unpack_from(events, offset)
+                offset += event_header.size
+                name = os.fsdecode(events[offset:offset + name_length].split(b"\0", 1)[0])
+                offset += name_length
+                if mask & _IN_IGNORED:
+                    if wd not in self._dependency_watch_dirs.values():
+                        continue
+                    self._switch_dependency_watcher_to_fallback()
+                    break
+                if mask & _IN_Q_OVERFLOW:
+                    self._switch_dependency_watcher_to_fallback()
+                    break
+                if mask & _IN_WATCH_INVALID:
+                    self._switch_dependency_watcher_to_fallback()
+                    break
+                if not name:
+                    continue
+                pair = (wd, name)
+                if pair in self._dependency_watch_paths:
+                    self._dependency_dirty_paths.add(pair)
+            if self._dependency_watcher_fallback:
+                break
+
+    def settled_owner_current(self, jobs: Path, status: str, raw: str, metadata: dict,
+                              related_rows) -> bool:
+        key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
+        entry = self._settled.get(key)
+        if entry is None:
+            return False
+        if (entry[0] != (status, raw)
+                or entry[1] != self._fingerprint_rows(related_rows)):
+            self.forget_owner(jobs, metadata.get("attempt_id", ""))
+            return False
+        if not self._dependencies_current(entry, self._pass_file_generations):
+            self.forget_owner(jobs, metadata.get("attempt_id", ""))
+            self._metrics["dependency_invalidations"] += 1
+            return False
+        self._metrics["settled_cache_hits"] += 1
+        return True
+
+    def remember_settled_owner(self, jobs: Path, status: str, raw: str,
+                               metadata: dict, related_rows, dependencies) -> bool | None:
+        key = (str(jobs.resolve(strict=False)), metadata.get("attempt_id", ""))
+        paths = tuple(dict.fromkeys(
+            os.path.abspath(os.path.expanduser(os.fspath(path)))
+            for path in dependencies))
+        try:
+            before_registration = self._current_generations(
+                paths, self._pass_file_generations)
+        except OSError:
+            self.forget_owner(jobs, metadata.get("attempt_id", ""))
+            return None
+        aliases = tuple(sorted({metadata.get(field, "") for field in
+            ("route_id", "route_hash", "owner_route_id", "owner_route_hash") if metadata.get(field)}))
+        self.forget_owner(jobs, metadata.get("attempt_id", ""))
+        self._register_dependency_watch(key, paths)
+        try:
+            # This snapshot must bypass the per-pass cache: it confirms the
+            # generation observed before watch installation did not change in
+            # the registration window.
+            generations = self._current_generations(paths)
+        except OSError:
+            self.forget_owner(jobs, metadata.get("attempt_id", ""))
+            return None
+        for path, generation in zip(paths, generations):
+            self._pass_file_generations[path] = generation
+        if generations != before_registration:
+            self._metrics["dependency_invalidations"] += 1
+            self.forget_owner(jobs, metadata.get("attempt_id", ""))
+            return False
+        self._settled[key] = ((status, raw), self._fingerprint_rows(related_rows),
+                              paths, generations, aliases)
+        self._queue_settled_dependency_check(key)
+        for alias in aliases:
+            self._route_owners.setdefault((key[0], alias), set()).add(key[1])
+        if len(self._settled) > 4096:
+            oldest = next(iter(self._settled))
+            self.forget_owner(Path(oldest[0]), oldest[1])
+        return True
+
+    def _queue_settled_dependency_check(self, key):
+        if key in self._dependency_queued:
+            return
+        self._dependency_queues.setdefault(key[0], deque()).append(key)
+        self._dependency_queued.add(key)
+
+    def _validate_settled_dependency_batch(self, jobs: Path) -> bool:
+        """Rotate a fixed-size dependency check batch through settled owners."""
+        self._poll_dependency_events()
+        root = str(jobs.resolve(strict=False))
+        queue = self._dependency_queues.get(root)
+        if not queue:
+            return any(item_root == root for item_root, _attempt in self._invalidated_owners)
+        if not self._dependency_watcher_fallback and not self._dependency_dirty_paths:
+            queue.rotate(-min(_SETTLED_DEPENDENCY_CHECKS_PER_PASS, len(queue)))
+            return bool(queue)
+        self.begin_dependency_pass()
+        examined = 0
+        invalidated = False
+        generations = self._pass_file_generations
+        while queue and examined < _SETTLED_DEPENDENCY_CHECKS_PER_PASS:
+            key = queue.popleft()
+            self._dependency_queued.discard(key)
+            examined += 1
+            entry = self._settled.get(key)
+            if entry is None:
+                continue
+            if not self._dependency_watcher_fallback:
+                dirty = any(pair in self._dependency_dirty_paths
+                            for pair in self._dependency_watch_keys.get(key, ()))
+                if dirty:
+                    self._metrics["dependency_invalidations"] += 1
+                    self._invalidated_owners.add(key)
+                    self.forget_owner(jobs, key[1])
+                    invalidated = True
+                    continue
+                self._queue_settled_dependency_check(key)
+                continue
+            paths, expected = entry[2], entry[3]
+            current = []
+            try:
+                for path, expected_generation in zip(paths, expected):
+                    generation = generations.get(path)
+                    if generation is None:
+                        info = os.stat(path)
+                        generation = (path, (info.st_dev, info.st_ino, info.st_size,
+                                             info.st_mtime_ns, info.st_ctime_ns))
+                        generations[path] = generation
+                    current.append(generation)
+                    if generation != expected_generation:
+                        break
+            except OSError:
+                current = []
+            self._metrics["dependency_checks"] += len(current)
+            if tuple(current) != expected:
+                self._metrics["dependency_invalidations"] += 1
+                self._invalidated_owners.add(key)
+                self.forget_owner(jobs, key[1])
+                invalidated = True
+                continue
+            self._queue_settled_dependency_check(key)
+        return bool(queue) or invalidated
+
+    def forget_owner(self, jobs: Path, attempt_id: str):
+        key = (str(jobs.resolve(strict=False)), attempt_id)
+        entry = self._settled.pop(key, None)
+        self._forget_dependency_watch(key)
+        if entry is not None:
+            if key in self._dependency_queued:
+                queue = self._dependency_queues.get(key[0])
+                if queue is not None:
+                    try:
+                        queue.remove(key)
+                    except ValueError:
+                        pass
+                self._dependency_queued.discard(key)
+            for alias in entry[4]:
+                owners = self._route_owners.get((key[0], alias))
+                if owners is not None:
+                    owners.discard(attempt_id)
+                    if not owners:
+                        self._route_owners.pop((key[0], alias), None)
+
+    def remember_active_owner(self, jobs: Path, record):
+        key = (str(jobs.resolve(strict=False)), record.completion_metadata().get("attempt_id", ""))
+        self._active_owners[key] = record
+
+    def forget_active_owner(self, jobs: Path, attempt_id: str):
+        self._active_owners.pop((str(jobs.resolve(strict=False)), attempt_id), None)
+
+    def active_owner_ids(self, jobs: Path):
+        key = str(jobs.resolve(strict=False))
+        return tuple(attempt for (root, attempt) in self._active_owners if root == key)
+
+    def affected_settled_owner_ids(self, jobs: Path, records):
+        root = str(jobs.resolve(strict=False))
+        affected = set()
+        for record in records:
+            metadata = record.completion_metadata()
+            parent = metadata.get("parent_attempt_id")
+            if parent and (root, parent) in self._settled:
+                affected.add(parent)
+            for field in ("route_id", "route_hash", "owner_route_id", "owner_route_hash"):
+                alias = metadata.get(field)
+                if alias:
+                    affected.update(self._route_owners.get((root, alias), ()))
+            attempt = metadata.get("attempt_id")
+            if attempt and (root, attempt) in self._settled:
+                affected.add(attempt)
+        return tuple(affected)
+
+    def take_invalidated_owner_ids(self, jobs: Path):
+        root = str(jobs.resolve(strict=False))
+        affected = tuple(attempt for item_root, attempt in self._invalidated_owners
+                         if item_root == root)
+        self._invalidated_owners.difference_update((root, attempt) for attempt in affected)
+        return affected
+
+    def owner_candidate_floor(self, jobs: Path, view):
+        key = str(jobs.resolve(strict=False))
+        prior = self._cursors.get(key)
+        if (prior is not None and view.append_only_generation
+                and view.path_identity == prior[0] and view.resolved_path == prior[1]
+                and tuple(view.signature[:2]) == prior[2]
+                and view.last_complete_order >= prior[3]):
+            return prior[3]
+        return -1
+
+    def remember_owner_cursor(self, jobs: Path, view):
+        key = str(jobs.resolve(strict=False))
+        self._cursors[key] = (view.path_identity, view.resolved_path,
+                              tuple(view.signature[:2]), view.last_complete_order)
+
+    def metrics(self):
+        return dict(self._metrics)
+
+    def record_historical_check(self):
+        self._metrics["historical_checks"] += 1
 
     def needs_scan(self, jobs: Path, lease_is_held) -> bool:
         key = str(jobs.resolve(strict=False))
         prior = self._seen.get(key)
         stamp = _registry_stamp(jobs)
-        if prior is None or stamp is None or stamp != prior[0]:
-            return True
-        for metadata in prior[1]:
-            try:
-                if not lease_is_held(jobs, metadata):
-                    return True
-            except Exception:
-                return True
-        return False
+        scan = prior is None or stamp is None or stamp != prior[0]
+        active_owner = any(root == key for root, _attempt in self._active_owners)
+        if active_owner:
+            scan = True
+        # A full candidate scan below rechecks each candidate's lease itself;
+        # only the unchanged fast path needs this cached lease probe.
+        if prior is not None and not scan:
+            for metadata in prior[1]:
+                try:
+                    if not lease_is_held(jobs, metadata):
+                        scan = True
+                except Exception:
+                    scan = True
+        # Advance the bounded rotating batch on every pass. Registry changes
+        # and active owners also need full candidate selection, but neither can
+        # defer dependency invalidation indefinitely.
+        dependency_changed = self._validate_settled_dependency_batch(jobs)
+        return scan or dependency_changed
 
     def cached_signatures(self, jobs: Path):
         prior = self._seen.get(str(jobs.resolve(strict=False)))
@@ -674,7 +1129,97 @@ class OwnerSettlementReadContext:
         self._seen[key] = (after_stamp, tuple(live_leases), tuple(signatures))
 
 
-def _pending_owner_settlements(jobs: Path):
+def _owner_settlement_dependency_paths(jobs: Path, status: str, metadata: dict):
+    """Return the exact cheap file generations that guard a settled cache entry."""
+    try:
+        import dispatch_contract
+        import dispatch_terminal_commit as terminal
+        request = terminal._historical_request(jobs, status, metadata)
+        if request is None:
+            return None
+        route = json.loads(Path(request.route_file).read_text(encoding="utf-8"))
+        route_id = route["route_id"]
+        attempt_id = metadata["attempt_id"]
+        slot = terminal.terminal_slot(request.artifact_root, route_id, attempt_id)
+        route_module = terminal._route_module()
+        binding_path = terminal.producer_binding_path(
+            request.artifact_root, route_id, attempt_id)
+        paths = [Path(request.route_file), terminal._commit_state_path(request),
+                 route_module.outcome_path(Path(request.route_file)),
+                 dispatch_contract.terminal_claim_path(jobs, route_id, attempt_id),
+                 binding_path, terminal.campaign_goal_path(request),
+                 slot / "owner-envelope.json", slot / "owner-envelope.txt"]
+        for node in route.get("nodes", []):
+            if node.get("terminal") is not True:
+                continue
+            marker_path = route_module.completion_dir(
+                route_id, jobs=request.jobs) / (str(node.get("id")) + ".json")
+            paths.append(marker_path)
+            try:
+                marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                evidence_path = (marker.get("evidence") or {}).get("path")
+                if isinstance(evidence_path, str) and evidence_path:
+                    evidence = Path(evidence_path)
+                    paths.append(evidence if evidence.is_absolute()
+                                 else request.artifact_root / evidence)
+            except (OSError, ValueError, TypeError):
+                pass
+        try:
+            envelope = json.loads((slot / "owner-envelope.json").read_text(encoding="utf-8"))
+            primary = envelope.get("primary_path")
+            if isinstance(primary, str) and primary:
+                paths.append(Path(primary))
+        except (OSError, ValueError, TypeError):
+            pass
+
+        if binding_path.is_file():
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            cycle_id = (binding.get("binding") or {}).get("cycle_id")
+            if isinstance(cycle_id, str) and cycle_id:
+                import artifact_producer as producer
+                cycle = producer.read_cycle_record(request.artifact_root, cycle_id)
+                if cycle is None:
+                    return None
+                paths.extend((producer.cycle_record_path(request.artifact_root, cycle_id),
+                              producer._record_cycle_manifest_path(request.artifact_root, cycle),
+                              producer.artifact_admission._index_path(request.artifact_root),
+                              request.artifact_root / producer.artifact_admission.ADMISSION_REL
+                                  / "root-identity.json"))
+                if route_id:
+                    canonical_route = producer.route_lineage.canonical_route_path(
+                        request.artifact_root, route_id)
+                    paths.extend((canonical_route,
+                                  producer.artifact_lifecycle.canonical_outcome_path(
+                                      request.artifact_root, route_id)))
+                    producer_route = json.loads(canonical_route.read_text(encoding="utf-8"))
+                    paths.extend(route_module.completion_dir(route_id) /
+                                 (str(node["id"]) + ".json")
+                                 for node in producer_route.get("nodes", [])
+                                 if node.get("terminal") is True)
+                snapshots = producer.artifact_lifecycle.manifest_snapshot_dir(
+                    request.artifact_root, cycle_id)
+                paths.append(snapshots)
+                if snapshots.is_dir():
+                    paths.extend(path for path in snapshots.iterdir()
+                                 if path.suffix == ".json")
+        # Missing optional files depend on their nearest existing parent, so
+        # their later creation invalidates the observation without a tree scan.
+        observed = []
+        seen = set()
+        for dependency in paths:
+            candidate = Path(dependency).expanduser()
+            while not candidate.exists() and candidate != candidate.parent:
+                candidate = candidate.parent
+            key = str(candidate.absolute())
+            if key not in seen:
+                seen.add(key)
+                observed.append(candidate)
+        return tuple(observed) if observed else None
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
+
+
+def _pending_owner_settlements(jobs: Path, *, context=None):
     """Return exact owner rows whose existing terminal path still owes work."""
     from dispatch_contract import (
         SUPERVISOR_LEASE_KIND, parse_registry_metadata, supervisor_lease_is_held,
@@ -683,12 +1228,36 @@ def _pending_owner_settlements(jobs: Path):
 
     try:
         from dispatch_registry_cache import registry_view
-        view = registry_view(jobs)
+        view = registry_view(jobs, append_only=True)
         view.require_complete_text()
-        candidates = view.settlement_owner_candidates()
+        if context is None:
+            candidates = view.settlement_owner_candidates()
+        else:
+            floor = context.owner_candidate_floor(jobs, view)
+            selected = {record.completion_metadata().get("attempt_id", ""): record
+                        for record in (view.settlement_owner_candidates()
+                                       if floor < 0 else
+                                       view.settlement_owner_candidates_since(floor))
+                        if record.completion_metadata().get("attempt_id")}
+            changed_rows = view.records_since(floor) if floor >= 0 else ()
+            impacted = set(context.affected_settled_owner_ids(jobs, changed_rows))
+            impacted.update(context.take_invalidated_owner_ids(jobs))
+            impacted.update(context.active_owner_ids(jobs))
+            for attempt_id in impacted:
+                current = view.settlement_owner_candidate(attempt_id)
+                if current is None:
+                    context.forget_owner(jobs, attempt_id)
+                    context.forget_active_owner(jobs, attempt_id)
+                else:
+                    previous = selected.get(attempt_id)
+                    if previous is None or current.order > previous.order:
+                        selected[attempt_id] = current
+            candidates = tuple(selected.values())
     except FileNotFoundError:
         return ()
     pending = []
+    if context is not None:
+        context.begin_dependency_pass()
     for candidate in candidates:
         order, raw, fields = candidate.order, candidate.raw, candidate.fields
         if fields[1] not in {"open", "running", "done"}:
@@ -698,21 +1267,65 @@ def _pending_owner_settlements(jobs: Path):
                 or meta.get("supervisor_lease") != SUPERVISOR_LEASE_KIND
                 or not meta.get("supervisor_lease_file") or not meta.get("log_file")
                 or not meta.get("attempt_id")):
+            if context is not None and meta.get("attempt_id"):
+                context.forget_active_owner(jobs, meta["attempt_id"])
+                context.forget_owner(jobs, meta["attempt_id"])
             continue
+        attempt_id = meta["attempt_id"]
+        if fields[1] in {"open", "running"} and context is not None:
+            context.remember_active_owner(jobs, candidate)
         if fields[1] == "done":
             if meta.get("workflow_completion") != "runtime-v1":
+                if context is not None:
+                    context.forget_active_owner(jobs, attempt_id)
+                    context.forget_owner(jobs, attempt_id)
+                continue
+            related_rows = view.completion_related(
+                meta.get("attempt_id", ""),
+                meta.get("owner_route_id") or meta.get("route_id", ""),
+                meta.get("owner_route_hash") or meta.get("route_hash", ""))
+            if (context is not None and context.settled_owner_current(
+                    jobs, fields[1], raw, meta, related_rows)):
+                context.forget_active_owner(jobs, attempt_id)
                 continue
             try:
-                if not owner_completion_pending(jobs, fields[1], meta):
-                    continue
+                if context is not None:
+                    context.record_historical_check()
+                pending_state = owner_completion_pending(jobs, fields[1], meta)
+                if not pending_state:
+                    if context is not None:
+                        dependencies = _owner_settlement_dependency_paths(jobs, fields[1], meta)
+                        if dependencies:
+                            remembered = context.remember_settled_owner(
+                                jobs, fields[1], raw, meta, related_rows, dependencies)
+                            if remembered is not True:
+                                # An invalidated or unavailable snapshot cannot
+                                # prove settlement; keep the row on its normal
+                                # settlement path instead of caching it.
+                                context.forget_active_owner(jobs, attempt_id)
+                            else:
+                                context.forget_active_owner(jobs, attempt_id)
+                                continue
+                        else:
+                            context.forget_active_owner(jobs, attempt_id)
+                            continue
+                    else:
+                        continue
+                if context is not None:
+                    context.forget_owner(jobs, meta["attempt_id"])
+                    context.remember_active_owner(jobs, candidate)
             except Exception:
                 # An unavailable observation remains a retryable obligation.
-                pass
+                if context is not None:
+                    context.forget_owner(jobs, attempt_id)
+                    context.remember_active_owner(jobs, candidate)
         try:
             lease_held = supervisor_lease_is_held(jobs, meta)
         except (OSError, ValueError):
             lease_held = True
         pending.append((order, fields[1], raw, meta, lease_held))
+    if context is not None:
+        context.remember_owner_cursor(jobs, view)
     return tuple(pending)
 
 
@@ -732,7 +1345,7 @@ def _resume_owner_settlements(jobs: Path, *, context=None) -> None:
         return context.cached_signatures(jobs)
     before_stamp = _registry_stamp(jobs)
     try:
-        pending = _pending_owner_settlements(jobs)
+        pending = _pending_owner_settlements(jobs, context=context)
     except (OSError, UnicodeError):
         if context is not None:
             context.remember(jobs, before_stamp, (), retry_required=True)

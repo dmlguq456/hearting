@@ -13,7 +13,39 @@ if ! mkdir -p "$TMP_BASE" 2>/dev/null || [ ! -w "$TMP_BASE" ]; then
 fi
 TMP=$(mktemp -d "$TMP_BASE/session-card-test.XXXXXX")
 SHIM_TMP=$(mktemp -d "$ROOT/.session-card-shim.XXXXXX")
-trap 'rm -rf "$TMP" "$SHIM_TMP"' EXIT
+unset FIXTURE_MARKER
+FIXTURE_MARKER=
+cleanup_fixture() {
+  local fixture_status=$? cleanup_status=0
+  trap - EXIT INT TERM
+  if [ -n "$FIXTURE_MARKER" ]; then
+    if python3 - "$ROOT" "$FIXTURE_MARKER" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
+import fixture_processes
+marker = sys.argv[2]
+fixture_processes.reap(marker, timeout=10)
+left = fixture_processes.marked_processes(marker)
+if left:
+    raise SystemExit("fixture runner survived cleanup: %s" % sorted(left))
+PY
+    then
+      :
+    else
+      cleanup_status=$?
+      echo "fixture runner cleanup failed" >&2
+    fi
+  fi
+  rm -rf "$TMP" "$SHIM_TMP" || cleanup_status=1
+  if [ "$fixture_status" -eq 0 ] && [ "$cleanup_status" -ne 0 ]; then
+    exit "$cleanup_status"
+  fi
+  exit "$fixture_status"
+}
+trap cleanup_fixture EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 FAILS=0
 ok() { printf 'ok - %s\n' "$1"; }
 bad() { printf 'not ok - %s\n' "$1"; FAILS=$((FAILS + 1)); }
@@ -31,6 +63,102 @@ export HOME="$TMP/home" XDG_CONFIG_HOME="$TMP/home/.config" XDG_DATA_HOME="$TMP/
 mkdir -p "$HOME" "$XDG_CONFIG_HOME/hearting" "$TMPDIR"
 printf '{"enabled": false}\n' > "$XDG_CONFIG_HOME/hearting/memory-sync.json"
 case "$XDG_STATE_HOME" in "$TMP_BASE"/session-card-test.*/*) ;; *) echo "isolation failed"; exit 2 ;; esac
+
+start_fixture_runner() {
+  local marker_file=${SESSION_CARD_MARKER_FILE:-}
+  FIXTURE_MARKER="$TMP/runner-marker-$$"
+  if ! python3 - "$ROOT" "$FIXTURE_MARKER" "$marker_file" <<'PY'
+import hashlib, os, sys, time
+from pathlib import Path
+root, marker, marker_file = map(str, sys.argv[1:4])
+sys.path.insert(0, str(Path(root) / "utilities"))
+sys.path.insert(0, str(Path(root) / "tools"))
+import peer_obligations
+from harness_capabilities import parent_completion
+import fixture_processes
+
+state_root = peer_obligations.peer_state_root()
+state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+jobs = state_root / "jobs.log"
+jobs.touch(exist_ok=True)
+os.environ["AGENT_DISPATCH_JOBS"] = str(jobs)
+carrier = parent_completion("codex")["carrier"]
+store = peer_obligations.ObligationStore(state_root)
+duty_id = "fixture-runner-" + hashlib.sha256(marker.encode()).hexdigest()[:16]
+store.create(duty_id, "registered-batch",
+    {"jobs": str(jobs), "attempt_id": "att-fixture-runner", "session_id": "fixture",
+     "harness": "codex", "server": "default"}, {"carrier": carrier})
+os.environ["SESSION_CARD_FIXTURE_MARKER"] = marker
+started = peer_obligations.ensure_runner(state_root, reconciliation_required=True)
+os.environ.pop("SESSION_CARD_FIXTURE_MARKER", None)
+if not started:
+    raise SystemExit("fixture runner did not start")
+deadline = time.monotonic() + 5
+while time.monotonic() < deadline:
+    runners = []
+    for pid in fixture_processes.marked_processes(marker):
+        try:
+            argv = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            continue
+        if b"__obligation-runner" in argv and b"peer-steward.py" in argv:
+            runners.append(pid)
+    if runners:
+        break
+    time.sleep(0.02)
+else:
+    raise SystemExit("marked fixture runner did not become visible")
+if marker_file:
+    Path(marker_file).write_text(marker, encoding="utf-8")
+PY
+  then
+    return 1
+  fi
+  return 0
+}
+
+if [ "${SESSION_CARD_RUNNER_PROBE:-0}" = 1 ]; then
+  if ! start_fixture_runner; then exit 72; fi
+  case "${SESSION_CARD_PROBE_MODE:-failure}" in
+    signal) kill -TERM "$$"; sleep 1; exit 143 ;;
+    *) exit 71 ;;
+  esac
+fi
+
+probe_runner_cleanup() { # exercise EXIT after failure and TERM interruption
+  local mode=$1 expected=$2 marker_file="$TMP/runner-probe-$1.marker" pid status marker
+  SESSION_CARD_RUNNER_PROBE=1 SESSION_CARD_PROBE_MODE="$mode" \
+    SESSION_CARD_MARKER_FILE="$marker_file" bash "$0" \
+    >"$TMP/runner-probe-$mode.log" 2>&1 &
+  pid=$!
+  wait "$pid"
+  status=$?
+  if [ "$status" -ne "$expected" ] || [ ! -s "$marker_file" ]; then
+    bad "session-card runner $mode probe did not preserve exit/cleanup"
+    return
+  fi
+  marker=$(cat "$marker_file")
+  if python3 - "$ROOT" "$marker" <<'PY'
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(sys.argv[1]) / "tools"))
+import fixture_processes
+raise SystemExit(bool(fixture_processes.marked_processes(sys.argv[2])))
+PY
+  then
+    ok "session-card runner cleanup after $mode"
+  else
+    bad "session-card runner remained after $mode"
+  fi
+}
+
+probe_runner_cleanup failure 71
+probe_runner_cleanup signal 143
+if start_fixture_runner; then
+  ok "session-card fixture starts a registered shared runner"
+else
+  bad "session-card fixture runner start"
+fi
 
 TIDY="$ROOT/utilities/session_tidy.py"
 REAL_PYTHON=$(command -v python3)

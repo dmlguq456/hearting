@@ -283,13 +283,15 @@ class RegistryView:
     __slots__ = ("path_identity", "resolved_path", "signature", "_segments", "_tail",
                  "line_count", "record_count", "malformed_rows", "has_partial_tail",
                  "last_observed_at", "_has_duplicate_attempts", "_invalid_utf8_prefix",
-                 "has_invalid_utf8", "_raw_digest", "_prefix_reuse_eligible")
+                 "has_invalid_utf8", "_raw_digest", "_prefix_reuse_eligible",
+                 "_append_only_generation")
 
     def __init__(self, path_identity: str, resolved_path: str, signature: tuple,
                  raw: bytes, *, previous: "RegistryView | None" = None):
         self.path_identity = path_identity
         self.resolved_path = resolved_path
         self.signature = signature
+        self._append_only_generation = previous is not None
         self.last_observed_at = time.monotonic()
         self._has_duplicate_attempts = None
         self._raw_digest = hashlib.sha256(raw)
@@ -454,6 +456,52 @@ class RegistryView:
 
     def settlement_owner_candidates(self):
         return tuple(record for segment in self._segments for record in segment.settlement_owners)
+
+    def records_since(self, order: int):
+        """Return records in appended segments after an observed row cursor."""
+        result = []
+        for segment in self._segments:
+            if not segment.records or segment.records[-1].order <= order:
+                continue
+            result.extend(record for record in segment.records if record.order > order)
+        return tuple(result)
+
+    def settlement_owner_candidates_since(self, order: int):
+        """Avoid revisiting historical owner candidates on append-only growth."""
+        result = []
+        for segment in self._segments:
+            if not segment.records or segment.records[-1].order <= order:
+                continue
+            result.extend(record for record in segment.settlement_owners
+                          if record.order > order)
+        return tuple(result)
+
+    def settlement_owner_candidate(self, attempt_id: str):
+        """Return the latest current row only when it still names a settlement owner."""
+        record, _error = self.completion_attempt(attempt_id)
+        if record is not None:
+            metadata = record.completion_metadata()
+            if (metadata.get("worker_type") == "owner"
+                    and metadata.get("launch_started") == "1"
+                    and metadata.get("supervisor_lease") == "flock-v1"):
+                return record
+        # Compatibility rows without attempt_schema_version are still
+        # settlement candidates; their small active set is resolved here.
+        candidates = [candidate for segment in self._segments
+                      for candidate in segment.settlement_owners
+                      if candidate.completion_metadata().get("attempt_id") == attempt_id]
+        return max(candidates, key=lambda candidate: candidate.order, default=None)
+
+    @property
+    def append_only_generation(self):
+        """Whether this view was derived from a continuously observed prefix."""
+        return self._append_only_generation
+
+    @property
+    def last_complete_order(self):
+        """Highest committed row order, excluding an incomplete UTF-8/LF tail."""
+        ends = [segment.records[-1].order for segment in self._segments if segment.records]
+        return max(ends, default=-1)
 
     def completion_parent_records(self, parent_sid: str) -> tuple[RegistryRecord, ...]:
         return tuple(record for segment in self._segments

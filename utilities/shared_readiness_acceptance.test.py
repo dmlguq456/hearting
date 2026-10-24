@@ -659,6 +659,124 @@ def _matrix_errors(measurement, metric_rows):
     return errors
 
 
+def _paired_performance_errors(measurement):
+    errors = {"d1": [], "d2": []}
+    d1 = measurement.get("d1_slow_lane_readiness")
+    paired_d1 = d1.get("paired") if isinstance(d1, dict) else None
+    if not isinstance(paired_d1, dict):
+        errors["d1"].append("paired slow-lane readiness evidence is missing")
+        paired_d1 = {}
+    p95_values = {}
+    for side in ("baseline", "candidate"):
+        record = paired_d1.get(side)
+        samples = record.get("samples") if isinstance(record, dict) else None
+        if not isinstance(samples, list) or len(samples) != 20:
+            errors["d1"].append(f"{side} must contain 20 raw slow-lane samples")
+            continue
+        latencies = []
+        for sample in samples:
+            latency = sample.get("close_to_ready_seconds") if isinstance(sample, dict) else None
+            stall = sample.get("runner_slow_lane_seconds") if isinstance(sample, dict) else None
+            if (not isinstance(latency, (int, float)) or isinstance(latency, bool)
+                    or not math.isfinite(latency) or latency < 0):
+                errors["d1"].append(f"{side} has an invalid close-to-ready sample")
+                continue
+            if (not isinstance(stall, (int, float)) or isinstance(stall, bool)
+                    or not math.isfinite(stall) or stall < 19.5):
+                errors["d1"].append(f"{side} sample did not hold the runner slow lane for 20 seconds")
+            generation = sample.get("projection_generation") if isinstance(sample, dict) else None
+            if not isinstance(generation, list) or len(generation) != 5:
+                errors["d1"].append(f"{side} sample lacks the current registry generation")
+            latencies.append(float(latency))
+        if len(latencies) != 20:
+            continue
+        runner_identities = {(sample.get("runner_pid"), sample.get("runner_start"))
+                             for sample in samples if isinstance(sample, dict)}
+        if (len(runner_identities) != 1
+                or not isinstance(next(iter(runner_identities))[0], int)
+                or not isinstance(next(iter(runner_identities))[1], str)
+                or not next(iter(runner_identities))[1].isdigit()):
+            errors["d1"].append(f"{side} samples do not identify one real runner process")
+        rank_value = sorted(latencies)[math.ceil(0.95 * len(latencies)) - 1]
+        recorded = record.get("nearest_rank_p95_seconds")
+        if (not isinstance(recorded, (int, float)) or isinstance(recorded, bool)
+                or not math.isclose(recorded, rank_value, rel_tol=1e-6, abs_tol=1e-6)):
+            errors["d1"].append(f"{side} nearest-rank p95 does not match its raw samples")
+        p95_values[side] = rank_value
+    if p95_values.get("candidate", float("inf")) > 10.0:
+        errors["d1"].append("candidate attempt-close to ready-projection p95 exceeds 10 seconds")
+    candidate_record = paired_d1.get("candidate")
+    candidate_samples = (candidate_record.get("samples", [])
+                         if isinstance(candidate_record, dict) else [])
+    if candidate_samples and not all(
+            sample.get("ready_before_slow_lane_release") is True
+            for sample in candidate_samples if isinstance(sample, dict)):
+        errors["d1"].append("candidate readiness was not published during the slow-lane stall")
+    if p95_values.get("baseline", 0.0) < 10.0:
+        errors["d1"].append("baseline did not reproduce the slow-lane readiness delay")
+
+    d2 = measurement.get("d2_scheduler_density")
+    density = d2.get("paired") if isinstance(d2, dict) else None
+    if not isinstance(density, dict):
+        errors["d2"].append("paired scheduler-density evidence is missing")
+        return errors
+    expected_cells = {"owners-0-terminal-0", "owners-1000-terminal-0",
+                      "owners-0-terminal-1000", "owners-1000-terminal-1000"}
+    if set(density) != {"baseline", "candidate"}:
+        errors["d2"].append("scheduler-density evidence must include baseline and candidate")
+        return errors
+    for side in ("baseline", "candidate"):
+        matrix = density.get(side)
+        if not isinstance(matrix, dict) or set(matrix) != expected_cells:
+            errors["d2"].append(f"{side} scheduler-density matrix is incomplete")
+            continue
+        for cell, entry in matrix.items():
+            repetitions = entry.get("repetitions") if isinstance(entry, dict) else None
+            if not isinstance(repetitions, list) or len(repetitions) != 7:
+                errors["d2"].append(f"{side}/{cell} must contain seven second-pass samples")
+                continue
+            for row in repetitions:
+                elapsed = row.get("second_pass_seconds") if isinstance(row, dict) else None
+                proofs = row.get("historical_proof_calls") if isinstance(row, dict) else None
+                terminal_stats = row.get("terminal_stat_calls") if isinstance(row, dict) else None
+                if (not isinstance(elapsed, (int, float)) or isinstance(elapsed, bool)
+                        or not math.isfinite(elapsed) or elapsed < 0):
+                    errors["d2"].append(f"{side}/{cell} has invalid pass timing")
+                if not isinstance(proofs, int) or isinstance(proofs, bool) or proofs < 0:
+                    errors["d2"].append(f"{side}/{cell} lacks historical proof call counts")
+                if not isinstance(terminal_stats, int) or isinstance(terminal_stats, bool) or terminal_stats < 0:
+                    errors["d2"].append(f"{side}/{cell} lacks terminal stat counts")
+    if isinstance(density.get("baseline"), dict):
+        for cell in ("owners-1000-terminal-0", "owners-1000-terminal-1000"):
+            rows = density["baseline"].get(cell, {}).get("repetitions", [])
+            if rows and any(row.get("historical_proof_calls") != 1000 for row in rows):
+                errors["d2"].append(f"baseline {cell} did not recheck all 1,000 settled owners")
+    candidate = density.get("candidate")
+    if isinstance(candidate, dict):
+        for cell in ("owners-1000-terminal-0", "owners-1000-terminal-1000"):
+            rows = candidate.get(cell, {}).get("repetitions", [])
+            if rows and any(row.get("historical_proof_calls") != 0 for row in rows):
+                errors["d2"].append(f"candidate {cell} repeated historical owner proof work")
+        terminal_cell = candidate.get("owners-0-terminal-1000", {})
+        for row in terminal_cell.get("repetitions", []):
+            if (row.get("terminal_stat_calls") != 0
+                    or row.get("active_full_scans") != 0):
+                errors["d2"].append("candidate repeated terminal duty discovery work")
+                break
+        try:
+            cpu_helper = _load_cpu_helper()
+            derived = cpu_helper._density_acceptance({"candidate": candidate})
+        except (KeyError, TypeError, ValueError) as exc:
+            derived = None
+            errors["d2"].append(f"scheduler-density raw timing is malformed: {exc}")
+        if derived is not None:
+            if not isinstance(d2.get("acceptance"), dict) or d2["acceptance"] != derived:
+                errors["d2"].append("scheduler-density acceptance does not match raw paired timing")
+            elif derived.get("pass") is not True:
+                errors["d2"].append("candidate 1,000-owner/1,000-terminal pass cost increased beyond paired timer noise")
+    return errors
+
+
 def _lifecycle_cleanup_errors(cleanup):
     if not isinstance(cleanup, dict) or cleanup.get("status") != "pass":
         return ["lifecycle fixture cleanup did not pass"]
@@ -816,7 +934,9 @@ def _candidate_runner_check(measurement):
 
 def _make_handoff(report, evidence_dir, measurement, lifecycle, cleanup):
     d1 = report["d1_source_provenance"]
+    d1_latency = report.get("d1_attempt_readiness", {})
     d2 = report["d2_shared_observation"]
+    d2_cost = report.get("d2_obligation_pass_cost", {})
     fixture = (lifecycle.get("fixtures") or [{}])[0]
     metric_rows = report["metric_windows"]
 
@@ -857,12 +977,14 @@ def _make_handoff(report, evidence_dir, measurement, lifecycle, cleanup):
         "Source content fingerprints identify the bytes measured. A Git revision is included only when Git's discovered toplevel exactly matches that supplied source root; matching worktrees also disclose dirty state.",
         source_line("baseline"),
         source_line("candidate"),
+        f"Actual runner stall samples: baseline p95={((d1_latency.get('paired') or {}).get('baseline') or {}).get('nearest_rank_p95_seconds', 'unknown')} s; candidate p95={((d1_latency.get('paired') or {}).get('candidate') or {}).get('nearest_rank_p95_seconds', 'unknown')} s (20 samples per side; each slow-lane stall was held for 20 seconds). Validation: `{d1_latency.get('status', 'missing')}`.",
         "Remote main ancestry and pull request inclusion are not evaluated by this helper; the owner checks those separately.",
         "",
         "## d2 — shared observation and retained cache",
         "",
         f"Carrier helper launches: baseline={d2.get('baseline_carrier_helper_launches')}, candidate={d2.get('candidate_carrier_helper_launches')}. Candidate peer-watch cold windows observed one runner per case. Runner session observations recorded: {fixture.get('runner_session_snapshot_calls', 'unknown')}; this is reported as measured with no exact-count gate.",
         f"Lifecycle target groups: {groups_text}. The selected runner regression kept pass-scoped RegistryView lookups below the six-watch count, with two grouped readiness reads and six independent wake requests.",
+        f"Settled-obligation density: candidate 1,000-owner/1,000-terminal second-pass mean={((((d2_cost.get('paired') or {}).get('candidate') or {}).get('owners-1000-terminal-1000') or {}).get('mean_second_pass_seconds', 'unknown'))} s; historical owner-proof calls were counted separately from active-index terminal discovery. Validation: `{d2_cost.get('status', 'missing')}`; paired timer-noise check `{((d2_cost.get('acceptance') or {}).get('pass', 'missing'))}`.",
         f"Fresh retained-memory children parsed {count(fixture_info.get('rows'))} rows ({count(fixture_info.get('bytes'))} bytes; SHA-256 `{fixture_info.get('sha256', 'unknown')}`). Retained traced bytes: {count(baseline.get('retained_traced_bytes'))} → {count(candidate.get('retained_traced_bytes'))}; post-parse RSS: {rss_after[0] if rss_after[0] is not None else 'unknown'} → {rss_after[1] if rss_after[1] is not None else 'unknown'} KiB; separate RSS high-water: {rss_high[0] if rss_high[0] is not None else 'unknown'} → {rss_high[1] if rss_high[1] is not None else 'unknown'} KiB.",
         "Each retained-memory reading uses the actual source cache module and a fresh one-shot child; its source and module hashes, fixture digest, parse counts, RSS, and high-water remain in the evidence directory.",
         "",
@@ -909,6 +1031,15 @@ def _assemble_report(evidence_dir, baseline_root, measurement_command, lifecycle
                      lifecycle_cleanup, retained):
     metric_rows = _metric_rollup(measurement_evidence)
     matrix_errors = _matrix_errors(measurement_evidence, metric_rows)
+    performance_errors = _paired_performance_errors(measurement_evidence)
+    matrix_errors.extend(performance_errors["d1"])
+    matrix_errors.extend(performance_errors["d2"])
+    d1_measurement = measurement_evidence.get("d1_slow_lane_readiness")
+    if not isinstance(d1_measurement, dict):
+        d1_measurement = {}
+    d2_measurement = measurement_evidence.get("d2_scheduler_density")
+    if not isinstance(d2_measurement, dict):
+        d2_measurement = {}
     provenance_errors = _source_provenance_errors(
         measurement_evidence, baseline_root, ROOT)
     lifecycle_errors = _lifecycle_errors(lifecycle_evidence)
@@ -1004,6 +1135,17 @@ def _assemble_report(evidence_dir, baseline_root, measurement_command, lifecycle
             "status": "verified" if provenance_complete else "invalid",
             "sources": provenance,
             "validation_errors": provenance_errors,
+        },
+        "d1_attempt_readiness": {
+            "status": "complete" if not performance_errors["d1"] else "incomplete or invalid",
+            "validation_errors": performance_errors["d1"],
+            "paired": d1_measurement.get("paired", {}),
+        },
+        "d2_obligation_pass_cost": {
+            "status": "complete" if not performance_errors["d2"] else "incomplete or invalid",
+            "validation_errors": performance_errors["d2"],
+            "paired": d2_measurement.get("paired", {}),
+            "acceptance": d2_measurement.get("acceptance", {}),
         },
         "d2_shared_observation": {
             "status": "supported" if shared_observation_complete else "incomplete or invalid",

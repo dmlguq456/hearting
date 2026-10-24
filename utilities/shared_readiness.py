@@ -3,13 +3,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import stat
-import tempfile
 import time
 
 
@@ -28,6 +28,8 @@ _JSON_CHUNK_CHARS = 65536
 _CHILD_FIELDS = ("attempt_id", "slug", "status", "readiness", "reason",
                  "required_action")
 _WATCH_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
+_DIR_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+              | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
 
 
 def attempt_identity(jobs, attempt_id, *, parent="", slug="", consumer_pid,
@@ -140,28 +142,79 @@ def _read_json(path, *, max_bytes=MAX_SMALL_JSON_BYTES):
 
 
 def _atomic_json(path, value, *, max_bytes=MAX_SMALL_JSON_BYTES):
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.parent.is_symlink() or path.is_symlink():
-        raise OSError("readiness-projection-path-symlink")
-    raw = _bounded_json_bytes(value, max_bytes)
-    fd, temporary = tempfile.mkstemp(prefix=".readiness-", dir=path.parent)
+    if path.parent.name == "readiness-v1":
+        state_root = path.parents[1].resolve(strict=False)
+        children = ("readiness-v1",)
+    elif (path.parent.name == "watch-transitions"
+          and path.parent.parent.name == "readiness-v1"):
+        state_root = path.parents[2].resolve(strict=False)
+        children = ("readiness-v1", "watch-transitions")
+    else:
+        raise OSError("readiness-projection-path-invalid")
+    root_fd = _open_state_children(state_root, children)
+    temporary = None
+    fd = None
     try:
-        os.fchmod(fd, 0o600)
+        raw = _bounded_json_bytes(value, max_bytes)
+        try:
+            existing = os.stat(path.name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            existing = None
+        if existing is not None and stat.S_ISLNK(existing.st_mode):
+            raise OSError("readiness-projection-path-symlink")
+        temporary = ".readiness-%s.tmp" % os.urandom(8).hex()
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=root_fd)
         with os.fdopen(fd, "wb") as stream:
             stream.write(raw)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        fd = None
+        os.replace(temporary, path.name, src_dir_fd=root_fd, dst_dir_fd=root_fd)
+        os.fsync(root_fd)
     except BaseException:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
         raise
+    finally:
+        if temporary is not None:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=root_fd)
+        os.close(root_fd)
+
+
+def _open_state_children(state_root, children):
+    """Create only known child directories under an existing state-root inode."""
+    state_root = Path(state_root).resolve(strict=False)
+    expected = os.stat(state_root, follow_symlinks=False)
+    if not stat.S_ISDIR(expected.st_mode):
+        raise OSError("readiness-state-root-unavailable")
+    expected_identity = (expected.st_dev, expected.st_ino)
+    fd = os.open(state_root, _DIR_FLAGS)
+    try:
+        if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != expected_identity:
+            raise OSError("readiness-state-root-replaced")
+        for child in children:
+            try:
+                next_fd = os.open(child, _DIR_FLAGS, dir_fd=fd)
+            except FileNotFoundError:
+                try:
+                    os.mkdir(child, 0o700, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                next_fd = os.open(child, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        current = os.stat(state_root, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != expected_identity:
+            raise OSError("readiness-state-root-replaced")
+        result = fd
+        fd = -1
+        return result
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def publish_runner_incarnation(root, pid, pid_start, incarnation):
@@ -179,21 +232,28 @@ def _runner_incarnation_current(root, producer):
 
 def _runner_wake_path(root):
     directory = Path(root)
-    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if directory.is_symlink():
-        raise OSError("readiness-runner-root-symlink")
+    try:
+        info = os.stat(directory, follow_symlinks=False)
+    except OSError as exc:
+        raise OSError("readiness-runner-root-unavailable") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError("readiness-runner-root-invalid")
+    root_fd = os.open(directory, _DIR_FLAGS)
     path = directory / RUNNER_WAKE_NAME
     try:
-        path.lstat()
-    except FileNotFoundError:
         try:
-            os.mkfifo(path, 0o600)
-        except FileExistsError:
-            pass
-    info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISFIFO(info.st_mode):
-        raise OSError("readiness-runner-wake-invalid")
-    return path
+            os.stat(RUNNER_WAKE_NAME, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            try:
+                os.mkfifo(RUNNER_WAKE_NAME, 0o600, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+        info = os.stat(RUNNER_WAKE_NAME, dir_fd=root_fd, follow_symlinks=False)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISFIFO(info.st_mode):
+            raise OSError("readiness-runner-wake-invalid")
+        return path
+    finally:
+        os.close(root_fd)
 
 
 def open_runner_wake(root):

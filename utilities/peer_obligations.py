@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from contextlib import contextmanager
 import copy
 import fcntl
@@ -40,6 +41,14 @@ _RUNNERS: list[subprocess.Popen] = []
 _DISTRIBUTION_MODULES = {}
 _MESSAGE_RECEIVER_PROVENANCE = "validated-peer-ref-receiver-v1"
 _LEGACY_PENDING_RECEIPT_PROVENANCE = "validated-legacy-pending-receipt-v1"
+_OBLIGATION_RETENTION_NS = 14 * 86400 * 1_000_000_000
+_READINESS_RETENTION_NS = 86400 * 1_000_000_000
+_RETENTION_DUE_NS = 300 * 1_000_000_000
+_RETENTION_EXAMINE_LIMIT = 64
+_RETENTION_REMOVE_LIMIT = 16
+_DIRECTORY_FLAGS = (os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+_ACTIVE_INDEX_FLOCK = fcntl.flock
 
 
 def _message_watch_ids(refs):
@@ -642,6 +651,17 @@ def _safe_id(value: str) -> str:
     return value
 
 
+def _proc_start_for_store(pid: int):
+    try:
+        raw = Path(f"/proc/{int(pid)}/stat").read_text(encoding="ascii")
+        fields = raw[raw.rfind(")") + 2:].split()
+        if not fields or fields[0] in {"Z", "X"}:
+            return None
+        return fields[19]
+    except (OSError, ValueError, TypeError, IndexError):
+        return None
+
+
 def _read_record(path: Path) -> dict | None:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -664,26 +684,103 @@ def _read_record(path: Path) -> dict | None:
     return value
 
 
-def _write_atomic(path: Path, value: dict) -> None:
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if path.parent.is_symlink() or path.is_symlink():
-        raise ObligationError("peer-obligation-path-symlink")
-    fd, temporary_name = tempfile.mkstemp(prefix=".obligation-", dir=path.parent)
-    temporary = Path(temporary_name)
+def _write_atomic(path: Path, value: dict, *, dir_fd: int | None = None) -> None:
+    previous = _read_record(path)
+    terminal = value.get("state") in {"complete", "cancelled"}
+    if terminal:
+        if previous and previous.get("state") in {"complete", "cancelled"}:
+            value.setdefault("terminal_at", previous.get("terminal_at")
+                             or previous.get("updated_at"))
+        else:
+            value.setdefault("terminal_at", time.time())
+    else:
+        value.pop("terminal_at", None)
+    if dir_fd is None:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        if path.parent.is_symlink() or path.is_symlink():
+            raise ObligationError("peer-obligation-path-symlink")
+        fd, temporary_name = tempfile.mkstemp(prefix=".obligation-", dir=path.parent)
+        temporary = Path(temporary_name)
+    else:
+        if path.parent.name != "obligations":
+            raise ObligationError("peer-obligation-path-invalid")
+        temporary_name = ".obligation-%s.tmp" % secrets.token_hex(8)
+        fd = os.open(temporary_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=dir_fd)
+        temporary = None
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":")).encode("utf-8") + b"\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        if dir_fd is None:
+            os.replace(temporary, path)
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        else:
+            os.replace(temporary_name, path.name,
+                       src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.fsync(dir_fd)
     finally:
-        temporary.unlink(missing_ok=True)
+        if dir_fd is None:
+            temporary.unlink(missing_ok=True)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary_name, dir_fd=dir_fd)
+
+
+def _registered_terminal_state(root, storage, delivery_id, attempt_id, metadata,
+                               carrier):
+    """Return the state of an exactly bound terminal delivery source, if present."""
+    import dispatch_pending_delivery as pending
+    root, storage = Path(root), str(storage or "")
+    if not storage or not isinstance(delivery_id, str) or not delivery_id:
+        return None
+    expected_kind = metadata.get("delivery_recipient_kind")
+    if expected_kind and expected_kind != carrier:
+        return None
+    try:
+        exact = pending.read(root, storage, delivery_id)
+        if exact is not None:
+            if (exact.get("delivery_id") != delivery_id
+                    or exact.get("recipient_kind") != carrier
+                    or attempt_id not in (exact.get("attempt_ids") or [])
+                    or exact.get("state") not in {"acked", "rejected", "expired"}):
+                return None
+            expected_digest = metadata.get("delivery_receipt_digest")
+            expected_revision = metadata.get("delivery_row_revision")
+            if expected_digest and exact.get("receipt_digest") != expected_digest:
+                return None
+            if (expected_revision and (exact.get("row_revisions") or {}).get(attempt_id)
+                    != expected_revision):
+                return None
+            pending.received_ack_identity(exact, storage, delivery_id)
+            return exact["state"]
+        tombstone = pending.tombstone_path(
+            pending.record_path(root, storage, delivery_id))
+        value = json.loads(tombstone.read_text(encoding="utf-8"))
+        expected_parent = metadata.get("parent_attempt_id")
+        if (value.get("schema") != pending.PRUNE_TOMBSTONE_SCHEMA
+                or value.get("delivery_id") != delivery_id
+                or value.get("recipient_digest") != pending.recipient_digest(storage)
+                or attempt_id not in (value.get("attempt_ids") or [])
+                or (expected_parent and value.get("parent_attempt_id") != expected_parent)
+                or value.get("terminal_state") not in {"acked", "rejected", "expired"}):
+            return None
+        return value["terminal_state"]
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
+
+
+def _registered_terminal_source(root, storage, delivery_id, attempt_id, metadata,
+                                carrier):
+    """Prove an exact terminal delivery before dedup creates a replacement duty."""
+    return _registered_terminal_state(
+        root, storage, delivery_id, attempt_id, metadata, carrier) is not None
 
 
 def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holder=None,
@@ -702,6 +799,13 @@ def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holde
             or row.metadata.get("parent_completion_delivery") != carrier
             or effective_parent(row.metadata, Path(jobs)) != session_id):
         return False
+    if row.status == "done":
+        if row.metadata.get("delivery_intent") != "1":
+            return True
+        if _registered_terminal_source(Path(jobs).resolve(strict=True).parent,
+                row.metadata.get("parent_sid"), row.metadata.get("delivery_id"),
+                attempt_id, row.metadata, carrier):
+            return True
     receiving_observation = None
     if delivery_record is not None:
         import dispatch_pending_delivery as pending
@@ -791,6 +895,10 @@ def retain_registered_notice(jobs, record):
     supervision.validate_pending_record(record, jobs=jobs, expected_thread_id=storage,
         expected_epoch=1, expected_attempts={row.attempt_id},
         expected_sealed_batch_id=row.metadata.get("managed_sealed_batch_id", ""))
+    if _registered_terminal_source(
+            jobs.parent, storage, record["delivery_id"], row.attempt_id,
+            {"delivery_receipt_digest": record.get("receipt_digest")}, carrier):
+        return True
     identity = {"jobs": str(jobs), "attempt_id": row.attempt_id,
                 "session_id": effective_parent(row.metadata, jobs), "harness": harness,
                 "server": os.environ.get("AGENT_HERDR_SESSION") or "default"}
@@ -830,7 +938,7 @@ def _registered_delivery_bindings(message, roots=None, *, received_only=False,
         return
     if roots is not None and root not in {Path(r).resolve() for r in roots}:
         return
-    store = ObligationStore(root)
+    store = ObligationStore(root, allow_state_root_creation=False)
     duty = store.get(binding["duty_id"])
     intent = (duty or {}).get("intent") or {}
     identity = intent.get("identity") or {}
@@ -978,15 +1086,52 @@ def acknowledge_registered_delivery(message, *, roots=None):
 class ObligationStore:
     """Atomic intent records; immutable intent is separate from mutable progress."""
 
-    def __init__(self, root: str | Path | None = None):
-        self.root = obligations_root(root)
+    def __init__(self, root: str | Path | None = None, *,
+                 allow_state_root_creation=True):
+        self.state_root = (Path(root).expanduser() if root is not None
+                           else peer_state_root()).resolve(strict=False)
+        self._allow_state_root_creation = bool(allow_state_root_creation)
+        self.root = self.state_root / "peer-steward" / "obligations"
+        try:
+            base = os.stat(self.state_root, follow_symlinks=False)
+            self._state_root_identity = ((base.st_dev, base.st_ino)
+                                         if stat.S_ISDIR(base.st_mode) else None)
+        except OSError:
+            self._state_root_identity = None
         self._list_cache: dict[str, tuple[tuple[int, int, int, int, int], dict | None]] = {}
-        self._discovery_metrics = {"stat_calls": 0, "json_reads": 0, "json_parses": 0}
+        self._directory_snapshot = None
+        self._directory_stamp = None
+        self._discovery_metrics = {"directory_scans": 0, "directory_entries": 0,
+                                   "terminal_cache_hits": 0, "stat_calls": 0,
+                                   "json_reads": 0, "json_parses": 0,
+                                   "active_index_scans": 0, "active_index_entries": 0,
+                                   "active_full_scans": 0}
         self._active_list_context = None
+
+    def _initialize_state_root_for_producer(self) -> bool:
+        """Initialize a genuinely absent root only on an explicit create path."""
+        if self._state_root_identity is not None:
+            try:
+                info = os.stat(self.state_root, follow_symlinks=False)
+                return (stat.S_ISDIR(info.st_mode)
+                        and (info.st_dev, info.st_ino) == self._state_root_identity)
+            except OSError:
+                return False
+        if not self._allow_state_root_creation:
+            return False
+        try:
+            self.state_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            info = os.stat(self.state_root, follow_symlinks=False)
+            if not stat.S_ISDIR(info.st_mode):
+                return False
+            self._state_root_identity = (info.st_dev, info.st_ino)
+            return True
+        except OSError:
+            return False
 
     def begin_read_pass(self) -> None:
         """Share one discovery snapshot among lists made during a runner pass."""
-        self._active_list_context = {"paths": None, "records": {}}
+        self._active_list_context = {"records": None}
 
     def end_read_pass(self) -> None:
         """Drop the pass snapshot so the next list observes external changes."""
@@ -995,13 +1140,267 @@ class ObligationStore:
     def _record_path(self, duty_id: str) -> Path:
         return self.root / (_safe_id(duty_id) + ".json")
 
-    def _lock(self, duty_id: str):
-        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        path = self.root / (_safe_id(duty_id) + ".lock")
-        if path.is_symlink():
-            raise ObligationError("peer-obligation-lock-symlink")
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX)
+    def _obligations_fd(self, *, create=False):
+        """Open the obligations directory beneath the state-root inode we saw."""
+        expected = self._state_root_identity
+        if expected is None:
+            return None
+        try:
+            base_fd = os.open(self.state_root, _DIRECTORY_FLAGS)
+        except OSError:
+            return None
+        peer_fd = None
+        try:
+            base = os.fstat(base_fd)
+            current = os.stat(self.state_root, follow_symlinks=False)
+            if ((base.st_dev, base.st_ino) != expected
+                    or (current.st_dev, current.st_ino) != expected
+                    or not stat.S_ISDIR(current.st_mode)):
+                return None
+            try:
+                peer_fd = os.open("peer-steward", _DIRECTORY_FLAGS, dir_fd=base_fd)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                os.mkdir("peer-steward", 0o700, dir_fd=base_fd)
+                peer_fd = os.open("peer-steward", _DIRECTORY_FLAGS, dir_fd=base_fd)
+            try:
+                result_fd = os.open("obligations", _DIRECTORY_FLAGS, dir_fd=peer_fd)
+            except FileNotFoundError:
+                if not create:
+                    return None
+                os.mkdir("obligations", 0o700, dir_fd=peer_fd)
+                result_fd = os.open("obligations", _DIRECTORY_FLAGS, dir_fd=peer_fd)
+            current = os.stat(self.state_root, follow_symlinks=False)
+            if (current.st_dev, current.st_ino) != expected:
+                os.close(result_fd)
+                return None
+            return result_fd
+        except FileExistsError:
+            # A concurrent creator won the mkdir; reopen through O_NOFOLLOW.
+            return self._obligations_fd(create=False)
+        finally:
+            if peer_fd is not None:
+                os.close(peer_fd)
+            os.close(base_fd)
+
+    def ensure_directory(self) -> bool:
+        """Create only store children below the already-existing state root."""
+        fd = self._obligations_fd(create=True)
+        if fd is None:
+            return False
+        os.close(fd)
+        return True
+
+    def _write_record(self, path: Path, record: dict) -> None:
+        root_fd = self._obligations_fd(create=True)
+        if root_fd is None:
+            raise ObligationError("peer-state-root-unavailable")
+        active_fd = None
+        pending_name = None
+        try:
+            active_fd = self._active_directory_fd(root_fd, create=True)
+            with self._active_index_lock(active_fd):
+                pending_name = self._begin_active_mutation(
+                    root_fd, active_fd, path.name[:-5])
+            _write_atomic(path, record, dir_fd=root_fd)
+            with self._active_index_lock(active_fd):
+                self._finish_active_mutation(root_fd, active_fd, path.name[:-5],
+                                             record, pending_name)
+                pending_name = None
+        finally:
+            if pending_name is not None and active_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(pending_name, dir_fd=active_fd)
+            if active_fd is not None:
+                os.close(active_fd)
+            os.close(root_fd)
+
+    @staticmethod
+    def _root_generation(root_fd):
+        info = os.fstat(root_fd)
+        return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns)
+
+    def _active_directory_fd(self, root_fd, *, create=False):
+        try:
+            return os.open("active", _DIRECTORY_FLAGS, dir_fd=root_fd)
+        except FileNotFoundError:
+            if not create:
+                return None
+            try:
+                os.mkdir("active", 0o700, dir_fd=root_fd)
+            except FileExistsError:
+                pass
+            return os.open("active", _DIRECTORY_FLAGS, dir_fd=root_fd)
+
+    @contextmanager
+    def _active_index_lock(self, active_fd):
+        lock_fd = os.open(".index.lock", os.O_RDWR | os.O_CREAT
+                          | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=active_fd)
+        try:
+            _ACTIVE_INDEX_FLOCK(lock_fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            _ACTIVE_INDEX_FLOCK(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+    @staticmethod
+    def _active_record(record):
+        if not isinstance(record, dict):
+            return False
+        if record.get("state") in _PENDING_STATES:
+            return True
+        intent = record.get("intent") or {}
+        observation = record.get("observation") or {}
+        return (record.get("state") == "complete"
+                and intent.get("kind") == "retire"
+                and record.get("result") in {"normal-exit", "target-already-gone"}
+                and observation.get("terminal_followup") != "complete")
+
+    def _write_active_marker(self, active_fd, duty_id):
+        name = _safe_id(duty_id)
+        temporary = ".mark-%s.tmp" % secrets.token_hex(8)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=active_fd)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(name.encode("ascii") + b"\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, name, src_dir_fd=active_fd, dst_dir_fd=active_fd)
+            os.fsync(active_fd)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=active_fd)
+
+    def _read_active_generation(self, active_fd):
+        try:
+            fd = os.open(".generation", os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                         dir_fd=active_fd)
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read(256)
+        try:
+            value = json.loads(raw.decode("ascii"))
+            generation = value.get("root") if isinstance(value, dict) else None
+            if (not isinstance(generation, list) or len(generation) != 4
+                    or any(not isinstance(item, int) for item in generation)):
+                return None
+            return tuple(generation)
+        except (UnicodeError, ValueError, TypeError):
+            return None
+
+    @staticmethod
+    def _active_exists(active_fd, name):
+        try:
+            os.stat(name, dir_fd=active_fd, follow_symlinks=False)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def _write_active_generation(self, root_fd, active_fd):
+        value = {"schema_version": 1, "root": list(self._root_generation(root_fd))}
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+        temporary = ".generation-%s.tmp" % secrets.token_hex(8)
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=active_fd)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, ".generation", src_dir_fd=active_fd, dst_dir_fd=active_fd)
+            os.fsync(active_fd)
+        finally:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary, dir_fd=active_fd)
+
+    def _begin_active_mutation(self, root_fd, active_fd, duty_id):
+        if (self._read_active_generation(active_fd) != self._root_generation(root_fd)
+                or self._active_exists(active_fd, ".rebuild")):
+            self._mark_active_rebuild(active_fd)
+        name = _safe_id(duty_id)
+        pid_start = _proc_start_for_store(os.getpid()) or ""
+        pending = ".pending-%s-%s-%s" % (
+            os.getpid(), pid_start or "unknown", secrets.token_hex(6))
+        payload = json.dumps({"id": name, "pid": os.getpid(),
+                              "pid_start": pid_start},
+                             sort_keys=True, separators=(",", ":")).encode("ascii")
+        fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                     | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=active_fd)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Keep the marker visible before the record changes. Readers that see a
+        # live pending writer use the active names without trusting generation.
+        self._write_active_marker(active_fd, name)
+        os.fsync(active_fd)
+        return pending
+
+    def _finish_active_mutation(self, root_fd, active_fd, duty_id, record, pending_name):
+        name = _safe_id(duty_id)
+        if self._active_record(record):
+            self._write_active_marker(active_fd, name)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=active_fd)
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(pending_name, dir_fd=active_fd)
+        # If another writer is still in flight, leave its pending marker as the
+        # conservative invalidation. Its final writer publishes the generation.
+        with os.scandir(active_fd) as entries:
+            pending = any(entry.name.startswith(".pending-") for entry in entries)
+        rebuilding = self._active_exists(active_fd, ".rebuild")
+        if not pending and not rebuilding:
+            self._write_active_generation(root_fd, active_fd)
+        else:
+            self._mark_active_rebuild(active_fd)
+        os.fsync(active_fd)
+
+    @staticmethod
+    def _mark_active_rebuild(active_fd):
+        try:
+            fd = os.open(".rebuild", os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                         | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=active_fd)
+        except FileExistsError:
+            return
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(b"rebuild\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _lock(self, duty_id: str, *, create=True):
+        root_fd = self._obligations_fd(create=create)
+        if root_fd is None:
+            raise ObligationError("peer-state-root-unavailable")
+        name = _safe_id(duty_id) + ".lock"
+        root_before = self._root_generation(root_fd)
+        active_fd = self._active_directory_fd(root_fd, create=False)
+        try:
+            try:
+                os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                lock_preexisted = True
+            except FileNotFoundError:
+                lock_preexisted = False
+            fd = os.open(name, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+                         0o600, dir_fd=root_fd)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            if not lock_preexisted and active_fd is not None:
+                with self._active_index_lock(active_fd):
+                    _ids, pending = self._active_names(active_fd)
+                    if (not pending and not self._active_exists(active_fd, ".rebuild")
+                            and self._read_active_generation(active_fd) == root_before):
+                        self._write_active_generation(root_fd, active_fd)
+        except Exception:
+            if "fd" in locals():
+                os.close(fd)
+            raise
+        finally:
+            if active_fd is not None:
+                os.close(active_fd)
+            os.close(root_fd)
         return fd
 
     def get(self, duty_id: str) -> dict | None:
@@ -1055,34 +1454,415 @@ class ObligationStore:
         for key in self._discovery_metrics:
             self._discovery_metrics[key] = 0
 
-    def list(self, *, states: Iterable[str] = _PENDING_STATES,
-             kinds: Iterable[str] | None = None) -> list[dict]:
-        if not self.root.is_dir():
+    def _active_names(self, active_fd):
+        ids = []
+        live_pending = False
+        stale_pending = False
+        with os.scandir(active_fd) as entries:
+            for entry in entries:
+                name = entry.name
+                if name.startswith(".pending-"):
+                    try:
+                        fd = os.open(name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                                     dir_fd=active_fd)
+                        with os.fdopen(fd, "rb") as handle:
+                            value = json.loads(handle.read(4097).decode("ascii"))
+                        pid = value.get("pid") if isinstance(value, dict) else None
+                        expected = value.get("pid_start") if isinstance(value, dict) else None
+                        current = (_proc_start_for_store(pid)
+                                   if isinstance(pid, int) and not isinstance(pid, bool) else None)
+                        if not expected or current == str(expected):
+                            live_pending = True
+                        else:
+                            os.unlink(name, dir_fd=active_fd)
+                            stale_pending = True
+                    except (OSError, UnicodeError, ValueError, TypeError):
+                        live_pending = True
+                    continue
+                if name.startswith("."):
+                    continue
+                try:
+                    ids.append(_safe_id(name))
+                except ObligationError:
+                    continue
+        if stale_pending:
+            self._mark_active_rebuild(active_fd)
+        return tuple(ids), live_pending
+
+    def _read_active_records(self, root_fd, active_fd, *, live_pending=False):
+        ids, live_pending = self._active_names(active_fd)
+        self._discovery_metrics["active_index_scans"] += 1
+        self._discovery_metrics["active_index_entries"] += len(ids)
+        output = {}
+        stale = []
+        for duty_id in ids:
+            path = self._record_path(duty_id)
+            try:
+                record = self._read_list_record(path)
+            except ObligationError:
+                continue
+            if record is None:
+                continue
+            if not self._active_record(record):
+                stale.append(duty_id)
+                if not live_pending:
+                    continue
+            output[str(path)] = record
+        if stale and not live_pending:
+            # A stale marker means a writer crashed between record and index
+            # updates. Rebuild under the index lock on the next pass.
+            self._mark_active_rebuild(active_fd)
+        return output
+
+    def _rebuild_active_index(self, root_fd, active_fd):
+        with self._active_index_lock(active_fd):
+            _ids, pending = self._active_names(active_fd)
+            if pending:
+                return self._read_active_records(root_fd, active_fd, live_pending=True)
+            before = self._root_generation(root_fd)
+            self._discovery_metrics["active_full_scans"] += 1
+            self._discovery_metrics["directory_scans"] += 1
+            active_records = {}
+            with os.scandir(root_fd) as entries:
+                for entry in entries:
+                    if not entry.name.endswith(".json"):
+                        continue
+                    self._discovery_metrics["directory_entries"] += 1
+                    path = self.root / entry.name
+                    try:
+                        record = _read_record(path)
+                    except ObligationError:
+                        continue
+                    if record is None:
+                        continue
+                    if self._active_record(record):
+                        duty_id = entry.name[:-5]
+                        active_records[duty_id] = record
+            if self._root_generation(root_fd) != before:
+                self._mark_active_rebuild(active_fd)
+                return {str(self.root / (duty_id + ".json")): record
+                        for duty_id, record in active_records.items()}
+            current_ids, pending = self._active_names(active_fd)
+            if pending:
+                self._mark_active_rebuild(active_fd)
+                return self._read_active_records(root_fd, active_fd, live_pending=True)
+            wanted = set(active_records)
+            for duty_id in set(current_ids) - wanted:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(duty_id, dir_fd=active_fd)
+            for duty_id in wanted - set(current_ids):
+                self._write_active_marker(active_fd, duty_id)
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(".rebuild", dir_fd=active_fd)
+            self._write_active_generation(root_fd, active_fd)
+            if self._root_generation(root_fd) != before:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(".generation", dir_fd=active_fd)
+                self._mark_active_rebuild(active_fd)
+            return {str(self.root / (duty_id + ".json")): record
+                    for duty_id, record in active_records.items()}
+
+    def _discover_active(self, root_fd, *, fast_active_only=False):
+        active_fd = self._active_directory_fd(root_fd, create=True)
+        try:
+            _ids, pending = self._active_names(active_fd)
+            if pending or fast_active_only:
+                return self._read_active_records(root_fd, active_fd, live_pending=pending)
+            generation = self._read_active_generation(active_fd)
+            root_generation = self._root_generation(root_fd)
+            if (generation != root_generation
+                    or self._active_exists(active_fd, ".rebuild")):
+                return self._rebuild_active_index(root_fd, active_fd)
+            return self._read_active_records(root_fd, active_fd)
+        finally:
+            os.close(active_fd)
+
+    def _discover(self, *, cached_terminal=True, force_terminal=False,
+                  fast_active_only=False):
+        root_fd = self._obligations_fd(create=False)
+        if root_fd is None:
             self._list_cache.clear()
-            return []
-        wanted = set(states)
+            self._directory_snapshot = None
+            self._directory_stamp = None
+            return {}
+        try:
+            if cached_terminal and not force_terminal:
+                return self._discover_active(root_fd, fast_active_only=fast_active_only)
+            before = os.fstat(root_fd)
+            stamp = (before.st_dev, before.st_ino, before.st_mtime_ns, before.st_ctime_ns)
+            rescan = self._directory_snapshot is None or stamp != self._directory_stamp
+            if rescan:
+                self._discovery_metrics["directory_scans"] += 1
+                current = {}
+                with os.scandir(root_fd) as entries:
+                    for entry in entries:
+                        if not entry.name.endswith(".json"):
+                            continue
+                        self._discovery_metrics["directory_entries"] += 1
+                        inode = entry.inode()
+                        prior = (self._directory_snapshot or {}).get(entry.name)
+                        prior_record = prior[1] if prior and prior[0] == inode else None
+                        is_terminal = bool(prior_record and prior_record.get("state")
+                                           in {"complete", "cancelled"})
+                        if (cached_terminal and not force_terminal and is_terminal):
+                            record = prior_record
+                            self._discovery_metrics["terminal_cache_hits"] += 1
+                        else:
+                            record = self._read_list_record(self.root / entry.name)
+                        current[entry.name] = (inode, record)
+                after = os.fstat(root_fd)
+                after_stamp = (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns)
+                self._directory_snapshot = current
+                self._directory_stamp = after_stamp if after_stamp == stamp else None
+                present = {str(self.root / name) for name in current}
+                for stale in set(self._list_cache).difference(present):
+                    self._list_cache.pop(stale, None)
+            else:
+                current = dict(self._directory_snapshot)
+                for name, (inode, record) in tuple(current.items()):
+                    terminal = bool(record and record.get("state")
+                                    in {"complete", "cancelled"})
+                    if terminal and cached_terminal and not force_terminal:
+                        self._discovery_metrics["terminal_cache_hits"] += 1
+                    else:
+                        current[name] = (inode, self._read_list_record(self.root / name))
+                self._directory_snapshot = current
+            return {str(self.root / name): record for name, (_inode, record) in current.items()}
+        finally:
+            os.close(root_fd)
+
+    def list(self, *, states: Iterable[str] | None = None,
+             kinds: Iterable[str] | None = None,
+             cached_terminal: bool = False,
+             fast_active_only: bool = False) -> list[dict]:
+        explicit_states = states is not None
+        wanted = set(_PENDING_STATES if states is None else states)
         wanted_kinds = None if kinds is None else set(kinds)
-        output = []
         context = self._active_list_context
-        if context is None:
-            context = {"paths": None, "records": {}}
-        if context["paths"] is None:
-            paths = sorted(self.root.glob("*.json"))
-            context["paths"] = paths
-            present = {str(path) for path in paths}
-            for stale in set(self._list_cache).difference(present):
-                self._list_cache.pop(stale, None)
-        paths = context["paths"]
-        for path in paths:
-            key = str(path)
-            if key not in context["records"]:
-                context["records"][key] = self._read_list_record(path)
-            record = context["records"][key]
-            if (record is not None and record.get("state") in wanted
+        if context is not None and context["records"] is not None:
+            records = context["records"]
+        else:
+            records = self._discover(
+                cached_terminal=(not explicit_states or cached_terminal
+                                 or not bool(wanted & {"complete", "cancelled"})),
+                force_terminal=(explicit_states and not cached_terminal
+                                and bool(wanted & {"complete", "cancelled"})),
+                fast_active_only=fast_active_only)
+            if context is not None:
+                context["records"] = records
+        output = []
+        for key, record in records.items():
+            followup = bool(
+                states is None and record is not None
+                and record.get("state") == "complete"
+                and (record.get("intent") or {}).get("kind") == "retire"
+                and record.get("result") in {"normal-exit", "target-already-gone"}
+                and (record.get("observation") or {}).get("terminal_followup") != "complete")
+            if (record is not None and (record.get("state") in wanted or followup)
                     and (wanted_kinds is None
                          or (record.get("intent") or {}).get("kind") in wanted_kinds)):
                 output.append(copy.deepcopy(record))
         return output
+
+    @staticmethod
+    def _terminal_time_ns(record):
+        value = record.get("terminal_at")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            value = record.get("updated_at")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return None
+        return int(value * 1_000_000_000)
+
+    def _registered_source_settled(self, record):
+        """Require the exact registered delivery source before pruning history."""
+        try:
+            from dispatch_completion_join import current_attempt_row
+            import dispatch_pending_delivery as pending
+
+            intent = record.get("intent") or {}
+            identity = intent.get("identity") or {}
+            jobs = Path(identity["jobs"])
+            attempt_id = identity["attempt_id"]
+            row = current_attempt_row(jobs, attempt_id)
+            if row is None or row.attempt_id != attempt_id:
+                return False
+            notice_id = intent.get("notice_delivery_id")
+            if not notice_id and row.status == "done" and row.metadata.get(
+                    "delivery_intent") != "1":
+                return record.get("delivery") in {"not-required", "acknowledged"}
+            delivery_id = notice_id or row.metadata.get("delivery_id")
+            storage = row.metadata.get("parent_sid")
+            if not isinstance(delivery_id, str) or not delivery_id or not storage:
+                return False
+            exact = pending.read(jobs.parent, storage, delivery_id)
+            if not exact or exact.get("state") not in {"acked", "rejected", "expired"}:
+                return False
+            if notice_id:
+                if exact.get("receipt_digest") != intent.get("notice_digest"):
+                    return False
+            elif (exact.get("receipt_digest") != row.metadata.get("delivery_receipt_digest")
+                    or (exact.get("row_revisions") or {}).get(attempt_id)
+                        != row.metadata.get("delivery_row_revision")):
+                return False
+            pending.received_ack_identity(exact, storage, delivery_id)
+            return True
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            return False
+
+    def _terminal_source_settled(self, record, now_ns):
+        state = record.get("state")
+        if state not in {"complete", "cancelled"}:
+            return False
+        ended_ns = self._terminal_time_ns(record)
+        if ended_ns is None:
+            return False
+        kind = (record.get("intent") or {}).get("kind")
+        if kind == "readiness-observation":
+            if now_ns - ended_ns < _READINESS_RETENTION_NS:
+                return False
+            try:
+                import shared_readiness
+                return not shared_readiness.consumer_is_current(
+                    (record.get("intent") or {}).get("identity"))
+            except (OSError, ValueError, TypeError):
+                return False
+        if now_ns - ended_ns < _OBLIGATION_RETENTION_NS:
+            return False
+        if kind == "registered-batch":
+            return self._registered_source_settled(record)
+        if kind == "message" and state == "complete":
+            observation = record.get("observation") or {}
+            receipt = observation.get("receiver_receipt") or {}
+            # Keep the duty when its only evidence is a cancellation: a late
+            # exact receipt may still need to attach to this stable ref.
+            return (record.get("delivery") == "acknowledged"
+                    and isinstance(receipt.get("ref"), str)
+                    and receipt.get("ref") == ((record.get("intent") or {}).get("ref")
+                                                 or observation.get("transfer_ref")))
+        if kind == "retire":
+            return ((record.get("observation") or {}).get("terminal_followup")
+                    == "complete")
+        return False
+
+    def prune_terminal_obligations(self, *, now=None, time_budget=0.1):
+        """Prune a bounded cursor slice after verifying source-side settlement."""
+        root_fd = self._obligations_fd(create=False)
+        if root_fd is None:
+            return {"status": "state-root-unavailable", "examined": 0, "removed": 0}
+        try:
+            now_ns = int((time.time() if now is None else float(now)) * 1_000_000_000)
+            try:
+                cursor_fd = os.open("retention.cursor", os.O_RDONLY
+                                    | getattr(os, "O_NOFOLLOW", 0), dir_fd=root_fd)
+            except FileNotFoundError:
+                state = {"last_pass_ns": 0, "cursor": ""}
+            else:
+                with os.fdopen(cursor_fd, "rb") as handle:
+                    raw = handle.read(4097)
+                try:
+                    state = json.loads(raw.decode("utf-8"))
+                except (UnicodeError, ValueError):
+                    state = {"last_pass_ns": 0, "cursor": ""}
+                if (not isinstance(state, dict)
+                        or not isinstance(state.get("last_pass_ns"), int)
+                        or not isinstance(state.get("cursor", ""), str)):
+                    state = {"last_pass_ns": 0, "cursor": ""}
+            if now_ns - state["last_pass_ns"] < _RETENTION_DUE_NS:
+                return {"status": "not-due", "examined": 0, "removed": 0,
+                        "cursor": state.get("cursor", "")}
+
+            with os.scandir(root_fd) as entries:
+                names = sorted(entry.name for entry in entries
+                               if entry.name.endswith(".json"))
+            after = [name for name in names if name > state.get("cursor", "")]
+            if not after:
+                after = names
+            examined_names = after[:_RETENTION_EXAMINE_LIMIT]
+            removed = 0
+            examined = 0
+            deadline = time.monotonic() + max(0.0, float(time_budget))
+            for name in examined_names:
+                if removed >= _RETENTION_REMOVE_LIMIT or time.monotonic() >= deadline:
+                    break
+                if not name.endswith(".json"):
+                    continue
+                duty_id = name[:-5]
+                try:
+                    duty_id = _safe_id(duty_id)
+                    before = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                except (OSError, ObligationError):
+                    examined += 1
+                    continue
+                examined += 1
+                if not stat.S_ISREG(before.st_mode):
+                    continue
+                lock_fd = None
+                try:
+                    lock_fd = self._lock(duty_id, create=False)
+                    current = self.get(duty_id)
+                    if not current or not self._terminal_source_settled(current, now_ns):
+                        continue
+                    after = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                    if ((after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+                            or not stat.S_ISREG(after.st_mode)):
+                        continue
+                    live_fd = self._obligations_fd(create=False)
+                    if live_fd is None:
+                        break
+                    try:
+                        live = os.fstat(live_fd)
+                        original = os.fstat(root_fd)
+                        if (live.st_dev, live.st_ino) != (original.st_dev, original.st_ino):
+                            break
+                        os.unlink(name, dir_fd=live_fd)
+                        os.fsync(live_fd)
+                        removed += 1
+                    finally:
+                        os.close(live_fd)
+                    self._list_cache.pop(str(self.root / name), None)
+                    if self._directory_snapshot is not None:
+                        self._directory_snapshot.pop(name, None)
+                except (OSError, ObligationError):
+                    continue
+                finally:
+                    if lock_fd is not None:
+                        os.close(lock_fd)
+
+            cursor = examined_names[min(examined, len(examined_names)) - 1] if examined else state.get("cursor", "")
+            payload = json.dumps({"last_pass_ns": now_ns, "cursor": cursor},
+                                 sort_keys=True, separators=(",", ":")).encode() + b"\n"
+            temporary = ".retention-%s.tmp" % secrets.token_hex(8)
+            temp_fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                              | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=root_fd)
+            try:
+                with os.fdopen(temp_fd, "wb") as handle:
+                    handle.write(payload)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, "retention.cursor",
+                           src_dir_fd=root_fd, dst_dir_fd=root_fd)
+                os.fsync(root_fd)
+            finally:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary, dir_fd=root_fd)
+            active_fd = self._active_directory_fd(root_fd, create=False)
+            if active_fd is not None:
+                try:
+                    _ids, pending = self._active_names(active_fd)
+                    if not pending and not self._active_exists(active_fd, ".rebuild"):
+                        self._write_active_generation(root_fd, active_fd)
+                finally:
+                    os.close(active_fd)
+            try:
+                info = os.fstat(root_fd)
+                self._directory_stamp = (info.st_dev, info.st_ino,
+                                         info.st_mtime_ns, info.st_ctime_ns)
+            except OSError:
+                self._directory_stamp = None
+            return {"status": "complete", "examined": examined,
+                    "removed": removed, "cursor": cursor}
+        finally:
+            os.close(root_fd)
 
     def _invalidate_list_record(self, duty_id: str) -> None:
         path = self._record_path(duty_id)
@@ -1091,15 +1871,14 @@ class ObligationStore:
         context = self._active_list_context
         if context is None:
             return
-        context["records"].pop(key, None)
-        if context["paths"] is not None and path.exists() and key not in {
-                str(candidate) for candidate in context["paths"]}:
-            context["paths"] = sorted([*context["paths"], path])
+        context["records"] = None
 
     def create(self, duty_id: str, kind: str, identity: dict, intent: dict) -> dict:
         duty_id = _safe_id(duty_id)
         if kind not in _DUTY_KINDS or not isinstance(identity, dict) or not isinstance(intent, dict):
             raise ObligationError("peer-obligation-intent-invalid")
+        if not self._initialize_state_root_for_producer():
+            raise ObligationError("peer-state-root-unavailable")
         path = self._record_path(duty_id)
         fd = self._lock(duty_id)
         try:
@@ -1114,7 +1893,7 @@ class ObligationStore:
                       "accepted_at": time.time(), "updated_at": time.time(),
                       "observation": None, "result": None, "delivery": "pending",
                       "cleanup": "pending"}
-            _write_atomic(path, record)
+            self._write_record(path, record)
             return record
         finally:
             os.close(fd)
@@ -1200,7 +1979,7 @@ class ObligationStore:
                 record["observation"] = observation
                 record["revision"] = int(record.get("revision", 0)) + 1
                 record["updated_at"] = time.time()
-                _write_atomic(path, record)
+                self._write_record(path, record)
             return record
         finally:
             os.close(fd)
@@ -1243,7 +2022,7 @@ class ObligationStore:
             record["delivery"] = "pending"
             record["revision"] = int(record.get("revision", 0)) + 1
             record["updated_at"] = time.time()
-            _write_atomic(path, record)
+            self._write_record(path, record)
             return record, prepared
         finally:
             os.close(fd)
@@ -1312,7 +2091,7 @@ class ObligationStore:
                 return record
             record["revision"] = int(record.get("revision", 0)) + 1
             record["updated_at"] = time.time()
-            _write_atomic(path, record)
+            self._write_record(path, record)
             return record
         finally:
             os.close(fd)
@@ -1360,7 +2139,7 @@ class ObligationStore:
                 return record
             record["revision"] = int(record.get("revision", 0)) + 1
             record["updated_at"] = time.time()
-            _write_atomic(path, record)
+            self._write_record(path, record)
             return record
         finally:
             os.close(fd)
@@ -1470,7 +2249,7 @@ class ObligationStore:
                     record["cleanup"] = "complete"
                 record["revision"] = int(record.get("revision", 0)) + 1
                 record["updated_at"] = time.time()
-                _write_atomic(path, record)
+                self._write_record(path, record)
                 return True
             finally:
                 os.close(fd)
@@ -1554,7 +2333,7 @@ class ObligationStore:
                     record["state"] = "complete"
                 record["revision"] = int(record.get("revision", 0)) + 1
                 record["updated_at"] = time.time()
-                _write_atomic(path, record)
+                self._write_record(path, record)
                 return True
             finally:
                 os.close(fd)
@@ -1644,7 +2423,7 @@ class ObligationStore:
                 record["observation"] = updated_observation
                 record["revision"] = int(record.get("revision", 0)) + 1
                 record["updated_at"] = time.time()
-                _write_atomic(path, record)
+                self._write_record(path, record)
                 return record
             finally:
                 os.close(fd)
@@ -1674,7 +2453,7 @@ class ObligationStore:
             record["state"] = state
             record["revision"] = int(record.get("revision", 0)) + 1
             record["updated_at"] = time.time()
-            _write_atomic(path, record)
+            self._write_record(path, record)
             return record
         finally:
             os.close(fd)
@@ -1696,8 +2475,11 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path, *,
     Accepted work stays in the existing store; the same flock fences its next
     observer. A pidfd prevents a recycled PID from ever receiving the signal.
     """
-    has_batch = any(d.get("intent", {}).get("kind") == "registered-batch" for d in store.list())
-    if not has_batch and not reconciliation_required:
+    # Any newly accepted active duty may require code newer than the runner
+    # already holding this lease. Consult only active markers so this handoff
+    # never scans settled history on the producer callback.
+    active_duties = store.list(fast_active_only=True)
+    if not active_duties and not reconciliation_required:
         return False
     if not service_current:
         return False
@@ -1735,13 +2517,17 @@ def _handoff_legacy_runner(store: ObligationStore, lock_path: Path, *,
 
 def _ensure_runner(root, *, service_current=None, use_remembered=False,
                    remember_binding=False, reconciliation_required=False):
-    store = ObligationStore(root)
-    duties = store.list()
+    store = ObligationStore(root, allow_state_root_creation=False)
+    # Producer callbacks already know which duty they just accepted. Consult
+    # only active markers here so a cold migration over terminal history never
+    # delays the callback that starts the shared runner.
+    duties = store.list(fast_active_only=True)
     lock_path = store.root / RUNNER_LOCK_NAME
     if not duties and not remember_binding and not reconciliation_required:
         if not use_remembered or not lock_path.exists():
             return False
-    store.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if not store.ensure_directory():
+        return False
     if lock_path.is_symlink():
         raise ObligationError("peer-obligation-runner-lock-symlink")
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)

@@ -221,10 +221,10 @@ class BatchObligationTest(unittest.TestCase):
         first_registry_before = self.jobs.read_bytes()
         read_owner_rows = obligations._pending_owner_settlements
 
-        def fail_first_registry(path):
+        def fail_first_registry(path, *, context=None):
             if Path(path) == self.jobs:
                 raise PermissionError("fixture registry read denied")
-            return read_owner_rows(path)
+            return read_owner_rows(path, context=context)
 
         class Launched:
             pid = 902342
@@ -604,6 +604,288 @@ class BatchObligationTest(unittest.TestCase):
             self.assertEqual(settle.call_count, 2, "an unresolved unowned row stays retryable")
             self.assertEqual(registry_cache.metrics_snapshot()["content_reads"], 2,
                              "retryable settlement reuses unchanged registry content")
+
+    def test_settled_owner_cache_survives_unrelated_append_and_invalidates_dependencies(self):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        dependency = self.base / "terminal-evidence.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        registry_cache.clear_cache()
+        context = obligations.OwnerSettlementReadContext()
+        context._dependency_watcher_fallback = True
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_pending",
+                        side_effect=[False, True, True]) as pending, \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close"), \
+             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            self.assertEqual(obligations._resume_owner_settlements(
+                self.jobs, context=context), ())
+            with self.jobs.open("a", encoding="utf-8") as stream:
+                stream.write("2026-10-19T00:00:00Z\tdone\t/repo\t/wt\tchild\t"
+                             "attempt_id=att-unrelated\n")
+            self.assertEqual(obligations._resume_owner_settlements(
+                self.jobs, context=context), ())
+            pending.assert_called_once()
+
+            dependency.write_text("changed", encoding="utf-8")
+            resumed = obligations._resume_owner_settlements(self.jobs, context=context)
+        self.assertTrue(any(signature[2] == "att-owner" for signature in resumed))
+        self.assertEqual(pending.call_count, 3)
+
+    def test_dependency_sweep_progresses_during_appends_and_an_active_owner(self):
+        settled_count = obligations._SETTLED_DEPENDENCY_CHECKS_PER_PASS + 1
+        target = f"att-settled-{settled_count - 1:03d}"
+        rows = [self._runtime_owner_row(f"att-settled-{index:03d}")
+                for index in range(settled_count)]
+        rows.append(self._runtime_owner_row("att-active", status="open"))
+        self.jobs.write_text("\n".join(rows) + "\n", encoding="utf-8")
+        dependencies = {}
+        for index in range(settled_count):
+            path = self.base / f"terminal-evidence-{index:03d}.json"
+            path.write_text("sealed", encoding="utf-8")
+            dependencies[f"att-settled-{index:03d}"] = path
+        context = obligations.OwnerSettlementReadContext()
+        historical = []
+        target_checks = 0
+
+        def owner_pending(_jobs, _status, metadata):
+            nonlocal target_checks
+            attempt_id = metadata["attempt_id"]
+            historical.append(attempt_id)
+            if attempt_id == target:
+                target_checks += 1
+                return target_checks > 1
+            return False
+
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               side_effect=lambda _jobs, _status, metadata:
+                                   (dependencies[metadata["attempt_id"]],)), \
+             mock.patch("dispatch_terminal_commit.owner_completion_pending",
+                        side_effect=owner_pending), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             mock.patch("dispatch_contract.supervisor_lease_is_held",
+                        side_effect=lambda _jobs, metadata:
+                            metadata.get("attempt_id") == "att-active"):
+            obligations._resume_owner_settlements(self.jobs, context=context)
+            dependencies[target].write_text("changed", encoding="utf-8")
+
+            passes = (settled_count + obligations._SETTLED_DEPENDENCY_CHECKS_PER_PASS - 1) // \
+                     obligations._SETTLED_DEPENDENCY_CHECKS_PER_PASS
+            completed_passes = None
+            for index in range(passes):
+                with self.jobs.open("a", encoding="utf-8") as stream:
+                    stream.write(f"t\tdone\t/repo\t/wt\tchild\t"
+                                 f"attempt_id=att-unrelated-{index}\n")
+                obligations._resume_owner_settlements(self.jobs, context=context)
+                if target_checks > 1:
+                    completed_passes = index + 1
+                    break
+
+        self.assertEqual(passes, 2)
+        self.assertIsNotNone(completed_passes, "the invalidated owner reaches settlement")
+        self.assertLessEqual(completed_passes, passes)
+        self.assertEqual(historical.count(target), 3,
+                         "the changed owner is rechecked and sent to settlement")
+        self.assertEqual(context.metrics()["dependency_invalidations"], 1)
+        settle.assert_called_once_with(self.jobs, target)
+
+    def _watch_context(self):
+        context = obligations.OwnerSettlementReadContext()
+        if not context._ensure_dependency_watcher():
+            context.close()
+            self.skipTest("inotify is unavailable")
+        self.addCleanup(context.close)
+        return context
+
+    def _remember_dependency(self, context, attempt, dependency):
+        return context.remember_settled_owner(
+            self.jobs, "done", f"row-{attempt}", {"attempt_id": attempt}, (),
+            (dependency,))
+
+    def test_dependency_watch_churn_releases_directory_and_filesystem_entries(self):
+        context = self._watch_context()
+        watcher_fd = context._dependency_watch_fd
+
+        for index in range(32):
+            directory = self.base / f"watch-churn-{index}"
+            directory.mkdir()
+            dependency = directory / "terminal.json"
+            dependency.write_text("sealed", encoding="utf-8")
+            attempt = f"att-churn-{index}"
+            self.assertTrue(self._remember_dependency(context, attempt, dependency))
+            self.assertEqual(len(context._dependency_watch_dirs), 1)
+            self.assertTrue(context._dependency_watch_fs_support)
+
+            context.forget_owner(self.jobs, attempt)
+            self.assertFalse(context._dependency_watch_dirs)
+            self.assertFalse(context._dependency_watch_paths)
+            self.assertFalse(context._dependency_watch_keys)
+            self.assertFalse(context._dependency_watch_fs_support)
+            self.assertEqual(os.fstat(watcher_fd).st_mode != 0, True)
+
+        context.close()
+        self.assertEqual(context._dependency_watch_fd, -1)
+        with self.assertRaises(OSError):
+            os.fstat(watcher_fd)
+
+    def test_dependency_watch_shares_directory_and_alias_ownership_until_last_owner(self):
+        context = self._watch_context()
+        shared = self.base / "watch-shared"
+        shared.mkdir()
+        alias = self.base / "watch-shared-alias"
+        alias.symlink_to(shared, target_is_directory=True)
+        first_path = shared / "first.json"
+        second_path = alias / "second.json"
+        first_path.write_text("one", encoding="utf-8")
+        second_path.write_text("two", encoding="utf-8")
+
+        self.assertTrue(self._remember_dependency(context, "att-shared-first", first_path))
+        self.assertTrue(self._remember_dependency(context, "att-shared-same", first_path))
+        self.assertTrue(self._remember_dependency(context, "att-shared-alias", second_path))
+        first_key = (str(self.jobs.resolve()), "att-shared-first")
+        same_key = (str(self.jobs.resolve()), "att-shared-same")
+        alias_key = (str(self.jobs.resolve()), "att-shared-alias")
+        first_pairs = context._dependency_watch_keys[first_key]
+        alias_pairs = context._dependency_watch_keys[alias_key]
+        shared_wd = first_pairs[0][0]
+        self.assertEqual({pair[0] for pair in alias_pairs}, {shared_wd})
+        self.assertEqual(context._dependency_watch_paths[(shared_wd, "first.json")],
+                         {first_key, same_key})
+        self.assertEqual(set(context._dependency_watch_dirs.values()), {shared_wd})
+        self.assertEqual(set(context._dependency_watch_dirs), {str(shared), str(alias)})
+
+        watcher_fd = context._dependency_watch_fd
+        remove = context._dependency_watch_remove
+        with mock.patch.object(context, "_dependency_watch_remove", wraps=remove) as rm_watch:
+            context.forget_owner(self.jobs, "att-shared-first")
+            self.assertEqual(context._dependency_watch_paths[(shared_wd, "first.json")],
+                             {same_key})
+            context.forget_owner(self.jobs, "att-shared-same")
+            self.assertIn((shared_wd, "second.json"), context._dependency_watch_paths)
+            rm_watch.assert_not_called()
+
+            context.forget_owner(self.jobs, "att-shared-alias")
+            rm_watch.assert_called_once_with(watcher_fd, shared_wd)
+
+        self.assertFalse(context._dependency_watch_dirs)
+        self.assertFalse(context._dependency_watch_paths)
+        self.assertFalse(context._dependency_watch_fs_support)
+
+    def test_dependency_watcher_closes_on_retirement_and_stat_fallback(self):
+        closing = self._watch_context()
+        closing_fd = closing._dependency_watch_fd
+        closing.close()
+        self.assertEqual(closing._dependency_watch_fd, -1)
+        with self.assertRaises(OSError):
+            os.fstat(closing_fd)
+
+        fallback = self._watch_context()
+        fallback_fd = fallback._dependency_watch_fd
+        dependency = self.base / "fallback-evidence.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        key = (str(self.jobs.resolve()), "att-fallback")
+        with mock.patch.object(fallback, "_dependency_watch_supported", return_value=False):
+            fallback._register_dependency_watch(key, (dependency,))
+
+        self.assertTrue(fallback._dependency_watcher_fallback)
+        self.assertEqual(fallback._dependency_watch_fd, -1)
+        self.assertFalse(fallback._dependency_watch_dirs)
+        self.assertFalse(fallback._dependency_watch_fs_support)
+        with self.assertRaises(OSError):
+            os.fstat(fallback_fd)
+
+    def test_snapshot_install_race_invalidates_proof_and_reaches_settlement(self):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        registry_cache.clear_cache()
+        dependency = self.base / "race-evidence.json"
+        dependency.write_text("before", encoding="utf-8")
+        context = self._watch_context()
+        register = context._register_dependency_watch
+
+        def replace_between_snapshot_and_install(key, paths):
+            replacement = dependency.with_suffix(".replacement")
+            replacement.write_text("after-atomic-replace", encoding="utf-8")
+            os.replace(replacement, dependency)
+            register(key, paths)
+
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch.object(context, "_register_dependency_watch",
+                               side_effect=replace_between_snapshot_and_install), \
+             mock.patch("dispatch_terminal_commit.owner_completion_pending",
+                        side_effect=(False, True)) as pending, \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            signatures = obligations._resume_owner_settlements(self.jobs, context=context)
+
+        self.assertEqual(pending.call_count, 2)
+        settle.assert_called_once_with(self.jobs, "att-owner")
+        self.assertEqual(context.metrics()["dependency_invalidations"], 1)
+        self.assertNotIn((str(self.jobs.resolve()), "att-owner"), context._settled)
+        self.assertTrue(any(item[:3] == (str(self.jobs), "owner-settlement", "att-owner")
+                            for item in signatures))
+
+    def test_post_registration_snapshot_disappearance_reaches_settlement(self):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        registry_cache.clear_cache()
+        dependency = self.base / "disappearing-evidence.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        context = obligations.OwnerSettlementReadContext()
+        current_generations = context._current_generations
+        snapshots = 0
+
+        def disappear_after_initial_snapshot(paths, cache=None):
+            nonlocal snapshots
+            snapshots += 1
+            if snapshots == 1:
+                observed = current_generations(paths, cache)
+                dependency.unlink()
+                return observed
+            return current_generations(paths)
+
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch.object(context, "_current_generations",
+                               side_effect=disappear_after_initial_snapshot), \
+             mock.patch.object(context, "_register_dependency_watch") as register, \
+             mock.patch("dispatch_terminal_commit.owner_completion_pending",
+                        side_effect=(False, True)) as pending, \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            signatures = obligations._resume_owner_settlements(self.jobs, context=context)
+
+        self.assertEqual(snapshots, 2)
+        register.assert_called_once()
+        self.assertEqual(pending.call_count, 2)
+        settle.assert_called_once_with(self.jobs, "att-owner")
+        self.assertNotIn((str(self.jobs.resolve()), "att-owner"), context._settled)
+        self.assertTrue(any(item[:3] == (str(self.jobs), "owner-settlement", "att-owner")
+                            for item in signatures))
+
+    def test_initial_registration_snapshot_error_reaches_settlement(self):
+        self.jobs.write_text(self._runtime_owner_row() + "\n", encoding="utf-8")
+        registry_cache.clear_cache()
+        dependency = self.base / "unreadable-evidence.json"
+        dependency.write_text("sealed", encoding="utf-8")
+        context = obligations.OwnerSettlementReadContext()
+
+        with mock.patch.object(obligations, "_owner_settlement_dependency_paths",
+                               return_value=(dependency,)), \
+             mock.patch.object(context, "_current_generations",
+                               side_effect=PermissionError("injected stat failure")), \
+             mock.patch.object(context, "_register_dependency_watch") as register, \
+             mock.patch("dispatch_terminal_commit.owner_completion_pending",
+                        side_effect=(False, True)) as pending, \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close") as settle, \
+             mock.patch("dispatch_contract.supervisor_lease_is_held", return_value=False):
+            signatures = obligations._resume_owner_settlements(self.jobs, context=context)
+
+        register.assert_not_called()
+        self.assertEqual(pending.call_count, 2)
+        settle.assert_called_once_with(self.jobs, "att-owner")
+        self.assertNotIn((str(self.jobs.resolve()), "att-owner"), context._settled)
+        self.assertTrue(any(item[:3] == (str(self.jobs), "owner-settlement", "att-owner")
+                            for item in signatures))
 
     def test_owner_settlement_accepts_valid_literal_replacement_character(self):
         row = self._runtime_owner_row().replace(

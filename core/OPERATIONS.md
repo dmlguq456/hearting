@@ -2511,7 +2511,16 @@ recipient generation. The notice-summary digest remains a separate fact, and a
 generic `received` ledger row is insufficient. Registered-batch continuation
 and handover duties retain their own settlement rules. Owner identity readers
 reuse the generation-checked registry input; current-row and non-registry
-authority checks remain fresh and completion verdicts are not memoized.
+authority checks remain fresh. The shared obligation runner may reuse a
+historical settlement observation only while the exact owner row and every
+identified settlement dependency remain unchanged. This is a scheduling
+optimization: it does not satisfy delivery, inspection, claim, mutation, or
+completion authority. Missing, unreadable, unstable, or untracked dependencies
+require a fresh observation and remain unknown until that observation succeeds.
+Runner recovery stops when its state-root identity or runner-lock inode is
+replaced; it cannot recreate a removed root. Terminal obligation history is
+retained only for its bounded, source-verified retention window, while pending
+work and exact late receipts remain recoverable.
 
 Identity on the ledger (F-100c): every steward record carries `to.session_id` resolved
 through `herdr agent get` (Claude UUID, Codex thread id; herdr reports no id for

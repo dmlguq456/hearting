@@ -102,6 +102,141 @@ class ObligationStoreTest(unittest.TestCase):
         self.assertEqual(self.store.list(states={"complete"})[0]["state"], "complete")
         self.assertEqual(refreshed["state"], "unknown")
 
+    def test_terminal_files_are_not_restatted_after_unrelated_directory_changes(self):
+        first = self.store.create("terminal-cache-one", "readiness-observation", {}, {})
+        second = self.store.create("terminal-cache-two", "readiness-observation", {}, {})
+        self.store.update(first["id"], state="complete", result="consumer-exited")
+        self.store.update(second["id"], state="cancelled", result="consumer-exited")
+        terminal_at = self.store.get(first["id"])["terminal_at"]
+        self.assertEqual(self.store.list(), [])
+        self.store.reset_discovery_metrics()
+        self.assertEqual(self.store.list(), [])
+        metrics = self.store.discovery_metrics()
+        self.assertEqual(metrics["stat_calls"], 0)
+        self.assertEqual(metrics["active_full_scans"], 0)
+
+        self.store.create("unrelated-active", "message", {}, {})
+        self.assertEqual(len(self.store.list()), 1)
+        metrics = self.store.discovery_metrics()
+        self.assertEqual(metrics["active_index_entries"], 1)
+        self.assertEqual(metrics["stat_calls"], 2,
+                         "only the active row should be statted and read")
+        refreshed = self.store.update(first["id"], observation={"late": "metadata"})
+        self.assertEqual(refreshed["terminal_at"], terminal_at)
+
+    def test_recovery_does_not_recreate_a_removed_state_root(self):
+        state_root = self.root / "removed-state"
+        state_root.mkdir()
+        store = obligations.ObligationStore(state_root)
+        store.create("before-removal", "message", {}, {})
+        moved = state_root.with_name("removed-state-held")
+        state_root.rename(moved)
+
+        self.assertFalse(store.ensure_directory())
+        with self.assertRaises(obligations.ObligationError):
+            store.create("after-removal", "message", {}, {})
+        self.assertFalse(state_root.exists())
+
+    def test_terminal_retention_is_due_bounded_and_preserves_live_work(self):
+        now = time.time()
+        old_ids = []
+        for index in range(20):
+            duty_id = f"old-readiness-{index:02d}"
+            duty = self.store.create(duty_id, "readiness-observation",
+                {"consumer": {"pid": 2_000_000_000 + index,
+                              "pid_start": "1"}}, {})
+            terminal = self.store.update(duty["id"], state="complete",
+                                         result="consumer-exited")
+            record_path = self.store._record_path(duty["id"])
+            persisted = json.loads(record_path.read_text(encoding="utf-8"))
+            persisted["terminal_at"] = now - 2 * 86400
+            record_path.write_text(json.dumps(persisted), encoding="utf-8")
+            self.assertEqual(terminal["state"], "complete")
+            old_ids.append(duty_id)
+
+        pending = self.store.create("old-active", "message", {}, {})
+        unknown = self.store.create("old-unknown", "registered-batch", {}, {})
+        self.store.update(unknown["id"], state="unknown", observer_error="unavailable")
+        result = self.store.prune_terminal_obligations(now=now)
+        self.assertLessEqual(result["examined"], 64)
+        self.assertEqual(result["removed"], 16)
+        self.assertEqual(sum(self.store.get(duty_id) is None for duty_id in old_ids), 16)
+        self.assertEqual(self.store.prune_terminal_obligations(now=now)["status"], "not-due")
+
+        next_pass = self.store.prune_terminal_obligations(now=now + 300)
+        self.assertEqual(next_pass["removed"], 4)
+        self.assertIsNotNone(self.store.get(pending["id"]))
+        self.assertEqual(self.store.get(unknown["id"])["state"], "unknown")
+
+    def test_pruned_registered_delivery_source_does_not_reaccept_a_duty(self):
+        from types import SimpleNamespace
+        import dispatch_pending_delivery as pending
+        from harness_capabilities import parent_completion
+
+        jobs = self.root / "dispatch" / "jobs.log"
+        jobs.parent.mkdir()
+        jobs.touch()
+        attempt, storage, delivery_id = "att-pruned", "parent-storage", "delivery-pruned"
+        carrier = parent_completion("codex")["carrier"]
+        digest, revision = "d" * 64, "row-revision"
+        metadata = {
+            "attempt_id": attempt, "parent_completion_delivery": carrier,
+            "parent_sid": storage, "delivery_intent": "1", "delivery_id": delivery_id,
+            "delivery_receipt_digest": digest, "delivery_row_revision": revision,
+        }
+        row = SimpleNamespace(status="done", metadata=metadata, attempt_id=attempt)
+        terminal = {"delivery_id": delivery_id, "recipient_kind": carrier,
+                    "attempt_ids": [attempt], "state": "acked",
+                    "receipt_digest": digest, "row_revisions": {attempt: revision}}
+        with mock.patch("dispatch_completion_join.current_attempt_row", return_value=row), \
+             mock.patch("dispatch_seat_handover.effective_parent", return_value="sid-parent"), \
+             mock.patch("dispatch_pending_delivery.read", return_value=terminal), \
+             mock.patch("dispatch_pending_delivery.received_ack_identity", return_value={}), \
+             mock.patch.object(obligations, "ensure_normal_runner") as ensure, \
+             mock.patch.object(obligations.ObligationStore, "create", autospec=True) as create:
+            self.assertTrue(obligations.retain_registered_completion(
+                jobs, attempt, "sid-parent", carrier))
+        create.assert_not_called()
+        ensure.assert_not_called()
+
+        tomb = pending.tombstone_path(pending.record_path(jobs.parent, storage, delivery_id))
+        tomb.parent.mkdir(parents=True, exist_ok=True)
+        tomb.write_text(json.dumps({
+            "schema": pending.PRUNE_TOMBSTONE_SCHEMA,
+            "delivery_id": delivery_id,
+            "recipient_digest": "wrong-recipient",
+            "attempt_ids": [attempt],
+            "parent_attempt_id": "att-parent",
+            "terminal_state": "expired",
+        }), encoding="utf-8")
+        with mock.patch("dispatch_completion_join.current_attempt_row", return_value=row), \
+             mock.patch("dispatch_seat_handover.effective_parent", return_value="sid-parent"), \
+             mock.patch("dispatch_pending_delivery.read", return_value=None), \
+             mock.patch.object(obligations, "ensure_normal_runner") as ensure, \
+             mock.patch.object(obligations.ObligationStore, "create", autospec=True) as create:
+            self.assertTrue(obligations.retain_registered_completion(
+                jobs, attempt, "sid-parent", carrier))
+        create.assert_called_once()
+        ensure.assert_called_once()
+
+        tomb.write_text(json.dumps({
+            "schema": pending.PRUNE_TOMBSTONE_SCHEMA,
+            "delivery_id": delivery_id,
+            "recipient_digest": pending.recipient_digest(storage),
+            "attempt_ids": [attempt],
+            "parent_attempt_id": "att-parent",
+            "terminal_state": "expired",
+        }), encoding="utf-8")
+        with mock.patch("dispatch_completion_join.current_attempt_row", return_value=row), \
+             mock.patch("dispatch_seat_handover.effective_parent", return_value="sid-parent"), \
+             mock.patch("dispatch_pending_delivery.read", return_value=None), \
+             mock.patch.object(obligations, "ensure_normal_runner") as ensure, \
+             mock.patch.object(obligations.ObligationStore, "create", autospec=True) as create:
+            self.assertTrue(obligations.retain_registered_completion(
+                jobs, attempt, "sid-parent", carrier))
+        create.assert_not_called()
+        ensure.assert_not_called()
+
     def test_runner_pass_shares_discovery_but_next_pass_observes_external_rewrite(self):
         duty = self.store.create("pass-snapshot", "retire", {}, {"target": "pane"})
         self.store.begin_read_pass()
@@ -126,6 +261,16 @@ class ObligationStoreTest(unittest.TestCase):
         default_update = self.store.update(duty["id"], state="unknown", observation=observation)
         self.assertEqual(default_update["revision"], updated["revision"] + 1)
         self.assertGreaterEqual(default_update["updated_at"], updated["updated_at"])
+
+    def test_completed_retire_remains_active_only_while_its_followup_is_pending(self):
+        duty = self.store.create("retire-followup", "retire", {"pane": "w1:p1"},
+                                 {"target": "fixture"})
+        self.store.update(duty["id"], state="complete", result="target-already-gone",
+                          cleanup="complete", observation={"phase": "complete"})
+        self.assertEqual([row["id"] for row in self.store.list()], [duty["id"]])
+        self.store.update(duty["id"], observation={"phase": "complete",
+                          "terminal_followup": "complete"})
+        self.assertEqual(self.store.list(), [])
 
     def test_message_receipt_requires_matching_ref_recipient_and_body_digest(self):
         ref, digest = "a" * 32, "b" * 64
@@ -627,6 +772,7 @@ class ObligationStoreTest(unittest.TestCase):
         from types import SimpleNamespace
         carrier = "fixture-parent-runtime"
         jobs = self.root / "dispatch" / "jobs.log"
+        jobs.parent.mkdir()
         row = SimpleNamespace(status="running", metadata={
             "parent_completion_delivery": carrier})
         with mock.patch("dispatch_completion_join.current_attempt_row", return_value=row), \

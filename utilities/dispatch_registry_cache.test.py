@@ -74,6 +74,27 @@ class RegistryLinesCacheTest(unittest.TestCase):
         self.assertTrue(after.has_duplicate_attempts)
         self.assertEqual(len(first.records), 3)
 
+    def test_settlement_owner_delta_skips_historical_rows_and_resolves_related_changes(self):
+        def owner(attempt):
+            return ("now\tdone\t/repo\t/wt\towner\tattempt_schema_version=2,"
+                    f"attempt_id={attempt},worker_type=owner,launch_started=1,"
+                    "supervisor_lease=flock-v1,route_id=rt-delta,route_hash=sha256:delta\n")
+
+        self.jobs.write_text(owner("att-owner-1") + owner("att-owner-2"), encoding="utf-8")
+        first = CACHE.registry_view(self.jobs, append_only=True)
+        self.assertEqual([row.order for row in first.settlement_owner_candidates_since(-1)],
+                         [0, 1])
+        cursor = first.last_complete_order
+
+        with self.jobs.open("a", encoding="utf-8") as stream:
+            stream.write("now\tdone\t/repo\t/wt\tchild\tattempt_id=att-child,"
+                         "parent_attempt_id=att-owner-1,route_id=rt-delta\n")
+        appended = CACHE.registry_view(self.jobs, append_only=True)
+        self.assertTrue(appended.append_only_generation)
+        self.assertEqual([row.order for row in appended.records_since(cursor)], [2])
+        self.assertEqual(appended.settlement_owner_candidates_since(cursor), ())
+        self.assertEqual(appended.settlement_owner_candidate("att-owner-1").order, 0)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
