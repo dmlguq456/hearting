@@ -423,6 +423,8 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         runner_store = []
         lock_identities = []
         lock_events = []
+        expected_binding_locks = {}
+        binding_observer_errors = []
         authority_counts = {}
         retire_recovery_events = []
         record_retire_events = []
@@ -453,6 +455,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         original_decide_continuation = route_authority.decide_continuation
         import dispatch_seat_handover
         original_record_retire = dispatch_seat_handover.record_retire_handover
+        original_binding_mutexes = dispatch_seat_handover.binding_mutexes
         import session_tidy
         seat_lock_dir = session_tidy.state_root() / "locks"
         seat_lock_dir_text = os.fspath(seat_lock_dir)
@@ -603,6 +606,32 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                     "pass": counts["passes"], "window": window_phase[0],
                 })
             return original_record_retire(*args, **kwargs)
+
+        def checked_binding_mutexes(bindings, *, wait=None):
+            bindings = list(bindings)
+            if monitoring[0] and phase[0] == "runner":
+                try:
+                    # Derive exact logical identities from admitted operations.
+                    # Phases are observed dynamically, including post-change.
+                    phase_name = window_phase[0]
+                    expected = expected_binding_locks.setdefault(phase_name, set())
+                    for binding in bindings:
+                        if not isinstance(binding, dict):
+                            continue
+                        identity = (str(binding.get("jobs") or ""),
+                                    str(binding.get("route") or ""),
+                                    str(binding.get("hash") or ""),
+                                    str(binding.get("node") or ""))
+                        if not identity[0] or not identity[1]:
+                            continue
+                        encoded = json.dumps(identity, ensure_ascii=False,
+                                             separators=(",", ":")).encode("utf-8")
+                        expected.add(
+                            "lineage-binding-" + hashlib.sha256(encoded).hexdigest())
+                except Exception as exc:  # the observer must not alter production behavior
+                    binding_observer_errors.append(
+                        f"{type(exc).__name__}: {exc} (phase={window_phase[0]!r})")
+            return original_binding_mutexes(bindings, wait=wait)
 
         def checked_flock(fd, operation):
             result = original_flock(fd, operation)
@@ -851,6 +880,8 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                     mock.patch.object(route_authority, "decide_continuation", side_effect=checked_authority),
                     mock.patch.object(dispatch_seat_handover, "record_retire_handover",
                                       side_effect=checked_record_retire),
+                    mock.patch.object(dispatch_seat_handover, "binding_mutexes",
+                                      side_effect=checked_binding_mutexes),
                     mock.patch.object(fcntl, "flock", side_effect=checked_flock),
                     mock.patch.object(dispatch_registry_cache, "registry_lines",
                                       side_effect=checked_registry_lines),
@@ -1055,16 +1086,40 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         self.assertEqual(sum(bool(row.get("dispatch_notice")) for row in initial_rows), 1)
 
         successor_locks = [key for key in lock_identities if key.startswith("peer-successor-")]
-        seat_locks = [key for key in lock_identities if not key.startswith("peer-successor-")]
+        binding_locks = [key for key in lock_identities if key.startswith("lineage-binding-")]
+        seat_locks = [key for key in lock_identities
+                      if not key.startswith(("peer-successor-", "lineage-binding-"))]
+        self.assertEqual(binding_observer_errors, [],
+                         f"binding lock test observer raised: {binding_observer_errors}")
         self.assertEqual(len(set(successor_locks)), 2, lock_identities)
         self.assertEqual(len(set(seat_locks)), 2, lock_identities)
-        self.assertEqual(len(set(lock_identities)), 4, lock_identities)
+        observed_binding_locks = set(binding_locks)
+        expected_binding_lock_set = set().union(*expected_binding_locks.values())
+        self.assertEqual(observed_binding_locks, expected_binding_lock_set,
+                         f"logical binding locks must exactly match admitted operations: "
+                         f"observed={observed_binding_locks}; expected={expected_binding_lock_set}")
+        self.assertEqual(len(set(lock_identities)),
+                         4 + len(expected_binding_lock_set), lock_identities)
+        for measured_window in expected_binding_locks:
+            seen = {row["key"] for row in lock_events if row["window"] == measured_window}
+            seen_bindings = {key for key in seen if key.startswith("lineage-binding-")}
+            self.assertEqual(seen_bindings, expected_binding_locks[measured_window],
+                             f"{measured_window} logical lock identities must match "
+                             f"admitted bindings: seen={seen_bindings}; "
+                             f"expected={expected_binding_locks[measured_window]}")
         if recurring_negative:
-            expected_lock_identities = set(lock_identities)
+            expected_physical_locks = set(seat_locks) | set(successor_locks)
+            self.assertEqual(len(expected_physical_locks), 4, lock_identities)
             for measured_window in ("cold", "steady"):
-                seen = {row["key"] for row in lock_events if row["window"] == measured_window}
-                self.assertEqual(seen, expected_lock_identities,
-                                 f"all four real lock identities must be entered in {measured_window}")
+                seen = {row["key"] for row in lock_events
+                        if row["window"] == measured_window}
+                seen_physical = {key for key in seen
+                                 if not key.startswith("lineage-binding-")}
+                self.assertEqual(
+                    seen_physical, expected_physical_locks,
+                    f"all four physical seat/successor lock identities must be entered "
+                    f"in {measured_window}: seen={seen_physical}; "
+                    f"expected={expected_physical_locks}")
             self.assertGreaterEqual(
                 sum(row["window"] == "steady" for row in record_retire_events), 4,
                 "steady negative discovery must enter the real retire handover path repeatedly")
@@ -1105,6 +1160,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
             "one_core=100% child_cpu=excluded(no child spawned) "
             f"registry_bytes={self.jobs.stat().st_size} obligations=902 readable_transfers=188 "
             f"successor_locks={len(set(successor_locks))} seat_locks={len(set(seat_locks))} "
+            f"binding_locks={len(observed_binding_locks)} "
             f"completed_retire_handover={successful_handover_count} "
             f"cold_window={cold['elapsed']:.2f}s cold_cpu={cold_cpu:.3f}% "
             f"steady_window={steady['elapsed']:.2f}s steady_cpu={steady_cpu:.3f}% "

@@ -951,6 +951,87 @@ def _effective(meta: dict, jobs=None, *, read_context=None, extra_seats=()) -> t
         return registered, str(meta.get("parent_harness") or "")
 
 
+def _lineage_identity_key(binding: dict) -> tuple[str, str, str, str]:
+    return (str(binding.get("jobs") or ""), str(binding.get("route") or ""),
+            str(binding.get("hash") or ""), str(binding.get("node") or ""))
+
+
+@contextlib.contextmanager
+def binding_mutexes(bindings: Iterable[dict], *, wait: Optional[float] = None):
+    """Lock exact logical bindings using the existing seat-lock backend.
+
+    The key exists before a snapshot does; it is synchronization only. Writers
+    enter while holding their seat transaction, so effect readers must not take
+    a seat lock here (seat -> binding is the sole nested order).
+    """
+    keys = set()
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            continue
+        identity = _lineage_identity_key(binding)
+        if not identity[0] or not identity[1]:
+            continue
+        digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False,
+                                           separators=(",", ":")).encode("utf-8")).hexdigest()
+        keys.add("lineage-binding-" + digest)
+    with contextlib.ExitStack() as stack:
+        for key in sorted(keys):
+            stack.enter_context(_st().seat_lock(key, wait=wait))
+        yield
+
+
+@contextlib.contextmanager
+def lineage_effect_lock(meta: dict, jobs, expected_parent: str, *, wait: float = 0.05):
+    """Serialize an effect with every writer of this binding, including its first one."""
+    registered = str(meta.get("parent_sid") or "")
+    readable = True
+    stack = contextlib.ExitStack()
+    try:
+        route, digest, node = route_identity(meta)
+        binding = {"jobs": _jobs_key(jobs), "route": route, "hash": digest, "node": node}
+        stack.enter_context(binding_mutexes([binding], wait=wait))
+        # Validate every readable snapshot and ledger under the same mutex
+        # used by publication, clear, and retire writers. A missing snapshot
+        # is a valid no-handover state, not a synchronization gap.
+        try:
+            paths = sorted(_snapshot_dir().glob("*.json")) if _snapshot_dir().exists() else []
+            if any(path.is_symlink() or (path.is_file() and read_snapshot(path.stem) is None)
+                   for path in paths):
+                readable = False
+            snapshots = _all_snapshots_uncached() if readable else []
+            seats = {}
+            for snapshot in snapshots:
+                data = snapshot.get("seat")
+                if isinstance(data, dict) and data.get("key"):
+                    key = str(data["key"])
+                    seats.setdefault(key, _seat_of(key, snapshot))
+            for seat in seats.values():
+                ledger = _st()._ledger_path(seat)
+                if not ledger.exists():
+                    continue
+                raw = _st().read_bytes(ledger)
+                if raw is None:
+                    readable = False
+                    break
+                for line in raw.splitlines():
+                    if line.strip() and not isinstance(json.loads(line), dict):
+                        readable = False
+                        break
+                if not readable:
+                    break
+        except (OSError, ValueError, TypeError):
+            readable = False
+        current = _effective(meta, jobs)[0] if readable else ""
+    except (OSError, ValueError, TypeError, RuntimeError, BlockingIOError):
+        stack.close()
+        yield False
+        return
+    try:
+        yield readable and current == expected_parent
+    finally:
+        stack.close()
+
+
 def effective_parent(meta: dict, jobs=None, *, read_context=None) -> str:
     """The session that answers for ``meta``'s attempt now: the registered ``parent_sid``, or
     the end of its A -> B (-> C) handover lineage.  Any failure answers the registered parent."""
@@ -1290,20 +1371,25 @@ def publish_snapshot_locked(seat, harness: str, sid: str, bindings: list[dict], 
         raise RuntimeError("snapshot-card-changed")
     if steward_payload:
         steward_payload = _revalidate_snapshot_steward(seat, harness, sid, steward_payload)
-    if not bindings and not steward_payload:
-        with contextlib.suppress(OSError):
-            os.unlink(_snapshot_path(seat.key))
-        return 0
-    path = _snapshot_path(seat.key)
-    st._reject_symlink(path)
-    snapshot = {
-        "schema": SCHEMA, "seat": seat.as_dict(), "from": {"harness": harness, "sid": sid},
-        "at": now, "prompt_seq": st.read_prompt_seq(seat), "card_generation": generation,
-        "bindings": bindings, "snapshot_id": os.urandom(16).hex()}
-    if steward_payload:
-        snapshot["steward"] = steward_payload
-    st.atomic_write_json(_snapshot_path(seat.key), snapshot)
-    return len(bindings)
+    old_snapshot = read_snapshot(seat.key)
+    affected = [*(old_snapshot.get("bindings") or [] if old_snapshot else []), *bindings]
+    with binding_mutexes(affected):
+        if read_snapshot(seat.key) != old_snapshot:
+            raise RuntimeError("snapshot-binding-changed")
+        if not bindings and not steward_payload:
+            with contextlib.suppress(OSError):
+                os.unlink(_snapshot_path(seat.key))
+            return 0
+        path = _snapshot_path(seat.key)
+        st._reject_symlink(path)
+        snapshot = {
+            "schema": SCHEMA, "seat": seat.as_dict(), "from": {"harness": harness, "sid": sid},
+            "at": now, "prompt_seq": st.read_prompt_seq(seat), "card_generation": generation,
+            "bindings": bindings, "snapshot_id": os.urandom(16).hex()}
+        if steward_payload:
+            snapshot["steward"] = steward_payload
+        st.atomic_write_json(_snapshot_path(seat.key), snapshot)
+        return len(bindings)
 
 
 def record_locked(seat, harness: str, sid: str, event: str, source: str, now: float) -> Optional[dict]:
@@ -1419,15 +1505,18 @@ def record_locked(seat, harness: str, sid: str, event: str, source: str, now: fl
            "bindings": bindings, "epoch": int((summary or {}).get("epoch", 0) or 0)}
     if steward_payload:
         row["steward"] = steward_payload
-    _append_transition_row(seat, row)
-    refreshed_snapshot = dict(snap)
-    refreshed_snapshot["bindings"] = bindings
-    if steward_payload:
-        refreshed_snapshot["steward"] = steward_payload
-    try:
-        st.atomic_write_json(_snapshot_path(seat.key), refreshed_snapshot)
-    except Exception:  # noqa: BLE001 - the durable ledger row remains the handover authority
-        pass
+    with binding_mutexes(snapshot_bindings):
+        if read_snapshot(seat.key) != snap:
+            return None
+        _append_transition_row(seat, row)
+        refreshed_snapshot = dict(snap)
+        refreshed_snapshot["bindings"] = bindings
+        if steward_payload:
+            refreshed_snapshot["steward"] = steward_payload
+        try:
+            st.atomic_write_json(_snapshot_path(seat.key), refreshed_snapshot)
+        except Exception:  # noqa: BLE001 - the durable ledger row remains the handover authority
+            pass
     return row
 
 
@@ -1474,40 +1563,51 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
             except OSError:
                 view = None
                 rows = {}
-        predecessor_rows = [
-            (binding, status) for binding, status in _handover_candidates(
-                predecessor_harness, predecessor_sid, jobs, rows=rows)
-            if binding["attempt"] in rows and effective_parent(
-                rows[binding["attempt"]][1], jobs) == predecessor_sid
-        ]
-        if not predecessor_rows:
+        possible_rows = _handover_candidates(
+            predecessor_harness, predecessor_sid, jobs, rows=rows)
+        if not possible_rows:
             return None
         # The seat's snapshot names the session now at it (the successor), so its own later
         # /clear hands everything on; what its own snapshot already bound is kept.
-        own = read_snapshot(seat.key)
-        kept = own["bindings"] if own and (own["from"].get("sid") == successor_sid) else []
-        union = _select_binding_rows([*_bindings_with_current_status(kept), *predecessor_rows])
-        selected_keys = {_logical_key(binding) for binding in union}
-        bindings = _deduplicate_bindings(
-            binding for binding, _status in predecessor_rows if _logical_key(binding) in selected_keys
-        )
-        if not bindings:
-            return None
-        st.atomic_write_json(_snapshot_path(seat.key), {
-            "schema": SCHEMA, "seat": seat.as_dict(),
-            "from": {"harness": successor_harness, "sid": successor_sid}, "at": now,
-            "bindings": union})
-        row = {"ts": now, "harness": successor_harness, "sid": successor_sid, "event": ROW_EVENT,
-               "from": predecessor_sid, "source": "retire", "bindings": bindings}
-        path = st._ledger_path(seat)
-        st.ensure_dir(path.parent)
-        st._reject_symlink(path)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-        try:
-            os.write(fd, (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
-        finally:
-            os.close(fd)
-        return row
+        own_before = read_snapshot(seat.key)
+        affected = [*(own_before.get("bindings") or [] if own_before else []),
+                    *(binding for binding, _status in possible_rows)]
+        with binding_mutexes(affected):
+            if read_snapshot(seat.key) != own_before:
+                return None
+            # Revalidate predecessor ownership while holding every affected
+            # logical binding mutex, then commit snapshot and ledger together.
+            predecessor_rows = [
+                (binding, status) for binding, status in possible_rows
+                if binding["attempt"] in rows and effective_parent(
+                    rows[binding["attempt"]][1], jobs) == predecessor_sid
+            ]
+            if not predecessor_rows:
+                return None
+            kept = own_before["bindings"] if own_before and (
+                own_before["from"].get("sid") == successor_sid) else []
+            union = _select_binding_rows([*_bindings_with_current_status(kept), *predecessor_rows])
+            selected_keys = {_logical_key(binding) for binding in union}
+            bindings = _deduplicate_bindings(
+                binding for binding, _status in predecessor_rows if _logical_key(binding) in selected_keys
+            )
+            if not bindings:
+                return None
+            row = {"ts": now, "harness": successor_harness, "sid": successor_sid, "event": ROW_EVENT,
+                   "from": predecessor_sid, "source": "retire", "bindings": bindings}
+            st.atomic_write_json(_snapshot_path(seat.key), {
+                "schema": SCHEMA, "seat": seat.as_dict(),
+                "from": {"harness": successor_harness, "sid": successor_sid}, "at": now,
+                "bindings": union})
+            path = st._ledger_path(seat)
+            st.ensure_dir(path.parent)
+            st._reject_symlink(path)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            try:
+                os.write(fd, (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
+            finally:
+                os.close(fd)
+            return row
 
 
 def _confirmed_clear(seat, harness: str, old: str, sid: str, event: str, source: str) -> bool:

@@ -970,6 +970,9 @@ decisions. Repeating a notification cannot declare the owner abandoned.
 
 A steward's idle-notify subscription is observation, not a continuation; the
 registered-continuation obligation below still applies (`core/OPERATIONS.md §5.14`).
+The Claude gate carrier may claim, emit, or settle a gate only while it still
+holds the arm and effective seat; a handed-away carrier leaves the gate record
+for its successor.
 
 This section is capability-independent. `autopilot-lab`, `autopilot-code`,
 `autopilot-ship`, spec/research, CI and GitHub check cycles, external-state

@@ -1693,6 +1693,11 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
                         continue
             if wait_state != "gate":
                 break
+            if not _holds_arm(claim) or _handed_away(launch):
+                # A successor now owns this wait. Leave its gate untouched for
+                # that session's next prompt or tool.
+                observation["reason"] = "arm-not-held-or-handed-away"
+                return 0
             # SD-129: the owner is alive at its gate. Wake the person now with
             # this process's one wake and record which gate record it spent
             # it on: once that record closes (the release retires it, or the
@@ -1704,17 +1709,32 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
             announced: list[str] = []
             supervision_claims: list[tuple[Path, str, str, str]] = []
             announced_records: list[dict] = []
-            notices = _gate_notices(
-                launch, attempt_only=True, settle="sent-ambiguous", announced=announced,
-                supervision_claims=supervision_claims,
-                announced_records=announced_records,
-            )
+            metadata = _row_metadata(launch.jobs, launch.attempt_id)
+            if not metadata:
+                time.sleep(interval)
+                continue
+            with seat_handover.lineage_effect_lock(
+                    metadata, launch.jobs, launch.session_id) as current_owner:
+                fresh_metadata = _row_metadata(launch.jobs, launch.attempt_id)
+                if (not current_owner or not _holds_arm(claim) or not fresh_metadata
+                        or fresh_metadata.get("parent_sid") != metadata.get("parent_sid")
+                        or seat_handover.effective_parent(fresh_metadata, launch.jobs)
+                           != launch.session_id):
+                    current_owner = False
+                    notices = []
+                else:
+                    notices = _gate_notices(
+                        launch, attempt_only=True, settle="sent-ambiguous", announced=announced,
+                        supervision_claims=supervision_claims,
+                        announced_records=announced_records,
+                    )
+                    if notices:
+                        observation.update(wait_state="gate", reason="human-gate-open")
+                        code = emit_receipt("attention", gate_wake_message(
+                            launch, notices, human_gate=any(is_human_gate_record(record)
+                                                          for record in announced_records)), block=False)
+                        settle_arm(claim, "gate-wake-sent", gate_delivery_id=announced[0])
             if notices:
-                observation.update(wait_state="gate", reason="human-gate-open")
-                code = emit_receipt("attention", gate_wake_message(
-                    launch, notices, human_gate=any(is_human_gate_record(record)
-                                                  for record in announced_records)), block=False)
-                settle_arm(claim, "gate-wake-sent", gate_delivery_id=announced[0])
                 # The native wake immediately runs UserPromptSubmit. Keeping
                 # this exited carrier's 30s lease prevents that synchronous
                 # sweep from consuming the warning, so every Bash call in a
