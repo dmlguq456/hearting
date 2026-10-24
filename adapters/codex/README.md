@@ -243,6 +243,13 @@ profiles include `Codex role-map inputs` so the concrete role can be selected
 by mode and QA policy instead of flattening the profile to one model role. Do
 not expose `adapters/claude/agents/` as Codex-native agents.
 
+Activation (`harness runtime activate|refresh`) renders these agents with the
+shared `utilities/native_agents.py` from the `models.conf` the Codex home selects
+(`sync-native-agents.py --runtime-home <home> --json` plans, it writes nothing):
+a render equal to the shipped TOML stays a symlink, a differing one is written
+as an activation-owned regular file, and an agent whose model is main-session-only
+in that config gets no file. Keep your own agents under other names.
+
 parity caveat: Codex custom agents are real native subagents, but they are not
 Claude Code Agent markdown/frontmatter. Runtime discovery, UI surfacing, child
 approval behavior, config inheritance, and noninteractive/headless behavior

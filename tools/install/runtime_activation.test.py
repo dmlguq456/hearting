@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import os
 import json
+import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -1955,6 +1957,301 @@ class HerdrIntegrationAdoptionTest(unittest.TestCase):
                 with self.subTest(name):
                     with self.assertRaisesRegex(activation.ActivationError, "destination collision"):
                         activation._safe_existing_dest(dest, "copy", set(), [], src)
+
+
+class NativeAgentRenderTest(unittest.TestCase):
+    """Activation renders native agents from the runtime home's selected models.conf."""
+
+    DEEP_KEYS = {
+        "claude": ("CFG_TIER_DEEP_MODEL", "CFG_TIER_BALANCED_DEEP_MODEL"),
+        "codex": ("CFG_TIER_DEEP_MODEL",),
+        "opencode": ("CFG_TIER_BALANCED_DEEP_MODEL",),
+    }
+    EXT = {"claude": ".md", "codex": ".toml", "opencode": ".md"}
+    CATALOG = ("general-purpose", "light", "deep", "balanced")
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        patched = fixture_env.patched_environment(self.root / "fixture", REPO_ROOT)
+        patched.__enter__()
+        self.addCleanup(patched.__exit__, None, None, None)
+
+    # -- helpers -------------------------------------------------------------
+    def home(self, runtime):
+        return activation.paths.runtime_home(runtime)
+
+    def agent(self, runtime, name):
+        return self.home(runtime) / "agents" / f"{name}{self.EXT[runtime]}"
+
+    def shipped_conf(self, runtime):
+        return (REPO_ROOT / "adapters" / runtime / "config" / "models.conf").read_text(encoding="utf-8")
+
+    def write_conf(self, runtime, edits=None, text=None):
+        text = self.shipped_conf(runtime) if text is None else text
+        for key, value in (edits or {}).items():
+            line = f'{key}="{value}"' if " " in value else f"{key}={value}"
+            pattern = re.compile(rf"^{key}=.*$", re.M)
+            text = pattern.sub(lambda _m: line, text, count=1) if pattern.search(text) else text + f"\n{line}\n"
+        target = self.home(runtime) / "agent-config" / "models.conf"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+
+    def write_legacy_conf(self, runtime):
+        text = self.shipped_conf(runtime)
+        text = re.sub(r"^CFG_MODEL_PROFILE_(?:BALANCED|GRANULARITY_BALANCED)=.*\n", "", text, flags=re.M)
+        text = re.sub(r"\s*balanced:balanced(?=\s|\")", "", text)
+        self.write_conf(runtime, text=text)
+
+    def model_of(self, path):
+        match = re.search(r'^model\s*[=:]\s*"?([^"\n]+?)"?\s*$', path.read_text(encoding="utf-8"), re.M)
+        return match.group(1) if match else None
+
+    def shipped_snapshot(self):
+        return {
+            str(path): path.read_bytes()
+            for runtime in ("claude", "codex", "opencode")
+            for path in sorted((REPO_ROOT / "adapters" / runtime / "agents").rglob("*")) if path.is_file()
+        }
+
+    def user_models(self, runtime, deep="fixture-user-deep", light="fixture-user-light"):
+        edits = {key: deep for key in self.DEEP_KEYS[runtime]}
+        edits["CFG_TIER_LIGHT_MODEL"] = light
+        return edits
+
+    def shipped_models(self, runtime, tiers=None):
+        sys.path.insert(0, str(REPO_ROOT / "utilities"))
+        import model_profile
+        cfg = model_profile.load_config(REPO_ROOT / "adapters" / runtime / "config" / "models.conf")
+        keys = tiers or self.DEEP_KEYS[runtime] + ("CFG_TIER_LIGHT_MODEL",)
+        return sorted({cfg[key] for key in keys})
+
+    def installed_agents(self, runtime):
+        directory = self.home(runtime) / "agents"
+        return sorted(item.name for item in directory.iterdir()) if directory.is_dir() else []
+
+    def lines(self, report):
+        return "\n".join(report.get("report_lines", []))
+
+    # -- T1 / T6: the verify condition ---------------------------------------
+    def test_all_three_adapters_follow_the_user_models_and_never_touch_shipped_files(self):
+        before = self.shipped_snapshot()
+        for runtime in ("claude", "codex", "opencode"):
+            with self.subTest(runtime):
+                self.write_conf(runtime, self.user_models(runtime))
+                report = activation.activate(runtime, "linked", str(REPO_ROOT))
+                self.assertEqual(report["model_config_source"], "user")
+                self.assertEqual(report["freshness"], "fresh", report)
+                models = {}
+                for name in self.CATALOG:
+                    path = self.agent(runtime, name)
+                    self.assertTrue(path.is_file() and not path.is_symlink(), path)
+                    models[name] = self.model_of(path)
+                self.assertEqual(models["deep"], "fixture-user-deep")
+                self.assertEqual(models["light"], "fixture-user-light")
+                self.assertEqual(models["balanced"], "fixture-user-light")
+                if runtime == "codex":
+                    scout = self.agent(runtime, "memory-scout")
+                    self.assertFalse(scout.is_symlink())
+                    self.assertEqual(self.model_of(scout), "fixture-user-light")
+                if runtime == "claude":
+                    # The hand-written definition is not generated and stays a shipped link.
+                    self.assertTrue(self.agent(runtime, "memory-scout").is_symlink())
+        self.assertEqual(self.shipped_snapshot(), before)
+
+    # -- T2: a copy equal to the shipped file projects the shipped files ------
+    def test_a_user_copy_equal_to_shipped_keeps_shipped_links_and_the_old_digest(self):
+        for runtime in ("claude", "codex", "opencode"):
+            with self.subTest(runtime):
+                report = activation.activate(runtime, "linked", str(REPO_ROOT))
+                self.assertEqual(report["model_config_source"], "user")
+                desired = activation._desired_entries(runtime, "linked", REPO_ROOT, REPO_ROOT, "x", "global")
+                self.assertFalse([e for e in desired if e["kind"] == "render"])
+                agents = [e for e in desired if Path(e["dest"]).parent == self.home(runtime) / "agents"]
+                self.assertEqual(len(agents), 5)
+                for entry in agents:
+                    dest = Path(entry["dest"])
+                    self.assertTrue(dest.is_symlink(), dest)
+                    self.assertEqual(dest.resolve(), Path(entry["source"]).resolve())
+                self.assertEqual(report["projection_digest"],
+                                 activation._digest_paths(Path(e["source"]) for e in desired))
+
+    def test_legacy_user_copy_keeps_balanced_on_activate_and_refresh(self):
+        for runtime in ("claude", "codex", "opencode"):
+            with self.subTest(runtime):
+                self.write_legacy_conf(runtime)
+                activation.activate(runtime, "linked", str(REPO_ROOT))
+                report = activation.refresh(runtime)
+                balanced = self.agent(runtime, "balanced")
+                self.assertTrue(balanced.is_file(), balanced)
+                shipped = next((path for path in (REPO_ROOT / "adapters" / runtime / "agents").rglob(balanced.name)
+                                if path.is_file()), None)
+                if shipped is not None and balanced.read_bytes() == shipped.read_bytes():
+                    self.assertTrue(balanced.is_symlink(), balanced)
+                    self.assertEqual(balanced.resolve(), shipped.resolve())
+                else:
+                    self.assertFalse(balanced.is_symlink(), balanced)
+                self.assertFalse(any("balanced not-in-selected-catalog" in line
+                                     for line in report.get("report_lines", [])))
+
+    def test_refresh_failure_after_render_restores_the_prior_shipped_activation(self):
+        runtime = "opencode"
+        source = REPO_ROOT / "adapters" / runtime / "agents" / "deep" / f"deep{self.EXT[runtime]}"
+        source_bytes = source.read_bytes()
+        activation.activate(runtime, "linked", str(REPO_ROOT))
+        destination = self.agent(runtime, "deep")
+        self.assertTrue(destination.is_symlink())
+        shipped_target = os.readlink(destination)
+        state_path = activation._state_path(runtime)
+        prior_state = state_path.read_bytes()
+
+        self.write_conf(runtime, self.user_models(runtime))
+        desired = activation._desired_entries(
+            runtime, "linked", REPO_ROOT, REPO_ROOT, activation.source_revision(REPO_ROOT), "global"
+        )
+        first_render_index = next(
+            index for index, item in enumerate(desired, start=1) if item["kind"] == "render"
+        )
+        with mock.patch.dict(os.environ, {"HARNESS_RUNTIME_FAIL_AFTER": str(first_render_index)}):
+            with self.assertRaisesRegex(activation.ActivationError, "injected failure"):
+                activation.refresh(runtime)
+
+        self.assertTrue(destination.is_symlink())
+        self.assertEqual(os.readlink(destination), shipped_target)
+        self.assertEqual(source.read_bytes(), source_bytes)
+        self.assertEqual(state_path.read_bytes(), prior_state)
+        self.write_conf(runtime)
+        self.assertEqual(activation.status(runtime)["freshness"], "fresh")
+        for item in desired:
+            if item["kind"] == "render":
+                destination = Path(item["dest"])
+                self.assertTrue(destination.is_symlink(), destination)
+                self.assertEqual(destination.resolve(), Path(item["source"]).resolve())
+
+    # -- T3: known defect 1 --------------------------------------------------
+    def test_every_model_main_session_only_projects_no_agents_and_never_falls_back_to_shipped(self):
+        for runtime in ("codex", "claude"):
+            with self.subTest(runtime):
+                activation.activate(runtime, "linked", str(REPO_ROOT))
+                before = self.installed_agents(runtime)
+                self.assertIn(f"deep{self.EXT[runtime]}", before)
+                self.write_conf(runtime, {"CFG_MAIN_SESSION_ONLY_MODELS": " ".join(self.shipped_models(runtime))})
+                report = activation.refresh(runtime)
+                expected = ["memory-scout.md"] if runtime == "claude" else []
+                self.assertEqual(self.installed_agents(runtime), expected)
+                text = self.lines(report)
+                for name in self.CATALOG:
+                    self.assertIn(f"native agent {name} withheld", text)
+                if runtime == "codex":
+                    self.assertIn("native agent memory-scout withheld", text)
+                self.assertEqual(report["freshness"], "fresh", report)
+
+    # -- T3b: catalog entries removed from the selected config ---------------
+    def test_catalog_entries_missing_from_the_selected_config_leave_no_definition(self):
+        activation.activate("codex", "linked", str(REPO_ROOT))
+        self.assertTrue(self.agent("codex", "general-purpose").is_symlink())
+        self.write_conf("codex", {"CFG_NATIVE_AGENT_CATALOG": "deep:deep light:light"})
+        report = activation.refresh("codex")
+        self.assertEqual(self.installed_agents("codex"), ["deep.toml", "light.toml", "memory-scout.toml"])
+        text = self.lines(report)
+        for name in ("general-purpose", "balanced"):
+            self.assertIn(f"native agent {name} not-in-selected-catalog", text)
+        # memory-scout is a kernel helper: rendered whatever the catalog lists.
+        self.assertTrue(self.agent("codex", "memory-scout").exists())
+        self.assertEqual(report["freshness"], "fresh", report)
+
+    # -- T4: known defect 2 --------------------------------------------------
+    def reinstall_withholding_deep(self, how):
+        """Activate with deep rendered or shipped, then withhold the deep model on refresh."""
+        if how == "rendered":
+            edits, withheld = self.user_models("codex"), "fixture-user-deep"
+        else:
+            edits, withheld = {}, self.shipped_models("codex", ("CFG_TIER_DEEP_MODEL",))[0]
+        self.write_conf("codex", edits)
+        activation.activate("codex", "linked", str(REPO_ROOT))
+        self.assertEqual(self.agent("codex", "deep").is_symlink(), how == "shipped-link")
+        mine = self.agent("codex", "mine")
+        mine.write_text('name = "mine"\n', encoding="utf-8")
+        outside = self.root / "outside"
+        outside.mkdir()
+        theirs = self.agent("codex", "theirs")
+        theirs.symlink_to(outside)
+        self.write_conf("codex", {**edits, "CFG_MAIN_SESSION_ONLY_MODELS": withheld})
+        report = activation.refresh("codex")
+        for name in ("deep", "general-purpose"):  # both use the deep tier
+            path = self.agent("codex", name)
+            self.assertFalse(path.exists() or path.is_symlink(), path)
+        self.assertIn("native agent deep withheld", self.lines(report))
+        for name in ("light", "balanced", "memory-scout"):
+            self.assertTrue(self.agent("codex", name).exists(), name)
+        self.assertEqual(mine.read_text(encoding="utf-8"), 'name = "mine"\n')
+        self.assertTrue(theirs.is_symlink() and Path(os.readlink(theirs)) == outside)
+        activation.deactivate("codex")
+        self.assertEqual(self.installed_agents("codex"), ["mine.toml", "theirs.toml"])
+
+    def test_reinstall_that_newly_withholds_a_rendered_agent_removes_it(self):
+        self.reinstall_withholding_deep("rendered")
+
+    def test_reinstall_that_newly_withholds_a_shipped_link_removes_it(self):
+        self.reinstall_withholding_deep("shipped-link")
+
+    def edited_render_scenario(self):
+        self.write_conf("codex", self.user_models("codex"))
+        activation.activate("codex", "linked", str(REPO_ROOT))
+        deep = self.agent("codex", "deep")
+        deep.write_text(deep.read_text(encoding="utf-8") + "# my edit\n", encoding="utf-8")
+        return deep, deep.read_bytes()
+
+    def test_a_user_edited_rendered_file_is_kept_and_reported_when_its_model_is_withheld(self):
+        deep, edited = self.edited_render_scenario()
+        self.write_conf("codex", {**self.user_models("codex"), "CFG_MAIN_SESSION_ONLY_MODELS": "fixture-user-deep"})
+        report = activation.refresh("codex")
+        self.assertEqual(deep.read_bytes(), edited)
+        self.assertIn("deep.toml was edited after it was rendered", self.lines(report))
+        self.assertFalse(self.agent("codex", "general-purpose").exists())  # unedited: collected
+
+    def test_a_user_edited_rendered_file_is_never_overwritten_by_a_shipped_link(self):
+        deep, edited = self.edited_render_scenario()
+        self.write_conf("codex")  # the user config is back to the shipped one: desired is a link
+        with self.assertRaisesRegex(activation.ActivationError, "destination collision"):
+            activation.refresh("codex")
+        self.assertEqual(deep.read_bytes(), edited)
+        self.assertFalse(deep.is_symlink())
+
+    # -- T5 ------------------------------------------------------------------
+    def test_deactivate_removes_rendered_files_and_keeps_user_files(self):
+        for runtime in ("claude", "codex", "opencode"):
+            with self.subTest(runtime):
+                self.write_conf(runtime, self.user_models(runtime))
+                activation.activate(runtime, "linked", str(REPO_ROOT))
+                mine = self.home(runtime) / "agents" / "mine.txt"
+                mine.write_text("mine", encoding="utf-8")
+                activation.deactivate(runtime)
+                self.assertEqual(self.installed_agents(runtime), ["mine.txt"])
+
+    # -- T7 ------------------------------------------------------------------
+    def test_a_changed_models_conf_reads_stale_until_refresh(self):
+        self.write_conf("codex", self.user_models("codex"))
+        activation.activate("codex", "linked", str(REPO_ROOT))
+        self.assertEqual(activation.status("codex")["freshness"], "fresh")
+        self.write_conf("codex", self.user_models("codex", deep="fixture-user-deep-2"))
+        stale = activation.status("codex")
+        self.assertEqual(stale["freshness"], "cache-stale")
+        self.assertIn("harness runtime refresh", stale["next_action"])
+        activation.refresh("codex")
+        self.assertEqual(activation.status("codex")["freshness"], "fresh")
+        self.assertEqual(self.model_of(self.agent("codex", "deep")), "fixture-user-deep-2")
+
+    def test_a_source_without_the_renderer_keeps_the_shipped_links(self):
+        source = self.root / "old-source"
+        # An older release: adapters only, no utilities/native_agents.py.
+        shutil.copytree(REPO_ROOT / "adapters", source / "adapters", symlinks=True)
+        entries, lines = activation._native_agent_entries("codex", source, self.home("codex"))
+        self.assertEqual(lines, [])
+        self.assertEqual(sorted(Path(e["dest"]).name for e in entries),
+                         sorted(p.name for p in (source / "adapters/codex/agents").glob("*.toml")))
+        self.assertTrue(all(e["kind"] == "symlink" for e in entries))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

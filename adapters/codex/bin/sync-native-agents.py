@@ -4,47 +4,29 @@
 Team agents are retired: former team behavior lives in the portable unit catalog
 (`roles/units/**`) and runs as dispatched depth-2 nodes, never as native agents.
 Only kernel helpers (`kernel.agents` in `harness-manifest.json`) project here.
+
+This file holds the Codex spec text and body format; the shared renderer in
+`utilities/native_agents.py` plans, generates and checks them.
 """
 
 from __future__ import annotations
 
-import argparse
 import sys
 from pathlib import Path
+from typing import Mapping, Optional
 
 
 ROOT = Path(__file__).resolve().parents[3]
-OUT = ROOT / "adapters" / "codex" / "agents"
 sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "utilities"))
 
 import harness_manifest
+import native_agents
+from model_profile import load_config, resolve_profile_values
 
 
 MODELS_CONF = ROOT / "adapters" / "codex" / "config" / "models.conf"
-
-
-def load_models_conf() -> dict[str, str]:
-    """Parse the flat KEY=value config that is the sole source of concrete models."""
-    cfg: dict[str, str] = {}
-    for raw in MODELS_CONF.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, val = line.split("=", 1)
-        key = key.strip()
-        val = val.strip()
-        if val[:1] in ('"', "'"):
-            end = val.find(val[0], 1)
-            val = val[1:end] if end != -1 else val[1:]
-        else:
-            hidx = val.find("#")
-            if hidx != -1:
-                val = val[:hidx].strip()
-        cfg[key] = val
-    return cfg
-
-
-_CFG = load_models_conf()
+_CFG = load_config(MODELS_CONF)
 
 
 KERNEL_AGENTS = {
@@ -129,24 +111,6 @@ Prefer one airtight answer over broad partial coverage.
 }
 
 
-def parse_native_catalog() -> list[tuple[str, str]]:
-    raw = _CFG.get("CFG_NATIVE_AGENT_CATALOG", "")
-    entries = []
-    for token in raw.split():
-        if token.count(":") != 1:
-            print(f"malformed CFG_NATIVE_AGENT_CATALOG entry: {token!r}", file=sys.stderr)
-            raise SystemExit(1)
-        name, profile = token.split(":", 1)
-        if profile == "top":
-            # A native subagent can never run the main-session-only model
-            # (the admission hook refuses it at every spawn), so a catalog
-            # entry pinning it would only generate a definition that always
-            # fails (top review m4).
-            raise SystemExit(f"CFG_NATIVE_AGENT_CATALOG entry {token!r}: top is not a native agent profile")
-        entries.append((name, profile))
-    return entries
-
-
 def toml_string(text: str) -> str:
     return text.replace("\\", "\\\\").replace('"', '\\"')
 
@@ -155,14 +119,16 @@ def toml_multiline(text: str) -> str:
     return text.replace('"""', '\\"\\"\\"')
 
 
-def codex_config(profile: str) -> tuple[str, str, str]:
+def codex_config(profile: str, cfg: Optional[Mapping[str, str]] = None) -> tuple[str, str, str]:
+    """Model, effort and sandbox of a kernel helper; `cfg` defaults to the shipped config."""
+    cfg = _CFG if cfg is None else cfg
     key = "CFG_PROFILE_" + profile.upper().replace("-", "_")
-    tier, effort, sandbox = (_CFG.get(key) or _CFG["CFG_PROFILE_DEFAULT"]).split(":")
-    return _CFG[f"CFG_TIER_{tier.upper()}_MODEL"], effort, sandbox
+    tier, effort, sandbox = (cfg.get(key) or cfg["CFG_PROFILE_DEFAULT"]).split(":")
+    return cfg[f"CFG_TIER_{tier.upper()}_MODEL"], effort, sandbox
 
 
-def render_kernel_agent(name: str, spec: dict[str, str]) -> str:
-    model, reasoning, sandbox = codex_config(name)
+def render_kernel_agent(name: str, spec: dict[str, str], cfg: Optional[Mapping[str, str]] = None) -> tuple[str, str]:
+    model, reasoning, sandbox = codex_config(name, cfg)
     return f'''name = "{toml_string(name)}"
 description = "{toml_string(spec["description"])}"
 model = "{toml_string(model)}"
@@ -170,17 +136,14 @@ model_reasoning_effort = "{toml_string(reasoning)}"
 sandbox_mode = "{toml_string(sandbox)}"
 developer_instructions = """
 {toml_multiline(spec["instructions"])}"""
-'''
+''', model
 
 
-def render_catalog_agent(name: str, profile: str) -> str:
+def render_catalog_agent(name: str, profile: str, cfg: Mapping[str, str]) -> tuple[str, str]:
     spec = CATALOG_AGENTS.get(name)
     if spec is None:
-        print(f"catalog names an agent with no Codex spec: {name}", file=sys.stderr)
-        raise SystemExit(1)
-    sys.path.insert(0, str(ROOT / "utilities"))
-    from model_profile import resolve_profile
-    resolved = resolve_profile("codex", MODELS_CONF, profile)
+        raise native_agents.RenderError(f"catalog names an agent with no Codex spec: {name}")
+    resolved = resolve_profile_values("codex", cfg, profile)
     return f'''name = "{toml_string(name)}"
 description = "{toml_string(spec["description"])}"
 model = "{toml_string(resolved["model"])}"
@@ -188,52 +151,28 @@ model_reasoning_effort = "{toml_string(resolved["budget"])}"
 sandbox_mode = "{toml_string(CATALOG_SANDBOX)}"
 developer_instructions = """
 {toml_multiline(spec["instructions"])}"""
-'''
+''', resolved["model"]
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--check", action="store_true", help="verify generated projections")
-    args = parser.parse_args()
-
-    manifest = harness_manifest.load()
-    expected: dict[Path, str] = {}
-    for name in manifest["kernel"]["agents"]:
+def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[str, Optional[str]]:
+    if profile is None:
         spec = KERNEL_AGENTS.get(name)
         if spec is None:
-            print(f"unknown kernel agent (no Codex projection defined): {name}", file=sys.stderr)
-            return 1
-        expected[OUT / f"{name}.toml"] = render_kernel_agent(name, spec)
-    for name, profile in parse_native_catalog():
-        expected[OUT / f"{name}.toml"] = render_catalog_agent(name, profile)
+            raise native_agents.RenderError(f"unknown kernel agent (no Codex projection defined): {name}")
+        return render_kernel_agent(name, spec, cfg)
+    return render_catalog_agent(name, profile, cfg)
 
-    stale: list[str] = []
-    for path, body in expected.items():
-        if args.check:
-            if not path.exists() or path.read_text(encoding="utf-8") != body:
-                stale.append(str(path.relative_to(ROOT)))
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body, encoding="utf-8")
 
-    existing = sorted(OUT.glob("*.toml")) if OUT.exists() else []
-    extras = [path for path in existing if path not in expected]
-    if args.check:
-        stale.extend(str(path.relative_to(ROOT)) for path in extras)
-    else:
-        for path in extras:
-            path.unlink()
-
-    if stale:
-        print("Codex native agent projections are stale:", file=sys.stderr)
-        for item in stale:
-            print(f"  {item}", file=sys.stderr)
-        return 1
-
-    if not args.check:
-        print(f"generated {len(expected)} Codex native agent projections")
-    return 0
+FORMAT = native_agents.Format(
+    adapter="codex",
+    kernel_names=tuple(harness_manifest.load()["kernel"]["agents"]),
+    static_names=(),
+    shipped_relpath=lambda name: f"{name}.toml",
+    dest_name=lambda name: f"{name}.toml",
+    render=render,
+    collect_glob="*.toml",
+)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(native_agents.main(FORMAT, sys.argv[1:]))

@@ -4,24 +4,26 @@
 Team agents are retired: former team behavior lives in the portable unit catalog
 (`roles/units/**`) and runs as dispatched depth-2 nodes, never as native agents.
 Only kernel helpers (`kernel.agents` in `harness-manifest.json`) project here.
+
+This file holds the OpenCode spec text and body format; the shared renderer in
+`utilities/native_agents.py` plans, generates and checks them.
 """
 
 from __future__ import annotations
 
-import argparse
 import re
 import sys
 from pathlib import Path
+from typing import Mapping, Optional
 
 
 ROOT = Path(__file__).resolve().parents[3]
-OUT = ROOT / "adapters" / "opencode" / "agents"
-MODELS_CONF = ROOT / "adapters" / "opencode" / "config" / "models.conf"
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "utilities"))
 
 import harness_manifest
-from model_profile import load_config, resolve_profile
+import native_agents
+from model_profile import resolve_profile_values
 
 
 KERNEL_AGENTS = {
@@ -105,30 +107,11 @@ Prefer one airtight answer over broad partial coverage.
 }
 
 
-def parse_native_catalog() -> list[tuple[str, str]]:
-    raw = load_config(MODELS_CONF).get("CFG_NATIVE_AGENT_CATALOG", "")
-    entries = []
-    for token in raw.split():
-        if token.count(":") != 1:
-            print(f"malformed CFG_NATIVE_AGENT_CATALOG entry: {token!r}", file=sys.stderr)
-            raise SystemExit(1)
-        name, profile = token.split(":", 1)
-        if profile == "top":
-            # A native subagent can never run the main-session-only model
-            # (the admission hook refuses it at every spawn), so a catalog
-            # entry pinning it would only generate a definition that always
-            # fails (top review m4).
-            raise SystemExit(f"CFG_NATIVE_AGENT_CATALOG entry {token!r}: top is not a native agent profile")
-        entries.append((name, profile))
-    return entries
-
-
-def render_catalog_agent(name: str, profile: str) -> str:
+def render_catalog_agent(name: str, profile: str, cfg: Mapping[str, str]) -> tuple[str, str]:
     spec = CATALOG_AGENTS.get(name)
     if spec is None:
-        print(f"catalog names an agent with no OpenCode spec: {name}", file=sys.stderr)
-        raise SystemExit(1)
-    resolved = resolve_profile("opencode", MODELS_CONF, profile)
+        raise native_agents.RenderError(f"catalog names an agent with no OpenCode spec: {name}")
+    resolved = resolve_profile_values("opencode", cfg, profile)
     description = compact(spec["description"])
     return f"""---
 description: "{description}"
@@ -136,7 +119,7 @@ mode: subagent
 model: {resolved["model"]}
 ---
 
-{spec["instructions"]}"""
+{spec["instructions"]}""", resolved["model"]
 
 
 def compact(text: str) -> str:
@@ -159,53 +142,26 @@ permission:
 {spec["instructions"]}"""
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--check", action="store_true", help="verify generated projections")
-    args = parser.parse_args()
-
-    manifest = harness_manifest.load()
-    expected: dict[Path, str] = {}
-    for name in manifest["kernel"]["agents"]:
+def render(name: str, profile: Optional[str], cfg: Mapping[str, str]) -> tuple[str, Optional[str]]:
+    if profile is None:
         spec = KERNEL_AGENTS.get(name)
         if spec is None:
-            print(f"unknown kernel agent (no OpenCode projection defined): {name}", file=sys.stderr)
-            return 1
-        expected[OUT / name / f"{name}.md"] = render_kernel_agent(name, spec)
-    for name, profile in parse_native_catalog():
-        expected[OUT / name / f"{name}.md"] = render_catalog_agent(name, profile)
+            raise native_agents.RenderError(f"unknown kernel agent (no OpenCode projection defined): {name}")
+        # A kernel helper is read-only and pins no model, so it can never be withheld.
+        return render_kernel_agent(name, spec), None
+    return render_catalog_agent(name, profile, cfg)
 
-    stale: list[str] = []
-    for path, body in expected.items():
-        if args.check:
-            if not path.exists() or path.read_text(encoding="utf-8") != body:
-                stale.append(str(path.relative_to(ROOT)))
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(body, encoding="utf-8")
 
-    existing = sorted(OUT.glob("*/*.md")) if OUT.exists() else []
-    extras = [path for path in existing if path not in expected]
-    if args.check:
-        stale.extend(str(path.relative_to(ROOT)) for path in extras)
-    else:
-        for path in extras:
-            path.unlink()
-            try:
-                path.parent.rmdir()
-            except OSError:
-                pass
-
-    if stale:
-        print("OpenCode native agent projections are stale:", file=sys.stderr)
-        for item in stale:
-            print(f"  {item}", file=sys.stderr)
-        return 1
-
-    if not args.check:
-        print(f"generated {len(expected)} OpenCode native agent projections")
-    return 0
+FORMAT = native_agents.Format(
+    adapter="opencode",
+    kernel_names=tuple(harness_manifest.load()["kernel"]["agents"]),
+    static_names=(),
+    shipped_relpath=lambda name: f"{name}/{name}.md",
+    dest_name=lambda name: f"{name}.md",
+    render=render,
+    collect_glob="*/*.md",
+)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(native_agents.main(FORMAT, sys.argv[1:]))

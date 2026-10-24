@@ -70,7 +70,7 @@ results remain a supervisor verification item.
 | Commands (`.opencode/command/<name>.md` or `.opencode/commands/<name>.md`) | yes | `adapters/opencode/commands/<name>.md` generated from `capabilities/` |
 | Skills (`.opencode/skill/<name>/SKILL.md` or `.opencode/skills/<name>/SKILL.md`) | yes | `adapters/opencode/skills/<name>/SKILL.md` generated from `capabilities/` |
 | External skill autoload (`~/.claude/skills/<name>/SKILL.md`, `~/.agents/skills/<name>/SKILL.md`) | yes (compat) | not relied on; adapter must generate its own skills, not depend on Claude skill autoload |
-| Agents (`.opencode/agent/<name>.md` or `.opencode/agents/<name>.md`) | yes | `adapters/opencode/agents/<name>/<name>.md` generated from `roles/README.md` role profiles, plus an explicit `EXTRA_AGENTS` out-of-catalog path in `adapters/opencode/bin/sync-native-agents.py` (e.g. `memory-scout`, sourced from `core/MEMORY.md` §7.4 rather than a role-catalog row), with `mode: subagent` |
+| Agents (`.opencode/agent/<name>.md` or `.opencode/agents/<name>.md`) | yes | `adapters/opencode/agents/<name>/<name>.md` generated from `roles/README.md` role profiles, plus an explicit `EXTRA_AGENTS` out-of-catalog path in `adapters/opencode/bin/sync-native-agents.py` (e.g. `memory-scout`, sourced from `core/MEMORY.md` §7.4 rather than a role-catalog row), with `mode: subagent`; activation renders them with the shared `utilities/native_agents.py` from the `models.conf` the runtime home selects |
 | Server plugin hooks | yes | V1 returned hook map at `plugins/hearting-guards.js`; V2 Promise setup at `plugins/hearting-guards/index.ts` ports tool, shell, session, and event hooks |
 | Permission model | versioned | V1 uses `permission` tool maps; V2 uses ordered `permissions` and policy rules. `dispatch-headless.py` translates the existing scoped grant into V2 actions |
 | Permission contract wrapper | yes | `adapters/opencode/bin/preflight.sh permissions` reports native permission surfaces and rejects Claude `allowedTools` as a portable contract |
@@ -86,6 +86,12 @@ materializes native Skills from `capabilities/*.md` and native Agents from
 `roles/README.md`, plus native Commands from `capabilities/*.md`. Current
 support still runs through explicit preflight wrappers for guard and
 tool-contract reporting.
+
+Activation renders the native agents with the shared `utilities/native_agents.py` from
+the `models.conf` the OpenCode home selects: a render equal to the shipped file stays a
+symlink, a differing one is written as an activation-owned regular file, and an agent
+whose model is main-session-only in that config gets no file. Keep your own agents
+under other names.
 
 Before adding or changing OpenCode-native skills, commands, or agents:
 

@@ -168,7 +168,9 @@ for a frame brief or person-named stage list; follow the shared
 
 The five portable profiles are deep, balanced-deep, balanced, light and mini.
 Concrete defaults and generated native agents come from this adapter's
-`config/models.conf`; runtime loading selects the user's whole file first.
+`config/models.conf`; runtime loading selects the user's whole file first, and
+activation renders the native agents from that selected file
+(`utilities/native_agents.py`).
 A missing balanced row is derived only from that user's light row in memory;
 explicit settings win, and other missing required keys retain whole-file fallback,
 except tier keys (`CFG_TIER_<tier>_MODEL/EFFORT`) of a tier that the user copy never

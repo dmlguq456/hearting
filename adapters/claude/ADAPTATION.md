@@ -412,6 +412,14 @@ output. The injected value derives from `adapters/claude/config/models.conf`
 (`CFG_NATIVE_SUBAGENT` names a tier; the tier resolves through
 `CFG_TIER_<TIER>_MODEL`), so no concrete model ID lives in the hook.
 
+The generated definitions pin model and effort, and the hook leaves a pin alone,
+so activation renders them with the shared `utilities/native_agents.py` from the
+`models.conf` the Claude home selects: a render equal to the shipped file stays a
+symlink, a differing one is written as an activation-owned regular file, and a
+definition whose model is main-session-only in that config is not projected. The
+hook still decides unpinned spawns and denies main-only models. Keep your own
+agents under other names.
+
 An explicit eligible per-invocation model or eligible agent-definition pin is
 preserved. A config-declared interactive-main-only model, explicit `inherit`,
 fork inheritance, or a missing eligibility policy returns a typed PreToolUse

@@ -215,6 +215,13 @@ Expose them to OpenCode by symlinking each generated `*.md` file into
 using `opencode_setting/opencode-agents` as the projection source. Do not expose
 `adapters/claude/agents/` as OpenCode-native agents.
 
+Activation (`harness runtime activate|refresh`) renders these agents with the
+shared `utilities/native_agents.py` from the `models.conf` the OpenCode home selects
+(`sync-native-agents.py --runtime-home <home> --json` plans, it writes nothing):
+a render equal to the shipped file stays a symlink, a differing one is written
+as an activation-owned regular file, and an agent whose model is main-session-only
+in that config gets no file. Keep your own agents under other names.
+
 ## Native Command Projection
 
 `adapters/opencode/commands/` contains OpenCode-native command projections

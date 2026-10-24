@@ -220,6 +220,7 @@ utility-deferred	model-config.sh
 utility-deferred	model-worker-governor.py
 utility-deferred	model_config.py
 utility-deferred	model_profile.py
+utility-deferred	native_agents.py
 utility-deferred	model_worker_governor.test.py
 utility-deferred	nested-dispatch-eligibility.py
 utility-deferred	nested_dispatch_eligibility.test.py

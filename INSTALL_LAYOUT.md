@@ -109,6 +109,12 @@ user-owned Hearting preference surface, not a managed projection:
 - runtime model/profile consumers use the complete user file only when it is
   safe and contains every shipped key, otherwise they use the complete shipped
   default and report the fallback reason;
+- activation renders the native agent definitions from the file a runtime home
+  selects: a definition equal to the shipped one stays a link to it, a differing
+  one is an activation-owned regular file, and one whose model that file lists as
+  main-session-only is not projected; only entries activation owns are removed.
+  The legacy installer, plugin and project scope keep the shipped definitions, and
+  a changed `models.conf` shows as `cache-stale` until `harness runtime refresh`;
 - native runtime configuration such as Codex `config.toml`, Claude
   `settings.json`, and OpenCode `opencode.json(c)` remains independently owned
   by that runtime.
@@ -382,7 +388,7 @@ harness install codex
 | Surface | Wiring | Contract |
 |---|---|---|
 | `AGENTS.md`/core/capabilities/roles/bin/tools/utilities/scaffolds | symlink using `agent-*` pointer names | Routes through generated projections under `codex_setting/` |
-| Codex-native skills/agents/modes | symlink fan-out (`skills/*`, `agents/*.toml`) | Generated from `capabilities/` and `roles/` into `codex_setting/codex-{skills,agents,modes}`; do not reimplement |
+| Codex-native skills/agents/modes | symlink fan-out (`skills/*`, `agents/*.toml`; an agent is an activation-owned regular file when the selected `models.conf` differs) | Generated from `capabilities/` and `roles/` into `codex_setting/codex-{skills,agents,modes}`; do not reimplement |
 | packaged activation | repo-local immutable bundle → same native surfaces | Does not use plugin marketplace, config, or cache state |
 | hooks | `codex_setting/codex-hooks` → `hooks.json` | Adapter-owned hook bridge; executes only `type:"command"` entries |
 | Herdr SessionStart reporter | managed regular copy at `$CODEX_HOME/herdr-agent-state.sh` (fallback `~/.codex/herdr-agent-state.sh`) | Matches Herdr's native consumer path; `hooks.json` registers one SessionStart call and the manifest tracks this same asset |
@@ -438,7 +444,7 @@ harness install opencode
 | Surface | Wiring | Contract |
 |---|---|---|
 | `AGENTS.md`/core/capabilities/roles/bin/tools/utilities | symlink using `agent-*` pointer names | Routes through generated projections under `opencode_setting/` |
-| OpenCode-native skills/agents/commands | symlink fan-out (`skills/*`, `agents/*.md`, `commands/*.md`) | Uses the current official plural discovery paths |
+| OpenCode-native skills/agents/commands | symlink fan-out (`skills/*`, `agents/*.md`, `commands/*.md`; an agent is an activation-owned regular file when the selected `models.conf` differs) | Uses the current official plural discovery paths |
 | guard plugin | `opencode_setting/opencode-plugins/hearting-guards.js` | JS/TS plugin hook surface; OpenCode has no marketplace or bundle format, so installer symlinks are the only channel |
 | Herdr backend/TUI assets | regular copies at `plugins/herdr-agent-state.js`, `herdr-tui-session.js`, and `herdr-opencode/tui.js` | Herdr reinstall can replace its own files in the runtime home; Hearting update restores current pinned bytes |
 | `opencode.json`/`opencode.jsonc` `skills.paths` | non-destructive merge | Preserves user config; reports conflicts and stops instead of guessing an automatic merge |
