@@ -513,7 +513,7 @@ class RelatedOwnerDiscoveryTests(unittest.TestCase):
         self.assertEqual((proof.status, proof.reason), ("proved", None))
         # A row that did claim its launch but has lost its process identity still blocks.
         claimed = self.row("done", "att-unlaunched", **{**stage, "launch_claimed": "1"})
-        self.jobs.write_text(latest + "\n" + claimed + "\n", encoding="utf-8")
+        T.dispatch_contract._atomic_registry_replace(self.jobs, [latest.rstrip("\n"), claimed.rstrip("\n")])
         proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
         self.assertEqual((proof.status, proof.reason), ("rejected", "child-not-quiescent"))
         # Any process identity keeps the ordinary quiescence check, whatever the launch flags say.
@@ -521,7 +521,7 @@ class RelatedOwnerDiscoveryTests(unittest.TestCase):
         try:
             identity = T.dispatch_contract.process_launch_identity(process.pid)
             live = self.row("done", "att-unlaunched", **{**stage, **identity, "launch_outcome": "running"})
-            self.jobs.write_text(latest + "\n" + live + "\n", encoding="utf-8")
+            T.dispatch_contract._atomic_registry_replace(self.jobs, [latest.rstrip("\n"), live.rstrip("\n")])
             proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
             self.assertEqual((proof.status, proof.reason), ("rejected", "child-not-quiescent"))
         finally:

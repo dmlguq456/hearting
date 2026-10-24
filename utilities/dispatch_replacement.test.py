@@ -349,9 +349,35 @@ class ReplacementTest(unittest.TestCase):
 
     def test_owner_open_child_vetoes_even_if_process_seems_quiet(self):
         self.write({**self.meta,'worker_type':'owner'})
-        self.write({**self.meta,'attempt_id':'att-child','parent_attempt_id':'att-source'},'open',append=True)
+        self.write({**self.meta,'attempt_id':'att-child','parent_attempt_id':'att-source',
+                    'worker_type':'stage','subsession_id':'ss-chain-a','stage_authority':'0',
+                    'chain_id':'ssc-execute-a'},'open',append=True)
         with self.assertRaises(D.DispatchContractError) as caught:self.claim()
         self.assertEqual(caught.exception.reason,'replacement-owner-child-unsettled')
+
+    def test_owner_child_lineage_distinguishes_open_live_unknown_and_quiescent_slice_rows(self):
+        owner = {**self.meta, 'worker_type': 'owner'}
+        child = {**self.meta, 'attempt_id': 'att-slice', 'parent_attempt_id': 'att-source',
+                 'worker_type': 'stage', 'subsession_id': 'ss-chain-a', 'stage_authority': '0',
+                 'session_chain_id': 'ssc-execute-a', 'launch_started': '1'}
+        for status, state, blocked in (
+            ('open', 'quiescent', True),
+            ('done', 'live', True),
+            ('done', 'unverifiable', True),
+            ('done', 'quiescent', False),
+        ):
+            with self.subTest(status=status, process_state=state):
+                self.write(owner, status='done')
+                self.write(child, status=status, append=True)
+                rows = R._rows(self.jobs.read_text(encoding='utf-8').splitlines())
+                with mock.patch.object(D, 'attempt_process_quiescence',
+                                       return_value=SimpleNamespace(state=state, reason='fixture-state')):
+                    if blocked:
+                        with self.assertRaises(D.DispatchContractError) as caught:
+                            R._children_quiescent(rows, 'att-source')
+                        self.assertEqual(caught.exception.reason, 'replacement-owner-child-unsettled')
+                    else:
+                        self.assertIsNone(R._children_quiescent(rows, 'att-source'))
 
     def test_terminal_fence_vetoes_claim(self):
         with mock.patch.object(D,'ensure_terminal_claim_absent',side_effect=D.DispatchContractError('terminal-claim-pending')):

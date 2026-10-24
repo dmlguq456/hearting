@@ -4635,6 +4635,18 @@ class SlicesOneCommandTest(unittest.TestCase):
                 rc, out = self.run_slices(self.plan(self.GOOD), extra=extra, env={"AGENT_DISPATCH_ATTEMPT_ID": None})
                 self.assert_single_session(rc, out, "parent-attempt-id-absent", ledger=False)
 
+    def test_non_object_slice_entries_keep_the_typed_fallback(self):
+        for invalid in (None, 42, "not-a-slice"):
+            with self.subTest(invalid=invalid):
+                slices = [invalid, json.loads(self.GOOD)[1]]
+                try:
+                    rc, out = self.run_slices(self.plan(json.dumps(slices)))
+                except AttributeError as exc:
+                    self.fail(f"malformed slice escaped the typed fallback: {exc}")
+                receipt = self.assert_single_session(
+                    rc, out, "subdivision-disjointness-unproven", ledger=True)
+                self.assertIn("plan-slice-invalid:1", receipt["detail"])
+
     def test_slices_gates_on_linked_worktree_falls_back_to_single_session(self):
         linked = self.base / "linked"
         self.git("worktree", "add", "-q", "-b", "linked-s", str(linked), cwd=self.primary)
@@ -4672,6 +4684,116 @@ class SlicesOneCommandTest(unittest.TestCase):
         self.assertIn("capability-route.py complete --route", receipt["next_command"])
         self.assertIn(f"--subsession-manifest {manifest_path}", receipt["next_command"])
         self.assertIn("--node execute", receipt["next_command"])
+
+    def test_replacement_owner_same_slices_registers_new_attempt(self):
+        plan = self.plan(self.GOOD)
+        admitted = SimpleNamespace(reservation_identity="r" * 8, sessions=[{}, {}])
+        started = [{"started": 1, "registered": 1}, {"started": 1, "registered": 1}]
+        rc_a, out_a = self.run_slices(
+            plan, action="start", env={"AGENT_DISPATCH_ATTEMPT_ID": "att-owner-a",
+                                        "AGENT_DISPATCH_CURRENT_HARNESS": "claude"},
+            admit=lambda **_kw: admitted, start=lambda *a, **_kw: started)
+        self.assertEqual(rc_a, 0, out_a)
+        manifest_a = json.loads(out_a)["chain_manifest"]
+        bytes_a = Path(manifest_a).read_bytes()
+
+        rc_b, out_b = self.run_slices(
+            plan, action="start", env={"AGENT_DISPATCH_ATTEMPT_ID": "att-owner-b",
+                                        "AGENT_DISPATCH_CURRENT_HARNESS": "codex"},
+            admit=lambda **_kw: admitted, start=lambda *a, **_kw: started)
+        self.assertEqual(rc_b, 0, out_b)
+        manifest_b = json.loads(out_b)["chain_manifest"]
+        bytes_b = Path(manifest_b).read_bytes()
+        manifest_a_doc = json.loads(bytes_a)
+        manifest_b_doc = json.loads(bytes_b)
+        slice_ids_a = [row["attempt_id"] for row in manifest_a_doc["sessions"]]
+        slice_ids_b = [row["attempt_id"] for row in manifest_b_doc["sessions"]]
+
+        # The planned manifests are produced by the real slice planner above.
+        # Exercise the existing seal and registry writers against their rows;
+        # only native worker execution is represented by a short local process.
+        import dispatch_contract as DC
+        import dispatch_replacement as replacement
+        import hashlib
+
+        def register_manifest(manifest, owner, harness, parent_session, sandbox, *, launch_first=False):
+            registered = []
+            process = None
+            for index, session in enumerate(manifest["sessions"]):
+                args = SimpleNamespace(
+                    attempt_id=session["attempt_id"], jobs_path=str(self.jobs), worktree=str(self.primary),
+                    replacement_input_argv=["--route", str(self.route_path), "--node", session["node"]],
+                    route_id=self.route["route_id"], route_node=session["node"],
+                    parent_session_id=parent_session, parent_attempt_id=owner,
+                    parent_harness=harness, parent_transport="headless", parent_sandbox=sandbox,
+                )
+                sealed = replacement.seal_launch_input(args, harness, "Execute the sealed slice brief")
+                metadata = {
+                    "attempt_schema_version": "2", "dispatch_depth": "2", "transport": "headless",
+                    "execution_surface": "registered-headless", "registered_worker": "1",
+                    "fallback_hop": "same-harness-headless", "attempt_id": session["attempt_id"],
+                    "route_id": self.route["route_id"], "route_hash": self.route["route_hash"],
+                    "route_node": session["node"], "worker_type": "stage", "harness": harness,
+                    "parent_attempt_id": owner, "parent_session_id": parent_session,
+                    "parent_harness": harness, "parent_transport": "headless", "parent_sandbox": sandbox,
+                    "subsession_id": session["subsession_id"], "subsession_index": str(index + 1),
+                    "subsession_count": str(len(manifest["sessions"])), "subsession_mode": "parallel",
+                    "session_chain_id": manifest["chain_id"], "stage_authority": "0",
+                    "subsession_purpose": "planned", "phase_brief": session["phase_brief"],
+                    "phase_brief_sha256": hashlib.sha256(Path(session["phase_brief"]).read_bytes()).hexdigest(),
+                    "state_ledger": str(self.base / f"{session['attempt_id']}.ledger"),
+                    "fixed_files_sha256": hashlib.sha256(json.dumps(session["fixed_files"], separators=(",", ":")).encode()).hexdigest(),
+                    "narrow_verify_sha256": hashlib.sha256(session["narrow_verify"].encode()).hexdigest(),
+                    "expected_round_trips": str(session["expected_round_trips"]), "parallel_group": "execute",
+                    "launch_fence": "registry-v1",
+                }
+                metadata.update(DC.parse_registry_metadata(sealed))
+                if launch_first and index == 0:
+                    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2)"],
+                                               start_new_session=True)
+                    metadata.update(DC.process_launch_identity(process.pid))
+                line = (f"2026-10-24T00:00:00Z\topen\t{self.primary}\t{self.primary}\t{session['slug']}\t"
+                        + ",".join(f"{key}={value}" for key, value in metadata.items()))
+                if not DC.claim_attempt_row(self.jobs, session["attempt_id"], line, launch=False):
+                    raise AssertionError(f"slice registration refused: {session['attempt_id']}")
+                registered.append((session, metadata, line))
+                if process is not None:
+                    self.assertTrue(DC.claim_attempt_row(self.jobs, session["attempt_id"], line, launch=True))
+                    DC.mark_attempt_launch_started(self.jobs, session["attempt_id"], process.pid)
+                    process.wait(timeout=5)
+                    process = None
+                    self.assertTrue(DC.close_attempt_row(self.jobs, session["attempt_id"], "dead-worker-blocked"))
+            if process is not None:
+                process.terminate()
+                process.wait(timeout=5)
+
+        register_manifest(manifest_a_doc, "att-owner-a", "claude", "parent-session-a", "sandbox-a",
+                          launch_first=True)
+        # A fresh Codex parent tuple gets its own slice IDs, manifest, sealed
+        # inputs, and real launch=False registrations.
+        try:
+            register_manifest(manifest_b_doc, "att-owner-b", "codex", "parent-session-b", "sandbox-b")
+        except DC.DispatchContractError as exc:
+            registration_status = ("refused", exc.reason)
+        else:
+            registration_status = ("registered", None)
+        self.assertEqual(registration_status, ("registered", None),
+                         "the replacement owner must register its same-file slice attempts")
+        self.assertNotEqual(manifest_a, manifest_b)
+        self.assertEqual(Path(manifest_a).read_bytes(), bytes_a)
+        self.assertTrue(set(slice_ids_a).isdisjoint(slice_ids_b))
+        registry = {}
+        for line in self.jobs.read_text(encoding="utf-8").splitlines():
+            fields = line.split("\t")
+            if len(fields) == 6:
+                registry.update({DC.parse_registry_metadata(fields[5])["attempt_id"]: (fields, DC.parse_registry_metadata(fields[5]))})
+        self.assertEqual(registry[slice_ids_a[0]][0][1], "done")
+        self.assertEqual(registry[slice_ids_a[0]][1]["launch_started"], "1")
+        self.assertEqual(registry[slice_ids_a[0]][1]["parent_sandbox"], "sandbox-a")
+        for attempt_id in slice_ids_b:
+            self.assertEqual(registry[attempt_id][0][1], "open")
+            self.assertEqual(registry[attempt_id][1]["parent_attempt_id"], "att-owner-b")
+            self.assertEqual(registry[attempt_id][1]["parent_sandbox"], "sandbox-b")
 
     def test_next_literal_paths_reach_batch_admission_and_true_globs_do_not(self):
         names = ["app/trips/[id]/page.tsx", "app/[...slug]/page.tsx", "app/(group)/page.tsx"]

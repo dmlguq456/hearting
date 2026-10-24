@@ -677,6 +677,29 @@ class PlanSlicesBriefAndAdapterTest(unittest.TestCase):
             self.assertNotIn("only the b part", texts[0])
             self.assertIn("only the b part", texts[1])
 
+    def test_plan_slices_is_stable_per_owner_and_distinct_for_replacement_owner(self):
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {}, clear=True):
+            root = Path(td)
+            for name in ("first", "repeat", "replacement"):
+                (root / name).mkdir()
+            os.environ["AGENT_DISPATCH_ATTEMPT_ID"] = "att-owner-a"
+            first, manifest_a, _plan, _wt = self._plan(root / "first", self.SLICES)
+            os.environ["AGENT_DISPATCH_ATTEMPT_ID"] = "att-owner-a"
+            repeated, manifest_a_repeat, _plan, _wt = self._plan(root / "repeat", self.SLICES)
+            os.environ["AGENT_DISPATCH_ATTEMPT_ID"] = "att-owner-b"
+            replacement, manifest_b, _plan, _wt = self._plan(root / "replacement", self.SLICES)
+
+            self.assertEqual(first["chain_id"], repeated["chain_id"])
+            self.assertEqual(
+                [row["attempt_id"] for row in manifest_a["sessions"]],
+                [row["attempt_id"] for row in manifest_a_repeat["sessions"]],
+            )
+            self.assertNotEqual(first["chain_id"], replacement["chain_id"])
+            self.assertNotEqual(
+                [row["attempt_id"] for row in manifest_a["sessions"]],
+                [row["attempt_id"] for row in manifest_b["sessions"]],
+            )
+
     def test_slice_adapter_follows_route_allocation_without_pin(self):
         def adapters(loader, env, slices=None):
             with tempfile.TemporaryDirectory() as td, mock.patch.object(SUBDIV, "_load_sibling", loader), \

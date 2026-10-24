@@ -614,6 +614,32 @@ def _default_slice_worktree(sealed_cwd: Path) -> Path:
     return sealed_cwd
 
 
+def slice_chain_id(route_id: str, node_id: str, slices: list[dict[str, Any]],
+                   *, owner_attempt_id: str | None = None) -> str:
+    """Return the stable chain identity for this owner and exact slice set.
+
+    Replacement owners get their own attempt namespace so a later `--slices`
+    launch cannot overwrite the prior owner's manifest or slice receipts.
+    Lower-level callers without an owner retain the historical identity.
+    """
+    if owner_attempt_id is None:
+        owner_attempt_id = os.environ.get("AGENT_DISPATCH_ATTEMPT_ID")
+    fixed_files = [
+        sorted(map(str, item.get("files", item.get("fixed_files")) or []))
+        if isinstance(item, dict) else []
+        for item in slices
+    ]
+    seed_parts = [route_id, node_id, fixed_files]
+    if owner_attempt_id:
+        seed_parts.append(owner_attempt_id)
+    seed = json.dumps(
+        seed_parts,
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(seed).hexdigest()[:12]
+    return f"ssc-{node_id}-{digest}"
+
+
 def plan_slices(
     *, route_path: Path, node_id: str, slices_path: Path,
     output_path: Path, worktree: Path | None = None, default_adapter: str | None = None,
@@ -659,12 +685,7 @@ def plan_slices(
     def fixed_of(item):
         return item.get("files", item.get("fixed_files")) if isinstance(item, dict) else None
 
-    seed = json.dumps(
-        [route.get("route_id"), node_id, [sorted(map(str, fixed_of(s) or [])) for s in slices]],
-        sort_keys=True, separators=(",", ":"),
-    ).encode("utf-8")
-    digest = hashlib.sha256(seed).hexdigest()[:12]
-    chain_id = f"ssc-{node_id}-{digest}"
+    chain_id = slice_chain_id(str(route.get("route_id") or ""), node_id, slices)
     allocated = None
     sessions = []
     briefs = []

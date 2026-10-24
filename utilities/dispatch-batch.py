@@ -2196,9 +2196,11 @@ def _run_slices(args: argparse.Namespace, route: dict[str, object]) -> int:
         2,
         args.action,
     ).path
-    digest = hashlib.sha256(Path(args.slices).read_bytes()).hexdigest()[:12]
+    chain_id = SUBDIVISION_ADMISSION.slice_chain_id(
+        str(route.get("route_id") or ""), args.parallel_group, slices,
+    )
     manifest_path = (
-        Path(jobs).parent / "subdivision" / str(route.get("route_id")) / f"{args.parallel_group}-{digest}.json"
+        Path(jobs).parent / "subdivision" / str(route.get("route_id")) / f"{chain_id}.json"
     )
     try:
         SUBDIVISION_ADMISSION.plan_slices(
