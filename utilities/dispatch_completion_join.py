@@ -562,6 +562,124 @@ def materialize_backstop_due(root, parent_sid, delivery_id) -> bool:
         and not pending_delivery.tombstone_path(record_file).is_file()
 
 
+_DEAD_RECIPIENT_ROW_FIELDS = (
+    "attempt_id", "parent_sid", "parent_harness", "parent_runtime_pid",
+    "parent_runtime_pid_start", "parent_runtime_ns", "delivery_intent",
+    "delivery_id", "delivery_receipt_digest", "delivery_row_revision",
+    "route_id", "route_hash", "route_node", "owner_route_id",
+    "owner_route_hash", "owner_route_node", "artifact_root",
+)
+
+
+def expire_pending_for_dead_recipient(
+    jobs: Path, owner_metadata: dict[str, str], record: dict, *, attempt_id: str,
+) -> str:
+    """Expire one exact pending delivery only for its positively dead original parent.
+
+    This is the shared single-record rule used by the periodic reconcile sweep
+    and the retained-obligation runner. A handover changes the effective
+    recipient and protects the original record; missing, unknown, or changed
+    identity remains pending. Fresh registry lineage and record identity are
+    checked immediately before the existing declared expiry actor writes.
+
+    Returns expired, pending (not positively dead), protected (successor or
+    identity changed), or skipped (incomplete/unreadable).
+    """
+    if not isinstance(owner_metadata, dict) or not isinstance(record, dict):
+        return "skipped"
+    recipient_key = owner_metadata.get("parent_sid", "")
+    delivery_id = record.get("delivery_id")
+    row_revisions = record.get("row_revisions")
+    if (not recipient_key or not isinstance(delivery_id, str) or not delivery_id
+            or owner_metadata.get("attempt_id") != attempt_id
+            or attempt_id not in (record.get("attempt_ids") or [])
+            or owner_metadata.get("delivery_intent") != "1"
+            or owner_metadata.get("delivery_id") != delivery_id
+            or owner_metadata.get("delivery_receipt_digest") != record.get("receipt_digest")
+            or not isinstance(row_revisions, dict)
+            or row_revisions.get(attempt_id) != owner_metadata.get("delivery_row_revision")
+            or pending_delivery.recipient_digest(recipient_key) != record.get("recipient_digest")
+            or record.get("state") not in {"pending", "claimed", "sent-ambiguous"}):
+        return "skipped"
+    raw_pid = owner_metadata.get("parent_runtime_pid", "")
+    pid_start = owner_metadata.get("parent_runtime_pid_start", "")
+    try:
+        if not raw_pid or not pid_start:
+            return "skipped"
+        pid = int(raw_pid)
+        if pid <= 0:
+            return "skipped"
+    except (TypeError, ValueError):
+        return "skipped"
+
+    from dispatch_seat_handover import effective_parent, lineage_effect_lock
+
+    def exact_current_row():
+        current = current_attempt_row(jobs, attempt_id)
+        if current is None:
+            return None
+        metadata = current.metadata
+        if any(metadata.get(key, "") != owner_metadata.get(key, "")
+               for key in _DEAD_RECIPIENT_ROW_FIELDS):
+            return None
+        if effective_parent(metadata, jobs) != recipient_key:
+            return None
+        return current
+
+    try:
+        current = exact_current_row()
+    except (JoinContractError, OSError, ValueError, TypeError):
+        return "protected"
+    if current is None:
+        return "protected"
+    try:
+        disposition = process_identity_disposition(pid, pid_start)
+    except (ValueError, OSError):
+        return "pending"
+    if disposition != "dead":
+        return "pending"
+
+    root = jobs.resolve(strict=False).parent
+    try:
+        fresh_record = pending_delivery.read(root, recipient_key, delivery_id)
+    except (pending_delivery.PendingDeliveryError, OSError, ValueError):
+        return "skipped"
+    if (fresh_record is None or fresh_record.get("state") not in {
+            "pending", "claimed", "sent-ambiguous",
+    } or any(fresh_record.get(key) != record.get(key)
+             for key in pending_delivery.IMMUTABLE_FIELDS)
+            or fresh_record.get("row_revisions") != record.get("row_revisions")
+            or attempt_id not in (fresh_record.get("attempt_ids") or [])):
+        return "protected"
+    # Close both observation races: the attempt and its effective parent must
+    # still be the same exact row after liveness and record rereads.
+    try:
+        with lineage_effect_lock(owner_metadata, jobs, recipient_key) as current_owner:
+            if not current_owner or exact_current_row() is None:
+                return "protected"
+            # Recheck the exact record after acquiring the seat writer lock;
+            # expiry then commits before a successor can adopt this binding.
+            fresh_record = pending_delivery.read(root, recipient_key, delivery_id)
+            if (fresh_record is None or fresh_record.get("state") not in {
+                    "pending", "claimed", "sent-ambiguous"}
+                    or any(fresh_record.get(key) != record.get(key)
+                           for key in pending_delivery.IMMUTABLE_FIELDS)
+                    or fresh_record.get("row_revisions") != record.get("row_revisions")
+                    or attempt_id not in (fresh_record.get("attempt_ids") or [])):
+                return "protected"
+            expired = pending_delivery.expire_if_due(
+                root, recipient_key, delivery_id,
+                actor="dispatch-reconcile",
+                reason="recipient-session-gone",
+                liveness="known",
+            )
+    except (JoinContractError, pending_delivery.PendingDeliveryError, OSError, ValueError,
+            TypeError, RuntimeError, BlockingIOError):
+        return "skipped"
+    return ("expired" if expired.get("state") == "expired"
+            and expired.get("expiry_reason") == "recipient-session-gone" else "protected")
+
+
 def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
     """SD-111 P2 trigger 2 + the single declared expiry actor (§2-b-2/§2-c).
 
@@ -628,49 +746,23 @@ def reconcile_pending_delivery(jobs: Path) -> dict[str, int]:
             }:
                 continue
             owner_metadata = None
+            owner_attempt_id = None
             attempt_ids = record.get("attempt_ids")
             if isinstance(attempt_ids, list):
                 for candidate in attempt_ids:
                     if candidate in rows_by_attempt:
+                        owner_attempt_id = candidate
                         owner_metadata = rows_by_attempt[candidate]
                         break
             if owner_metadata is None:
                 result["skipped"] += 1
                 continue
-            recipient_key = owner_metadata.get("parent_sid", "")
-            if (
-                not recipient_key
-                or pending_delivery.recipient_digest(recipient_key)
-                != record.get("recipient_digest")
-            ):
-                result["skipped"] += 1
-                continue
-            raw_pid = owner_metadata.get("parent_runtime_pid", "")
-            pid_start = owner_metadata.get("parent_runtime_pid_start", "")
-            if not raw_pid or not pid_start:
-                result["skipped"] += 1
-                continue
-            try:
-                disposition = process_identity_disposition(int(raw_pid), pid_start)
-            except ValueError:
-                result["skipped"] += 1
-                continue
-            # F-1: only a positive "dead" determination expires. "live" and
-            # "unresolved" (e.g. a transient procfs/permission/namespace
-            # denial) both leave the record pending -- an inaccessible
-            # observation is not a session-gone observation.
-            if disposition != "dead":
-                continue
-            try:
-                pending_delivery.expire_if_due(
-                    root, recipient_key, record["delivery_id"],
-                    actor="dispatch-reconcile",
-                    reason="recipient-session-gone",
-                    liveness="known",
-                )
+            expiry = expire_pending_for_dead_recipient(
+                jobs, owner_metadata, record, attempt_id=owner_attempt_id)
+            if expiry == "expired":
                 result["expired"] += 1
-            except pending_delivery.PendingDeliveryError:
-                pass
+            elif expiry == "skipped":
+                result["skipped"] += 1
     # 3. **Retention prune** (SD-111 §(7) v67). Terminal (`acked`/`expired`)
     #    records past `TERMINAL_RETENTION_SECONDS` and orphan `.lock` files
     #    past `ORPHAN_LOCK_RETENTION_SECONDS` are unlinked under the same

@@ -213,6 +213,11 @@ review subject, fixed inputs, session scope and granted addresses remain bound;
 parent, owner and runtime selection follow their recorded lineage. A claim alone
 does not adopt a continuation. Process quiescence and terminal result availability
 are separate observations consumed by resume, reconciliation and settlement alike.
+Registered delivery expiry follows the exact attempt and recipient lineage:
+positive dead PID/start evidence can expire its one pending record, while an
+identity-matched closed route settles its bound duty without deleting that
+record. Unknown liveness and live successors remain protected; unchanged
+observations do not rewrite the duty.
 
 Exact comparison protects sealed evidence from tampering; it is not a reason to
 refuse the normal ways work moves. When a recovery path still refuses, the

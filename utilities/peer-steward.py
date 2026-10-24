@@ -6948,6 +6948,51 @@ def _settle_claude_native_dispatch_receipt(root, storage_recipient, row,
         return False
 
 
+def _closed_registered_route_outcome(row, jobs):
+    """Read route closure only when the exact current row binding matches it."""
+    if getattr(row, "status", None) != "done":
+        return None
+    metadata = row.metadata
+    try:
+        if (metadata.get("dispatch_depth") == "1"
+                and metadata.get("worker_type") == "owner"):
+            from owner_route_binding import OwnerRouteBinding, resolve_owner_route_lifecycle
+            sealed = (metadata.get("owner_route_file"), metadata.get("owner_route_id"),
+                      metadata.get("owner_route_hash"))
+            if not all(sealed):
+                return None
+            binding, _status = resolve_owner_route_lifecycle(
+                jobs, owner_attempt_id=row.attempt_id, sealed_binding=OwnerRouteBinding(*sealed))
+            if binding is None:
+                return None
+            route_id, route_hash = binding.route_id, binding.route_hash
+        else:
+            route_id, route_hash = metadata.get("route_id"), metadata.get("route_hash")
+        artifact_root = metadata.get("artifact_root")
+        if (not isinstance(artifact_root, str) or not Path(artifact_root).is_absolute()
+                or not route_id or not route_hash):
+            return None
+        from route_identity import route_id_from_hash
+        if route_id_from_hash(route_hash) != route_id:
+            return None
+        import artifact_campaign
+        import artifact_lifecycle
+        root = Path(artifact_root).resolve()
+        path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+        try:
+            outcome, _raw = artifact_campaign.read_json(root, path)
+        except artifact_campaign.CampaignError:
+            return None
+        closed_at = outcome.get("closed_at")
+        if (outcome.get("route_id") != route_id or outcome.get("route_hash") != route_hash
+                or not isinstance(closed_at, str) or not closed_at):
+            return None
+        datetime.datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+        return {"route_id": route_id, "route_hash": route_hash, "closed_at": closed_at}
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError, ImportError):
+        return None
+
+
 def _resume_registered_obligation(duty, store, *, read_context=None):
     """Wake an exact restored recipient through the existing durable peer courier."""
     intent = duty.get("intent") or {}
@@ -6960,7 +7005,7 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
     from dispatch_completion_join import current_attempt_row, materialize_after_terminal_close
     from dispatch_notice_state import keep_claim
     import dispatch_pending_delivery as pending
-    from dispatch_seat_handover import effective_parent, effective_parent_harness
+    from dispatch_seat_handover import effective_parent, effective_parent_harness, lineage_effect_lock
     from dispatch_session_sweep import (
         IDENTITY_KEY, STORAGE_KEY, addressed_records, delivery_context, is_human_gate_record,
     )
@@ -7034,6 +7079,7 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
     if row.status not in {"open", "running", "done"}:
         return
     notice_id = intent.get("notice_delivery_id")
+    record = None
     if notice_id:
         # A fresh handover is independent of the original completion ACK. Its
         # exact pending record already carries revision, lineage and authority.
@@ -7091,10 +7137,38 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
         matches = [a for a in agents if a.get("agent") == recipient_harness
                    and (a.get("agent_session") or {}).get("value") == recipient_sid]
         if len(matches) != 1:
-            if fresh_recipient_row() is None:
+            fresh = fresh_recipient_row()
+            if fresh is None:
                 return
+            row = fresh
+            original_sid = str(row.metadata.get("parent_sid") or "")
+            if len(matches) == 0 and recipient_sid == original_sid and row.status == "done":
+                with lineage_effect_lock(row.metadata, jobs, recipient_sid) as current_owner:
+                    final_row = current_attempt_row(jobs, identity["attempt_id"])
+                    if (not current_owner or final_row is None or final_row.status != "done"
+                            or any(final_row.metadata.get(key) != row.metadata.get(key)
+                                   for key in identity_fields)):
+                        return
+                    closed = _closed_registered_route_outcome(final_row, jobs)
+                    if closed is not None:
+                        store.update(duty["id"], state="complete", delivery="not-required",
+                            cleanup="complete", observation={**observation, "reason": "route-closed",
+                                **closed, "recipient_sid": recipient_sid}, skip_unchanged=True)
+                        return
+                if isinstance(record, dict):
+                    from dispatch_completion_join import expire_pending_for_dead_recipient
+                    expiry = expire_pending_for_dead_recipient(
+                        jobs, row.metadata, record, attempt_id=row.attempt_id)
+                    if expiry == "expired":
+                        store.update(duty["id"], observation={**observation,
+                            "reason": "recipient-session-gone", "session_id": recipient_sid,
+                            "recipient_pid": row.metadata.get("parent_runtime_pid", ""),
+                            "recipient_pid_start": row.metadata.get("parent_runtime_pid_start", "")},
+                            skip_unchanged=True)
+                        return
             store.update(duty["id"], observation={"reason": "recipient-unavailable",
-                                                  "session_id": recipient_sid})
+                                                  "session_id": recipient_sid},
+                         skip_unchanged=True)
             return
         pane = matches[0]["pane_id"]
         if _resolve_target(pane)[:2] != (recipient_harness, recipient_sid):

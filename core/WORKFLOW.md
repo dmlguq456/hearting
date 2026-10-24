@@ -942,8 +942,12 @@ itself cannot carry the closure, because `route_hash` covers every other field.
 An unclosed route is indistinguishable from abandoned work, and the same applies
 to the other things a finished attempt leaves behind: a merged worktree and
 branch, a spec `pipeline_state.yaml` still naming a live phase, and a memory
-handoff still `pending` after its obligation is met. Close what the attempt
-opened, or the next session pays for it in reconstruction.
+handoff still `pending` after its obligation is met. Registered delivery
+reconciliation expires only the exact record whose original recipient has
+positive dead PID/start evidence; a closed identity-matched route settles its
+bound duty as not-required while retaining the record. Unknown liveness and a
+live successor remain pending, and unchanged observations are not rewritten.
+Close what the attempt opened, or the next session pays for it in reconstruction.
 
 ### 0.6. Tracked-Workflow Lifecycle and Continuation
 

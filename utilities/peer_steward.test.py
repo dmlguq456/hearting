@@ -12849,5 +12849,556 @@ class SharedReadinessRunnerTest(unittest.TestCase):
             terminal_case.doCleanups()
 
 
+class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
+    CARRIER = "claude-parent-runtime"
+
+    def _registered_duty(self, attempt, *, status="done", pid=None, start=None,
+                         worker_type="stage"):
+        import dispatch_completion_join as join
+        import dispatch_contract as D
+
+        jobs = self.jobs_path
+        artifact_root = self.tmp_root / "artifacts"
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        route_hash = "sha256:" + "a" * 64
+        route_id = "rt-" + "a" * 16
+        recipient = "recipient-" + attempt
+        metadata = {
+            "attempt_schema_version": "2",
+            "dispatch_depth": "1",
+            "transport": "headless",
+            "execution_surface": "registered-headless",
+            "registered_worker": "1",
+            "fallback_hop": "same-harness-headless",
+            "attempt_id": attempt,
+            "parent_attempt_id": "att-d3-parent",
+            "worker_type": worker_type,
+            "harness": "codex",
+            "parent_sid": recipient,
+            "parent_harness": "claude",
+            "parent_completion_delivery": self.CARRIER,
+            "route_id": route_id,
+            "route_hash": route_hash,
+            "route_node": "execute",
+            "artifact_root": str(artifact_root),
+        }
+        if pid is not None:
+            metadata["parent_runtime_pid"] = str(pid)
+        if start is not None:
+            metadata["parent_runtime_pid_start"] = str(start)
+        pipe = ",".join(f"{key}={value}" for key, value in metadata.items())
+        initial_status = "open" if status == "done" else status
+        jobs.write_text(
+            f"2026-10-23T00:00:00Z\t{initial_status}\t{self.tmp_root}\t{self.tmp_root}\t"
+            f"execute\t{pipe}\n",
+            encoding="utf-8",
+        )
+        if status == "done":
+            self.assertTrue(D.close_attempt_row(jobs, attempt, "fixture-complete"))
+            self.assertIsNotNone(join.materialize_after_terminal_close(jobs, attempt))
+        store = peer_steward.peer_obligations.ObligationStore()
+        duty_id = "registered-batch-d3-" + attempt.replace("-", "")
+        identity = {"jobs": str(jobs), "attempt_id": attempt, "harness": "claude",
+                    "session_id": recipient, "server": "default"}
+        duty = store.create(duty_id, "registered-batch", identity, {"carrier": self.CARRIER})
+        row = join.current_attempt_row(jobs, attempt)
+        record = None
+        if row is not None and row.metadata.get("delivery_id"):
+            record = join.pending_delivery.read(
+                jobs.parent, recipient, row.metadata["delivery_id"])
+        return store, duty, row, record, artifact_root, route_id, route_hash
+
+    def _resume_with_agents(self, duty, store, agents=()):
+        payload = {"result": {"agents": list(agents)}}
+        with mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
+                stdout=json.dumps(payload), returncode=0)):
+            peer_steward._resume_registered_obligation(duty, store)
+
+    def test_dead_recipient_expires_and_completes_without_sweep(self):
+        import dispatch_completion_join as join
+
+        store, duty, row, record, _root, _route_id, _route_hash = self._registered_duty(
+            "att-d3-dead", pid=999999999, start="123456789")
+        self.assertIsNotNone(record)
+        with mock.patch.object(join, "reconcile_pending_delivery",
+                               side_effect=AssertionError("global sweep")):
+            self._resume_with_agents(duty, store)
+            expired = join.pending_delivery.read(
+                self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+            self.assertEqual(expired["state"], "expired")
+            self.assertEqual(store.get(duty["id"])["state"], "pending")
+            self._resume_with_agents(store.get(duty["id"]), store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "expired", "complete"))
+        retained = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual(retained["state"], "expired")
+        self.assertEqual(retained["expiry_reason"], "recipient-session-gone")
+
+    def test_closed_route_without_runtime_pid_is_not_required(self):
+        import dispatch_completion_join as join
+        import artifact_lifecycle
+
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-closed")
+        outcome_path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+        outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        closed_at = "2026-10-23T00:00:00Z"
+        outcome_path.write_text(json.dumps({
+            "schema_version": 4, "route_id": route_id, "route_hash": route_hash,
+            "closed_at": closed_at,
+        }), encoding="utf-8")
+        self._resume_with_agents(duty, store)
+        settled = store.get(duty["id"])
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "not-required", "complete"))
+        self.assertEqual(settled["observation"], {
+            "reason": "route-closed", "route_id": route_id,
+            "route_hash": route_hash, "closed_at": closed_at,
+            "recipient_sid": row.metadata["parent_sid"],
+        })
+        retained = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual(retained["state"], "pending")
+
+    def test_first_same_seat_adoption_keeps_closed_route_duty_pending(self):
+        import artifact_lifecycle
+        import dispatch_seat_handover as handover
+        import dispatch_completion_join as join
+        import pane_ownership
+        import session_tidy
+
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-closed-first-binding", worker_type="frame")
+        outcome_path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+        outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        outcome_path.write_text(json.dumps({
+            "schema_version": 4, "route_id": route_id, "route_hash": route_hash,
+            "closed_at": "2026-10-23T00:00:00Z",
+        }), encoding="utf-8")
+        pane = "fixture:closed-first-binding-" + self.tmp_root.name
+        env = {"XDG_STATE_HOME": str(self.tmp_root / "state"),
+               "HERDR_PANE_ID": pane, "AGENT_DISPATCH_JOBS": str(self.jobs_path)}
+        proof = mock.patch.object(pane_ownership, "verified_pane",
+                                  side_effect=lambda value, *a, **kw: value or "")
+        proof.start()
+        self.addCleanup(proof.stop)
+        successor = "sess-closed-first-binding-successor"
+        with mock.patch.dict(os.environ, env, clear=False):
+            seat = session_tidy.resolve_seat("claude", str(self.tmp_root), os.environ)
+            self.assertIsNone(handover.read_snapshot(seat.key))
+            with session_tidy.seat_lock(seat.key):
+                now = session_tidy.now_epoch()
+                session_tidy.record_event(seat, "claude", row.metadata["parent_sid"], "start",
+                                          cwd=str(self.tmp_root), now=now - 2)
+                self.assertEqual(handover.publish_snapshot_locked(
+                    seat, "claude", row.metadata["parent_sid"],
+                    [handover.binding_of(self.jobs_path, row.metadata)],
+                    jobs=self.jobs_path, now=now - 1), 1)
+                session_tidy.record_event(seat, "claude", successor, "start",
+                                          source="clear", cwd=str(self.tmp_root), now=now)
+                self.assertIsNotNone(handover.record_locked(
+                    seat, "claude", successor, "start", "clear", now))
+            self.assertEqual(handover.effective_parent(row.metadata, self.jobs_path), successor)
+            self._resume_with_agents(duty, store)
+        self.assertEqual(store.get(duty["id"])["state"], "pending")
+        self.assertEqual(join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])["state"],
+            "pending")
+
+    def test_identical_unknown_observation_does_not_rewrite(self):
+        store, duty, _row, _record, _root, _route_id, _route_hash = self._registered_duty(
+            "att-d3-unknown", status="open")
+        self._resume_with_agents(duty, store)
+        first = store.get(duty["id"])
+        path = store._record_path(duty["id"])
+        before = (first["revision"], first["updated_at"], path.stat().st_mtime_ns,
+                  json.loads(path.read_text(encoding="utf-8"))["observation"])
+        self._resume_with_agents(first, store)
+        second = store.get(duty["id"])
+        after = (second["revision"], second["updated_at"], path.stat().st_mtime_ns,
+                 json.loads(path.read_text(encoding="utf-8"))["observation"])
+        self.assertEqual(second["observation"]["reason"], "recipient-unavailable")
+        self.assertEqual(after, before)
+
+    def test_unknown_liveness_never_expires_a_terminal_delivery(self):
+        import dispatch_completion_join as join
+
+        store, duty, row, record, _root, _route_id, _route_hash = self._registered_duty(
+            "att-d3-no-pid")
+        self.assertIsNotNone(record)
+        with mock.patch.object(join, "process_identity_disposition",
+                               side_effect=AssertionError("no runtime PID")):
+            self._resume_with_agents(duty, store)
+        self.assertEqual(store.get(duty["id"])["state"], "pending")
+        retained = join.pending_delivery.read(
+            self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+        self.assertEqual(retained["state"], "pending")
+
+    def test_live_second_successor_receives_despite_dead_original(self):
+        import dispatch_completion_join as join
+        import dispatch_pending_delivery as pending
+        import dispatch_supervision as supervision
+        from harness_capabilities import parent_completion
+
+        fixture = ClosedParentNativeHandoverTest()
+        fixture.setUp()
+        try:
+            fixture.meta.update({
+                "parent_runtime_pid": "999999991",
+                "parent_runtime_pid_start": "123456789",
+            })
+            fixture.write_jobs()
+            fixture.replay()  # Original A handed to the real first successor B.
+            first = fixture.handover.effective_parent(fixture.meta, fixture.jobs_path)
+            self.assertEqual(first, fixture.SUCCESSOR)
+            second = "claude-second-successor"
+            second_seat = fixture.tidy._pane_seat_of("w1:pThird")
+            fixture.handover.record_retire_handover(
+                first, fixture.SUCCESSOR_HARNESS, second, "claude",
+                jobs=fixture.jobs_path, successor_seat=second_seat)
+            self.assertEqual(fixture.handover.effective_parent(fixture.meta, fixture.jobs_path), second)
+
+            carrier = parent_completion("opencode")["carrier"]
+            delivery_id = "delivery-" + "d" * 32
+            revision = "revision-d3-live-successor"
+            receipt = {
+                "schema_version": 2, "state": "delivered",
+                "job_registry": str(fixture.jobs_path),
+                "parent_attempt_id": "att-selected",
+                "delivery_classification": "attention",
+                "children": [{
+                    "attempt_id": "att-selected", "status": "done",
+                    "readiness": "ready", "reason": "terminal-failure-or-unclosed",
+                    "required_action": "inspect-done-failure",
+                    "harness": "opencode", "delivery_classification": "attention",
+                }],
+            }
+            digest = pending._canonical_receipt_digest(receipt)
+            metadata = {
+                **fixture.meta,
+                "parent_completion_delivery": carrier,
+                "delivery_intent": "1",
+                "delivery_id": delivery_id,
+                "delivery_receipt_digest": digest,
+                "delivery_row_revision": revision,
+                "delivery_recipient_kind": carrier,
+                "delivery_receipt_b64": join.seal_delivery_receipt(receipt),
+            }
+            fixture.rows[2] = ("done", metadata)
+            fixture.write_jobs()
+            pending.create(
+                fixture.jobs_path.parent, recipient_kind=carrier, recipient_key=fixture.PARENT,
+                delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+                attempt_ids=["att-selected"], parent_attempt_id="att-selected",
+                route_id=fixture.route["route_id"], route_node="_owner",
+                receipt=receipt, receipt_digest=digest, row_revisions={"att-selected": revision},
+            )
+            identity = {
+                "jobs": str(fixture.jobs_path), "attempt_id": "att-selected",
+                "harness": "opencode", "session_id": fixture.PARENT, "server": "default",
+            }
+            store = peer_steward.peer_obligations.ObligationStore()
+            duty_id = peer_steward.peer_obligations.stable_duty_id("registered-batch", identity)
+            duty = store.create(duty_id, "registered-batch", identity, {"carrier": carrier})
+            sent = []
+
+            def courier(args, *, expected_recipient, on_prepared, producer_binding):
+                self.assertEqual(expected_recipient, ("claude", second))
+                body = Path(args.body_file).read_text(encoding="utf-8")
+                recipient = {"harness": expected_recipient[0], "session_id": expected_recipient[1]}
+                sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
+                text, ref = peer_steward.peer_message.prepare_peer_message(
+                    body, sender, recipient, defer=True,
+                    refs=[duty_id, "att-selected", delivery_id],
+                    producer_binding=producer_binding,
+                )
+                binding = {
+                    "duty_id": duty_id, "jobs": str(fixture.jobs_path),
+                    "attempt_id": "att-selected", "carrier": carrier,
+                    "recipient_sid": second, "delivery_id": delivery_id,
+                    "storage_recipient": fixture.PARENT,
+                    "claim_owner": "retained-rewake:" + duty_id,
+                }
+                peer_steward.peer_message.bind_dispatch_notice(ref, binding)
+                on_prepared(ref)
+                sent.append((recipient, text, ref))
+                return 3
+
+            agents = {"result": {"agents": [{
+                "agent": "claude", "pane_id": "w1:pThird",
+                "agent_session": {"value": second},
+            }]}}
+            with mock.patch.object(join, "materialize_after_terminal_close"), \
+                 mock.patch.object(join, "expire_pending_for_dead_recipient",
+                                   side_effect=AssertionError("live successor protects original"),
+                                   create=True), \
+                 mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
+                     stdout=json.dumps(agents), returncode=0)), \
+                 mock.patch.object(peer_steward, "_resolve_target", return_value=("claude", second)), \
+                 mock.patch.object(peer_steward, "_settle_claude_native_dispatch_receipt",
+                                   return_value=False), \
+                 mock.patch.object(peer_steward.peer_message, "_valid_runtime_producer_binding",
+                                   return_value=True), \
+                 mock.patch.object(supervision, "continue_for_parent", return_value=None), \
+                 mock.patch("dispatch_session_sweep.delivery_context",
+                            return_value="late completion for C"), \
+                 mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
+                peer_steward._resume_registered_obligation(duty, store)
+            self.assertEqual(len(sent), 1)
+            recipient, text, ref = sent[0]
+            self.assertEqual(recipient, {"harness": "claude", "session_id": second})
+            self.assertIn("late completion for C", text)
+            transfer = peer_steward.peer_message._read_pending(ref)
+            self.assertEqual(transfer["to"], recipient)
+            self.assertEqual(peer_steward.peer_message.receive_peer_message(
+                transfer["text"], transfer["to"]), 0)
+            self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "received")
+            stored = pending.read(fixture.jobs_path.parent, fixture.PARENT, delivery_id)
+            self.assertEqual(stored["state"], "acked")
+            self.assertEqual(fixture.handover.effective_parent(fixture.meta, fixture.jobs_path), second)
+        finally:
+            fixture.doCleanups()
+
+    def test_malformed_or_foreign_outcome_remains_pending(self):
+        import dispatch_completion_join as join
+        import artifact_lifecycle
+
+        cases = (
+            b"{",
+            json.dumps({"route_id": "rt-foreign", "route_hash": "sha256:foreign",
+                        "closed_at": "2026-10-23T00:00:00Z"}).encode(),
+            json.dumps({"route_id": "rt-placeholder", "route_hash": "sha256:foreign",
+                        "closed_at": "2026-10-23T00:00:00Z"}).encode(),
+            json.dumps({"route_id": "rt-placeholder", "route_hash": "sha256:" + "a" * 64}).encode(),
+        )
+        for number, body in enumerate(cases):
+            with self.subTest(number=number):
+                attempt = f"att-d3-outcome-{number}"
+                store, duty, row, record, root, route_id, route_hash = self._registered_duty(attempt)
+                path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if number in {2, 3}:
+                    document = json.loads(body)
+                    document["route_id"] = route_id
+                    if number == 2:
+                        document["route_hash"] = "sha256:" + "b" * 64
+                    body = json.dumps(document).encode()
+                path.write_bytes(body)
+                self._resume_with_agents(duty, store)
+                self.assertEqual(store.get(duty["id"])["state"], "pending")
+                retained = join.pending_delivery.read(
+                    self.jobs_path.parent, row.metadata["parent_sid"], record["delivery_id"])
+                self.assertEqual(retained["state"], "pending")
+
+    def test_closed_route_settlement_yields_to_adoption_at_effect_boundary(self):
+        import artifact_lifecycle
+        import dispatch_seat_handover as handover
+        import session_tidy
+        import contextlib
+        import threading
+
+        store, duty, row, record, root, route_id, route_hash = self._registered_duty(
+            "att-d3-closed-race", worker_type="frame")
+        outcome_path = artifact_lifecycle.canonical_outcome_path(root, route_id)
+        outcome_path.parent.mkdir(parents=True, exist_ok=True)
+        outcome_path.write_text(json.dumps({
+            "schema_version": 4, "route_id": route_id, "route_hash": route_hash,
+            "closed_at": "2026-10-23T00:00:00Z",
+        }), encoding="utf-8")
+        pane = "fixture:closed-route-race"
+        env = {"XDG_STATE_HOME": str(self.tmp_root / "state"),
+               "HARNESS_STATE_ROOT": str(self.tmp_root / "state" / "hearting"),
+               "HERDR_PANE_ID": pane, "AGENT_DISPATCH_JOBS": str(self.jobs_path)}
+        with mock.patch.dict(os.environ, env, clear=False):
+            seat = session_tidy.resolve_seat("claude", str(self.tmp_root), os.environ)
+            original_lock = session_tidy.seat_lock
+            successor = "sess-closed-route-successor"
+            adopted = threading.Event()
+            writer_lock_attempt = threading.Event()
+            order = []
+            local = threading.local()
+            effect_thread = threading.get_ident()
+
+            def commit_adoption():
+                with original_lock(seat.key):
+                    now = session_tidy.now_epoch()
+                    session_tidy.record_event(seat, "claude", row.metadata["parent_sid"], "start",
+                                              cwd=str(self.tmp_root), now=now - 2)
+                    self.assertEqual(handover.publish_snapshot_locked(
+                        seat, "claude", row.metadata["parent_sid"],
+                        [handover.binding_of(self.jobs_path, row.metadata)],
+                        jobs=self.jobs_path, now=now - 1), 1)
+                    session_tidy.record_event(seat, "claude", successor, "start",
+                        source="clear", cwd=str(self.tmp_root), now=now)
+                    self.assertIsNotNone(handover.record_locked(
+                        seat, "claude", successor, "start", "clear", now))
+                order.append("adopted")
+                adopted.set()
+
+            @contextlib.contextmanager
+            def observed_lock(key, *, wait=None):
+                if (key.startswith("lineage-binding-")
+                        and threading.get_ident() != effect_thread):
+                    writer_lock_attempt.set()
+                with original_lock(key, wait=wait):
+                    previous = getattr(local, "binding", False)
+                    if key.startswith("lineage-binding-"):
+                        local.binding = True
+                    try:
+                        yield
+                    finally:
+                        local.binding = previous
+
+            original_close = peer_steward._closed_registered_route_outcome
+
+            def after_real_close(*args, **kwargs):
+                result = original_close(*args, **kwargs)
+                if result is not None:
+                    if getattr(local, "binding", False):
+                        def writer():
+                            commit_adoption()
+                        threading.Thread(target=writer, daemon=True).start()
+                        self.assertTrue(writer_lock_attempt.wait(2),
+                                        "retire writer did not reach the real binding lock")
+                    else:
+                        commit_adoption()
+                return result
+
+            original_update = store.update
+
+            def mark_settlement(duty_id, **changes):
+                if changes.get("state") == "complete" and changes.get("delivery") == "not-required":
+                    order.append("settled")
+                return original_update(duty_id, **changes)
+
+            with mock.patch.object(session_tidy, "seat_lock", side_effect=observed_lock), \
+                 mock.patch.object(peer_steward, "_closed_registered_route_outcome",
+                                   side_effect=after_real_close), \
+                 mock.patch.object(store, "update", side_effect=mark_settlement):
+                self._resume_with_agents(duty, store)
+            self.assertTrue(adopted.wait(3), "first adoption did not finish after settlement")
+            self.assertEqual(handover.effective_parent(row.metadata, self.jobs_path), successor)
+            self.assertEqual(store.get(duty["id"])["state"], "complete")
+            self.assertLess(order.index("settled"), order.index("adopted"), order)
+            import dispatch_pending_delivery as pending
+            self.assertEqual(pending.read(self.jobs_path.parent, row.metadata["parent_sid"],
+                                          record["delivery_id"])["state"], "pending")
+
+
+class RetireCandidatePromotionLockTest(_TmpRootMixin, unittest.TestCase):
+    """A post-lock promotion must already belong to the retire transaction."""
+
+    def test_promoted_candidate_effect_mutex_serializes_real_retire(self):
+        import dispatch_seat_handover as handover
+        import session_tidy
+
+        self.handover = handover
+        registered, predecessor = "registered-parent", "retire-parent"
+        candidates = []
+        for index in range(handover.MAX_BINDINGS + 1):
+            candidates.append({
+                "attempt_schema_version": "2", "dispatch_depth": "1", "worker_type": "owner",
+                "registered_worker": "1", "attempt_id": f"att-retire-{index:02d}",
+                "parent_sid": registered, "parent_harness": "claude",
+                "route_id": f"rt-retire-{index:02d}", "route_hash": f"sha256:retire-{index:02d}",
+                "route_node": "owner",
+            })
+        self.jobs_path.write_text("".join(
+            "now\trunning\t0\tjob\tlog\t" + ",".join(f"{key}={value}" for key, value in meta.items()) + "\n"
+            for meta in candidates))
+        retained = self.tmp_root / "retained-job-data.json"
+        retained.write_text('{"state":"retained"}')
+        bindings = [handover.binding_of(self.jobs_path, meta) for meta in candidates]
+
+        # Two real snapshot publications make all thirteen exact route keys
+        # discoverable while each initial seat remains within the normal cap.
+        source_seats = [session_tidy._pane_seat_of("w1:pRetireSeedA"),
+                        session_tidy._pane_seat_of("w1:pRetireSeedB")]
+        groups = (bindings[:handover.MAX_BINDINGS], bindings[handover.MAX_BINDINGS:])
+        for seat, group in zip(source_seats, groups):
+            handover.publish_snapshot_locked(seat, "claude", registered, group,
+                                               jobs=self.jobs_path)
+            seeded = handover.record_retire_handover(
+                registered, "claude", predecessor, "codex", jobs=self.jobs_path,
+                successor_seat=seat)
+            self.assertTrue(seeded)
+
+        possible = handover._handover_candidates("codex", predecessor, self.jobs_path)
+        self.assertEqual(len({handover._logical_key(binding) for binding, _ in possible}),
+                         handover.MAX_BINDINGS + 1)
+        initial_selection = handover._select_binding_rows(possible)
+        selected_keys = {handover._logical_key(binding) for binding in initial_selection}
+        promoted = next(binding for binding, _status in possible
+                        if handover._logical_key(binding) not in selected_keys)
+        self.assertEqual(handover.effective_parent(candidates[-1], self.jobs_path), predecessor)
+
+        c_seat = session_tidy._pane_seat_of("w1:pRetireC")
+        d_seat = session_tidy._pane_seat_of("w1:pRetireD")
+        entered_acquire = threading.Event()
+        resume_c = threading.Event()
+        c_done = threading.Event()
+        results = []
+        original_mutexes = handover.binding_mutexes
+
+        @contextlib.contextmanager
+        def pause_c_acquisition(rows, *, wait=None):
+            if threading.current_thread().name == "retire-C":
+                entered_acquire.set()
+                if not resume_c.wait(3):
+                    raise TimeoutError("C did not receive the controlled lock schedule")
+            with original_mutexes(rows, wait=wait):
+                yield
+
+        def retire_c():
+            try:
+                results.append(handover.record_retire_handover(
+                    predecessor, "codex", "successor-C", "claude", jobs=self.jobs_path,
+                    successor_seat=c_seat))
+            except BaseException as exc:  # propagate worker errors through the main test assertion
+                results.append(exc)
+            finally:
+                c_done.set()
+
+        worker = threading.Thread(target=retire_c, name="retire-C", daemon=True)
+        with mock.patch.object(handover, "binding_mutexes", side_effect=pause_c_acquisition):
+            worker.start()
+            try:
+                self.assertTrue(entered_acquire.wait(3), "C did not reach real binding acquisition")
+                d_row = handover.record_retire_handover(
+                    predecessor, "codex", "successor-D", "codex", jobs=self.jobs_path,
+                    successor_seat=d_seat)
+                self.assertTrue(d_row)
+                self.assertEqual({handover._logical_key(binding) for binding in d_row["bindings"]},
+                                 selected_keys)
+                hold_promoted = original_mutexes([promoted])
+                hold_promoted.__enter__()
+                resume_c.set()
+                self.assertFalse(c_done.wait(0.3),
+                                 "C committed a candidate while its real binding mutex was held")
+                self.assertFalse(any(row.get("sid") == "successor-C"
+                                     for row in handover.handover_rows(c_seat)))
+            finally:
+                resume_c.set()
+                if "hold_promoted" in locals():
+                    hold_promoted.__exit__(None, None, None)
+                worker.join(4)
+        self.assertFalse(worker.is_alive(), "bounded retire worker did not finish")
+        self.assertTrue(c_done.is_set())
+        self.assertEqual(len(results), 1)
+        self.assertNotIsInstance(results[0], BaseException)
+        c_row = results[0]
+        self.assertTrue(c_row)
+        self.assertEqual({handover._logical_key(binding) for binding in c_row["bindings"]},
+                         {handover._logical_key(promoted)})
+        promoted_meta = next(row for row in candidates if row["attempt_id"] == promoted["attempt"])
+        self.assertEqual(handover.effective_parent(promoted_meta, self.jobs_path), "successor-C")
+        for binding in initial_selection:
+            meta = next(row for row in candidates if row["attempt_id"] == binding["attempt"])
+            self.assertEqual(handover.effective_parent(meta, self.jobs_path), "successor-D")
+        self.assertEqual(retained.read_text(), '{"state":"retained"}')
+
+
 if __name__ == "__main__":
     unittest.main()
