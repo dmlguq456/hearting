@@ -473,6 +473,29 @@ stamp path in `core/HOOKS.md`.
 
 ### 7.2. Completion delivery clarifications (SD-92/97, SD-123/129)
 
+- **Successful sibling delivery batches.** A carrier may hold successful completion
+  records until every member of an explicitly related batch is ready, then emit
+  the ready successes together. Failures, attention, human gates, supervision,
+  and other actionable notices remain immediate. Membership requires the exact
+  relationship named by the source: same route and its two frame legs; the same
+  registered parent session and `parent_cycle_id` (capability and mode may
+  differ); or membership in one existing sealed parallel batch. A shared cycle
+  value or sealed string by itself grants no authority. Route-free consecutive
+  launches and rows from different parent sessions remain separate. Hold does
+  not mutate a record or its retry/attempt accounting. One existing record lease
+  elects the carrier; all members retain their own immutable identity, receipt,
+  and at-least-once recovery. A batch is admitted or released as a whole within
+  the existing sweep time budget; it is never partially emitted on overrun.
+
+  | Membership example | Batch? | Required relationship |
+  |---|---:|---|
+  | Two frame legs of one route | yes | Exact route binding and the route's frame pair |
+  | Same parent session and `parent_cycle_id`, mixed capabilities | yes | Both exact registered parent and cycle |
+  | One sealed parallel batch | yes | Existing sealed member list, matching every member |
+  | Route-free consecutive launches | no | No explicit shared membership |
+  | Same cycle value, different parent session | no | Parent session differs |
+  | Same sealed string without matching sealed membership | no | String alone is not authority |
+
 - **Human gate in flight (SD-123 (8), SD-129).** While the armed Claude
   `asyncRewake` hook or the runtime-owned Codex completion sidecar waits on an
   open owner attempt it also watches, once per interval, for

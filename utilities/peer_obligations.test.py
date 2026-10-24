@@ -549,6 +549,8 @@ class ObligationStoreTest(unittest.TestCase):
                 mock.patch("dispatch_pending_delivery.received_ack_identity",
                            side_effect=lambda value, _storage, _did: {"delivery_id": value["delivery_id"]}), \
                 mock.patch("dispatch_pending_delivery.ack_received", side_effect=acknowledge) as ack:
+            self.assertEqual(len(list(obligations._registered_delivery_bindings(
+                message, roots=[self.root], received_only=True))), 1)
             self.assertTrue(obligations.acknowledge_registered_delivery(message, roots=[self.root]))
             ack.assert_called_once()
             self.assertEqual(self.store.get(duty["id"])["state"], "pending")
@@ -622,6 +624,15 @@ class ObligationStoreTest(unittest.TestCase):
             self.assertTrue(obligations.acknowledge_registered_delivery(final_transfer, roots=[self.root]))
             self.assertEqual(ack.call_count, 1)
             self.assertEqual(self.store.get(duty["id"])["state"], "complete")
+
+    def test_batch_transfer_is_not_settled_when_one_declared_binding_is_invalid(self):
+        terminal = (None, None, None, {"state": "acked"}, None, "sid", "delivery-a")
+        message = {"state": "received", "receipt": "exact-peer-ref",
+                   "dispatch_notices": [{"delivery_id": "delivery-a"},
+                                        {"delivery_id": "delivery-b"}]}
+        with mock.patch.object(obligations, "_registered_delivery_bindings",
+                               return_value=iter([terminal])):
+            self.assertFalse(obligations.registered_delivery_settled(message))
 
     def test_registered_completion_producer_uses_shared_normal_runner_helper(self):
         from types import SimpleNamespace
@@ -734,13 +745,15 @@ class ObligationStoreTest(unittest.TestCase):
         import dispatch_pending_delivery as pending
         from harness_capabilities import parent_completion
         carrier = parent_completion(harness)["carrier"]
-        metadata = {"attempt_schema_version": "2", "attempt_id": "att-stopped-owner",
+        attempt_id = "att-stopped-owner-" + harness
+        metadata = {"attempt_schema_version": "2", "attempt_id": attempt_id,
             "dispatch_depth": "1", "worker_type": "owner", "parent_sid": "idle-parent",
-            "parent_harness": harness, "parent_completion_delivery": carrier,
-            "note": "dead-worker-blocked", "delivery_intent": "1", "delivery_id": "delivery-original"}
+            "harness": harness, "parent_harness": harness, "parent_completion_delivery": carrier,
+            "note": "dead-worker-blocked", "delivery_intent": "1",
+            "delivery_id": "delivery-original-" + harness}
         self.jobs.write_text("2026-10-18T01:00:00Z\tdone\t/r\t/w\towner\t" +
                              ",".join(f"{k}={v}" for k,v in metadata.items()) + "\n")
-        identity = {"jobs": str(self.jobs), "attempt_id": "att-stopped-owner",
+        identity = {"jobs": str(self.jobs), "attempt_id": attempt_id,
                     "session_id": "idle-parent", "harness": harness, "server": "default"}
         old = self.store.create(obligations.stable_duty_id("registered-batch", identity),
                                  "registered-batch", identity, {"carrier": carrier})
@@ -750,11 +763,14 @@ class ObligationStoreTest(unittest.TestCase):
              mock.patch("dispatch_owner_input.blocked_owner_answers", return_value=answers), \
              mock.patch("dispatch_replacement._replacement_in_flight", return_value=False), \
              mock.patch.object(obligations, "ensure_normal_runner") as ensure:
-            result = supervision.handover_identity_refusal(self.jobs, "att-stopped-owner",
+            result = supervision.handover_identity_refusal(self.jobs, attempt_id,
                 {"reason": "replacement-parent-identity-unproven"})
             self.assertTrue(result["parent_notified"])
             records = list(pending.record_directory(self.root, "idle-parent").glob("*.json"))
-            record = json.loads(records[0].read_text())
+            parsed_records = [json.loads(path.read_text()) for path in records]
+            matching = [value for value in parsed_records if value.get("recipient_kind") == carrier]
+            self.assertTrue(matching, f"harness={harness} records={[(r.get('recipient_kind'), r.get('delivery_id')) for r in parsed_records]}")
+            record = matching[0]
             self.assertTrue(obligations.retain_registered_notice(self.jobs, record))
         self.assertEqual(ensure.call_count, 2)  # repeat producer requests the same runner/duty
         duties = self.store.list(states={"pending"}, kinds={"registered-batch"})
@@ -788,13 +804,14 @@ class ObligationStoreTest(unittest.TestCase):
                          armed.append(k) or {"state": "armed"}):
                     peer_steward._reconcile_obligations(self.store, [duty])
                     latest = self.store.get(duty["id"])
-                    self.assertEqual(latest["observation"]["transfer_ref"], "a" * 32)
+                    self.assertEqual((latest.get("observation") or {}).get("transfer_ref"), "a" * 32,
+                        f"carrier={duty['intent']['carrier']} sends={len(sent)}")
                     peer_steward._reconcile_obligations(self.store, [latest])
                     self.assertEqual(len(sent), 1)
                     self.assertEqual(sent[0][0], (harness, "idle-parent"))
                     self.assertIn("scheduled the route's start under the parent's identity", sent[0][1])
                     self.assertEqual(sent[0][2]["schema"], "registered-runtime-completion-v1")
-                    self.assertEqual(sent[0][2]["attempt_id"], "att-stopped-owner")
+                    self.assertEqual(sent[0][2]["attempt_id"], duty["intent"]["identity"]["attempt_id"])
                     self.assertEqual(armed[0]["session_id"], "idle-parent")
                     exact = pending.read(self.root, "idle-parent", record["delivery_id"])
                     self.assertEqual(exact["state"], "sent-ambiguous")

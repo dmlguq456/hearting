@@ -97,6 +97,49 @@ class _FakeStdin:
 
 
 class PeerMessageTest(_TmpRootMixin, unittest.TestCase):
+    def test_registered_completion_batch_of_24_fits_pending_transfer_limit(self):
+        recipient = {"harness": "codex", "session_id": "batch-recipient"}
+        sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
+        jobs = str(self.jobs_path.resolve())
+        notices = []
+        refs = []
+        for index in range(24):
+            suffix = f"{index:032x}"
+            duty_id, attempt_id, delivery_id = (
+                "registered-batch-" + suffix, "att-batch-" + suffix,
+                "delivery-batch-" + suffix)
+            refs.extend((duty_id, attempt_id, delivery_id))
+            notices.append({"duty_id": duty_id, "attempt_id": attempt_id,
+                "delivery_id": delivery_id, "storage_recipient": "batch-recipient",
+                "receipt_digest": f"{index + 1:064x}",
+                "claim_owner": "retained-rewake:" + duty_id})
+        first = notices[0]
+        producer = {"schema": peer_message._RUNTIME_PRODUCER_SCHEMA,
+            "duty_id": first["duty_id"], "jobs": jobs,
+            "attempt_id": first["attempt_id"], "carrier": "codex-native-queue",
+            "delivery_id": first["delivery_id"], "receipt_digest": first["receipt_digest"],
+            "recipient": recipient, "route_id": "rt-batch", "route_node": "execute",
+            "dispatch_notices": notices}
+        _text, ref = peer_message.prepare_peer_message(
+            "[notice] 24 sibling completion receipts", sender, recipient,
+            defer=True, refs=refs, producer_binding=producer)
+        bindings = [{"duty_id": item["duty_id"], "jobs": jobs,
+            "attempt_id": item["attempt_id"], "carrier": "codex-native-queue",
+            "recipient_sid": recipient["session_id"],
+            "storage_recipient": item["storage_recipient"],
+            "delivery_id": item["delivery_id"], "claim_owner": item["claim_owner"],
+            "receipt_digest": item["receipt_digest"]} for item in notices]
+        peer_message.bind_dispatch_notice(ref, bindings)
+        pending = peer_message._read_pending(ref)
+        encoded = json.dumps(pending, ensure_ascii=False).encode("utf-8")
+        self.assertEqual(len(pending["dispatch_notices"]), 24)
+        self.assertLessEqual(len(encoded), 65536)
+        altered = dict(pending["dispatch_notices"][0], duty_id="registered-batch-" + "f" * 32)
+        peer_message._save_pending(dict(pending,
+            dispatch_notices=[altered, *pending["dispatch_notices"][1:]]))
+        with self.assertRaisesRegex(ValueError, "peer-dispatch-binding-invalid"):
+            peer_message._read_pending(ref)
+
     def test_runtime_completion_uses_registered_binding_and_the_exact_receive_path(self):
         recipient = {"harness": "codex", "session_id": "runtime-recipient"}
         sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}

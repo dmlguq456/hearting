@@ -68,6 +68,7 @@ REGISTRY_DEPTH1_START = {
 }
 SUCCESS_NOTIFICATION = "\x1b]9;Hearting dispatch completed\x07"
 CLAIM_LEASE_SECONDS = 30.0
+HOLD_MAX_SECONDS = 60.0  # longest wait between checks while a sibling batch is incomplete
 # How long a terminal, delivery-owing row may wait for its pending-delivery
 # record to materialize before this carrier gives up silently. Trigger 1 can
 # lag the row close: an owner's supervisor closes its row while still alive,
@@ -1209,6 +1210,15 @@ class ClaimWin:
     recipient_key: str
     delivery_id: str
     root: Path
+    # Every member this claim still owns (a ready success batch is claimed as
+    # one unit); empty for the legacy single-record win.
+    members: tuple[tuple[str, dict], ...] = ()
+
+
+@dataclass(frozen=True)
+class ClaimHeld:
+    """The sibling batch is not complete yet. Nothing was claimed or settled:
+    the record stays pending and this carrier keeps waiting."""
 
 
 def _delivery_owing_row(launch: Launch) -> dict[str, str] | None:
@@ -1229,13 +1239,15 @@ def _delivery_owing_row(launch: Launch) -> dict[str, str] | None:
     return row.metadata
 
 
-def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | None:
+def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | ClaimHeld | None:
     """P3 claim gate. Never creates a record (§4.4 -- carrier 1 only claims
-    what trigger 1/2 already materialized); returns the winning claim on
-    success, or ``None`` on any refusal -- claim lost, record already
-    acked/claimed, record not yet materialized, or the incarnation binding
-    does not match. Every ``None`` path is a silent, zero-notice exit-0 per
-    SD-97 (no re-delivery)."""
+    what trigger 1/2 already materialized); returns the winning claim, a
+    ``ClaimHeld`` while the record's sibling success batch is incomplete, or
+    ``None`` on any other refusal -- claim lost, record already acked/claimed,
+    record not yet materialized, or the incarnation binding does not match.
+    Every ``None`` path is a silent, zero-notice exit-0 per SD-97 (no
+    re-delivery). A ready batch is claimed whole, so one carrier wakes the
+    parent for all of its members."""
 
     if not _incarnation_binding_matches(metadata):
         return None
@@ -1246,20 +1258,29 @@ def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | N
     root = launch.jobs.resolve(strict=False).parent
     claim_owner = f"claude-async-rewake:{os.getpid()}:{time.monotonic_ns()}"
     try:
-        record = pending_delivery.claim(
+        records = pending_delivery.claim_ready_batch(
             root,
             recipient_key,
             delivery_id,
             claim_owner=claim_owner,
             lease_seconds=CLAIM_LEASE_SECONDS,
+            jobs=launch.jobs,
             require_generation_proof=False,
         )
-    except pending_delivery.PendingDeliveryError:
+    except pending_delivery.PendingDeliveryError as exc:
+        if exc.detail == "batch-hold":
+            return ClaimHeld()
         return None
     from dispatch_notice_state import keep_claim
-    if not keep_claim(root, recipient_key, delivery_id, record, claim_owner, jobs=launch.jobs):
+    kept = [
+        (record["delivery_id"], record) for record in records
+        if keep_claim(root, recipient_key, record["delivery_id"], record, claim_owner, jobs=launch.jobs)
+    ]
+    if not kept:
         return None
-    return ClaimWin(claim_owner, recipient_key, delivery_id, root)
+    if len(records) == 1:
+        return ClaimWin(claim_owner, recipient_key, delivery_id, root)
+    return ClaimWin(claim_owner, recipient_key, kept[0][0], root, tuple(kept))
 
 
 def _record_missing(launch: Launch, metadata: dict[str, str]) -> bool:
@@ -1630,8 +1651,43 @@ def main() -> int:
     return _observe_carrier(launch, claim, payload)
 
 
+def _announce_gate(launch: Launch, claim: ArmClaim, observation: dict[str, Any]) -> int | None:
+    """Spend this process's one wake on the gate this owner raised; ``None``
+    when another carrier beat us to every gate record."""
+
+    announced: list[str] = []
+    supervision_claims: list[tuple[Path, str, str, str]] = []
+    announced_records: list[dict] = []
+    notices = _gate_notices(
+        launch, attempt_only=True, settle="sent-ambiguous", announced=announced,
+        supervision_claims=supervision_claims,
+        announced_records=announced_records,
+    )
+    if not notices:
+        return None
+    observation.update(wait_state="gate", reason="human-gate-open")
+    code = emit_receipt("attention", gate_wake_message(
+        launch, notices, human_gate=any(is_human_gate_record(record)
+                                      for record in announced_records)), block=False)
+    settle_arm(claim, "gate-wake-sent", gate_delivery_id=announced[0])
+    # The native wake immediately runs UserPromptSubmit. Keeping
+    # this exited carrier's 30s lease prevents that synchronous
+    # sweep from consuming the warning, so every Bash call in a
+    # short attention turn refuses to re-arm as `gate-open`.
+    # Return only our supervision claims; the sweep owns the ACK.
+    for state_root, recipient, delivery_id, claim_owner in supervision_claims:
+        try:
+            pending_delivery.release_claim(
+                state_root, recipient, delivery_id, claim_owner=claim_owner
+            )
+        except (pending_delivery.PendingDeliveryError, OSError):
+            pass
+    return code
+
+
 def _run_carrier(launch, claim, payload, observation, holder) -> int:
     root = agent_home()
+    deadline = time.monotonic()
     readiness = root / "utilities" / "dispatch-attempt-ready.py"
     if not readiness.is_file():
         # A helper missing from *this* call's agent home (release rotation, a
@@ -1701,32 +1757,8 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
             # that another carrier beat to the record (nothing left to
             # announce) sleeps one interval and resumes waiting -- never a
             # tight loop (review round 1, B3).
-            announced: list[str] = []
-            supervision_claims: list[tuple[Path, str, str, str]] = []
-            announced_records: list[dict] = []
-            notices = _gate_notices(
-                launch, attempt_only=True, settle="sent-ambiguous", announced=announced,
-                supervision_claims=supervision_claims,
-                announced_records=announced_records,
-            )
-            if notices:
-                observation.update(wait_state="gate", reason="human-gate-open")
-                code = emit_receipt("attention", gate_wake_message(
-                    launch, notices, human_gate=any(is_human_gate_record(record)
-                                                  for record in announced_records)), block=False)
-                settle_arm(claim, "gate-wake-sent", gate_delivery_id=announced[0])
-                # The native wake immediately runs UserPromptSubmit. Keeping
-                # this exited carrier's 30s lease prevents that synchronous
-                # sweep from consuming the warning, so every Bash call in a
-                # short attention turn refuses to re-arm as `gate-open`.
-                # Return only our supervision claims; the sweep owns the ACK.
-                for state_root, recipient, delivery_id, claim_owner in supervision_claims:
-                    try:
-                        pending_delivery.release_claim(
-                            state_root, recipient, delivery_id, claim_owner=claim_owner
-                        )
-                    except (pending_delivery.PendingDeliveryError, OSError):
-                        pass
+            code = _announce_gate(launch, claim, observation)
+            if code is not None:
                 return code
             time.sleep(interval)
         if wait_state not in {"ready", "attention"}:
@@ -1777,6 +1809,26 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
         # terminal notice is claim-gated.
         return _emit_with_gates(launch, claim, state, message, block=False, owner_closed=wait_state == "ready")
     win = _carrier_one_claim(launch, owing)
+    hold_wait = 0.0
+    while isinstance(win, ClaimHeld):
+        # The sibling batch is incomplete: keep the arm and the record, wait
+        # with a growing interval inside the overall cap, and keep the gate
+        # probe alive. A hold never claims, acks, or expires anything.
+        if time.monotonic() >= deadline:
+            observation["reason"] = "batch-hold-timeout"
+            settle_arm(claim, "lapsed")
+            return 0
+        if not _holds_arm(claim) or _handed_away(launch):
+            observation["reason"] = "arm-not-held-or-handed-away"
+            return 0
+        if _open_gate_pending(launch):
+            code = _announce_gate(launch, claim, observation)
+            if code is not None:
+                return code
+        hold_wait = min(HOLD_MAX_SECONDS, max(hold_wait * 2, float(_bounded_number(
+            "AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 1, 300))))
+        time.sleep(min(hold_wait, max(0.0, deadline - time.monotonic())))
+        win = _carrier_one_claim(launch, owing)
     if win is None and _record_missing(launch, owing):
         grace = _bounded_number(
             "AGENT_CLAUDE_REWAKE_RECORD_GRACE_SECONDS", DEFAULT_RECORD_GRACE_SECONDS, 0, 3_600
@@ -1788,29 +1840,59 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
         while win is None and time.monotonic() < until and _record_missing(launch, owing):
             time.sleep(max(0.0, min(step, until - time.monotonic())))
             win = _carrier_one_claim(launch, owing)
-    if win is None:
+    if not isinstance(win, ClaimWin):
         # Another carrier holds (or already acked) the durable record: the
         # completion is delivered by it, so this attempt is finished here --
         # and the recipient's gates are that carrier's (or the sweep's) too.
         observation["reason"] = "completion-claim-unavailable"
         return _ended(claim, 0, terminal=True)
     binding = None
-    try:
-        record = pending_delivery.read(win.root, win.recipient_key, win.delivery_id)
-        if record and record.get("claim_owner") == win.claim_owner:
-            from dispatch_recipient_receipt import receipt_marker
-            binding = receipt_marker(record, win.recipient_key)
-    except (OSError, ValueError, TypeError, pending_delivery.PendingDeliveryError):
-        binding = None
+    if win.members:
+        message = _batch_message(launch, win, message)
+    else:
+        try:
+            record = pending_delivery.read(win.root, win.recipient_key, win.delivery_id)
+            if record and record.get("claim_owner") == win.claim_owner:
+                from dispatch_recipient_receipt import receipt_marker
+                binding = receipt_marker(record, win.recipient_key)
+        except (OSError, ValueError, TypeError, pending_delivery.PendingDeliveryError):
+            binding = None
     exit_code = _emit_with_gates(launch, claim, state, message, block=False,
                                  owner_closed=True, receipt_binding=binding)
-    try:
-        pending_delivery.mark_sent_ambiguous(
-            win.root, win.recipient_key, win.delivery_id, claim_owner=win.claim_owner,
-        )
-    except pending_delivery.PendingDeliveryError:
-        pass
+    for delivery_id in (member_id for member_id, _record in win.members) if win.members else (win.delivery_id,):
+        try:
+            pending_delivery.mark_sent_ambiguous(
+                win.root, win.recipient_key, delivery_id, claim_owner=win.claim_owner,
+            )
+        except pending_delivery.PendingDeliveryError:
+            pass
     return exit_code
+
+
+def _batch_message(launch: Launch, win: ClaimWin, message: str) -> str:
+    """One wake for a whole ready batch: each kept member's own completion
+    receipt line plus its binding marker. The caller's `message` is the
+    receipt of this launch's own attempt."""
+
+    from dispatch_recipient_receipt import receipt_marker
+    root = agent_home()
+    lines: list[str] = []
+    for _delivery_id, record in win.members:
+        attempts = record.get("attempt_ids") or []
+        text = message if launch.attempt_id in attempts else ""
+        if not text and len(attempts) == 1:
+            try:
+                text = classified_receipt(replace(launch, attempt_id=attempts[0]), "ready", "batch-member", root)[1]
+            except (DispatchContractError, JoinContractError, OSError, ValueError):
+                text = ""
+        if not text:
+            text = _bounded_receipt_text(record)
+        try:
+            text += "\n" + receipt_marker(record, win.recipient_key)
+        except (KeyError, TypeError, ValueError, pending_delivery.PendingDeliveryError):
+            pass
+        lines.append(text)
+    return "\n".join(lines)
 
 
 def _emit_with_gates(

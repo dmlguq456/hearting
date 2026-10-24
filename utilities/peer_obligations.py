@@ -810,11 +810,32 @@ def _registered_delivery_bindings(message, roots=None, *, received_only=False,
         return
     if message.get("state") not in {"pending", "queued", "unverified", "received"}:
         return
+    many = message.get("dispatch_notices")
+    if many is not None:
+        if (not isinstance(many, list) or not 1 < len(many) <= 24
+                or message.get("dispatch_notice") is not None
+                or any(not isinstance(item, dict) for item in many)
+                or len({item.get("delivery_id") for item in many}) != len(many)):
+            return
+        for binding in many:
+            member = {key: value for key, value in message.items()
+                      if key not in {"dispatch_notice", "dispatch_notices"}}
+            member["_dispatch_notice_batch"] = many
+            yield from _registered_delivery_bindings(
+                {**member, "dispatch_notice": binding}, roots,
+                received_only=received_only,
+                require_current_recipient=require_current_recipient,
+                read_context=read_context)
+        return
     binding = message.get("dispatch_notice") or {}
     expected_binding = {"duty_id", "jobs", "attempt_id", "carrier", "recipient_sid",
                         "storage_recipient", "delivery_id", "claim_owner"}
-    if (not isinstance(binding, dict) or set(binding) != expected_binding
+    if (not isinstance(binding, dict) or set(binding) not in (
+                expected_binding, expected_binding | {"receipt_digest"})
             or binding.get("duty_id") not in (message.get("refs") or [])
+            or "_dispatch_notice_batch" in message and (
+                binding.get("attempt_id") not in (message.get("refs") or [])
+                or binding.get("delivery_id") not in (message.get("refs") or []))
             or not isinstance(message.get("ref"), str)
             or not re.fullmatch(r"[0-9a-f]{32}", message["ref"])):
         return
@@ -840,7 +861,10 @@ def _registered_delivery_bindings(message, roots=None, *, received_only=False,
             or intent.get("carrier") != binding.get("carrier")
             or (intent.get("notice_delivery_id")
                 and intent["notice_delivery_id"] != binding.get("delivery_id"))
-            or binding.get("claim_owner") != "retained-rewake:" + binding["duty_id"]):
+            or binding.get("claim_owner") not in {
+                "retained-rewake:" + item.get("duty_id", "")
+                for item in message.get("_dispatch_notice_batch", [binding])
+                if isinstance(item, dict)}):
         return
     try:
         row = (current_attempt_row(jobs, binding["attempt_id"]) if read_context is None else
@@ -853,6 +877,9 @@ def _registered_delivery_bindings(message, roots=None, *, received_only=False,
                 or record.get("recipient_digest") != pending.recipient_digest(storage)
                 or row.metadata.get("parent_sid") != storage
                 or row.metadata.get("parent_completion_delivery") != binding.get("carrier")):
+            return
+        if (binding.get("receipt_digest") is not None
+                and binding.get("receipt_digest") != record.get("receipt_digest")):
             return
         producer = message.get("producer_binding")
         sender = message.get("from") or {}
@@ -867,7 +894,21 @@ def _registered_delivery_bindings(message, roots=None, *, received_only=False,
                 "route_id": str(row.metadata.get("route_id") or ""),
                 "route_node": str(row.metadata.get("route_node") or ""),
             }
-            if (producer != expected or sender.get("session_id") not in (None, "")
+            producer_matches = producer == expected
+            producer_notices = (producer or {}).get("dispatch_notices") if isinstance(producer, dict) else None
+            if producer_notices is not None:
+                producer_matches = (
+                    isinstance(producer_notices, list)
+                    and producer.get("schema") == expected["schema"]
+                    and producer.get("jobs") == str(jobs)
+                    and producer.get("recipient") == expected["recipient"]
+                    and any(item == {"duty_id": duty["id"], "attempt_id": row.attempt_id,
+                                    "delivery_id": delivery_id,
+                                    "storage_recipient": storage,
+                                    "receipt_digest": record.get("receipt_digest"),
+                                    "claim_owner": binding["claim_owner"]}
+                            for item in producer_notices))
+            if (not producer_matches or sender.get("session_id") not in (None, "")
                     or sender.get("name") != "Hearting runtime"
                     or not {duty["id"], row.attempt_id, delivery_id}.issubset(
                         set(message.get("refs") or []))):
@@ -903,11 +944,15 @@ def _registered_delivery_bindings(message, roots=None, *, received_only=False,
 
 
 def registered_delivery_settled(message, *, roots=None, read_context=None):
-    """An exact historical recipient receipt settles the immutable result record."""
-    return any(record["state"] in {"acked", "rejected", "expired"}
-               for _store, _duty, _row, record, _root, _storage, _delivery_id
-               in _registered_delivery_bindings(message, roots,
-                   require_current_recipient=False, read_context=read_context))
+    """Settle only when every exact binding in a retained delivery is terminal."""
+    bindings = list(_registered_delivery_bindings(
+        message, roots, require_current_recipient=False, read_context=read_context))
+    declared = message.get("dispatch_notices")
+    if declared is not None and (not isinstance(declared, list) or len(bindings) != len(declared)):
+        return False
+    return bool(bindings) and all(record["state"] in {"acked", "rejected", "expired"}
+                                  for _store, _duty, _row, record, _root, _storage, _delivery_id
+                                  in bindings)
 
 
 def received_registered_ack(jobs, record, recipient_sid) -> bool:

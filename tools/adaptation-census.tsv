@@ -32,6 +32,7 @@ shared-utility-deferred	conversation_reader.py
 shared-utility-deferred	dispatch-readiness.py
 shared-utility-deferred	dispatch_attempt_policy.py
 shared-utility-deferred	dispatch_capacity_evidence.py
+shared-utility-deferred	dispatch_delivery_batch_fixture.py
 shared-utility-deferred	dispatch_notice_receipt.py
 shared-utility-deferred	dispatch_notice_state.py
 shared-utility-deferred	dispatch_owner_input.py

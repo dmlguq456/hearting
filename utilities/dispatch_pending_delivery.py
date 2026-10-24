@@ -1116,6 +1116,9 @@ def claim(
     jobs: Path | str | None = None,
     retry_context: str | None = None,
     retry_base_delay_seconds: float = 0.05,
+    batch_owner: str | None = None,
+    _batch_snapshot: dict | None = None,
+    _batch_snapshot_resolved: bool = False,
 ) -> dict:
     """CAS ``expected_state -> claimed`` under one flock (SD-111 §10.2:
     read-check-write inside one lock; ``os.replace`` atomicity alone is not
@@ -1128,6 +1131,18 @@ def claim(
 
     if lease_seconds <= 0:
         raise PendingDeliveryError("pending-delivery-identity-conflict", "lease_seconds")
+    batch_snapshot = _batch_snapshot
+    snapshot_record = None
+    if jobs is not None:
+        try:
+            snapshot_record = read(root, recipient_key, delivery_id)
+            if snapshot_record is not None and not _batch_snapshot_resolved:
+                from dispatch_notice_state import resolve_delivery_batch
+                batch_snapshot = resolve_delivery_batch(
+                    Path(jobs), snapshot_record, recipient_key=recipient_key,
+                    delivery_root=root)
+        except Exception:
+            batch_snapshot = None
     retry_context_digest = _retry_context_digest(retry_context)
     retry_base_ns = _delay_ns(retry_base_delay_seconds)
     path = record_path(root, recipient_key, delivery_id)
@@ -1154,6 +1169,34 @@ def claim(
             raise PendingDeliveryError(
                 "pending-delivery-claim-refused", f"state={value['state']}"
             )
+        batch = batch_snapshot
+        if batch is not None:
+            signature_matches = False
+            try:
+                info = Path(batch["registry_path"]).stat()
+                signature_matches = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns) == batch["registry_signature"]
+            except (OSError, KeyError, TypeError):
+                pass
+            identity = (value.get("delivery_id"), value.get("receipt_digest"),
+                        tuple(value.get("attempt_ids") or ()), value.get("recipient_digest"))
+            if (not signature_matches or identity != batch.get("seed_identity")
+                    or snapshot_record is None
+                    or snapshot_record.get("delivery_id") != delivery_id):
+                batch = None
+        if batch and len(batch["delivery_ids"]) > 1:
+            if batch["held"]:
+                raise PendingDeliveryError("pending-delivery-claim-refused", "batch-hold")
+            leader_id = batch["delivery_ids"][0]
+            if not batch_owner:
+                raise PendingDeliveryError("pending-delivery-claim-refused", "batch-group-claim-required")
+            if delivery_id != leader_id:
+                leader = read(root, recipient_key, leader_id)
+                if (leader is None or leader.get("state") != "claimed"
+                        or leader.get("claim_owner") != batch_owner
+                        or leader.get("claim_deadline_ns", 0) <= time.monotonic_ns()):
+                    raise PendingDeliveryError("pending-delivery-claim-refused", "batch-hold")
+        elif batch and batch["held"]:
+            raise PendingDeliveryError("pending-delivery-claim-refused", "batch-hold")
         retry = _read_courier_retry_unlocked(path, value)
         now_wall_ns = time.time_ns()
         if retry is None:
@@ -1203,6 +1246,93 @@ def claim(
         updated["last_attempt_at_ns"] = now
         _write_unlocked(path, updated)
         return _public_record(updated)
+
+
+def claim_ready_batch(root: Path, recipient_key: str, delivery_id: str, *,
+                      claim_owner: str, lease_seconds: float, jobs: Path | str,
+                      require_generation_proof: bool = False,
+                      retry_context: str | None = None) -> list[dict]:
+    """Claim a whole ready success batch, releasing every acquired lease on failure."""
+    seed = read(root, recipient_key, delivery_id)
+    if seed is None:
+        raise PendingDeliveryError("pending-delivery-identity-conflict", "record-missing")
+    if jobs is None:
+        return [claim(root, recipient_key, delivery_id, claim_owner=claim_owner,
+                      lease_seconds=lease_seconds,
+                      require_generation_proof=require_generation_proof,
+                      jobs=None, retry_context=retry_context)]
+    from dispatch_notice_state import resolve_delivery_batch
+    batch = resolve_delivery_batch(Path(jobs), seed, recipient_key=recipient_key,
+                                   delivery_root=root)
+    return _claim_ready_batch_snapshot(
+        root, recipient_key, delivery_id, claim_owner=claim_owner,
+        lease_seconds=lease_seconds, jobs=jobs,
+        require_generation_proof=require_generation_proof,
+        retry_context=retry_context, seed=seed, batch=batch)
+
+
+def _claim_ready_batch_snapshot(root: Path, recipient_key: str, delivery_id: str, *,
+                                claim_owner: str, lease_seconds: float,
+                                jobs: Path | str, require_generation_proof: bool = False,
+                                retry_context: str | None = None,
+                                seed: dict | None = None,
+                                batch: dict | None = None) -> list[dict]:
+    """Claim with a resolver snapshot already taken by the carrier or public wrapper."""
+    seed = seed if seed is not None else read(root, recipient_key, delivery_id)
+    if seed is None:
+        raise PendingDeliveryError("pending-delivery-identity-conflict", "record-missing")
+    if batch is None or len(batch["delivery_ids"]) <= 1:
+        return [claim(root, recipient_key, delivery_id, claim_owner=claim_owner,
+                      lease_seconds=lease_seconds,
+                      require_generation_proof=require_generation_proof,
+                      jobs=jobs, retry_context=retry_context,
+                      _batch_snapshot=_member_batch_snapshot(batch, seed),
+                      _batch_snapshot_resolved=True)]
+    if batch["held"]:
+        raise PendingDeliveryError("pending-delivery-claim-refused", "batch-hold")
+    ids = batch["delivery_ids"]
+    if delivery_id not in ids:
+        raise PendingDeliveryError("pending-delivery-identity-conflict", "batch-seed-missing")
+    acquired = []
+    expected_claims = 0
+    try:
+        for member_id in ids:
+            member = read(root, recipient_key, member_id)
+            if member is None:
+                raise PendingDeliveryError("pending-delivery-claim-refused", "batch-member-unavailable")
+            if member.get("state") in {"acked", "expired", "rejected"}:
+                continue
+            if member.get("state") not in {"pending", "claimed", "sent-ambiguous"}:
+                raise PendingDeliveryError("pending-delivery-claim-refused", "batch-member-unavailable")
+            expected_claims += 1
+            if member["state"] in {"claimed", "sent-ambiguous"}:
+                if member.get("claim_deadline_ns", 0) > time.monotonic_ns():
+                    raise PendingDeliveryError("pending-delivery-claim-refused", "batch-owned-elsewhere")
+                reclaim(root, recipient_key, member_id, now_ns=time.monotonic_ns())
+            claimed = claim(root, recipient_key, member_id, claim_owner=claim_owner,
+                            lease_seconds=lease_seconds,
+                            require_generation_proof=require_generation_proof,
+                            jobs=jobs, retry_context=retry_context,
+                            batch_owner=claim_owner,
+                            _batch_snapshot=_member_batch_snapshot(batch, member),
+                            _batch_snapshot_resolved=True)
+            acquired.append(claimed)
+        if len(acquired) != expected_claims:
+            raise PendingDeliveryError("pending-delivery-claim-refused", "batch-partial")
+        return acquired
+    except Exception:
+        for member in acquired:
+            with suppress(PendingDeliveryError, OSError):
+                release_claim(root, recipient_key, member["delivery_id"], claim_owner=claim_owner)
+        raise
+
+
+def _member_batch_snapshot(batch: dict | None, record: dict) -> dict | None:
+    if batch is None:
+        return None
+    return dict(batch, seed_identity=(record.get("delivery_id"), record.get("receipt_digest"),
+                                      tuple(record.get("attempt_ids") or ()),
+                                      record.get("recipient_digest")))
 
 
 def mark_sent_ambiguous(

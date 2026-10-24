@@ -234,7 +234,7 @@ followup_flat=$(tr '\n' ' ' < "$ROOT/utilities/dispatch_completion_join.py" | \
   sed -E 's/"[[:space:]]*"/ /g' | tr -s ' ' | tr 'A-Z' 'a-z')
 has_original_task_followthrough() {
   case "$1" in
-    *'continue and complete the original user task itself'*'preserving every explicit content and output-format requirement'*'this receipt supplements the task'*'does not replace it with a receipt-only response'*) return 0 ;;
+    *'original request/format apply'*'review result; do approved follow-through or existing continuation'*'first close:'*"receipt/ack isn't execution"*) return 0 ;;
     *) return 1 ;;
   esac
 }

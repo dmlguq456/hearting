@@ -9936,6 +9936,109 @@ class ClosedParentNativeHandoverTest(_TmpRootMixin, unittest.TestCase):
             self.assertFalse(peer_steward.peer_obligations.acknowledge_registered_delivery(
                 peer_steward.peer_message._read_pending(old_ref), roots=[self.jobs_path.parent]))
             self.assertEqual(handover.effective_parent(metadata, self.jobs_path), "codex-successor")
+    def test_registered_peer_carrier_emits_one_24_member_transfer_with_all_receipts(self):
+        import dispatch_pending_delivery as pending
+        import dispatch_session_sweep as sweep
+
+        carrier, recipient_sid = "codex-native-queue", "codex-batch-recipient"
+        jobs = self.jobs_path
+        rows, duties, records = {}, [], {}
+        for index in range(24):
+            suffix = f"{index:032x}"
+            attempt_id, delivery_id = "att-peer-batch-" + suffix, "delivery-peer-batch-" + suffix
+            metadata = {"attempt_schema_version": "2", "dispatch_depth": "1",
+                "worker_type": "owner", "attempt_id": attempt_id,
+                "parent_sid": "codex-storage-recipient", "parent_harness": "codex",
+                "parent_completion_delivery": carrier, "delivery_intent": "1",
+                "delivery_id": delivery_id, "delivery_receipt_digest": f"{index + 1:064x}",
+                "delivery_row_revision": "revision-" + suffix, "route_id": "rt-peer-batch",
+                "route_node": "execute", "parent_attempt_id": "att-owner-batch"}
+            row = SimpleNamespace(attempt_id=attempt_id, status="done", metadata=metadata)
+            rows[attempt_id] = row
+            identity = {"jobs": str(jobs.resolve()), "attempt_id": attempt_id,
+                "session_id": recipient_sid, "harness": "codex", "server": "default"}
+            duty_id = peer_steward.peer_obligations.stable_duty_id("registered-batch", identity)
+            duties.append(self.store.create(duty_id, "registered-batch", identity,
+                                             {"carrier": carrier}))
+            records[delivery_id] = {"state": "pending", "delivery_id": delivery_id,
+                "recipient_kind": carrier, "attempt_ids": [attempt_id],
+                "receipt_digest": metadata["delivery_receipt_digest"],
+                "row_revisions": {attempt_id: metadata["delivery_row_revision"]},
+                "receipt": {"classification": "success", "attempt_id": attempt_id}}
+        self.write_jobs()
+        claimed = [dict(value, state="claimed", claim_owner="retained-rewake:" + duties[0]["id"])
+                   for value in records.values()]
+        sends = []
+
+        def render(groups):
+            _root, members = groups[0]
+            return "\n".join("HEARTING_RECEIPT_V1 " + json.dumps(member[sweep.IDENTITY_KEY])
+                + " " + member["delivery_id"] + " " + json.dumps(member["receipt"])
+                for member in members)
+
+        def courier(args, expected_recipient, on_prepared, producer_binding=None):
+            body = Path(args.body_file).read_text()
+            _text, ref = peer_steward.peer_message.prepare_peer_message(body,
+                {"harness": "runtime", "session_id": None, "name": "Hearting runtime"},
+                {"harness": expected_recipient[0], "session_id": expected_recipient[1]},
+                defer=True, refs=args.ref, producer_binding=producer_binding)
+            on_prepared(ref)
+            sends.append((body, ref, producer_binding))
+            return 3
+
+        agents = {"result": {"agents": [{"agent": "codex", "pane_id": "w1:pBatch",
+            "agent_session": {"value": recipient_sid}}]}}
+        row_for = lambda _jobs, attempt_id, **_kwargs: rows.get(attempt_id)
+        record_for = lambda _root, _storage, delivery_id: records.get(delivery_id)
+        with mock.patch("dispatch_completion_join.current_attempt_row", side_effect=row_for), \
+             mock.patch("dispatch_completion_join.materialize_after_terminal_close"), \
+             mock.patch("dispatch_seat_handover.effective_parent", return_value=recipient_sid), \
+             mock.patch("dispatch_seat_handover.effective_parent_harness", return_value="codex"), \
+             mock.patch.object(pending, "read", side_effect=record_for), \
+             mock.patch.object(pending, "claim_ready_batch", return_value=claimed) as claim_batch, \
+             mock.patch("dispatch_notice_state.keep_claim", return_value=True), \
+             mock.patch.object(pending, "received_ack_identity", side_effect=lambda rec, _storage, _did:
+                 {"schema": "HEARTING_RECEIPT_V1", "delivery_id": rec["delivery_id"],
+                  "receipt_digest": rec["receipt_digest"]}), \
+             mock.patch.object(pending, "mark_sent_ambiguous"), \
+             mock.patch("dispatch_supervision.continue_for_parent", return_value=None), \
+             mock.patch.object(sweep, "delivery_context", side_effect=render), \
+             mock.patch.object(peer_steward.subprocess, "run", return_value=SimpleNamespace(
+                 stdout=json.dumps(agents), returncode=0)), \
+             mock.patch.object(peer_steward, "_resolve_target", return_value=("codex", recipient_sid)), \
+             mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
+            peer_steward._resume_registered_obligation(self.store.get(duties[0]["id"]), self.store)
+            self.assertEqual(len(sends), 1)
+            self.assertTrue(all(self.store.get(member_duty["id"])["observation"]["transfer_ref"]
+                                == sends[0][1] for member_duty in duties[:24]))
+
+            for member_duty in duties:
+                self.store.update(member_duty["id"], observation={})
+            claim_batch.side_effect = pending.PendingDeliveryError(
+                "pending-delivery-claim-refused", "batch-hold")
+            peer_steward._resume_registered_obligation(self.store.get(duties[0]["id"]), self.store)
+            self.assertEqual(len(sends), 1)
+            self.assertTrue(all(record["state"] == "pending" for record in records.values()))
+
+            already_received = next(iter(records))
+            records[already_received]["state"] = "acked"
+            already_index = list(records).index(already_received)
+            with mock.patch.object(peer_steward, "_resume_native_receiving_turn", return_value=False):
+                peer_steward._resume_registered_obligation(
+                    self.store.get(duties[already_index]["id"]), self.store)
+            self.assertEqual(len(sends), 1)
+            self.assertEqual(records[already_received]["state"], "acked")
+
+
+        self.assertEqual(claim_batch.call_count, 2)
+        self.assertEqual(len(sends), 1)
+        body, ref, producer = sends[0]
+        self.assertEqual(sum(line.startswith("HEARTING_RECEIPT_V1 ")
+                             for line in body.splitlines()), 24)
+        self.assertEqual(len(producer["dispatch_notices"]), 24)
+        self.assertLessEqual(len(peer_steward.peer_message._read_pending(ref)["text"].encode("utf-8")), 65536)
+        print(f"batch24 emissions={len(sends)} wakes={len(sends)} chars={len(body)}")
+
     def test_unrelated_closed_missing_sidecar_does_not_become_a_global_requirement(self):
         unrelated = {**self.meta, "attempt_id": "att-unrelated", "parent_sid": "ses_unrelated",
                      "owner_route_id": "rt-closed", "owner_route_hash": "sha256:closed"}

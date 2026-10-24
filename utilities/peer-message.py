@@ -194,7 +194,7 @@ def _valid_runtime_producer_binding(binding, sender, recipient=None, refs=None):
     """Validate the existing registered completion lineage carried by a runtime sender."""
     keys = {"schema", "duty_id", "jobs", "attempt_id", "carrier", "delivery_id",
             "receipt_digest", "recipient", "route_id", "route_node"}
-    if (not isinstance(binding, dict) or set(binding) != keys
+    if (not isinstance(binding, dict) or set(binding) not in (keys, keys | {"dispatch_notices"})
             or binding.get("schema") != _RUNTIME_PRODUCER_SCHEMA
             or not isinstance(sender, dict) or sender.get("harness") != "runtime"
             or sender.get("session_id") not in (None, "")
@@ -221,6 +221,31 @@ def _valid_runtime_producer_binding(binding, sender, recipient=None, refs=None):
     if refs is not None and (not isinstance(refs, (list, tuple))
                              or duty_id not in refs or attempt not in refs or delivery not in refs):
         return False
+    notices = binding.get("dispatch_notices")
+    if notices is not None:
+        if (not isinstance(notices, list) or not 1 < len(notices) <= 24
+                or any(not isinstance(item, dict) for item in notices)
+                or len({item.get("delivery_id") for item in notices}) != len(notices)):
+            return False
+        notice_duties = {item.get("duty_id") for item in notices}
+        for item in notices:
+            required = {"duty_id", "attempt_id", "delivery_id", "storage_recipient",
+                        "receipt_digest", "claim_owner"}
+            if (set(item) != required
+                    or any(not isinstance(item.get(key), str) or not item[key]
+                           for key in required)
+                    or not re.fullmatch(r"registered-batch-[0-9a-f]{32}", item["duty_id"])
+                    or not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}", item["receipt_digest"])
+                    or item["claim_owner"] not in {
+                        "retained-rewake:" + member_duty for member_duty in notice_duties}
+                    or refs is not None and any(value not in refs for value in (
+                        item["duty_id"], item["attempt_id"], item["delivery_id"]))):
+                return False
+        if (binding["duty_id"] != notices[0]["duty_id"]
+                or binding["attempt_id"] != notices[0]["attempt_id"]
+                or binding["delivery_id"] != notices[0]["delivery_id"]
+                or binding["receipt_digest"] != notices[0]["receipt_digest"]):
+            return False
     return True
 
 
@@ -985,19 +1010,37 @@ def _read_pending(ref, *, roots=None, state_root=None):
                 raise ValueError("peer-pending-source-invalid")
         if hashlib.sha256(source.encode("utf-8")).hexdigest() != row.get("source_sha256"):
             raise ValueError("peer-pending-source-invalid")
-    binding = row.get("dispatch_notice")
-    if binding is not None:
+    def valid_dispatch_binding(binding, batch_duties=None):
         keys = {"duty_id", "jobs", "attempt_id", "carrier", "recipient_sid",
                 "storage_recipient", "delivery_id", "claim_owner"}
-        if (not isinstance(binding, dict) or set(binding) != keys
-                or any(not isinstance(value, str) or not value or len(value) > 4096 or "\0" in value
-                       for value in binding.values())
-                or not binding["duty_id"].startswith("registered-batch-")
+        if not isinstance(binding, dict) or set(binding) not in (keys, keys | {"receipt_digest"}):
+            return False
+        is_list_member = batch_duties is not None
+        if (any(not isinstance(value, str) or not value or len(value) > 4096 or "\0" in value
+                for value in binding.values())
+                or not (re.fullmatch(r"registered-batch-[0-9a-f]{32}", binding["duty_id"])
+                        if is_list_member else binding["duty_id"].startswith("registered-batch-"))
                 or binding["duty_id"] not in row["refs"]
+                or is_list_member and (binding["attempt_id"] not in row["refs"]
+                                       or binding["delivery_id"] not in row["refs"])
                 or binding["recipient_sid"] != row["to"].get("session_id")
-                or binding["claim_owner"] != "retained-rewake:" + binding["duty_id"]
+                or binding["claim_owner"] not in {
+                    "retained-rewake:" + duty_id for duty_id in (batch_duties or {binding["duty_id"]})}
                 or not Path(binding["jobs"]).is_absolute()):
-            raise ValueError("peer-dispatch-binding-invalid")
+            return False
+        return ("receipt_digest" not in binding or bool(re.fullmatch(
+            r"(?:sha256:)?[0-9a-f]{64}", binding["receipt_digest"])))
+
+    binding = row.get("dispatch_notice")
+    many = row.get("dispatch_notices")
+    if (binding is not None and many is not None
+            or binding is not None and not valid_dispatch_binding(binding)
+                or many is not None and (not isinstance(many, list) or not 1 < len(many) <= 24
+                or len({item.get("delivery_id") for item in many if isinstance(item, dict)}) != len(many)
+                or any(not valid_dispatch_binding(item, {
+                    value.get("duty_id") for value in many if isinstance(value, dict)})
+                    for item in many))):
+        raise ValueError("peer-dispatch-binding-invalid")
     # Old writers marked an unsent shell notification unverified solely because
     # its sender was absent. Keep the immutable endpoints/body and use the normal
     # claim transition. Queued, attempted or ambiguous sends are never reset.
@@ -1033,9 +1076,41 @@ def bind_dispatch_notice(ref, binding):
     """Keep each transfer's exact notice binding through later gate/final transfers."""
     with pending_lock(ref):
         row = _read_pending(ref)
-        if not row or (row.get("dispatch_notice") and row["dispatch_notice"] != binding):
+        if not row:
             raise ValueError("peer-dispatch-binding-conflict")
-        _save_pending(dict(row, dispatch_notice=dict(binding)))
+        additions = binding if isinstance(binding, list) else [binding]
+        if not 1 <= len(additions) <= 24:
+            raise ValueError("peer-dispatch-binding-invalid")
+        existing = row.get("dispatch_notices")
+        if existing is None:
+            existing = ([row["dispatch_notice"]] if row.get("dispatch_notice") else [])
+        merged = list(existing)
+        by_delivery = {item.get("delivery_id"): item for item in merged if isinstance(item, dict)}
+        for item in additions:
+            delivery_id = item.get("delivery_id") if isinstance(item, dict) else None
+            if delivery_id in by_delivery:
+                prior = by_delivery[delivery_id]
+                common = set(prior) & set(item) if isinstance(item, dict) else set()
+                if (not isinstance(item, dict)
+                        or any(prior.get(key) != item.get(key) for key in common)
+                        or (prior.get("receipt_digest") and item.get("receipt_digest")
+                            and prior["receipt_digest"] != item["receipt_digest"])):
+                    raise ValueError("peer-dispatch-binding-conflict")
+                prior_index = merged.index(prior)
+                merged[prior_index] = dict(prior, **item)
+                by_delivery[delivery_id] = merged[prior_index]
+                continue
+            merged.append(dict(item) if isinstance(item, dict) else item)
+            by_delivery[delivery_id] = item
+        if len(merged) > 24:
+            raise ValueError("peer-dispatch-binding-conflict")
+        update = {key: value for key, value in row.items()
+                  if key not in {"dispatch_notice", "dispatch_notices"}}
+        if len(merged) == 1 and not row.get("dispatch_notices") and not isinstance(binding, list):
+            update["dispatch_notice"] = merged[0]
+        elif merged:
+            update["dispatch_notices"] = merged
+        _save_pending(dict(update, ref=ref))
 
 
 def _quarantine_pending(path, expected):

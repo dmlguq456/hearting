@@ -401,6 +401,47 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
             second, _ = SWEEP.sweep_deliver(self.root, "claude-parent-runtime", "sess-owner")
         self.assertEqual([record["delivery_id"] for record in second], [left])
 
+    def test_near_budget_24_member_batch_releases_whole_then_next_sweep_delivers(self):
+        from types import SimpleNamespace
+        self.root.mkdir(parents=True, exist_ok=True)
+        jobs = self.root / "jobs.log"
+        jobs.touch()
+        ids = ["delivery-" + f"{index:032x}" for index in range(24)]
+        for index, delivery_id in enumerate(ids):
+            attempt = f"att-batch-{index:02d}"
+            self._seed(delivery_id=delivery_id, attempt_ids=[attempt],
+                       row_revisions={attempt: f"revision-{index}"})
+
+        def batch_for(_jobs, record, **_kwargs):
+            info = jobs.stat()
+            return {"delivery_ids": tuple(ids), "held": False,
+                    "registry_path": str(jobs),
+                    "registry_signature": (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns),
+                    "seed_identity": (record["delivery_id"], record["receipt_digest"],
+                                      tuple(record["attempt_ids"]), record["recipient_digest"])}
+
+        addressed = {**PD.read(self.root, "sess-owner", ids[0]),
+                     SWEEP.STORAGE_KEY: "sess-owner"}
+        def invoke(clock_values):
+            clock = iter(clock_values)
+            with mock.patch.object(SWEEP, "record_jobs", return_value=jobs), \
+                 mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=batch_for), \
+                 mock.patch("dispatch_notice_state.keep_claim", return_value=True), \
+                 mock.patch("dispatch_supervision.continue_for_parent", return_value=None), \
+                 mock.patch.object(SWEEP, "addressed_records", return_value=([addressed], 24)), \
+                 mock.patch.object(SWEEP, "_append_self_instrumentation"), \
+                 mock.patch.object(SWEEP, "time", SimpleNamespace(
+                     monotonic_ns=lambda: next(clock, clock_values[-1]))):
+                return SWEEP.sweep_deliver(self.root, "claude-parent-runtime", "sess-owner")
+
+        first, _ = invoke([0, 0, 0, 7_000_000_000])
+        self.assertEqual(first, [])
+        self.assertTrue(all(PD.read(self.root, "sess-owner", delivery_id)["state"] == "pending"
+                            for delivery_id in ids))
+        second, _ = invoke([0, 0, 0, 1_000_000_000])
+        self.assertEqual(len(second), 24)
+        self.assertEqual({record["delivery_id"] for record in second}, set(ids))
+
     def test_sessionstart_activation_leaves_one_recovery_request_to_hook_finally(self):
         self.root.mkdir(parents=True, exist_ok=True)
         with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
@@ -431,8 +472,13 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         project.mkdir(parents=True)
         transcript = project / "sess-owner.jsonl"
         transcript.write_text(json.dumps({
-            "type": "user", "sessionId": "sess-owner", "summary": "Stop hook feedback",
-            "message": {"content": marker},
+            "type": "user", "sessionId": "sess-owner",
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+            "promptSource": "system", "turnOrigin": "task_notification",
+            "message": {"content": (
+                "<task-notification><task-id>fixture</task-id>"
+                "<summary>Stop hook feedback</summary>" + marker +
+                "</task-notification>")},
         }) + "\n", encoding="utf-8")
         payload = {"hook_event_name": "UserPromptSubmit", "cwd": str(ROOT),
                    "transcript_path": str(transcript)}
@@ -445,6 +491,14 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(output.getvalue(), "")
         exact = PD.read(self.root, "sess-owner", did)
         self.assertEqual((exact["state"], exact["attempts"]), ("acked", 1))
+        replay = io.StringIO()
+        with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
+             mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root,)), \
+             mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(runtime_home)}), \
+             contextlib.redirect_stdout(replay):
+            self.assertEqual(HOOK._process_session(payload, "sess-owner"), 0)
+        self.assertEqual(replay.getvalue(), "")
+        self.assertEqual(PD.read(self.root, "sess-owner", did)["attempts"], 1)
 
     def test_projected_parent_close_completion_is_delivered_with_its_stored_binding(self):
         import dispatch_recipient_receipt as recipient_receipt
@@ -848,7 +902,7 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
         self.assertEqual(payload["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
         self.assertIn("att-0000000000000000000000000000bbbb", context)
         self.assertNotIn("Harvest each attempt", context)
-        self.assertIn("Follow each receipt's required_action", context)
+        self.assertIn("Follow required_action", context)
         state = PD.read(self.root, "sess-owner", "delivery-" + "a" * 32)["state"]
         self.assertEqual(state, "acked")
 
@@ -1283,6 +1337,75 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
     def seed_turn(self, **overrides):
         return self._seed(self.SID, recipient_kind="opencode-turn", **overrides)
 
+    def seed_cycle_batch(self, *, materialize_second=True, member_count=2):
+        from datetime import datetime, timezone
+        from route_identity import route_hash
+        serial = getattr(self, "_batch_serial", 0) + 1
+        self._batch_serial = serial
+        jobs = self.root / "jobs.log"
+        jobs.parent.mkdir(parents=True, exist_ok=True)
+        jobs.touch(exist_ok=True)
+        route_path = self.root / f"batch-route-{serial}.json"
+        route = {"route_id": f"rt-opencode-batch-{serial}",
+                 "parent_cycle_id": f"cycle-opencode-batch-{serial}",
+                 "nodes": [{"id": "frame"}]}
+        route["route_hash"] = route_hash(route)
+        route_path.write_text(json.dumps(route), encoding="utf-8")
+        self._last_batch_route = (serial, route_path, route, jobs)
+        ids = [f"delivery-{serial:08x}{index:024x}" for index in range(member_count)]
+        attempts = [f"att-opencode-{serial}-{index}" for index in range(member_count)]
+        for index, (delivery_id, attempt_id) in enumerate(zip(ids, attempts)):
+            receipt = _receipt(
+                state="ready", parent_attempt_id="att-opencode-parent",
+                job_registry=str(jobs), delivery_classification="success",
+                children=[{"attempt_id": attempt_id, "status": "done", "readiness": "ready",
+                           "required_action": "advance-completed", "delivery_classification": "success"}])
+            if index == 0 or materialize_second:
+                self.seed_turn(delivery_id=delivery_id, attempt_ids=[attempt_id],
+                               parent_attempt_id="att-opencode-parent", route_id=route["route_id"],
+                               route_node="frame", receipt=receipt,
+                               row_revisions={attempt_id: f"revision-{index}"})
+            metadata = {"attempt_id": attempt_id, "dispatch_depth": "1", "registered_worker": "1",
+                        "worker_type": "frame", "parent_sid": self.SID, "delivery_intent": "1",
+                        "delivery_id": delivery_id, "failure_class": "pass", "note": "completed-marker",
+                        "delivery_intent_at_ns": str(time.monotonic_ns()),
+                        "launch_outcome": "reaped-before-publish",
+                        "route_file": str(route_path), "route_id": route["route_id"],
+                        "route_hash": route["route_hash"], "route_node": "frame"}
+            stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            with jobs.open("a", encoding="utf-8") as handle:
+                handle.write(stamp + "\tdone\t/r\t/w\ttask\t" +
+                             ",".join(f"{key}={value}" for key, value in metadata.items()) + "\n")
+        return ids
+
+    def seed_cycle_failure(self):
+        from datetime import datetime, timezone
+        serial, route_path, route, jobs = self._last_batch_route
+        delivery_id = f"delivery-{serial:08x}{99:024x}"
+        attempt_id = f"att-opencode-{serial}-failure"
+        receipt = _receipt(
+            state="attention", parent_attempt_id="att-opencode-parent",
+            job_registry=str(jobs), delivery_classification="attention",
+            children=[{"attempt_id": attempt_id, "status": "done", "readiness": "ready",
+                       "required_action": "inspect-done-failure",
+                       "delivery_classification": "attention"}])
+        self.seed_turn(delivery_id=delivery_id, attempt_ids=[attempt_id],
+                       parent_attempt_id="att-opencode-parent", route_id=route["route_id"],
+                       route_node="frame", receipt=receipt,
+                       row_revisions={attempt_id: "failure-revision"})
+        metadata = {"attempt_id": attempt_id, "dispatch_depth": "1", "registered_worker": "1",
+                    "worker_type": "frame", "parent_sid": self.SID, "delivery_intent": "1",
+                    "delivery_id": delivery_id, "failure_class": "fail", "note": "dead-worker-fail",
+                    "delivery_intent_at_ns": str(time.monotonic_ns()),
+                    "launch_outcome": "reaped-before-publish", "route_file": str(route_path),
+                    "route_id": route["route_id"], "route_hash": route["route_hash"],
+                    "route_node": "frame"}
+        stamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        with jobs.open("a", encoding="utf-8") as handle:
+            handle.write(stamp + "\tdone\t/r\t/w\ttask\t" +
+                         ",".join(f"{key}={value}" for key, value in metadata.items()) + "\n")
+        return delivery_id
+
     def state(self):
         return PD.read(self.root, self.SID, "delivery-" + "a" * 32)["state"]
 
@@ -1325,7 +1448,7 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
         owed = self.cli("deliver")
         self.assertEqual([item["delivery_id"] for item in owed["records"]], ["delivery-" + "a" * 32])
         self.assertIn("att-0000000000000000000000000000bbbb", owed["text"])
-        self.assertIn("Follow each receipt's required_action", owed["text"])
+        self.assertIn("Follow required_action", owed["text"])
         self.assertEqual(self.state(), "claimed")
         self.assertEqual(self.cli("deliver")["records"], [])      # a live claim is not handed out twice
         self.assertEqual(self.cli("release", json.dumps(owed))["count"], 1)
@@ -1333,6 +1456,78 @@ class OpenCodeTurnCarrierTest(IsolatedRootMixin, unittest.TestCase):
         again = self.cli("deliver")
         self.assertEqual(self.cli("ack", json.dumps(again))["count"], 1)
         self.assertEqual(self.state(), "acked")
+
+    def test_opencode_batch_hold_ready_and_already_received_prompt_counts(self):
+        held_ids = self.seed_cycle_batch(materialize_second=False, member_count=24)
+        held = self.run_plugin(self.IDLE_THEN_WAIT)
+        self.assertEqual(held["prompts"], [])
+        self.assertTrue(all(PD.read(self.root, self.SID, did)["state"] == "pending"
+                            for did in held_ids[:1]))
+        failure_id = self.seed_cycle_failure()
+        immediate_failure = self.run_plugin(self.IDLE_THEN_WAIT)
+        self.assertEqual(len(immediate_failure["prompts"]), 1)
+        failure_text = immediate_failure["prompts"][0]["body"]["parts"][0]["text"]
+        self.assertIn(failure_id, failure_text)
+        self.assertNotIn(held_ids[0], failure_text)
+        self.assertEqual(PD.read(self.root, self.SID, failure_id)["state"], "acked")
+        self.assertEqual(PD.read(self.root, self.SID, held_ids[0])["state"], "pending")
+
+        ready_ids = self.seed_cycle_batch(materialize_second=True, member_count=24)
+        ready = self.run_plugin(self.IDLE_THEN_WAIT)
+        self.assertEqual(len(ready["prompts"]), 1, json.dumps(ready["logs"], sort_keys=True))
+        ready_text = ready["prompts"][0]["body"]["parts"][0]["text"]
+        self.assertEqual(ready_text.count("HEARTING_RECEIPT_V1"), 24)
+        print(f"batch24 emissions=1 wakes={len(ready['prompts'])} chars={len(ready_text)}")
+        self.assertTrue(all(PD.read(self.root, self.SID, did)["state"] == "acked"
+                            for did in ready_ids))
+
+        received_ids = self.seed_cycle_batch(materialize_second=True, member_count=24)
+        received_records = []
+        for did in received_ids:
+            claimed = PD.claim(self.root, self.SID, did, claim_owner="prior-opencode",
+                               lease_seconds=30, require_generation_proof=False)
+            received_records.append(PD.mark_sent_ambiguous(
+                self.root, self.SID, did, claim_owner="prior-opencode"))
+        native_body = SWEEP.delivery_context([(self.root, [
+            {**record, SWEEP.STORAGE_KEY: self.SID} for record in received_records])])
+        already_received = self.run_plugin(
+            self.IDLE_THEN_WAIT,
+            native_messages=[{"info": {"sessionID": self.SID, "role": "user"},
+                              "parts": [{"type": "text", "text": native_body}]}])
+        self.assertEqual(already_received["prompts"], [])
+        self.assertTrue(all(PD.read(self.root, self.SID, did)["state"] == "acked"
+                            for did in received_ids))
+
+    def test_batch_delivery_bounds_process_walks_and_batch_resolutions(self):
+        ready_ids = self.seed_cycle_batch(materialize_second=True, member_count=24)
+        with mock.patch("dispatch_contract.attempt_process_quiescence",
+                        wraps=__import__("dispatch_contract").attempt_process_quiescence) as walks, \
+             mock.patch("dispatch_notice_state.resolve_delivery_batch",
+                        wraps=__import__("dispatch_notice_state").resolve_delivery_batch) as resolves:
+            records, _ = SWEEP.sweep_deliver(self.root, "opencode-turn", self.SID)
+        self.assertEqual({record["delivery_id"] for record in records}, set(ready_ids))
+        self.assertLessEqual(walks.call_count, 1)
+        self.assertLessEqual(resolves.call_count, 1)
+
+        held_ids = self.seed_cycle_batch(materialize_second=True, member_count=24)
+        jobs = self.root / "jobs.log"
+        lines = jobs.read_text(encoding="utf-8").splitlines()
+        changed = []
+        for index, line in enumerate(lines):
+            fields = line.split("\t")
+            if "att-opencode-2-" in fields[5]:
+                attempt_id = fields[5].split("attempt_id=", 1)[1].split(",", 1)[0]
+                if int(attempt_id.rsplit("-", 1)[1]) < 23:
+                    fields[1] = "running"
+            changed.append("\t".join(fields))
+        jobs.write_text("\n".join(changed) + "\n", encoding="utf-8")
+        with mock.patch("dispatch_contract.attempt_process_quiescence",
+                        return_value=SimpleNamespace(state="live")) as walks:
+            held_records, _ = SWEEP.sweep_deliver(self.root, "opencode-turn", self.SID)
+        self.assertEqual(held_records, [])
+        self.assertEqual(walks.call_count, 1)
+        self.assertTrue(all(PD.read(self.root, self.SID, did)["state"] == "pending"
+                            for did in held_ids))
 
     def test_every_runtime_renders_delivered_records_with_one_text(self):
         self.seed_turn()
@@ -1716,6 +1911,25 @@ console.log(JSON.stringify({carrierEnv: globalThis.carrierEnv}));
             self.assertEqual(PD.read(self.root, self.SID, delivery_id)["state"], "acked")
         self.assertNotIn(recipient_receipt.receipt_marker(first, self.SID), sent_body)
         self.assertNotIn(recipient_receipt.receipt_marker(second, self.SID), sent_body)
+
+    def test_previous_full_completion_body_matches_exactly_with_frozen_renderer(self):
+        self.seed_turn()
+        record = self._mark_sent_ambiguous("delivery-" + "a" * 32)
+        current_followup = (SWEEP._CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX +
+                            "\nprior next-action handle")
+        with mock.patch.object(SWEEP, "_followup", return_value=current_followup):
+            current = SWEEP.delivery_context([(self.root, [{**record, SWEEP.STORAGE_KEY: self.SID}])])
+            legacy = SWEEP._legacy_opencode_completion_body(current, [self.root], [record])
+            messages = [{"info": {"sessionID": self.SID, "role": "user"},
+                         "parts": [{"type": "text", "text": legacy}]}]
+            accepted = SWEEP._opencode_delivery_expectations(
+                [self.root], "opencode-turn", self.SID, messages)
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(accepted[0]["text"], legacy)
+            altered = [{"info": {"sessionID": self.SID, "role": "user"},
+                        "parts": [{"type": "text", "text": legacy + " "}]}]
+            self.assertEqual(SWEEP._opencode_delivery_expectations(
+                [self.root], "opencode-turn", self.SID, altered), [])
 
     def test_prior_batch_settles_open_member_after_other_member_was_acked(self):
         first_id = "delivery-" + "a" * 32

@@ -10,11 +10,248 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import time
 
 from route_identity import route_hash
 
 
 _CAPABILITY_ROUTE_CACHE = None
+_BATCH_REGISTRY_SNAPSHOTS = {}
+_BATCH_ROUTE_SNAPSHOTS = {}
+DEFAULT_RECORD_GRACE_SECONDS = 900
+
+
+def delivery_batch_key(*, registry_id: str, parent_sid: str, attempt_id: str,
+                       route_id: str = "", route_hash_value: str = "",
+                       route_node: str = "", parent_cycle_id: str = "",
+                       sealed_batch_id: str = "", sealed_attempt_ids=()):
+    """Return a key only for an exact, already-validated batch relationship.
+
+    The caller supplies route identity only after ``bound_route`` succeeds and
+    sealed membership only from the existing sealed declaration. Never infer
+    membership from launch order, slug, a shared cycle value, or a batch label.
+    """
+    if not all(isinstance(value, str) and value for value in
+               (registry_id, parent_sid, attempt_id)):
+        return None
+    if parent_cycle_id:
+        return ("parent-cycle", registry_id, parent_sid, parent_cycle_id)
+    if route_node in {"frame", "frame-alternative"} and route_id and route_hash_value:
+        return ("frame-pair", registry_id, parent_sid, route_id, route_hash_value)
+    members = tuple(sorted(set(sealed_attempt_ids))) if isinstance(
+        sealed_attempt_ids, (list, tuple, set, frozenset)) else ()
+    if (sealed_batch_id and len(members) > 1 and attempt_id in members):
+        return ("sealed-parallel", registry_id, parent_sid, sealed_batch_id, members)
+    return None
+
+
+def resolve_delivery_batch(jobs: Path, record: dict, *, recipient_key: str = "",
+                           delivery_root: Path | None = None,
+                           now_ns: int | None = None) -> dict | None:
+    """Read the exact successful sibling set for one registered completion.
+
+    ``None`` means the extra batching evidence was unavailable or ambiguous;
+    callers then retain the established singleton delivery.  This function
+    never writes registry, route, pending-delivery, or lease state.
+    """
+    try:
+        from dispatch_contract import parse_registry_metadata, attempt_process_quiescence
+        from dispatch_attempt_policy import committed_outcome
+        jobs = Path(jobs).resolve(strict=True)
+        before = jobs.stat()
+        registry_id = f"{jobs}:{before.st_dev}:{before.st_ino}"
+        signature = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        cached_registry = _BATCH_REGISTRY_SNAPSHOTS.get(str(jobs))
+        if cached_registry and cached_registry[0] == signature:
+            parsed = cached_registry[1]
+        else:
+            lines = tuple(jobs.read_text(encoding="utf-8").splitlines())
+            parsed_rows = []
+            for line in lines:
+                fields = line.split("\t")
+                if len(fields) != 6:
+                    continue
+                meta = parse_registry_metadata(fields[5])
+                if meta.get("attempt_id"):
+                    parsed_rows.append((fields, meta))
+            parsed = tuple(parsed_rows)
+            _BATCH_REGISTRY_SNAPSHOTS[str(jobs)] = (signature, parsed)
+        after = jobs.stat()
+        if (before.st_ino, before.st_size, before.st_mtime_ns) != (
+                after.st_ino, after.st_size, after.st_mtime_ns):
+            return None
+        seed_ids = record.get("attempt_ids")
+        receipt = record.get("receipt") or {}
+        if (not isinstance(seed_ids, list) or len(seed_ids) != 1
+                or not isinstance(receipt, dict)
+                or receipt.get("kind") in {"notice", "supervision", "human-gate"}
+                or receipt.get("replacement_attention") or receipt.get("human_gate")
+                or receipt.get("state") != "ready"
+                or receipt.get("delivery_classification") != "success"
+                or not isinstance(receipt.get("children"), list)
+                or not receipt["children"]
+                or any(not isinstance(child, dict)
+                       or child.get("required_action") != "advance-completed"
+                       for child in receipt["children"])):
+            return None
+        seed = seed_ids[0]
+        matches = [(fields, meta) for fields, meta in parsed if meta.get("attempt_id") == seed]
+        if len(matches) != 1:
+            return None
+        seed_fields, seed_meta = matches[0]
+        if ((recipient_key and seed_meta.get("parent_sid") != recipient_key)
+                or seed_meta.get("dispatch_depth") != "1"
+                or seed_meta.get("delivery_intent") != "1"
+                or seed_meta.get("failure_class") not in {None, "pass"}
+                or seed_meta.get("note", "").startswith(("dead-", "review-blocking"))):
+            return None
+        route_cache: dict[tuple[str, str], dict] = {}
+        def route_parent(meta):
+            prefix = "owner_" if not meta.get("route_file") else ""
+            path, rid, digest = (meta.get(prefix + key, "") for key in
+                                 ("route_file", "route_id", "route_hash"))
+            if not (path and rid and digest):
+                return None
+            cache_key = (path, digest)
+            route = route_cache.get(cache_key)
+            if route is None:
+                route_path = Path(path)
+                route_stat = route_path.stat()
+                route_signature = (route_path, route_stat.st_ino, route_stat.st_size,
+                                   route_stat.st_mtime_ns, digest)
+                route = _BATCH_ROUTE_SNAPSHOTS.get(route_signature)
+                if route is None:
+                    route = json.loads(route_path.read_text(encoding="utf-8"))
+                if (not isinstance(route, dict) or route.get("route_id") != rid
+                        or route.get("route_hash") != digest or route_hash(route) != digest):
+                    raise ValueError("batch-route-binding-mismatch")
+                _BATCH_ROUTE_SNAPSHOTS[route_signature] = route
+                route_cache[cache_key] = route
+            return route
+        seed_route = route_parent(seed_meta)
+        if not seed_route:
+            return None
+        parent_cycle = seed_route.get("parent_cycle_id")
+        key = delivery_batch_key(
+            registry_id=registry_id, parent_sid=seed_meta.get("parent_sid", ""),
+            attempt_id=seed, route_id=seed_meta.get("route_id", ""),
+            route_hash_value=seed_meta.get("route_hash", ""),
+            route_node=seed_meta.get("route_node", ""),
+            parent_cycle_id=parent_cycle or "",
+            sealed_batch_id=seed_meta.get("managed_sealed_batch_id", ""),
+            sealed_attempt_ids=(seed_meta.get("managed_sealed_attempt_ids", "") or "").split(" "),
+        )
+        if key is None:
+            return None
+        siblings = []
+        pending_states = {}
+        for fields, meta in parsed:
+            if (meta.get("dispatch_depth") != "1" or meta.get("registered_worker") != "1"
+                    or meta.get("parent_sid") != seed_meta.get("parent_sid")
+                    or meta.get("delivery_intent") != "1"):
+                continue
+            if committed_outcome(fields[1], meta) == "succeeded":
+                did = meta.get("delivery_id")
+                if did and delivery_root is not None:
+                    try:
+                        import dispatch_pending_delivery
+                        materialized = dispatch_pending_delivery.read(
+                            Path(delivery_root), seed_meta.get("parent_sid", ""), did)
+                        pending_states[did] = materialized.get("state") if materialized else None
+                    except Exception:
+                        pending_states[did] = "unreadable"
+                    if pending_states[did] in {"acked", "expired", "rejected"}:
+                        continue
+            route = route_parent(meta)
+            if not route:
+                continue
+            candidate_key = delivery_batch_key(
+                registry_id=registry_id, parent_sid=meta.get("parent_sid", ""),
+                attempt_id=meta.get("attempt_id", ""), route_id=meta.get("route_id", ""),
+                route_hash_value=meta.get("route_hash", ""), route_node=meta.get("route_node", ""),
+                parent_cycle_id=route.get("parent_cycle_id") or "",
+                sealed_batch_id=meta.get("managed_sealed_batch_id", ""),
+                sealed_attempt_ids=(meta.get("managed_sealed_attempt_ids", "") or "").split(" "),
+            )
+            if candidate_key == key:
+                siblings.append((fields, meta))
+        if not any(meta.get("attempt_id") == seed for _, meta in siblings):
+            return None
+        for fields, meta in siblings:
+            if fields[1] not in {"open", "running"}:
+                continue
+            process = attempt_process_quiescence(meta)
+            if process.state in {"live", "unverifiable"}:
+                return {"key": key, "delivery_ids": (),
+                        "attempt_ids": tuple(sorted(row.get("attempt_id", "")
+                                                     for _, row in siblings)),
+                        "member_delivery_ids": tuple(sorted({row.get("delivery_id", "")
+                                                               for row_fields, row in siblings
+                                                               if row.get("delivery_id")
+                                                               and (row_fields[1] in {"open", "running"}
+                                                                    or committed_outcome(
+                                                                        row_fields[1], row)
+                                                                    == "succeeded")})),
+                        "registry_path": str(jobs), "registry_signature": signature,
+                        "seed_identity": (record.get("delivery_id"), record.get("receipt_digest"),
+                                          tuple(record.get("attempt_ids") or ()),
+                                          record.get("recipient_digest")),
+                        "held": len(siblings) > 1,
+                        "outstanding_attempt_ids": (meta.get("attempt_id", ""),)}
+        outstanding = []
+        delivery_ids = []
+        now_mono_ns = time.monotonic_ns() if now_ns is None else now_ns
+        for fields, meta in siblings:
+            aid = meta.get("attempt_id", "")
+            if committed_outcome(fields[1], meta) == "succeeded":
+                did = meta.get("delivery_id")
+                if did:
+                    row_time_ns = None
+                    try:
+                        stamp = meta.get("delivery_intent_at_ns", "")
+                        if stamp.isascii() and stamp.isdigit():
+                            parsed_stamp = int(stamp)
+                            if parsed_stamp > 0:
+                                row_time_ns = parsed_stamp
+                    except (ValueError, OverflowError, TypeError, AttributeError):
+                        pass
+                    state = pending_states.get(did)
+                    if state == "unreadable":
+                        continue
+                    if state in {"acked", "expired", "rejected"}:
+                        continue
+                    if state is None:
+                        if (row_time_ns is not None
+                                and 0 <= now_mono_ns - row_time_ns
+                                <= DEFAULT_RECORD_GRACE_SECONDS * 1_000_000_000):
+                            outstanding.append(aid)
+                        # Missing/unreadable terminal time fails open. Both
+                        # operands are monotonic; never compare created_at_ns
+                        # or a registry wall-clock field to this timestamp.
+                        continue
+                    if state in {"pending", "claimed", "sent-ambiguous"}:
+                        delivery_ids.append(did)
+            elif fields[1] in {"open", "running"}:
+                continue
+            elif fields[1] not in {"done", "killed", "cancelled"}:
+                return None
+        return {"key": key, "delivery_ids": tuple(sorted(set(delivery_ids))),
+                "attempt_ids": tuple(sorted(meta.get("attempt_id", "") for _, meta in siblings)),
+                "member_delivery_ids": tuple(sorted({meta.get("delivery_id", "")
+                                                       for row_fields, meta in siblings
+                                                       if meta.get("delivery_id")
+                                                       and (row_fields[1] in {"open", "running"}
+                                                            or committed_outcome(
+                                                                row_fields[1], meta)
+                                                            == "succeeded")})),
+                "registry_path": str(jobs), "registry_signature": signature,
+                "seed_identity": (record.get("delivery_id"), record.get("receipt_digest"),
+                                  tuple(record.get("attempt_ids") or ()),
+                                  record.get("recipient_digest")),
+                "held": len(siblings) > 1 and bool(outstanding),
+                "outstanding_attempt_ids": tuple(sorted(set(outstanding)))}
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
 
 
 def _capability_route_reader():

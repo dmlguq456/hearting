@@ -21,6 +21,11 @@ OPENCODE_MARKER_LINE_RE = re.compile(
     r"(?m)^HEARTING_RECEIPT_V1 (delivery-[A-Za-z0-9._-]{1,128}) ([0-9a-f]{64})$"
 )
 MAX_CLAUDE_TRANSCRIPT_BYTES = 4 * 1024 * 1024
+CLAUDE_TASK_NOTIFICATION_SUMMARY_RE = re.compile(
+    r"<task-notification>(?:(?!</task-notification>).)*?"
+    r"<summary>Stop hook feedback</summary>(?:(?!</task-notification>).)*?"
+    r"</task-notification>", re.DOTALL,
+)
 LEGACY_COMPLETION_RE = re.compile(
     r"Runtime owner completion receipt schema=2 state=(success|attention) "
     r"attempt_id=([^\s]+) armed=([^\s]+) status=([^\s]+) "
@@ -101,11 +106,19 @@ def claude_feedback_evidence(events: Any, session_id: str) -> dict[str, Any] | N
             continue
         if event.get("sessionId", event.get("session_id")) != session_id:
             continue
-        if event.get("summary") != "Stop hook feedback":
-            continue
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else event.get("content")
         text = _text_content(content)
+        legacy_feedback = event.get("summary") == "Stop hook feedback"
+        native_notification = (
+            isinstance(event.get("origin"), dict)
+            and event["origin"].get("kind") == "task-notification"
+            and event.get("promptSource") == "system"
+            and event.get("turnOrigin") == "task_notification"
+            and CLAUDE_TASK_NOTIFICATION_SUMMARY_RE.search(text) is not None
+        )
+        if not (legacy_feedback or native_notification):
+            continue
         if text:
             texts.append(text)
     return _evidence("claude", session_id, "claude-transcript", texts)

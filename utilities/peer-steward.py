@@ -7124,74 +7124,156 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
         if record and record.get("state") in {"claimed", "sent-ambiguous"}:
             pending.reclaim(jobs.parent, storage_recipient, delivery_id,
                             now_ns=time.monotonic_ns())
-        record = pending.claim(jobs.parent, storage_recipient, delivery_id,
-                               claim_owner=owner, lease_seconds=30, require_generation_proof=False,
-                               jobs=jobs,
-                               retry_context=f"{recipient_harness}:{recipient_sid}:{pane}:{duty['id']}")
-        # keep_claim may project the in-memory receipt; receipt evidence and
-        # the rendered marker stay bound to the stored record.
-        stored = dict(record)
-        if not keep_claim(jobs.parent, storage_recipient, delivery_id, record, owner, jobs=jobs):
+        claim_owner = owner
+        try:
+            claimed_members = pending.claim_ready_batch(
+                jobs.parent, storage_recipient, delivery_id, claim_owner=claim_owner,
+                lease_seconds=30, jobs=jobs, require_generation_proof=False,
+                retry_context=f"{recipient_harness}:{recipient_sid}:{pane}:{duty['id']}")
+        except pending.PendingDeliveryError:
+            # Positive holds and claims owned by another carrier leave every
+            # obligation open for the runner's existing retry/backoff.
             return
-        if (recipient_harness == "claude"
+        member_context = []
+        transfer_members = []
+        for claimed in claimed_members:
+            member_id = claimed["delivery_id"]
+            stored_member = pending.read(jobs.parent, storage_recipient, member_id)
+            if (stored_member is None or not keep_claim(
+                    jobs.parent, storage_recipient, member_id, claimed, claim_owner, jobs=jobs)):
+                for acquired in claimed_members:
+                    pending.release_claim(jobs.parent, storage_recipient,
+                        acquired["delivery_id"], claim_owner=claim_owner)
+                return
+            attempt_ids = list(stored_member.get("attempt_ids") or [])
+            if not attempt_ids and member_id == delivery_id:
+                attempt_ids = [row.attempt_id]
+            matching_rows = ([row] if len(claimed_members) == 1 and member_id == delivery_id
+                             else [current_attempt_row(jobs, aid, read_context=read_context)
+                                   for aid in attempt_ids])
+            seed_notice = bool(notice_id and len(claimed_members) == 1
+                               and member_id == delivery_id)
+            matching_rows = [candidate for candidate in matching_rows
+                             if candidate is not None and candidate.status == "done"
+                             and (seed_notice or candidate.metadata.get("delivery_id") == member_id)]
+            if len(matching_rows) != 1:
+                for acquired in claimed_members:
+                    pending.release_claim(jobs.parent, storage_recipient,
+                        acquired["delivery_id"], claim_owner=claim_owner)
+                return
+            member_row = matching_rows[0]
+            if len(claimed_members) == 1 and member_id == delivery_id:
+                member_duty_id, member_duty = duty["id"], duty
+            else:
+                member_identity = {"jobs": str(jobs.resolve()),
+                    "attempt_id": member_row.attempt_id, "session_id": recipient_sid,
+                    "harness": harness, "server": identity.get("server") or "default"}
+                member_duty_id = peer_obligations.stable_duty_id(
+                    "registered-batch", member_identity)
+                member_duty = store.get(member_duty_id)
+            if (member_duty is None or (member_duty.get("intent") or {}).get("carrier")
+                    != intent["carrier"]):
+                for acquired in claimed_members:
+                    pending.release_claim(jobs.parent, storage_recipient,
+                        acquired["delivery_id"], claim_owner=claim_owner)
+                return
+            try:
+                member_ack = pending.received_ack_identity(
+                    stored_member, storage_recipient, member_id)
+            except pending.PendingDeliveryError:
+                member_ack = None
+            context_item = {**claimed, STORAGE_KEY: storage_recipient,
+                            **({IDENTITY_KEY: member_ack} if member_ack else {})}
+            member_context.append(context_item)
+            transfer_members.append({"duty_id": member_duty_id, "jobs": str(jobs),
+                "attempt_id": member_row.attempt_id,
+                "carrier": member_duty["intent"]["carrier"],
+                "recipient_sid": recipient_sid, "delivery_id": member_id,
+                "storage_recipient": storage_recipient, "claim_owner": claim_owner,
+                "receipt_digest": stored_member.get("receipt_digest"),
+                "row": member_row, "duty": member_duty, "record": stored_member})
+        if not transfer_members:
+            for acquired in claimed_members:
+                pending.release_claim(jobs.parent, storage_recipient,
+                    acquired["delivery_id"], claim_owner=claim_owner)
+            return
+        if (recipient_harness == "claude" and len(transfer_members) == 1
                 and _settle_claude_native_dispatch_receipt(
-                    jobs.parent, storage_recipient, row, recipient_sid, stored)):
+                    jobs.parent, storage_recipient, transfer_members[0]["row"],
+                    recipient_sid, transfer_members[0]["record"])):
             return
         from dispatch_supervision import CONTINUED_KEY, continue_for_parent
-        continued = continue_for_parent(record, session_id=recipient_sid,
-                                        recipient_kind=intent["carrier"])
-        try:
-            bound = {IDENTITY_KEY: pending.received_ack_identity(
-                stored, storage_recipient, delivery_id)}
-        except pending.PendingDeliveryError:
-            bound = {}  # Sent without a marker; its receipt stays on the fallback path.
-        context_record = {**record, STORAGE_KEY: storage_recipient, **bound,
-                          **({CONTINUED_KEY: continued} if continued else {})}
-        message = delivery_context([(jobs.parent, [context_record])])
+        for index, member in enumerate(transfer_members):
+            continued = continue_for_parent(member["record"], session_id=recipient_sid,
+                                            recipient_kind=member["carrier"])
+            if continued:
+                member_context[index][CONTINUED_KEY] = continued
+        message = delivery_context([(jobs.parent, member_context)])
+        first_member = transfer_members[0]
         producer_binding = {
             "schema": peer_message._RUNTIME_PRODUCER_SCHEMA,
-            "duty_id": duty["id"], "jobs": str(jobs), "attempt_id": row.attempt_id,
-            "carrier": intent["carrier"], "delivery_id": delivery_id,
-            "receipt_digest": record.get("receipt_digest"),
+            "duty_id": first_member["duty_id"], "jobs": str(jobs),
+            "attempt_id": first_member["attempt_id"],
+            "carrier": first_member["carrier"],
+            "delivery_id": first_member["delivery_id"],
+            "receipt_digest": first_member["receipt_digest"],
             "recipient": {"harness": recipient_harness, "session_id": recipient_sid},
-            "route_id": str(row.metadata.get("route_id") or ""),
-            "route_node": str(row.metadata.get("route_node") or ""),
+            "route_id": str(first_member["row"].metadata.get("route_id") or ""),
+            "route_node": str(first_member["row"].metadata.get("route_node") or ""),
         }
+        if len(transfer_members) > 1:
+            producer_binding["dispatch_notices"] = [
+                {key: member[key] for key in ("duty_id", "attempt_id", "delivery_id",
+                    "storage_recipient", "receipt_digest", "claim_owner")}
+                for member in transfer_members]
         runtime_sender = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
-        transfer_refs = [duty["id"], row.attempt_id, delivery_id]
+        transfer_refs = [value for member in transfer_members for value in (
+            member["duty_id"], member["attempt_id"], member["delivery_id"])]
         if not peer_message._valid_runtime_producer_binding(
                 producer_binding, runtime_sender, producer_binding["recipient"], transfer_refs):
-            pending.release_claim(jobs.parent, storage_recipient, delivery_id, claim_owner=owner)
+            for member in transfer_members:
+                pending.release_claim(jobs.parent, storage_recipient,
+                    member["delivery_id"], claim_owner=claim_owner)
             return
         # The normal prompt command seals the body, checks the recipient again,
         # and retains it through forms, busy turns and sender/observer exit (#446).
         prepared = []
         def bind_transfer(ref):
-            binding = {"duty_id": duty["id"], "jobs": str(jobs), "attempt_id": row.attempt_id,
-                "carrier": intent["carrier"], "recipient_sid": recipient_sid,
-                "delivery_id": delivery_id, "storage_recipient": storage_recipient, "claim_owner": owner}
-            peer_message.bind_dispatch_notice(ref, binding)
-            store.update(duty["id"], observation={**observation, "transfer_ref": ref,
-                "delivery_id": delivery_id, "storage_recipient": storage_recipient,
-                "recipient_sid": recipient_sid, "claim_owner": owner,
-                "producer_binding": producer_binding})
+            bindings = [{key: member[key] for key in (
+                "duty_id", "jobs", "attempt_id", "carrier", "recipient_sid",
+                "delivery_id", "storage_recipient", "claim_owner", "receipt_digest")}
+                for member in transfer_members]
+            peer_message.bind_dispatch_notice(ref, bindings if len(bindings) > 1 else bindings[0])
+            for member in transfer_members:
+                member_observation = member["duty"].get("observation") or {}
+                store.update(member["duty_id"], observation={**member_observation,
+                    "transfer_ref": ref, "delivery_id": member["delivery_id"],
+                    "storage_recipient": storage_recipient, "recipient_sid": recipient_sid,
+                    "claim_owner": claim_owner, "producer_binding": producer_binding})
             prepared.append(ref)
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as body:
             body.write(message)
             body.flush()
             args = build_parser().parse_args(["prompt", pane, "--body-file", body.name,
-                                              "--ref", duty["id"], "--ref", row.attempt_id,
-                                              "--ref", delivery_id])
+                *[item for member in transfer_members for item in (
+                    "--ref", member["duty_id"], "--ref", member["attempt_id"],
+                    "--ref", member["delivery_id"]) ]])
             code = cmd_prompt(args, expected_recipient=(recipient_harness, recipient_sid),
                               on_prepared=bind_transfer, producer_binding=producer_binding)
-        current = pending.read(jobs.parent, storage_recipient, delivery_id)
-        if current and current.get("state") == "acked":
+        current = [pending.read(jobs.parent, storage_recipient, member["delivery_id"])
+                   for member in transfer_members]
+        if current and all(item and item.get("state") == "acked" for item in current):
             return
         if prepared or code in {0, 3}:
-            pending.mark_sent_ambiguous(jobs.parent, storage_recipient, delivery_id, claim_owner=owner)
-            store.update(duty["id"], state="pending", delivery="peer-courier", cleanup="pending")
+            for member in transfer_members:
+                pending.mark_sent_ambiguous(jobs.parent, storage_recipient,
+                    member["delivery_id"], claim_owner=claim_owner)
+                store.update(member["duty_id"], state="pending",
+                             delivery="peer-courier", cleanup="pending")
         else:
-            pending.release_claim(jobs.parent, storage_recipient, delivery_id, claim_owner=owner)
+            for member in transfer_members:
+                pending.release_claim(jobs.parent, storage_recipient,
+                    member["delivery_id"], claim_owner=claim_owner)
     finally:
         globals()["_HERDR_SESSION"] = old_server
 

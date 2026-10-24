@@ -76,8 +76,8 @@ class PromptReceiptTest(unittest.TestCase):
                 self.assertEqual(hook.native_queue_prompt_receipts('sibling'), ([], []))
                 batches, texts = hook.native_queue_prompt_receipts('native-parent')
             self.assertIn('att-exact', texts[0])
-            self.assertIn('perform already approved parent review/follow-through', texts[0])
-            self.assertIn('Receipt, queue consumption and ACK are not execution', texts[0])
+            self.assertIn('Continue the authorized work within its existing human gates', texts[0])
+            self.assertIn("Receipt/ACK isn't execution", texts[0])
             self.assertEqual(pending.read(root, 'native-parent', did)['state'], 'claimed')
             output = io.StringIO()
             with contextlib.redirect_stdout(output):

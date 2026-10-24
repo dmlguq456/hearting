@@ -4020,6 +4020,139 @@ class SeatHandoverRewakeTest(unittest.TestCase):
         self.assertFalse(rewake._handed_away(launch))
 
 
+class BatchWakeCarrierTest(unittest.TestCase):
+    """A ready sibling success batch wakes the parent once through this carrier;
+    a held batch wakes nobody and leaves every record pending; failures and
+    already-received members never ride the batch."""
+
+    RECIPIENT = "session-1"
+    SIZE = 24
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.jobs = self.root / "jobs.log"
+        self.jobs.write_text("", encoding="utf-8")
+        self.pd = rewake.pending_delivery
+        for name, value in (("AGENT_HOME", str(MODULE_PATH.parents[1])),
+                            ("AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS", "1"),
+                            ("AGENT_CLAUDE_REWAKE_MAX_SECONDS", "1")):
+            self.enterContext(mock.patch.dict(os.environ, {name: value}))
+        self.ids = [(f"att-{i:032x}", f"delivery-{i:032x}") for i in range(self.SIZE)]
+        for attempt_id, delivery_id in self.ids:
+            self._create(attempt_id, delivery_id, success=True)
+        self.batch_ids = tuple(sorted(d for _, d in self.ids))
+        self.held = False
+        self.retired: set[str] = set()
+        self.enterContext(mock.patch.object(
+            self.pd, "claim_ready_batch", wraps=self.pd.claim_ready_batch))
+        self.enterContext(mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=self._resolve))
+        self.enterContext(mock.patch("dispatch_notice_state.keep_claim", side_effect=self._keep))
+
+    def _create(self, attempt_id, delivery_id, *, success):
+        receipt = {
+            "schema_version": 2, "state": "ready", "parent_attempt_id": "att-parent",
+            "job_registry": str(self.jobs),
+            "children": [{"attempt_id": attempt_id, "status": "done", "readiness": "ready",
+                          "reason": "terminal-complete" if success else "terminal-failure-or-unclosed",
+                          "required_action": "advance-completed" if success else "inspect-done-failure",
+                          "harness": "claude",
+                          "delivery_classification": "success" if success else "attention"}],
+            "delivery_classification": "success" if success else "attention",
+        }
+        self.pd.create(
+            self.root, recipient_kind="claude-parent-runtime", recipient_key=self.RECIPIENT,
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[attempt_id], parent_attempt_id="att-parent", route_id="rt-batch",
+            route_node="frame", receipt=receipt, receipt_digest=self.pd._canonical_receipt_digest(receipt),
+            row_revisions={attempt_id: "rev"})
+
+    def _resolve(self, jobs, record, **_options):
+        if record["delivery_id"] not in self.batch_ids:
+            return None
+        return {"delivery_ids": self.batch_ids, "held": self.held}
+
+    def _keep(self, root, recipient, delivery_id, record, claim_owner, *, jobs=None):
+        if delivery_id in self.retired:
+            self.pd.reject_claimed(root, recipient, delivery_id, claim_owner=claim_owner,
+                                   reason="notice-obligation-resolved")
+            return False
+        return True
+
+    def _wake(self, attempt_id, delivery_id):
+        """One sibling's carrier from the ready wait to its exit; returns (code, stdout, stderr)."""
+        launch = rewake.Launch(attempt_id=attempt_id, jobs=self.jobs, session_id=self.RECIPIENT, armed="registry")
+        owing = {"delivery_id": delivery_id, "parent_sid": self.RECIPIENT}
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with mock.patch.object(rewake.sys, "stdout", stdout), mock.patch.object(rewake.sys, "stderr", stderr), \
+                mock.patch.object(rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")), \
+                mock.patch.object(rewake, "follow_replacement", return_value=None), \
+                mock.patch.object(rewake, "_owner_status", return_value="done"), \
+                mock.patch.object(rewake, "classified_receipt", side_effect=lambda l, st, r, root: (
+                    "success", f"RECEIPT {l.attempt_id} state=success status=done")), \
+                mock.patch.object(rewake, "_delivery_owing_row", return_value=owing), \
+                mock.patch.object(rewake, "_incarnation_binding_matches", return_value=True), \
+                mock.patch.object(rewake, "_holds_arm", return_value=True), \
+                mock.patch.object(rewake, "_handed_away", return_value=False), \
+                mock.patch.object(rewake, "_open_gate_pending", return_value=False), \
+                mock.patch.object(rewake, "_gate_notices", return_value=[]), \
+                mock.patch.object(rewake, "settle_arm", return_value=True), \
+                mock.patch.object(rewake.time, "sleep"):
+            code = rewake._run_carrier(launch, mock.sentinel.arm, {}, {}, {"claim": mock.sentinel.arm})
+        return code, stdout.getvalue(), stderr.getvalue()
+
+    def _states(self):
+        return {d: self.pd.read(self.root, self.RECIPIENT, d)["state"] for _, d in self.ids}
+
+    def test_ready_batch_of_24_wakes_once_with_every_receipt_and_marker(self):
+        results = [self._wake(a, d) for a, d in self.ids]
+        emissions = [r for r in results if r[0] == 2]
+        self.assertEqual(len(emissions), 1)
+        self.assertTrue(all(r == (0, "", "") for r in results if r[0] != 2))
+        text = emissions[0][2]
+        self.assertEqual(text.count("HEARTING_RECEIPT_V1 "), self.SIZE)
+        for attempt_id, delivery_id in self.ids:
+            self.assertIn(f"RECEIPT {attempt_id} ", text)
+            self.assertIn(f"HEARTING_RECEIPT_V1 {delivery_id} ", text)
+        self.assertEqual(set(self._states().values()), {"sent-ambiguous"})
+        print(f"batch24 emissions={len(emissions)} wakes={len(emissions)} chars={len(text)}")
+
+    def test_held_batch_emits_nothing_and_keeps_every_record_pending(self):
+        self.held = True
+        for attempt_id, delivery_id in self.ids[:3]:
+            self.assertEqual(self._wake(attempt_id, delivery_id), (0, "", ""))
+        self.assertEqual(set(self._states().values()), {"pending"})
+        for _, delivery_id in self.ids:
+            self.assertEqual(self.pd.read(self.root, self.RECIPIENT, delivery_id)["attempts"], 0)
+        self.held = False
+        code, _out, text = self._wake(*self.ids[0])
+        self.assertEqual((code, text.count("HEARTING_RECEIPT_V1 ")), (2, self.SIZE))
+
+    def test_a_failure_record_is_delivered_immediately_on_its_own(self):
+        self.held = True
+        failed = ("att-" + "f" * 32, "delivery-" + "f" * 32)
+        self._create(*failed, success=False)
+        code, _out, text = self._wake(*failed)
+        self.assertEqual((code, text.count("HEARTING_RECEIPT_V1 ")), (2, 1))
+        self.assertIn(f"HEARTING_RECEIPT_V1 {failed[1]} ", text)
+        self.assertEqual(self.pd.read(self.root, self.RECIPIENT, failed[1])["state"], "sent-ambiguous")
+        self.assertEqual(set(self._states().values()), {"pending"})
+
+    def test_an_already_received_member_is_not_emitted_again(self):
+        received = self.ids[5][1]
+        self.pd.claim(self.root, self.RECIPIENT, received, claim_owner="earlier", lease_seconds=30)
+        self.pd.ack(self.root, self.RECIPIENT, received, acked_by="earlier")
+        self.retired.add(received)
+        results = [self._wake(a, d) for a, d in self.ids]
+        emissions = [r for r in results if r[0] == 2]
+        self.assertEqual(len(emissions), 1)
+        text = emissions[0][2]
+        self.assertEqual(text.count("HEARTING_RECEIPT_V1 "), self.SIZE - 1)
+        self.assertNotIn(received, text)
+        self.assertEqual(self.pd.read(self.root, self.RECIPIENT, received)["state"], "acked")
+
+
 def replace_session(launch, session):
     return rewake.Launch(attempt_id=launch.attempt_id, jobs=launch.jobs, session_id=session, armed=launch.armed)
 

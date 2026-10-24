@@ -956,6 +956,63 @@ def _queue_target_from_rows(jobs: Path, rows, registered: str, *, read_context=N
     return registered
 
 
+# Read-only copy of the success follow-up text sent before the trimmed wording
+# (commit aec3a362f). A body already queued or consumed with it is recognized by an
+# exact full-body match only; every new send uses the current text.
+_PRIOR_SUCCESS_FOLLOWUP = (
+    "The requested work is complete, including its declared stages and runtime workflow/route/cycle settlement. "
+    "Continue and complete the original user task itself, preserving every explicit content and output-format "
+    "requirement from that request; this receipt supplements the task and does not replace it with a receipt-only response. "
+    "Read the exact result and perform the already approved parent review/follow-through in this turn, "
+    "or run its existing registered continuation. On the first user-facing close, explain what changed and why, "
+    "the observed before/after, checks actually run (including reused, skipped, and unrun checks), applicable "
+    "commit/PR/deployment/serving state, and limits or remaining work. Do not invent deployment or operating "
+    "results. Receipt, queue consumption and ACK are not execution. No harvest, route restart, or manual "
+    "finalization is required. An automatic repeat of this exact result or a cleanup-only notice after the "
+    "follow-through is handled does not call for the same action or a new user ACK; preserve a new failure, "
+    "conflict, unfinished work, or direct user question."
+)
+_CURRENT_SUCCESS_FOLLOWUP_START = "Original request/format apply."
+_LEGACY_HISTORY_MISMATCH = {"queue-peer-history-mismatch", "queue-peer-history-conflict",
+                            "queue-peer-pending-mismatch"}
+_IMMEDIATE_RECEIPT_KINDS = {"human-gate", "supervision", "notice"}
+QUEUE_BODY_LIMIT = 15 * 1024  # codex_queue_delivery refuses a message over 16 KiB
+
+
+def _prior_followup_text(current: str) -> str | None:
+    """The previous wording of a current success follow-up, or None when it never differed."""
+    head, newline, rest = current.partition("\n")
+    if not head.startswith(_CURRENT_SUCCESS_FOLLOWUP_START):
+        return None
+    return _PRIOR_SUCCESS_FOLLOWUP + newline + rest
+
+
+def _is_completion_record(record: dict) -> bool:
+    receipt = record.get("receipt")
+    return (isinstance(receipt, dict) and receipt.get("kind") not in _IMMEDIATE_RECEIPT_KINDS
+            and isinstance(receipt.get("children"), list))
+
+
+def _batch_client_id(thread_id: str, delivery_ids) -> str:
+    material = "\0".join(("codex-native-queue-batch-v1", thread_id, *sorted(delivery_ids)))
+    return "delivery-" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+
+
+def _batch_units(root: Path, thread_id: str, members: list[dict]) -> list[tuple[list[dict], str]]:
+    """Render a claimed sibling batch as one shared-header body, halving it only when it
+    cannot fit one queue message. The attempts counter is pinned so every sibling sidecar
+    and every pass renders the same bytes for the same members."""
+    import dispatch_session_sweep as sweep
+    members = sorted(members, key=lambda record: record["delivery_id"])
+    body = sweep.delivery_context([(root, [
+        {**record, "attempts": 0, sweep.STORAGE_KEY: thread_id} for record in members])])
+    if len(body.encode("utf-8")) <= QUEUE_BODY_LIMIT or len(members) == 1:
+        return [(members, body)]
+    middle = len(members) // 2
+    return (_batch_units(root, thread_id, members[:middle])
+            + _batch_units(root, thread_id, members[middle:]))
+
+
 def _native_queue_delivery_once(
     args: argparse.Namespace,
     receipt: dict[str, Any],
@@ -988,16 +1045,15 @@ def _native_queue_delivery_once(
         raise CompletionError("native-queue-thread-identity-invalid")
     if thread.get("cwd") and not isinstance(thread.get("cwd"), str):
         raise CompletionError("native-queue-thread-cwd-invalid")
-    context = (
-        "AGENT_HARNESS_COMPLETION_V1\n"
-        + canonical(receipt)
-        + "\n"
-        + completion_followup_text(
-            receipt,
-            jobs=str(args.jobs),
-            surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"),
-        )
+    envelope = "AGENT_HARNESS_COMPLETION_V1\n" + canonical(receipt) + "\n"
+    followup = completion_followup_text(
+        receipt,
+        jobs=str(args.jobs),
+        surface=str(ROOT / "adapters" / "codex" / "bin" / "preflight.sh"),
     )
+    context = envelope + followup
+    prior_followup = _prior_followup_text(followup)
+    prior_context = envelope + prior_followup if prior_followup else None
     delivery_material = "\0".join((
         "codex-native-queue-v1", args.thread_id,
         *sorted(row.metadata.get("delivery_id", "") for row in rows),
@@ -1040,6 +1096,15 @@ def _native_queue_delivery_once(
     if any(record is None for record in records):
         raise CompletionError("native-queue-ledger-state-invalid")
     acked_by = f"codex-native-queue:{client_message_id}"
+    if all(record.get("state") in {"acked", "rejected", "expired"} for record in records) and any(
+            record.get("state") != "acked" for record in records):
+        # A sibling batch already settled or retired these records (for instance an
+        # exact result the recipient had already received): nothing is owed here.
+        return {
+            "schema_version": 1, "status": "accepted", "thread_id": args.thread_id,
+            "client_user_message_id": client_message_id,
+            "deduplicated_by": "pending-delivery-ledger",
+        }
     acknowledged = [record for record in records if record.get("state") == "acked"]
     if acknowledged and (len(acknowledged) == len(records) or all(
             record.get("acked_by") == acked_by for record in acknowledged)):
@@ -1065,8 +1130,10 @@ def _native_queue_delivery_once(
         codex_consumed_evidence, codex_queue_evidence, receipt_marker,
         settle_native_receipt,
     )
-    context += "\n" + "\n".join(
-        receipt_marker(record, args.thread_id) for record in records)
+    markers = "\n" + "\n".join(receipt_marker(record, args.thread_id) for record in records)
+    context += markers
+    if prior_context is not None:
+        prior_context += markers
     # Recover an exact native receipt before taking another queue claim. A
     # successful queue RPC is insufficient; the strict history translator
     # requires the stable client id and this exact marker-bearing body.
@@ -1082,6 +1149,11 @@ def _native_queue_delivery_once(
         evidence = codex_queue_evidence(
             endpoint=path, session_id=native_thread, delivery_id=client_message_id,
             expected_message=context, timeout=5.0, session=session)
+        if (evidence is None or not evidence.get("bindings")) and prior_context is not None:
+            # A body queued before the follow-up was trimmed (exact full-body match).
+            evidence = codex_queue_evidence(
+                endpoint=path, session_id=native_thread, delivery_id=client_message_id,
+                expected_message=prior_context, timeout=5.0, session=session) or evidence
         if evidence is None:
             continue
         bindings = set(evidence.get("bindings") or ())
@@ -1121,7 +1193,8 @@ def _native_queue_delivery_once(
         return {"schema_version": 1, "status": "sent-ambiguous",
                 "reason": "native-batch-receipt-partial", "submitted": True,
                 "thread_id": args.thread_id, "client_user_message_id": client_message_id}
-    records = [record for record in records if record.get("state") != "acked"]
+    records = [record for record in records
+               if record.get("state") not in {"acked", "rejected", "expired"}]
     if any(record.get("state") not in {"pending", "claimed", "sent-ambiguous"}
            for record in records):
         raise CompletionError("native-queue-ledger-state-invalid")
@@ -1129,37 +1202,77 @@ def _native_queue_delivery_once(
     claimed: list[str] = []
     retry_base = min(max(args.delivery_retry_interval, 0.05), 15.0)
     retry_failure = "native-queue-pass-incomplete"
-    try:
-        for record in records:
-            delivery_id = record["delivery_id"]
-            if record["state"] in {"claimed", "sent-ambiguous"}:
-                pending_delivery.reclaim(root, args.thread_id, delivery_id, now_ns=time.monotonic_ns())
-            pending_delivery.claim(root, args.thread_id, delivery_id,
-                                   claim_owner=claim_owner, lease_seconds=60.0,
-                                   jobs=args.jobs, retry_context=target,
-                                   retry_base_delay_seconds=retry_base)
-            claimed.append(delivery_id)
+
+    def consumed_by(thread_id: str, bodies: list[str]):
+        """The consumed turn for the first body that exactly matches native history."""
+        first_error = None
+        for body in bodies:
+            try:
+                turn = codex_queue_delivery._known_consumed(
+                    path, thread_id, unit_client_id, timeout=5.0, strict_history=True,
+                    expected_message=body, **transport)
+            except codex_queue_delivery.QueueDeliveryError as exc:
+                first_error = first_error or exc
+                continue
+            if turn is not None:
+                return turn, body
+        if first_error is not None:
+            raise first_error
+        return None, bodies[0]
+
+    def send_unit(bodies: list[str]):
+        try:
+            result = codex_queue_delivery.send_at_least_once(
+                path, thread_id=target, client_message_id=unit_client_id,
+                message=bodies[0], timeout=5.0, require_message_match=True, **transport)
+            return result, bodies[0]
+        except codex_queue_delivery.QueueDeliveryError as exc:
+            if len(bodies) == 1 or str(exc) not in _LEGACY_HISTORY_MISMATCH:
+                raise
+            # The same id may already hold the previous exact wording; never resend it.
+            for earlier in bodies[1:]:
+                try:
+                    turn = codex_queue_delivery._known_consumed(
+                        path, target, unit_client_id, timeout=5.0, strict_history=True,
+                        expected_message=earlier, **transport)
+                except codex_queue_delivery.QueueDeliveryError:
+                    turn = None
+                if turn is not None:
+                    return {"status": "consumed", "turn_id": turn.get("id"),
+                            "turn_status": turn.get("status")}, earlier
+                queued = [item for item in codex_queue_delivery.list_queue(
+                    path, target, timeout=5.0, **transport)
+                    if isinstance(item, dict)
+                    and item.get("clientUserMessageId") == unit_client_id]
+                if len(queued) == 1 and codex_queue_delivery._peer_text_input(
+                        queued[0].get("input"), earlier):
+                    item_id = queued[0].get("id")
+                    return {"status": "queued", "already_pending": True,
+                            "queued_submission_id": item_id if isinstance(item_id, str) else None
+                            }, earlier
+            raise
+
+    def deliver_unit(unit_records: list[dict], bodies: list[str]) -> dict[str, Any]:
+        nonlocal retry_failure
+        unit_ids = [record["delivery_id"] for record in unit_records]
+        unit_acked_by = f"codex-native-queue:{unit_client_id}"
+        body = bodies[0]
         turn_thread = target
         send_observed = False
-        consumed = (codex_queue_delivery._known_consumed(
-            path, args.thread_id, client_message_id, timeout=5.0,
-            strict_history=True, expected_message=context, **transport)
-            if target != args.thread_id else None)
+        consumed = None
+        if target != args.thread_id:
+            consumed, body = consumed_by(args.thread_id, bodies)
         if consumed is not None:
             # The item already reached the cleared window's thread before the handover.
             result = {"status": "consumed", "turn_id": consumed.get("id"),
                       "turn_status": consumed.get("status")}
             turn_thread = args.thread_id
         elif allow_enqueue:
-            result = codex_queue_delivery.send_at_least_once(
-                path, thread_id=target, client_message_id=client_message_id,
-                message=context, timeout=5.0, require_message_match=True, **transport)
+            result, body = send_unit(bodies)
             send_observed = (result.get("status") == "queued"
                              and not result.get("already_pending"))
         else:
-            consumed = codex_queue_delivery._known_consumed(
-                path, target, client_message_id, timeout=5.0, strict_history=True,
-                expected_message=context, **transport)
+            consumed, body = consumed_by(target, bodies)
             if consumed is not None:
                 result = {"status": "consumed", "turn_id": consumed.get("id"),
                           "turn_status": consumed.get("status")}
@@ -1167,7 +1280,7 @@ def _native_queue_delivery_once(
                 # An item still waiting in the old thread's queue cannot be moved (the local queue API
                 # has no move/remove): it is never restarted there; the successor gets the same record.
                 result = codex_queue_delivery.poll_owned_item(
-                    path, thread_id=target, client_message_id=client_message_id, timeout=5.0,
+                    path, thread_id=target, client_message_id=unit_client_id, timeout=5.0,
                     **transport)
                 result["status"] = "queued"
 
@@ -1179,61 +1292,137 @@ def _native_queue_delivery_once(
                 from peer_obligations import retain_registered_completion
                 receiving_turn = {"thread_id": turn_thread, "turn_id": turn_id,
                                   "status": turn_status}
-                for row, record in zip(rows, records):
+                for record in unit_records:
                     if not retain_registered_completion(
-                            args.jobs, row.attempt_id, turn_thread, "codex-native-queue",
+                            args.jobs, record["attempt_ids"][0], turn_thread, "codex-native-queue",
                             delivery_record={**record, "_storage_key": args.thread_id},
                             receiving_turn=receiving_turn):
                         retained = False
                         break
             if not retained:
-                for delivery_id in claimed:
+                for delivery_id in unit_ids:
                     pending_delivery.mark_sent_ambiguous(
                         root, args.thread_id, delivery_id, claim_owner=claim_owner)
                 return {"schema_version": 1, "status": "sent-ambiguous",
                         "reason": "native-receiving-turn-retain-unavailable",
                         "submitted": True, "thread_id": args.thread_id,
-                        "client_user_message_id": client_message_id}
+                        "client_user_message_id": unit_client_id}
             evidence = codex_consumed_evidence(
-                session_id=turn_thread, client_message_id=client_message_id,
-                confirmed_client_message_id=client_message_id, expected_message=context)
+                session_id=turn_thread, client_message_id=unit_client_id,
+                confirmed_client_message_id=unit_client_id, expected_message=body)
             outcomes = []
-            for delivery_id in claimed:
+            for delivery_id in unit_ids:
                 exact = pending_delivery.read(root, args.thread_id, delivery_id)
                 if exact is None:
                     outcomes.append({"received": False, "settled": False})
                     continue
                 outcomes.append(settle_native_receipt(
                     root, args.thread_id, "codex", turn_thread, exact, evidence,
-                    acked_by=acked_by))
+                    acked_by=unit_acked_by))
             if all(outcome["received"] for outcome in outcomes):
                 return {"schema_version": 1, "status": "accepted",
                         "reason": ("native-receipt-ack-pending"
                                    if not all(outcome["settled"] for outcome in outcomes)
                                    else "native-receipt-settled"),
-                        "thread_id": args.thread_id, "client_user_message_id": client_message_id}
-            for delivery_id in claimed:
+                        "thread_id": args.thread_id, "client_user_message_id": unit_client_id}
+            for delivery_id in unit_ids:
                 pending_delivery.mark_sent_ambiguous(
                     root, args.thread_id, delivery_id, claim_owner=claim_owner)
             return {"schema_version": 1, "status": "sent-ambiguous",
                     "reason": "native-receipt-binding-unavailable", "submitted": True,
-                    "thread_id": args.thread_id, "client_user_message_id": client_message_id}
+                    "thread_id": args.thread_id, "client_user_message_id": unit_client_id}
         if send_observed:
-            for delivery_id in claimed:
+            for delivery_id in unit_ids:
                 try:
                     pending_delivery.record_send(
                         root, args.thread_id, delivery_id,
-                        source="codex-native-queue-accepted", event_id=client_message_id)
+                        source="codex-native-queue-accepted", event_id=unit_client_id)
                 except (pending_delivery.PendingDeliveryError, OSError):
                     pass  # Timestamp evidence is advisory and never changes delivery acceptance.
-        for delivery_id in claimed:
+        for delivery_id in unit_ids:
             pending_delivery.mark_sent_ambiguous(
                 root, args.thread_id, delivery_id, claim_owner=claim_owner)
         retry_failure = str(result.get("reason") or "native-queue-consumption-pending")
         return {"schema_version": 1, "status": "sent-ambiguous",
                 "reason": "native-queue-consumption-pending", "submitted": True, "thread_id": args.thread_id,
-                "client_user_message_id": client_message_id,
+                "client_user_message_id": unit_client_id,
                 "queued_submission_id": result.get("queued_submission_id")}
+
+    try:
+        # Claim each owed record. A completion record goes through the ready-batch
+        # claim: a held sibling batch waits on the retry loop, a lost claim means
+        # another sidecar owns the same batch and this pass stays quiet.
+        group: dict[str, dict] = {}
+        lost = False
+        for record in records:
+            delivery_id = record["delivery_id"]
+            if delivery_id in group:
+                continue
+            try:
+                if record["state"] in {"claimed", "sent-ambiguous"}:
+                    pending_delivery.reclaim(root, args.thread_id, delivery_id, now_ns=time.monotonic_ns())
+                if _is_completion_record(record):
+                    members = pending_delivery.claim_ready_batch(
+                        root, args.thread_id, delivery_id, claim_owner=claim_owner,
+                        lease_seconds=60.0, jobs=args.jobs, retry_context=target)
+                else:
+                    members = [pending_delivery.claim(
+                        root, args.thread_id, delivery_id,
+                        claim_owner=claim_owner, lease_seconds=60.0,
+                        jobs=args.jobs, retry_context=target,
+                        retry_base_delay_seconds=retry_base)]
+            except pending_delivery.PendingDeliveryError as exc:
+                if (exc.reason != "pending-delivery-claim-refused"
+                        or exc.detail == "batch-hold"):
+                    raise
+                lost = True
+                continue
+            if len(members) == 1:
+                members = [record]  # A singleton claim is the seed's own validated record.
+            for member in members:
+                group[member["delivery_id"]] = member
+                claimed.append(member["delivery_id"])
+        kept: dict[str, dict] = {}
+        from dispatch_notice_state import keep_claim
+        for delivery_id, member in group.items():
+            if member.get("recipient_kind") != "codex-native-queue":
+                raise CompletionError("native-queue-batch-recipient-mismatch")
+            if (not _is_completion_record(member)
+                    or keep_claim(root, args.thread_id, delivery_id, member, claim_owner,
+                                  jobs=args.jobs)):
+                kept[delivery_id] = member
+                continue
+            fresh = pending_delivery.read(root, args.thread_id, delivery_id)
+            if (fresh and fresh.get("state") == "claimed"
+                    and fresh.get("claim_owner") == claim_owner):
+                kept[delivery_id] = member  # Unreadable evidence never withholds delivery.
+            else:
+                claimed.remove(delivery_id)  # Retired as already received/obsolete, or handed back.
+        if not kept:
+            settled = all((pending_delivery.read(root, args.thread_id, record["delivery_id"]) or {}
+                           ).get("state") in {"acked", "rejected", "expired"}
+                          for record in records)
+            retry_failure = "native-queue-claim-not-held"
+            return {"schema_version": 1, "status": "accepted" if settled else "retryable",
+                    "reason": ("native-queue-nothing-current" if settled else
+                               "native-queue-batch-owned-elsewhere" if lost else
+                               "native-queue-completion-deferred"),
+                    "thread_id": args.thread_id}
+        own_ids = [record["delivery_id"] for record in records]
+        if set(kept) == set(own_ids):
+            units = [([kept[i] for i in own_ids],
+                      [context] + ([prior_context] if prior_context else []),
+                      client_message_id)]
+        else:
+            units = [(unit_records, [body], _batch_client_id(
+                args.thread_id, [record["delivery_id"] for record in unit_records]))
+                for unit_records, body in _batch_units(root, args.thread_id, list(kept.values()))]
+        result = {"schema_version": 1, "status": "accepted", "thread_id": args.thread_id}
+        for unit_records, bodies, unit_client_id in units:
+            result = deliver_unit(unit_records, bodies)
+            if result.get("status") != "accepted":
+                return result
+        return result
     except Exception as exc:
         retry_failure = str(exc) or type(exc).__name__
         raise

@@ -4043,10 +4043,10 @@ class NextLegReceiptTest(unittest.TestCase):
         receipt = {"children": [{"attempt_id": "owner", "required_action": "advance-completed",
                                  "next_leg": self.NEXT_LEG}]}
         text = JOIN.completion_followup_text(receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
-        self.assertIn("requested work is complete", text)
+        self.assertIn("Original request/format apply", text)
         self.assertIn(self.NEXT_LEG["compose_command"], text)
         self.assertIn("If this next leg is already approved, execute it in this turn", text)
-        self.assertIn("Receipt, queue consumption and ACK are not execution", text)
+        self.assertIn("Receipt/ACK isn't execution", text)
         plain = JOIN.completion_followup_text({"children": [{"attempt_id": "owner", "required_action": "advance-completed"}]},
                                               jobs=str(jobs), surface="/fixture/preflight.sh")
         self.assertNotIn("next leg", plain)
@@ -4061,13 +4061,16 @@ class NextLegReceiptTest(unittest.TestCase):
                                  "required_action": "advance-completed"}]}
         text = JOIN.completion_followup_text(
             receipt, jobs=str(jobs), surface="/fixture/preflight.sh")
-        required = (
-            "Continue and complete the original user task itself",
-            "preserving every explicit content and output-format requirement",
-            "this receipt supplements the task",
-            "does not replace it with a receipt-only response",
-        )
-        self.assertTrue(all(part in text for part in required))
+        from dispatch_session_sweep import COMPLETION_DELIVERY_HEADER
+        fixed_text = COMPLETION_DELIVERY_HEADER + "\n" + text
+        required = ("Original request/format apply", "Review result",
+                    "approved follow-through", "First close:",
+                    "checks run/reused/skipped/unrun", "commit/PR/deployment/serving",
+                    "No harvest/restart/manual finalize", "Receipt/ACK isn't execution",
+                    "handled exact repeats need no ACK", "new failures/conflicts",
+                    "unfinished work, questions")
+        self.assertTrue(all(part in fixed_text for part in required))
+        self.assertLessEqual(len(COMPLETION_DELIVERY_HEADER) + len(text), 583)
         receipt_only = "Receipt received. The queue was consumed and ACKed."
         self.assertFalse(all(part in receipt_only for part in required))
 
@@ -5382,7 +5385,7 @@ class WorkContinuationReceiptTest(unittest.TestCase):
         text = self.render([("owner","advance-completed")])
         self.assertNotIn("capability-route.py start",text)
         self.assertNotIn("preflight.sh harvest",text)
-        self.assertIn("requested work is complete",text)
+        self.assertIn("Original request/format apply",text)
         self.assertNotIn("advance the route",text)
 
     def test_parked_owner_followup_says_paused_and_keeps_start_handle(self):

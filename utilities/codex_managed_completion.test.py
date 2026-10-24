@@ -1600,6 +1600,8 @@ class NativeQueueDeliveryTest(unittest.TestCase):
             self.assertEqual(delivered["state"], "acked")
             self.assertNotIn("courier_retry", delivered)
 
+    # The ledger is mocked here; the registry that keep_claim reads does not exist.
+    @mock.patch("dispatch_notice_state.keep_claim", new=lambda *_a, **_k: True)
     def test_queue_acceptance_uses_exact_id_and_restarts_only_while_pending(self) -> None:
         from types import SimpleNamespace
 
@@ -1669,6 +1671,8 @@ class NativeQueueDeliveryTest(unittest.TestCase):
         restart.assert_not_called()  # Transport owns exact restart decisions.
 
 
+    # The ledger is mocked here; the registry that keep_claim reads does not exist.
+    @mock.patch("dispatch_notice_state.keep_claim", new=lambda *_a, **_k: True)
     def test_a_cleared_windows_successor_receives_the_item_while_claim_and_ack_stay_with_the_registered_parent(self) -> None:
         from types import SimpleNamespace
 
@@ -1737,6 +1741,8 @@ class NativeQueueDeliveryTest(unittest.TestCase):
             with mock.patch.object(handover, "effective_parent", side_effect=OSError("boom")):
                 self.assertEqual(module.queue_target(jobs, {"att-one"}, SESSION), SESSION)
 
+    # The ledger is mocked here; the registry that keep_claim reads does not exist.
+    @mock.patch("dispatch_notice_state.keep_claim", new=lambda *_a, **_k: True)
     def test_accepted_send_is_not_repeated_during_history_outage(self) -> None:
         from types import SimpleNamespace
 
@@ -1808,6 +1814,8 @@ class NativeQueueDeliveryTest(unittest.TestCase):
         self.assertEqual(restart.call_count, 2)  # Consumed item absent, history temporarily unavailable.
 
 
+    # The ledger is mocked here; the registry that keep_claim reads does not exist.
+    @mock.patch("dispatch_notice_state.keep_claim", new=lambda *_a, **_k: True)
     def test_refused_transport_releases_its_exact_claim_before_returning(self) -> None:
         from types import SimpleNamespace
 
@@ -2171,6 +2179,236 @@ class NativeQueueDeliveryTest(unittest.TestCase):
             self.assertEqual(old_record["state"], "pending")
             self.assertIsNone(old_record["acked_at_ns"])
             self.assertEqual(pending.read(root, SESSION, new_id)["state"], "pending")
+
+
+class NativeQueueSiblingBatchTest(unittest.TestCase):
+    """One ready sibling batch reaches the Codex queue as one message from any sidecar."""
+
+    def setUp(self):
+        self.module = load_completion_module()
+        self.pending = self.module.pending_delivery
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.jobs = self.root / "jobs.log"
+        self.jobs.write_text("", encoding="utf-8")
+        self.held = False
+        self.sent: list[dict] = []
+        self.ids: list[str] = []
+
+    def _create(self, index, *, failure=False):
+        attempt = f"att-{index:032x}"
+        delivery_id = f"delivery-{index:032x}"
+        child = {"attempt_id": attempt, "status": "done", "readiness": "ready",
+                 "reason": "completed",
+                 "required_action": "inspect-done-failure" if failure else "advance-completed",
+                 "delivery_classification": "attention" if failure else "success"}
+        receipt = {"schema_version": 2, "state": "ready", "children": [child],
+                   "delivery_classification": child["delivery_classification"],
+                   "job_registry": str(self.jobs.resolve()), "parent_attempt_id": PARENT}
+        self.pending.create(
+            self.root, recipient_kind="codex-native-queue", recipient_key=SESSION,
+            delivery_id=delivery_id, session_generation="", session_generation_supported="0",
+            attempt_ids=[attempt], parent_attempt_id=PARENT, route_id="rt-fixture",
+            route_node="frame", receipt=receipt,
+            receipt_digest=self.pending._canonical_receipt_digest(receipt),
+            row_revisions={attempt: "revision"})
+        self.ids.append(delivery_id)
+        return attempt, delivery_id, receipt
+
+    def _row(self, attempt, delivery_id, receipt):
+        record = self.pending.read(self.root, SESSION, delivery_id)
+        return SimpleNamespace(attempt_id=attempt, metadata={
+            "delivery_id": delivery_id, "delivery_recipient_kind": "codex-native-queue",
+            "delivery_row_revision": "revision",
+            "delivery_receipt_digest": record["receipt_digest"]})
+
+    def _resolve(self, jobs, record, *, recipient_key="", delivery_root=None, now_ns=None):
+        receipt = record.get("receipt") or {}
+        if receipt.get("delivery_classification") != "success":
+            return None
+        open_ids = []
+        for delivery_id in self.ids:
+            member = self.pending.read(self.root, SESSION, delivery_id)
+            if (member and member["receipt"].get("delivery_classification") == "success"
+                    and member["state"] not in {"acked", "expired", "rejected"}):
+                open_ids.append(delivery_id)
+        info = Path(jobs).stat()
+        return {"delivery_ids": tuple(sorted(open_ids)), "held": self.held,
+                "registry_path": str(jobs),
+                "registry_signature": (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns),
+                "seed_identity": (record["delivery_id"], record["receipt_digest"],
+                                  tuple(record["attempt_ids"]), record["recipient_digest"])}
+
+    def _run(self, members, *, current=None):
+        """Run each sibling's own sidecar once, in order; return their results."""
+        rows = {attempt: self._row(attempt, delivery_id, receipt)
+                for attempt, delivery_id, receipt in members}
+        args = SimpleNamespace(queue_socket=Path("/tmp/app-server.sock"), thread_id=SESSION,
+                               jobs=self.jobs, timeout=2.0, delivery_retry_interval=0.01)
+
+        def send(path, **kwargs):
+            self.sent.append(kwargs)
+            return {"status": "consumed", "turn_id": f"turn-{len(self.sent)}",
+                    "turn_status": "completed"}
+
+        results = []
+        module = self.module
+        with mock.patch.object(module.codex_queue_delivery, "_rpc", return_value={
+                "thread": {"id": SESSION, "cwd": "/tmp/repo"}}), \
+             mock.patch.object(module, "current_session_children",
+                               side_effect=lambda _jobs, _thread, attempts, _kind: [
+                                   rows[a] for a in sorted(attempts)]), \
+             mock.patch.object(module, "_queue_target_from_rows", return_value=SESSION), \
+             mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=self._resolve), \
+             mock.patch("dispatch_notice_state.notice_is_current",
+                        side_effect=current or (lambda record, jobs=None: True)), \
+             mock.patch.object(self.pending, "_replacement_disposition", return_value=""), \
+             mock.patch.object(module.codex_queue_delivery, "send_at_least_once",
+                               side_effect=send), \
+             mock.patch("peer_obligations.retain_registered_completion", return_value=True):
+            for attempt, _delivery_id, receipt in members:
+                try:
+                    results.append(module._native_queue_delivery_once(
+                        args, receipt, {attempt}))
+                except self.pending.PendingDeliveryError as exc:
+                    results.append(exc)
+        return results
+
+    def _states(self):
+        return {delivery_id: (self.pending.read(self.root, SESSION, delivery_id) or {}).get("state")
+                for delivery_id in self.ids}
+
+    def test_24_ready_siblings_wake_the_parent_once_and_ack_every_record(self):
+        members = [self._create(index) for index in range(24)]
+        results = self._run(members)
+        self.assertEqual(len(self.sent), 1)
+        message = self.sent[0]["message"]
+        self.assertTrue(self.sent[0]["client_message_id"].startswith("delivery-"))
+        self.assertEqual(sum(1 for line in message.splitlines()
+                             if line.startswith("HEARTING_RECEIPT_V1")), 24)
+        for _attempt, delivery_id, _receipt in members:
+            self.assertIn("delivery_id=" + delivery_id, message)
+        self.assertEqual(set(self._states().values()), {"acked"})
+        self.assertTrue(all(isinstance(result, dict) and result["status"] == "accepted"
+                            for result in results), results)
+        print(f"batch24 emissions={len(self.sent)} wakes={len(self.sent)} chars={len(message)}")
+
+    def test_a_held_batch_emits_nothing_and_keeps_every_record_pending(self):
+        members = [self._create(index) for index in range(24)]
+        self.held = True
+        results = self._run(members)
+        self.assertEqual(self.sent, [])
+        self.assertTrue(all(isinstance(result, self.pending.PendingDeliveryError)
+                            and result.detail == "batch-hold" for result in results), results)
+        self.assertEqual(set(self._states().values()), {"pending"})
+        self.assertEqual({self.pending.read(self.root, SESSION, delivery_id)["attempts"]
+                          for delivery_id in self.ids}, {0})
+
+    def test_a_failure_record_is_delivered_immediately_on_its_own(self):
+        members = [self._create(index) for index in range(3)]
+        failure = self._create(3, failure=True)
+        self.held = True  # The success siblings are still held; the failure must not wait.
+        results = self._run([failure])
+        self.assertEqual(len(self.sent), 1)
+        self.assertTrue(self.sent[0]["message"].startswith("AGENT_HARNESS_COMPLETION_V1\n"))
+        self.assertEqual(results[0]["status"], "accepted")
+        states = self._states()
+        self.assertEqual(states[failure[1]], "acked")
+        self.assertEqual({states[member[1]] for member in members}, {"pending"})
+
+    def test_an_already_received_member_is_retired_without_a_second_emission(self):
+        members = [self._create(index) for index in range(3)]
+        received = members[1][1]
+        results = self._run(members, current=lambda record, jobs=None:
+                            record["delivery_id"] != received)
+        self.assertEqual(len(self.sent), 1)
+        message = self.sent[0]["message"]
+        self.assertNotIn("delivery_id=" + received, message)
+        self.assertEqual(sum(1 for line in message.splitlines()
+                             if line.startswith("HEARTING_RECEIPT_V1")), 2)
+        states = self._states()
+        self.assertEqual(states[received], "rejected")
+        self.assertEqual({states[m[1]] for m in (members[0], members[2])}, {"acked"})
+        self.assertTrue(all(isinstance(result, dict) for result in results), results)
+        # Replaying every sidecar finds nothing owed and emits nothing more.
+        self._run(members)
+        self.assertEqual(len(self.sent), 1)
+
+    def test_only_a_single_sibling_that_was_already_received_queues_nothing(self):
+        member = self._create(0)
+        results = self._run([member], current=lambda record, jobs=None: False)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(results[0]["status"], "accepted")
+        self.assertEqual(self._states()[member[1]], "rejected")
+
+    def test_a_batch_owned_by_another_sidecar_stays_quiet_and_untouched(self):
+        members = [self._create(index) for index in range(4)]
+        with mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=self._resolve), \
+             mock.patch.object(self.pending, "_replacement_disposition", return_value=""):
+            owned = self.pending.claim_ready_batch(
+                self.root, SESSION, members[0][1], claim_owner="other-sidecar",
+                lease_seconds=60.0, jobs=self.jobs)
+        self.assertEqual(len(owned), 4)
+        results = self._run(members[1:])
+        self.assertEqual(self.sent, [])
+        self.assertEqual({result["reason"] for result in results},
+                         {"native-queue-batch-owned-elsewhere"})
+        self.assertEqual({self.pending.read(self.root, SESSION, d)["claim_owner"]
+                          for d in self.ids}, {"other-sidecar"})
+
+    def test_a_batch_too_large_for_one_message_is_split_without_losing_a_record(self):
+        members = [self._create(index) for index in range(24)]
+        with mock.patch.object(self.module, "QUEUE_BODY_LIMIT", 4000):
+            self._run(members)
+        self.assertGreater(len(self.sent), 1)
+        self.assertTrue(all(len(call["message"].encode("utf-8")) <= 4000 for call in self.sent))
+        self.assertEqual(len({call["client_message_id"] for call in self.sent}), len(self.sent))
+        delivered = [d for _a, d, _r in members
+                     if any("delivery_id=" + d in call["message"] for call in self.sent)]
+        self.assertEqual(len(delivered), 24)
+        self.assertEqual(set(self._states().values()), {"acked"})
+
+    def test_a_body_queued_with_the_previous_follow_up_wording_is_recognized_exactly(self):
+        module = self.module
+        member = self._create(0)
+        current = module._CURRENT_SUCCESS_FOLLOWUP_START + " Fixture current text.\nnext leg note"
+        prior = module._prior_followup_text(current)
+        self.assertTrue(prior.startswith(module._PRIOR_SUCCESS_FOLLOWUP))
+        self.assertTrue(prior.endswith("\nnext leg note"))
+        self.assertIsNone(module._prior_followup_text("Other wording"))
+        sent = []
+
+        def refuse_new_wording(path, **kwargs):
+            sent.append(kwargs["message"])
+            raise module.codex_queue_delivery.QueueDeliveryError(
+                "queue-peer-history-mismatch", ambiguous=True)
+
+        def consumed_with_prior(path, thread, client_id, *, expected_message=None, **_kw):
+            if expected_message == sent[0].replace(current, prior):
+                return {"id": "turn-prior", "status": "completed"}
+            return None
+
+        rows = [self._row(*member)]
+        args = SimpleNamespace(queue_socket=Path("/tmp/app-server.sock"), thread_id=SESSION,
+                               jobs=self.jobs, timeout=2.0, delivery_retry_interval=0.01)
+        with mock.patch.object(module.codex_queue_delivery, "_rpc", return_value={
+                "thread": {"id": SESSION, "cwd": "/tmp/repo"}}), \
+             mock.patch.object(module, "current_session_children", return_value=rows), \
+             mock.patch.object(module, "_queue_target_from_rows", return_value=SESSION), \
+             mock.patch.object(module, "completion_followup_text", return_value=current), \
+             mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=self._resolve), \
+             mock.patch("dispatch_notice_state.notice_is_current", return_value=True), \
+             mock.patch.object(self.pending, "_replacement_disposition", return_value=""), \
+             mock.patch.object(module.codex_queue_delivery, "send_at_least_once",
+                               side_effect=refuse_new_wording), \
+             mock.patch.object(module.codex_queue_delivery, "_known_consumed",
+                               side_effect=consumed_with_prior), \
+             mock.patch("peer_obligations.retain_registered_completion", return_value=True):
+            result = module._native_queue_delivery_once(args, member[2], {member[0]})
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(len(sent), 1)  # Never resent: the previous wording was the consumed body.
+        self.assertEqual(self._states()[member[1]], "acked")
 
 
 if __name__ == "__main__":

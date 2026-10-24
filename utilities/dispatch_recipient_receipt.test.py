@@ -85,6 +85,28 @@ class RecipientReceiptTest(unittest.TestCase):
         ], self.session)
         self.assertEqual(claude["bindings"], [(self.delivery_id, marker.split()[-1])])
 
+    def test_claude_21306_native_task_notification_is_session_bound(self):
+        marker = receipt.receipt_marker(self.record, self.storage)
+        native = {
+            "type": "user", "sessionId": self.session,
+            "origin": {"kind": "task-notification", "producer": "session-task"},
+            "promptSource": "system", "turnOrigin": "task_notification",
+            "message": {"content": (
+                "<task-notification><task-id>fixture</task-id>"
+                "<summary>Stop hook feedback</summary>" + marker +
+                "</task-notification>")},
+        }
+        evidence = receipt.claude_feedback_evidence([native], self.session)
+        self.assertEqual(evidence["bindings"], [(self.delivery_id, marker.split()[-1])])
+        for invalid in (
+            {**native, "sessionId": "foreign"},
+            {**native, "promptSource": "user"},
+            {**native, "message": {"content": "quoted " + marker}},
+            {**native, "message": {"content": "<task-notification>partial" + marker}},
+        ):
+            observed = receipt.claude_feedback_evidence([invalid], self.session)
+            self.assertFalse(observed["bindings"])
+
     def test_exact_receipt_settles_delivery_only(self):
         self._mark_sent_ambiguous()
         marker = receipt.receipt_marker(self.record, self.storage)
