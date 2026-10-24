@@ -24,7 +24,7 @@ phase: code
 EOF
 printf '.claude_reports/\n' > .gitignore
 git add -A && git commit -q -m "init"
-# 이 fixture root 의 stale grounding 마커 제거 (이전 run 잔재 오탐 방지)
+# 이 fixture root 의 stale grounding 마커 제거 (이전 isolated run 잔재 오탐 방지)
 key=$(printf '%s' "$PWD" | sed 's#[/ ]#_#g')
-rm -f "${DRILL_MARKER_HOME:-$HOME/.claude}/.spec-grounding/"*"__${key}" 2>/dev/null || true
+rm -f "${DRILL_MARKER_DIR:?}/"*"__${key}" 2>/dev/null || true
 echo "$key" > "$WORK/.pre/root_key"

@@ -110,6 +110,20 @@ class RouteReleaseRetentionConsumerTest(unittest.TestCase):
         )
         return archive, digest
 
+    def test_release_archive_leaves_shared_spec_marker_state_outside_the_bundle(self):
+        marker_dir = Path(self.env["HARNESS_STATE_ROOT"]) / "spec-grounding"
+        marker_dir.mkdir(parents=True)
+        marker = marker_dir / "session__fixture"
+        marker.write_text("123456789\n", encoding="utf-8")
+        archive, _digest = self._archive("state-root-fixture")
+        with tarfile.open(archive, "r:gz") as bundle:
+            names = bundle.getnames()
+        self.assertFalse(any(
+            ".spec-grounding/" in name or "/spec-grounding/" in name
+            for name in names
+        ))
+        self.assertEqual(marker.read_text(encoding="utf-8"), "123456789\n")
+
     def _publish_index(self, version: str, archive: Path) -> None:
         checksum = archive.with_name(archive.name + ".sha256")
         index = archive.parent / "release.json"

@@ -87,6 +87,7 @@ _IGNORE_NAMES = {
     ".claude_reports",
     ".core-grounding",
     ".route-grounding",
+    # Keep release-local residue out of snapshots; active spec markers use state_root.
     ".spec-grounding",
     ".harness",
     ".venv",

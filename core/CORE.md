@@ -194,7 +194,7 @@ never orders a move or a delete.
 | `shards/` | parallel-leg support material | `C-INT` |
 | `.runtime/` | artifact-root-scoped runtime state (route lifecycle records, producer cutover/cycle records, stage-session ledgers under `.runtime/stage-sessions/<route_id>/`, and similar); the only bucket name for this, legacy `_runtime/` is read-only | `C-RT` |
 | `.core-grounding/` | legacy core-read marker state (no longer written) | `C-RT` |
-| `.spec-grounding/` | spec read-guard state | `C-RT` |
+| `.spec-grounding/` | legacy release-local residue; canonical spec read-guard writes use `dispatch_contract.state_root(environ)/spec-grounding` | `C-RT` |
 | `routes/`, `_routes/` | legacy route-record locations outside `.runtime/` | `C-LRT` |
 | `notes/`, `proposals/`, `spec-research-alternative/`, `research-alternative/` | present containers whose owner is not declared — recognized, not adopted | `C-LEG(undeclared-container)` |
 | `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |

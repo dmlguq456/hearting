@@ -541,7 +541,9 @@ Artifact directories are gitignored in every tracked repository, including
 `<agent-home>`. Add `.agent_reports/` to
 `.gitignore` on first creation; treat legacy `.claude_reports/` similarly.
 Runtime grounding state (`.capability-grounding/`, `.route-grounding/`,
-`.spec-grounding/`, `.core-grounding/`) is likewise never tracked. Linked
+`.spec-grounding/`, `.core-grounding/`) is likewise never tracked. New spec-read
+markers live under `dispatch_contract.state_root(environ)/spec-grounding`; old
+release-local `.spec-grounding/` entries remain ignored as residue. Linked
 worktrees resolve the primary checkout's canonical root; durable writes still
 target it. Transient locks and untracked markers remain ignored.
 

@@ -11,6 +11,7 @@ GOLD="${DRILL_HOME:-$AGENT_HOME/loops/drill}"   # DRILL_HOME supports worktree t
 # adapter-specific. DRILL_ADAPTER / --adapter selects claude|codex|opencode.
 # shellcheck source=../lib-runner.sh
 . "$SCRIPT_DIR/../lib-runner.sh"
+export DRILL_MARKER_DIR="${DRILL_MARKER_DIR:-$(_loop_spec_marker_dir)}"
 ADAPTER="${DRILL_ADAPTER:-claude}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 RUNNER_ROOT=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$AGENT_HOME")
@@ -166,10 +167,8 @@ for c in "${cases[@]}"; do
     rc=$?
   fi
 
-  # Spec-grounding marker home for assertions: guards write the marker to the
-  # ADAPTER's resolved agent-home, so cases must read it there, not a literal
-  # claude path. Default to this run's AGENT_HOME.
-  export DRILL_MARKER_HOME="${DRILL_MARKER_HOME:-$AGENT_HOME}"
+  # Markers and assertions share the canonical state-root directory computed
+  # by harness_state_roots; release updates cannot move it.
 
   assert_rc=0
   out=$(bash "$CASE_DIR/assert.sh" "$WORK" "$T" 2>&1) || assert_rc=$?

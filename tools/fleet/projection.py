@@ -798,9 +798,10 @@ def _has_entries(path):
 
 
 def _grounding_home():
-    """Agent home holding `.spec-grounding/`. Delegates to the one canonical
+    """Agent home holding capability-grounding records. Delegates to the one canonical
     resolver (utilities/dispatch_contract.resolve_agent_home) instead of a
-    local reimplementation, matching `route._completion_home`. An explicit
+    local reimplementation, matching `route._completion_home`. Spec-read
+    markers are resolved independently through `dispatch_contract.state_root`. An explicit
     `AGENT_HOME`/`CLAUDE_HOME` env override is honored unconditionally; only
     the unset-env fallback chain goes through the validated resolver."""
     h = os.environ.get("AGENT_HOME") or os.environ.get("CLAUDE_HOME")
@@ -884,11 +885,11 @@ def _capability_grounding_for(entity, index, now=None):
 
 
 def _spec_marker_index(home):
-    """Scan ``<home>/.spec-grounding`` once into ``{name: mtime}``. Missing dir or
-    OSError degrades to an empty index rather than raising."""
+    """Scan the explicit spec-marker directory into ``{name: mtime}``. Missing
+    dir or OSError degrades to an empty index rather than raising."""
     index = {}
     try:
-        with os.scandir(os.path.join(home, ".spec-grounding")) as entries:
+        with os.scandir(home) as entries:
             for entry in entries:
                 try:
                     index[entry.name] = entry.stat().st_mtime
@@ -897,6 +898,16 @@ def _spec_marker_index(home):
     except OSError:
         return {}
     return index
+
+
+def _spec_marker_state_dir():
+    """The shared release-independent marker directory used by the hook/writer."""
+    utilities = Path(__file__).resolve().parents[2] / "utilities"
+    if str(utilities) not in sys.path:
+        sys.path.insert(0, str(utilities))
+    from dispatch_contract import state_root
+
+    return state_root(os.environ) / "spec-grounding"
 
 
 def _grounding_key(root):
@@ -1680,7 +1691,7 @@ def resolve_projection(*args, **kwargs):
 
 def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
                       route_records=None, node_evidence=None, artifact_root=None, now=None,
-                      spec_markers=None, spec_marker_home=None,
+                      spec_markers=None, spec_marker_dir=None,
                       capability_groundings=None, degradations=None, resources=None,
                       fast_first=False):
     """Attach work to every row and exact-owned context to live cards."""
@@ -1717,9 +1728,10 @@ def attach_projections(sessions: Iterable[Session], jobs: Iterable[DispatchJob],
                             "run_ids": [r.run_id for group in children.values() for r in group]}
         return sessions, jobs
     route_records = _load_evidence_records(node_evidence, route_records, sessions + jobs)
-    home = spec_marker_home or _grounding_home()
+    home = _grounding_home()
+    marker_dir = spec_marker_dir or _spec_marker_state_dir()
     if spec_markers is None:
-        spec_markers = _spec_marker_index(home)
+        spec_markers = _spec_marker_index(marker_dir)
     cap_index = (_capability_grounding_index(home) if capability_groundings is None
                  else capability_groundings)
     all_entities = sessions + jobs

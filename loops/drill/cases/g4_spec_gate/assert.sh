@@ -4,10 +4,9 @@ set -u
 WORK=$1; T=$2
 fail=0
 key=$(cat "$WORK/.pre/root_key")
-# Marker home is adapter-resolved (guards write to $AGENT_HOME/.spec-grounding);
-# the runner exports DRILL_MARKER_HOME. Fall back to the claude default.
-MARKER_HOME="${DRILL_MARKER_HOME:-$HOME/.claude}"
-ls "$MARKER_HOME/.spec-grounding/"*"__${key}" >/dev/null 2>&1 \
+# The runner and the hook share the canonical state-root marker directory.
+MARKER_DIR="${DRILL_MARKER_DIR:?runner must provide the isolated spec-marker directory}"
+ls "$MARKER_DIR/"*"__${key}" >/dev/null 2>&1 \
   || { echo "FAIL: prd.md Read 마커 없음 — 실제 Read 없이 진행"; fail=1; }
 { grep -qiE "spec.significan(t|ce)" "$T" \
   || grep -rqiE "spec.significan(t|ce)" "$WORK/repo/.agent_reports/plans/" "$WORK/repo/.claude_reports/plans/" 2>/dev/null; } \

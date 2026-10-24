@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -33,6 +34,13 @@ class HarnessStateRootsTest(unittest.TestCase):
         self.home = Path(self._tmp.name) / "home"
         (self.home / ".core-grounding").mkdir(parents=True)
         self.jobs = Path(self._tmp.name) / "state" / "jobs.log"
+        self.state_root = Path(self._tmp.name) / "hearting-state"
+        self._environment = mock.patch.dict(os.environ, {
+            "HARNESS_STATE_ROOT": str(self.state_root),
+            "AGENT_HOME": str(self.home),
+        })
+        self._environment.start()
+        self.addCleanup(self._environment.stop)
 
     def args(self, **values):
         base = dict(agent_home=str(self.home), jobs_path=str(self.jobs))
@@ -50,7 +58,24 @@ class HarnessStateRootsTest(unittest.TestCase):
         self.assertEqual([H.spec_read_marker_required(a) for a in (plain, routed, registered)], [False, True, True])
         self.assertEqual([H.registry_writable_launch(a) for a in (plain, routed, self.args(route_id="rt-1"))],
                          [False, True, False])
-        self.assertEqual(H.spec_grounding_dir(plain), self.home / ".spec-grounding")
+        self.assertEqual(H.spec_grounding_dir(plain), self.state_root / "spec-grounding")
+
+    def test_spec_marker_root_is_release_independent(self):
+        first = self.args(agent_home=str(self.home / "release-a"))
+        second = self.args(agent_home=str(self.home / "release-b"))
+        with mock.patch.dict(os.environ, {"HARNESS_STATE_ROOT": str(self.state_root)}):
+            a = H.spec_grounding_dir(first)
+            b = H.spec_grounding_dir(second)
+        self.assertEqual(a, self.state_root / "spec-grounding")
+        self.assertEqual(a, b)
+        for env, expected in (
+            ({"XDG_STATE_HOME": str(self._tmp.name) + "/xdg", "HOME": str(self.home)},
+             Path(self._tmp.name) / "xdg" / "hearting" / "spec-grounding"),
+            ({"HOME": str(self.home)},
+             self.home / ".local" / "state" / "hearting" / "spec-grounding"),
+        ):
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(H.spec_grounding_dir(first), expected)
 
     def test_the_codex_wrapper_projects_the_shared_answer(self):
         spec = importlib.util.spec_from_file_location(
@@ -74,6 +99,14 @@ class HarnessStateRootsTest(unittest.TestCase):
             codex.ensure_owner_writable_dirs(self.args(nested_headless_network=True))
             self.assertTrue(ledger.is_dir())
             self.assertTrue(titles.is_dir())
+
+        worker = self.args(route_id="rt-spec", command_attempt_id="att-spec")
+        with mock.patch.object(codex, "nested_owner_writable_dirs", return_value=()):
+            codex.ensure_owner_writable_dirs(worker)
+        marker_dir = self.state_root / "spec-grounding"
+        self.assertTrue(marker_dir.is_dir())
+        self.assertEqual(marker_dir.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.home / ".spec-grounding").exists())
 
     def test_only_an_adapter_that_confines_writes_opens_them(self):
         # The rule is shared; opening the directories is the realization of an

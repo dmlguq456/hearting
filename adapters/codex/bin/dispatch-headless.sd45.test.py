@@ -350,6 +350,15 @@ class CodexRouteBoundWorkerGrant(unittest.TestCase):
             max_continuations=None,
         )
 
+    def setUp(self):
+        self._state_tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._state_tmp.cleanup)
+        self._state_env = mock.patch.dict(os.environ, {
+            "HARNESS_STATE_ROOT": self._state_tmp.name,
+        })
+        self._state_env.start()
+        self.addCleanup(self._state_env.stop)
+
     def test_ordinary_depth2_worker_gets_core_grounding_independent_of_network_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             args = self._depth2_args(tmp)
@@ -375,9 +384,11 @@ class CodexRouteBoundWorkerGrant(unittest.TestCase):
                         args.resolved_completion_delivery = delivery
                         WH.ensure_owner_writable_dirs(args)
                         command = WH.shell_command(args, Path(tmp)/"p", Path(tmp)/"log")
-                        marker_dir = args.agent_home / ".spec-grounding"
+                        marker_dir = Path(os.environ["HARNESS_STATE_ROOT"]) / "spec-grounding"
                         self.assertIn(f"{flag} {marker_dir}", command)
                         self.assertTrue(marker_dir.is_dir())
+                        self.assertEqual(marker_dir.stat().st_mode & 0o777, 0o700)
+                        self.assertFalse((args.agent_home / ".spec-grounding").exists())
                         self.assertNotIn(f"{flag} {args.agent_home} ", command)
                         self.assertFalse((args.agent_home / ".core-grounding").exists())
 
@@ -389,8 +400,9 @@ class CodexRouteBoundWorkerGrant(unittest.TestCase):
             args.execution_surface = "registered-headless"
             WH.ensure_owner_writable_dirs(args)
             command = WH.shell_command(args, Path(tmp)/"p", Path(tmp)/"log")
-            self.assertNotIn(str(args.agent_home / ".spec-grounding"), command)
-            self.assertFalse((args.agent_home / ".spec-grounding").exists())
+            marker_dir = Path(os.environ["HARNESS_STATE_ROOT"]) / "spec-grounding"
+            self.assertNotIn(str(marker_dir), command)
+            self.assertFalse(marker_dir.exists())
 
     def test_ordinary_depth2_worker_add_dir_list_includes_core_grounding(self):
         # The direct verification requirement (c): build the args for a plain
@@ -448,7 +460,7 @@ class CodexRouteBoundWorkerGrant(unittest.TestCase):
             command = WH.shell_command(
                 args, Path(tmp) / "p.txt", Path(tmp) / "l.log"
             )
-            spec_grounding = str(args.agent_home.resolve() / ".spec-grounding")
+            spec_grounding = str(Path(os.environ["HARNESS_STATE_ROOT"]) / "spec-grounding")
             self.assertIn(spec_grounding, command)
 
 

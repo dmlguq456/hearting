@@ -4,6 +4,7 @@
 # Session data (per-machine, ephemeral)
 history.jsonl
 sessions/
+# Legacy release-local residue only; active spec markers use the shared state root.
 .spec-grounding/
 .core-grounding/
 session-env/

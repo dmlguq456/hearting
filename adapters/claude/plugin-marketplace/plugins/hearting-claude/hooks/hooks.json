@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "AGENT_HOME=\"${CLAUDE_PLUGIN_DATA}\" sh \"${CLAUDE_PLUGIN_ROOT}/hooks/spec-read-marker.sh\""
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/spec-read-marker.sh\""
           }
         ]
       },
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "AGENT_HOME=\"${CLAUDE_PLUGIN_DATA}\" bash \"${CLAUDE_PLUGIN_ROOT}/hooks/spec-sync-nudge.sh\""
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/spec-sync-nudge.sh\""
           }
         ]
       }

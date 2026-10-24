@@ -53,6 +53,13 @@ _loop_agent_home() {
   printf '%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current"
 }
 
+_loop_spec_marker_dir() {
+  local agent_home
+  agent_home=$(_loop_agent_home) || return
+  PYTHONPATH="$agent_home/utilities" python3 -c \
+    'import os; from harness_state_roots import spec_grounding_dir; print(spec_grounding_dir(None))'
+}
+
 _loop_governor_path() {
   local agent_home src dir root
   agent_home="$(_loop_agent_home)"
@@ -339,7 +346,7 @@ _loop_run_codex() {
   governor=$(_loop_governor_path) || return $?
   work_root=$(CDPATH= cd -- "$repo/.." && pwd)
   dispatch_root=$(dirname -- "$(_loop_jobs_path)")
-  spec_marker_root="$agent_home/.spec-grounding"
+  spec_marker_root="$(_loop_spec_marker_dir)" || return
   core_marker_root="$agent_home/.core-grounding"
   mkdir -p "$dispatch_root" "$spec_marker_root" "$core_marker_root"
   # Fleet resolves Codex liveness through a deterministic worktree-local pointer.

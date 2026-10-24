@@ -16,6 +16,7 @@ VALID_AFFINITY = DEFAULTS.AFFINITY_VALUES | {"unspecified"}
 sys.path.insert(0, str(ROOT/"utilities"))
 from hearting_gates import gates_on, same_work_or_refuse
 import artifact_locator as ARTIFACT_LOCATOR
+import harness_state_roots as HARNESS_STATE_ROOTS
 import git_index_lock
 import route_identity as ROUTE_IDENTITY
 import route_lineage as ROUTE_LINEAGE
@@ -3587,7 +3588,7 @@ SPEC_READ_MARKER_PREFIX = "spec-read-marker: "
 
 def _spec_reads_recorded(paths, artifact_root):
     """The `paths` this session has read unchanged, as the read hook recorded them
-    (`hooks/spec-read-marker.sh`: `<agent home>/.spec-grounding/<session>__<root key>`
+    (`hooks/spec-read-marker.sh`: `<state_root>/spec-grounding/<session>__<root key>`
     holding the file's mtime at the read). Only a root-level `spec/prd.md` of the
     artifact root has such a key; anything unreadable counts as not read."""
     try:
@@ -3598,7 +3599,7 @@ def _spec_reads_recorded(paths, artifact_root):
         return []
     root = Path(artifact_root)
     key = str(root.parent).replace("/", "_").replace(" ", "_")
-    marker = Path(resolve_agent_home()) / ".spec-grounding" / f"{session}__{key}"
+    marker = HARNESS_STATE_ROOTS.spec_grounding_dir(None) / f"{session}__{key}"
     try:
         recorded = int(marker.read_text(encoding="utf-8").strip())
     except (OSError, ValueError):

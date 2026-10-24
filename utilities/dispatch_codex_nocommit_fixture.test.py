@@ -46,6 +46,7 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
         )
         self.artifact = self.base / ".agent_reports"
         self.artifact.mkdir()
+        self.state_root = self.base / "hearting-state"
         self.jobs = self.base / "jobs.log"
         self.logs = self.base / "logs"
         self.owner = subprocess.Popen(["sleep", "60"])
@@ -92,6 +93,7 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             **{key: value for key, value in os.environ.items()
                if key not in {"AGENT_DISPATCH_JOBS", "AGENT_MODEL_GOVERNOR_ROOT"}},
             "AGENT_HOME": str(self.primary),
+            "HARNESS_STATE_ROOT": str(self.state_root),
             "AGENT_ARTIFACT_ROOT": str(self.artifact),
             "AGENT_DISPATCH_ATTEMPT_ID": "att-nocommit-parent",
         }
@@ -128,7 +130,8 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
         # (1) Source/artifact markers and exact Git directories are granted; the common root is not.
         command_line = next(ln for ln in result.stdout.splitlines() if ln.startswith("command="))
         command = command_line[len("command="):]
-        self.assertIn(str(self.primary / ".spec-grounding"), command)
+        marker_dir = self.state_root / "spec-grounding"
+        self.assertIn(str(marker_dir), command)
         self.assertIn(str(self.artifact), command)
         tokens = shlex.split(command)
         grants = [Path(tokens[i + 1]).resolve() for i, token in enumerate(tokens[:-1])
@@ -139,8 +142,10 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             text=True, capture_output=True, check=True,
         ).stdout.strip()
         self.assertNotIn(Path(os.path.realpath(common_dir)), grants)
-        self.assertTrue((self.primary / ".spec-grounding").is_dir())
-        self.assertEqual((self.primary / ".spec-grounding").stat().st_mode & 0o777, 0o700)
+        self.assertTrue(marker_dir.is_dir())
+        self.assertEqual(marker_dir.stat().st_mode & 0o777, 0o700)
+        self.assertFalse((self.primary / ".spec-grounding").exists())
+        self.assertFalse((self.linked / ".spec-grounding").exists())
 
         # A normal route-bound execute is commit-expected; route pins remain immutable.
         row = self.jobs.read_text(encoding="utf-8").strip().splitlines()[-1]
@@ -226,22 +231,21 @@ class CodexNoCommitFixtureTest(unittest.TestCase):
             (),
         )
 
-    def test_source_edit_and_primary_spec_marker_persist_across_boundary(self):
-        """(2) a simulated worker's source edit persists in the worktree, and a
-        `.spec-grounding/<marker>` write lands in the PRIMARY checkout — the
-        exact narrow root the argv builder actually grants, exercised directly
-        rather than via a real (unavailable in CI) `codex exec` process."""
+    def test_source_edit_and_spec_marker_persist_across_boundary(self):
+        """A simulated source edit persists in the worktree, while its spec
+        marker uses the shared state-root directory granted to the worker."""
         route = self.compile_route()
         (self.linked / "source_edit.txt").write_text("worker output\n", encoding="utf-8")
         self.assertTrue((self.linked / "source_edit.txt").is_file())
 
-        spec_grounding = self.primary / ".spec-grounding"
+        spec_grounding = self.state_root / "spec-grounding"
         spec_grounding.mkdir(mode=0o700, parents=True, exist_ok=True)
         marker = spec_grounding / "fixture-marker.json"
         marker.write_text(json.dumps({"route_id": route["route_id"]}), encoding="utf-8")
         self.assertTrue(marker.is_file())
-        self.assertFalse((self.linked / ".spec-grounding").exists(),
-                          "the marker root is the PRIMARY checkout, never the sandboxed worktree")
+        self.assertFalse((self.primary / ".spec-grounding").exists(),
+                          "the marker root is shared state, not either checkout")
+        self.assertFalse((self.linked / ".spec-grounding").exists())
 
         # HEAD stays exactly source_commit (no forged/no actual commit) — worker-route-guard's
         # existing exact-match gate for a first attempt already covers this; this test only

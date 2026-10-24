@@ -1,11 +1,11 @@
 """F-40-adjacent spec-grounding marker attribution matrix (SD-82 fleet-grounding-projection).
 
-Every cell is hermetic: `.spec-grounding` is never scanned from disk here —
-`spec_markers` is injected directly as a `{name: mtime}` dict (mirrors the
-existing `spec_marker_home`/`spec_markers` injection points added to
-`attach_projections`/`resolve_work_projection`). Only `pipeline_state.yaml`
-content lives on a tmp filesystem tree, since `_spec_stage_parts` is a real
-file reader by design (zero-dep line parser, not injectable).
+Every attribution cell is hermetic: spec markers are injected directly as a
+`{name: mtime}` dict. A separate default-path test verifies that the actual
+state-root directory selected by the shared resolver is scanned. Only
+`pipeline_state.yaml` content lives on a tmp filesystem tree, since
+`_spec_stage_parts` is a real file reader by design (zero-dep line parser,
+not injectable).
 """
 import os
 import sys
@@ -68,7 +68,7 @@ def _attach_projections(sessions, jobs, **kwargs):
     """Most legacy cells exercise spec projection itself, so explicitly model
     an active autopilot-spec entry.  F-43 negative cells call the production
     function directly with no capability evidence."""
-    home = kwargs.get("spec_marker_home")
+    home = kwargs.pop("grounding_home", None)
     cap_index = projection._capability_grounding_index(home) if home else {}
     if kwargs.get("spec_markers") is not None:
         for entity in sessions:
@@ -483,7 +483,7 @@ class CapabilityGroundingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self._write(tmp, "sid-c", "capability=autopilot-code\nmode=dev\nintensity=standard\n")
             s = _session(sid="sid-c", cwd="/x")
-            _attach_projections([s], [], now=NOW, spec_marker_home=tmp)
+            _attach_projections([s], [], now=NOW, grounding_home=tmp)
             self.assertEqual(s.cap_grounding,
                              {"capability": "autopilot-code", "mode": "dev", "intensity": "standard"})
             text = "".join(t for t, _k in render._session_stage_segs(s, True, 80))
@@ -496,7 +496,7 @@ class CapabilityGroundingTest(unittest.TestCase):
             self._write(tmp, "sid-s", "capability=autopilot-spec\nintensity=strong\n")
             s = _session(sid="sid-s", cwd=tmp)
             _attach_projections([s], [], artifact_root=tmp, now=NOW,
-                                          spec_markers=markers, spec_marker_home=tmp)
+                                          spec_markers=markers, grounding_home=tmp)
             text = "".join(t for t, _k in render._session_stage_segs(s, True, 80))
             self.assertIn("spec(cli·strong) : ", text)   # intensity from the grounding marker
 
@@ -529,7 +529,7 @@ class CapabilityGroundingTest(unittest.TestCase):
             _attach_projections(
                 [s], [], artifact_root=tmp, now=NOW,
                 spec_markers={_marker_name("sid-code", tmp, "topic-a"): NOW},
-                spec_marker_home=tmp,
+                grounding_home=tmp,
             )
             text = "".join(t for t, _k in render._session_stage_segs(s, True, 80))
             self.assertEqual(s.work_projection.source, "none")
@@ -566,6 +566,32 @@ class CapabilityGroundingTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"FLEET_CAPABILITY_GROUNDING_DIR": new_dir}):
                 index = projection._capability_grounding_index(tmp)
             self.assertEqual(index["sid-legacy-only"][1]["capability"], "autopilot-code")
+
+
+class SpecMarkerStateRootTest(unittest.TestCase):
+    def test_default_scan_reads_hook_marker_from_state_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, ".agent_reports")
+            _write_pipeline_state(tmp, "topic-state", "mode: [cli]\nphases:\n  dev: in_progress\n")
+            state = os.path.join(tmp, "isolated-state")
+            marker_dir = os.path.join(state, "spec-grounding")
+            os.makedirs(marker_dir)
+            marker = os.path.join(marker_dir, _marker_name("sid-state", tmp, "topic-state"))
+            with open(marker, "w", encoding="utf-8") as handle:
+                handle.write(str(int(NOW)))
+            os.utime(marker, (NOW, NOW))
+            with mock.patch.dict(os.environ, {
+                "HARNESS_STATE_ROOT": state,
+                "AGENT_HOME": os.path.join(tmp, "release-a"),
+            }):
+                entity = _session(sid="sid-state", cwd=tmp)
+                projection.attach_projections(
+                    [entity], [], artifact_root=root, now=NOW,
+                    capability_groundings={"sid-state": (NOW, {"capability": "autopilot-spec"})},
+                )
+            self.assertEqual(entity.work_projection.source, "artifact-inferred")
+            self.assertEqual(entity.work_projection.stage_label, "spec topic-state ·dev")
+            self.assertFalse(os.path.exists(os.path.join(tmp, "release-a", ".spec-grounding")))
 
 
 if __name__ == "__main__":

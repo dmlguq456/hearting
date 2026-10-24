@@ -5,8 +5,10 @@
 # The marker stores prd.md mtime at read time for later drift comparison. POSIX sh, no jq.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-AGENT_HOME="${AGENT_HOME:-$("$SCRIPT_DIR/../utilities/agent-home.sh")}"
 ARTIFACT_ROOT_RESOLVER="$SCRIPT_DIR/../utilities/artifact-root.sh"
+if [ ! -f "$ARTIFACT_ROOT_RESOLVER" ] && [ -f "$SCRIPT_DIR/../../../utilities/artifact-root.sh" ]; then
+  ARTIFACT_ROOT_RESOLVER="$SCRIPT_DIR/../../../utilities/artifact-root.sh"
+fi
 
 usage() {
   cat <<'EOF'
@@ -14,6 +16,23 @@ usage: spec-read-marker.sh --file <prd.md> [--session <id>] [--agent-home <dir>]
 
 Without arguments, reads Claude hook JSON from stdin.
 EOF
+}
+
+spec_marker_state_dir() {
+  harness_root=""
+  for candidate in "$AGENT_HOME" "$SCRIPT_DIR/.." "$SCRIPT_DIR/../../.."; do
+    if [ -n "$candidate" ] && [ -f "$candidate/utilities/harness_state_roots.py" ]; then
+      harness_root=$(CDPATH= cd -- "$candidate" && pwd -P)
+      break
+    fi
+  done
+  if [ -z "$harness_root" ]; then
+    home_resolver="$SCRIPT_DIR/../utilities/agent-home.sh"
+    [ -f "$home_resolver" ] || { echo "spec-read-marker: harness-resolver-unavailable" >&2; return 1; }
+    harness_root=$("$home_resolver") || { echo "spec-read-marker: harness-resolver-unavailable" >&2; return 1; }
+  fi
+  PYTHONPATH="$harness_root/utilities${PYTHONPATH:+:$PYTHONPATH}" python3 -c \
+    'import os; from harness_state_roots import spec_grounding_dir; print(spec_grounding_dir(None))'
 }
 
 # Governing prd.md candidates for one artifact root -- ONE definition:
@@ -120,11 +139,13 @@ mark_read() {
     marker_name="${sid}__${key}__${slug_key}"
   fi
 
-  if ! mkdir -p "$AGENT_HOME/.spec-grounding"; then
+  marker_dir=$(spec_marker_state_dir) || { echo "spec-read-marker: state-root-unresolved" >&2; return 1; }
+  umask 077
+  if ! mkdir -p "$marker_dir"; then
     echo "spec-read-marker: marker-write-failed (directory creation)" >&2
     return 1
   fi
-  if ! printf '%s\n' "$mtime" > "$AGENT_HOME/.spec-grounding/${marker_name}"; then
+  if ! printf '%s\n' "$mtime" > "$marker_dir/${marker_name}"; then
     echo "spec-read-marker: marker-write-failed (read not recorded)" >&2
     return 1
   fi

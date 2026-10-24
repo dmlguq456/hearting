@@ -79,16 +79,6 @@ _HOOK_SHELLS = {
     "spec-sync-nudge.sh": "bash",
     "session-tidy-idle.py": "python3",
 }
-# spec-pipeline trio: rebase state (`.spec-grounding` markers) onto the
-# plugin's persistent, update-surviving data dir instead of the default
-# agent-home.sh fallback — canonical hook bodies stay unmodified (they
-# already honor `AGENT_HOME` as a top-priority env override).
-_HOOK_DATA_HOME = {
-    "spec-read-marker.sh",
-    "spec-sync-nudge.sh",
-}
-
-
 def plugin_json() -> dict:
     return {
         "name": PLUGIN_NAME,
@@ -126,17 +116,15 @@ def hooks_json() -> dict:
     plugins-reference — differs from the flat settings.json shape). Each
     adopted hook registers on its settings.json event (PreToolUse/PostToolUse)
     with its settings.json matcher, path rebased to ${CLAUDE_PLUGIN_ROOT}.
-    Hooks in `_HOOK_DATA_HOME` additionally get an `AGENT_HOME=
-    "${CLAUDE_PLUGIN_DATA}"` env-prefix on the command — this rebases their
-    `.spec-grounding` state onto the plugin's persistent data dir without
-    modifying the canonical hook bodies (cycle 3, 2026-07-13; see plan
-    2026-07-13_harness-installer-hooks). Event/hook ordering follows
-    `HOOK_ADOPT` for determinism (dict insertion order = output order).
+    State-writing hooks resolve the installed harness identity through the
+    bundled `agent-home.sh`; marker state itself follows the shared state-root
+    resolver. The plugin data directory is not an alternate state root.
+    Event/hook ordering follows `HOOK_ADOPT` for determinism (dict insertion
+    order = output order).
     """
     events: dict[str, list] = {}
     for name in HOOK_ADOPT:
-        prefix = 'AGENT_HOME="${CLAUDE_PLUGIN_DATA}" ' if name in _HOOK_DATA_HOME else ""
-        command = f'{prefix}{_HOOK_SHELLS[name]} "${{CLAUDE_PLUGIN_ROOT}}/hooks/{name}"'
+        command = f'{_HOOK_SHELLS[name]} "${{CLAUDE_PLUGIN_ROOT}}/hooks/{name}"'
         events.setdefault(_HOOK_EVENTS[name], []).append(
             {
                 "matcher": _HOOK_MATCHERS[name],
