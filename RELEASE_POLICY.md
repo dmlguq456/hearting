@@ -66,3 +66,6 @@ The planner and its policy fixtures can be run locally:
 python3 tools/release/plan.py plan --repo . --head HEAD
 ./tools/release/plan.test.sh
 ```
+
+For an isolated operator first-use measurement, see
+[`tools/release/first-journey.md`](tools/release/first-journey.md).
