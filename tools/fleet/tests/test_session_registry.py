@@ -343,13 +343,16 @@ class ManagedEntryLifecycleTest(_RegistryDirMixin, unittest.TestCase):
             self.pid = pid
             self.returncode = returncode
             self._on_wait = on_wait
+            self._waited = False
 
         def poll(self):
-            return None
+            # Like Popen: running until wait() has reaped it.
+            return self.returncode if self._waited else None
 
         def wait(self, timeout=None):
             if self._on_wait is not None:
                 self._on_wait()
+            self._waited = True
             return self.returncode
 
     def _run(self, *, fail_stage=None, on_client_wait=None):

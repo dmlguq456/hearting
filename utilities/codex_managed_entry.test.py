@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import fcntl
+import importlib.util
 import os
+import signal
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from unittest import mock
 
@@ -42,7 +46,7 @@ class ManagedEntryTest(unittest.TestCase):
             textwrap.dedent(
                 """\
                 #!/usr/bin/env python3
-                import json, os, pathlib, signal, socket, sys, time
+                import fcntl, json, os, pathlib, signal, socket, sys, time
                 log = pathlib.Path(__ARGV_LOG__)
                 with log.open('a', encoding='utf-8') as handle:
                     handle.write(json.dumps(sys.argv[1:]) + '\\n')
@@ -63,6 +67,12 @@ class ManagedEntryTest(unittest.TestCase):
                 if '--remote' in sys.argv:
                     raise SystemExit(0)
                 listen = sys.argv[sys.argv.index('--listen') + 1]
+                if os.environ.get('FAKE_SOCKET_DELAY'):
+                    time.sleep(float(os.environ['FAKE_SOCKET_DELAY']))
+                lock = None
+                if os.environ.get('FAKE_LOCK_FILE'):
+                    lock = open(os.environ['FAKE_LOCK_FILE'], 'a+')
+                    fcntl.flock(lock, fcntl.LOCK_EX)
                 path = listen[len('unix://'):] if listen.startswith('unix://') else listen
                 server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
                 daemon = os.environ.get('FAKE_DAEMON_DIR')
@@ -83,6 +93,7 @@ class ManagedEntryTest(unittest.TestCase):
                 while not stop:
                     time.sleep(0.02)
                 server.close()
+                if lock: lock.close()
                 if daemon:
                     os.unlink(real)
                 """
@@ -95,7 +106,7 @@ class ManagedEntryTest(unittest.TestCase):
         self.client.write_text(
             textwrap.dedent(
                 """\
-                import json, os, pathlib, sys
+                import json, os, pathlib, signal, sys, time
                 remote, result = sys.argv[1:]
                 value = {
                     'remote': remote,
@@ -107,6 +118,15 @@ class ManagedEntryTest(unittest.TestCase):
                     'jobs': os.environ.get('AGENT_DISPATCH_JOBS'),
                 }
                 pathlib.Path(result).write_text(json.dumps(value), encoding='utf-8')
+                if os.environ.get('FAKE_CLIENT_WAIT'):
+                    marker = os.environ.get('FAKE_CLIENT_TERM_MARKER')
+                    if marker:
+                        def delayed_end(*_args):
+                            pathlib.Path(marker).write_text('terminating')
+                            time.sleep(0.2)
+                            raise SystemExit(0)
+                        signal.signal(signal.SIGTERM, delayed_end)
+                    while True: time.sleep(0.1)
                 raise SystemExit(int(os.environ.get('FAKE_CLIENT_EXIT', '0')))
                 """
             ),
@@ -169,6 +189,153 @@ class ManagedEntryTest(unittest.TestCase):
             "managed-control.sock",
         ):
             self.assertFalse((self.state / name).exists())
+
+    def test_signal_unwinds_entry_and_all_children(self) -> None:
+        def children(pid):
+            path = Path(f"/proc/{pid}/task/{pid}/children")
+            try:
+                return [int(part) for part in path.read_text().split()]
+            except FileNotFoundError:
+                return []
+
+        for sig in (signal.SIGHUP, signal.SIGTERM):
+            lock_path = self.base / "app.lock"
+            marker = self.base / "client-terminating"
+            with self.subTest(sig=sig), mock.patch.dict(os.environ, {
+                    "FAKE_CLIENT_WAIT": "1", "FAKE_LOCK_FILE": str(lock_path),
+                    "FAKE_CLIENT_TERM_MARKER": str(marker)}):
+                proc = subprocess.Popen(self.command(), stdout=subprocess.DEVNULL,
+                                        stderr=subprocess.DEVNULL, start_new_session=True)
+                observed = {}
+                try:
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        if self.result.exists() and len(children(proc.pid)) >= 3:
+                            break
+                        time.sleep(0.02)
+                    self.assertTrue(self.result.exists(), "client never became ready")
+                    observed = {pid: Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[19]
+                                for pid in children(proc.pid)}
+                    self.assertEqual(len(observed), 3)
+                    proc.send_signal(sig)
+                    while time.monotonic() < deadline and not marker.exists():
+                        time.sleep(0.01)
+                    self.assertTrue(marker.exists(), "client was not terminated")
+                    proc.send_signal(signal.SIGTERM)  # cleanup must survive a second signal
+                    proc.wait(timeout=10)
+                    self.assertEqual(proc.returncode, 128 + sig)
+                    self.assertTrue(all(not Path(f"/proc/{pid}").exists() for pid in observed))
+                    for name in ("app-server.sock", "managed-tui.sock", "managed-control.sock"):
+                        self.assertFalse(os.path.lexists(self.state / name), name)
+                    with lock_path.open("a+") as lock:
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill()
+                        proc.wait(timeout=5)
+                    for pid, start in observed.items():
+                        path = Path(f"/proc/{pid}/stat")
+                        try:
+                            if path.read_text().split(") ", 1)[1].split()[19] == start:
+                                os.kill(pid, signal.SIGKILL)
+                        except (FileNotFoundError, ProcessLookupError):
+                            pass
+                    self.result.unlink(missing_ok=True)
+                    marker.unlink(missing_ok=True)
+                    for name in ("app-server.sock", "managed-tui.sock", "managed-control.sock"):
+                        (self.state / name).unlink(missing_ok=True)
+
+    def test_signal_during_app_server_startup_cleans_partial_children(self) -> None:
+        self.argv_log.unlink(missing_ok=True)
+        with mock.patch.dict(os.environ, {"FAKE_SOCKET_DELAY": "2"}):
+            proc = subprocess.Popen(self.command(), stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, start_new_session=True)
+            children = []
+            try:
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline:
+                    path = Path(f"/proc/{proc.pid}/task/{proc.pid}/children")
+                    if path.exists():
+                        children = [int(part) for part in path.read_text().split()]
+                    if (children and self.argv_log.exists()
+                            and '"--listen"' in self.argv_log.read_text(encoding="utf-8")):
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(children, "app-server was not started")
+                proc.send_signal(signal.SIGTERM)
+                proc.wait(timeout=10)
+                self.assertEqual(proc.returncode, 143)
+                self.assertTrue(all(not Path(f"/proc/{pid}").exists() for pid in children))
+                for name in ("app-server.sock", "managed-tui.sock", "managed-control.sock"):
+                    self.assertFalse(os.path.lexists(self.state / name), name)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
+    def test_signal_during_each_spawn_transfer_owns_child(self) -> None:
+        spec = importlib.util.spec_from_file_location("managed_entry_transfer", ENTRY)
+        entry = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(entry)
+        original_popen = subprocess.Popen
+        child_script = self.base / "signal-disposition.py"
+        child_script.write_text(textwrap.dedent("""\
+            import json, pathlib, signal, sys, time
+            blocked = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+            pathlib.Path(sys.argv[1]).write_text(json.dumps({
+                "hup_default": signal.getsignal(signal.SIGHUP) == signal.SIG_DFL,
+                "term_default": signal.getsignal(signal.SIGTERM) == signal.SIG_DFL,
+                "hup_unblocked": signal.SIGHUP not in blocked,
+                "term_unblocked": signal.SIGTERM not in blocked,
+            }))
+            time.sleep(60)
+        """), encoding="utf-8")
+        args = entry.parser().parse_args(self.command()[2:])
+        for target, sig in ((target, sig)
+                            for target in ("app-server", "gateway", "client")
+                            for sig in (signal.SIGHUP, signal.SIGTERM)):
+            with self.subTest(target=target, sig=sig):
+                marker = self.base / f"{target}-{sig}-signals.json"
+                spawned = []
+                count = 0
+
+                def interrupted_popen(command, **options):
+                    nonlocal count
+                    count += 1
+                    if count != {"app-server": 1, "gateway": 2, "client": 3}[target]:
+                        child = original_popen(command, **options)
+                    else:
+                        child = original_popen(
+                            [sys.executable, "-B", str(child_script), str(marker)],
+                            **options,
+                        )
+                    spawned.append(child)
+                    if count == {"app-server": 1, "gateway": 2, "client": 3}[target]:
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline and not marker.exists():
+                            time.sleep(0.01)
+                        self.assertTrue(marker.exists(), "child never reached exec")
+                        os.kill(os.getpid(), sig)
+                    return child
+
+                try:
+                    with mock.patch.object(entry, "check_runtime", return_value="enabled"), \
+                            mock.patch.object(entry.subprocess, "Popen", side_effect=interrupted_popen):
+                        self.assertEqual(entry.execute(args), 128 + sig)
+                    self.assertEqual(json.loads(marker.read_text()), {
+                        "hup_default": True, "term_default": True,
+                        "hup_unblocked": True, "term_unblocked": True,
+                    })
+                    self.assertEqual(len(spawned), {"app-server": 1, "gateway": 2, "client": 3}[target])
+                    self.assertTrue(all(child.poll() is not None for child in spawned))
+                    for name in ("app-server.sock", "managed-tui.sock", "managed-control.sock"):
+                        self.assertFalse(os.path.lexists(self.state / name), name)
+                finally:
+                    for child in spawned:
+                        if child.poll() is None:
+                            child.kill()
+                        child.wait(timeout=5)
+                    marker.unlink(missing_ok=True)
 
     def test_client_failure_and_gateway_fault_clean_only_exact_session_sockets(self) -> None:
         sentinel = self.state / "unrelated.sock"

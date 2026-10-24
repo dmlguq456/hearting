@@ -385,13 +385,42 @@ def execute(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    app_server: subprocess.Popen[Any] | None = None
-    gateway: subprocess.Popen[Any] | None = None
-    client_proc: subprocess.Popen[Any] | None = None
+    owned: dict[str, subprocess.Popen[Any]] = {}
     app_server_pid: int | None = None
     client_pid: int | None = None
+    spawning = False
+    pending_signal: int | None = None
+    class EntrySignal(BaseException):
+        def __init__(self, signum: int):
+            self.signum = signum
+
+    def stop_on_signal(signum: int, _frame: Any) -> None:
+        nonlocal pending_signal
+        if spawning:
+            if pending_signal is None:
+                pending_signal = signum
+            return
+        raise EntrySignal(signum)
+
+    def spawn(name: str, command: list[str], **options: Any) -> subprocess.Popen[Any]:
+        """Own the child before delivering a signal received inside Popen."""
+        nonlocal spawning
+        spawning = True
+        try:
+            process = subprocess.Popen(command, **options)
+            owned[name] = process
+        finally:
+            spawning = False
+            if pending_signal is not None:
+                raise EntrySignal(pending_signal)
+        return process
+
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGTERM)}
     try:
-        app_server = subprocess.Popen(
+        for sig in previous:
+            signal.signal(sig, stop_on_signal)
+        app_server = spawn(
+            "app-server",
             [
                 args.codex,
                 "app-server",
@@ -441,7 +470,8 @@ def execute(args: argparse.Namespace) -> int:
         ]
         if args.gateway_fault != "none":
             gateway_command += ["--fault", args.gateway_fault]
-        gateway = subprocess.Popen(
+        gateway = spawn(
+            "gateway",
             gateway_command,
             cwd=workspace,
             env=environment,
@@ -484,7 +514,8 @@ def execute(args: argparse.Namespace) -> int:
         # record. No `start_new_session`/stdio arguments — same process group, same
         # tty, same inherited stdin/stdout/stderr as the prior `subprocess.run` call,
         # so TUI focus and Ctrl-C delivery are unchanged (R11).
-        client_proc = subprocess.Popen(
+        client_proc = spawn(
+            "client",
             client,
             cwd=workspace,
             env=environment,
@@ -506,17 +537,34 @@ def execute(args: argparse.Namespace) -> int:
         except Exception:
             pass
         return client_proc.wait()
+    except EntrySignal as exc:
+        return 128 + exc.signum
     finally:
+        # A second termination request must not interrupt the first cleanup.
+        for sig in previous:
+            signal.signal(sig, signal.SIG_IGN)
+        client_proc = owned.get("client")
+        if client_proc is not None and client_proc.poll() is None:
+            # The client shares this entry's process group and tty. Kill only
+            # its PID; terminate() below is for session-owning children.
+            client_proc.terminate()
+            try:
+                client_proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                client_proc.kill()
+                client_proc.wait(timeout=2)
         for pid in (client_pid, app_server_pid):
             if pid is not None:
                 try:
                     session_registry.remove("codex", pid)
                 except Exception:
                     pass
-        terminate(gateway)
-        terminate(app_server)
+        terminate(owned.get("gateway"))
+        terminate(owned.get("app-server"))
         for path in (front, control, upstream):
             cleanup_socket(path)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def main() -> int:
