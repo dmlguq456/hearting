@@ -246,6 +246,20 @@ class _HerdrApiFixture:
             subscriber.close()
 
 
+class ObservationSocketOwnershipTest(unittest.TestCase):
+    def test_inherited_socket_owner_is_herdr_session_or_default(self):
+        socket_path = "/fixture/default.sock"
+        env = {"HERDR_SOCKET_PATH": socket_path, "AGENT_HERDR_SESSION": "second"}
+        self.assertEqual(observation.socket_path_for_endpoint("default", env), socket_path)
+        self.assertIsNone(observation.socket_path_for_endpoint("second", env))
+        env = {"HERDR_SOCKET_PATH": "/fixture/second.sock", "HERDR_SESSION": "second",
+               "AGENT_HERDR_SESSION": "default"}
+        self.assertEqual(observation.socket_path_for_endpoint("second", env), "/fixture/second.sock")
+        self.assertIsNone(observation.socket_path_for_endpoint("default", env))
+        self.assertEqual(observation.socket_path_for_endpoint("default", {
+            "HERDR_SOCKET_PATH": socket_path, "HERDR_SESSION": ""}), socket_path)
+
+
 class ObservationTransportTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

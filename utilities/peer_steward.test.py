@@ -1757,6 +1757,20 @@ class WatchWakeTest(unittest.TestCase):
 class WatchArmTest(_WatchMixin, unittest.TestCase):
     """A56-1."""
 
+    def test_second_server_watch_does_not_use_default_socket_or_finish_on_default_pane(self):
+        env = self._env("held")
+        env["HERDR_SOCKET_PATH"] = str(self.tmp_root / "default-herdr.sock")
+        env["HERDR_PANE_ID"] = "w1:p1"
+        armed = self._run("--herdr-session", "second", "watch", "peer-a", env=env)
+        self.assertEqual(armed.returncode, 0, armed.stderr)
+        watch_id = self._fields(armed.stdout)["watch_id"]
+        arm_path = self.watch_root / f"{watch_id}.json"
+        arm = peer_steward._read_json(arm_path)
+        self.assertEqual((arm["server"], arm["steward_server"]), ("second", "default"))
+        waits = self._wait_for_wait_calls(1)
+        self.assertTrue(any(line.startswith("--session second agent wait peer-a") for line in waits), waits)
+        self.assertFalse((self.watch_root / f"{watch_id}.receipt.json").exists())
+
     def test_explicit_watch_timeout_is_terminal_and_sweep_does_not_restart_it(self):
         env = self._env("held")
         armed = self._run("watch", "peer-a", "--timeout", "500", env=env)
@@ -3378,16 +3392,24 @@ class WatchTerminalReconcileTest(unittest.TestCase):
     def test_server_rearm_drops_a_socket_path_bound_to_another_endpoint(self):
         module = peer_steward
         foreign = module._herdr_env_for_server("fourth", {
-            "AGENT_HERDR_SESSION": "default", "HERDR_SOCKET_PATH": "/default.sock"})
+            "HERDR_SOCKET_PATH": "/default.sock"})
         self.assertEqual(foreign["AGENT_HERDR_SESSION"], "fourth")
         self.assertNotIn("HERDR_SOCKET_PATH", foreign)
         exact = module._herdr_env_for_server("fourth", {
-            "AGENT_HERDR_SESSION": "fourth", "HERDR_SOCKET_PATH": "/fourth.sock"})
+            "AGENT_HERDR_SESSION": "default", "HERDR_SESSION": "fourth",
+            "HERDR_SOCKET_PATH": "/fourth.sock"})
         self.assertEqual(exact["HERDR_SOCKET_PATH"], "/fourth.sock")
+        agent_conflict = module._herdr_env_for_server("fourth", {
+            "AGENT_HERDR_SESSION": "default", "HERDR_SESSION": "fourth",
+            "HERDR_SOCKET_PATH": "/fourth.sock"})
+        self.assertEqual(agent_conflict["HERDR_SOCKET_PATH"], "/fourth.sock")
         back_to_default = module._herdr_env_for_server("default", {
-            "AGENT_HERDR_SESSION": "fourth", "HERDR_SOCKET_PATH": "/fourth.sock"})
+            "HERDR_SESSION": "fourth", "HERDR_SOCKET_PATH": "/fourth.sock"})
         self.assertNotIn("HERDR_SOCKET_PATH", back_to_default)
         self.assertNotIn("AGENT_HERDR_SESSION", back_to_default)
+        same_default = module._herdr_env_for_server("default", {
+            "AGENT_HERDR_SESSION": "fourth", "HERDR_SOCKET_PATH": "/default.sock"})
+        self.assertEqual(same_default["HERDR_SOCKET_PATH"], "/default.sock")
 
     def test_terminal_event_requires_a_fresh_snapshot_that_rejects_reused_pane_id(self):
         expected = {"harness": "codex", "session_id": "sid-old", "pane": "w1:p9"}

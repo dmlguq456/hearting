@@ -697,9 +697,11 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         # persisted selected identity and explicit CLI server argument.
         self.state_file.write_text(json.dumps({"status": "working"}), encoding="utf-8")
         os.environ["AGENT_HERDR_SESSION"] = "secondary"
+        os.environ["HERDR_SESSION"] = "secondary"
         os.environ["HERDR_SOCKET_PATH"] = "/fixture/secondary.sock"
         self._arm(20, server="secondary", target_override="peer-0")
         os.environ["AGENT_HERDR_SESSION"] = "default"
+        os.environ.pop("HERDR_SESSION", None)
         os.environ["HERDR_SOCKET_PATH"] = "/fixture/default.sock"
         self._arm(21, server="default", target_override="peer-0")
         self.assertEqual([arm["readiness_endpoint"] for _watch_id, arm, _paths in self.arms],
@@ -707,6 +709,7 @@ class LifecycleRunnerProcessTest(unittest.TestCase):
         # Runner startup context is secondary, while the default watch keeps
         # the exact URI selected when it was armed.
         os.environ["AGENT_HERDR_SESSION"] = "secondary"
+        os.environ["HERDR_SESSION"] = "secondary"
         os.environ["HERDR_SOCKET_PATH"] = "/fixture/secondary.sock"
         store = peer_steward.peer_obligations.ObligationStore(self.state_root)
         self._hold_runner_lock()

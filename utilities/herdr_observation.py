@@ -202,10 +202,10 @@ def socket_path_for_endpoint(session: str | None = None, environ=None) -> str | 
     if not isinstance(value, str) or not value.strip():
         return None
     requested = endpoint_name(session)
-    configured = env.get("AGENT_HERDR_SESSION") or env.get("HERDR_SESSION")
-    if configured and endpoint_name(configured) != requested:
-        return None
-    if session is not None and not configured and requested != endpoint_name():
+    # AGENT_HERDR_SESSION selects a herdr CLI target.  The inherited socket's
+    # owner is the actual HERDR_SESSION, with an unset value belonging to default.
+    socket_owner = endpoint_name(env.get("HERDR_SESSION") or "default")
+    if socket_owner != requested:
         return None
     return value.strip()
 

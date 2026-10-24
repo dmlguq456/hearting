@@ -89,11 +89,11 @@ def _herdr_argv(*args):
 
 
 def _herdr_env_for_server(server, environ=None):
-    """Carry a socket path only when its inherited session still matches."""
+    """Carry an inherited socket only when its HERDR_SESSION owner still matches."""
     selected = server or "default"
     env = dict(os.environ if environ is None else environ)
-    configured = [env.get("AGENT_HERDR_SESSION"), env.get("HERDR_SESSION")]
-    if any(value and value != selected for value in configured):
+    socket_owner = env.get("HERDR_SESSION") or "default"
+    if socket_owner != selected:
         env.pop("HERDR_SOCKET_PATH", None)
     if selected == "default":
         env.pop("AGENT_HERDR_SESSION", None)
@@ -3945,6 +3945,7 @@ def cmd_watch(args):
             "timeout": args.timeout,
             "refs": list(args.ref or []),
             "server": server,
+            "steward_server": getattr(args, "steward_server", None) or server,
             "readiness_endpoint": (
                 herdr_observation.socket_path_for_endpoint(server)
                 or _WATCH_SERVER_ENDPOINT_PREFIX + herdr_observation.endpoint_name(server)),
@@ -4170,7 +4171,8 @@ def cmd_watch_run(args):
             if target_reason:
                 terminal_reason = target_reason
                 state, agent = "pane-exited", expected_agent
-            if steward_seat.get("kind") == "pane":
+            steward_server = arm.get("steward_server", server) or "default"
+            if steward_seat.get("kind") == "pane" and steward_server == server:
                 steward_agent = {**(arm.get("steward") or {}),
                                  "pane": steward_seat.get("pane", "-")}
                 steward_reason = _watch_terminal_from_view(
@@ -9275,6 +9277,7 @@ def main(argv=None):
     parsed_argv, agent_args = _split_agent_args(argv)
     args = build_parser().parse_args(parsed_argv)
     args.agent_args = agent_args
+    args.steward_server = herdr_observation.endpoint_name(os.environ.get("HERDR_SESSION"))
     if args.herdr_session:
         global _HERDR_SESSION
         _HERDR_SESSION = args.herdr_session
