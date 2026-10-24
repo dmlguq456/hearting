@@ -57,6 +57,8 @@ def _resolve_target(adapter: str, raw: str, values: dict[str, str], *,
                 and not key.startswith("CFG_MODEL_PROFILE_GRANULARITY_")]
     if "CFG_MODEL_PROFILE_BALANCED" not in values and "balanced" not in profiles:
         profiles.append("balanced")
+    if "top" not in profiles:
+        profiles.append("top")  # An explicit edit is the only way to opt in.
     role_matches = []
     for key, text in values.items():
         if key.startswith("CFG_ROLES_"):
@@ -183,6 +185,14 @@ def _candidate(adapter: str, values: dict[str, str], target: dict[str, str],
         profile_values = values
         if profile == "balanced" and "CFG_MODEL_PROFILE_BALANCED" not in values:
             profile_values = model_config._derive_balanced_values(adapter, values)
+        if profile == "top" and "CFG_MODEL_PROFILE_TOP" not in values:
+            try:
+                deep = model_profile.resolve_profile_values(adapter, values, "deep")
+            except ValueError as exc:
+                raise ModelSettingsError(f"cannot resolve deep profile for top declaration: {exc}") from exc
+            selected_budget = budget if budget is not None else deep["budget"]
+            changed["CFG_MODEL_PROFILE_TOP"] = f"model/{model}:{_profile_budget(adapter, selected_budget)}"
+            return dict(values), changed
         try:
             current = model_profile.resolve_profile_values(adapter, profile_values, profile)
         except ValueError as exc:
@@ -314,10 +324,13 @@ def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | 
         old_profile_values = values
         if target.get("profile") == "balanced" and "CFG_MODEL_PROFILE_BALANCED" not in values:
             old_profile_values = model_config._derive_balanced_values(adapter, values)
+        old_profile = (None if target.get("profile") == "top" and "CFG_MODEL_PROFILE_TOP" not in values else
+                       model_profile.resolve_profile_values(adapter, old_profile_values, target["profile"])
+                       if "profile" in target else None)
         old_model = (values.get(f"CFG_TIER_{target['tier']}_MODEL") if "tier" in target else
-                     model_profile.resolve_profile_values(adapter, old_profile_values, target["profile"])["model"])
+                     old_profile["model"] if old_profile else None)
         old_budget = (values.get(f"CFG_TIER_{target['tier']}_{'VARIANT' if adapter == 'opencode' else 'EFFORT'}") if "tier" in target else
-                      model_profile.resolve_profile_values(adapter, old_profile_values, target["profile"])["budget"])
+                      old_profile["budget"] if old_profile else None)
         new_values = parsed
         new_model = (new_values.get(f"CFG_TIER_{target['tier']}_MODEL") if "tier" in target else
                      model_profile.resolve_profile_values(adapter, new_values, target["profile"])["model"])

@@ -118,7 +118,8 @@ _HINTS = {
                                             "or select an available candidate already sealed in this profile; changing the candidate set requires recomposition",
     "frame-harness-unavailable": "no candidate harness declares the top profile in its runtime model config "
                                  "(CFG_MODEL_PROFILE_TOP in the selected models.conf; top_undeclared= above names the ones "
-                                 "left out). Declare it for a harness the route sealed, or name a harness with --pin frame=<harness>",
+                                 "left out). Declare it with hearting model set <harness> profile/top <model[@budget]> "
+                                 "for a harness the route sealed, or name a harness with --pin frame=<harness>",
     "no-eligible-candidate": "no configured owner harness is usable: usage-limited, gated, or no positive capacity score "
                              "(see eligibility.* and capacity_headroom.* above; utilities/usage-check.sh --harness all)",
     "exactly-one-action-required": "pass exactly one of --dry-run | --register | --start",

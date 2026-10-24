@@ -233,6 +233,36 @@ class ModelSettingsCliTest(unittest.TestCase):
         self.assertEqual(model_profile.resolve_runtime_profile(adapter, "light", runtime=self.home / ".claude", source_root=ROOT)[0]["model"],
                          "vendor-reviewer")
 
+    def test_explicit_top_opt_in_from_old_user_copies(self):
+        import json
+        for adapter in model_config.ADAPTERS:
+            with self.subTest(adapter=adapter):
+                path = self.user_path(adapter)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                original = b"".join(line for line in model_config.shipped_path(adapter).read_bytes().splitlines(keepends=True)
+                                    if not line.startswith(b"CFG_MODEL_PROFILE_TOP="))
+                path.write_bytes(original)
+                deep = model_profile.resolve_profile_values(adapter, model_config.parse_config(path), "deep")
+                code, output = self.run_cli(adapter, "profile/top", "vendor-top", "--dry-run", "--json")
+                self.assertEqual(code, 0, output)
+                self.assertEqual(json.loads(output)["status"], "planned")
+                self.assertEqual(path.read_bytes(), original)
+                code, output = self.run_cli(adapter, "profile/top", "vendor-top", "--json")
+                self.assertEqual(code, 0, output)
+                result = json.loads(output)
+                self.assertEqual(result["old_model"], None)
+                self.assertEqual(Path(result["backup"]).read_bytes(), original)
+                top = model_profile.resolve_profile_values(adapter, model_config.parse_config(path), "top")
+                self.assertEqual((top["model"], top["budget"]), ("vendor-top", deep["budget"]))
+                code, output = self.run_cli(adapter, "profile/top", "vendor-top", "--json")
+                self.assertEqual(code, 0, output)
+                self.assertEqual(json.loads(output)["status"], "unchanged")
+                code, output = self.run_cli(adapter, "profile/top", "vendor-next@high", "--json")
+                self.assertEqual(code, 0, output)
+                self.assertEqual(model_profile.resolve_profile_values(adapter, model_config.parse_config(path), "top")["budget"], "high")
+                code, output = self.run_cli(adapter, "profile/top", "bad model", "--json")
+                self.assertEqual(code, 64, output)
+
     def test_opencode_role_families_use_installed_cli_and_real_shell_consumer(self):
         import json
         path = self.user_path("opencode")
