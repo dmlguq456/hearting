@@ -580,6 +580,11 @@ class Case4RetryLinkTest(unittest.TestCase):
             "launch_outcome": "never-launched", "launch_claimed": "0",
         }
         self.assertEqual(RA._replacement_kind("done", base), "candidate-preparation")
+        for reason in ("opencode-runtime-executable-unavailable",
+                       "opencode-runtime-generation-unavailable"):
+            with self.subTest(reason=reason):
+                self.assertEqual(RA._replacement_kind(
+                    "done", {**base, "reconcile_reason": reason}), "candidate-preparation")
         refusals = (
             ("open", base),
             ("done", {**base, "launch_outcome": "spawned"}),
@@ -588,11 +593,112 @@ class Case4RetryLinkTest(unittest.TestCase):
             ("done", {**base, "note": "dead-producer-binding-failed"}),
             ("done", {**base, "failure_class": "fail"}),
             ("done", {**base, "reconcile_reason": "permission-refused"}),
+            ("done", {**base, "reconcile_reason": "opencode-runtime-version-invalid"}),
             ("cancelled", base),
         )
         for status, metadata in refusals:
             with self.subTest(status=status, metadata=metadata):
                 self.assertIsNone(RA._replacement_kind(status, metadata))
+
+    def test_batch_gap_replay_uses_admitted_harness_but_keeps_worker_pin(self):
+        route_id = "rt-batch-gap"
+        route_hash_value = "sha256:" + "a" * 64
+        source = {
+            "attempt_id": "att-source", "route_id": route_id,
+            "route_hash": route_hash_value, "route_node": "gap",
+            "parent": "owner", "dispatch_depth": "2", "worker_type": "stage",
+            "harness": "opencode", "batch_group": "research",
+            "batch_manifest_sha256": "sha256:" + "b" * 64,
+        }
+        record = {"replacement_attempt_id": "att-replacement", "route_id": route_id,
+                  "route_hash": route_hash_value}
+        route = {"route_id": route_id, "route_hash": route_hash_value}
+        node = {"id": "gap", "parallel_group": "research"}
+        patches = (
+            mock.patch.object(RA, "require_recovery_binding"),
+            mock.patch.object(RA, "recovery_task", return_value="sealed task"),
+        )
+        with patches[0], patches[1], mock.patch.object(RA, "sealed_pin_harness", return_value=None):
+            self.assertEqual(RA.recovery_node_task(
+                record, source, {}, attempt_id="att-replacement", route=route,
+                node=node, harness="codex", parent="owner", jobs=Path("/unused")),
+                "sealed task")
+        without_batch = {key: value for key, value in source.items()
+                         if key not in {"batch_group", "batch_manifest_sha256"}}
+        with patches[0], patches[1], mock.patch.object(RA, "sealed_pin_harness", return_value=None):
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                RA.recovery_node_task(record, without_batch, {}, attempt_id="att-replacement",
+                    route=route, node=node, harness="codex", parent="owner", jobs=Path("/unused"))
+        self.assertEqual(refused.exception.reason, "replacement-launch-binding-mismatch")
+        with patches[0], patches[1], mock.patch.object(RA, "sealed_pin_harness", return_value="opencode"):
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                RA.recovery_node_task(record, source, {}, attempt_id="att-replacement",
+                    route=route, node=node, harness="codex", parent="owner", jobs=Path("/unused"))
+        self.assertEqual(refused.exception.reason, "replacement-launch-binding-mismatch")
+
+    def test_recovery_work_accepts_only_the_exact_reserved_candidate_prep_tuple(self):
+        route_id = "rt-batch-recovery"
+        route_hash_value = "sha256:" + "a" * 64
+        source_manifest = "sha256:" + "b" * 64
+        source = {
+            "attempt_id": "att-batch-source", "route_id": route_id,
+            "route_hash": route_hash_value, "route_node": "gap",
+            "parent_attempt_id": "att-owner", "worker_type": "stage",
+            "dispatch_depth": "2", "harness": "opencode",
+            "note": "dead-candidate-preparation", "failure_class": "launch-tuple",
+            "reconcile_reason": "opencode-runtime-generation-unavailable",
+            "launch_outcome": "never-launched", "batch_group": "research",
+            "batch_declared_size": "2", "batch_manifest_sha256": source_manifest,
+            "batch_assignment_sha256": "sha256:" + "c" * 64,
+            "fallback_hop": "same-harness-headless", "fallback_ordinal": "1",
+        }
+        history = {
+            "attempt_id": source["attempt_id"], "harness": "opencode",
+            "jobs": "/tmp/batch-recovery/jobs.log", "worktree": "/tmp/batch-recovery/worktree",
+            "route_id": route_id, "route_node": "gap", "task": "same approved task",
+            "argv": ["--fallback-hop", "same-harness-headless", "--fallback-ordinal", "1"],
+            "resolved": {"worker_type": "stage", "model_profile": "light",
+                         "parent_attempt_id": "att-owner",
+                         "fallback_hop": "same-harness-headless"},
+            "applied_permissions": {},
+        }
+        candidate = {**history, "attempt_id": "att-batch-replacement", "harness": "codex",
+            "argv": ["--fallback-hop", "cross-harness-headless", "--fallback-ordinal", "2"],
+            "resolved": {**history["resolved"], "fallback_hop": "cross-harness-headless"}}
+        candidate["route_hash"] = route_hash_value
+        route = {"route_id": route_id, "route_hash": route_hash_value,
+                 "artifact_root": "/tmp/batch-recovery/artifacts", "nodes": [
+            {"id": "gap", "parallel_group": "research", "dispatch_depth": 2,
+             "model_profile": "light", "perspective": "independent", "parallel_leg_index": 1},
+            {"id": "peer", "parallel_group": "research", "dispatch_depth": 2,
+             "model_profile": "balanced-deep", "perspective": "primary", "parallel_leg_index": 0},
+        ]}
+        record = {"original_attempt_id": source["attempt_id"],
+                  "replacement_attempt_id": candidate["attempt_id"], "route_id": route_id,
+                  "route_hash": route_hash_value,
+                  "proof": {"death_kind": "candidate-preparation", "state": "quiescent"}}
+        reservation = {
+            "reservation_kind": "parallel-batch", "batch_admission_count": "1",
+            "batch_declared_size": "2", "batch_group": "research", "batch_route_id": route_id,
+            "batch_parent_attempt_id": "att-owner", "batch_attempt_id": candidate["attempt_id"],
+            "batch_route_node": "gap", "batch_harness": "codex",
+            "batch_fallback_hop": "cross-harness-headless", "batch_fallback_ordinal": "2",
+            "batch_model_profile": "light", "batch_perspective": "independent",
+            "batch_parallel_leg_index": "1", "batch_assignment_sha256": source["batch_assignment_sha256"],
+            "batch_manifest_sha256": "sha256:" + "d" * 64,
+            "batch_leg_sha256": "sha256:" + "e" * 64,
+            "batch_peer_count": "1", "batch_peer_set_sha256": "sha256:" + "f" * 64,
+        }
+        authorized = {"record": record,
+            "source_fields": ["now", "done", "repo", history["worktree"], "source", "metadata"],
+            "source": source, "reservation": reservation, "jobs": Path("/tmp/batch-recovery/jobs.log")}
+        RA.require_recovery_work(candidate, history, route=route, worker_type="stage",
+                                 batch_recovery=authorized)
+        forged = {**reservation, "batch_harness": "opencode"}
+        with self.assertRaises(DC.DispatchContractError) as refused:
+            RA.require_recovery_work(candidate, history, route=route, worker_type="stage",
+                batch_recovery={**authorized, "reservation": forged})
+        self.assertEqual(refused.exception.reason, "replacement-input-tuple-mismatch")
 
 
     def test_new_settled_request_does_not_inherit_a_spent_transport_retry(self):

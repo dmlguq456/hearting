@@ -1388,12 +1388,21 @@ def main(argv: list[str]) -> int:
     if not worktree.is_dir():
         return fail("worktree-not-found", 66, worktree=args.worktree)
     args.opencode_launch_observation = None
+    args.opencode_launch_observation_error = None
     if action == "start":
         try:
             args.opencode_launch_observation = opencode_runtime.observe_launch(
                 cwd=args.worktree, environ=os.environ)
         except opencode_runtime.OpenCodeRuntimeError as exc:
-            return fail(str(exc), 69, worktree=args.worktree, child_spawned="0")
+            # Only failure to resolve/probe the native runtime is an eligible
+            # candidate-preparation failure. Invalid caller configuration
+            # remains the ordinary refusal path.
+            if str(exc) not in {
+                "opencode-runtime-executable-unavailable",
+                "opencode-runtime-generation-unavailable",
+            }:
+                return fail(str(exc), 69, worktree=args.worktree, child_spawned="0")
+            args.opencode_launch_observation_error = exc
     try:
         from dispatch_contract import launch_repository_identity
         args.repository_identity, args.repository_kind = launch_repository_identity(
@@ -1403,15 +1412,20 @@ def main(argv: list[str]) -> int:
     try:
         args.artifact_root = resolve_artifact_root(args.worktree)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
-        args.opencode_config_content = scoped_external_directory_config(
-            args.artifact_root,
-            str(args.report_bundle_root) if args.report_bundle_root is not None else None,
-            agent_home=args.agent_home,
-            worktree=args.worktree,
-            selected_agent=args.agent,
-            recordish=args.repository_kind == "non-git",
-            runtime_observation=args.opencode_launch_observation,
-        )
+        if args.opencode_launch_observation_error is None:
+            args.opencode_config_content = scoped_external_directory_config(
+                args.artifact_root,
+                str(args.report_bundle_root) if args.report_bundle_root is not None else None,
+                agent_home=args.agent_home,
+                worktree=args.worktree,
+                selected_agent=args.agent,
+                recordish=args.repository_kind == "non-git",
+                runtime_observation=args.opencode_launch_observation,
+            )
+        else:
+            # Keep the caller's config opaque while generation is unknown. It
+            # is never projected into a V1/V2 form or used to launch a worker.
+            args.opencode_config_content = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
     except ValueError as e:
         return fail("artifact-root-access-config-failed", 64, detail=str(e), worktree=args.worktree)
     args.worker_type = resolve_worker_type(
@@ -1525,7 +1539,12 @@ def main(argv: list[str]) -> int:
     except DispatchContractError as exc:
         return fail(exc.reason, 69, detail=exc.detail, child_spawned="0")
     try:
-        args.resolved_model_settings = resolve_model_settings(args)
+        if args.opencode_launch_observation_error is None:
+            args.resolved_model_settings = resolve_model_settings(args)
+        else:
+            # Validate the sealed/direct selection without inferring a runtime
+            # generation. The attempt is closed before these settings are used.
+            args.resolved_model_settings = _select_model_settings(args)
         from model_profile import selection_receipt, ModelProfileError
         try:
             args.profile_selection_receipt = selection_receipt(args)
@@ -1536,7 +1555,8 @@ def main(argv: list[str]) -> int:
         if args.model_role:
             fields["model_role"] = args.model_role
         return fail(e.reason, 64, **fields)
-    if args.start and shutil.which("opencode") is None:
+    if (args.start and args.opencode_launch_observation_error is None
+            and shutil.which("opencode") is None):
         return fail("opencode-command-unavailable", 69, worktree=args.worktree)
     if args.start:
         rc = check_runtime_projection(args.worktree)
@@ -1624,20 +1644,23 @@ def main(argv: list[str]) -> int:
             args, runtime="opencode", default_roots=default_roots)
         grant = args.execution_access_grant
         args.opencode_config_base_content = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
-        args.opencode_config_content = scoped_external_directory_config(
-            args.artifact_root,
-            str(args.report_bundle_root) if args.report_bundle_root is not None else None,
-            grant.additional_writable_roots if grant is not None else (),
-            grant.read_roots if grant is not None else (),
-            agent_home=args.agent_home,
-            contract_read_roots=args.contract_read_roots,
-            worktree=args.worktree,
-            selected_agent=args.agent,
-            task_publish_scope=args.task_publish_scope,
-            merge_observation_only=args.merge_observation_only,
-            recordish=args.repository_kind == "non-git",
-            runtime_observation=args.opencode_launch_observation,
-        )
+        if args.opencode_launch_observation_error is None:
+            args.opencode_config_content = scoped_external_directory_config(
+                args.artifact_root,
+                str(args.report_bundle_root) if args.report_bundle_root is not None else None,
+                grant.additional_writable_roots if grant is not None else (),
+                grant.read_roots if grant is not None else (),
+                agent_home=args.agent_home,
+                contract_read_roots=args.contract_read_roots,
+                worktree=args.worktree,
+                selected_agent=args.agent,
+                task_publish_scope=args.task_publish_scope,
+                merge_observation_only=args.merge_observation_only,
+                recordish=args.repository_kind == "non-git",
+                runtime_observation=args.opencode_launch_observation,
+            )
+        else:
+            args.opencode_config_content = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
     except ExecutionAccessError as exc:
         return fail(exc.reason, 64, detail=exc.detail, child_spawned="0")
     except ValueError as exc:
@@ -1647,7 +1670,9 @@ def main(argv: list[str]) -> int:
             detail=str(exc),
             child_spawned="0",
         )
-    if commit_policy.no_commit_stage(args):
+    if args.opencode_launch_observation_error is not None:
+        pass
+    elif commit_policy.no_commit_stage(args):
         # A no-commit worker (commit_policy) is refused `git commit` by the runtime too.
         args.opencode_config_content = deny_commands(
             args.opencode_config_content, commit_policy.COMMIT_COMMANDS, args.agent,
@@ -1657,7 +1682,8 @@ def main(argv: list[str]) -> int:
             args.opencode_config_content, commit_policy.MERGE_MUTATION_COMMANDS, args.agent,
             runtime_observation=args.opencode_launch_observation)
     args.nested_runtime_env = {}
-    if action == "start" and args.dispatch_depth == 2 and args.parent_harness == "codex":
+    if (args.opencode_launch_observation_error is None and action == "start"
+            and args.dispatch_depth == 2 and args.parent_harness == "codex"):
         try:
             args.nested_runtime_env = prepare_nested_runtime(
                 Path(args.worktree), args.attempt_id, state_root=dispatch_state_root(args.jobs_path),
@@ -1700,7 +1726,7 @@ def main(argv: list[str]) -> int:
                 if args.command_attempt_id else f"{args.slug}.opencode.jsonl")
     log_path = log_dir / log_name
     args.log_path = log_path
-    if action == "start":
+    if action == "start" and args.opencode_launch_observation_error is None:
         # V2 execution mode is selected at the existing command-construction
         # boundary. The later context probe must confirm this mode before spawn.
         v2_execution = args.opencode_launch_observation.generation == "v2"
@@ -1708,7 +1734,8 @@ def main(argv: list[str]) -> int:
             "standalone" if v2_execution else "shared-service")
         args.resolved_model_settings["context_window_runtime_target"] = (
             "standalone-per-command" if v2_execution else "shared-service")
-    command = shell_command(args, prompt_path, log_path)
+    command = (shell_command(args, prompt_path, log_path)
+               if args.opencode_launch_observation_error is None else "")
 
     governor = ROOT / "utilities" / "model-worker-governor.py"
     try:
@@ -1773,6 +1800,17 @@ def main(argv: list[str]) -> int:
                     cancel_governor_reservation(governor, governor_root, reservation_token)
                     close_job_row(jobs, args.slug, args.worktree, "producer-binding-failed", "", args.attempt_id)
                     return fail(exc.code, 73, detail=exc.detail, child_spawned="0")
+            if args.opencode_launch_observation_error is not None:
+                reason = str(args.opencode_launch_observation_error)
+                closed = WRAPPER_COMMON.close_candidate_preparation_failure(
+                    jobs, args.attempt_id, reason,
+                    materialize=materialize_after_terminal_close,
+                )
+                cancel_governor_reservation(governor, governor_root, reservation_token)
+                if not closed:
+                    return fail("candidate-preparation-close-failed", 73,
+                                attempt_id=args.attempt_id, child_spawned="0")
+                return fail(reason, 69, attempt_id=args.attempt_id, child_spawned="0")
     else:
         args.attempt_claimed = False
     if action == "start" and not args.attempt_claimed:

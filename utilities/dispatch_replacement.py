@@ -1914,7 +1914,9 @@ def admission(jobs, lines, metadata):
     route_authority.require_recovery_work(
         candidate, replay, route=current_route, worker_type=source.get('worker_type'),
         transition=_transition_of(record), access=record.get('execution_access'),
-        parent_values=parent_values)
+        parent_values=parent_values,
+        batch_recovery={"record": record, "source_fields": source_fields,
+                        "source": source, "reservation": metadata, "jobs": jobs})
     if candidate.get('task') != expected_task:
         raise DC.DispatchContractError('replacement-task-mismatch')
     if Path(record['route_file']).with_suffix('.outcome.json').exists():

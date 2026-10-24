@@ -127,7 +127,8 @@ class ModelContextLaunchTest(unittest.TestCase):
             }}}},
         }
         final = json.loads(json.dumps(configured))
-        with mock.patch.object(context, "_native_limits", return_value={
+        with mock.patch.object(context, "_installed_version", return_value="1.19.0"), \
+                mock.patch.object(context, "_native_limits", return_value={
                 "context": 1000000, "input": None, "output": 120000}), mock.patch.object(
                 context, "_resolved_config", side_effect=[configured, final]):
             launch = context.prepare_launch_context(
@@ -148,7 +149,8 @@ class ModelContextLaunchTest(unittest.TestCase):
         managed_override = {"model": MODEL, "provider": {"opencode-go": {
             "models": {"deepseek-v4.1-flash": {"limit": {"context": 900000}}}
         }}}
-        with mock.patch.object(context, "_native_limits", return_value={
+        with mock.patch.object(context, "_installed_version", return_value="1.19.0"), \
+                mock.patch.object(context, "_native_limits", return_value={
                 "context": 1000000, "input": None, "output": None}), mock.patch.object(
                 context, "_resolved_config", side_effect=[{"model": MODEL}, managed_override]):
             with self.assertRaisesRegex(context.OpenCodeContextError, "higher-priority managed setting"):
@@ -196,7 +198,8 @@ class ModelContextLaunchTest(unittest.TestCase):
                 }}},
             }},
         }
-        with mock.patch.object(context, "_native_limits", side_effect=
+        with mock.patch.object(context, "_installed_version", return_value="1.19.0"), \
+                mock.patch.object(context, "_native_limits", side_effect=
                 context.OpenCodeContextError("no standard model record")), mock.patch.object(
                 context, "_resolved_config", side_effect=[configured, configured]):
             launch = context.prepare_launch_context(
@@ -212,7 +215,8 @@ class ModelContextLaunchTest(unittest.TestCase):
         self.assertEqual(json.loads(launch["config_content"]), configured)
 
     def test_missing_catalog_and_native_context_remain_unknown(self):
-        with mock.patch.object(context, "_native_limits", side_effect=
+        with mock.patch.object(context, "_installed_version", return_value="1.19.0"), \
+                mock.patch.object(context, "_native_limits", side_effect=
                 context.OpenCodeContextError("no standard model record")), mock.patch.object(
                 context, "_resolved_config", return_value={"model": "local/custom"}):
             with self.assertRaisesRegex(context.OpenCodeContextError, "no standard model record"):
