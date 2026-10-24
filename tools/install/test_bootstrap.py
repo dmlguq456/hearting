@@ -244,6 +244,18 @@ class MemoryStoreBootstrapTest(unittest.TestCase):
                 }))
             return installer.cmd_runtime(args)
 
+    def test_legacy_install_dry_run_does_not_create_inventory_parent_or_file(self):
+        config_dir = Path(os.environ["XDG_CONFIG_HOME"]) / "hearting"
+        driver = mock.Mock()
+        driver.install.return_value = {"actions": [], "blocked": False}
+        args = Namespace(runtimes=["claude"], scope="global", plugin=False,
+                         dry_run=True, report_bundle_root=None)
+        with mock.patch.object(installer, "get_driver", return_value=driver):
+            result = installer.cmd_install(args)
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+        self.assertIn("compute-hosts-config: would-create", "\n".join(result["lines"]))
+        self.assertFalse(config_dir.exists())
+
     def test_a_first_install_creates_a_store_mem_then_writes_to(self):
         refused = self._mem_add()
         self.assertEqual(refused.returncode, 2, refused.stderr)  # the derived-path guard

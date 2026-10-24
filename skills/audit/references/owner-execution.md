@@ -1,6 +1,6 @@
 # audit
 
-Read-oriented post-run inspection entrypoint for artifacts and pipelines. Diagnose drift, inconsistency, and omissions through Stages A-E: detect type, select scope, ingest the P1 baseline, lint selected aspects, report findings, and optionally dispatch an auto-fix chain. This file defines routing and stage contracts; load the relevant reference only when its detailed procedure or template is needed.
+Read-oriented post-run inspection entrypoint for artifacts and pipelines. Diagnose drift, inconsistency, and omissions by detecting type, selecting scope, ingesting the P1 baseline, linting selected aspects, and reporting findings. This file defines routing and stage contracts; load the relevant reference only when its detailed procedure or template is needed.
 
 > **Output folder convention**: CONVENTIONS.md §5 (`<agent-home>/core/CONVENTIONS.md#5-skill-output-convention--t1t2t3`) (3-tier). Do not modify the audited artifact during inspection; write only an audit report at `{artifact_dir}/_internal/audit/audit_{YYYY-MM-DDTHHMM}.md`.
 > Resolve `<artifact-root>`: CONVENTIONS §5.1 (`<agent-home>/core/CONVENTIONS.md#51-workspace-assumption`).
@@ -61,12 +61,12 @@ chat locale.
   - Fuzzy short name (for example, `se-seminar-tfrestormer`) — resolve with `ls -d <artifact-root>/{plans,research,documents}/*$ARG* 2>/dev/null`. Use a single match. For multiple matches, ask which artifact to use in the conversation language and follow the adapter pause/autonomy rule; if no answer arrives, use the most recently modified candidate. Return an error for zero matches.
 - `--scope` (default `auto`): select the aspect set. An explicit user value takes precedence. Otherwise, infer an appropriate set from artifact mode, refinement count, status, and structure. Map `facts | style | structure | cross-ref | coverage | all` to the type-specific groups in Stage B.
 - `--read-only` (default for plans): for plan artifacts, skip aspects that require executing tests or linters and perform only static inspection. For research and document artifacts, read-only behavior is implicit and the flag is a no-op; report that those audit types are always read-only.
-- `--report-only`: skip Stage E. Produce the report and stop without dispatching follow-up edits.
-- `--no-fact-check`: opt-out flag honored per `feedback_factcheck_principles.md` Principle 0. If present, the `facts` aspect (and the `coverage` aspect's cards-set diff) are **skipped** before Stage C aspect dispatch — i.e., the aspect skip happens at the _pre-check_ stage, not via filtering after lint runs. Other aspects (style / structure / cross-ref / Tier / cross-card / test / lint / code review / TODO) still run. Stage D report emits an informational line at the top of "Aspects checked": `ℹ facts/coverage aspects: skipped via --no-fact-check flag (memory feedback_factcheck_principles Principle 0)`. This is the _only_ allowed disable mechanism for fact verification; ad-hoc prompt evasion must not be honored.
+- `--report-only`: retained as a compatibility option. Audit produces its report and stops without dispatching follow-up edits by default.
+- `--no-fact-check`: opt-out flag honored per `feedback_factcheck_principles.md` Principle 0. If present, the `facts` aspect (and the `coverage` aspect's cards-set diff) are **skipped** before Stage C aspect dispatch — i.e., the aspect skip happens at the _pre-check_ stage, not via filtering after lint runs. Other aspects (style / structure / cross-ref / Tier / cross-card / test / lint / code review / TODO) still run. Stage D report emits an informational line at the top of "Aspects checked": `ℹ facts/coverage aspects: skipped via --no-fact-check flag (memory feedback_factcheck_principles Principle 0)`. An explicit request to skip validation for this pass is also honored in plain language; a vague speed request keeps the checks enabled.
 
 ## Process
 
-Run `Stage A → B (B.1/B.2) → B.5 → C → D (D.5) → E` in order. The references below preserve the complete procedures, signal tables, lint definitions, templates, and prompts; read a stage's reference before executing it.
+Run `Stage A → B (B.1/B.2) → B.5 → C → D (D.5)` in order. The references below preserve the procedures, signal tables, lint definitions, templates, and prompts; read a stage's reference before executing it.
 
 | Stage | Content | Reference |
 |---|---|---|
@@ -75,15 +75,15 @@ Run `Stage A → B (B.1/B.2) → B.5 → C → D (D.5) → E` in order. The refe
 | Stage B.5 | Ingest the minor-log baseline for document and research artifacts (P1 input) | `scope-and-baseline.md` |
 | Stage C | Run per-aspect pre-checks and lints for document, research, or plan artifacts | `aspect-lints.md` |
 | Stage D · D.5 | Render the report, polish through the `editorial/polish` unit, and format the chat summary | `report-and-autofix.md` |
-| Stage E | Auto-fix chain (default — `--report-only` opt-out) | `report-and-autofix.md` |
+| Follow-up | A separate explicit code/refine request may use the completed report as input. | `examples-and-checklist.md` |
 
 ## Constraints
 
-- **Audit pass is read-only** — Stage A-D never modify the audited artifact (the audit log is written under `_internal/audit/`). Stage E _dispatches a separate skill_ (`autopilot-code` or `autopilot-refine`) which then makes edits per its own confirmation flow. With `--report-only`, Stage E is skipped entirely.
+- **Audit pass is read-only** — the audit never modifies the audited artifact (the audit log is written under `_internal/audit/`). A separate explicit code/refine request may use the report as input.
 - **No web fetch** — inspect only local `<artifact-root>/*` files through direct reads, searches, and static scans.
 - **No delegated role invocation** — run `/audit` in the current agent session without dispatching `research/*` or `qa/*` units. A future version may add intensity-derived, agent-backed linting.
 - **Type-specific aspects** — research aspects do not run on documents artifacts and vice versa. `--scope cross-ref` on plans warns and skips.
-- **Suggestions only in Stages A-D** — each 🔴 or 🟡 finding may include a "Suggested fix" line. Stage E dispatches those suggestions to the appropriate capability, which follows its own application, halt, review, QA, commit, and reporting protocol.
+- **Suggestions only** — each 🔴 or 🟡 finding may include a "Suggested fix" line; the audit does not dispatch it.
 
 ## When NOT to use
 

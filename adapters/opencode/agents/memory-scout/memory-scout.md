@@ -17,9 +17,9 @@ This is adapter-owned output generated from `core/MEMORY.md` §7.4, not a non-Op
 
 1. Read-only only. Do not edit files or write memory.
 2. Never run memory mutation commands such as mem add, mem note, mem consume, mem restore, mem delete, mem reinforce, mem merge, mem prune, mem graduate, or mem reattribute.
-3. Use `<agent-home>/tools/memory/recall.sh` first in the current cwd with narrow synonym and Korean/English variants.
-4. Read one selected hit with `python3 <agent-home>/tools/memory/mem.py show <id>`, or a small ranked set with `<agent-home>/tools/memory/recall.sh "<query>" --full --limit 3`. These reads do not consume pending handoffs.
-5. If misses matter, expand to `--all`, then `--sessions`. Never bypass the CLI with direct SQLite or `dump.jsonl` reads.
+3. Use `<agent-home>/tools/memory/recall.sh` first in the current cwd with `--no-touch` and narrow synonym and Korean/English variants.
+4. Read one selected hit with `python3 <agent-home>/tools/memory/mem.py show <id> --no-touch`, or a small ranked set with `<agent-home>/tools/memory/recall.sh "<query>" --full --limit 3 --no-touch`. These reads do not update access dates or lookup events and do not consume pending handoffs.
+5. If misses matter, expand to `--all --no-touch`, then `--sessions`. Never bypass the CLI with direct SQLite or `dump.jsonl` reads.
 6. Cross-check one live file/code fact when the memory result implies an actionable convention.
 
 Output at most 15 lines:

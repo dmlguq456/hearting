@@ -12,7 +12,9 @@ a failure can be injected precisely after legacy launcher removal
 restored to its exact pre-transaction bytes.
 """
 import os
+import json
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -161,6 +163,73 @@ class LauncherCommitBoundaryTest(unittest.TestCase):
             scope="global",
             dry_run=False,
         )
+
+    def test_packaged_distribution_activation_reaches_real_inventory_ensure(self):
+        # Keep the real _activate_release argv construction and parser/cmd_runtime
+        # consumer. Only runtime projection work is stubbed; ensure() is real.
+        real_run = installer.distribution.subprocess.run
+        def run_packaged(argv, *args, **kwargs):
+            if not (isinstance(argv, list) and len(argv) > 1 and argv[0] == "sh"
+                    and argv[1].endswith("tools/install/harness.sh")):
+                return real_run(argv, *args, **kwargs)
+            env = kwargs["env"]
+            args = installer.build_parser().parse_args(argv[2:])
+            with mock.patch.dict(os.environ, env, clear=True), _stubbed_runtime_projection():
+                payload = installer.cmd_runtime(args)
+            return type("Completed", (), {
+                "returncode": payload["exit"], "stdout": json.dumps(payload), "stderr": ""
+            })()
+
+        with mock.patch.object(installer.distribution.subprocess, "run", side_effect=run_packaged):
+            first = installer.distribution._activate_release(Path(__file__).resolve().parents[2], ["codex"])
+        self.assertEqual(first["runtimes"], ["codex"])
+        self.assertEqual(first["report"]["compute_hosts_config"]["status"], "created")
+        inventory = Path(os.environ["XDG_CONFIG_HOME"]) / "hearting/compute-hosts.yaml"
+        self.assertTrue(inventory.is_file())
+        self.assertEqual(inventory.stat().st_mode & 0o777, 0o600)
+        original = inventory.read_bytes()
+        stamp = inventory.stat().st_mtime_ns
+        inventory.write_text("user-owned inventory\n", encoding="utf-8")
+        os.utime(inventory, ns=(stamp, stamp))
+        with _stubbed_runtime_projection():
+            args = installer.build_parser().parse_args([
+                "runtime", "refresh", "--runtime", "codex", "--json",
+            ])
+            result = installer.cmd_runtime(args)
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+        self.assertEqual(result["compute_hosts_config"]["status"], "preserved")
+        self.assertEqual(inventory.read_text(encoding="utf-8"), "user-owned inventory\n")
+        self.assertEqual(inventory.stat().st_mtime_ns, stamp)
+        override = Path(self._tmp.name) / "custom-config" / "inventory.yaml"
+        with mock.patch.dict(os.environ, {"COMPUTE_HOSTS_CONFIG": str(override)}), \
+             _stubbed_runtime_projection():
+            args = installer.build_parser().parse_args([
+                "runtime", "refresh", "--runtime", "codex", "--json",
+            ])
+            result = installer.cmd_runtime(args)
+        self.assertEqual(result["compute_hosts_config"]["status"], "created")
+        self.assertTrue(override.is_file())
+        self.assertEqual(inventory.read_text(encoding="utf-8"), "user-owned inventory\n")
+
+    def test_real_packaged_harness_activation_creates_inventory(self):
+        root = Path(__file__).resolve().parents[2]
+        env = os.environ.copy()
+        env["HARNESS_SCHEDULER_NO_ACTIVATE"] = "1"
+        codex_config = Path(env["CODEX_HOME"]) / "config.toml"
+        codex_config.write_text("", encoding="utf-8")
+        result = subprocess.run(
+            ["sh", str(root / "tools/install/harness.sh"), "runtime", "activate",
+             "--runtime", "codex", "--mode", "packaged", "--source", str(root), "--json"],
+            env=env, text=True, capture_output=True, timeout=180,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["compute_hosts_config"]["status"], "created")
+        self.assertTrue(any("compute-hosts-config: created" in line
+                            for line in payload.get("lines", [])), payload)
+        inventory = Path(env["XDG_CONFIG_HOME"]) / "hearting/compute-hosts.yaml"
+        self.assertTrue(inventory.is_file())
+        self.assertEqual(inventory.stat().st_mode & 0o777, 0o600)
 
     def test_refresh_keeps_shared_history_key_in_common_ensure_path(self):
         target = self.home / ".local/bin/hearting"

@@ -19,6 +19,7 @@ import unittest
 from unittest import mock
 
 import fixture_env
+import distribution
 
 
 class StandaloneDistributionSafetyTest(unittest.TestCase):

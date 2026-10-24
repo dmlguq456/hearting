@@ -37,7 +37,7 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 
 ## Portable Contract
 
-- Invocation semantics: Design tokens decision — color palette, typography scale, spacing scale, radius, shadow, motion. Writes tokens.css / tailwind.config.ts. Extends existing tokens (never silently overwrites). Versions every change — snapshots prior tokens to _internal/versions/v{N}/ + logs reason to design_summary.md (mirrors spec versioning), so later token edits stay traceable. Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
+- Invocation semantics: Design token decisions cover palette, typography, spacing, radius, shadow, and motion. Record proposed values, rationale, and a rendered specimen in the design artifacts; hand off application-file edits to `autopilot-code`, which inspects and updates the real imported token source. Extend existing tokens by default and preserve version history in the design artifacts. Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
 
 

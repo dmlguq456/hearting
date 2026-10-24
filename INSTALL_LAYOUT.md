@@ -32,17 +32,13 @@ $HOME/.claude/              # Claude Code runtime home
 $HOME/.codex/               # Codex runtime home
 $HOME/.config/opencode/     # OpenCode global config home
 $HOME/.local/share/opencode/  # OpenCode data home (DB, logs, snapshots)
-$CODEX_HOME/.harness/bin/codex # Hearting-owned protected Codex ingress
 $HOME/.local/bin/codex         # vendor-owned Codex command binding
 ```
 
 Do not make `$HOME/.claude`, `$HOME/.codex`, or `$HOME/.config/opencode` the canonical repo. Those directories contain runtime-owned state such as credentials, sessions, logs, SQLite databases, caches, and shell snapshots.
 
-Codex ingress is kept under `$CODEX_HOME/.harness/bin` so a vendor updater may
-replace `$HOME/.local/bin/codex` without overwriting Hearting code. Shell profile
-management is opt-in and byte-preserving; `manual`/`deny` leave the profile
-untouched and report the exact PATH source needed for the current terminal.
-`legacy-inplace-v1` is a separately authorized degraded mode. Claude remains
+Codex owns its executable and command binding. Runtime activation does not
+install a protected ingress or edit shell profiles. Claude likewise remains
 vendor-owned and has no Hearting executable ingress.
 
 ## Report Bundle Store
@@ -298,12 +294,12 @@ your Git Bash `PATH`) so `fleet` works as a one-word command. Everything else
 The installer places one shared `compute-hosts` launcher in
 `~/.local/bin`; Claude, Codex, and OpenCode use the same entry. It resolves the
 active pinned Hearting root and delegates to `utilities/compute-hosts.py`.
-Choose a host explicitly. The installer seeds the user-owned
+Choose a host explicitly. Install and runtime activation seed the user-owned
 `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml` once as a
-commented template and never edits it again; it does not edit shell startup
-files, schedule GPU work, or dispatch remote agents. A template that still has
-no hosts is reported as `template` by `compute-hosts`, `harness verify`, and
-the Fleet COMPUTE RESOURCES panel, never as an error.
+commented template when absent and preserve any existing file or symlink; they
+do not edit shell startup files, schedule GPU work, or dispatch remote agents. A
+template that still has no hosts is reported as `template` by `compute-hosts`,
+`harness verify`, and the Fleet COMPUTE RESOURCES panel, never as an error.
 
 For a non-self host, `compute-hosts run` places a validated managed `AGENT_HOME`
 code copy under the shared `run_root` for the payload; it does not install into

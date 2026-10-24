@@ -10,7 +10,7 @@
 
 Design leads visual decisions; code applies the resulting visual specification (DESIGN_PRINCIPLES §9).
 
-- Design tokens have one source of truth: the file imported by the application, such as `globals.css` with `@theme` or `tokens.css`.
+- The application owns the token file it imports, such as `globals.css` with `@theme` or `tokens.css`. Design records proposed values and a specimen; `autopilot-code` inspects and edits that real source.
 - `designs/` and `spec/design/` hold references, mockups, rationale, and specimens as decision records, not duplicate token sources.
 - For an existing app, render and inspect the real screen rather than relying only on a mockup.
 - Route direction, token, new-layout, and structural visual changes here. Keep only trivial one-property tweaks in `autopilot-code`.
@@ -54,7 +54,7 @@ Skip phases only when the scope makes them unnecessary:
 
 ### `--artifact`
 
-- `project`: integrate into the project's `components/ui/` and token files; prefer when a stack already exists
+- `project`: prepare project-aware specs and previews for handoff; `autopilot-code` owns application token/component edits
 - `standalone`: create a self-contained `preview.html` with inline CSS/JS and optional CDN dependencies; prefer when no stack exists or a portable preview is required
 - Auto-detect `project` when cwd contains `package.json`, `components.json`, or `tailwind.config.*`; otherwise use `standalone`
 

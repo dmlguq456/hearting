@@ -51,7 +51,7 @@ actually discovers.
 
 ### Requirements
 
-- Python 3.10+
+- Python 3.11+
 - PyYAML for that Python (e.g. `python3 -m pip install --user pyyaml`):
   framed routes read their frame proposals with it, and `hearting verify`
   checks it
@@ -71,16 +71,9 @@ the full capability set for all three runtimes as immutable packaged bundles and
 registers a daily user-level update check where the OS supports it. It does not
 touch runtime credentials, sessions, logs, or databases.
 
-When Codex is installed, the same transaction also installs a reversible
-`$CODEX_HOME/.harness/bin/codex` protected ingress. Plain interactive `codex`, `codex resume`, and
-`codex fork` enter the harness-managed App Server automatically; `codex exec`,
-plugin administration, login, and other non-interactive commands pass through to
-the recorded real CLI. Updates repair the launcher, and `hearting uninstall codex`
-restores the exact previous command binding. Profile PATH edits require explicit
-`--profile-policy manage` authority; otherwise use the printed manual source
-instruction (the current terminal is not changed). `legacy-inplace-v1` is an
-explicit degraded mode only. If Codex is not installed yet, this step is
-reported as skipped and can be applied by a later runtime refresh.
+Codex remains responsible for its executable and command binding. Runtime
+activation does not install a protected Codex ingress or edit shell profiles;
+the `codex` executable remains vendor-owned.
 
 Once `~/.local/bin` is on your `PATH`, manage it with:
 
@@ -101,9 +94,10 @@ full-screen view needs `curses`; `fleet --once` and `fleet --json` do not, so
 scripting and snapshots work anywhere Python does.
 
 `compute-hosts` requires an explicit host choice and reads the user-owned
-`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`. Install seeds
-that file once as a fully commented template (two example hosts, English
-comments) and never modifies it afterwards; until a host is filled in, the tool
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml`. Install and
+runtime activation seed that file once as a fully commented template (two
+example hosts, English comments) when absent and preserve any existing file or
+symlink; until a host is filled in, the tool
 and the Fleet panel report it as a template rather than failing. `harness
 config status` lists every user-owned config file with its state and the
 command that seeds it. The installer does not edit shell startup files,

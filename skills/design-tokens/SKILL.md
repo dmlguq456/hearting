@@ -58,15 +58,15 @@ Render the specimen, inspect the resulting image, critique contrast, harmony, co
 
 This specimen-consume gate is mandatory: components may consume the tokens only after rendered verification succeeds.
 
-### Step 4: Write the Canonical Token File
+### Step 4: Prepare the Application Token Handoff
 
-Write or extend CSS variables in `tokens.css`, `@theme` in `app/globals.css`, or `tailwind.config.ts` according to the actual stack and selected single source. Use [references/templates.md](references/templates.md). Apply project-file changes only after the applicable confirmation.
+Record the proposed values and target in `02_tokens/tokens.md`, using [references/templates.md](references/templates.md). Identify the actual application token file from the live project and hand off the values and specimen to `autopilot-code` for production edits and verification. Do not edit the application token file from this design step.
 
 ### Step 5: Snapshot and Version Changes
 
 Before a major overwrite or extension when a prior token system exists:
 
-1. Copy the previous `02_tokens/tokens.md` and canonical token file into `_internal/versions/v{N}/`, where `N` is one more than the current maximum.
+1. Copy the previous `02_tokens/tokens.md` and its design rationale/specimen references into `_internal/versions/v{N}/`, where `N` is one more than the current maximum. The application token file remains source-controlled by the app and is changed by `autopilot-code`.
 2. Extend while preserving keys, or replace only for an explicitly selected redesign.
 3. Append a narrative to `design_summary.md` with changed tokens, old → new values, rationale, and date. This is the only design-cycle change-history source; do not add a separate CHANGELOG.
 4. Ask the user only when a genuine token conflict requires a design choice.
@@ -93,7 +93,7 @@ tokens_verified_visually: true
 
 - `02_tokens/tokens.md`
 - `02_tokens/specimen.html`
-- the canonical project token file, such as `tokens.css`, `app/globals.css`, or `tailwind.config.ts`
+- an implementation handoff naming the real application token file and proposed changes
 - `_internal/versions/v{N}/` for a major change
 - `design_summary.md`
 

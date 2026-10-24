@@ -54,10 +54,33 @@ class ComputeHostsConfigTests(unittest.TestCase):
             plan = compute_hosts_config.ensure(dry_run=True)
             self.assertEqual(plan["status"], "would-create")
             self.assertFalse(Path(plan["path"]).exists())
+            self.assertFalse(Path(plan["path"]).parent.exists())
             override = Path(td) / "elsewhere.yaml"
             with mock.patch.dict(os.environ, {"COMPUTE_HOSTS_CONFIG": str(override)}):
                 self.assertEqual(Path(compute_hosts_config.ensure()["path"]), override)
                 self.assertEqual(compute_hosts_config.validate()["status"], "template")
+
+    def test_existing_and_dangling_symlinks_are_preserved(self):
+        with tempfile.TemporaryDirectory() as td, self.env(Path(td)):
+            path = Path(td) / "config/hearting/compute-hosts.yaml"
+            path.parent.mkdir(parents=True)
+            target = Path(td) / "user-inventory.yaml"
+            target.write_text("user-owned\n", encoding="utf-8")
+            path.symlink_to(target)
+            first = compute_hosts_config.ensure()
+            self.assertEqual(first["status"], "preserved")
+            self.assertTrue(path.is_symlink())
+            self.assertEqual(path.read_text(encoding="utf-8"), "user-owned\n")
+
+            # destructive-ok: reason=replace the first symlink fixture with a dangling symlink; boundary=the exact temporary compute-host config leaf
+            path.unlink()
+            dangling = Path(td) / "missing-target.yaml"
+            path.symlink_to(dangling)
+            first = compute_hosts_config.ensure()
+            self.assertEqual(first["status"], "preserved")
+            self.assertTrue(path.is_symlink())
+            self.assertEqual(Path(os.readlink(path)), dangling)
+            self.assertFalse(dangling.exists())
 
     def test_registry_reads_every_surface_and_only_invalid_fails(self):
         with tempfile.TemporaryDirectory() as td, self.env(Path(td)):

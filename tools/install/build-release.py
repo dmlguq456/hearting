@@ -86,7 +86,7 @@ done
 
 PY=$(command -v python3 || command -v python || true)
 if [ -z "$PY" ]; then
-  echo "hearting: Python 3.10+ is required." >&2
+  echo "hearting: Python 3.11+ is required." >&2
   exit 1
 fi
 

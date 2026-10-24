@@ -200,6 +200,30 @@ grep -q "$RID" <<<"$EXPLICIT" && grep -q "$KOREAN_ID" <<<"$KOREAN" \
   && [ "$LA" = 2000-01-01 ] \
   && ok "explicit identifier and Korean queries hit while no-touch preserves access time" \
   || bad "explicit='$EXPLICIT' korean='$KOREAN' last_accessed=$LA"
+NO_TOUCH_EVENTS="$STORE/no-touch-events.jsonl"
+python3 - "$STORE" >"$TMP/no-touch-before" <<'PY'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]); rows=[]
+for suffix in ("", "-wal", "-shm"):
+ p=Path(str(root/"memory.db")+suffix)
+ if p.exists(): rows.append((suffix,p.read_bytes().hex(),p.stat().st_mtime_ns,p.stat().st_mode&0o777))
+print(json.dumps(rows,sort_keys=True))
+PY
+MEM_RECALL_EVENTS="$NO_TOUCH_EVENTS" cli show "$RID" --no-touch >/dev/null
+MEM_RECALL_EVENTS="$NO_TOUCH_EVENTS" cli recall 'tail-UNIQUE-991' --full --json --no-touch >/dev/null
+python3 - "$STORE" "$TMP/no-touch-before" <<'PY'
+import json,sys
+from pathlib import Path
+root=Path(sys.argv[1]); rows=[]
+for suffix in ("", "-wal", "-shm"):
+ p=Path(str(root/"memory.db")+suffix)
+ if p.exists(): rows.append((suffix,p.read_bytes().hex(),p.stat().st_mtime_ns,p.stat().st_mode&0o777))
+assert json.dumps(rows,sort_keys=True)==Path(sys.argv[2]).read_text().strip()
+PY
+[ ! -e "$NO_TOUCH_EVENTS" ] \
+  && ok "no-touch show/full preserve serving DB files and create no lookup event journal" \
+  || bad "no-touch lookup wrote event journal or changed DB bytes/stat"
 grep -q '"event": "explicit-recall"' "$STORE/events.jsonl" && grep -q '"event": "show"' "$STORE/events.jsonl" \
   && grep -q '"event": "consume"' "$STORE/events.jsonl" && ! grep -q 'tail-UNIQUE-991' "$STORE/events.jsonl" \
   && ok "bounded telemetry distinguishes retrieval/consume without raw prompt" || bad "telemetry contract"

@@ -1381,6 +1381,10 @@ def cmd_runtime(args):
             lines.append("fleet-config: " + fleet_preferences["status"] + " " + fleet_preferences["path"])
             for report in reports:
                 report["fleet_config"] = fleet_preferences
+            inventory = compute_hosts_config.ensure()
+            lines.append("compute-hosts-config: " + inventory["status"] + " " + inventory["path"])
+            for report in reports:
+                report["compute_hosts_config"] = inventory
     except runtime_activation.ActivationError as exc:
         rollback_errors = []
         for snapshot in reversed(snapshots):

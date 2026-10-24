@@ -265,9 +265,9 @@ Efficiency is not corner cutting. Reduce duplicated orchestrator reasoning, not 
 
 Visual decisions begin in design rather than emerging ad hoc in code. Design acts as the visual blueprint, and implementation applies it.
 
-- **Tokens are one design-owned contract imported by code.** Color, typography, spacing, radius, and shadow live in exactly one file that the real app imports, such as `app/globals.css` with `@theme` or `styles/tokens.css`. `autopilot-design` decides and edits that file; `autopilot-code` consumes it. Do not keep a token copy under `designs/`, which should contain references, mockups, rationale, and specimens only.
+- **The application owns its imported token contract.** Color, typography, spacing, radius, and shadow live in the file the real app imports, such as `app/globals.css` with `@theme` or `styles/tokens.css`. Design decides and documents values in the design artifacts, then hands them to `autopilot-code` to inspect the live app token source and apply them. Do not keep a competing token source under `designs/`, which contains references, mockups, rationale, and specimens.
 - Components consume tokens rather than redefining them through scattered inline hex or pixel values. A token change routes back to design.
-- Built apps remain design-first: render the real running application through the adapter visual harness, make the visual decision, update the token contract, and then apply code.
+- Built apps remain design-first: inspect and render the real running application through the adapter visual harness, make the visual decision, record the contract and specimen, then hand off production token/component edits to code for application and verification.
 - Direction, tokens, a new screen layout, or structure are substantial and route through design-first. A tiny adjustment to one element may remain a direct code tweak.
 
 This prevents token drift, fossilized design copies, and loss of visual decision history. The rule came from the 2026-06-08 worklog-board divergence between a stale 7 KB design token copy and the live 50 KB application stylesheet.

@@ -1,7 +1,8 @@
-# Managed Codex visible-main transitions and recovery
+# Codex visible-main transition evidence
 
-This document separates the upstream App Server protocol from Hearting's local
-delivery projection and from observations that have not been reproduced.
+This document records the upstream App Server protocol and Hearting's bounded
+headless delivery evidence. It does not promise an interactive Codex launcher
+or automatic recovery of a user-facing main session.
 
 ## Evidence boundary
 
@@ -55,20 +56,9 @@ preflight.sh interactive-main-recovery --check \
   --workspace /absolute/project/path
 ```
 
-`--start` is a separate explicit mutation. It repeats the source proof, verifies
-the protected managed launcher from its owner-private install record, and opens
-a visible pane in the same Herdr workspace through the shared window contract
-(`core/OPERATIONS.md §5.14`): the next 2×2 cell of the source tab, an idle empty
-shell, the newest other tab with room, or one new tab. Focus stays where it was;
-the result's `pane` and `placement` say where the new main is. It verifies the
-pane's workspace (and a created pane's cwd), then submits the shell-quoted
-protected executable through `herdr pane run`; its `--cd` moves a reused shell
-into the workspace. Every API call uses the validated socket, including when
-`--socket` differs from the ambient environment. `launch-requested` proves
-command submission only; it does not assert native readiness or a managed
-binding. It never falls back to tmux. If validation or agent start fails after
-a pane was created, the result includes `created_pane`; cleanup remains an
-operator decision.
+The `--start` path is not a supported interactive recovery promise. The
+read-only `--check` result is observational evidence only and does not establish
+that a user-facing main can be launched or recovered.
 
 Do not use this path for registered headless workers. Do not edit credentials,
 sessions, logs, cache, database files, `config.toml`, trust state, or the

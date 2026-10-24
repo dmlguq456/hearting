@@ -64,7 +64,7 @@ python3 <agent-home>/tools/memory/mem.py <command>
 |---|---|
 | `add <tier> <type> "<body>" [--headline] [--alias] [--entity] [--topic] [--artifact-ref] …` | Add a record and bounded retrieval capsule after mechanical validation. Repeat capsule-list options as needed. |
 | `note "<body>" [--type] [--requires-consume]` | Shorthand for a working record. Use `--requires-consume` for delivery-bearing threads. |
-| `candidates "<prompt>" --session-id <id> [--turn-id <id>] [--hook]` | Main-prompt mechanical capsule lookup. Exposes at most six active current-project/global headline-and-ID candidates within 2,400 UTF-8 bytes, never bodies, and publishes a same-turn opportunity receipt on a successful probe. A session is shown each record once: the ranked top six is chosen as before and the ones already shown are dropped, so a repeat prompt can print nothing (the receipt is still written). The history is `<runtime-state>/candidate-seen/`, one 0600 file per session hash and project (512 ids, 24 hours), and every failure to read or write it lets the candidate through. `--session-id` empty or a bridge placeholder means no session and no de-duplication. Compact and `/clear` empty the history; resume and start keep it. `MEM_CANDIDATE_BODY=1` (off by default) adds a body of at most 600 characters for one clearly leading new candidate, paid for by half of the bytes the session already saved. |
+| `candidates "<prompt>" --session-id <id> [--turn-id <id>] [--hook]` | Main-prompt mechanical capsule lookup. By default exposes at most six active current-project/global headline-and-ID candidates within 2,400 UTF-8 bytes; the explicit `MEM_CANDIDATE_BODY=1` opt-in adds at most 600 characters for one clearly leading new candidate, paid for by half of the bytes the session already saved. A successful probe publishes a same-turn opportunity receipt. A session is shown each record once: the ranked top six is chosen as before and the ones already shown are dropped, so a repeat prompt can print nothing (the receipt is still written). The history is `<runtime-state>/candidate-seen/`, one 0600 file per session hash and project (512 ids, 24 hours), and every failure to read or write it lets the candidate through. `--session-id` empty or a bridge placeholder means no session and no de-duplication. Compact and `/clear` empty the history; resume and start keep it. |
 | `bootstrap-context --query <q>... --cwd <dir> [--limit 4] [--max-bytes 6144]` | Runtime-only; assembles the prompt of a worker whose unit declares `bootstrap.memory`. Prints at most four active global/current-project feedback, decision, convention, preference, and user-correction bodies within 6,144 UTF-8 bytes (query groups rank in order). It opens the database read-only and writes no access date, recall event, or receipt; a missing or unreadable store prints nothing and exits 0. |
 | `recall-gate --decision recall\|skip --reason … [--query …]` | Record the work-start opportunity decision without raw prompts; recall executes immediately. Applied outcomes require `--gate-id` and at least one `--record-id`; miss has no record ID. |
 | `recall "<query>" [--topic] [--include-superseded] …` | Search active capsules first, then body/CJK/LIKE compatibility paths. Historical rows require explicit inclusion. |
@@ -278,8 +278,10 @@ and confidence thresholds never substitute for that judgment.
 ## Retrieval boundary (D-40)
 
 - `show`, explicit recall/full, and SessionStart injection do not consume a
-  handoff. Explicit recall/show update `last_accessed` unless `--no-touch` is
-  supplied. Source upsert/body dedup never lowers pending to ordinary.
+  handoff. Main-session recall/show update `last_accessed` unless `--no-touch`
+  is supplied. Scout no-touch reads also skip lookup events, exchange notice
+  consumption, and the read-trigger. Source upsert/body dedup never lowers
+  pending to ordinary.
 - Prompt-submit hooks mechanically query only the capsule index on every
   eligible main prompt. They expose bounded candidates but never classify
   relevance or adopt a record. The agent ignores unrelated candidates and

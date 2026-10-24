@@ -1,6 +1,6 @@
 ### Stage C: Per-Aspect Lint — report only
 
-Before dispatching aspects, if `--no-fact-check` is present, remove `facts` and `coverage` from the resolved set and record that the explicit flag disabled them. Ad-hoc prompt exemptions do not disable these checks.
+Before dispatching aspects, if `--no-fact-check` is present, remove `facts` and `coverage` from the resolved set and record that the explicit flag disabled them. An explicit request to skip validation for this pass also applies when stated in plain language; a vague request to move faster does not.
 
 Each issue has this stable shape:
 

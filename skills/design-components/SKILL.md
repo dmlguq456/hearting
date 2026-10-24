@@ -61,7 +61,7 @@ Write:
 - 03_components/<component>.md
 ```
 
-The `.tsx` file is the working React component; the `.md` file records props, usage, and accessibility notes.
+The `.tsx` file is an illustrative design artifact for review, not a production app component; the `.md` file records props, usage, and accessibility notes. `autopilot-code` adapts and integrates approved components in the application.
 
 #### `scope=slide`
 
@@ -116,15 +116,11 @@ Write:
 Render and inspect the output through Step 4. A paper-architecture wireframe receives a lighter check because it is a handoff guide, not the final figure.
 ```
 
-### Step 3: Integrate UI Code
+### Step 3: Prepare the Implementation Handoff
 
-For `scope=ui`, install selected shadcn/ui components only after the applicable confirmation:
+For `scope=ui`, document component structure, props, accessibility, and token usage in the design artifacts. `autopilot-code` owns production component integration and any project-file edits.
 
-```bash
-pnpm dlx shadcn@latest add button card dialog
-```
-
-Place integrated code under the project root `components/ui/`. Keep customization and usage guidance under `03_components/`.
+Keep mockups, specifications, and preview artifacts under `03_components/`; identify the target project paths and any selected library components in the implementation handoff.
 
 ### Step 4: Rendered Visual Verification
 
@@ -174,7 +170,7 @@ verified_visually: true
 ## Output
 
 - `03_components/` with scope-specific code, specs, assets, and preview
-- integrated project components only after confirmation
+- a handoff describing production component paths and required token usage
 
 ## Return Format
 

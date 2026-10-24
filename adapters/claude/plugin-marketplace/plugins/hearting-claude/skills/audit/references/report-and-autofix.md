@@ -79,22 +79,8 @@ Preserve severity, aspect, file:line, issue identity, and suggested-fix meaning.
 
 Then print at most eight localized lines containing completion, artifact name and type, aspects, totals, report path, verdict, and—when 🔴 exists—the recommended corrective invocation.
 
-### Stage E: Corrective Chain — default
+### Follow-up
 
-After writing and reporting the audit, dispatch correction unless `--report-only` is set.
-
-1. Skip when `--report-only` is set or the audit has no 🔴 or 🟡 findings. Print `✓ Audit clean — no corrective dispatch needed.` for a clean result.
-2. Build one prompt from all 🔴 and significant 🟡 findings:
-
-   ```text
-   Automatically correct audit findings:
-   - {issue 1} → {suggested fix}
-   - {issue 2} → {suggested fix}
-   Source audit report: {audit log path}
-   ```
-
-3. Dispatch plans to `autopilot-code --mode dev`; dispatch research and documents to `autopilot-refine`.
-4. Alert the user before dispatch with the selected Skill and finding counts. The user may interrupt before the next Skill runs.
-5. Append `**Auto-fix dispatched**: yes (→ {skill}) | no (--report-only or clean)` to `## Verdict`.
-
-The default chain exists because reports were ignored during the motivating incident, allowing five factual drifts to persist across more than twenty refine cycles. `--report-only` preserves inspection-only and handoff-review use cases.
+The audit ends after writing and reporting its findings. If the user explicitly
+requests corrections, pass the report to the existing `autopilot-code` or
+`autopilot-refine` flow; the audit itself does not dispatch work.

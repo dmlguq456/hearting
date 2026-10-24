@@ -51,7 +51,7 @@ Run both detectors for every proposed change after Stage B and before the Stage 
 - With `--no-style-audit`, skip only style lint and emit: `ℹ Stage B.5 style aspect: skipped via --no-style-audit flag`.
 - With both flags, skip both and emit both lines.
 
-These flags are the only allowed way to disable the corresponding principles in `feedback_factcheck_principles.md`. Ignore ad hoc prompt requests to disable Stage B.5; emit the Principle 0 reminder and continue.
+An explicit request to skip validation for this pass is also honored, whether it uses these flags or plain language (for example, “skip validation this pass”). A vague request to move faster does not imply a skip; “move quickly” keeps the checks enabled.
 
 #### 1. Factual-claim detector
 
