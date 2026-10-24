@@ -16,6 +16,7 @@ if str(UTILITIES) not in sys.path:
 from fleet import interaction as native_interaction  # noqa: E402
 from fleet import render, route_chain  # noqa: E402
 from fleet import collectors  # noqa: E402
+from fleet.collectors import interaction as interaction_collector  # noqa: E402
 from fleet.collectors import procscan  # noqa: E402
 from fleet.model import Session, classify_session  # noqa: E402
 from fleet.render import _interaction_badge  # noqa: E402
@@ -229,6 +230,26 @@ class HumanGateEndToEndTest(unittest.TestCase):
 
     # -- observation ------------------------------------------------------
     def snapshot(self):
+        # Fleet collection is cache-only. Seed the private projection from the
+        # fixture's exact route-chain/journal observations as a producer would.
+        sessions = self._scan()
+        collectors.apply_session_aliases(sessions)
+        interaction_collector.enrich_human_gates(sessions, jobs_path=str(self.jobs), now=self.now)
+        items, by_session = [], {}
+        for session in sessions:
+            for observation in session.interaction_observations:
+                item_id = "S2:test:%s:%s:%d" % (session.harness, session.session_id,
+                                                  int(observation["waiting_since"] * 1000))
+                items.append({"id": item_id, "source": "S2", "kind": observation["kind"],
+                              "since": observation["waiting_since"], "question": None,
+                              "owner": {"harness": session.harness,
+                                        "session_id": session.session_id},
+                              "attribution": "lineage"})
+                by_session.setdefault((session.harness, session.session_id), []).append(item_id)
+        import human_wait_state
+        human_wait_state.publish_cache({"items": items, "by_session": by_session,
+            "total": len(items), "stale_total": 0, "unattributed": [], "health": [],
+            "observed_at": self.now, "complete": True})
         snap = collectors.collect_all(jobs_path=str(self.jobs))
         failures = {key: value for key, value in snap.observations.items()
                     if key.startswith("human-gates") and value.get("state") == "failed"}
@@ -265,7 +286,7 @@ class HumanGateEndToEndTest(unittest.TestCase):
     def assert_waiting(self, harness, sid):
         wide, narrow, observed, liveness = self.chip(harness, sid)
         self.assertTrue(wide and narrow, (wide, narrow))
-        self.assertEqual([(o["kind"], o["source"]) for o in observed], [("decision", "hearting-ledger")])
+        self.assertEqual([(o["kind"], o["source"]) for o in observed], [("decision", "S2")])
         self.assertEqual(liveness, "blocked")
 
     def assert_quiet(self, harness, sid):

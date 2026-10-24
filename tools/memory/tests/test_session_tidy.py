@@ -86,6 +86,25 @@ class TidyCase(unittest.TestCase):
         return self.iso.patched_environ(env)
 
 
+class AnswerWaitHookTest(TidyCase):
+
+    def test_start_does_not_replay_cached_own_seat_s4_after_close(self):
+        import human_wait_state
+        output = []
+        with self.library():
+            seat = st.resolve_seat("claude", str(self.cwd), sid="sid-closed")
+            projected = {"items": [{"id": "S4:closed", "source": "S4",
+                "question": "already closed", "since": 1, "stale": False,
+                "owner": {"harness": "claude", "session_id": "sid-closed",
+                          "seat_key": seat.key}}],
+                "by_session": {("claude", "sid-closed"): ["S4:closed"]}}
+            with mock.patch.object(human_wait_state, "cached_view", return_value=projected), \
+                 mock.patch.object(human_wait_state, "_read", return_value=None):
+                st.run_hook("claude", "start", "sid-closed", cwd=str(self.cwd),
+                            env=os.environ, now=100, emit=output.append)
+        self.assertFalse(any("already closed" in value or "답변 필요" in value for value in output))
+
+
 class CardWriteTest(TidyCase):
 
     def test_card_is_written_at_once_with_private_modes(self):

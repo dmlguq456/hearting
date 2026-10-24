@@ -178,7 +178,9 @@ class CodexFooterBindingTest(unittest.TestCase):
                         mock.patch.object(projection, "_formatter_overrides", return_value=(None, None)), \
                         mock.patch.object(projection, "compose", return_value=("[46] codex", "fixture title")), \
                         mock.patch.object(projection, "header_title", return_value="fixture header"), \
-                        mock.patch.dict(os.environ, {"HERDR_PANE_ID": "stale:pane",
+                        mock.patch.dict(os.environ, {"HOME": str(self.root / "home"),
+                                                     "XDG_STATE_HOME": str(self.root / "state"),
+                                                     "HERDR_PANE_ID": "stale:pane",
                                                      "CODEX_THREAD_ID": thread_id,
                                                      "HERDR_SOCKET_PATH": "/inherited-service.sock"}, clear=True), \
                         mock.patch("tempfile.gettempdir", return_value=str(self.root)):

@@ -55,6 +55,7 @@ class LiveSnapshot:
     memory: object = None
     governor: object = None
     hearting: dict = None
+    answer_waits: object = None
 
     def __iter__(self):
         # Keep the existing sessions, jobs unpacking surface for CLI readers.
@@ -75,6 +76,43 @@ def as_snapshot(value):
         except Exception:
             pass
     return snapshot
+
+
+def fleet_answer_wait_view(result):
+    """Keep answer-wait identity and timing in Fleet, without private text."""
+    if not isinstance(result, dict):
+        return None
+    items = []
+    for item in result.get("items", ()) or ():
+        if not isinstance(item, dict):
+            continue
+        allowed = ("id", "source", "kind", "route_id", "node", "attempt_id", "since", "stale",
+                   "session_id", "harness", "pane_id")
+        row = {key: item[key] for key in allowed if key in item}
+        owner = item.get("owner") if isinstance(item.get("owner"), dict) else {}
+        for key in ("harness", "session_id"):
+            if key not in row and key in owner:
+                row[key] = owner[key]
+        if isinstance(row.get("stale"), bool):
+            row["stale"] = "older" if row["stale"] else "current"
+        items.append(row)
+        if "session_id" in row or "harness" in row:
+            items[-1]["owner"] = {key: row[key] for key in ("harness", "session_id")
+                                   if key in row}
+    health = []
+    for item in result.get("health", ()) or ():
+        if isinstance(item, dict):
+            health.append({key: item[key] for key in ("source", "state") if key in item})
+    return {
+        "items": items,
+        "by_session": dict(result.get("by_session", {}) or {}),
+        "unattributed": list(result.get("unattributed", ()) or ()),
+        "total": int(result.get("total", 0) or 0),
+        "older": int(result.get("older", 0) or 0),
+        "health": health,
+        "observed_at": result.get("observed_at"),
+        "complete": bool(result.get("complete", False)),
+    }
 
 
 # Measured normal tick = 10-12s (attach_projections 5.64s + dispatch.collect

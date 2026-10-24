@@ -120,11 +120,27 @@ class CodexPendingTest(unittest.TestCase):
         # the reply arrives later as a user message with a JSON questionItemId.
         self.write(self.event("task_started"), self.async_call(), self.accepted())
         self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
-        self.append(self.event("task_complete"), self.event("task_started", "next"),
-                    self.call("exec", name="exec_command"), self.output("exec"))
+        self.append(self.event("task_complete"))
         self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
         self.append(self.reply())
         self.assertIsNone(codex._tail_pending_request_user_input(self.path))
+
+    def test_relayed_async_question_closes_when_a_later_turn_starts(self):
+        # Real runtime shape from the [bb] rollout: acceptance is followed by a
+        # peer-injected user message, then the session starts another turn.
+        injected = record({"type": "message", "role": "user", "content": [
+            {"type": "input_text", "text": "supervisor relay: keep waiting"},
+        ]})
+        self.write(self.event("task_started", "asking"), self.async_call(),
+                   self.accepted(), self.event("task_complete", "asking"), injected)
+        self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
+        self.append(self.event("task_started", "following"), self.event("task_complete", "following"))
+        self.assertIsNone(codex._tail_pending_request_user_input(self.path))
+
+    def test_unanswered_async_question_without_later_turn_stays_pending(self):
+        self.write(self.event("task_started", "asking"), self.async_call(), self.accepted(),
+                   self.event("task_complete", "asking"))
+        self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
 
     def test_partial_and_duplicate_replies_do_not_close_other_questions(self):
         self.write(self.async_call(count=2), self.accepted(), self.reply(index=0))
@@ -185,8 +201,7 @@ class CodexPendingTest(unittest.TestCase):
 
     def test_completion_delivery_prompt_keeps_async_question(self):
         self.write(self.event("task_started"), self.async_call(), self.accepted(),
-                   self.event("task_complete"), self.user_prompt("delivery-" + "ab" * 32),
-                   self.event("task_started", "t2"), self.event("task_complete", "t2"))
+                   self.event("task_complete"), self.user_prompt("delivery-" + "ab" * 32))
         self.assertEqual(codex._tail_pending_request_user_input(self.path)["call_id"], "async")
 
     def test_prompt_before_question_in_same_turn_does_not_clear_it(self):

@@ -27,6 +27,7 @@ WAIT_SOURCES = (
     "codex-permissionrequest",
     "codex-rollout",
     "codex-appserver",
+    "opencode-question",
 )
 _ALLOWED_KEYS = frozenset(
     ("schema_version", "harness", "session_id", "kind", "source", "waiting_since")

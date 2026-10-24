@@ -707,6 +707,20 @@ def _metadata_command(herdr, harness, session_id, pane):
     title = session_title(harness, session_id)
     label, custom_title = _formatter_overrides(harness, session_id, title)
     agent, shown_title = compose(harness, session_id, title=custom_title or title, label=label)
+    try:
+        utilities = str(Path(__file__).resolve().parents[2] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import human_wait_state
+        waits = human_wait_state.cached_view()
+        if waits is None:
+            waits = {"items": [], "by_session": {}}
+        waiting_ids = set(waits.get("by_session", {}).get((harness, session_id), ()))
+        if any(item.get("id") in waiting_ids and not item.get("stale")
+               for item in waits.get("items", ())):
+            shown_title = "◑답변 필요 " + shown_title
+    except Exception:
+        pass
     # Herdr replaces the whole metadata record, so send both fields together.
     metadata = [herdr, "pane", "report-metadata", pane, "--source", "herdr:%s" % harness,
                 "--display-agent", agent]

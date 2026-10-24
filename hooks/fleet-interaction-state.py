@@ -50,18 +50,28 @@ def main():
         from fleet import interaction
 
         action = sys.argv[1] if len(sys.argv) > 1 else ""
+        harness = "claude"
+        if "--harness" in sys.argv:
+            index = sys.argv.index("--harness")
+            if index + 1 < len(sys.argv) and sys.argv[index + 1] in {"claude", "codex", "opencode"}:
+                harness = sys.argv[index + 1]
         if action == "clear":
-            interaction.clear_wait(session_id, "claude")
+            interaction.clear_wait(session_id, harness)
             return 0
-        if action != "set" or len(sys.argv) != 4 or sys.argv[2] != "--kind":
+        if action != "set" or "--kind" not in sys.argv:
             return 0
-        kind = sys.argv[3]
+        kind_index = sys.argv.index("--kind")
+        if kind_index + 1 >= len(sys.argv):
+            return 0
+        kind = sys.argv[kind_index + 1]
         source = {
             "decision": "claude-asktool",
             "permission": "claude-permission",
         }.get(kind)
+        if harness == "opencode" and kind == "decision":
+            source = "opencode-question"
         if source:
-            interaction.set_wait(session_id, "claude", kind, source)
+            interaction.set_wait(session_id, harness, kind, source)
     except Exception:
         pass
     return 0

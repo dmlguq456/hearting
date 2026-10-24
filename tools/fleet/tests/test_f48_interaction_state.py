@@ -42,6 +42,15 @@ class InteractionStateTest(unittest.TestCase):
         self.assertIsNone(interaction.read_wait("sid-a", "claude"))
         self.assertTrue(interaction.clear_wait("sid-a", "claude"))
 
+    def test_opencode_question_uses_the_exact_source_and_session(self):
+        self.assertIn("opencode-question", interaction.WAIT_SOURCES)
+        self.assertTrue(interaction.set_wait("oc-sid", "opencode", "decision",
+                                             "opencode-question", now=200.0))
+        record = interaction.read_wait("oc-sid", "opencode")
+        self.assertEqual((record["harness"], record["session_id"], record["source"]),
+                         ("opencode", "oc-sid", "opencode-question"))
+        self.assertTrue(interaction.clear_wait("oc-sid", "opencode"))
+
     def test_schema_has_no_content_channel(self):
         signature = inspect.signature(interaction.set_wait)
         self.assertFalse(

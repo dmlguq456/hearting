@@ -8,6 +8,7 @@ import io
 import json
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -79,7 +80,9 @@ class StopLifecycleTest(unittest.TestCase):
 
         child = HeldChild()
         payload = json.dumps({"thread_id": "thread-held", "cwd": str(ROOT), "transcript_path": ""})
-        with mock.patch.dict(os.environ, {}, clear=True), \
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.dict(os.environ, {"HOME": home,
+                                             "XDG_STATE_HOME": str(Path(home) / "state")}, clear=True), \
                 mock.patch("sys.stdin", io.StringIO(payload)), \
                 mock.patch.object(session_tidy_idle.subprocess, "Popen", return_value=child), \
                 mock.patch.object(interaction, "clear_wait", side_effect=lambda *_: events.append("clear_wait")), \

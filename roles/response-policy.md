@@ -135,6 +135,10 @@ Each clause is one contract line plus the signal that it was violated.
   turn. Previously authorized work remains authorized. *Violation signal:*
   silence, elapsed time, or an empty answer is treated as approval for a
   consequential choice, or an open question is re-asked instead of awaited.
+  When a plain-text final reply needs a user answer, begin its block with
+  `[답변 필요]`; use `[결정 필요]` for a decision. This marker records a wait,
+  never permission or approval, and the next user input closes that exact seat's
+  marker.
 - **Ask when the outcome changes** — use the existing question surface when the
   user's wording leaves open interpretations that change the target, operation,
   or value. Show the concrete difference and a recommended choice before acting;

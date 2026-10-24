@@ -222,6 +222,53 @@ def observe_payload(harness: str, payload: dict, *, now: float | None = None,
     if is_worker() or os.environ.get("AGENT_SESSION_ROLE", "").lower() in {
             "owner", "worker", "auxiliary", "reviewer"}:
         return "booking=skipped reason=worker"
+    # This observation is independent of idle usage/compact booking. A lock
+    # contention or unknown usage never prevents the marked wait from appearing.
+    try:
+        import human_wait_state
+        import session_tidy as tidy
+        seat = tidy.resolve_seat(harness, cwd, os.environ, sid)
+        current_sequence = tidy.read_prompt_seq(seat)
+        expected_sequence = payload.get("_answer_wait_prompt_seq",
+                                       os.environ.get("HEARTING_ANSWER_WAIT_PROMPT_SEQ", current_sequence))
+        expected_sequence = int(expected_sequence)
+        signal = human_wait_state.signal_value(
+            harness, sid, seat.key, last_reply(harness, payload, sid),
+            sequence=expected_sequence, now=now)
+        if signal is not None:
+            registered = False
+            fallback = False
+            try:
+                # Prompt closure uses this same lock. Keep the sequence fence and
+                # private atomic write together, and leave subprocess work outside.
+                with tidy.seat_lock(seat.key, wait=0.1):
+                    if tidy.read_prompt_seq(seat) == expected_sequence:
+                        registered = human_wait_state.write_signal(signal)
+            except BlockingIOError:
+                # A busy seat must not discard a real wait. Write optimistically,
+                # then retract only our own signal if prompt closure won the race.
+                fallback = True
+                if human_wait_state.write_signal(signal):
+                    if tidy.read_prompt_seq(seat) == expected_sequence:
+                        registered = True
+                    else:
+                        try:
+                            with tidy.seat_lock(seat.key, wait=0.05):
+                                if tidy.read_prompt_seq(seat) != expected_sequence:
+                                    human_wait_state.remove_signal_if_current(signal)
+                        except BlockingIOError:
+                            human_wait_state.remove_signal_if_current(signal)
+            if registered:
+                current = human_wait_state.signal_is_current(signal)
+                sequence_matches = (not fallback or
+                                    tidy.read_prompt_seq(seat) == expected_sequence)
+                if current and sequence_matches:
+                    # A prompt can still close after this check and before herdr starts; at most one silent registration notice is lost.
+                    human_wait_state.notify_signal(signal)
+                elif current:
+                    human_wait_state.remove_signal_if_current(signal)
+    except Exception:
+        pass
     from session_tidy import accept_reply_card, reconcile_compact_frontier
     try:
         # A card written as the reply to an automatic tidy request is taken before the
@@ -263,6 +310,10 @@ def launch_observer(harness: str, payload: dict, *, environ=None, popen=None) ->
         return False
     payload_fd = None
     try:
+        import session_tidy as tidy
+        sid = _walk(payload, "session_id", "sessionID", "thread_id", "threadID")
+        cwd = _walk(payload, "cwd", "working_directory", "workingDirectory") or os.getcwd()
+        seat = tidy.resolve_seat(harness, cwd, environ, sid)
         body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(body) > 48 * 1024:
             return False
@@ -277,6 +328,7 @@ def launch_observer(harness: str, payload: dict, *, environ=None, popen=None) ->
         os.lseek(payload_fd, 0, os.SEEK_SET)
         from session_tidy_runner import clean_env
         child_env = clean_env(environ)
+        child_env["HEARTING_ANSWER_WAIT_PROMPT_SEQ"] = str(tidy.read_prompt_seq(seat))
         # A pane id is only a lookup hint and is revalidated by the normal seat resolver.
         for key in ("HERDR_PANE_ID", "HERDR_SOCKET_PATH"):
             if environ.get(key):

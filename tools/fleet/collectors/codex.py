@@ -261,6 +261,7 @@ class _PendingInput:
     turn_id: object
     # None is a blocking call; async calls retain only unanswered question indices.
     questions: object = None
+    ended: bool = False
 
 
 def _question_replies(payload):
@@ -332,13 +333,15 @@ def _advance_pending_input(open_calls, lifecycle, row):
         kind = payload.get("type")
         if kind == "task_started":
             for call_id, request in list(open_calls.items()):
-                if request.questions is None:
+                if request.questions is None or request.ended:
                     open_calls.pop(call_id)
         elif kind in {"task_complete", "turn_aborted"}:
-            # Task lifecycle can become ambiguous after an unrelated terminal.
-            # Keep each question's own turn binding until it is answered/ended.
             for call_id, request in list(open_calls.items()):
-                if kind == "task_complete" and request.questions is not None:
+                if (kind == "task_complete" and request.questions is not None
+                        and request.turn_id is not None
+                        and request.turn_id == payload.get("turn_id")):
+                    open_calls[call_id] = _PendingInput(
+                        request.since, request.turn_id, request.questions, ended=True)
                     continue
                 if request.turn_id is None or request.turn_id == payload.get("turn_id"):
                     open_calls.pop(call_id)
@@ -357,7 +360,8 @@ def _advance_pending_input(open_calls, lifecycle, row):
             continue
         remaining = request.questions - {index}
         if remaining:
-            open_calls[answered_call] = _PendingInput(request.since, request.turn_id, remaining)
+            open_calls[answered_call] = _PendingInput(
+                request.since, request.turn_id, remaining, request.ended)
         else:
             open_calls.pop(answered_call)
     call_id = payload.get("call_id")

@@ -6,6 +6,8 @@
 # context     = stdin 의 context_window.used_percentage (공식 값), or the same callback's
 # current_usage/context_window_size pair. Missing native window means an empty reading.
 set -euo pipefail
+_AGENT_HOME_EXPLICIT=0
+[ -n "${AGENT_HOME:-}" ] && _AGENT_HOME_EXPLICIT=1
 AGENT_HOME="${AGENT_HOME:-${CLAUDE_HOME:-$HOME/.claude}}"
 # 상태 파일(.statusline-last*.json, .statusline/<sid>.json)은 Claude Code 설정 홈에 쓴다.
 # AGENT_HOME이 관리형 릴리즈 트리(~/.local/share/hearting/releases/vX)를 가리키는 세션에서
@@ -486,6 +488,26 @@ if [ "${S_CTX}" -ge 0 ] 2>/dev/null; then
   while [ "$i" -lt "$filled" ]; do fbar="${fbar}━"; i=$((i+1)); done
   ebar=""; while [ "$i" -lt "$segs" ]; do ebar="${ebar}─"; i=$((i+1)); done
   segs_arr+=("${DIM}context${RST} ${cc}${fbar}${RST}${DIM}${ebar}${RST} ${cc}${S_CTX}%${RST}")
+fi
+
+# Fast, cached answer-wait badge. The detached refresh owns all registry/route
+# reads; each statusline tick reads only the private derived cache.
+if [ -n "$S_SID" ] && command -v python3 >/dev/null 2>&1; then
+  wait_helper=""
+  if [ "$_AGENT_HOME_EXPLICIT" -eq 1 ]; then
+    [ -f "$AGENT_HOME/utilities/human_wait_state.py" ] && wait_helper="$AGENT_HOME/utilities/human_wait_state.py"
+  else
+    wait_helper="$(dirname "$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")")/../../utilities/human_wait_state.py"
+  fi
+  if [ -f "$wait_helper" ]; then
+    wait_counts=$(python3 "$wait_helper" --count claude "$S_SID" 2>/dev/null || true)
+    set -- $wait_counts
+    if [ "$#" -eq 2 ] && [ "${2:-0}" -gt 0 ] 2>/dev/null; then
+      wait_total="$1"
+      [ "$wait_total" = "-1" ] && wait_total="?"
+      segs_arr+=("${RED}◑답 대기 ${wait_total}${RST}")
+    fi
+  fi
 fi
 
 # 모델별 색 (fleet 동일 팔레트): opus=cyan · sonnet=blue · haiku=green · fable=magenta · gpt=yellow

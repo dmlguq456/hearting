@@ -466,17 +466,41 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     except Exception:
         pass
 
-    # The journal wait joins after exact resume aliases and before the one liveness pass.
+    answer_waits = None
+    fleet_answer_waits = None
     try:
-        from . import interaction as _interaction
-        for failed_session, reason in _interaction.enrich_human_gates(sessions, jobs_path=jobs_path) or ():
-            identity = "%s:%s" % (getattr(failed_session, "harness", "unknown"),
-                                   getattr(failed_session, "session_id", "unknown"))
-            observations["human-gates:" + identity] = _observation_health(
-                identity, "human-gates", reason)
+        utilities = str(Path(__file__).resolve().parents[3] / "utilities")
+        if utilities not in sys.path:
+            sys.path.insert(0, utilities)
+        import human_wait_state
+        answer_waits = human_wait_state.cached_fleet_view(now=_time.time())
+        if answer_waits is None:
+            answer_waits = {"items": [], "by_session": {}, "complete": False,
+                            "total": 0, "older": 0, "health": [
+                                {"source": "cache", "state": "unknown"}]}
+        from ..refresh import fleet_answer_wait_view
+        fleet_answer_waits = fleet_answer_wait_view(answer_waits)
+        for session in sessions:
+            key = (getattr(session, "harness", None), getattr(session, "session_id", None))
+            ids = {item.get("id") for item in answer_waits.get("items", ())
+                   if item.get("session_id") == key[1] and item.get("harness") == key[0]
+                   and item.get("stale") == "current"}
+            if ids:
+                session.interaction_observations.extend(
+                    {"kind": {"human gate": "decision", "blocked owner": "decision",
+                              "marker": "decision"}.get(item.get("kind"), item.get("kind")),
+                 "source": item.get("source"),
+                 "waiting_since": item.get("since"), "item_id": item.get("id")}
+                for item in answer_waits.get("items", ())
+                if item.get("id") in ids)
+        if not answer_waits.get("complete", False):
+            reasons = ";".join(str(item.get("state", "unknown"))
+                                for item in answer_waits.get("health", ()))
+            observations["answer-waits"] = _observation_health(
+                job_key, "answer-waits", reasons[:160] or "observation-incomplete")
     except Exception as exc:
-        observations["human-gates"] = _observation_health(
-            job_key, "human-gates", "%s: %s" % (type(exc).__name__, str(exc)[:160]))
+        observations["answer-waits"] = _observation_health(
+            job_key, "answer-waits", "%s: %s" % (type(exc).__name__, str(exc)[:160]))
 
     # One shared live assignment pass; peer trailers and Herdr read the same snapshot.
     tag_metadata = []
@@ -645,6 +669,20 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         jobs = dispatch.collect(jobs_path=jobs_path, harness_filter=harness_filter,
                                 session_rows=sessions,
                                 **({"fast_first": True} if fast_first else {}))
+        if answer_waits is not None:
+            by_attempt = {}
+            for item in answer_waits.get("items", ()):
+                attempt = item.get("attempt_id")
+                if attempt and item.get("stale") == "current":
+                    by_attempt.setdefault(attempt, []).append(
+                        {"kind": {"human gate": "decision", "blocked owner": "decision",
+                                  "marker": "decision"}.get(item.get("kind"), item.get("kind")),
+                         "source": item.get("source"),
+                         "waiting_since": item.get("since"), "item_id": item.get("id")})
+            for job in jobs:
+                values = by_attempt.get(getattr(job, "attempt_id", None), ())
+                if values:
+                    job.interaction_observations.extend(values)
         # Capture the collector's output at its boundary, never in render or
         # from the independent detail worker. Older readers keep the attributes.
         node_evidence = copy.deepcopy(getattr(dispatch.collect, "last_route_nodes", {}) or {})
@@ -789,6 +827,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         resource_diagnostics=copy.deepcopy(resource_diagnostics),
         observations=observations, tag_metadata=copy.deepcopy(tag_metadata),
         display_snapshot=display_snapshot,
+        answer_waits=fleet_answer_waits,
     )
     if not sessions and not jobs and node_evidence:
         from ..projection import terminal_route_entities

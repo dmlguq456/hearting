@@ -26,6 +26,7 @@ const summaryTrigger = path.join(root, "utilities", "session_summary_trigger.py"
 const checkpointTrigger = path.join(root, "utilities", "artifact_checkpoint_trigger.py")
 const sessionTidy = path.join(root, "utilities", "session_tidy.py")
 const sessionTidyIdle = path.join(root, "utilities", "session_tidy_idle.py")
+const fleetInteractionState = path.join(root, "hooks", "fleet-interaction-state.py")
 const herdrProjection = path.join(root, "tools", "fleet", "herdr_projection.py")
 const coreWriteGuard = path.join(root, "hooks", "core-write-guard.py")
 const routePresenceGate = path.join(root, "utilities", "route_presence_gate.py")
@@ -2350,11 +2351,25 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       const sid = event.properties?.sessionID || ""
       if (sid) { pendingPeerStatus.set(sid, "blocked"); completionCarrier.status(sid, "blocked") }
       observeCompactRuntimeStatus(ctx, sid, "blocked")
+      if (event.type === "question.asked" && sid && !isWorkerSession()) {
+        const child = spawn("python3", [fleetInteractionState, "set", "--harness", "opencode",
+          "--kind", "decision"], { stdio: ["pipe", "ignore", "ignore"], detached: true })
+        child.on("error", () => {})
+        child.unref()
+        child.stdin?.end(JSON.stringify({ session_id: sid }))
+      }
     }
     if (event && ["question.replied", "question.rejected", "permission.replied"].includes(event.type)) {
       const sid = event.properties?.sessionID || ""
       if (sid) { pendingPeerStatus.set(sid, "working"); completionCarrier.status(sid, "working") }
       observeCompactRuntimeStatus(ctx, sid, "working")
+      if (sid && !isWorkerSession()) {
+        const child = spawn("python3", [fleetInteractionState, "clear", "--harness", "opencode"], {
+          stdio: ["pipe", "ignore", "ignore"], detached: true })
+        child.on("error", () => {})
+        child.unref()
+        child.stdin?.end(JSON.stringify({ session_id: sid }))
+      }
     }
     if (event && event.type === "session.idle") {
       const eventSid = (event.properties && event.properties.sessionID) || ""
@@ -2392,6 +2407,13 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
     if (event && event.type === "session.deleted") {
       const sid = (event.properties && event.properties.sessionID) || ""
       if (sid) {
+        if (!isWorkerSession()) {
+          const child = spawn("python3", [fleetInteractionState, "clear", "--harness", "opencode"], {
+            stdio: ["pipe", "ignore", "ignore"], detached: true })
+          child.on("error", () => {})
+          child.unref()
+          child.stdin?.end(JSON.stringify({ session_id: sid }))
+        }
         spawnSummary(sid, "final")
         completionCarrier.forget(sid)
         promptBySession.delete(sid)

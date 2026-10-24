@@ -648,6 +648,7 @@ class SubAgent:
 class DispatchJob:
     """One headless dispatch job (autopilot-*/loops process, or jobs.log row)."""
     key: str                            # pipe key: autopilot-code / oncall / ...
+    interaction_observations: list = field(default_factory=list)
     stage: Optional[str] = None         # plan | exec | test | done (live_stage)
     residue_pids: Optional[list] = None  # tagged pids a finished worker left running (display only)
     mode: Optional[str] = None          # legacy overloaded --mode value (read-only)

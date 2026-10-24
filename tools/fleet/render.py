@@ -3065,6 +3065,7 @@ def _dispatch_row(j, orphan=False, parent_model=None, parent_harness=None, is_la
     name_key_j = ("nm_dead" if j.liveness == "dead"
                   else _NAME_KEY_DIM.get(j.harness, "nmd_other"))
     segs.append((nm, _subject_name_key(j, name_key_j)))
+    segs.extend(_interaction_chip(j)[0])
     if otag and used + len(otag) <= avail:
         segs.append((otag, "g_dead" if registry_split else "gate_u")); used += len(otag)
     branch_segs = _branch_suffix_segs(
@@ -3378,6 +3379,7 @@ def _dispatch_row_2line(j, orphan=False, parent_model=None, parent_effort=None, 
                   else _NAME_KEY_DIM.get(j.harness, "nmd_other"))
     l1 = [("  ", None), (prefix, "dim"), (gch, gkey), (" ", None),
           (_badge_cell(hn, max(9, _HW - len(prefix))), _BADGE_KEY.get(j.harness, "dim")), (shown_name, _subject_name_key(j, name_key_j))]
+    l1.extend(_interaction_chip(j)[0])
     if orphan:
         l1.append(("  (orphan)", "gate_u"))
     br_segs = _branch_suffix_segs(
