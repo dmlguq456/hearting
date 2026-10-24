@@ -174,7 +174,7 @@ class ProgressTest(unittest.TestCase):
         lease = self.base / "verification-leases" / f"{self.attempt}.json"
         lease.parent.mkdir(parents=True, exist_ok=True)
         start = P.process_start_ticks(process.pid)
-        command = (Path("/proc") / str(process.pid) / "cmdline").read_bytes().rstrip(b"\0")
+        command = self._exec_cmdline(process)
         lease.write_text(
             json.dumps(
                 {
@@ -193,6 +193,19 @@ class ProgressTest(unittest.TestCase):
             encoding="utf-8",
         )
         return lease
+
+    @staticmethod
+    def _exec_cmdline(process):
+        # Popen can return while the child's exec is still setting up its
+        # arguments; until then /proc/<pid>/cmdline reads empty.
+        expected = b"\0".join(os.fsencode(arg) for arg in process.args)
+        path = Path("/proc") / str(process.pid) / "cmdline"
+        for _ in range(500):
+            command = path.read_bytes().rstrip(b"\0")
+            if command == expected:
+                break
+            time.sleep(0.01)
+        return command
 
     @staticmethod
     def _stop_process(process):
