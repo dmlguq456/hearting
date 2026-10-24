@@ -58,6 +58,8 @@ MAX_APPROVALS = 4
 MAX_TEXT = 300
 MAX_YAML_EVENTS = 600
 SHAPES = ("direct", "solo", "staged")
+SHAPE_INTENSITY = {"direct": "direct", "solo": "quick", "staged": "standard", "framed": "standard"}
+INTENSITIES = frozenset(("direct", "quick", "standard", "strong", "thorough", "adversarial"))
 APPROVAL_KEYS = ("full-run", "deploy", "handback", "preview")
 VALID = "valid"
 _SLUG = re.compile(r"[a-z][a-z0-9-]{0,31}")
@@ -402,6 +404,16 @@ def _normal_leg(raw, index, notes=None):
         raise ProposalError(f"schema-invalid:legs[{index}].mode")
     if intensity is not None and (not isinstance(intensity, str) or not _MODE.fullmatch(intensity)):
         raise ProposalError(f"schema-invalid:legs[{index}].intensity")
+    if intensity in INTENSITIES and intensity != SHAPE_INTENSITY[shape]:
+        allowed = {
+            "direct": {"direct"},
+            "solo": {"quick"},
+            "staged": set(INTENSITIES) - {"direct", "quick"},
+        }[shape]
+        if intensity not in allowed:
+            if notes is not None:
+                notes.append(f"ignored:legs[{index}].intensity:{intensity}-for-{shape}")
+            intensity = SHAPE_INTENSITY[shape]
     graph = raw.get("graph")
     if graph is not None:
         if shape != "staged":

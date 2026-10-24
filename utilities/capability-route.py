@@ -19,6 +19,7 @@ import artifact_locator as ARTIFACT_LOCATOR
 import git_index_lock
 import route_identity as ROUTE_IDENTITY
 import route_lineage as ROUTE_LINEAGE
+import route_plan as ROUTE_PLAN
 import dispatch_runtime_support as RUNTIME_SUPPORT
 import dispatch_terminal_commit
 import model_profile as PROFILE
@@ -2756,7 +2757,7 @@ def compile_route(capability, capability_mode, requested_intensity, cwd, artifac
 # composition changes route shape only (WORKFLOW §7 compose-on-demand).
 # ---------------------------------------------------------------------------
 COMPOSE_SHAPES = ("direct", "solo", "staged", "framed")
-SHAPE_INTENSITY = {"direct": "direct", "solo": "quick", "staged": "standard", "framed": "standard"}
+SHAPE_INTENSITY = ROUTE_PLAN.SHAPE_INTENSITY
 # The compiler-internal capability behind `--shape framed`. No person and no model names it; a
 # route of any other shape can never seal it (`compose-shape-invalid`).
 ROUTE_FRAME_CAPABILITY = TOPO.ROUTE_FRAME_CAPABILITY
@@ -4072,11 +4073,11 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     if requested not in ORDER:
         raise ValueError("invalid intensity")
     if shape == "direct" and requested != "direct":
-        raise ValueError("compose-shape-intensity-mismatch:direct")
+        raise ValueError("compose-shape-intensity-mismatch:direct (allowed: direct)")
     if shape == "solo" and requested != "quick":
-        raise ValueError("compose-shape-intensity-mismatch:solo")
+        raise ValueError("compose-shape-intensity-mismatch:solo (allowed: quick)")
     if shape == "staged" and ORDER[requested] < ORDER["standard"]:
-        raise ValueError("compose-shape-intensity-mismatch:staged")
+        raise ValueError("compose-shape-intensity-mismatch:staged (allowed: standard,strong,thorough,adversarial)")
     cwd = str(Path(cwd).resolve(strict=True))
     artifact_root = str(Path(artifact_root).resolve())
     # The campaign is the agent's proposal for the work stream (CONVENTIONS

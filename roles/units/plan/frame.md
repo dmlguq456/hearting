@@ -111,7 +111,7 @@ created: {YYYY-MM-DD}
          mode: eval              # only when the capability has several modes
          shape: staged           # direct | solo | staged
          graph: [eval-run, metrics, report]   # staged only; stage ids or capability:stage[:unit] from the catalogue; never a frame stage
-         intensity: standard     # optional
+         intensity: standard     # optional; direct fixes direct, solo fixes quick, and staged allows standard+
          cwd: /path/to/existing-worktree  # optional: use this worktree for this leg; relative to the frame's cwd
          why: "one sentence"
          done_when:              # optional, 1-5: what shows this leg is finished (a sentence or {text, check})

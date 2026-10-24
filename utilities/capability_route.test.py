@@ -7483,6 +7483,32 @@ class FixtureRegistryGuardTest(unittest.TestCase):
         self.assertFalse(self._guard("/var/tmpish/jobs.log"))
 
 
+class ShapeIntensityDiagnosticTest(unittest.TestCase):
+ def setUp(self):
+  self.harness=TestRoute()
+  self.harness.setUp()
+ def tearDown(self):
+  self.harness.tearDown()
+ def compose(self,**kw):
+  h=self.harness
+  d=dict(capability="autopilot-code",capability_mode="dev",shape="staged",graph="execute,test,report",
+         slug="shape-intensity-fixture",cwd=R.ROOT,artifact_root=R.ROOT,
+         dispatch_evidence=h.dispatch(h.nested(parent="claude",child="claude"),
+                                      h.nested(parent="claude",child="codex")))
+  d.update(kw)
+  if d.get("campaign_key") is None and d.get("parent_cycle_id") is None and "unassigned" not in d:
+   d["unassigned"]=True
+  return R.compose_route(**d)
+
+ def test_cli_mismatch_names_allowed_values(self):
+  cases=(("direct", "standard", "direct"), ("solo", "standard", "quick"),
+         ("staged", "quick", "standard,strong,thorough,adversarial"))
+  for shape, intensity, allowed in cases:
+   with self.subTest(shape=shape):
+    with self.assertRaisesRegex(ValueError, rf"compose-shape-intensity-mismatch:{shape} .*allowed: {allowed}"):
+     self.compose(shape=shape,graph=None if shape != "staged" else "execute,test,report",intensity=intensity)
+
+
 class ComposeRouteTest(TestRoute):
  """SD-135: `compose` seals a preset-free shape/subgraph through the same sealer."""
  def test_card_lists_sealed_nodes_for_default_explicit_and_single_node_routes(self):
