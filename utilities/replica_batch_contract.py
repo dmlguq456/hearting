@@ -17,7 +17,7 @@ from typing import Any
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 SUPPORTED_HARNESSES = frozenset({"claude", "codex", "opencode"})
 SUPPORTED_INDEPENDENCE = frozenset({"persona", "cross-harness", "degraded-same-harness"})
-SUPPORTED_AXES = frozenset({"cross-harness", "model-profile", "perspective"})
+SUPPORTED_AXES = frozenset({"cross-harness", "model", "model-profile", "perspective"})
 SUPPORTED_PROFILES = frozenset({"top", "deep", "balanced-deep", "balanced", "light"})
 # At most one `top` leg per group. Two reasons, both structural: unbounded
 # top-tier fan-out is a cost and exposure risk, and if every leg in a group ran

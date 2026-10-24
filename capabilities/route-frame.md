@@ -28,7 +28,7 @@ Two legs never read each other's brief. The terminal depends on every frame leg 
 An owner pin applies only to the owner, not to frame legs; automatically
 selected two-leg frames prefer different harnesses, using one harness only
 when it is the only usable family or the person explicitly pins the frame,
-with that reason shown on the card.
+with that reason shown on the card. If both same-harness legs resolve to the same concrete model, shared profile logic may rotate only the alternative leg to the next declared profile whose configured model differs and passes the existing usage check. Explicit `--profile`, `--explicit-profiles`, and harness/profile-only pins remain eligible; only a concrete model pin or capacity-retry-chosen model is preserved. Traversal skips profiles configured to the sibling's model and never enters `top` or `mini`; profile order is a decision rule, not a quality ranking. The sealed profile remains in the route, and no eligible alternative runs immediately under the seal with the reason recorded.
 
 ## What the runtime does
 

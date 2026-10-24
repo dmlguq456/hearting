@@ -61,6 +61,31 @@ def args(adapter: str, profile: str, **overrides):
 
 
 class ModelProfileTest(unittest.TestCase):
+    def test_pair_rotation_uses_declared_profiles_and_model_identity(self):
+        for adapter in ("claude", "codex", "opencode"):
+            config = PROFILE.load_config(ROOT / "adapters" / adapter / "config" / "models.conf")
+            result = PROFILE.pair_model_rotation(adapter, config, "deep", "opus")
+            self.assertIsNotNone(result, adapter)
+            self.assertNotEqual(result["model"], "opus")
+            self.assertIn(result["profile"], ("balanced", "light"))
+
+    def test_pair_rotation_skips_same_model_profiles_and_does_not_enter_top(self):
+        config = PROFILE.load_config(ROOT / "adapters" / "claude" / "config" / "models.conf")
+        deep_model = PROFILE.resolve_profile_values("claude", config, "deep")["model"]
+        result = PROFILE.pair_model_rotation("claude", config, "deep", deep_model)
+        self.assertIsNotNone(result)
+        self.assertEqual(result["profile"], "balanced")
+        self.assertNotEqual(result["model"], deep_model)
+
+    def test_pair_rotation_returns_none_when_all_lower_profiles_match(self):
+        config = PROFILE.load_config(ROOT / "adapters" / "claude" / "config" / "models.conf")
+        model = PROFILE.resolve_profile_values("claude", config, "deep")["model"]
+        for profile in ("balanced-deep", "balanced", "light"):
+            key = "CFG_MODEL_PROFILE_" + profile.upper().replace("-", "_")
+            config[key] = "opus:medium"
+        result = PROFILE.pair_model_rotation("claude", config, "deep", model)
+        self.assertIsNone(result)
+
     def demand(self, judgment="predetermined", scope="short-local", **extra):
         value = {
             "schema_version": 1,
@@ -654,6 +679,25 @@ class LowerLaunchSelectionReceiptTest(unittest.TestCase):
         with self.assertRaises(PROFILE.ModelProfileError) as refused:
             self.receipt("deep", reader)
         self.assertEqual(refused.exception.reason, "profile-selection-mismatch")
+
+    def test_verified_pair_context_keeps_the_seal_and_emits_diversity_receipt(self):
+        selection = PROFILE.resolve_profile_demand(None, explicit_profile="balanced-deep")
+        route = {"route_id": "rt-pair", "route_hash": "sha256:pair",
+                 "profile_selection_contract_version": 1,
+                 "nodes": [{"id": "plan-b", "model_profile": "balanced-deep",
+                            "profile_demand": None, "profile_selection": selection}]}
+        path = Path(self.tmp.name) / "pair-route.json"
+        path.write_text(json.dumps(route))
+        args = argparse.Namespace(
+            route_file=str(path), route_node="plan-b",
+            resolved_model_settings={"profile": "balanced"},
+            pair_model_context={"status": "rotated", "sealed_profile": "balanced-deep",
+                                "profile": "balanced", "sibling_model": "fixture-model"},
+        )
+        receipt = PROFILE.selection_receipt(args)
+        self.assertEqual(receipt["profile_selection_source"], "explicit")
+        self.assertEqual(receipt["model_diversity"], "rotated")
+        self.assertEqual(receipt["model_source"], "profile+diversity")
 
 
 class FrameTierLadder(unittest.TestCase):

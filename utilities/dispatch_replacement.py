@@ -349,6 +349,60 @@ def _frame_rule_top(jobs, meta):
     return not (pin.get('model') or pin.get('effort'))
 
 
+def _frame_pair_rotation_verified(jobs, meta):
+    """Verify the exact launch input and sibling behind a rotated alternative."""
+    if (meta.get('worker_type') != 'frame' or meta.get('dispatch_depth') != '1'
+            or meta.get('route_node') != 'frame-alternative'
+            or meta.get('model_diversity') != 'rotated'
+            or not meta.get('route_file') or not meta.get('attempt_id')
+            or not meta.get('harness') or not meta.get('model_profile')):
+        return False
+    try:
+        route = _read(Path(meta['route_file']))
+        if not route or route.get('route_id') != meta.get('route_id') or route.get('route_hash') != meta.get('route_hash'):
+            return False
+        node = next((n for n in route.get('nodes', [])
+                     if isinstance(n, dict) and n.get('id') == 'frame-alternative'), None)
+        if not node or node.get('worker_type') != 'frame':
+            return False
+        pins = route_authority.selection_pin_rows(route)
+        frame_pin = pins.get('frame') or {}
+        if frame_pin.get('model'):
+            return False
+        source = launch_input(jobs, meta['attempt_id'], meta)
+        argv = source.get('argv')
+        if not isinstance(argv, list):
+            return False
+        hint = None
+        for index, value in enumerate(argv[:-1]):
+            if value == '--pair-model-profile':
+                hint = argv[index + 1]
+                break
+            if value.startswith('--pair-model-profile='):
+                hint = value.split('=', 1)[1]
+                break
+        if not hint:
+            return False
+        siblings = []
+        for fields, row in _rows(Path(jobs).read_text().splitlines()).values():
+            if (row.get('route_id') == meta.get('route_id')
+                    and row.get('route_hash') == meta.get('route_hash')
+                    and row.get('route_node') == 'frame'
+                    and row.get('worker_type') == 'frame'
+                    and row.get('harness') == meta.get('harness') and row.get('model')):
+                siblings.append(row)
+        if len(siblings) != 1:
+            return False
+        from model_config import resolve_config
+        from model_profile import pair_model_rotation
+        config, _ = resolve_config(meta['harness'], source_root=ROOT)
+        candidate = pair_model_rotation(
+            meta['harness'], config, str(node.get('model_profile')), str(siblings[0]['model']))
+        return bool(candidate and candidate['profile'] == hint == meta.get('model_profile'))
+    except (DispatchContractError, OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def death_kind(fields, meta, *, jobs=None, lines=None):
     return route_authority._replacement_kind(fields[1], meta, jobs=jobs, lines=lines)
 

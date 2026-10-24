@@ -96,6 +96,12 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
             and (meta.get('note') == 'dead-capacity' or meta.get('failure_class') == 'capacity')
             and DR._frame_rule_top(jobs, meta)):
         return DR.FRAME_CAPACITY
+    if (jobs is not None and meta.get('worker_type') == 'frame' and status == 'done'
+            and (meta.get('note') == 'dead-capacity' or meta.get('failure_class') == 'capacity')
+            and DR._frame_pair_rotation_verified(jobs, meta)):
+        # A verified rotated alternative uses ordinary capacity recovery; it
+        # does not claim the frame rule's top-to-deep transition.
+        return 'capacity'
     return None
 
 

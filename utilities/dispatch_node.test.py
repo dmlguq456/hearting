@@ -1649,6 +1649,12 @@ class SubsessionWorktreeLaunchTest(unittest.TestCase):
         self.assertEqual(ctx.exception.reason, "dispatch-generated-argument-override")
         self.assertEqual(ctx.exception.fields["flag"], "--subsession-worktree")
 
+    def test_pair_profile_cannot_be_overridden_in_adapter_arguments(self):
+        with self.assertRaises(N.DispatchNodeError) as ctx:
+            N.reject_generated_argument_overrides(["--", "--pair-model-profile", "light"])
+        self.assertEqual(ctx.exception.reason, "dispatch-generated-argument-override")
+        self.assertEqual(ctx.exception.fields["flag"], "--pair-model-profile")
+
     def test_non_subsession_launch_keeps_route_cwd(self):
         code, _printed, calls = self._launch(subsession=False)
         self.assertEqual(code, 0)

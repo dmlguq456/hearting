@@ -140,6 +140,61 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                         record.assert_not_called()
                 self.assertEqual(Path(launch.call_args.args[0][0]).parts[-3], other)
 
+    def test_single_harness_top_frame_pair_forwards_only_the_alternative_profile_hint(self):
+        import artifact_producer
+        from model_config import resolve_config
+        from model_profile import resolve_profile_values
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            jobs, route_file = base / "jobs.log", base / "route.json"
+            config, _ = resolve_config("claude", source_root=ROOT)
+            top_model = resolve_profile_values("claude", config, "top")["model"]
+            route = {"route_id": "rt-frame-pair", "route_hash": "sha256:frame-pair",
+                     "effective_intensity": "standard",
+                     "dispatch_evidence": {"tuples": [{"status": "supported", "child_harness": "claude"}]},
+                     "nodes": [{"id": name, "worker_type": "frame", "model_profile": "top"}
+                               for name in ("frame", "frame-alternative")]}
+            route_file.write_text(json.dumps(route))
+            jobs.write_text("2026-10-24\trunning\t/r\t/w\tframe\t"
+                f"route_id={route['route_id']},route_hash={route['route_hash']},route_node=frame,"
+                f"worker_type=frame,harness=claude,model={top_model},attempt_id=att-first\n")
+            policy = {"primary": ["claude"], "relief": [], "last_resort": [],
+                      "promote_relief_below": 0}
+            allocation = {"strategy": "capacity-aware", "window": 30,
+                          "harness_order": ["claude"]}
+            values = {"--model-profile": "top", "--worker-type": "frame",
+                      "--route-node": "frame-alternative", "--worktree": str(base),
+                      "--capability": "autopilot-code", "--capability-mode": "dev",
+                      "--intensity": "standard"}
+            binding = SimpleNamespace(route_file=str(route_file), route_id=route["route_id"],
+                route_hash=route["route_hash"], route_node="frame-alternative",
+                registry_digest="sha256:test", write_scope=str(base), completion_gate="test")
+            out = io.StringIO()
+            with mock.patch.object(OWNER, "_parse", return_value=(None, values, ["--start"], str(route_file), [])), \
+                 mock.patch.object(OWNER, "_authoritative_jobs", return_value=str(jobs)), \
+                 mock.patch.object(OWNER, "_sealed_owner_context", return_value={
+                     "harnesses": {"claude"}, "policy": None, "allocation": allocation}), \
+                 mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3}), \
+                 mock.patch.object(OWNER._defaults, "query_profile_policy", return_value=policy), \
+                 mock.patch.object(OWNER, "_usage", return_value={"claude": "ok"}), \
+                 mock.patch.object(OWNER._allocation, "attempt_counts", return_value={"claude": 0}), \
+                 mock.patch.object(OWNER._capacity, "capacity_report", return_value={"scores": {"claude": 90}, "sources": {}}), \
+                 mock.patch.object(OWNER, "derive_frame_route_binding", return_value=binding), \
+                 mock.patch.object(artifact_producer, "prepare_route_artifact_env", return_value={}), \
+                 mock.patch.object(OWNER.os, "access", return_value=True), \
+                 mock.patch.object(OWNER, "select_launch_lifecycle", return_value="detached"), \
+                 mock.patch.object(OWNER, "run_owner_wrapper", return_value=0) as launch, \
+                 contextlib.redirect_stdout(out):
+                self.assertEqual(OWNER.main([]), 0)
+            argv = launch.call_args.args[0]
+            self.assertEqual(values["--model-profile"], "top")
+            self.assertIn("--pair-model-profile", argv)
+            self.assertEqual(argv[argv.index("--pair-model-profile") + 1], "deep")
+            owner_output = out.getvalue()
+            self.assertIn("model_diversity_proposal=proposed", owner_output)
+            self.assertIn("model_diversity_proposal_profile=deep", owner_output)
+            self.assertNotRegex(owner_output, r"(?m)^model_diversity=")
+
     def test_unusable_configured_alternate_records_reason_only_after_successful_start(self):
         import artifact_producer
         for mode, launch_result, should_record in (

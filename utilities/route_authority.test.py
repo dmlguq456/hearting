@@ -30,6 +30,20 @@ from execution_access import ExecutionAccessRequest  # noqa: E402
 from route_identity import route_hash  # noqa: E402
 
 
+class RotatedFrameCapacityAuthorityTest(unittest.TestCase):
+    def test_verified_pair_rotation_uses_ordinary_capacity_without_transition(self):
+        meta = {"worker_type": "frame", "dispatch_depth": "1",
+                "route_node": "frame-alternative", "note": "dead-capacity",
+                "attempt_id": "att-pair"}
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch("route_parent_close.row_requested", return_value=False), \
+             mock.patch.object(DR, "_frame_pair_rotation_verified", return_value=True):
+            jobs = Path(td) / "jobs.log"
+            jobs.write_text("")
+            self.assertEqual(RA._replacement_kind("done", meta, jobs=jobs, lines=[]), "capacity")
+
+
+
 def _load(name, relative):
     spec = importlib.util.spec_from_file_location(name, ROOT / relative)
     module = importlib.util.module_from_spec(spec)

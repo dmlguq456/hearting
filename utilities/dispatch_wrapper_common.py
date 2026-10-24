@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -980,6 +981,165 @@ def validate_route_record(args: argparse.Namespace, *, marker_gate) -> int:
         reason, code, fields = refusal
         return fail(reason, code, **fields)
     return 0
+
+
+def prepare_pair_model_rotation(args: argparse.Namespace, *, harness: str) -> dict[str, object]:
+    """Re-derive a narrow pair hint from the existing route and pair evidence.
+
+    The caller's hint is never evidence. An unverifiable hint is discarded and
+    the sealed profile remains the launch profile.
+    """
+    sealed = getattr(args, "model_profile", None)
+    context: dict[str, object] = {
+        "sealed_profile": sealed or "", "profile": sealed or "",
+        "status": "none", "sibling_model": "-",
+    }
+    hint = getattr(args, "pair_model_profile", None)
+    if not sealed or getattr(args, "model", None):
+        if getattr(args, "model", None):
+            context["status"] = "explicit-model"
+        args.pair_model_context = context
+        return context
+    route_path = getattr(args, "route_file", None) or getattr(
+        getattr(args, "owner_route_binding", None), "route_file", None)
+    if not route_path:
+        context["status"] = "none"
+        args.pair_model_context = context
+        return context
+    try:
+        from model_config import resolve_config
+        from model_profile import pair_model_rotation, resolve_profile_values
+        route = json.loads(Path(route_path).read_text(encoding="utf-8"))
+        nodes = route.get("nodes", [])
+        node_id = getattr(args, "route_node", None)
+        current = next(node for node in nodes if node.get("id") == node_id)
+        pins = route_authority.selection_pin_rows(route)
+        target_pin = pins.get("frame" if current.get("worker_type") == "frame"
+                              or current.get("kind") == "frame" else "worker")
+        if isinstance(target_pin, dict) and target_pin.get("model"):
+            context["status"] = "explicit-model"
+            args.pair_model_context = context
+            return context
+        group_key = "parallel_group" if current.get("parallel_group") else "replica_group"
+        group = current.get(group_key)
+        sibling = None
+        if group:
+            members = [node for node in nodes if node.get(group_key) == group]
+            if len(members) != 2:
+                raise ValueError("pair-cardinality-mismatch")
+            token = os.environ.get("AGENT_MODEL_GOVERNOR_RESERVATION_TOKEN", "")
+            if not token:
+                raise ValueError("pair-reservation-missing")
+            from dispatch_contract import (
+                _governor_json, replica_batch_expectation,
+                resolve_model_governor_root,
+            )
+            from replica_batch_contract import verify_manifest
+            expected = replica_batch_expectation(
+                route_path, node_id, getattr(args, "action", ""),
+                attempt_id=getattr(args, "attempt_id", ""),
+                parent_attempt_id=getattr(args, "parent_attempt_id", ""),
+                harness=harness,
+                fallback_hop=getattr(args, "fallback_hop", ""),
+                fallback_ordinal=getattr(args, "fallback_ordinal", None),
+                assignment_sha256=("sha256:" + hashlib.sha256(
+                    str(getattr(args, "prompt_text", "")).encode("utf-8")).hexdigest()
+                    if isinstance(getattr(args, "prompt_text", None), str) else ""),
+            )
+            if expected is None:
+                raise ValueError("pair-reservation-not-applicable")
+            governor_root = resolve_model_governor_root(args.artifact_root)
+            governor = Path(args.agent_home) / "utilities" / "model-worker-governor.py"
+            payload = _governor_json([
+                sys.executable, str(governor), "--root", str(governor_root),
+                "reservation-check", "--token", token, "--class", "dispatch",
+            ], allow_absent=True)
+            if payload.get("state") != "unclaimed":
+                raise ValueError("pair-reservation-not-unclaimed")
+            route_authority.require_batch_reservation(payload, expected)
+            manifest, _, _ = verify_manifest(payload.get("batch_manifest"))
+            manifest_members = manifest.get("members")
+            if not isinstance(manifest_members, list) or len(manifest_members) != 2:
+                raise ValueError("pair-manifest-cardinality-mismatch")
+            own_members = [member for member in manifest_members
+                           if member.get("route_node") == node_id]
+            if len(own_members) != 1:
+                raise ValueError("pair-manifest-current-member-mismatch")
+            sibling_members = [member for member in manifest_members
+                               if member.get("route_node") != node_id]
+            if len(sibling_members) != 1:
+                raise ValueError("pair-manifest-sibling-member-mismatch")
+            sibling_member = sibling_members[0]
+            if sibling_member.get("harness") != harness:
+                raise ValueError("pair-sibling-harness-mismatch")
+            sibling_id = str(sibling_member.get("route_node", ""))
+            sibling = next(node for node in members if node.get("id") == sibling_id)
+            if sibling.get("model_profile") != next(
+                member.get("model_profile") for member in manifest_members
+                if member.get("route_node") == sibling_id):
+                raise ValueError("pair-sealed-profile-mismatch")
+        else:
+            if node_id != "frame-alternative":
+                context["status"] = "none"
+                args.pair_model_context = context
+                return context
+            if getattr(args, "worker_type", None) != "frame":
+                raise ValueError("pair-route-node-unbound")
+            jobs = (Path(args.jobs) if getattr(args, "jobs", None)
+                    else resolve_dispatch_state_root(args.agent_home) / "jobs.log")
+            rows = []
+            for line in jobs.read_text(encoding="utf-8").splitlines():
+                fields = line.split("\t")
+                if len(fields) != 6:
+                    continue
+                meta = parse_registry_metadata(fields[5])
+                if (meta.get("route_id") == route.get("route_id")
+                        and meta.get("route_hash") == route.get("route_hash")
+                        and meta.get("route_node") == "frame"
+                        and meta.get("worker_type") == "frame"
+                        and meta.get("harness") == harness and meta.get("model")):
+                    rows.append(meta)
+            if len(rows) != 1:
+                raise ValueError("frame-sibling-model-ambiguous")
+            context["sibling_model"] = str(rows[0]["model"])
+        if sibling is not None:
+            if sibling.get("model_profile") is None or sibling.get("model_profile") == "top":
+                raise ValueError("pair-sibling-profile-unavailable")
+            config, _ = resolve_config(harness, source_root=ROOT)
+            sibling_values = resolve_profile_values(
+                harness, config, str(sibling["model_profile"]))
+            context["sibling_model"] = sibling_values["model"]
+        config, _ = resolve_config(harness, source_root=ROOT)
+        own_model = resolve_profile_values(harness, config, str(sealed))["model"]
+        if own_model == context["sibling_model"]:
+            pass
+        else:
+            context["status"] = "distinct"
+            args.pair_model_context = context
+            return context
+        candidate = pair_model_rotation(harness, config, str(sealed), str(context["sibling_model"]))
+        if candidate is None:
+            context["status"] = "unavailable"
+            args.pair_model_context = context
+            return context
+        if not hint or candidate["profile"] != hint:
+            raise ValueError("pair-hint-does-not-match-shared-policy")
+        from dispatch_capacity_evidence import usage_states
+        jobs = (Path(args.jobs) if getattr(args, "jobs", None)
+                else resolve_dispatch_state_root(args.agent_home) / "jobs.log")
+        state = usage_states(jobs, profile=hint, models={harness: candidate["model"]}, recheck=False).get(harness, "unknown")
+        if str(state).startswith("limited("):
+            context["status"] = "target-limited"
+            raise ValueError("pair-target-limited")
+        context.update({"profile": hint, "status": "rotated", "sibling_model": candidate["model"]
+                        if candidate["model"] == context["sibling_model"] else context["sibling_model"]})
+    except Exception as exc:
+        context["profile"] = sealed or ""
+        if context.get("status") != "target-limited":
+            context["status"] = "unverified-kept-sealed"
+        context["detail"] = str(exc)[:200]
+    args.pair_model_context = context
+    return context
 
 
 def _route_guard_refusal(stderr: str, *, returncode: int = 65,

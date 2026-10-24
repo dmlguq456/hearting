@@ -64,7 +64,9 @@ from dispatch_allocation import (  # noqa: E402
     attempt_counts,
 )
 import subdivision_batch_admission as SUBDIVISION_ADMISSION  # noqa: E402
-from route_authority import decide_continuation, route_in_force, sealed_pin_harness  # noqa: E402
+from route_authority import (  # noqa: E402
+    decide_continuation, route_in_force, sealed_pin_harness, selection_pin_rows,
+)
 
 CAPACITY_SPEC = importlib.util.spec_from_file_location(
     "harness_capacity", ROOT / "utilities" / "harness-capacity.py"
@@ -729,6 +731,52 @@ def _policy_by_profile(route, nodes):
         if isinstance(policy, dict) and isinstance(profile, str) and profile:
             by_profile.setdefault(profile, policy)
     return by_profile
+
+
+def _pair_model_proposals(assignments, *, route=None, source_root=ROOT, jobs=None):
+    """Suggest one declared-profile turn for a same-harness, width-two pair."""
+    if len(assignments) != 2:
+        return {}, {"reason": "out-of-scope"}
+    (left, left_adapter, _, _), (right, right_adapter, _, _) = assignments
+    if left_adapter != right_adapter:
+        return {}, {"reason": "distinct-harness"}
+    pins = selection_pin_rows(route) if isinstance(route, dict) else {}
+    worker_pin = pins.get("worker") if isinstance(pins, dict) else None
+    if isinstance(worker_pin, dict) and worker_pin.get("model"):
+        return {}, {"reason": "explicit-model"}
+    try:
+        from model_config import resolve_config
+        from model_profile import pair_model_rotation, resolve_profile_values
+        config, _ = resolve_config(left_adapter, source_root=source_root)
+        own = [resolve_profile_values(left_adapter, config, str(node.get("model_profile")))
+               for node in (left, right)]
+    except (ImportError, ValueError, OSError) as exc:
+        return {}, {"reason": "unverified-kept-sealed", "detail": str(exc)[:160]}
+    if own[0]["model"] != own[1]["model"]:
+        return {}, {"reason": "distinct", "model": "-"}
+    order = {name: index for index, name in enumerate(("top", "deep", "balanced-deep", "balanced", "light"))}
+    rotate_index = max(range(2), key=lambda i: (
+        order.get(str((left, right)[i].get("model_profile")), -1),
+        int((left, right)[i].get("parallel_leg_index", i))))
+    node = (left, right)[rotate_index]
+    try:
+        candidate = pair_model_rotation(
+            left_adapter, config, str(node.get("model_profile")), own[1 - rotate_index]["model"])
+    except ValueError as exc:
+        return {}, {"reason": "unverified-kept-sealed", "detail": str(exc)[:160]}
+    if candidate is None:
+        return {}, {"reason": "unavailable", "sealed_profile": str(node.get("model_profile"))}
+    from dispatch_capacity_evidence import usage_states
+    states = usage_states(jobs, profile=candidate["profile"],
+                          models={left_adapter: candidate["model"]}, recheck=False) if jobs else {}
+    state = states.get(left_adapter, "unknown")
+    if str(state).startswith("limited("):
+        return {}, {"reason": "target-limited", "profile": candidate["profile"]}
+    return {str(node["id"]): candidate["profile"]}, {
+        "reason": "proposed", "node": str(node["id"]),
+        "sealed_profile": str(node.get("model_profile")),
+        "profile": candidate["profile"], "sibling_model": own[1 - rotate_index]["model"],
+    }
 
 
 def assign_harnesses(
@@ -1645,6 +1693,9 @@ def wrapper_result(
         "reason": reason,
         **({"detail": fields["detail"]} if fields.get("detail") else {}),
         **({"cleanup_diagnostics": cleanup_diagnostics} if cleanup_diagnostics else {}),
+        **{key: fields[key] for key in
+           ("model_profile", "model", "model_source", "model_diversity", "model_diversity_from")
+           if fields.get(key)},
     }
 
 
@@ -1898,6 +1949,16 @@ def batch_receipt(
 ) -> tuple[dict[str, object], bool]:
     order = {str(leg["attempt_id"]): index for index, leg in enumerate(legs)}
     results.sort(key=lambda leg: order[str(leg["attempt_id"])])
+    observed_models = [str(result.get("model", "")) for result in results]
+    if (len(results) == 2 and all(observed_models)
+            and observed_models[0] != observed_models[1] and "model" not in realized_axes):
+        realized_axes.append("model")
+    if selection_diagnostics is not None:
+        selection_diagnostics["model_diversity_realized"] = (
+            {str(result.get("node", result.get("route_node", "-"))): {
+                key: result.get(key, "-") for key in
+                ("model_profile", "model", "model_source", "model_diversity", "model_diversity_from")
+             } for result in results})
     started_count = sum(leg.get("launch_state") == "started" for leg in results)
     existing_count = sum(leg.get("launch_state") == "existing" for leg in results)
     success = (
@@ -2235,6 +2296,8 @@ def node_launch_command(*, route_path, leg, parent, prompt_text, reviewed_eviden
         "--prompt-text", prompt_text,
         *(["--reviewed-evidence", reviewed_evidence] if reviewed_evidence else []),
         "--attempt-id", str(leg["attempt_id"]),
+        *( ["--pair-model-profile", str(leg["pair_model_profile"])]
+           if leg.get("pair_model_profile") else []),
         "--jobs", str(jobs),
         *(["--qa", qa] if qa else []),
         "--",
@@ -2617,6 +2680,11 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     lifecycle = select_launch_lifecycle()
+    pair_profiles, pair_diagnostic = ({}, {"reason": "sealed-replay"})
+    if prior_input is None and partial is None:
+        pair_profiles, pair_diagnostic = _pair_model_proposals(
+            assignments, route=route, source_root=ROOT, jobs=jobs)
+    diagnostics["model_diversity_proposal"] = pair_diagnostic
     required_axes = list(nodes[0].get("parallel_independence_axes", ["perspective"]))
     effective_axes = effective_independence_axes(required_axes)
     realized_axes = []
@@ -2672,6 +2740,8 @@ def main(argv: list[str] | None = None) -> int:
                 else None
             ),
         }
+        if node_id in pair_profiles:
+            leg["pair_model_profile"] = pair_profiles[node_id]
         if "profile_selection" in node:
             leg.update({key: node[key] for key in ("profile_demand", "profile_selection")})
         if prior_input is not None:

@@ -284,6 +284,46 @@ def resolve_profile_values(
     }
 
 
+def pair_model_rotation(
+    adapter: str, config: Mapping[str, str], own_profile: str, sibling_model: str
+) -> dict[str, str] | None:
+    """Return the next declared profile whose model differs from a pair sibling.
+
+    This is a pure policy helper: callers supply the already selected complete
+    config mapping and own the evidence and capacity checks around the result.
+    Profile order is a deterministic selection order, not a quality ranking.
+    """
+    if own_profile not in KNOWN_PROFILES:
+        raise ModelProfileError(f"unknown model profile: {own_profile!r}")
+    if not isinstance(sibling_model, str) or not sibling_model:
+        return None
+    order = (TOP_PROFILE, "deep", "balanced-deep", "balanced", "light")
+    try:
+        start = order.index(own_profile) + 1
+    except ValueError:
+        return None
+    try:
+        sealed = resolve_profile_values(adapter, config, own_profile)
+    except ModelProfileError:
+        raise
+    for candidate in order[start:]:
+        try:
+            resolved = resolve_profile_values(adapter, config, candidate)
+        except ModelProfileError:
+            continue
+        # Never put a main-session-only model under a different profile name.
+        try:
+            from model_config import main_session_only_models
+        except ImportError:
+            from utilities.model_config import main_session_only_models
+        if resolved["model"] == sibling_model or resolved["model"] == sealed["model"]:
+            continue
+        if resolved["model"] in main_session_only_models(config):
+            continue
+        return resolved
+    return None
+
+
 def resolve_profile(adapter: str, config_path: str | Path, profile: str) -> dict[str, str]:
     return resolve_profile_values(adapter, load_config(config_path), profile)
 
@@ -536,6 +576,10 @@ def _lower_launch_verified(args, route, node_id, selection, profile):
     fails its proof, keeps the sealed-profile check.
     """
     sealed = selection.get("resolved_profile") if isinstance(selection, Mapping) else None
+    pair = getattr(args, "pair_model_context", None)
+    if (isinstance(pair, Mapping) and pair.get("status") == "rotated"
+            and pair.get("sealed_profile") == sealed and pair.get("profile") == profile):
+        return True
     if (not node_id or sealed is None or sealed == profile
             or not getattr(args, "automatic_retry_of", None) or not getattr(args, "attempt_id", None)
             or not getattr(args, "jobs", None)):
@@ -574,8 +618,16 @@ def selection_receipt(args):
     if _lower_launch_verified(args, route, node_id, selection, profile):
         profile = selection["resolved_profile"]  # the sealed selection is still checked as sealed
     validate_profile_selection(selection, demand, profile=profile, existing_versioned_stage=True)
-    return {"profile_selection_source": selection["source"],
-            "profile_resolver_version": selection["resolver_version"],
-            "profile_demand_digest": selection["demand_digest"] or "-",
-            "profile_selection_digest": _digest(selection),
-            "profile_judgment_floor": selection["judgment_floor"]}
+    receipt = {"profile_selection_source": selection["source"],
+               "profile_resolver_version": selection["resolver_version"],
+               "profile_demand_digest": selection["demand_digest"] or "-",
+               "profile_selection_digest": _digest(selection),
+               "profile_judgment_floor": selection["judgment_floor"]}
+    pair = getattr(args, "pair_model_context", None)
+    if isinstance(pair, Mapping) and pair.get("status") not in {None, "none"}:
+        receipt["model_diversity"] = str(pair.get("status"))
+        receipt["model_diversity_from"] = (
+            f"{pair.get('sealed_profile', '-')}/{pair.get('sibling_model', '-')}")
+        if pair.get("status") == "rotated":
+            receipt["model_source"] = "profile+diversity"
+    return receipt

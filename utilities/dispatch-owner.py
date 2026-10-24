@@ -804,6 +804,8 @@ def run_owner_wrapper(argv: list[str], env: dict[str, str]) -> int:
 def main(argv):
     try:
         frame_degradation = None
+        pair_model_profile = None
+        pair_model_reason = "not-applicable"
         explicit, values, forwarded, route_evidence, derived = _parse(argv)
         jobs = _authoritative_jobs(values, os.environ)
         profile = values["--model-profile"]
@@ -1037,6 +1039,41 @@ def main(argv):
                         detail = json.dumps({"configured_alternatives": []})
                     frame_degradation = (
                         route, first.get("attempt_id"), first_harness, reason, detail)
+            if selected == first_harness and first.get("model"):
+                pair_model_reason = "unverified-kept-sealed"
+                pins = route_in_force(route).get("selection_pins") or {}
+                frame_pin = pins.get("frame") if isinstance(pins, dict) else None
+                if isinstance(frame_pin, dict) and frame_pin.get("model"):
+                    pair_model_reason = "explicit-model"
+                else:
+                    alternative = next((n for n in route.get("nodes", [])
+                                        if n.get("id") == "frame-alternative"), None)
+                    own_profile = (alternative or {}).get("model_profile")
+                    if own_profile:
+                        try:
+                            from model_config import resolve_config
+                            from model_profile import pair_model_rotation, resolve_profile_values
+                            config, _ = resolve_config(selected, source_root=ROOT)
+                            sealed_model = resolve_profile_values(selected, config, own_profile)["model"]
+                            if sealed_model != first["model"]:
+                                pair_model_reason = "distinct"
+                            else:
+                                rotated = pair_model_rotation(selected, config, own_profile,
+                                                              str(first["model"]))
+                                if rotated is None:
+                                    pair_model_reason = "unavailable"
+                                else:
+                                    from dispatch_capacity_evidence import usage_states
+                                    target_state = usage_states(
+                                        Path(jobs), profile=rotated["profile"],
+                                        models={selected: rotated["model"]}, recheck=False).get(selected, "unknown")
+                                    if str(target_state).startswith("limited("):
+                                        pair_model_reason = "target-limited"
+                                    else:
+                                        pair_model_profile = rotated["profile"]
+                                        pair_model_reason = "proposed"
+                        except (OSError, ValueError):
+                            pair_model_profile = None
             try:
                 frame_harness_admission(
                     route, Path(jobs), lines, [first_harness, selected],
@@ -1063,6 +1100,10 @@ def main(argv):
                                   reason=reason, capacity=capacity, capacity_sources=capacity_sources,
                                   quality_band=quality_band,
                                   relief_promoted=relief_promoted, top_excluded=top_excluded)), flush=True)
+        if pair_model_reason != "not-applicable":
+            print(f"model_diversity_proposal={pair_model_reason}", flush=True)
+            print(f"model_diversity_proposal_profile={pair_model_profile or values.get('--model-profile', '-')}", flush=True)
+            print(f"model_diversity_proposal_from={values.get('--model-profile', '-')}/{first.get('model', '-')}", flush=True)
         if frame_degradation:
             print(f"reason={reason}", flush=True)
         if explicit_policy and source == "explicit":
@@ -1103,6 +1144,8 @@ def main(argv):
                               "--route-hash", binding.route_hash, "--route-node", binding.route_node,
                               "--registry-digest", binding.registry_digest, "--write-scope", binding.write_scope,
                               "--completion-gate", binding.completion_gate]
+                if pair_model_profile:
+                    forwarded += ["--pair-model-profile", pair_model_profile]
                 if values["--worker-type"] == "frame":
                     from artifact_producer import prepare_route_artifact_env, ProducerError
                     try:

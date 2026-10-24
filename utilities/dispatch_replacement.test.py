@@ -3546,6 +3546,42 @@ class FrameTopCapacityTest(unittest.TestCase):
         fields,meta=self.rows()['att-source']
         return R.death_kind(fields,meta,jobs=self.jobs)
 
+    def _rotated_alternative(self, hint="deep"):
+        from model_config import resolve_config
+        from model_profile import resolve_profile_values
+        config, _ = resolve_config(self.harness, source_root=R.ROOT)
+        top_model = resolve_profile_values(self.harness, config, "top")["model"]
+        self.route.update(nodes=[
+            {"id": "frame", "worker_type": "frame", "dispatch_depth": 1, "model_profile": "top"},
+            {"id": "frame-alternative", "worker_type": "frame", "dispatch_depth": 1, "model_profile": "top"},
+        ])
+        self.path.write_text(json.dumps(self.route))
+        first = {**self.meta, "attempt_id": "att-first", "route_node": "frame",
+                 "worker_type": "frame", "dispatch_depth": "1", "harness": self.harness,
+                 "model": top_model, "model_profile": "top", "note": ""}
+        self.write(first, status="running")
+        args = SimpleNamespace(
+            attempt_id="att-alt", jobs_path=self.jobs, worktree=str(self.root),
+            route_id=self.route["route_id"], route_node="frame-alternative",
+            replacement_input_argv=["--start", "--pair-model-profile", hint],
+        )
+        fragment = R.seal_launch_input(args, self.harness, "the raw task")
+        meta = {**self.meta, "attempt_id": "att-alt", "route_node": "frame-alternative",
+                "worker_type": "frame", "dispatch_depth": "1", "harness": self.harness,
+                "model_profile": "deep", "model": resolve_profile_values(
+                    self.harness, config, "deep")["model"], "model_diversity": "rotated",
+                **D.parse_registry_metadata(fragment)}
+        self.write(meta, status="done", append=True)
+        return meta
+
+    def test_rotated_frame_alternative_requires_the_sealed_launch_input_and_pair_model(self):
+        meta = self._rotated_alternative()
+        self.assertTrue(R._frame_pair_rotation_verified(self.jobs, meta))
+        self.assertIsNone(R._transition_of({"proof": {"death_kind": "capacity"}}))
+        (R._directory(self.jobs) / "inputs" / "att-alt.json").unlink()
+        forged = self._rotated_alternative("balanced")
+        self.assertFalse(R._frame_pair_rotation_verified(self.jobs, forged))
+
     def candidate(self,record,profile='deep'):
         """The replacement row as a wrapper registers it, launched at `profile`."""
         source=self.rows()['att-source'][1]

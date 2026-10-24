@@ -256,6 +256,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--agent", default="build")
     p.add_argument("--model-role", default=os.environ.get("OPENCODE_DISPATCH_MODEL_ROLE"))
     p.add_argument("--model-profile", default=os.environ.get("OPENCODE_DISPATCH_MODEL_PROFILE"))
+    p.add_argument("--pair-model-profile")
     p.add_argument("--model", default=os.environ.get("OPENCODE_DISPATCH_MODEL"))
     p.add_argument("--variant", default=os.environ.get("OPENCODE_DISPATCH_VARIANT"))
     p.add_argument(
@@ -519,8 +520,16 @@ def _select_model_settings(args: argparse.Namespace) -> dict[str, str]:
 
 
 def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
-    selected = _select_model_settings(args)
-    if (selected.get("source") in {"profile", "role"}
+    context = WRAPPER_COMMON.prepare_pair_model_rotation(args, harness="opencode")
+    selection_args = args
+    if context.get("status") == "rotated":
+        import copy
+        selection_args = copy.copy(args)
+        selection_args.model_profile = context["profile"]
+    selected = _select_model_settings(selection_args)
+    if context.get("status") == "rotated" and selected.get("source") == "profile":
+        selected["source"] = "profile+diversity"
+    if (selected.get("source") in {"profile", "role", "profile+diversity"}
             and opencode_runtime.is_v2()):
         # The first automatically eligible candidate runs. Without one, an
         # unverified primary still runs here (automatic placement has already
