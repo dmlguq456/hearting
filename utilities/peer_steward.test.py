@@ -11495,31 +11495,75 @@ class WatchReceiptLockBudgetTest(_TmpRootMixin, unittest.TestCase):
 
     def test_jobs_lock_contention_releases_to_writer_and_receipt_completes(self):
         with self._holder("jobs", hold_seconds=0.08):
-            started = time.monotonic()
             result = self._publish_receipt()
-            elapsed = time.monotonic() - started
         self.assertTrue(result)
-        self.assertLess(elapsed, peer_steward._WATCH_TRANSITION_LOCK_BUDGET_SEC + 0.15)
         self.assertEqual(peer_steward._read_json(self.paths.receipt)["state"], "idle")
 
     def test_seat_contention_is_bounded_and_releases_partial_jobs_ownership(self):
         with self._holder("seat"):
-            started = time.monotonic()
             result = self._publish_receipt()
-            elapsed = time.monotonic() - started
             self.assertEqual(result, peer_steward._WATCH_RECEIPT_CONTENDED)
-            self.assertLess(elapsed, 0.34)
             self._probe_jobs_writer_progress()
         self.assertFalse(self.paths.receipt.exists())
 
     def test_jobs_then_seat_share_one_remaining_budget(self):
-        with self._holder("both", hold_seconds=0.14) as jobs_released:
-            started = time.monotonic()
-            result = self._publish_receipt()
-            elapsed = time.monotonic() - started
+        import dispatch_seat_handover
+
+        budget = peer_steward._WATCH_TRANSITION_LOCK_BUDGET_SEC
+        scheduler_delay = budget * 0.8
+
+        class _LocalClock:
+            """Inject a scheduler pause without patching process-global time."""
+            def __init__(self):
+                self.now = 10.0
+                self.deadline = None
+                self.delay_after_jobs_lock = False
+                self.delay_applied = False
+
+            def monotonic(self):
+                if self.deadline is None:
+                    self.deadline = self.now + budget
+                if self.delay_after_jobs_lock:
+                    self.now += scheduler_delay
+                    self.delay_after_jobs_lock = False
+                    self.delay_applied = True
+                return self.now
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        clock = _LocalClock()
+        real_fcntl = peer_steward.fcntl
+
+        class _LocalFcntl:
+            """Advance only peer-steward's clock after its jobs flock succeeds."""
+            def flock(self, fd, operation):
+                result = real_fcntl.flock(fd, operation)
+                if (operation & real_fcntl.LOCK_EX
+                        and operation & real_fcntl.LOCK_NB):
+                    clock.delay_after_jobs_lock = True
+                return result
+
+            def __getattr__(self, name):
+                return getattr(real_fcntl, name)
+
+        real_seat_lock = dispatch_seat_handover.readiness_transition_lock
+        with self._holder("seat"):
+            with mock.patch.object(peer_steward, "time", clock), \
+                    mock.patch.object(peer_steward, "fcntl", _LocalFcntl()), \
+                    mock.patch.object(
+                        dispatch_seat_handover, "readiness_transition_lock",
+                        wraps=real_seat_lock) as seat_lock:
+                result = self._publish_receipt()
             self.assertEqual(result, peer_steward._WATCH_RECEIPT_CONTENDED)
-            self.assertTrue(jobs_released.is_set())
-            self.assertLess(elapsed, 0.30, f"two independent lock budgets took {elapsed:.3f}s")
+            self.assertTrue(clock.delay_applied)
+            seat_lock.assert_called_once()
+            self.assertAlmostEqual(
+                seat_lock.call_args.kwargs["wait"],
+                clock.deadline - clock.now, places=6)
+            self.assertAlmostEqual(
+                seat_lock.call_args.kwargs["wait"], budget - scheduler_delay,
+                places=6)
             self._probe_jobs_writer_progress()
         self.assertFalse(self.paths.receipt.exists())
 

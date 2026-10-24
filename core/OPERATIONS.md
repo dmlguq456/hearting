@@ -2064,7 +2064,9 @@ Hearting runs use a private tmux server namespace derived from the host-local
 GPU lease state root. Its first start has release, attempt, route, and session
 pins cleared and runs from `/`; each new session receives only the launcher's
 validated session/release/attempt provenance plus its exact compute run id and
-host with tmux `-e`; stale resource-run and lease-release markers are empty.
+host with a shell-quoted `exec env` prefix on the session command; the first
+wrapper process receives that validated launch environment, and stale
+resource-run and lease-release markers are present but empty.
 The selected working directory is passed with `-c`. The namespace is recorded
 in run metadata, and `runs`/`stop` address that same server. Older run metadata
 without a transport keeps its legacy default

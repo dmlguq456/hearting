@@ -322,8 +322,58 @@ def remote(host, script, *, timeout=PROBE_TIMEOUT):
             else ["bash", "-lc", script])
     try:
         return subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return subprocess.CompletedProcess(argv, 255, "", "timed out")
+    except subprocess.TimeoutExpired as exc:
+        def output_text(value):
+            if isinstance(value, bytes):
+                return value.decode("utf-8", "replace")
+            return value or ""
+        partial_out = output_text(exc.stdout if exc.stdout is not None else exc.output)
+        partial_err = output_text(exc.stderr)
+        return subprocess.CompletedProcess(
+            argv, 255, partial_out,
+            (partial_err + ("\n" if partial_err else "") + "timed out"))
+
+
+_LAUNCH_OUTPUT_LIMIT = 16 * 1024
+
+
+def _bounded_launch_output(value):
+    if isinstance(value, bytes):
+        raw = value
+    else:
+        raw = str(value or "").encode("utf-8", "replace")
+    if len(raw) <= _LAUNCH_OUTPUT_LIMIT:
+        return raw.decode("utf-8", "replace")
+    suffix = b"\n...[truncated]"
+    return raw[:_LAUNCH_OUTPUT_LIMIT - len(suffix)].decode("utf-8", "replace") + suffix.decode()
+
+
+def _write_launch_failure(run_dir, result, classification):
+    """Persist bounded remote diagnostics and mark only definitive failures."""
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "launch.log"
+    content = ("remote_exit_code: %s\nclassification: %s\n"
+               "--- stdout ---\n%s\n--- stderr ---\n%s\n") % (
+                   result.returncode, classification,
+                   _bounded_launch_output(result.stdout),
+                   _bounded_launch_output(result.stderr))
+    path.write_text(content, encoding="utf-8", errors="replace")
+    if result.returncode not in (0, 255):
+        exit_path = run_dir / "exit_code"
+        reason_path = run_dir / STOP_REASON_FILENAME
+        if not exit_path.exists() and not reason_path.exists():
+            try:
+                with reason_path.open("x", encoding="utf-8") as handle:
+                    handle.write("launch-failed\n")
+            except FileExistsError:
+                pass
+            try:
+                with exit_path.open("x", encoding="utf-8") as handle:
+                    handle.write("125\n")
+            except FileExistsError:
+                pass
+    return path
 
 
 def _normalize_ip(value):
@@ -2432,14 +2482,35 @@ def cmd_run(args):
     result = remote(host, launch)
     if agent_home_status in {"unmanaged-forwarded", "publish-failed", "unknown"}:
         print(f"note: AGENT_HOME {agent_home_status}: {agent_home_reason}", file=sys.stderr)
+
+    def record_failure(classification):
+        try:
+            return _write_launch_failure(run_dir, result, classification)
+        except OSError as record_error:
+            print(f"launch failed on {name}: {result.stderr or result.stdout or result.returncode}; "
+                  f"could not write {run_dir / 'launch.log'}: {record_error}", file=sys.stderr)
+            return None
+
     if result.returncode != 0:
+        classification = ("timeout" if result.returncode == 255 and
+                          "timed out" in (result.stderr or "").lower() else
+                          "ssh-255" if result.returncode == 255 else "remote-failure")
+        launch_log = record_failure(classification)
         detail = (result.stderr or result.stdout).strip()
-        print(f"launch failed on {name}: {detail}", file=sys.stderr)
+        print(f"launch failed on {name}: {detail}; diagnostics: "
+              f"{launch_log or (run_dir / 'launch.log')}", file=sys.stderr)
         return 1
     try:
         admission = json.loads(result.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError) as exc:
-        raise ConfigError("invalid GPU launch receipt") from exc
+        if (not isinstance(admission, dict) or "gpus" not in admission
+                or (admission["gpus"] is not None and not isinstance(admission["gpus"], str))):
+            raise ValueError("invalid receipt shape")
+    except (ValueError, IndexError, TypeError) as exc:
+        launch_log = record_failure("receipt-invalid")
+        detail = f" on host {name}; diagnostics: {launch_log or (run_dir / 'launch.log')}"
+        if launch_log is None:
+            detail += " (diagnostic write failed)"
+        raise ConfigError("invalid GPU launch receipt" + detail) from exc
     meta = {"run_id": run_id, "host": name, "command": command,
             "cwd": workdir, "env": env, "gpus": admission["gpus"],
             "gpu_lease": admission.get("gpu_lease"), "share": share,
@@ -2737,8 +2808,10 @@ def cmd_tail(args):
     state = _run_state(config, args.run_id)
     log = state["dir"] / "log"
     if not log.is_file():
-        print(f"no log yet: {log}", file=sys.stderr)
-        return 1
+        log = state["dir"] / "launch.log"
+        if not log.is_file():
+            print(f"no log yet: {state['dir'] / 'log'}", file=sys.stderr)
+            return 1
     lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
     for line in lines[-args.lines:]:
         print(line)

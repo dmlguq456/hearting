@@ -109,12 +109,12 @@ def install_fake_tmux(fakebin, *, stale_environment=None):
         '    -d) shift ;;',
         '    -s) run_id=$2; shift 2 ;;',
         '    -c) cwd=$2; shift 2 ;;',
-        '    -e) export "$2"; shift 2 ;;',
+        '    -e) echo "tmux: unknown option -- e" >&2; exit 1 ;;',
         '    *) command=$1; break ;;',
         "  esac",
         "done",
         'cd "$cwd" || exit 1',
-        'exec /bin/bash -lc "$command"',
+        'exec /bin/sh -c "$command"',
     ])
     tmux.write_text("\n".join(lines) + "\n", encoding="utf-8")
     tmux.chmod(0o755)
@@ -144,7 +144,7 @@ class ComputeRunLauncherIdentityTest(unittest.TestCase):
                 "name": "NVIDIA Test GPU", "utilization_gpu_pct": 0,
                 "memory_used_mib": 0, "memory_total_mib": 24000, "processes": [],
                 "reservations": []}]}
-            receipt = {"gpus": ["0"], "gpu_lease": {"token": "remote-lease"}}
+            receipt = {"gpus": "0", "gpu_lease": {"token": "remote-lease"}}
             remote = mock.Mock(return_value=SimpleNamespace(
                 returncode=0, stdout=json.dumps(receipt) + "\n", stderr=""))
             args = SimpleNamespace(host="here", command=["python", "-c", "pass"],
@@ -384,6 +384,166 @@ class RunGPUObservationTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         probe.assert_called_once_with("here", self.host, ssh_session_bridges=[])
         return output.getvalue(), launch
+
+    def run_failed_launch(self, result, *, run_id="launch-failure", record_error=False):
+        import gpu_leases
+        args = SimpleNamespace(host="here", command=["true"], name=run_id,
+                               cwd=None, env=None, gpus="", dry_run=False, json=True)
+        output, warning = io.StringIO(), io.StringIO()
+        with mock.patch.object(gpu_leases, "state_path", return_value=self.run_root.parent / "leases.json"), \
+             mock.patch.object(self.module, "load_config", return_value=self.config), \
+             mock.patch.object(self.module, "_run_id", return_value=run_id), \
+             mock.patch.object(self.module, "_run_gpu_observation", return_value={"gpus": []}), \
+             mock.patch.object(self.module, "_launcher_provenance", return_value={}), \
+             mock.patch.object(self.module, "_launcher_route", return_value=None), \
+             mock.patch.object(self.module, "_launcher_session_owner", return_value=None), \
+             mock.patch.object(self.module, "remote", return_value=result), \
+             mock.patch.object(self.module, "_write_launch_failure",
+                               side_effect=OSError("diagnostic disk full") if record_error else None,
+                               wraps=None if record_error else self.module._write_launch_failure), \
+             mock.patch.object(self.module, "_spawn_completion_watch") as watch, \
+             mock.patch("sys.stdout", output), mock.patch("sys.stderr", warning):
+            try:
+                code = self.module.cmd_run(args)
+                error = None
+            except self.module.ConfigError as exc:
+                code, error = None, exc
+        return self.run_root / run_id, code, error, output.getvalue(), warning.getvalue(), watch
+
+    def test_failed_launch_persists_bounded_output_and_only_definitive_status(self):
+        run_dir, code, error, _out, warning, watch = self.run_failed_launch(
+            subprocess.CompletedProcess([], 2, "remote-stdout", "remote-stderr"))
+        self.assertEqual(code, 1)
+        self.assertIsNone(error)
+        self.assertIn("launch.log", warning)
+        log = (run_dir / "launch.log").read_text()
+        self.assertIn("remote_exit_code: 2", log)
+        self.assertIn("classification: remote-failure", log)
+        self.assertIn("remote-stdout", log)
+        self.assertIn("remote-stderr", log)
+        self.assertEqual((run_dir / "exit_code").read_text(), "125\n")
+        self.assertEqual((run_dir / "stop_reason").read_text(), "launch-failed\n")
+        state = self.module._run_state(self.config, "launch-failure")
+        self.assertEqual((state["state"], state["exit_code"], state["stop_reason"]),
+                         ("finished", 125, "launch-failed"))
+        watch.assert_not_called()
+
+        uncertain_dir, code, error, _out, _warning, watch = self.run_failed_launch(
+            subprocess.CompletedProcess([], 255, "partial-out", "ssh down"),
+            run_id="launch-uncertain")
+        self.assertEqual(code, 1)
+        self.assertIsNone(error)
+        self.assertTrue((uncertain_dir / "launch.log").is_file())
+        self.assertFalse((uncertain_dir / "exit_code").exists())
+        self.assertFalse((uncertain_dir / "stop_reason").exists())
+        watch.assert_not_called()
+
+        timeout_dir, code, error, _out, _warning, watch = self.run_failed_launch(
+            subprocess.CompletedProcess([], 255, "partial timeout stdout",
+                                        "partial timeout stderr\ntimed out"),
+            run_id="launch-timeout")
+        self.assertEqual(code, 1)
+        self.assertIsNone(error)
+        timeout_log = (timeout_dir / "launch.log").read_text()
+        self.assertIn("classification: timeout", timeout_log)
+        self.assertIn("partial timeout stdout", timeout_log)
+        self.assertIn("partial timeout stderr", timeout_log)
+        self.assertFalse((timeout_dir / "exit_code").exists())
+        self.assertFalse((timeout_dir / "stop_reason").exists())
+        watch.assert_not_called()
+
+    def test_invalid_receipt_shapes_are_logged_without_terminal_status_or_watch(self):
+        for index, receipt in enumerate(("", "not-json", "null", "[]", "{}",
+                                         '{"gpus": []}')):
+            with self.subTest(receipt=receipt):
+                run_dir, code, error, _out, _warning, watch = self.run_failed_launch(
+                    subprocess.CompletedProcess([], 0, receipt, ""),
+                    run_id="receipt-invalid-%d" % index)
+                self.assertIsNone(code)
+                self.assertRegex(str(error), "invalid GPU launch receipt")
+                self.assertIn("host here", str(error))
+                self.assertIn(str(run_dir / "launch.log"), str(error))
+                self.assertEqual((run_dir / "launch.log").read_text().splitlines()[1],
+                                 "classification: receipt-invalid")
+                self.assertFalse((run_dir / "exit_code").exists())
+                self.assertFalse((run_dir / "stop_reason").exists())
+                watch.assert_not_called()
+
+    def test_remote_timeout_keeps_partial_stdout_and_stderr(self):
+        error = subprocess.TimeoutExpired(["ssh"], 2, output=b"partial-out", stderr="partial-err")
+        with mock.patch.object(self.module, "ssh_prefix", return_value=["ssh"]), \
+             mock.patch.object(self.module.subprocess, "run", side_effect=error):
+            result = self.module.remote({"ssh_host": "remote"}, "true", timeout=2)
+        self.assertEqual(result.returncode, 255)
+        self.assertEqual(result.stdout, "partial-out")
+        self.assertIn("partial-err", result.stderr)
+        self.assertIn("timed out", result.stderr)
+
+    def test_diagnostic_write_error_keeps_original_launch_failure_visible(self):
+        run_dir, code, error, _out, warning, watch = self.run_failed_launch(
+            subprocess.CompletedProcess([], 2, "remote-out", "original remote error"),
+            run_id="recording-error", record_error=True)
+        self.assertEqual(code, 1)
+        self.assertIsNone(error)
+        self.assertIn("original remote error", warning)
+        self.assertIn("diagnostic disk full", warning)
+        self.assertIn(str(run_dir / "launch.log"), warning)
+        self.assertFalse((run_dir / "launch.log").exists())
+        watch.assert_not_called()
+
+    def test_launch_failure_output_is_capped_and_existing_terminal_files_survive(self):
+        run_dir = self.run_root / "bounded-launch-failure"
+        result = subprocess.CompletedProcess([], 2, "o" * (20 * 1024), "e" * (20 * 1024))
+        log = self.module._write_launch_failure(run_dir, result, "remote-failure")
+        content = log.read_text()
+        self.assertLessEqual(len(content.encode("utf-8")), 33 * 1024)
+        self.assertIn("...[truncated]", content)
+        self.assertEqual((run_dir / "exit_code").read_text(), "125\n")
+        self.assertEqual((run_dir / "stop_reason").read_text(), "launch-failed\n")
+
+        existing = self.run_root / "existing-terminal"
+        existing.mkdir(parents=True)
+        (existing / "exit_code").write_text("0\n")
+        (existing / "stop_reason").write_text("completed\n")
+        self.module._write_launch_failure(
+            existing, subprocess.CompletedProcess([], 3, "out", "err"), "remote-failure")
+        self.assertEqual((existing / "exit_code").read_text(), "0\n")
+        self.assertEqual((existing / "stop_reason").read_text(), "completed\n")
+
+        existing_reason = self.run_root / "existing-reason"
+        existing_reason.mkdir(parents=True)
+        (existing_reason / "stop_reason").write_text("path-namespace-unshare\n")
+        self.module._write_launch_failure(
+            existing_reason, subprocess.CompletedProcess([], 3, "out", "err"), "remote-failure")
+        self.assertFalse((existing_reason / "exit_code").exists())
+        self.assertEqual((existing_reason / "stop_reason").read_text(), "path-namespace-unshare\n")
+
+    def test_tail_uses_launch_log_only_when_payload_log_is_missing(self):
+        run_id = "tail-launch-log"
+        run_dir = self.run_root / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "launch.log").write_text("launch diagnostic\nsecond line\n")
+        config = {"run_root": self.run_root, "hosts": {}}
+        output, warning = io.StringIO(), io.StringIO()
+        with mock.patch.object(self.module, "load_config", return_value=config), \
+             mock.patch("sys.stdout", output), mock.patch("sys.stderr", warning):
+            self.assertEqual(self.module.cmd_tail(SimpleNamespace(run_id=run_id, lines=10)), 0)
+        self.assertEqual(output.getvalue(), "launch diagnostic\nsecond line\n")
+
+        (run_dir / "log").write_text("payload log wins\n")
+        output = io.StringIO()
+        with mock.patch.object(self.module, "load_config", return_value=config), \
+             mock.patch("sys.stdout", output), mock.patch("sys.stderr", warning):
+            self.assertEqual(self.module.cmd_tail(SimpleNamespace(run_id=run_id, lines=10)), 0)
+        self.assertEqual(output.getvalue(), "payload log wins\n")
+
+        (run_dir / "log").unlink()
+        (run_dir / "launch.log").unlink()
+        warning = io.StringIO()
+        with mock.patch.object(self.module, "load_config", return_value=config), \
+             mock.patch("sys.stdout", io.StringIO()), mock.patch("sys.stderr", warning):
+            self.assertEqual(self.module.cmd_tail(SimpleNamespace(run_id=run_id, lines=10)), 1)
+        self.assertIn("no log yet", warning.getvalue())
 
     def test_run_receipt_keeps_headroom_and_selected_gpu(self):
         row = {"reachable": True, "observed_at": 1728000000, "gpus": [
@@ -1346,6 +1506,14 @@ class ComputeHostsTest(unittest.TestCase):
             if Path(entry) != self.fakebin)}
         if shutil.which("tmux", path=env["PATH"]) is None:
             self.skipTest("tmux is not installed")
+        probe_server = "hearting-test-%d-%d" % (os.getpid(), time.time_ns())
+        probe = subprocess.run(["tmux", "-L", probe_server, "start-server"],
+                               capture_output=True, text=True, env=env)
+        if probe.returncode != 0:
+            self.skipTest("tmux server is unavailable in this environment: " +
+                          (probe.stderr or probe.stdout).strip())
+        subprocess.run(["tmux", "-L", probe_server, "kill-server"],
+                       capture_output=True, text=True, env=env)
         result = self.run_tool("run", "here", "--name", "stopme", "--",
                                "bash", "-c", "sleep 30", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -2150,7 +2318,7 @@ class LauncherProvenanceTest(unittest.TestCase):
         self.assertIn("export AGENT_DISPATCH_ATTEMPT_ID=''", unknown.stdout.split("setup: ", 1)[1])
 
     def run_with_foreign_transport(self, name, env):
-        """Exercise a stale server environment against the per-run tmux -e pins."""
+        """Exercise stale server values against the per-launch env prefix."""
         fakebin = self.root / name
         install_fake_tmux(fakebin, stale_environment={
             "AGENT_HOME": "/foreign/stale-home",
