@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -104,6 +105,59 @@ class TagRaceTests(unittest.TestCase):
         self.assertEqual(PLAN.tag_commit(self.api, second["version"]), self.b)
         self.assertEqual(PLAN.tag_commit(self.api, first["version"]), self.a)
 
+    def test_two_merges_in_one_request_reserve_one_version_from_published_baseline(self):
+        result = self.prepare(0, self.b)
+        self.assertEqual(result["base_tag"], "v1.0.0")
+        self.assertEqual(result["version"], "v1.0.1")
+        self.assertEqual(self.created_refs, ["v1.0.1"])
+
+    def test_manual_v4_tag_uses_prior_published_baseline_even_after_v3_same_sha(self):
+        docs = self.source / "README.md"
+        docs.write_text("readiness docs\n")
+        self.run_git(self.source, "add", "README.md")
+        self.run_git(self.source, "commit", "-qm", "docs: public readiness")
+        docs_head = self.run_git(self.source, "rev-parse", "HEAD")
+        self.run_git(self.source, "push", "-q", "origin", "HEAD")
+        self.ref("v1.0.1", docs_head)
+        self.ref("v4.0.0", docs_head, publish=False)
+        self.run_git(self.jobs[0], "fetch", "origin")
+        self.assertFalse(PLAN.plan(self.jobs[0], docs_head, "v1.0.1")["release"])
+        result = self.prepare(0, docs_head, version="v4.0.0")
+        self.assertTrue(result["release"])
+        self.assertEqual(result["version"], "v4.0.0")
+        self.assertEqual(result["base_tag"], "v1.0.1")
+        self.assertEqual(self.created_refs, [])
+
+    def test_breaking_changes_stay_minor_and_major_orphans_do_not_set_auto_floor(self):
+        breaking = self.commit("feat!: replace compatibility")
+        self.run_git(self.source, "push", "-q", "origin", "HEAD")
+        self.run_git(self.jobs[0], "fetch", "origin")
+        self.ref("v5.0.0", breaking, publish=False)
+        result = self.prepare(0, breaking)
+        self.assertEqual(result["bump"], "minor")
+        self.assertEqual(result["version"], "v1.1.0")
+        self.assertTrue(result["reason"].startswith("major-held:"))
+        self.assertEqual(PLAN.tag_commit(self.api, "v5.0.0"), breaking)
+
+    def test_v4_published_baseline_keeps_automatic_semver_inside_v4(self):
+        self.ref("v4.0.0", self.a)
+        patch = self.commit("fix: v4 patch")
+        self.run_git(self.source, "push", "-q", "origin", "HEAD")
+        self.run_git(self.jobs[0], "fetch", "origin")
+        result = self.prepare(0, patch)
+        self.assertEqual(result["base_tag"], "v4.0.0")
+        self.assertEqual(result["version"], "v4.0.1")
+        self.assertEqual(result["bump"], "patch")
+        self.published.add(result["version"])
+        breaking = self.commit("feat!: v4 compatibility change")
+        self.run_git(self.source, "push", "-q", "origin", "HEAD")
+        self.run_git(self.jobs[0], "fetch", "origin")
+        held = self.prepare(0, breaking)
+        self.assertEqual(held["base_tag"], "v4.0.1")
+        self.assertEqual(held["version"], "v4.1.0")
+        self.assertEqual(held["bump"], "minor")
+        self.assertTrue(held["reason"].startswith("major-held:"))
+
     def test_newer_merge_published_before_delayed_older_job_skips_successfully(self):
         first = self.prepare(0, self.b)
         self.published.add(first["version"])
@@ -150,6 +204,7 @@ class TagRaceTests(unittest.TestCase):
         self.assertTrue(result["release"])
         self.assertEqual(result["version"], "v1.0.2")
         self.assertEqual(result["reason"], "resume-existing-tag")
+        self.assertEqual(result["base_tag"], "v1.0.0")
 
     def test_publication_lookup_failure_after_orphan_is_not_hidden_by_resume(self):
         self.ref("v1.0.1", self.b)
@@ -217,6 +272,33 @@ class TagRaceTests(unittest.TestCase):
         self.assertIn('--version "$RELEASE_TAG"', workflow)
         self.assertIn('--verify-tag', workflow)
         self.assertIn('--generate-notes', workflow)
+        self.assertIn('--notes-start-tag "$BASE_TAG"', workflow)
+
+    def test_publish_step_passes_exact_baseline_and_breaking_note_to_fake_gh(self):
+        workflow = (HERE.parents[1] / ".github/workflows/release.yml").read_text()
+        block = workflow.split("- name: Publish the verified release\n", 1)[1].split("\n      - name:", 1)[0]
+        run = re.search(r"        run: \|\n((?:          .*\n)+)", block).group(1)
+        script = textwrap.dedent(run)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            fake = bin_dir / "gh"
+            fake.write_text('#!/bin/sh\nprintf \'%s\\n\' "$@" > "$GH_LOG"\n')
+            fake.chmod(0o755)
+            log = root / "args"
+            subprocess.run(["/bin/bash", "-e", "-c", script], check=True,
+                           env=dict(os.environ, PATH=str(bin_dir), GH_LOG=str(log),
+                                    RUNNER_TEMP=directory, RELEASE_TAG="v3.44.0",
+                                    BASE_TAG="v3.43.4", REASON="resume-existing-tag; major-held:abc:compat break"))
+            args = log.read_text().splitlines()
+            for required in ("v3.44.0", "--verify-tag", "--generate-notes",
+                             "--notes-start-tag", "v3.43.4", "--notes-file", "--title"):
+                self.assertIn(required, args)
+            notes_path = Path(args[args.index("--notes-file") + 1])
+            self.assertIn("major-by-tag-only", notes_path.read_text())
+            self.assertIn("dist/hearting.tar.gz.sha256", args)
+            self.assertIn("dist/install.sh.sha256", args)
 
     def test_delayed_candidate_uses_workflow_policy_without_replacing_asset_source(self):
         # The old tested source has no prepare command or planner file at all.

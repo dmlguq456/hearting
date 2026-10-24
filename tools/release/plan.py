@@ -93,20 +93,6 @@ def is_release_relevant(path: str) -> bool:
     return True
 
 
-def latest_stable_tag(repo: Path, head: str) -> tuple[str, tuple[int, int, int]]:
-    tags = git(repo, "tag", "--merged", head, "--list", "v*").splitlines()
-    parsed = []
-    for tag in tags:
-        try:
-            parsed.append((parse_version(tag, stable_only=True), tag))
-        except PlanError:
-            continue
-    if not parsed:
-        raise PlanError("no stable vMAJOR.MINOR.PATCH tag is reachable from HEAD")
-    version, tag = max(parsed)
-    return tag, version
-
-
 def changed_paths(repo: Path, older: str, newer: str) -> list[str]:
     return sorted(
         set(
@@ -138,13 +124,10 @@ def bump(version: tuple[int, int, int], level: str) -> str:
     raise PlanError(f"cannot bump level: {level}")
 
 
-def plan(repo: Path, head: str, base_tag: str | None = None) -> dict:
+def plan(repo: Path, head: str, base_tag: str) -> dict:
     head_sha = git(repo, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
-    if base_tag:
-        base_version = parse_version(base_tag, stable_only=True)
-        git(repo, "rev-parse", "--verify", f"{base_tag}^{{commit}}")
-    else:
-        base_tag, base_version = latest_stable_tag(repo, head_sha)
+    base_version = parse_version(base_tag, stable_only=True)
+    git(repo, "rev-parse", "--verify", f"{base_tag}^{{commit}}")
     if subprocess.run(
         ["git", "-C", str(repo), "merge-base", "--is-ancestor", base_tag, head_sha]
     ).returncode:
@@ -173,12 +156,14 @@ def plan(repo: Path, head: str, base_tag: str | None = None) -> dict:
         subject = message.splitlines()[0] if message.splitlines() else ""
         candidate = "patch"
         if BREAKING_SUBJECT_RE.search(subject) or BREAKING_BODY_RE.search(message):
-            candidate = "major"
+            candidate = "minor"
         elif FEATURE_SUBJECT_RE.search(subject):
             candidate = "minor"
         if SEVERITY[candidate] > SEVERITY[level]:
             level = candidate
             reason = f"{candidate}:{commit[:12]}:{subject[:80]}"
+        if BREAKING_SUBJECT_RE.search(subject) or BREAKING_BODY_RE.search(message):
+            reason = f"major-held:{commit[:12]}:{subject[:80]}"
 
     return {
         "release": True,
@@ -228,15 +213,41 @@ def stable_tags(repo: Path, *selection: str) -> list[str]:
                   key=lambda tag: parse_version(tag, stable_only=True), reverse=True)
 
 
+def published_baseline(repo: Path, head: str, *, api, cache: dict[str, object],
+                       exclude: str | None = None) -> tuple[str, tuple[int, int, int]]:
+    head = git(repo, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
+    for tag in stable_tags(repo, "--merged", head):
+        if tag == exclude:
+            continue
+        if tag not in cache:
+            if len(cache) >= 32:
+                raise PlanError("published release lookup exceeded 32-tag budget")
+            cache[tag] = api(f"releases/tags/{tag}")
+        release = cache[tag]
+        if release is None:
+            continue
+        if not isinstance(release, dict) or release.get("tag_name") != tag:
+            raise PlanError(f"invalid published release metadata for {tag}")
+        if not release.get("draft") and not release.get("prerelease"):
+            return tag, parse_version(tag, stable_only=True)
+    raise PlanError("no published stable release is reachable from HEAD")
+
+
 def prepare(repo: Path, head: str, *, api, version: str | None = None) -> dict:
     """Refresh and reserve before assets embed the version; never move a tag."""
     head = git(repo, "rev-parse", "--verify", f"{head}^{{commit}}").strip()
+    cache: dict[str, object] = {}
     if version:
+        git(repo, "fetch", "--tags", "origin")
         parse_version(version)
         if tag_commit(api, version) != head:
             raise PlanError(f"selected tag does not match the tested commit: {version}")
         release = api(f"releases/tags/{version}")
-        return dict(release=release is None, base_tag="", head=head, bump="manual",
+        if release is not None and (not isinstance(release, dict)
+                                    or release.get("tag_name") != version):
+            raise PlanError(f"invalid published release metadata for {version}")
+        base_tag, _ = published_baseline(repo, head, api=api, cache=cache, exclude=version)
+        return dict(release=release is None, base_tag=base_tag, head=head, bump="manual",
                     version=version, reason="validated-tag" if release is None else "already-published",
                     mode="tag")
 
@@ -244,33 +255,56 @@ def prepare(repo: Path, head: str, *, api, version: str | None = None) -> dict:
         # Checkout and earlier plans may predate another publisher's tag.
         git(repo, "fetch", "--tags", "origin")
         tags = stable_tags(repo)
+        base_tag, base_version = published_baseline(repo, head, api=api, cache=cache)
         resume_tag = None
         for tag in stable_tags(repo, "--contains", head):
-            release = api(f"releases/tags/{tag}")
+            if tag not in cache:
+                if len(cache) >= 32:
+                    raise PlanError("published release lookup exceeded 32-tag budget")
+                cache[tag] = api(f"releases/tags/{tag}")
+            release = cache[tag]
+            if release is not None and (not isinstance(release, dict)
+                                        or release.get("tag_name") != tag):
+                raise PlanError(f"invalid published release metadata for {tag}")
             if release is not None and not release.get("draft") and not release.get("prerelease"):
                 return dict(release=False, base_tag=tag, head=head, bump="none",
                             version="", reason="already-published", mode="auto")
-            if resume_tag is None and git(repo, "rev-parse", f"{tag}^{{commit}}").strip() == head:
+            if (resume_tag is None
+                    and parse_version(tag, stable_only=True)[0] == base_version[0]
+                    and git(repo, "rev-parse", f"{tag}^{{commit}}").strip() == head):
                 resume_tag = tag
         if resume_tag is not None:
             # An orphan reservation cannot hide a published containing commit
             # with a lower version. Check all publications before resuming.
-            return dict(release=True, base_tag=resume_tag, head=head, bump="none",
-                        version=resume_tag, reason="resume-existing-tag", mode="auto")
+            planned = plan(repo, head, base_tag)
+            reason = "resume-existing-tag"
+            if planned["reason"].startswith("major-held:"):
+                reason += "; " + planned["reason"]
+            return dict(release=True, base_tag=base_tag, head=head,
+                        bump=planned["bump"], version=resume_tag,
+                        reason=reason, mode="auto")
 
-        value = dict(plan(repo, head), mode="auto")
+        value = dict(plan(repo, head, base_tag), mode="auto")
         if not value["release"]:
             return value
-        if tags:
-            floor = parse_version(tags[0], stable_only=True)
+        same_major = [tag for tag in tags
+                      if parse_version(tag, stable_only=True)[0] == base_version[0]]
+        if same_major:
+            floor = parse_version(same_major[0], stable_only=True)
             if parse_version(value["version"], stable_only=True) <= floor:
                 value["version"] = bump(floor, value["bump"])
         version = value["version"]
         existing = tag_commit(api, version)
         if existing == head:
             release = api(f"releases/tags/{version}")
+            if release is not None and (not isinstance(release, dict)
+                                        or release.get("tag_name") != version):
+                raise PlanError(f"invalid published release metadata for {version}")
             value["release"] = release is None
-            value["reason"] = "resume-existing-tag" if release is None else "already-published"
+            value["reason"] = (("resume-existing-tag; " + value["reason"])
+                               if release is None and value["reason"].startswith("major-held:")
+                               else "resume-existing-tag" if release is None
+                               else "already-published")
             return value
         if existing is not None:
             # Re-read publication state and the version floor after a collision.
@@ -329,7 +363,16 @@ def main() -> int:
             if args.format == "github":
                 print(f"mode={value['mode']}")
         else:
-            emit(plan(Path(args.repo).resolve(), args.head, args.base_tag), args.format)
+            repository = os.environ.get("GITHUB_REPOSITORY")
+            if args.base_tag:
+                base_tag = args.base_tag
+            elif repository:
+                base_tag, _ = published_baseline(
+                    Path(args.repo).resolve(), args.head,
+                    api=lambda endpoint: github_api(repository, endpoint), cache={})
+            else:
+                raise PlanError("set GITHUB_REPOSITORY or provide --base-tag")
+            emit(plan(Path(args.repo).resolve(), args.head, base_tag), args.format)
         return 0
     except PlanError as exc:
         print(f"release-plan: {exc}", file=sys.stderr)

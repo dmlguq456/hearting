@@ -25,72 +25,90 @@ class ReleaseGateTest(unittest.TestCase):
     def setUp(self):
         self.context = {
             "GITHUB_REPOSITORY": "owner/repo", "GITHUB_REPOSITORY_ID": "42",
-            "GITHUB_EVENT_NAME": "workflow_run", "GITHUB_SHA": TIP,
+            "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": HEAD,
             "GITHUB_REF": "refs/heads/main",
         }
-        self.event = {
-            "action": "completed", "repository": copy.deepcopy(REPO),
-            "workflow_run": {
-                "name": "Checks", "path": ".github/workflows/checks.yml",
-                "event": "push", "status": "completed", "conclusion": "success",
-                "head_branch": "main", "head_sha": HEAD, "head_commit": {"id": HEAD},
-                "repository": copy.deepcopy(REPO), "head_repository": copy.deepcopy(REPO),
-            },
-        }
+        self.event = {"repository": copy.deepcopy(REPO)}
 
-    def test_uses_tested_sha_even_when_default_branch_has_advanced(self):
-        self.assertEqual(GATE.admit(self.event, self.context),
-                         {"head": HEAD, "validation_required": "false"})
+    def checks_run(self, **changes):
+        run = {"name": "Checks", "path": ".github/workflows/checks.yml",
+               "event": "push", "status": "completed", "conclusion": "success",
+               "head_branch": "main", "head_sha": HEAD, "head_commit": {"id": HEAD},
+               "repository": copy.deepcopy(REPO), "head_repository": copy.deepcopy(REPO)}
+        run.update(changes)
+        return {"workflow_runs": [run]}
 
-    def test_unsuccessful_or_incomplete_checks_never_admit(self):
-        for conclusion in ("failure", "cancelled", "skipped", "neutral", "timed_out", None):
-            with self.subTest(conclusion=conclusion):
-                self.event["workflow_run"]["conclusion"] = conclusion
-                with self.assertRaises(GATE.Rejected):
-                    GATE.admit(self.event, self.context)
-        self.event["workflow_run"]["conclusion"] = "success"
-        self.event["workflow_run"]["status"] = "in_progress"
+    def test_exact_successful_main_checks_are_reused(self):
+        calls = []
+        result = GATE.admit(self.event, self.context,
+                            api=lambda endpoint: calls.append(endpoint) or self.checks_run())
+        self.assertEqual(result, {"head": HEAD, "validation_required": "false"})
+        self.assertEqual(len(calls), 1)
+        self.assertIn("head_sha=" + HEAD, calls[0])
+        self.assertIn("per_page=20", calls[0])
+
+    def test_malformed_or_untrusted_checks_fall_back_to_validation(self):
+        bad_runs = [
+            self.checks_run(head_sha=TIP),
+            self.checks_run(head_commit={"id": TIP}),
+            self.checks_run(conclusion="failure"),
+            self.checks_run(status="in_progress"),
+            self.checks_run(repository={"full_name": "fork/repo", "id": 42}),
+            self.checks_run(repository={"full_name": "owner/repo", "id": 99}),
+            self.checks_run(head_repository={"full_name": "fork/repo", "id": 42}),
+            self.checks_run(event="pull_request"),
+            self.checks_run(head_branch="feature"),
+            self.checks_run(path=".github/workflows/other.yml"),
+            self.checks_run(name="Other"),
+        ]
+        for response in (None, {}, {"workflow_runs": []}, {"workflow_runs": [None]},
+                         *bad_runs):
+            with self.subTest(response=response):
+                result = GATE.admit(self.event, self.context, api=lambda _: response)
+                self.assertEqual(result["validation_required"], "true")
+        for failure in (RuntimeError("403"), TimeoutError(), ValueError("bad JSON")):
+            result = GATE.admit(self.event, self.context,
+                                api=lambda _, failure=failure: (_ for _ in ()).throw(failure))
+            self.assertEqual(result["validation_required"], "true")
+
+    def test_invalid_request_is_rejected_before_actions_api_call(self):
+        context = dict(self.context, GITHUB_REF="refs/heads/feature")
+        calls = []
         with self.assertRaises(GATE.Rejected):
-            GATE.admit(self.event, self.context)
+            GATE.admit(self.event, context, api=lambda endpoint: calls.append(endpoint))
+        self.assertEqual(calls, [])
 
-    def test_pr_branch_workflow_and_sha_substitutions_are_rejected(self):
-        for field, value in (("event", "pull_request"), ("event", "workflow_dispatch"),
-                             ("head_branch", "feature"), ("name", "Other"),
-                             ("path", ".github/workflows/other.yml"), ("head_sha", TIP),
-                             ("head_sha", "main"), ("head_commit", {"id": TIP})):
-            with self.subTest(field=field, value=value):
-                event = copy.deepcopy(self.event)
-                event["workflow_run"][field] = value
-                with self.assertRaises(GATE.Rejected):
-                    GATE.admit(event, self.context)
+    def test_workflow_run_is_never_release_authority(self):
+        context = dict(self.context, GITHUB_EVENT_NAME="workflow_run")
+        with self.assertRaises(GATE.Rejected):
+            GATE.admit(self.event, context, api=lambda _: self.checks_run())
 
-    def test_foreign_or_missing_repository_identity_is_rejected(self):
-        for location in ("event", "repository", "head_repository"):
-            for replacement in ({"id": 99, "full_name": "owner/repo"},
-                                {"id": 42, "full_name": "fork/repo"}, None):
-                with self.subTest(location=location, replacement=replacement):
-                    event = copy.deepcopy(self.event)
-                    if location == "event":
-                        event["repository"] = replacement
-                    else:
-                        event["workflow_run"][location] = replacement
-                    with self.assertRaises(GATE.Rejected):
-                        GATE.admit(event, self.context)
-
-    def test_tag_and_manual_paths_require_fresh_validation_at_caller_sha(self):
+    def test_tag_push_requires_fresh_validation_and_dispatch_falls_back(self):
         for kind, ref in (("push", "refs/tags/v1.2.3"),
-                          ("workflow_dispatch", "refs/heads/main"),
-                          ("workflow_dispatch", "refs/tags/v1.2.3-rc.1")):
+                          ("workflow_dispatch", "refs/heads/main")):
             with self.subTest(kind=kind, ref=ref):
                 context = dict(self.context, GITHUB_EVENT_NAME=kind, GITHUB_REF=ref)
                 event = {"repository": REPO, "ref": ref, "after": TIP, "deleted": False}
-                self.assertEqual(GATE.admit(event, context),
-                                 {"head": TIP, "validation_required": "true"})
+                self.assertEqual(GATE.admit(event, context, api=lambda _: {}),
+                                 {"head": HEAD, "validation_required": "true"})
+
+    def test_tag_ref_dispatch_requires_full_checks_without_api_reuse(self):
+        for ref in ("refs/tags/v1.2.3", "refs/tags/v1.2.0-rc.1"):
+            with self.subTest(ref=ref):
+                context = dict(self.context, GITHUB_REF=ref)
+                calls = []
+                event = {"repository": REPO}
+                result = GATE.admit(
+                    event, context,
+                    api=lambda endpoint: calls.append(endpoint) or self.checks_run(),
+                )
+                self.assertEqual(result, {"head": HEAD, "validation_required": "true"})
+                self.assertEqual(calls, [])
 
     def test_annotated_tag_object_does_not_replace_runner_commit(self):
         context = dict(self.context, GITHUB_EVENT_NAME="push", GITHUB_REF="refs/tags/v1.2.3")
         event = {"repository": REPO, "ref": "refs/tags/v1.2.3", "after": HEAD, "deleted": False}
-        self.assertEqual(GATE.admit(event, context)["head"], TIP)
+        self.assertEqual(GATE.admit(event, context)["head"], HEAD)
 
     def test_unsupported_events_refs_and_deleted_tags_fail(self):
         for kind, ref, after, deleted in (
@@ -109,12 +127,12 @@ class ReleaseGateTest(unittest.TestCase):
             path = Path(directory) / "event.json"
             env = dict(os.environ, **self.context, GITHUB_EVENT_PATH=str(path))
             for success in (True, False):
-                self.event["workflow_run"]["conclusion"] = "success" if success else "failure"
+                context = dict(env, GITHUB_EVENT_NAME="workflow_run" if success else "pull_request")
                 path.write_text(json.dumps(self.event))
                 result = subprocess.run([sys.executable, str(HERE / "validation-gate.py")],
-                                        env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0 if success else 1)
-                self.assertEqual(result.stdout, f"head={HEAD}\nvalidation_required=false\n" if success else "")
+                                        env=context, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
 
     def test_actual_publish_condition_requires_admission_and_validation(self):
         workflow = (HERE.parents[1] / ".github/workflows/release.yml").read_text()
@@ -153,10 +171,8 @@ class ReleaseGateTest(unittest.TestCase):
         # cancel-in-progress=false. Failed admission must therefore stop before
         # the only job owning that queue; the expression matrix above exercises
         # failure/cancellation against that actual job's condition.
-        for conclusion in ("failure", "cancelled"):
-            self.event["workflow_run"]["conclusion"] = conclusion
-            with self.assertRaises(GATE.Rejected):
-                GATE.admit(self.event, self.context)
+        workflow = (HERE.parents[1] / ".github/workflows/release.yml").read_text()
+        self.assertNotIn("workflow_run:", workflow)
 
     def test_actual_checkout_guard_rejects_foreign_commit(self):
         workflow = (HERE.parents[1] / ".github/workflows/release.yml").read_text()
@@ -190,6 +206,12 @@ class ChecksWorkflowContractTest(unittest.TestCase):
         root = HERE.parents[1] / ".github/workflows"
         self.checks = (root / "checks.yml").read_text()
         self.release = (root / "release.yml").read_text()
+
+    def checks_run(self):
+        return {"workflow_runs": [{"name": "Checks", "path": ".github/workflows/checks.yml",
+                "event": "push", "status": "completed", "conclusion": "success",
+                "head_branch": "main", "head_sha": HEAD, "head_commit": {"id": HEAD},
+                "repository": dict(REPO), "head_repository": dict(REPO)}]}
 
     def test_required_check_name_survives_as_a_single_aggregate_job(self):
         aggregate = job_block(self.checks, "full-test-suite")
@@ -254,6 +276,9 @@ class ChecksWorkflowContractTest(unittest.TestCase):
         self.assertIn("      contents: read\n      # The called Checks job", validation)
         self.assertIn("      actions: read\n", validation)
         self.assertNotIn("write", validation)
+        admission = job_block(self.release, "admission")
+        self.assertIn("      contents: read\n      actions: read\n", admission)
+        self.assertIn('GH_TOKEN: ${{ github.token }}', admission)
         self.assertIn("    permissions:\n      contents: write\n", job_block(self.release, "release"))
         self.assertRegex(self.release, r"(?m)^permissions:\n  contents: read\n")
 
@@ -265,25 +290,19 @@ class ChecksWorkflowContractTest(unittest.TestCase):
                 with self.subTest(workflow=name, reference=reference):
                     self.assertRegex(reference, r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
 
-    def test_a_successful_main_push_checks_run_is_admitted_whatever_it_skipped(self):
+    def test_successful_main_checks_can_be_reused_even_if_scope_skipped_suites(self):
         # A main push whose expensive jobs were skipped (docs-only or a tree a
         # PR already validated) still concludes success; admission reads only
         # that conclusion, so no gate change is needed for the skip.
-        self.assertEqual(GATE.admit(self.event(), self.context()), {"head": HEAD, "validation_required": "false"})
-        for conclusion in ("failure", "cancelled"):
-            with self.assertRaises(GATE.Rejected):
-                GATE.admit(self.event(conclusion), self.context())
+        result = GATE.admit(self.event(), self.context(), api=lambda _: self.checks_run())
+        self.assertEqual(result["validation_required"], "false")
 
     def context(self):
         return {"GITHUB_REPOSITORY": "owner/repo", "GITHUB_REPOSITORY_ID": "42",
-                "GITHUB_EVENT_NAME": "workflow_run", "GITHUB_SHA": TIP, "GITHUB_REF": "refs/heads/main"}
+                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": HEAD, "GITHUB_REF": "refs/heads/main"}
 
-    def event(self, conclusion="success"):
-        return {"action": "completed", "repository": dict(REPO), "workflow_run": {
-            "name": "Checks", "path": ".github/workflows/checks.yml", "event": "push",
-            "status": "completed", "conclusion": conclusion, "head_branch": "main",
-            "head_sha": HEAD, "head_commit": {"id": HEAD},
-            "repository": dict(REPO), "head_repository": dict(REPO)}}
+    def event(self):
+        return {"repository": dict(REPO)}
 
 
 if __name__ == "__main__":

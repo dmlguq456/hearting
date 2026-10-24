@@ -271,8 +271,9 @@ git config core.hooksPath tools/git-hooks
 ```
 
 `pre-push`는 CI가 돌리는 것과 동일한 생성물 검사를 수행하고 실패할 push를
-거부합니다. 커밋이 공개되고 release workflow가 태그를 붙이기 전에 drift를
-잡습니다. `git push --no-verify`로 우회할 수 있습니다.
+거부해 커밋이 공개되기 전에 drift를 잡습니다. 릴리스 workflow는 별도의
+유지보수자 요청 뒤에 게시합니다. `git push --no-verify`로 hook을 우회할 수
+있습니다.
 
 공유 정의를 변경한 후에는 모든 생성 projection을 갱신하고 drift를
 검사합니다.

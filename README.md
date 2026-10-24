@@ -298,8 +298,9 @@ git config core.hooksPath tools/git-hooks
 ```
 
 `pre-push` runs the same generated-projection check CI runs and refuses a push
-that would fail it, so drift is caught before the commit is public and before
-the release workflow tags it. `git push --no-verify` still bypasses it.
+that would fail it, so drift is caught before the commit is public. A release
+workflow publishes only after a separate maintainer request. The hook can be
+bypassed with the `--no-verify` option.
 
 After changing a shared definition, refresh every generated projection and
 check for drift:

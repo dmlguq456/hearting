@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 from collections.abc import Mapping
 
@@ -30,7 +31,43 @@ def _sha(value: object) -> str:
     return str(value)
 
 
-def admit(event: dict, context: Mapping[str, str]) -> dict[str, str]:
+def trusted_checks(api, repository: str, repository_id: str, head: str) -> bool:
+    """Reuse only a successful Checks run for this exact main commit."""
+    try:
+        result = api(
+            "actions/workflows/checks.yml/runs"
+            f"?head_sha={head}&branch=main&event=push&per_page=20"
+        )
+        runs = result.get("workflow_runs") if isinstance(result, dict) else None
+        if not isinstance(runs, list):
+            return False
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            repo = run.get("repository")
+            head_repo = run.get("head_repository")
+            commit = run.get("head_commit")
+            if (run.get("name") == "Checks"
+                    and run.get("path") == ".github/workflows/checks.yml"
+                    and run.get("event") == "push"
+                    and run.get("head_branch") == "main"
+                    and run.get("status") == "completed"
+                    and run.get("conclusion") == "success"
+                    and run.get("head_sha") == head
+                    and isinstance(commit, dict) and commit.get("id") == head
+                    and isinstance(repo, dict) and repo.get("full_name") == repository
+                    and isinstance(head_repo, dict)
+                    and head_repo.get("full_name") == repository
+                    and str(repo.get("id")) == repository_id
+                    and str(head_repo.get("id")) == repository_id):
+                return True
+    except Exception:
+        # An unavailable Actions API must not make a valid request unavailable.
+        return False
+    return False
+
+
+def admit(event: dict, context: Mapping[str, str], *, api=None) -> dict[str, str]:
     repository = context.get("GITHUB_REPOSITORY")
     repository_id = context.get("GITHUB_REPOSITORY_ID")
     _require(bool(repository) and bool(repository_id), "missing repository identity")
@@ -41,28 +78,15 @@ def admit(event: dict, context: Mapping[str, str]) -> dict[str, str]:
 
     _require(trusted(event.get("repository")), "foreign event repository")
     kind = context.get("GITHUB_EVENT_NAME")
-    if kind == "workflow_run":
-        run = event.get("workflow_run") or {}
-        _require(event.get("action") == "completed" and run.get("status") == "completed",
-                 "Checks has not completed")
-        _require(run.get("name") == "Checks" and run.get("path") == ".github/workflows/checks.yml",
-                 "unexpected validation workflow")
-        _require(run.get("conclusion") == "success", "Checks did not succeed")
-        _require(run.get("event") == "push" and run.get("head_branch") == "main",
-                 "Checks must validate a main push")
-        _require(trusted(run.get("repository")) and trusted(run.get("head_repository")),
-                 "foreign Checks repository")
-        head = _sha(run.get("head_sha"))
-        _require((run.get("head_commit") or {}).get("id") == head,
-                 "Checks commit identity mismatch")
-        return {"head": head, "validation_required": "false"}
+    _require(kind != "workflow_run", "workflow_run cannot request a release")
 
     # These paths validate within Release through the same reusable Checks.
     # A manual feature branch is not automatic release authority.
     ref = context.get("GITHUB_REF", "")
     version_tag = ref.startswith("refs/tags/v")
     _require((kind == "push" and version_tag)
-             or (kind == "workflow_dispatch" and (ref == "refs/heads/main" or version_tag)),
+             or (kind == "workflow_dispatch"
+                 and (ref == "refs/heads/main" or version_tag)),
              "release requires a version tag or manual main invocation")
     head = _sha(context.get("GITHUB_SHA"))
     if kind == "push":
@@ -70,13 +94,26 @@ def admit(event: dict, context: Mapping[str, str]) -> dict[str, str]:
                  "tag push identity mismatch")
         # `after` may identify an annotated tag object. The runner's commit
         # SHA is the validation input; Release also checks the peeled tag.
-    return {"head": head, "validation_required": "true"}
+    reuse = (kind == "workflow_dispatch" and ref == "refs/heads/main"
+             and api is not None and trusted_checks(api, repository, repository_id, head))
+    return {"head": head, "validation_required": "false" if reuse else "true"}
 
 
 def main() -> int:
     try:
         event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-        result = admit(event, os.environ)
+        repository = os.environ["GITHUB_REPOSITORY"]
+        def api(endpoint):
+            result = subprocess.run(
+                ["gh", "api", f"repos/{repository}/{endpoint}"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode:
+                raise RuntimeError(result.stderr.strip() or "Actions API failed")
+            return json.loads(result.stdout)
+        result = admit(
+            event, os.environ, api=api,
+        )
     except (Rejected, KeyError, OSError, ValueError, TypeError, AttributeError) as exc:
         print(f"Release denied: {exc}", file=sys.stderr)
         return 1
