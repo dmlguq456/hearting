@@ -117,14 +117,37 @@ def _codex_shell_command_display(value):
                    for token in command_argv)
             or any("$" in token or "`" in token for token in command_argv)):
         return None
-    # This exact project helper forwards its argv after the required --. Keep
-    # the original wrapper in `command`; summarize only its explicit payload.
-    if (len(command_argv) >= 6 and command_argv[0] in {"python", "python3"}
-            and command_argv[1] == "utilities/verification-background-lease.py"
-            and command_argv[2] == "--timeout" and command_argv[3].replace(".", "", 1).isdigit()
-            and command_argv[4] == "--"):
-        command_argv = command_argv[5:]
+    # This helper's options precede its required --; preserve the outer command
+    # and summarize only a payload whose option sequence is fully recognized.
+    payload = _verification_lease_payload(command_argv)
+    if payload is not None:
+        command_argv = payload
     return command_summary(shlex.join(command_argv))
+
+
+def _verification_lease_payload(argv):
+    if (len(argv) < 2 or argv[0] not in {"python", "python3"}
+            or argv[1] != "utilities/verification-background-lease.py"):
+        return None
+    i, seen = 2, set()
+    while i < len(argv) and argv[i] != "--":
+        name, eq, value = argv[i].partition("=")
+        if name not in ("--timeout", "--memory-budget") or name in seen:
+            return None
+        if not eq:
+            i += 1
+            if i >= len(argv):
+                return None
+            value = argv[i]
+        if name == "--timeout" and not value.replace(".", "", 1).isdigit():
+            return None
+        if name == "--memory-budget" and (not value or value.startswith("-")):
+            return None
+        seen.add(name)
+        i += 1
+    if "--timeout" not in seen or i + 1 >= len(argv):
+        return None
+    return argv[i + 1:]
 
 
 def _bounded(cache, key, value, limit):
