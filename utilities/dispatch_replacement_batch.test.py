@@ -127,7 +127,10 @@ class ReplacementBatchTest(unittest.TestCase):
             stack.enter_context(mock.patch.object(BATCH, 'load_route', return_value=self.route))
             stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE, 'resolve_checked_tuple', side_effect=FIXTURE.resolve_side_effect))
             allocator = stack.enter_context(mock.patch.object(BATCH, 'assign_harnesses',
-                side_effect=BATCH.BatchError('successful-peer-backend-now-unavailable')))
+                return_value=([(self.route['nodes'][1], 'claude', 'cross-harness-headless', 2)],
+                              'persona', {'families_considered': ['claude'], 'usable_families': ['claude'],
+                                          'family_exclusions': {}, 'capacity': {},
+                                          'degradation_cause': '', 'sole_gate': 'ok'})))
             stack.enter_context(mock.patch.object(BATCH, 'resolve_agent_home', return_value=self.base))
             stack.enter_context(mock.patch.object(BATCH, 'resolve_global_registry', return_value=SimpleNamespace(path=self.jobs)))
             stack.enter_context(mock.patch.object(BATCH, 'resolve_live_parent_attempt'))
@@ -145,13 +148,66 @@ class ReplacementBatchTest(unittest.TestCase):
                 rc = BATCH.main(command[2:])
         self.assertEqual(rc, 0, output.getvalue())
         self.assertEqual(len(spawned), 1)
-        allocator.assert_not_called()
+        allocator.assert_called_once()
+        self.assertEqual([node['id'] for node in allocator.call_args.args[1]], [self.gap['node']])
         self.assertEqual(spawned[0][spawned[0].index('--attempt-id')+1], self.record['replacement_attempt_id'])
         self.assertEqual(spawned[0][spawned[0].index('--automatic-retry-of')+1], self.gap['attempt_id'])
         self.assertEqual(len(reserve.call_args.args[2]), 1)
         self.assertEqual(reserve.call_args.kwargs['source_manifest'], self.manifest)
         self.assertFalse(reserve.call_args.kwargs['replacement_seal']['retry_claim_reused'])
         self.assertIn('reused-successful-peer', output.getvalue())
+
+    def test_automatic_gap_reallocation_changes_only_the_gap_tuple(self):
+        nodes = BATCH.parallel_nodes(self.route, 'plan')
+        chosen = []
+
+        def select_gap(route, selected_nodes, **kwargs):
+            chosen.append((route, selected_nodes, kwargs))
+            self.assertEqual([node['id'] for node in selected_nodes], [self.partial['gap_leg_id']])
+            gap_node = selected_nodes[0]
+            return [(gap_node, 'claude', 'same-harness-headless', 1)], 'persona', {
+                'families_considered': ['claude'], 'usable_families': ['claude'],
+                'family_exclusions': {'opencode': ['preparation-failed']},
+                'capacity': {}, 'degradation_cause': '', 'sole_gate': 'ok',
+            }
+
+        with mock.patch.object(BATCH, 'assign_harnesses', side_effect=select_gap):
+            assignments, _diagnostics = BATCH.automatic_partial_assignments(
+                self.jobs, self.route, nodes, self.partial,
+                {'parent_harness': 'claude', 'parent_transport': 'headless',
+                 'parent_sandbox': 'workspace-write'},
+                allow_degraded=False, recheck=True)
+        self.assertEqual(len(chosen), 1)
+        by_node = {node['id']: (adapter, hop, ordinal)
+                   for node, adapter, hop, ordinal in assignments}
+        self.assertEqual(by_node[self.peer['node']],
+                         (self.peer['adapter'], self.peer['hop'], self.peer['ordinal']))
+        self.assertEqual(by_node[self.gap['node']], ('claude', 'same-harness-headless', 1))
+
+    def test_initial_collection_projects_only_a_launched_exact_replacement(self):
+        target = dict(self.gap, attempt_id=self.record['replacement_attempt_id'],
+                      adapter='claude', hop='same-harness-headless', ordinal=1)
+        self.write_existing(target, status='open', claimed='1', live_identity=True,
+                            all_legs=[self.peer, target])
+        results = [
+            {'node': self.peer['node'], 'attempt_id': self.peer['attempt_id'],
+             'adapter': self.peer['adapter'], 'hop': self.peer['hop'],
+             'launch_state': 'started', 'child_spawned': '1'},
+            {'node': self.gap['node'], 'attempt_id': self.gap['attempt_id'],
+             'adapter': self.gap['adapter'], 'hop': self.gap['hop'],
+             'launch_state': 'failed', 'child_spawned': '0'},
+        ]
+        peer_before = dict(results[0])
+        with mock.patch('dispatch_replacement.advance_batch', return_value=(
+                {self.peer['attempt_id'], self.record['replacement_attempt_id']},
+                [{'original_attempt_id': self.gap['attempt_id'],
+                  'replacement_attempt_id': self.record['replacement_attempt_id']}], [])) as advance:
+            BATCH._consume_initial_replacement_checkpoint(self.jobs, results)
+        advance.assert_called_once_with(self.jobs, {self.peer['attempt_id'], self.gap['attempt_id']})
+        self.assertEqual(results[0], peer_before)
+        self.assertEqual(results[1]['attempt_id'], self.record['replacement_attempt_id'])
+        self.assertEqual((results[1]['adapter'], results[1]['hop'], results[1]['child_spawned']),
+                         ('claude', 'same-harness-headless', '1'))
 
     def test_failed_initial_reservation_label_does_not_override_registered_source(self):
         original_path = RB._input_path(self.jobs, self.source['batch_manifest_sha256'])
@@ -214,6 +270,58 @@ class ReplacementBatchTest(unittest.TestCase):
         with mock.patch.object(R, 'validate_claim_source', side_effect=R.DC.DispatchContractError('replacement-process-live')):
             with self.assertRaisesRegex(ValueError, 'replacement-process-live'):
                 GOVERNOR._validate_partial_replacement(replacement, replacement_digest, source, evidence, seal, peers)
+
+    def test_governor_allows_a_new_tuple_only_for_proven_preparation_gap(self):
+        _command, _path, evidence = self.evidence()
+        partial = dict(evidence['partial_group_continuation'],
+                       continuation_id=evidence['continuation_id'], automatic_replacement_evidence=evidence)
+        source, digest, leg_digests = RB.verify_manifest(self.manifest)
+        seal = BATCH.prepare_partial_replacement(self.jobs, self.route, partial, source,
+                                                  digest, leg_digests, apply=True)
+        members = [dict(member) for member in source['members']]
+        gap_member = next(member for member in members if member['route_node'] == self.gap['node'])
+        gap_member.update(attempt_id=self.record['replacement_attempt_id'], harness='claude',
+                          fallback_hop='same-harness-headless', fallback_ordinal=1)
+        replacement, replacement_digest, _ = BATCH.build_manifest(
+            parallel_group='plan', route_id=self.route['route_id'], parent_attempt_id='att-parent-fixture',
+            independence='cross-harness', members=members,
+            required_independence_axes=source['required_independence_axes'],
+            realized_independence_axes=source['realized_independence_axes'])
+        lines = self.jobs.read_text().splitlines()
+        for index, line in enumerate(lines):
+            fields = line.split('\t')
+            if len(fields) != 6:
+                continue
+            metadata = R.DC.parse_registry_metadata(fields[5])
+            if metadata.get('attempt_id') == self.gap['attempt_id']:
+                metadata.update(note='dead-candidate-preparation', failure_class='launch-tuple',
+                                launch_outcome='never-launched',
+                                reconcile_reason='opencode-context-limit-unavailable')
+                fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                lines[index] = '\t'.join(fields)
+                break
+        self.jobs.write_text('\n'.join(lines) + '\n')
+        peers = [{'jobs': str(self.jobs)}]
+        self.assertEqual(GOVERNOR._validate_partial_replacement(
+            replacement, replacement_digest, source, evidence, seal, peers)[3],
+            self.gap['attempt_id'])
+
+        lines = self.jobs.read_text().splitlines()
+        for index, line in enumerate(lines):
+            fields = line.split('\t')
+            if len(fields) != 6:
+                continue
+            metadata = R.DC.parse_registry_metadata(fields[5])
+            if metadata.get('attempt_id') == self.gap['attempt_id']:
+                metadata.update(note='dead-exact-pid', failure_class='runtime',
+                                launch_outcome='spawned')
+                fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                lines[index] = '\t'.join(fields)
+                break
+        self.jobs.write_text('\n'.join(lines) + '\n')
+        with self.assertRaisesRegex(ValueError, 'tuple change lacks preparation-failure proof'):
+            GOVERNOR._validate_partial_replacement(
+                replacement, replacement_digest, source, evidence, seal, peers)
 
     def test_node_replays_original_round_task_without_recounting(self):
         node = BATCH.DISPATCH_NODE

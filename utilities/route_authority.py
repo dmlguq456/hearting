@@ -50,6 +50,9 @@ class ContinuationDecision(NamedTuple):
 PROVEN_BLOCKED_GATE_REASONS = frozenset({
     "completion-attempt-not-current", "completion-evidence-revised-unrecorded",
 })
+CANDIDATE_PREPARATION_REASONS = frozenset({
+    "launch-error", "opencode-context-limit-unavailable", "worker-home-io-failed",
+})
 
 
 def _replacement_kind(status, meta, *, jobs=None, lines=None):
@@ -62,6 +65,15 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
         # The launch fence is the execution boundary. A reservation may carry a
         # claim, but its absence of launch_started means it has no worker result.
         return 'unlaunched'
+    if (meta.get('worker_type') in {'stage', 'frame', 'review', 'test', 'support'}
+            and meta.get('note') == 'dead-candidate-preparation'
+            and meta.get('failure_class') == 'launch-tuple'
+            and meta.get('reconcile_reason') in CANDIDATE_PREPARATION_REASONS
+            and DR.never_started(status, meta)):
+        # Only the shared wrapper close for a known pre-payload preparation
+        # failure writes this note. Generic never-launched, authority, input,
+        # cancellation and unreadable-result rows retain their own settlement.
+        return 'candidate-preparation'
     if jobs is not None and meta.get('note') == 'dead-worker-blocked':
         found = DR.owner_parked_gate(jobs, meta.get('attempt_id'), lines=lines)
         if found and found['status'] == 'proceed':

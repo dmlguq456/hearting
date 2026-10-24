@@ -1894,8 +1894,17 @@ def main(argv: list[str]) -> int:
             env["AGENT_DISPATCH_UNIT"] = args.unit
         else:
             env.pop("AGENT_DISPATCH_UNIT", None)
-        args.worker_runtime_env = prepare_worker_home(args.agent_home, 'claude', args.worker_type,
-                                                       args.attempt_id, env=env, profile=args.profile)
+        try:
+            args.worker_runtime_env = prepare_worker_home(args.agent_home, 'claude', args.worker_type,
+                                                           args.attempt_id, env=env, profile=args.profile)
+        except OSError as exc:
+            WRAPPER_COMMON.close_candidate_preparation_failure(
+                jobs, args.attempt_id, "worker-home-io-failed",
+                materialize=materialize_after_terminal_close)
+            cancel_governor_reservation(governor, governor_root, reservation_token)
+            return fail("worker-home-preparation-failed", 73,
+                        detail=type(exc).__name__, attempt_id=args.attempt_id,
+                        child_spawned="0")
         env.update(args.worker_runtime_env)
         # Apply after the masked worker home and all inherited environment
         # updates so every direct/supervised/resumed native child sees this
@@ -2087,11 +2096,9 @@ def main(argv: list[str]) -> int:
                     os.close(fd)
                 except OSError:
                     pass
-            annotate_attempt_row(
-                jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-            )
+            WRAPPER_COMMON.close_candidate_preparation_failure(
+                jobs, args.attempt_id, "launch-error", materialize=materialize_after_terminal_close)
             cancel_governor_reservation(governor, governor_root, reservation_token)
-            close_job_row(jobs, args.slug, args.worktree, "launch-error", "", args.attempt_id)
             return fail("child-launch-failed", 70, detail=str(exc), attempt_id=args.attempt_id)
         try:
             args.governor_reservation = wait_governor_reservation_claim(

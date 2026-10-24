@@ -571,6 +571,30 @@ class Case4RetryLinkTest(unittest.TestCase):
         death = {**latest, "note": "dead-route-completion-rejected", "failure_class": "contract"}
         self.assertEqual(RA.retry_predecessor([death]), "att-0c43")
 
+    def test_only_a_proven_shared_candidate_preparation_failure_is_replaceable(self):
+        base = {
+            "worker_type": "stage", "dispatch_depth": "2", "route_id": "rt-prep",
+            "route_hash": "sha256:prep", "route_node": "execute", "harness": "opencode",
+            "attempt_id": "att-prep", "note": "dead-candidate-preparation",
+            "failure_class": "launch-tuple", "reconcile_reason": "opencode-context-limit-unavailable",
+            "launch_outcome": "never-launched", "launch_claimed": "0",
+        }
+        self.assertEqual(RA._replacement_kind("done", base), "candidate-preparation")
+        refusals = (
+            ("open", base),
+            ("done", {**base, "launch_outcome": "spawned"}),
+            ("done", {**base, "launch_started": "1"}),
+            ("done", {**base, "pid": "4242"}),
+            ("done", {**base, "note": "dead-producer-binding-failed"}),
+            ("done", {**base, "failure_class": "fail"}),
+            ("done", {**base, "reconcile_reason": "permission-refused"}),
+            ("cancelled", base),
+        )
+        for status, metadata in refusals:
+            with self.subTest(status=status, metadata=metadata):
+                self.assertIsNone(RA._replacement_kind(status, metadata))
+
+
     def test_new_settled_request_does_not_inherit_a_spent_transport_retry(self):
         import dispatch_replacement as replacement
         with tempfile.TemporaryDirectory() as td:

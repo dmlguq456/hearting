@@ -1453,6 +1453,89 @@ class FallbackTest(unittest.TestCase):
  def test_new_execute_gap_registers_after_transport_budget_was_spent(self):
   self.assert_new_execute_request("gap-three")
 
+ def test_candidate_preparation_claim_selects_the_next_checked_stage_hop(self):
+  import dispatch_contract as DC
+  import dispatch_replacement as REPLACEMENT
+  with self.dispatch_env():
+   path=self.route(same_status="supported",intensity="standard",
+                   tuples=[self.tuple("codex","supported"),self.tuple("claude","supported")])
+   route=json.loads(path.read_text());node=next(n for n in route["nodes"] if n["id"]=="execute")
+   self.seed_parent();self.seed_predecessor_markers(path,"execute")
+   source_id="att-candidate-preparation-source"
+   prompt=self.art/"candidate-preparation-task.md"
+   task="Run the approved stage and preserve its source tuple."
+   prompt.write_text(task)
+   input_args=SimpleNamespace(attempt_id=source_id,jobs_path=self.jobs,worktree=self.repo,
+       replacement_input_argv=["--start","--attempt-id",source_id,"--parent","owner",
+                               "--route-file",str(path),"--route-node","execute",
+                               "--prompt-file",str(prompt)],
+       route_id=route["route_id"],route_node="execute")
+   sealed=DC.parse_registry_metadata(REPLACEMENT.seal_launch_input(input_args,"codex",task))
+   source={"attempt_schema_version":"2","dispatch_depth":"2","transport":"headless",
+       "execution_surface":"registered-headless","registered_worker":"1",
+       "fallback_hop":"same-harness-headless","fallback_ordinal":"1",
+       "worker_type":"stage","harness":"codex","child_harness":"codex",
+       "parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write",
+       "launch_authority":"conductor","probe_source":"fixture","route_file":str(path),
+       "route_id":route["route_id"],"route_hash":route["route_hash"],"route_node":"execute",
+       "parent_attempt_id":"att-fallback-parent","parent_sid":"fixture-native-parent",
+       "attempt_id":source_id,"note":"dead-candidate-preparation","failure_class":"launch-tuple",
+       "reconcile_reason":"opencode-context-limit-unavailable","launch_outcome":"never-launched",
+       "launch_claimed":"0","launch_started":"0","log_file":str(self.art/"missing.log"),**sealed}
+   with self.jobs.open("a",encoding="utf-8") as handle:
+    handle.write(f"now\tdone\t{self.repo}\t{self.repo}\tgap-execute\t"+
+                 ",".join(f"{key}={value}" for key,value in source.items())+"\n")
+   quiet=SimpleNamespace(state="quiescent",reason="fixture-no-payload")
+   with mock.patch.object(REPLACEMENT,"_reuse_snapshot",return_value={
+           "completed":[],"cycle_id":"cyc-fixture","producer_id":"prod-fixture","gates":[]}), \
+        mock.patch.object(REPLACEMENT,"_source_fences"), \
+        mock.patch.object(REPLACEMENT,"_settle_terminal_cleanup"), \
+        mock.patch.object(REPLACEMENT,"_capacity_hold",return_value=None), \
+        mock.patch("route_parent_close.owner_continuation_processes",return_value=(quiet,[])):
+    claim=REPLACEMENT.claim(self.jobs,source_id)
+   hops=[{"ordinal":1,"fallback_hop":"same-harness-headless",
+          "candidates":[self.tuple("codex","supported")]},
+         {"ordinal":2,"fallback_hop":"cross-harness-headless",
+          "candidates":[self.tuple("claude","supported")]}]
+   commands=[]
+   def wrapper(_args,command):
+    commands.append(command)
+    return SimpleNamespace(returncode=0,stdout=("check=ok\nregistered=1\nstarted=1\n"
+        "child_spawned=1\nattempt_id="+claim["replacement_attempt_id"]+"\n"),stderr="")
+   claim_lines=self.jobs.read_text(encoding="utf-8").splitlines()
+   source_row=REPLACEMENT._rows(claim_lines)[source_id]
+   replay=REPLACEMENT.launch_input(self.jobs,source_id,source_row[1])
+   argv=["stage-dispatch-fallback.py","--route",str(path),"--node","execute",
+       "--slug","gap-execute","--parent","owner","--capability-mode","dev",
+       "--jobs",str(self.jobs),"--prompt-file",str(REPLACEMENT._directory(self.jobs)/"tasks"/
+       (claim["replacement_attempt_id"]+".txt")),"--start"]
+   task_path=Path(argv[argv.index("--prompt-file")+1]);task_path.parent.mkdir(parents=True,exist_ok=True)
+   task_path.write_text(task)
+   env={**os.environ,"AGENT_DISPATCH_REPLACEMENT_SOURCE_ATTEMPT_ID":source_id,
+        "AGENT_DISPATCH_REPLACEMENT_ATTEMPT_ID":claim["replacement_attempt_id"]}
+   out=io.StringIO()
+   with mock.patch.object(sys,"argv",argv), \
+        mock.patch.object(F,"load_node",return_value=(route,node)), \
+        mock.patch.object(F,"resolve_global_registry",return_value=SimpleNamespace(path=self.jobs)), \
+        mock.patch.object(F.DISPATCH_NODE,"current_parent_identity",return_value={
+            "parent_harness":"codex","parent_transport":"headless","parent_sandbox":"workspace-write"}), \
+        mock.patch.object(F,"parent_attempt_generation",return_value="att-fallback-parent"), \
+        mock.patch.object(F,"ordered_fallback_hops",return_value=(hops,None)), \
+        mock.patch.object(F,"run_wrapper",side_effect=wrapper), \
+        mock.patch.object(F,"watch_launched_attempt",return_value=("observed",{})), \
+        mock.patch.object(F,"_report_launched",return_value=0), \
+        mock.patch.object(REPLACEMENT,"validate_claim_source",return_value=(
+            source_row[0],source_row[1],replay)), \
+        mock.patch.dict(os.environ,env,clear=True),contextlib.redirect_stdout(out):
+    code=F._dispatch(F.LAUNCH_TUPLE.ReportOnlyObservation())
+   self.assertEqual(code,0,out.getvalue())
+   self.assertEqual(len(commands),1)
+   command=commands[0]
+   self.assertEqual(self.arg(command,"--attempt-id"),claim["replacement_attempt_id"])
+   self.assertEqual(self.arg(command,"--automatic-retry-of"),source_id)
+   self.assertEqual(self.arg(command,"--fallback-hop"),"cross-harness-headless")
+   self.assertEqual(self.arg(command,"--owner-harness"),"codex")
+
  def test_new_execute_request_can_reuse_its_failed_slug(self):
   self.assert_new_execute_request("gap-two")
 

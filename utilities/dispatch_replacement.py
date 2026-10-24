@@ -2044,6 +2044,10 @@ def _command(jobs, record, source, replay):
     root = ROOT.resolve()
     if replay['harness'] not in {'codex','claude','opencode'}:
         raise DC.DispatchContractError('replacement-runtime-mismatch')
+    if (source.get('worker_type') in {'stage', 'frame', 'review', 'test', 'support'}
+            and (record.get('proof') or {}).get('death_kind') == 'candidate-preparation'
+            and not source.get('batch_manifest_sha256')):
+        return _stage_candidate_replacement_command(jobs, record, source, replay)
     task = _replacement_task(record, source, replay)
     prompt = _directory(jobs)/'tasks'/(record['replacement_attempt_id']+'.txt')
     prompt.parent.mkdir(parents=True, exist_ok=True)
@@ -2055,6 +2059,40 @@ def _command(jobs, record, source, replay):
                '--jobs': Path(jobs).resolve(), '--worktree': replay['worktree']}
     argv = _replace_options(_replacement_argv(record, source, replay), options)
     return [sys.executable,str(root/f'adapters/{replay["harness"]}/bin/dispatch-headless.py'),*argv]
+
+
+def _stage_candidate_replacement_command(jobs, record, source, replay):
+    """Re-enter the shared stage tuple selector for one claimed prep replacement."""
+    rows = _rows(Path(jobs).read_text(encoding='utf-8', errors='replace').splitlines())
+    original = record['original_attempt_id']
+    if original not in rows:
+        raise DC.DispatchContractError('replacement-source-missing')
+    fields, current = rows[original]
+    if (current.get('note') != 'dead-candidate-preparation'
+            or current.get('launch_outcome') != 'never-launched'
+            or current.get('route_node') != source.get('route_node')):
+        raise DC.DispatchContractError('replacement-preparation-proof-invalid')
+    task = replay.get('task')
+    if not isinstance(task, str):
+        raise DC.DispatchContractError('replacement-input-unproven')
+    prompt = _directory(jobs) / 'tasks' / (record['replacement_attempt_id'] + '.txt')
+    prompt.parent.mkdir(parents=True, exist_ok=True)
+    raw = task.encode('utf-8')
+    if prompt.is_symlink() or (not _write_once(prompt.parent, prompt, raw)
+                               and prompt.read_bytes() != raw):
+        raise DC.DispatchContractError('replacement-task-conflict')
+    argv = [sys.executable, str(ROOT.resolve() / 'utilities/stage-dispatch-fallback.py'),
+            '--route', record['route_file'], '--node', source['route_node'],
+            '--slug', fields[4], '--jobs', str(Path(jobs).resolve()),
+            '--prompt-file', str(prompt), '--start']
+    for name, flag in (('--parent', '--parent'), ('--qa', '--qa'),
+                       ('--reviewed-evidence', '--reviewed-evidence'),
+                       ('--worker-role', '--worker-role'),
+                       ('--foreground-timeout', '--foreground-timeout')):
+        value = _argv_value(replay.get('argv', []), name)
+        if value:
+            argv.extend([flag, value])
+    return argv
 
 
 def _argv_value(argv, flag):
@@ -2290,6 +2328,10 @@ def _advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capa
             if key.startswith('AGENT_OWNER_ROUTE_') or key in {
                     DC.GOVERNOR_RESERVATION_ENV}:
                 env.pop(key,None)
+        if ((record.get('proof') or {}).get('death_kind') == 'candidate-preparation'
+                and source.get('worker_type') in {'stage', 'frame', 'review', 'test', 'support'}):
+            env['AGENT_DISPATCH_REPLACEMENT_SOURCE_ATTEMPT_ID'] = aid
+            env['AGENT_DISPATCH_REPLACEMENT_ATTEMPT_ID'] = replacement
         if source.get('worker_type') == 'owner' and not source.get('route_file'):
             env.update(AGENT_OWNER_ROUTE_FILE=record['route_file'],
                        AGENT_OWNER_ROUTE_ID=record['route_id'],AGENT_OWNER_ROUTE_HASH=record['route_hash'])

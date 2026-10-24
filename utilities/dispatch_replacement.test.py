@@ -2142,6 +2142,47 @@ class ReplacementTest(unittest.TestCase):
         self.assertIn('never started',text)
         self.assertNotIn('You replace exact-dead attempt',text)
 
+    def test_stage_candidate_preparation_claim_is_stable_and_uses_shared_tuple_selector(self):
+        source = {**self.meta, 'worker_type': 'stage', 'dispatch_depth': '2',
+                  'route_node': 'execute', 'note': 'dead-candidate-preparation',
+                  'failure_class': 'launch-tuple',
+                  'reconcile_reason': 'opencode-context-limit-unavailable',
+                  'launch_outcome': 'never-launched', 'launch_claimed': '0',
+                  'launch_started': '0'}
+        self.write(source)
+        fields, metadata = R._rows(self.jobs.read_text().splitlines())['att-source']
+        self.assertEqual(R.death_kind(fields, metadata, jobs=self.jobs), 'candidate-preparation')
+        first = R.claim(self.jobs, 'att-source')
+        second = R.claim(self.jobs, 'att-source')
+        self.assertEqual(first['replacement_attempt_id'], second['replacement_attempt_id'])
+        self.assertEqual(first['proof']['death_kind'], 'candidate-preparation')
+        source = R._rows(self.jobs.read_text().splitlines())['att-source'][1]
+        replay = R.launch_input(self.jobs, 'att-source', source)
+        command = R._command(self.jobs, first, source, replay)
+        self.assertEqual(Path(command[1]).name, 'stage-dispatch-fallback.py')
+        self.assertEqual(command[command.index('--node') + 1], 'execute')
+        prompt = Path(command[command.index('--prompt-file') + 1])
+        self.assertEqual(prompt.read_text(), replay['task'])
+        self.assertEqual(prompt.read_text(), 'the raw task')
+        launched = []
+
+        def run_claimed_stage(command, **kwargs):
+            launched.append((command, kwargs['env']))
+            return SimpleNamespace(returncode=0, stdout='check=ok\n', stderr='')
+
+        with mock.patch.object(R, '_capacity_hold', return_value=None), \
+             mock.patch.object(R, '_settle_terminal_cleanup'), \
+             mock.patch.object(R, 'launch_input', return_value=replay):
+            result = R.advance(self.jobs, 'att-source', authority_check=lambda *_: True,
+                               run=run_claimed_stage)
+        self.assertEqual(len(launched), 1)
+        command, environment = launched[0]
+        self.assertEqual(Path(command[1]).name, 'stage-dispatch-fallback.py')
+        self.assertEqual(environment['AGENT_DISPATCH_REPLACEMENT_SOURCE_ATTEMPT_ID'], 'att-source')
+        self.assertEqual(environment['AGENT_DISPATCH_REPLACEMENT_ATTEMPT_ID'],
+                         first['replacement_attempt_id'])
+        self.assertEqual(result['reason'], 'replacement-launch-pending')
+
     def test_owner_takeover_observes_merge_without_mutation_commit_or_publication(self):
         import commit_policy
         self.route.update(entry_scope_contract_version=1, entry_execution_scope="complete",

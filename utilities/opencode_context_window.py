@@ -525,14 +525,37 @@ def prepare_launch_context(*, model: str, context_window: str | int,
                            config_content: str, cwd: str,
                            environ: Mapping[str, str] | None = None,
                            command: str | None = None,
-                           variant: str | None = None) -> dict[str, object]:
+                           variant: str | None = None,
+                           runtime_observation=None) -> dict[str, object]:
     """Inspect the installed runtime's effective model limit and prepare its cap."""
     env = dict(os.environ if environ is None else environ)
-    native_command = _installed_command(command, environ=env)
+    if runtime_observation is None:
+        # Compatibility for direct read-only consumers. A launch wrapper passes
+        # its immutable observation and never reaches this independent probe.
+        native_command = _installed_command(command, environ=env)
+        observed_version = _installed_version(native_command, cwd=cwd, env=env)
+        version_parts = opencode_runtime.parse_version(observed_version)
+        if version_parts is None:
+            raise OpenCodeContextError("OpenCode runtime generation is unavailable")
+        launch_cwd = str(Path(cwd).expanduser().resolve(strict=False))
+        runtime_observation = opencode_runtime.OpenCodeLaunchObservation(
+            binary=native_command, version=version_parts,
+            generation="v2" if version_parts[0] >= 2 else "v1", cwd=launch_cwd)
+    try:
+        opencode_runtime.validate_observation_environment(runtime_observation, env)
+    except opencode_runtime.OpenCodeRuntimeError as exc:
+        raise OpenCodeContextError(str(exc)) from exc
+    try:
+        launch_cwd = str(Path(cwd).expanduser().resolve(strict=False))
+    except OSError as exc:
+        raise OpenCodeContextError(f"cannot resolve OpenCode launch directory: {exc}") from exc
+    if launch_cwd != runtime_observation.cwd:
+        raise OpenCodeContextError("OpenCode runtime observation belongs to a different launch directory")
+    native_command = runtime_observation.binary
     env["OPENCODE_CONFIG_CONTENT"] = config_content
-    runtime_version = _installed_version(native_command, cwd=cwd, env=env)
-    version_parts = opencode_runtime.parse_version(runtime_version)
-    is_v2 = bool(version_parts and opencode_runtime.is_v2(version=version_parts))
+    runtime_version = runtime_observation.version_text
+    version_parts = runtime_observation.version
+    is_v2 = runtime_observation.generation == "v2"
     if is_v2:
         model_variant = model.partition("#")[2] if isinstance(model, str) else ""
         effective_variant = (variant if variant not in (None, "", "runtime-default")
@@ -579,6 +602,8 @@ def prepare_launch_context(*, model: str, context_window: str | int,
             "final_limits": final_limits,
             "compaction_policy": compaction,
             "runtime_version": runtime_version,
+            "runtime_generation": runtime_observation.generation,
+            "runtime_binary": native_command,
             "native_application": "standalone-api:OPENCODE_CONFIG_CONTENT:providers-model-limit",
             "execution_mode": "standalone",
             "runtime_target": "standalone-per-command",
@@ -669,6 +694,8 @@ def prepare_launch_context(*, model: str, context_window: str | int,
         "final_limits": final_limits,
         "compaction_policy": policy,
         "runtime_version": runtime_version,
+        "runtime_generation": runtime_observation.generation,
+        "runtime_binary": native_command,
         "variant": variant,
         "native_application": "OPENCODE_CONFIG_CONTENT:provider-model-limit",
         "server_identity": None,

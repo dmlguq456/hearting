@@ -89,11 +89,11 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
 
         def payload(args, prompt, *_):
-            if node == "research-alternative" and self.fail_gap:
+            if node == "autopilot-research-retrieval-alternative" and self.fail_gap:
                 return shlex.join([sys.executable, "-c",
                     "from pathlib import Path; import os; "
                     f"Path({str(marker)!r}).write_text(str(os.getpid())); "
-                    "print('fixture failed research sibling', flush=True); raise SystemExit(1)"])
+                    "print('fixture failed retrieval alternative', flush=True); raise SystemExit(1)"])
             return shlex.join([sys.executable, str(f.worker), str(marker), str(release),
                                str(prompt), str(f.root / (attempt + ".prompt.txt"))])
 
@@ -165,6 +165,10 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         injection.mkdir(exist_ok=True)
         (injection / "sitecustomize.py").write_text(
             "import os, sys, runpy, traceback\nfrom pathlib import Path\n"
+            "if Path(sys.argv[0]).name == 'dispatch-batch.py':\n"
+            f" sys.path.insert(0,{str(ROOT / 'utilities')!r})\n"
+            " import dispatch_lifecycle\n"
+            " dispatch_lifecycle.pid_namespace_evidence=lambda *a,**k: {'lifecycle_selector_source':'host-like','lifecycle_nspid_width':'1','lifecycle_pid1_class':'system-init'}\n"
             "if Path(sys.argv[0]).name == 'dispatch-headless.py':\n"
             " try:\n"
             f"  module=runpy.run_path({str(Path(__file__).resolve())!r},run_name='fixture_driver')\n"
@@ -172,8 +176,9 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
             " except BaseException:\n  traceback.print_exc(); rc=1\n"
             " sys.stdout.flush(); sys.stderr.flush(); os._exit(rc)\n")
         env.update(PYTHONPATH=str(injection), HEARTING_RECOVERY_FIXTURE=str(f.root),
-                   HEARTING_RECOVERY_FAIL_GAP=str(int(self.fail_gap)), CODEX_DISPATCH_EARLY_EXIT_WATCH=".2")
-        argv = ["--route", str(self.path), "--parallel-group", "research", "--start",
+                   HEARTING_RECOVERY_FAIL_GAP=str(int(self.fail_gap)), CODEX_DISPATCH_EARLY_EXIT_WATCH=".2",
+                   AGENT_DISPATCH_ALLOW_NAMESPACED_SPAWN="1")
+        argv = ["--route", str(self.path), "--parallel-group", "autopilot-research-retrieval", "--start",
                 "--jobs", str(f.jobs), "--prompt-text", prompt]
         if continuation is not None: argv += ["--continuation", str(continuation)]
         result = subprocess.run([sys.executable, str(ROOT / "utilities/dispatch-batch.py"), *argv],
@@ -182,7 +187,7 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
             self.prompts[path.name.removesuffix(".prompt.txt")] = path.read_text()
         for line in f.jobs.read_text().splitlines():
             metadata = DC.parse_registry_metadata(line.split("\t")[-1])
-            if metadata.get("pid") and line.split("\t")[1] == "open":
+            if metadata.get("pid") and line.split("\t")[1] in {"open", "running"}:
                 pid = int(metadata["pid"])
                 if pid not in f.processes: f.processes.append(pid)
         try: return result.returncode, json.loads(result.stdout.splitlines()[-1])
@@ -207,7 +212,8 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         self.finish_process(aid)
         record = PRODUCER.route_cycle_for(self.f.artifacts, self.route)
         output = PRODUCER.cycle_dir(self.f.artifacts, record["campaign_id"], record["cycle_id"], record) / "artifacts"
-        evidence = output / "spec/_internal" / node_id / "REPORT.md"
+        leg = "retrieval-alternative" if node_id.endswith("-alternative") else "retrieval"
+        evidence = output / f"spec/_internal/research/parts/autopilot-research/retrieval/shards/{leg}/REPORT.md"
         evidence.parent.mkdir(parents=True, exist_ok=True)
         evidence.write_text("# Research\nPASS\n")
         node = next(n for n in self.route["nodes"] if n["id"] == node_id)
@@ -225,7 +231,8 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
             "retry_on_isolated_worktree": 0} for h in ("claude", "codex", "opencode")], "native_subagent": []}))
         with mock.patch.dict(os.environ, self.env, clear=True):
             self.route = api.compose_route(capability="autopilot-spec", capability_mode="update", shape="staged",
-                graph="research,review,prd-transaction", slug="partial-owner-recovery", cwd=str(f.worktree),
+                graph="autopilot-research:retrieval,autopilot-research:synthesis,review,prd-transaction",
+                slug="partial-owner-recovery", cwd=str(f.worktree),
                 artifact_root=str(f.artifacts), campaign_key="partial-owner-recovery", spec_read="isolated-fixture",
                 parent_harness="opencode", dispatch_evidence=json.loads(evidence.read_text()), jobs=f.jobs,
                 selection_pins={"owner": {"harness": "opencode", "model": None, "effort": None},
@@ -255,22 +262,25 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         self.complete(peer)
         peer_row = f.row(peer["attempt_id"])[0]
         peer_spawn_marker = (f.root / (peer["attempt_id"] + ".started")).read_bytes()
-        marker_path = api.completion_dir(self.route["route_id"], jobs=f.jobs) / "research.json"
+        marker_path = api.completion_dir(self.route["route_id"], jobs=f.jobs) / "autopilot-research-retrieval.json"
         marker_bytes = marker_path.read_bytes()
         self.finish_process(owner)
         _, owner_meta = f.row(owner)
         owner_artifact = f.artifacts / "owner.md"
-        owner_artifact.write_text("BLOCKED: research alternative failed.\n")
+        owner_artifact.write_text("BLOCKED: retrieval alternative failed.\n")
         Path(owner_meta["log_file"]).write_text(json.dumps({"type": "text", "part": {"type": "text",
             "text": f"artifact: {owner_artifact}\nverdict: BLOCKED\nblocker: failed sibling"}}) + "\n")
         DC.reconcile_attempt_terminal(f.jobs, owner, "dead-worker-blocked", evidence={"failure_class": "blocked"})
         input_path = REPLACEMENT._directory(f.jobs) / "batch-inputs"
         manifest = json.loads(next(input_path.glob("*.json")).read_text())["manifest"]
         with mock.patch.dict(os.environ, self.env, clear=True):
-            partial_options = dict(source_group_id="research", source_batch_manifest=manifest,
-                failed_source_attempt_id=gap["attempt_id"], gap_leg_id="research-alternative")
-            continuation = api.build_continuation_route(self.route, resume_from_node="research-alternative",
-                requested_boundary="research", reason="retry failed sibling", artifact_root=str(f.artifacts), partial_group=partial_options)
+            partial_options = dict(source_group_id="autopilot-research-retrieval", source_batch_manifest=manifest,
+                failed_source_attempt_id=gap["attempt_id"],
+                gap_leg_id="autopilot-research-retrieval-alternative")
+            continuation = api.build_continuation_route(
+                self.route, resume_from_node="autopilot-research-retrieval-alternative",
+                requested_boundary="autopilot-research-retrieval", reason="retry failed retrieval alternative",
+                artifact_root=str(f.artifacts), partial_group=partial_options)
             partial = continuation["partial_group_continuation"]
             continuation_path = api.canonical_route_path(f.artifacts, continuation["route_id"])
             api.publish_continuation_route(continuation, self.route, continuation_path)
@@ -286,7 +296,7 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         self.assertIn("Continue only the approved research gap.", self.prompts[new_owner])
         self.assertEqual(f.row(new_owner)[1]["automatic_retry_of"], owner)
         self.fail_gap = False
-        brief = "New recovery request: reuse primary PASS and finish the gap.\n"
+        brief = "New recovery request: reuse successful retrieval and finish its alternative.\n"
         rc, retried = self.batch(new_owner, continuation_path, brief)
         self.assertEqual(rc, 0, retried)
         self.assertEqual((retried["newly_started"], retried["existing"], retried["reused_peer_count"]), (1, 1, 1))
@@ -297,7 +307,7 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         replacement_prompt = self.prompts[replacement["attempt_id"]]
         self.assertIn(brief, replacement_prompt)
         self.assertIn("original sealed request", replacement_prompt)
-        self.assertIn("Round protocol (round 2 of route node `research-alternative`", replacement_prompt)
+        self.assertIn("Round protocol (round 2 of route node `autopilot-research-retrieval-alternative`", replacement_prompt)
         self.assertIn("판정 없음(dead-launch-exit-1)", replacement_prompt)
         self.assertIn("full execution of the original assigned task and scope", replacement_prompt)
         self.assertIn("verdict-less attempts provide execution context only", replacement_prompt)
@@ -305,7 +315,7 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
         self.assertNotIn("This is a correction round", replacement_prompt)
         self.complete(replacement)
         with mock.patch.dict(os.environ, self.env, clear=True):
-            DC.completion_marker_gate(str(self.path), "review", "start", ROOT, f.jobs)
+            DC.completion_marker_gate(str(self.path), "autopilot-research-synthesis", "start", ROOT, f.jobs)
         self.assertEqual(marker_bytes, marker_path.read_bytes())
         self.assertEqual(peer_row, f.row(peer["attempt_id"])[0])
         self.assertEqual(peer_spawn_marker, (f.root / (peer["attempt_id"] + ".started")).read_bytes())
@@ -315,7 +325,7 @@ class PartialGroupOwnerRecoveryTest(unittest.TestCase):
             "gap_attempt": replacement["attempt_id"], "gap_pid": f.row(replacement["attempt_id"])[1]["pid"],
             "gap_spawned": replacement["child_spawned"], "gap_completed": True,
             "reused_peer_count": retried["reused_peer_count"], "peer_evidence_unchanged": True,
-            "review_gate": "PASS", "retry_and_round_guidance_delivered": True}, sort_keys=True))
+            "synthesis_gate": "PASS", "retry_and_round_guidance_delivered": True}, sort_keys=True))
 
 
 def fixture_wrapper():

@@ -2303,6 +2303,45 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     else None)
     args.automatic_retry_of = retry_predecessor(
         prior_rows, jobs=args.jobs, task=request_task)
+    replacement_source = os.environ.get("AGENT_DISPATCH_REPLACEMENT_SOURCE_ATTEMPT_ID", "")
+    replacement_attempt = os.environ.get("AGENT_DISPATCH_REPLACEMENT_ATTEMPT_ID", "")
+    if bool(replacement_source) != bool(replacement_attempt):
+        return fail("replacement-claim-binding-invalid", 65, child_spawned="0")
+    args.replacement_claim = None
+    if replacement_source:
+        if args.action != "start" or not args.prompt_file or not node.get("id"):
+            return fail("replacement-claim-binding-invalid", 65, child_spawned="0")
+        try:
+            import dispatch_replacement as replacement_contract
+            claim_lines = args.jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+            claim_rows = replacement_contract._rows(claim_lines)
+            source_row = claim_rows.get(replacement_source)
+            if source_row is None:
+                raise DispatchContractError("replacement-source-missing")
+            binding = replacement_contract.source_binding(args.jobs, source_row[1])
+            if not binding or binding[1] != replacement_attempt:
+                raise DispatchContractError("replacement-claim-pending")
+            claim = replacement_contract._check_record(
+                replacement_contract._read(
+                    replacement_contract._record_path(args.jobs, binding[0])), binding[0])
+            _source_fields, _source_meta, sealed_input = replacement_contract.validate_claim_source(
+                args.jobs, claim_lines, claim)
+            if (claim.get("proof", {}).get("death_kind") != "candidate-preparation"
+                    or claim.get("replacement_attempt_id") != replacement_attempt
+                    or claim.get("route_id") != route.get("route_id")
+                    or claim.get("route_hash") != route.get("route_hash")
+                    or _source_meta.get("route_node") != node.get("id")
+                    or args.prompt_file.read_text(encoding="utf-8") != sealed_input.get("task")):
+                raise DispatchContractError("replacement-claim-binding-invalid")
+            args.automatic_retry_of = replacement_source
+            args.replacement_claim = {
+                "source_attempt_id": replacement_source,
+                "attempt_id": replacement_attempt,
+                "selected": False,
+            }
+        except (OSError, ValueError, DispatchContractError) as exc:
+            return fail(getattr(exc, "reason", "replacement-claim-binding-invalid"),
+                        65, detail=str(exc), child_spawned="0")
     failed_tuples = set(args.failed_tuple) | set(prior_failures)
     attempts: list[str] = []
     direct_failures: list[dict[str, str]] = []
@@ -2514,6 +2553,13 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                     attempt_id = retry_attempt_identity(attempt_id)
                 attempt_id = retry_proven_unstarted_identity(
                     args.jobs, route["route_id"], node["id"], attempt_id)
+                if args.replacement_claim is not None:
+                    if args.replacement_claim["selected"]:
+                        return fail("replacement-claim-candidate-reused", 65,
+                                    attempt_id=args.replacement_claim["attempt_id"],
+                                    child_spawned="0")
+                    attempt_id = args.replacement_claim["attempt_id"]
+                    args.replacement_claim["selected"] = True
                 legacy_reason = legacy_parent_generation_conflict(
                     args.jobs,
                     legacy_attempt_identity(args, route, node, row, ordinal),
@@ -2626,6 +2672,16 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                                         candidate_outcomes=candidate_outcomes,
                                         attempt_trace="|".join(attempts),
                                         **_last_failure_fields(direct_failures), **extra)
+                        if args.replacement_claim is not None and early != "capacity":
+                            return fail(
+                                "replacement-candidate-failed", 70,
+                                attempt_id=attempt_id,
+                                child_spawned=fields.get("child_spawned", "0"),
+                                detail=failure_reason,
+                                candidate_outcomes=candidate_outcomes,
+                                attempt_trace="|".join(attempts),
+                                **_last_failure_fields(direct_failures),
+                            )
                 except subprocess.TimeoutExpired as exc:
                     attempts.append(f"{ordinal}:{key}:direct-timeout:attempt-{attempt_id}")
                     timeout_state = settle_direct_timeout_attempt(
@@ -2677,6 +2733,16 @@ def _dispatch(observation: "LAUNCH_TUPLE.ReportOnlyObservation") -> int:
                                             attempt_id, result.returncode,
                                             watch_fields.get("failure_class") or watch_fields.get("note") or "watchdog-fallback",
                                             watch_fields.get("process_reason") or watch_fields.get("action", "watchdog fallback"))
+                            if args.replacement_claim is not None:
+                                return fail(
+                                    "replacement-candidate-failed", 70,
+                                    attempt_id=attempt_id,
+                                    child_spawned="1",
+                                    detail=watch_fields.get("process_reason") or "watchdog-fallback",
+                                    candidate_outcomes=candidate_outcomes,
+                                    attempt_trace="|".join(attempts),
+                                    **_last_failure_fields(direct_failures),
+                                )
                             failed_tuples.add(key)
                             continue
                         if watch_state == "capacity":

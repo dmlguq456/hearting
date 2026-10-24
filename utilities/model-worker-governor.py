@@ -887,6 +887,7 @@ def _validate_partial_replacement(
         for member in replacement_manifest["members"]
     }
     gap = str(partial.get("gap_leg_id", ""))
+    gap_tuple_changed = False
     if set(source_by_node) != set(replacement_by_node) or gap not in source_by_node:
         raise ValueError("partial continuation replacement member census invalid")
     for node_id, source_member in source_by_node.items():
@@ -895,6 +896,15 @@ def _validate_partial_replacement(
         replacement_shape = {
             key: value for key, value in replacement_member.items() if key != "attempt_id"
         }
+        if automatic and node_id == gap:
+            # A never-launched preparation gap may use a newly checked tuple.
+            # Its profile, persona, source assignment and group identity remain
+            # sealed; only the actual harness fallback tuple may change.
+            for key in ("harness", "fallback_hop", "fallback_ordinal"):
+                if source_shape.get(key) != replacement_shape.get(key):
+                    gap_tuple_changed = True
+                source_shape.pop(key, None)
+                replacement_shape.pop(key, None)
         if source_shape != replacement_shape:
             raise ValueError("partial continuation replacement member drift")
         if node_id != gap and replacement_member["attempt_id"] != source_member["attempt_id"]:
@@ -973,6 +983,18 @@ def _validate_partial_replacement(
         or metadata.get("batch_leg_sha256") != source_leg_digests[source_attempt]
     ):
         raise ValueError("partial continuation gap source row invalid")
+    if gap_tuple_changed and (
+        not automatic
+        or fields[1] != "done"
+        or metadata.get("note") != "dead-candidate-preparation"
+        or metadata.get("launch_outcome") != "never-launched"
+        or metadata.get("failure_class") != "launch-tuple"
+    ):
+        raise ValueError("partial continuation tuple change lacks preparation-failure proof")
+    if gap_tuple_changed:
+        from route_authority import CANDIDATE_PREPARATION_REASONS
+        if metadata.get("reconcile_reason") not in CANDIDATE_PREPARATION_REASONS:
+            raise ValueError("partial continuation tuple change lacks typed preparation reason")
     if automatic:
         if replacement_seal["retry_claim_reused"] or metadata.get("retry_attempt_id"):
             raise ValueError("automatic replacement must not borrow legacy retry claim")
