@@ -1,0 +1,13 @@
+These fixtures use width-preserving synthetic text in place of freeform source content. cells-140.json and cells-168.json store each cell row as exact [glyph, colour_key, tint, count] runs; the oracle expands them and compares every cell and ordered hit array for every state. source.json points to view_model.json, which contains the same source values; long redacted strings use the fixture's transparent zlib/base85 encoding and test helpers decode them on load.
+
+PEERS is exact like every other state: all cells and ordered hits at 140 and 168 columns, including the filtered f5 state. Its drawing data is general: `peer_edges.cards[tag].owners` carries the owner-stage rows the reference hand-writes per tag; the GPU and question lines, lane labels and the clear marker are derived from the session, question, link and seat records. The reference draws the repository-frame watch footer only for a repo named `hearting`; the scrubbed repo name differs, so the golden carries none and `peer_edges.watches` is empty here.
+
+transitions.json is compact unindented JSON: cases store each viewer-main input chunk and a trace of state/frame references; shared frames intern identical frames, while the rows pool interns repeated cell rows stored as exact run-length records. Transition Every transition frame, PEERS included, compares all cells and ordered hits exactly. The manifest default is r14 DESIGN=4.
+
+Repository-only test runs compare the committed goldens. Running freeze_explorer.py --check with the external approved reference directory re-verifies provenance using the input hashes in manifest.json. The reference renderer and PNGs are intentionally external; no private absolute path is stored here. default-once.json is captured separately from the archived base CLI.
+
+The `attempts` record carries the route it belongs to (`route`: f5). The reference draws one owner's raw output, on that route's page; the live builder names the route of the owner output the selection reader returned, so a route page never shows another route's lines.
+
+A route record may carry `detail_title`, `detail_trailer` and `detail_after`: the words on the top band of an opened route and the note beside its stage band, which the reference words apart from the row's own title and age for some routes. A source without them gets the derived words.
+
+parity_matrix.py compares the same view model with the approved reference for every state the reference's own click targets reach, at 80, 100, 140 and 168 columns; where the reference overlaps or overflows itself the rows are excluded and Fleet must draw clean there.

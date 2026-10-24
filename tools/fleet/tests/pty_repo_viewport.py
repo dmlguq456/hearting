@@ -49,15 +49,25 @@ def _proc_start(pid):
         return None
 
 
-def _child_main(evidence_dir):
+def _child_main(evidence_dir, explorer=False):
     from fleet import control, gitinfo, render
     from fleet.model import Session
     from fleet.refresh import LiveSnapshot
 
     evidence_dir = Path(evidence_dir)
+    render.set_explorer_mode(explorer)
+    if explorer:
+        # The synthetic explorer reads the frozen redacted view model, so a route
+        # page with an owner-raw scroll strip exists without any host discovery.
+        from fleet.explorer import live as explorer_live
+        from fleet.explorer.view_model import load_fixture
+        fixture_vm = load_fixture(Path(__file__).parent / "fixtures" / "explorer" / "view_model.json")
+        explorer_live.build_view_model = lambda *_args, **_kwargs: fixture_vm
     event_path = evidence_dir / "events.jsonl"
     state_path = evidence_dir / "state.json"
+    reducer_path = evidence_dir / "effects.jsonl"
     event_path.write_text("", encoding="utf-8")
+    reducer_path.write_text("", encoding="utf-8")
     cfg = {"requested_mask": None, "supported_mask": None, "mouseinterval": None}
 
     def event(kind, **fields):
@@ -75,6 +85,15 @@ def _child_main(evidence_dir):
                         session_id="pty-fixture-sid-%02d" % i,
                         liveness="working", elapsed_min=i + 1)
                 for i in range(24)]
+
+    if explorer:
+        # Session order and the frozen view model must name the same sessions.
+        sessions = [Session(harness=str(item.get("harness") or "codex"), pid=61001 + i,
+                            proc_start="pty-fixture-start-%02d" % i,
+                            cwd="/tmp/fleet-pty-fixture", slug="fixture-%02d" % i,
+                            title="synthetic session %02d" % i, session_id=str(item["tag"]),
+                            liveness="working", elapsed_min=i + 1)
+                    for i, item in enumerate(fixture_vm.sessions)]
 
     def collect_all(**_kwargs):
         return LiveSnapshot(sessions=list(sessions))
@@ -131,10 +150,15 @@ def _child_main(evidence_dir):
                       "folded": bool(value["folded"]),
                       "spans": [[int(a), int(b)] for a, b in render._REPO_FOLD_SPANS.get(row, [])]}
                      for row, value in render._REPO_FOLD_ROWS.items()]
-        click_rows = [{"row": int(row), "pid": int(value.get("pid") or 0),
-                       "proc_start": value.get("proc_start"),
-                       "spans": [[int(a), int(b)] for a, b in render._CLICK_SPANS.get(row, [])]}
-                      for row, value in render._CLICK_ROWS.items()]
+        if explorer:
+            click_rows = [{"row": int(row),
+                           "actions": [list(hit.action) for hit in hits]}
+                          for row, hits in render._CLICK_ROWS.items()]
+        else:
+            click_rows = [{"row": int(row), "pid": int(value.get("pid") or 0),
+                           "proc_start": value.get("proc_start"),
+                           "spans": [[int(a), int(b)] for a, b in render._CLICK_SPANS.get(row, [])]}
+                          for row, value in render._CLICK_ROWS.items()]
         h, w = stdscr.getmaxyx()
         state = {"utc": _utc(), "monotonic": time.monotonic(),
                  "frame": frame_count[0], "size": [h, w],
@@ -149,6 +173,34 @@ def _child_main(evidence_dir):
                  "select_mode": bool(render._SELECT_MODE),
                  "prompt_stage": (render._PROMPT or {}).get("stage"),
                  "mouse_config": dict(cfg)}
+        if explorer:
+            frame = render._EXPLORER_FRAME
+            explorer_state = render._EXPLORER_STATE
+            state["explorer"] = {
+                "title": getattr(frame, "title", ""),
+                "regions": ({"screen": [0, 0, int(w), int(h)]} if frame is not None else {}),
+                "hit_count": len(getattr(frame, "hits", ()) or ()),
+                "state": ({"view": explorer_state.view,
+                           "scope": explorer_state.scope,
+                           "opened": explorer_state.opened,
+                           "usage_open": explorer_state.usage_open,
+                           "folds": [list(item) for item in explorer_state.folds],
+                           "scroll": [list(item) for item in explorer_state.scroll]}
+                          if explorer_state is not None else None),
+                "tree_drag": (list(explorer_state.drag) if explorer_state is not None and
+                              explorer_state.drag and explorer_state.drag[0] == "tree" else []),
+                "hits": ([[hit.y, hit.x0, hit.x1, list(hit.action)]
+                          for hit in getattr(frame, "hits", ())] if frame is not None else []),
+                "order": {
+                    "repos": list((getattr(render._EXPLORER_MODEL, "ordering", {}) or {}).get("repo_keys", ())),
+                    "sessions": list((getattr(render._EXPLORER_MODEL, "ordering", {}) or {}).get("tag_cycle", ())),
+                    "repo_by_tag": dict((getattr(render._EXPLORER_MODEL, "ordering", {}) or {}).get("repo_by_tag", {})),
+                    "session_keys": {str(key): list(value) for key, value in
+                                     (getattr(render._EXPLORER_MODEL, "ordering", {}) or {}).get("session_keys", {}).items()},
+                    "tree_cells": ([[list(cell) for cell in row[:32]] for row in frame.cells[:35]]
+                                   if frame is not None else []),
+                },
+            }
         _write_json(state_path, state)
         return result
 
@@ -163,15 +215,53 @@ def _child_main(evidence_dir):
     render._getmouse_event = capture_getmouse
     original_input_read = render._CursesInput.read
 
-    def capture_input_read(input_reader, stdscr):
-        result = original_input_read(input_reader, stdscr)
+    def capture_input_read(input_reader, stdscr, *args, **kwargs):
+        result = original_input_read(input_reader, stdscr, *args, **kwargs)
         _ch, mouse_event = result
         if mouse_event is not None:
             x, y, bstate = mouse_event
             event("decoded-mouse-read", x=x, y=y, bstate=bstate)
+        elif _ch != curses.ERR:
+            key = render._explorer_key_name(
+                _ch, searching=bool(getattr(render._EXPLORER_STATE, "searching", False)))
+            event("decoded-key-read", code=int(_ch), key=key)
         return result
 
     render._CursesInput.read = capture_input_read
+    original_explorer_handle = render._explorer_handle
+
+    def capture_explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
+        if ch == curses.KEY_MOUSE:
+            event("explorer-mouse-dispatch", x=mouse_event[0] if mouse_event else None,
+                  y=mouse_event[1] if mouse_event else None,
+                  bstate=mouse_event[2] if mouse_event else None,
+                  size=list(size or ()), hit_valid=bool(render._HIT_VALID),
+                  hit_size=list(render._HIT_SIZE or ()),
+                  same_snapshot=(render._HIT_SNAPSHOT_ID == id(snapshot)),
+                  current=render._explorer_click_current(size, snapshot) if size else False)
+        return original_explorer_handle(ch, mouse_event, size, snapshot)
+
+    render._explorer_handle = capture_explorer_handle
+    from fleet.explorer import state as explorer_state_module
+    original_reduce = explorer_state_module.reduce
+
+    def capture_reduce(*args, **kwargs):
+        result = original_reduce(*args, **kwargs)
+        row = {"utc": _utc(), "type": args[1].get("type") if len(args) > 1 and
+               isinstance(args[1], dict) else "key", "event": args[1] if len(args) > 1 and
+               isinstance(args[1], dict) else str(args[1]),
+               "state": {"view": result[0].view, "scope": result[0].scope,
+                         "usage_open": result[0].usage_open,
+                         "scroll": [list(item) for item in result[0].scroll]},
+               "effects": [list(item) for item in result[1]]}
+        if isinstance(row["event"], dict):
+            row["event"] = {key: value for key, value in row["event"].items()
+                            if key != "ordering"}
+        with reducer_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+        return result
+
+    explorer_state_module.reduce = capture_reduce
     original_mouse_event = render._handle_mouse_event
 
     def capture_mouse_event(x, y, bstate):
@@ -203,13 +293,19 @@ def _child_main(evidence_dir):
 
 
 class PtyRun:
-    def __init__(self, evidence_dir):
+    def __init__(self, evidence_dir, *, cols=120, rows=40, live_capture=False):
         self.evidence_dir = Path(evidence_dir).resolve()
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
-        self.mode = "default" if "FLEET_MOUSE" not in os.environ else "opt-out"
+        self.cols, self.rows = max(40, int(cols)), max(12, int(rows))
+        self.live_capture = bool(live_capture)
+        self.mode = ("live-capture" if self.live_capture else
+                     "default" if "FLEET_MOUSE" not in os.environ else "opt-out")
+        self.explorer = False
         self.transcript = bytearray()
         self.inputs = []
         self.assertions = []
+        self.drag_actions = []
+        self.drag_previews = []
         self.started_mono = time.monotonic()
         self.started_utc = _utc()
         self.child = None
@@ -344,12 +440,19 @@ class PtyRun:
         # state snapshot so startup polling cannot mistake it for this child.
         (self.evidence_dir / "state.json").unlink(missing_ok=True)
         master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ,
+                    struct.pack("HHHH", self.rows, self.cols, 0, 0))
         child_env = dict(os.environ)
         child_env["TERM"] = os.environ.get("TERM") or "xterm-256color"
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
-        command = [sys.executable, str(Path(__file__).resolve()), "--_fixture-child",
-                   "--evidence-dir", str(self.evidence_dir)]
+        if self.live_capture:
+            command = [sys.executable, str(TOOLS_DIR / "fleet" / "fleet.py"), "--explorer"]
+            child_env["FLEET_PTY_LIVE_CAPTURE"] = "1"
+        else:
+            command = [sys.executable, str(Path(__file__).resolve()), "--_fixture-child",
+                       "--evidence-dir", str(self.evidence_dir)]
+            if self.explorer:
+                command.append("--explorer")
         self.child = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
                                       cwd=str(REPO_ROOT), env=child_env, close_fds=True,
                                       start_new_session=True)
@@ -654,9 +757,13 @@ class PtyRun:
                   "TERM": os.environ.get("TERM"),
                   "FLEET_MOUSE": os.environ.get("FLEET_MOUSE", "<unset>"),
                   "child": getattr(self, "child_identity", None),
-                  "returncode": status, "initial_size": [40, 120],
-                  "resize_sizes": [[18, 80]] if any(x.get("label") == "resize" for x in self.inputs) else [],
+                  "returncode": status, "initial_size": [self.rows, self.cols],
+                  "resize_sizes": [[row, col] for row, col in
+                                   ((x.get("rows"), x.get("cols")) for x in self.inputs)
+                                   if row is not None and col is not None],
+                  "source": "host" if self.live_capture else "synthetic-fixture",
                   "inputs": self.inputs, "assertions": self.assertions,
+                  "drag_actions": self.drag_actions, "drag_previews": self.drag_previews,
                   "passed": all(x["passed"] for x in self.assertions),
                   "terminal_limitations": [
                       "This is an xterm-256color PTY with SGR mouse packets; it does not emulate a physical mouse or every terminal emulator.",
@@ -671,7 +778,11 @@ class PtyRun:
     def execute(self):
         self.start()
         try:
-            if self.mode == "default":
+            if self.live_capture:
+                self.run_live_capture()
+            elif self.explorer:
+                self.run_explorer()
+            elif self.mode == "default":
                 self.run_default()
             else:
                 self.run_opt_out()
@@ -682,15 +793,319 @@ class PtyRun:
             result = self.finish()
         return result
 
+    def run_live_capture(self):
+        """Capture the real read-only Fleet explorer for evidence; the child is ours to stop."""
+        self.drain(3.0)
+        alive = self.child.poll() is None
+        raw = bytes(self.transcript)
+        self.check("host explorer produced a colored terminal frame",
+                   alive and b"\x1b[" in raw and len(raw) > 256,
+                   {"alive": alive, "bytes": len(raw), "cols": self.cols, "rows": self.rows})
+        (self.evidence_dir / "capture.ansi").write_bytes(raw)
+        self.send(b"q", "quit-owned-live-capture")
+        self.drain(0.25)
+
+    def run_explorer(self):
+        state = self.wait_for("initial explorer frame",
+                              lambda s: s.get("hit_valid") and s.get("explorer", {}).get("hit_count"))
+        initial = state["explorer"]["state"]
+        self.check("explorer frame has screen bounds and view state",
+                   bool(state["explorer"].get("regions")) and bool(initial.get("view")),
+                   state.get("explorer"))
+
+        # Split one CSI arrow across PTY writes around the decoder's ESC deadline.
+        before_view = initial.get("view")
+        self.send(b"\x1b", "split-arrow-prefix")
+        self.drain(0.008)
+        self.send(b"[B", "split-arrow-tail")
+        down = self.wait_for("split CSI arrow is decoded as one down key",
+                             lambda _s: any(row.get("kind") == "decoded-key-read"
+                                            and row.get("key") == "down"
+                                            for row in self.read_events()))
+        decoded = [row for row in self.read_events() if row.get("kind") == "decoded-key-read"]
+        self.check("split escape bytes decode to one arrow event",
+                   sum(row.get("key") == "down" for row in decoded) == 1,
+                   {"view_before": before_view,
+                    "view_after": down["explorer"]["state"].get("view"),
+                    "decoded": decoded[-3:]})
+
+        # Multiple complete inputs in one write remain ordered and each reaches the live loop.
+        start_index = len(self.read_events())
+        start_reducers = len(self.read_jsonl("effects.jsonl"))
+        self.send(b"\tu", "batched-tab-usage")
+        batched = self.wait_for("both batched keys reach the input loop",
+                                lambda s: len([row for row in self.read_events()[start_index:]
+                                               if row.get("kind") == "decoded-key-read"
+                                               and row.get("key") in ("tab", "u")]) >= 2 and
+                                len(self.read_jsonl("effects.jsonl")) >= start_reducers + 2 and
+                                s.get("explorer", {}).get("state", {}).get("usage_open")
+                                != initial["usage_open"])
+        keys = [row.get("key") for row in self.read_events()[start_index:]
+                if row.get("kind") == "decoded-key-read"]
+        self.check("batched tab and usage keys preserve order", keys[:2] == ["tab", "u"], keys)
+        self.check("batched tab and usage keys both change explorer state",
+                   batched["explorer"]["state"]["view"] == initial["view"] and
+                   batched["explorer"]["state"]["scope"] == "-" and
+                   batched["explorer"]["state"]["usage_open"] != initial["usage_open"],
+                   batched["explorer"]["state"])
+
+        before_f = batched["explorer"]["state"]
+        self.send(b"u", "toggle-explorer-usage")
+        changed = self.wait_for("usage key reaches reducer",
+                                lambda s: s.get("explorer", {}).get("state", {}).get("usage_open")
+                                != before_f.get("usage_open"))
+        self.check("usage toggles in live explorer",
+                   changed["explorer"]["state"]["usage_open"] != before_f["usage_open"],
+                   changed["explorer"]["state"])
+
+        # Arrow navigation, Enter's advisory focus request, and both parent steps
+        # are exercised through the real PTY reader/reducer/draw loop.
+        entered = changed["explorer"]["state"]
+        self.send(b"\x1b[A", "explorer-up-session")
+        up_state = self.wait_for("up key selects a session page",
+                                 lambda s: s.get("explorer", {}).get("state", {}).get("scope")
+                                 not in (None, "-"))
+        self.check("up key changes the selected session page",
+                   up_state["explorer"]["state"]["scope"] != entered.get("scope"),
+                   up_state["explorer"]["state"])
+        self.send(b"\r", "explorer-enter-pane")
+        effects = self.wait_for("Enter emits an advisory pane request",
+                                lambda _s: any(row.get("effects") for row in
+                                               self.read_jsonl("effects.jsonl")))
+        effect_rows = self.read_jsonl("effects.jsonl")
+        self.check("Enter requests pane focus without executing a command",
+                   any(item[:1] == ["focus"] for row in effect_rows
+                       for item in row.get("effects", [])) and
+                   not any(item[:1] == ["command"] for row in effect_rows
+                           for item in row.get("effects", [])),
+                   effect_rows[-3:])
+        before_escape = effects["explorer"]["state"]["scope"]
+        self.send(b"\x1b", "explorer-escape-parent")
+        parent = self.wait_for("Escape returns to the session parent",
+                               lambda s: s.get("explorer", {}).get("state", {}).get("scope")
+                               != before_escape)
+        parent_scope = parent["explorer"]["state"]["scope"]
+        self.send(b"\x7f", "explorer-backspace-parent")
+        root = self.wait_for("Backspace returns to the list",
+                             lambda s: s.get("explorer", {}).get("state", {}).get("scope")
+                             == "-")
+        self.check("Escape and Backspace walk page parents",
+                   parent_scope != "-" and root["explorer"]["state"]["scope"] == "-",
+                   {"session": before_escape, "parent": parent_scope,
+                    "list": root["explorer"]["state"]})
+
+        if os.environ.get("FLEET_PTY_DRAG") == "1":
+            def tree_hits(state, kind):
+                return [hit for hit in state["explorer"]["hits"]
+                        if hit[3][:1] == ["scope"] and
+                        ((kind == "repo" and str(hit[3][1]).startswith("repo:")) or
+                         (kind == "session" and not str(hit[3][1]).startswith("repo:")
+                          and ":" not in str(hit[3][1])))]
+
+            repos = tree_hits(root, "repo")
+            self.check("tree exposes at least two repo rows for drag", len(repos) >= 2, repos)
+            before_repos = list(root["explorer"]["order"]["repos"])
+            source, target = repos[1], repos[0]
+            sx, sy = source[1] + 2, source[0]
+            tx, ty = target[1] + 2, target[0]
+            self.mouse(0, sx, sy)
+            held = self.wait_for("repo press holds a pending tree drag",
+                                 lambda s: s.get("explorer", {}).get("tree_drag"))
+            held_cells = held["explorer"]["order"]["tree_cells"]
+            source_row = next(hit[0] for hit in held["explorer"]["hits"]
+                              if hit[3][:2] == ["scope", source[3][1]])
+            prior_cells = root["explorer"]["order"]["tree_cells"]
+            self.check("repo press leaves the frame unchanged until motion",
+                       held_cells[source_row] == prior_cells[source_row],
+                       {"before": prior_cells[source_row], "press": held_cells[source_row]})
+            self.mouse(32, tx, ty)
+            preview = self.wait_for("repo drag previews a valid insertion",
+                                    lambda s: len(s.get("explorer", {}).get("tree_drag", [])) >= 9
+                                    and s["explorer"]["tree_drag"][7])
+            cells = preview["explorer"]["order"]["tree_cells"]
+            grabbed = preview["explorer"]["tree_drag"][2]
+            grabbed_hit = next(hit for hit in preview["explorer"]["hits"]
+                               if hit[3][:2] == ["scope", "repo:" + grabbed])
+            self.check("repo grabbed row uses the highlighted background",
+                       all(cell[2] == 236 for cell in cells[grabbed_hit[0]]),
+                       cells[grabbed_hit[0]])
+            target_repo_id = str(target[3][1])[5:]
+            drop_hit = next(hit for hit in preview["explorer"]["hits"]
+                            if hit[3][:2] == ["scope", "repo:" + target_repo_id])
+            self.check("repo drop row carries the insertion marker",
+                       cells[drop_hit[0]][1][0] == "↳", cells[drop_hit[0]][:3])
+            self.drag_previews.append({"grabbed": {"row": grabbed_hit[0], "cells": cells[grabbed_hit[0]]},
+                                       "drop": {"row": drop_hit[0], "cells": cells[drop_hit[0]]}})
+            self.drag_actions.append({"kind": "repo", "source": source[3][1][5:],
+                                      "target": target_repo_id})
+            self.mouse(0, tx, ty, release=True)
+            reordered = self.wait_for("repo release applies ordering",
+                                      lambda s: s.get("explorer", {}).get("order", {}).get("repos")
+                                      != before_repos)
+            self.check("repo drag moves to the first insertion point",
+                       reordered["explorer"]["order"]["repos"][0] == before_repos[1],
+                       reordered["explorer"]["order"]["repos"])
+
+            by_repo = {}
+            for hit in tree_hits(reordered, "session"):
+                session_tag = str(hit[3][1])
+                owner = max((repo for repo in tree_hits(reordered, "repo") if repo[0] < hit[0]),
+                            key=lambda repo: repo[0], default=None)
+                if owner:
+                    by_repo.setdefault(str(owner[3][1]), []).append(hit)
+            group = next((rows for rows in by_repo.values() if len(rows) >= 2), None)
+            self.check("tree exposes two sessions in one repo", group is not None, by_repo)
+            session_source, session_target = group[1], group[0]
+            self.drag_actions.append({"kind": "session", "source": session_source[3][1],
+                                      "target": session_target[3][1]})
+            before_sessions = list(reordered["explorer"]["order"]["sessions"])
+            packet = ("\x1b[<0;%d;%dM\x1b[<32;%d;%dM\x1b[<0;%d;%dm" %
+                      (session_source[1] + 3, session_source[0] + 1,
+                       session_target[1] + 3, session_target[0] + 1,
+                       session_target[1] + 3, session_target[0] + 1)).encode("ascii")
+            self.send(packet, "batched-session-drag")
+            session_reordered = self.wait_for("batched session drag commits",
+                                              lambda s: s.get("explorer", {}).get("order", {}).get("sessions")
+                                              != before_sessions)
+            self.check("same-repo session drag changes the shared cycle order",
+                       session_reordered["explorer"]["order"]["sessions"] != before_sessions,
+                       session_reordered["explorer"]["order"])
+
+            visible_sessions = tree_hits(session_reordered, "session")
+            cross_source = visible_sessions[0]
+            cross_target = next(hit for hit in visible_sessions
+                                if hit[0] != cross_source[0] and
+                                session_reordered["explorer"]["order"]["repo_by_tag"].get(hit[3][1]) !=
+                                session_reordered["explorer"]["order"]["repo_by_tag"].get(cross_source[3][1]))
+            before_cross = list(session_reordered["explorer"]["order"]["sessions"])
+            packet = ("\x1b[<0;%d;%dM\x1b[<32;%d;%dM\x1b[<0;%d;%dm" %
+                      (cross_source[1] + 3, cross_source[0] + 1,
+                       cross_target[1] + 3, cross_target[0] + 1,
+                       cross_target[1] + 3, cross_target[0] + 1)).encode("ascii")
+            self.send(packet, "cross-repo-session-drop")
+            self.drain(0.25)
+            after_cross = self.state()
+            self.check("cross-repo session drop is refused",
+                       after_cross["explorer"]["order"]["sessions"] == before_cross,
+                       after_cross["explorer"]["order"])
+
+            outside_source = tree_hits(after_cross, "repo")[0]
+            outside_before = list(after_cross["explorer"]["order"]["repos"])
+            self.mouse(0, outside_source[1] + 2, outside_source[0])
+            self.mouse(32, 40, outside_source[0])
+            self.mouse(0, 40, outside_source[0], release=True)
+            self.drain(0.2)
+            self.check("release outside the tree cancels the drag",
+                       self.state()["explorer"]["order"]["repos"] == outside_before,
+                       self.state()["explorer"]["state"])
+
+        # Several complete packets in one PTY write retain order; wheel and
+        # button-1 drag packets are decoded even when this synthetic page has no
+        # scrollable record to move.
+        start = len(self.read_events())
+        self.send(b"\x1b[<64;10;5M\x1b[<65;10;5M", "explorer-wheel-both-directions")
+        self.send(b"\x1b[<0;10;5M\x1b[<32;10;8M\x1b[<0;10;8m",
+                  "explorer-drag-press-motion-release")
+        mouse_rows = self.wait_for("wheel and drag packets reach the decoder",
+                                   lambda _s: len([row for row in self.read_events()[start:]
+                                                   if row.get("kind") == "decoded-mouse-read"]) >= 5)
+        decoded_mouse = [row for row in self.read_events()[start:]
+                         if row.get("kind") == "decoded-mouse-read"]
+        self.check("wheel packets and drag motion are decoded in order",
+                   len(decoded_mouse) >= 5 and
+                   any(row.get("bstate") & getattr(curses, "BUTTON4_PRESSED", 0)
+                       for row in decoded_mouse) and
+                   any(row.get("bstate") & getattr(curses, "BUTTON5_PRESSED", 0)
+                       for row in decoded_mouse) and
+                   any(row.get("bstate") & (1 << 30) for row in decoded_mouse),
+                   decoded_mouse)
+
+        # Open a route page whose owner-raw strip scrolls, then move it by wheel and drag.
+        route_hit = next((hit for hit in root["explorer"]["hits"] if hit[3][:1] == ["route"]
+                          and hit[3][1] == "f5"), None)
+        self.check("list offers the f5 route row", route_hit is not None, root["explorer"]["hits"][:12])
+        row_y, x0 = route_hit[0], route_hit[1]
+        self.send(b"\x1b[<0;%d;%dM\x1b[<0;%d;%dm" % (x0 + 4, row_y + 1, x0 + 4, row_y + 1),
+                  "explorer-click-route-row")
+        page = self.wait_for("route page with a scroll strip opens",
+                             lambda s: s.get("explorer", {}).get("state", {}).get("scope") == "route:f5" and
+                             any(hit[3][:2] == ["scroll", "rawoff"] for hit in s["explorer"]["hits"]))
+        strip = next(hit for hit in page["explorer"]["hits"] if hit[3][:2] == ["scroll", "rawoff"])
+        strip_y, strip_x, top = strip[0] + 1, strip[1] + 4, strip[3][2]
+        self.check("owner raw strip can scroll", top >= 6, strip)
+
+        def rawoff(state):
+            return dict((k, v) for k, v in state["explorer"]["state"]["scroll"]).get("rawoff", 0)
+
+        self.send(b"\x1b[<64;%d;%dM" % (strip_x + 1, strip_y + 1), "explorer-strip-wheel-back")
+        back = self.wait_for("wheel moves the strip back three rows", lambda s: rawoff(s) == 3)
+        self.send(b"\x1b[<65;%d;%dM" % (strip_x + 1, strip_y + 1), "explorer-strip-wheel-forward")
+        forward = self.wait_for("opposite wheel returns it", lambda s: rawoff(s) == 0)
+        self.send(b"\x1b[<0;%d;%dM" % (strip_x + 1, strip_y + 1), "explorer-strip-drag-press")
+        self.send(b"\x1b[<32;%d;%dM" % (strip_x + 1, strip_y + 3), "explorer-strip-drag-motion")
+        dragged = self.wait_for("drag motion follows the pointer", lambda s: rawoff(s) == 2)
+        self.send(b"\x1b[<32;%d;%dM" % (strip_x + 1, strip_y + 5), "explorer-strip-drag-further")
+        further = self.wait_for("drag keeps following", lambda s: rawoff(s) == 4)
+        self.send(b"\x1b[<0;%d;%dm" % (strip_x + 1, strip_y + 5), "explorer-strip-drag-release")
+        self.send(b"\x1b[<32;%d;%dM" % (strip_x + 1, strip_y + 7), "explorer-strip-motion-after-release")
+        self.drain(0.3)
+        self.check("wheel and drag change the strip's scroll offset",
+                   rawoff(back) == 3 and rawoff(forward) == 0 and rawoff(dragged) == 2 and
+                   rawoff(further) == 4 and rawoff(self.state()) == 4,
+                   {"wheel_back": rawoff(back), "wheel_forward": rawoff(forward),
+                    "drag": rawoff(dragged), "drag_more": rawoff(further),
+                    "after_release": rawoff(self.state())})
+
+        # Clipped content: this page is longer than the pane, so what falls below the pane rule is
+        # cut and the feed, key and status lines own those rows. A click there has no hit, no effect
+        # and changes no state.
+        settled = self.state()
+        height = settled["size"][0]
+        pane_x = strip[1] + 6
+        clipped = [("pane rule / overflow marker", pane_x, height - 4), ("feed line", pane_x, height - 3),
+                   ("key line", 10, height - 2), ("status line", 10, height - 1)]
+        covered = [name for name, x, y in clipped
+                   if any(hit[0] == y and hit[1] <= x < hit[2] for hit in settled["explorer"]["hits"])]
+        self.check("nothing is clickable on the rows below the pane", covered == [], covered)
+        def requested():
+            return [row for row in self.read_jsonl("effects.jsonl") if row.get("effects")]
+        effects_before = len(requested())
+        frames_before = settled["frame"]
+        for name, x, y in clipped:
+            self.send(b"\x1b[<0;%d;%dM\x1b[<0;%d;%dm" % (x + 1, y + 1, x + 1, y + 1),
+                      "explorer-click-clipped-" + name.split()[0])
+        self.drain(0.5)
+        after = self.state()
+        self.check("a click on clipped content changes no state and requests no effect",
+                   after["explorer"]["state"] == settled["explorer"]["state"] and
+                   len(requested()) == effects_before,
+                   {"before": settled["explorer"]["state"], "after": after["explorer"]["state"],
+                    "frames": [frames_before, after["frame"]]})
+
+    def read_jsonl(self, name):
+        try:
+            path = self.evidence_dir / name
+            return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()]
+        except (OSError, json.JSONDecodeError):
+            return []
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence-dir", required=True)
     parser.add_argument("--_fixture-child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--explorer", action="store_true", help="exercise the explorer in the PTY")
+    parser.add_argument("--live-capture", action="store_true",
+                        help="capture the host-backed explorer in the PTY")
+    parser.add_argument("--cols", type=int, default=120)
+    parser.add_argument("--rows", type=int, default=40)
     args = parser.parse_args()
     if args._fixture_child:
-        return _child_main(args.evidence_dir)
-    run = PtyRun(args.evidence_dir)
+        return _child_main(args.evidence_dir, explorer=args.explorer)
+    run = PtyRun(args.evidence_dir, cols=args.cols, rows=args.rows,
+                 live_capture=args.live_capture)
+    run.explorer = args.explorer
     result = run.execute()
     print(json.dumps({"mode": result["mode"], "passed": result["passed"],
                       "returncode": result["returncode"],

@@ -17,10 +17,8 @@ if _TOOLS_DIR not in sys.path:
 
 from fleet import render  # noqa: E402
 from fleet.collectors import dispatch  # noqa: E402
-from fleet.explorer.focus import output_plans, read_attempts  # noqa: E402
-from fleet.explorer.ledger import build_ledger_rows  # noqa: E402
-from fleet.explorer.requests import build_tabs, latest_results  # noqa: E402
-from fleet.explorer.types import AttemptRow, FocusKey  # noqa: E402
+from fleet.explorer.focus import read_attempts  # noqa: E402
+from fleet.explorer.types import AttemptRow  # noqa: E402
 from fleet.model import DispatchJob, current_attempt_rank  # noqa: E402
 from fleet.route import _node_state  # noqa: E402
 from fleet.tests.snapshot_fixture import build_observed_lines  # noqa: E402
@@ -152,38 +150,20 @@ class SupersessionIsUnchanged(unittest.TestCase):
 
 
 class Fleet2PicksTheRunningAttempt(_Registry):
+    """fleet2 draws route stages from the shared route view (``route._node_state`` above);
+    its own attempt rows only carry the same verdict."""
+
     def setUp(self):
         super().setUp()
         live = {"att-cont-8494ab15d3a2f3d0-2": {"liveness": "working"}}
         self.attempts = read_attempts(self.jobs_log, PARENT_SID, live)
-        routes = {ROUTE: {"route_id": ROUTE, "nodes": [{"id": "plan"}, {"id": "execute"}]}}
-        (self.tab,) = build_tabs(self.attempts, routes, {})
-        self.routes = routes
 
     def test_read_attempts_carries_the_runtime_verdict(self):
         flags = {row.attempt_id[-2:]: row.registered_only for row in self.attempts
                  if row.route_node == "execute"}
         self.assertEqual(flags, {"-1": False, "-2": False, "-3": True})
 
-    def test_ledger_row_is_the_running_attempt(self):
-        execute = next(row for row in build_ledger_rows(self.tab, self.attempts, self.routes)
-                       if row.route_node == "execute")
-        self.assertEqual((execute.attempt_id, execute.liveness, execute.attempts),
-                         ("att-cont-8494ab15d3a2f3d0-2", "working", 3))
-
-    def test_stage_output_and_default_output_follow_the_running_attempt(self):
-        _title, plans, _ = output_plans(FocusKey("claude", PARENT_SID, stage_id="execute"),
-                                        self.tab, self.attempts)
-        self.assertEqual([p.attempt_id for p in plans], ["att-cont-8494ab15d3a2f3d0-2"])
-        _title, plans, _ = output_plans(FocusKey("claude", PARENT_SID), self.tab, self.attempts)
-        self.assertEqual([p.attempt_id for p in plans], [OWNER, "att-cont-8494ab15d3a2f3d0-2"])
-
-    def test_header_results_use_the_same_current_attempt(self):
-        current = [row.attempt_id for row in latest_results([self.tab], self.attempts)
-                   if row.route_node == "execute"]
-        self.assertEqual(current, ["att-cont-8494ab15d3a2f3d0-2"])
-
-    def test_a_newer_launched_attempt_still_supersedes_in_the_ledger(self):
+    def test_a_newer_launched_attempt_still_supersedes_an_older_row(self):
         old = AttemptRow("att-old", 10, "done", "s", "codex", worker_type="stage", depth=2,
                          route_id=ROUTE, route_node="execute")
         new = AttemptRow("att-new", 11, "open", "s", "codex", worker_type="stage", depth=2,

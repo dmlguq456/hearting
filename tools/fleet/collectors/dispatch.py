@@ -16,6 +16,7 @@ live_stage() derives the real pipeline stage from plans/*_<slug>/ artifacts (por
 statusline.sh:131-171) so the label reflects live progress, not the static argv.
 """
 import functools
+from collections import OrderedDict
 import json
 import glob
 import hashlib
@@ -27,6 +28,7 @@ import sqlite3
 import stat
 import sys
 import time
+from types import MappingProxyType
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -217,6 +219,118 @@ def _parse_pipe_meta_uncached(pipe):
 
 
 _parse_pipe_meta_cached = functools.lru_cache(maxsize=8192)(_parse_pipe_meta_uncached)
+
+_PARSED_REGISTRY_ROWS = OrderedDict()
+_PARSED_REGISTRY_LINE_COUNTS = {}
+_PARSED_REGISTRY_SEGMENTS = {}
+_PARSED_REGISTRY_ROWS_LIMIT = 32
+
+
+def _parse_registry_lines(path, lines, generation, *, first_line=0,
+                          complete_line_count=None, segments=None):
+    """Parse registry rows once, retaining physical line positions."""
+    rows = []
+    # Match the legacy registry_order contract: enumerate the physical lines from
+    # zero, including blank and malformed lines, before filtering invalid rows.
+    for line_number, line in enumerate(lines, first_line):
+        fields = tuple(line.split("\t"))
+        if len(fields) != 6:
+            continue
+        metadata = MappingProxyType(dict(_parse_pipe_meta(fields[5] or "")))
+        rows.append((line_number, fields, metadata))
+    result = tuple(rows)
+    key = (os.path.abspath(os.fspath(path)), generation)
+    _PARSED_REGISTRY_ROWS[key] = result
+    _PARSED_REGISTRY_LINE_COUNTS[key] = (
+        first_line + len(lines) if complete_line_count is None
+        else complete_line_count
+    )
+    _PARSED_REGISTRY_SEGMENTS[key] = tuple(segments) if segments is not None else None
+    _PARSED_REGISTRY_ROWS.move_to_end(key)
+    while len(_PARSED_REGISTRY_ROWS) > _PARSED_REGISTRY_ROWS_LIMIT:
+        evicted, _value = _PARSED_REGISTRY_ROWS.popitem(last=False)
+        _PARSED_REGISTRY_LINE_COUNTS.pop(evicted, None)
+        _PARSED_REGISTRY_SEGMENTS.pop(evicted, None)
+    return result
+
+
+def parsed_registry_rows(path):
+    """Return an immutable parsed snapshot of valid six-field registry rows.
+
+    During a collector pass the shared pinned registry generation is used; direct
+    callers read the path once. Metadata uses the existing pipe parser so current
+    legacy and key/value forms retain their established meaning.
+    """
+    lines = _pinned_registry_lines(path)
+    generation = None
+    view = None
+    if lines is None:
+        try:
+            source = Path(path)
+            before = source.stat()
+            lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+            after = source.stat()
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                    before.st_ctime_ns) == (after.st_dev, after.st_ino, after.st_size,
+                                            after.st_mtime_ns, after.st_ctime_ns):
+                generation = (after.st_dev, after.st_ino, after.st_size,
+                              after.st_mtime_ns, after.st_ctime_ns)
+        except OSError:
+            return ()
+    else:
+        try:
+            view = _dispatch_registry_cache.current_registry_view(Path(path))
+            generation = tuple(view.signature)
+        except (OSError, ValueError):
+            pass
+    key = (os.path.abspath(os.fspath(path)), generation)
+    cached = _PARSED_REGISTRY_ROWS.get(key) if generation is not None else None
+    if cached is not None:
+        _PARSED_REGISTRY_ROWS.move_to_end(key)
+        return cached
+    # The shared registry cache already retains append-only byte segments. Reuse
+    # the parsed prefix too, so a generation append parses only newly added rows.
+    prefix_key = None
+    prefix_rows = ()
+    prefix_lines = 0
+    if view is not None and generation is not None and len(generation) >= 3:
+        identity = (generation[0], generation[1])
+        for candidate in reversed(_PARSED_REGISTRY_ROWS):
+            candidate_path, candidate_generation = candidate
+            if (candidate_path != key[0] or not isinstance(candidate_generation, tuple)
+                    or len(candidate_generation) < 3):
+                continue
+            if ((candidate_generation[0], candidate_generation[1]) == identity
+                    and candidate_generation[2] < generation[2]):
+                old_segments = _PARSED_REGISTRY_SEGMENTS.get(candidate)
+                new_segments = tuple(view._segments)
+                if (old_segments is not None and len(old_segments) <= len(new_segments)
+                        and all(old is new for old, new in zip(old_segments, new_segments))):
+                    prefix_key = candidate
+                    prefix_lines = _PARSED_REGISTRY_LINE_COUNTS.get(candidate, 0)
+                    prefix_rows = tuple(row for row in _PARSED_REGISTRY_ROWS[candidate]
+                                        if row[0] < prefix_lines)
+                    break
+    if prefix_key is not None and prefix_lines <= len(lines):
+        suffix = _parse_registry_lines(
+            path, lines[prefix_lines:], generation, first_line=prefix_lines,
+            complete_line_count=view.line_count - int(view.has_partial_tail),
+            segments=view._segments)
+        result = tuple(prefix_rows) + tuple(suffix)
+        _PARSED_REGISTRY_ROWS[key] = result
+        _PARSED_REGISTRY_LINE_COUNTS[key] = view.line_count - int(view.has_partial_tail)
+        _PARSED_REGISTRY_SEGMENTS[key] = tuple(view._segments)
+        while len(_PARSED_REGISTRY_ROWS) > _PARSED_REGISTRY_ROWS_LIMIT:
+            evicted, _value = _PARSED_REGISTRY_ROWS.popitem(last=False)
+            _PARSED_REGISTRY_LINE_COUNTS.pop(evicted, None)
+            _PARSED_REGISTRY_SEGMENTS.pop(evicted, None)
+        return result
+    if view is not None:
+        return _parse_registry_lines(
+            path, lines, generation,
+            complete_line_count=view.line_count - int(view.has_partial_tail),
+            segments=view._segments)
+    return _parse_registry_lines(path, lines, generation)
 
 
 def _parse_pipe(pipe):
@@ -2808,21 +2922,9 @@ def _scan_registry_evidence(paths):
     for path in paths:
         path_result = {}
         path_attempts = {}
-        try:
-            rows = _pinned_registry_lines(path)
-            if rows is None:
-                with open(path, encoding="utf-8", errors="replace") as f:
-                    rows = f.read().splitlines()
-        except OSError:
-            continue
-        for registry_order, line in enumerate(rows):
-            if not line.strip():
-                continue
-            fields = line.split("\t")
-            if len(fields) != 6:
-                continue
+        rows = parsed_registry_rows(path)
+        for registry_order, fields, meta in rows:
             ts, status, _repo, _worktree, slug, pipe = fields
-            meta = _parse_pipe_meta(pipe or "")
             attempt_contract = _attempt_contract(meta)
             route_id = meta.get("route_id")
             route_node = meta.get("route_node")

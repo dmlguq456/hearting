@@ -1,459 +1,283 @@
-"""Pure viewer-state schema conversion and Explorer keyboard reducer.
+"""Compact view-local state and reducer for the Fleet explorer."""
 
-The reducer performs no I/O and adds no mode: ↑↓ move or scroll the focused region, ←→ move the
-focus between regions, Enter opens / selects, Tab walks the request tabs, ``/`` filters the
-navigation by name, ``e`` folds the navigation, ``F`` hides the event row. Selection and tab
-survive every fold.
-"""
-
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, replace
 from collections.abc import Mapping
-
-REGIONS = ("nav", "ledger", "output", "tabs", "relations", "system")
-WIDE_NAV_COLS = 100
-PID_PREFIX = "pid:"               # a schema-1 kill cursor, resolved to a navigation row by ``settle``
 
 
 @dataclass(frozen=True)
-class ExplorerState:
-    selection: str = ""
-    tab: str = ""
-    stage: str = ""
-    active_region: str = "nav"
-    nav_fold: tuple = ()
-    scrolls: tuple = ()
-    nav_visible: bool = True
-    events_visible: bool = True
-    search: str = ""
-    tab_order: tuple = ()
-    nav_open: tuple = ()
-    keep: tuple = ()
-    history: tuple = ()
-    searching: bool = False
-    focus: str = ""
+class NavState:
+    view: str = "OVERVIEW"
+    scope: str = "-"
+    opened: str = ""
+    usage_open: bool = False
+    scroll: tuple = ()
+    title: str = "OVERVIEW"
+    status: str = ""
+    parents: tuple = ()
+    folds: tuple = ()
+    drag: tuple = ()
 
-    def scroll_map(self):
-        return dict(self.scrolls)
+    def fold_map(self):
+        return dict(self.folds)
 
-    def fold_set(self):
-        return set(self.nav_fold)
+    def opened_for(self, key, default=""):
+        return self.fold_map().get(str(key), default)
 
-
-def initial_state(cols=WIDE_NAV_COLS):
-    """A fresh view: the navigation starts folded below 100 columns."""
-    return ExplorerState(nav_visible=int(cols) >= WIDE_NAV_COLS)
-
-
-def _mapping(value):
-    if isinstance(value, Mapping):
-        return value
-    if hasattr(value, "__dict__"):
-        return vars(value)
-    return {}
+    @classmethod
+    def from_value(cls, value=None):
+        if isinstance(value, cls):
+            return value
+        if not isinstance(value, Mapping):
+            return cls()
+        names = set(cls.__dataclass_fields__)
+        values = {key: value[key] for key in names if key in value}
+        for key in ("folds", "scroll", "drag"):
+            values[key] = tuple(tuple(item) for item in values.get(key, ()))
+        values["parents"] = tuple(values.get("parents", ()))
+        return cls(**values)
 
 
-def _clean_scrolls(value):
-    if not isinstance(value, Mapping):
-        return ()
-    result = []
-    for identity, offset in value.items():
-        try:
-            result.append((str(identity), max(0, int(offset))))
-        except (TypeError, ValueError, OverflowError):
-            continue
-    return tuple(sorted(result))
+VIEWS = ("OVERVIEW", "PEERS", "ROUTES", "QUESTIONS", "HISTORY", "COMPUTE", "MEMORY", "MODELS", "SYSTEM")
 
 
-def _strings(value):
-    return tuple(str(x) for x in (value or ()))
+def reduce(state, event, frame=None):
+    """Apply one normalized input or hit-map action and preserve its order."""
+    before = NavState.from_value(state)
+    after, effects = _reduce(before, event, frame)
+    folds = after.fold_map()
+    if (after.scope, after.view) != (before.scope, before.view):
+        # A generation pick belongs to the page it was made on.
+        folds = {key: value for key, value in folds.items() if not key.startswith("ui:gen:")}
+    # The open OVERVIEW session is a view-local fold; it is not cleared by moving away.
+    after = replace(after, opened=str(folds.get("sopen:OVERVIEW") or ""),
+                    folds=tuple(sorted(folds.items())))
+    return after, effects
 
 
-def restore(value=None):
-    """Restore schema 2 and translate useful selection/fold/offset from schema 1."""
-    data = _mapping(value)
-    if isinstance(data.get("viewer_state"), Mapping):
-        data = data["viewer_state"]
-    layout = data.get("frame_layout") or data.get("layout") or {}
-    layout = _mapping(layout)
-    version = layout.get("schema_version", data.get("schema_version", 1))
-    if version == 2:
-        return ExplorerState(
-            selection=str(data.get("selection") or ""),
-            tab=str(data.get("tab") or ""),
-            stage=str(data.get("stage") or ""),
-            active_region=str(data.get("active_region") or "nav"),
-            nav_fold=_strings(data.get("nav_fold")),
-            scrolls=_clean_scrolls(data.get("scrolls", {})),
-            nav_visible=bool(data.get("nav_visible", True)),
-            events_visible=bool(data.get("events_visible", True)),
-            search=str(data.get("search") or ""),
-            tab_order=_strings(data.get("tab_order")),
-            nav_open=_strings(data.get("nav_open")),
-            keep=_strings(data.get("keep")),
-            history=_strings(data.get("history")),
-            focus=str(data.get("focus") or ""),
-        )
-
-    # Schema 1 cursor identities are the closest available nav selection evidence: an
-    # ``_entry_id`` mapping, or the (pid, proc_start) pair the old kill cursor was.
-    raw_cursor = data.get("cursor")
-    cursor = _mapping(raw_cursor)
-    selection = cursor.get("_entry_id") or cursor.get("entry_id") or ""
-    if (not selection and isinstance(raw_cursor, (list, tuple)) and raw_cursor
-            and isinstance(raw_cursor[0], int) and not isinstance(raw_cursor[0], bool)):
-        start = raw_cursor[1] if len(raw_cursor) > 1 and raw_cursor[1] is not None else ""
-        selection = f"{PID_PREFIX}{raw_cursor[0]}:{start}"
-    folds = []
-    for source in (data.get("folds"), data.get("repo_folds")):
-        if isinstance(source, Mapping):
-            folds.extend(key for key, folded in source.items() if folded)
-        elif isinstance(source, (list, tuple)):
-            for item in source:
-                if isinstance(item, (list, tuple)) and len(item) == 2:
-                    if item[1] and isinstance(item[0], str):
-                        folds.append(item[0])
-                elif isinstance(item, str):
-                    folds.append(item)
-    offsets = {}
-    if "offset" in data:
-        offsets["nav"] = data.get("offset")
-    # Keep a known old view only as a display-region hint; never replay its frame.
-    return ExplorerState(selection=str(selection), active_region="nav",
-                         nav_fold=_strings(folds),
-                         scrolls=_clean_scrolls(offsets), nav_visible=True)
-
-
-def coerce(value):
-    """An ExplorerState from a state, a mapping of its fields, or a persisted payload."""
-    if isinstance(value, ExplorerState):
-        return value
-    data = _mapping(value)
-    names = {field.name for field in fields(ExplorerState)}
-    if data and set(data) <= names:
-        known = {k: v for k, v in data.items() if k in names}
-        for key in ("nav_fold", "nav_open", "keep", "history", "tab_order"):
-            if key in known:
-                known[key] = _strings(known[key])
-        if isinstance(known.get("scrolls"), Mapping):
-            known["scrolls"] = _clean_scrolls(known["scrolls"])
-        return ExplorerState(**known)
-    return restore(value)
+def _reduce(state, event, frame=None):
+    if isinstance(event, str):
+        event = {"type": "key", "key": event}
+    if not isinstance(event, Mapping):
+        return state, ()
+    kind, key = event.get("type", "key"), event.get("key")
+    if kind in ("click", "action"):
+        action = tuple(event.get("action", ()))
+        if not action:
+            return state, ()
+        if action[0] in ("view", "tab") and len(action) > 1:
+            view = str(action[1])
+            return replace(state, view=view, scope="-", opened="", title=view), ()
+        if action[0] == "fold" and len(action) > 2:
+            slot, identity = str(action[1]), str(action[2])
+            folds = state.fold_map()
+            folds[slot] = "" if folds.get(slot, "") == identity else identity
+            opened = folds[slot] if slot == "sopen:OVERVIEW" else state.opened
+            return replace(state, opened=opened, folds=tuple(sorted(folds.items()))), ()
+        if action[0] == "ui" and len(action) > 2:
+            folds = state.fold_map()
+            if action[1] == "sel":
+                folds = {key: value for key, value in folds.items()
+                         if key not in ("ui:sel", "ui:model", "ui:effort")}
+            folds["ui:" + str(action[1])] = str(action[2])
+            return replace(state, folds=tuple(sorted(folds.items()))), ()
+        if action[0] == "usage":
+            return replace(state, usage_open=not state.usage_open), ()
+        if action[0] in ("page", "scope") and len(action) > 1:
+            scope = str(action[1]) if action[0] == "scope" else f"{action[1]}:{action[2]}"
+            if action[0] == "scope" and scope != "-" and ":" not in scope:
+                scope = "session:" + scope
+            parents = state.parents + (state.scope,)
+            return replace(state, scope=scope, opened="", title=scope.split(":", 1)[-1],
+                           parents=parents), ()
+        if action[0] == "route" and len(action) > 1:
+            offsets = dict(state.scroll)
+            offsets["rawoff"] = 0
+            return replace(state, scope=f"route:{action[1]}", opened="",
+                           title=str(action[1]), parents=state.parents + (state.scope,),
+                           scroll=tuple(sorted(offsets.items()))), ()
+        if action[0] == "pane" and len(action) > 2:
+            return state, (("focus", action[1], action[2]),)
+        if action[0] == "root" and len(action) > 1:
+            view = str(action[1])
+            folds = state.fold_map()
+            if len(action) > 2 and isinstance(action[2], Mapping):
+                opened = str(action[2].get("ropen:" + view, ""))
+                if opened:
+                    folds["ropen:" + view] = opened
+            return replace(state, view=view, scope="-", opened="",
+                           title=view, folds=tuple(sorted(folds.items()))), ()
+        return state, ()
+    if kind != "key":
+        if kind == "wheel":
+            x, y = int(event.get("x", -1)), int(event.get("y", -1))
+            hit = next((item for item in getattr(frame, "hits", ())
+                        if item.y == y and item.x0 <= x < item.x1 and item.action[:1] == ("scroll",)), None)
+            if hit is None:
+                return state, ()
+            _name, slot, maximum, *sign = hit.action
+            direction = int(event.get("direction", 0))
+            amount = 3 * direction * (int(sign[0]) if sign else 1)
+            offsets = dict(state.scroll)
+            offsets[slot] = max(0, min(int(maximum), int(offsets.get(slot, 0)) + amount))
+            return replace(state, scroll=tuple(sorted(offsets.items()))), ()
+        if kind == "mouse":
+            phase = event.get("phase")
+            x, y = int(event.get("x", -1)), int(event.get("y", -1))
+            button = int(event.get("button", 0))
+            offsets = dict(state.scroll)
+            if phase == "release":
+                if state.drag and state.drag[0] == "tree":
+                    drag = state.drag
+                    if x >= 32 or y < 0 or y >= int(getattr(frame, "rows", 0)):
+                        return replace(state, drag=()), ()
+                    if drag[7] and drag[8]:
+                        ordering = event.get("ordering") or {}
+                        source = (drag[2] if drag[1] == "repo" else
+                                  getattr(ordering.get("tag_keys", {}), "get", lambda _key: None)(drag[2]))
+                        target = drag[6]
+                        if drag[1] == "session":
+                            target = (getattr(ordering.get("tag_keys", {}), "get", lambda _key: None)(target)
+                                      if target != "end" else None)
+                        repo = (drag[2] if drag[1] == "repo" else
+                                getattr(ordering.get("repo_by_tag", {}), "get", lambda _key: None)(drag[2]))
+                        if source and repo is not None:
+                            return replace(state, drag=()), (("reorder", drag[1], repo, source, target),)
+                    if not drag[8]:
+                        return reduce(replace(state, drag=()),
+                                      {"type": "click", "action": ("scope", drag[3])}, frame)
+                    return replace(state, drag=()), ()
+                return replace(state, drag=()), ()
+            if event.get("motion") and state.drag:
+                if state.drag[0] == "tree":
+                    drag = state.drag
+                    moved = drag[8] or abs(y - drag[5]) >= 1 or abs(x - drag[4]) >= 2
+                    if not moved:
+                        return state, ()
+                    hit = next((item for item in getattr(frame, "hits", ())
+                                if item.y == y and item.x0 <= x < item.x1), None)
+                    action = hit.action if hit is not None else ()
+                    target_kind, target = None, None
+                    valid = False
+                    if action[:1] == ("scope",) and len(action) > 1:
+                        value = str(action[1])
+                        if value.startswith("repo:"):
+                            target_kind, target = "repo", value[5:]
+                        elif ":" not in value:
+                            target_kind, target = "session", value
+                    elif action[:1] == ("order-end",):
+                        target, valid = "end", True
+                    elif (hit is None and x < 32 and
+                          y > max((item.y for item in getattr(frame, "hits", ())
+                                   if item.action[:1] == ("scope",) and len(item.action) > 1 and
+                                   (str(item.action[1]).startswith("repo:") or
+                                    ":" not in str(item.action[1]))), default=-1)):
+                        # Empty rail cells below the last tree row are the end
+                        # insertion point; they deliberately have no hit box.
+                        target, valid = "end", True
+                    if target_kind == drag[1]:
+                        if target_kind == "repo":
+                            valid = target != drag[2]
+                        else:
+                            ordering = event.get("ordering") or {}
+                            repo_by_tag = ordering.get("repo_by_tag", {})
+                            source_repo = repo_by_tag.get(drag[2])
+                            valid = target != drag[2] and repo_by_tag.get(target) == source_repo
+                    return replace(state, drag=("tree", drag[1], drag[2], drag[3], drag[4],
+                                                 drag[5], target if valid else None, valid, moved)), ()
+                slot, maximum, origin_y, origin_offset, sign = state.drag
+                offsets[slot] = max(0, min(int(maximum), int(origin_offset) +
+                                           (y - int(origin_y)) * int(sign)))
+                return replace(state, scroll=tuple(sorted(offsets.items()))), ()
+            if phase != "press" or button != 0:
+                return state, ()
+            hit = next((item for item in getattr(frame, "hits", ())
+                        if item.y == y and item.x0 <= x < item.x1), None)
+            if hit is None:
+                return state, ()
+            if hit.action[:1] == ("scope",) and len(hit.action) > 1:
+                scope = str(hit.action[1])
+                if scope.startswith("repo:"):
+                    return replace(state, drag=("tree", "repo", scope[5:], scope, x, y,
+                                                None, False, False)), ()
+                if ":" not in scope:
+                    ordering = event.get("ordering") or {}
+                    repo = ordering.get("repo_by_tag", {}).get(scope)
+                    if repo is not None:
+                        return replace(state, drag=("tree", "session", scope, scope, x, y,
+                                                    None, False, False)), ()
+            if hit.action[:1] == ("scroll",):
+                _name, slot, maximum, *sign = hit.action
+                return replace(state, drag=(slot, int(maximum), y,
+                                            min(int(offsets.get(slot, 0)), int(maximum)),
+                                            int(sign[0]) if sign else 1)), ()
+            return reduce(state, {"type": "click", "action": hit.action}, frame)
+        return state, ()
+    if key in ("tab", "shift-tab", "left", "right"):
+        if state.scope != "-":
+            return replace(state, scope="-", opened=""), ()
+        step = -1 if key in ("shift-tab", "left") else 1
+        tabs = tuple(str(item) for item in event.get("tabs", VIEWS))
+        if not tabs:
+            return state, ()
+        index = tabs.index(state.view) if state.view in tabs else 0
+        view = tabs[(index + step) % len(tabs)]
+        return replace(state, view=view, scope="-", opened="", title=view), ()
+    if key in ("escape", "esc"):
+        if state.drag:
+            return replace(state, drag=()), ()
+        if state.scope != "-":
+            parent = event.get("parent")
+            if parent is None:
+                parent_hit = next((hit for hit in getattr(frame, "hits", ())
+                                   if hit.y == -1 and hit.action[:1] == ("parent",)), None)
+                parent = parent_hit.action[1] if parent_hit else (
+                    state.parents[-1] if state.parents else "-")
+            if parent not in (None, "-") and ":" not in str(parent):
+                parent = "session:" + str(parent)
+            parents = state.parents[:-1] if state.parents else ()
+            return replace(state, scope=str(parent), opened="", parents=parents,
+                           title=(str(parent).split(":", 1)[-1] if parent != "-" else state.view)), ()
+        return state, ()
+    if key in ("backspace", "delete"):
+        return reduce(state, {"type": "key", "key": "escape"}, frame)
+    if key in ("up", "down"):
+        order = tuple(str(item) for item in event.get("order", ()))
+        if not order:
+            return state, ()
+        step = -1 if key == "up" else 1
+        index = order.index(state.scope) + step if state.scope in order else (0 if step > 0 else -1)
+        scope = order[index % len(order)]
+        return replace(state, scope=scope, opened="", title=scope.partition(":")[2] or scope), ()
+    if key in ("u", "usage"):
+        return replace(state, usage_open=not state.usage_open), ()
+    if key in ("/", "F"):
+        return state, (("command", "filter" if key == "/" else "feed"),)
+    if key in ("enter", "\n"):
+        hit = event.get("hit")
+        action = hit.action if hasattr(hit, "action") else hit
+        if state.scope == "-" and not action:
+            return state, ()
+        if state.scope != "-":
+            tag = state.scope.partition(":")[2]
+            pane_hit = next((item for item in getattr(frame, "hits", ())
+                             if item.action[:1] == ("pane",) and
+                             len(item.action) > 2 and str(item.action[1]) == tag), None)
+            pane = pane_hit.action[2] if pane_hit else ""
+            return state, (("focus", tag, pane),)
+        return reduce(state, {"type": "click", "action": action}, frame)
+    return state, ()
 
 
 def serialize(state):
-    """Emit a stable schema-2 viewer payload; no frame pixels are persisted."""
-    state = coerce(state)
-    return {
-        "schema_version": 2,
-        "selection": state.selection,
-        "tab": state.tab,
-        "stage": state.stage,
-        "active_region": state.active_region,
-        "nav_fold": list(state.nav_fold),
-        "nav_open": list(state.nav_open),
-        "scrolls": dict(state.scrolls),
-        "nav_visible": state.nav_visible,
-        "events_visible": state.events_visible,
-        "search": state.search,
-        "tab_order": list(state.tab_order),
-        "keep": list(state.keep),
-        "history": list(state.history),
-        "focus": state.focus,
-        "frame_layout": {"schema_version": 2},
-    }
+    """Persist only explorer view state; old B cursors are ignored on read."""
+    state = NavState.from_value(state)
+    return {"schema_version": 3, "view": state.view, "scope": state.scope,
+            "opened": state.opened, "usage_open": state.usage_open,
+            "scroll": [list(item) for item in state.scroll], "title": state.title,
+            "status": state.status, "parents": list(state.parents),
+            "folds": [list(item) for item in state.folds],
+            "frame_layout": {"schema_version": 3}}
 
 
-def reconcile(state, tabs):
-    """Keep an existing tab, otherwise select its nearest surviving old neighbor."""
-    state = coerce(state)
-    identities = [str(getattr(tab, "identity", tab.get("identity", "")
-                              if isinstance(tab, Mapping) else "")) for tab in tabs or ()]
-    if not identities or state.tab in identities or not state.tab:
-        return replace(state, tab_order=tuple(identities))
-    old = list(state.tab_order)
-    try:
-        old_index = old.index(state.tab)
-    except ValueError:
-        old_index = 0
-    preferred = old[old_index + 1:] + list(reversed(old[:old_index]))
-    selected = next((identity for identity in preferred if identity in identities), identities[0])
-    return replace(state, tab=selected, tab_order=tuple(identities))
-
-
-# -- settling against the navigation --------------------------------------------------------------
-
-# Rows that exist only once the focused session's request data has been read.
-_REQUEST_ROWS = ("request:", "stages:", "stage:", "requests-other:", "worker:", "previous-generation:", "generation:")
-
-
-def _row_session(rows, identity):
-    """The session row at or above ``identity`` (its fold parents lead up to it), else None."""
-    by_id = {row.identity: row for row in rows}
-    row = by_id.get(identity)
-    seen = set()
-    while row is not None and row.identity not in seen:
-        if row.kind == "session":
-            return row
-        seen.add(row.identity)
-        row = by_id.get(row.parent)
-    return None
-
-
-def _session_ref(row):
-    return row.identity[len("session:"):]
-
-
-def _legacy_pid_row(rows, token):
-    pid, _, start = token[len(PID_PREFIX):].partition(":")
-    for row in rows:
-        target = row.target_ref
-        if target is None:
-            continue
-        cursor_pid = target.get("pid") if isinstance(target, Mapping) else getattr(target, "pid", None)
-        cursor_start = target.get("proc_start") if isinstance(target, Mapping) else getattr(target, "proc_start", None)
-        if str(cursor_pid) == pid and (not start or str(cursor_start) == start):
-            return row
-    return None
-
-
-def _fold_identities(folds, rows):
-    """Fold keys as navigation identities: schema-1 repo keys (paths / names) become project rows."""
-    from . import nav
-    known = {row.identity for row in rows}
-    projects = {row.identity for row in rows if row.kind == "project"}
-    result = []
-    for key in folds:
-        if key in known or not ("/" in key or f"project:{key}" in projects):
-            result.append(key)
-            continue
-        name = nav.project_name(key) if "/" in key else key
-        if f"project:{name}" in projects:
-            result.append(f"project:{name}")
-    return tuple(dict.fromkeys(result))
-
-
-def settle(state, rows, tabs=None):
-    """Resolve the state against the navigation rows it is about to be drawn with; pure.
-
-    A schema-1 kill cursor (``pid:...``) or ``harness:sid`` selection becomes the nearest nav
-    row, repo folds become project folds, an empty or vanished selection falls back to the first
-    session, ``focus`` follows the selected row's session, and — once ``tabs`` (the focused
-    session's request tabs) are known — a vanished request tab moves to its nearest surviving
-    neighbor or the overview. Request-level selections are left alone while ``tabs`` is None:
-    those rows exist only after the selected scope has been read.
-    """
-    state = coerce(state)
-    rows = tuple(rows or ())
-    identities = {row.identity for row in rows}
-    selection = state.selection
-    if selection.startswith(PID_PREFIX):
-        row = _legacy_pid_row(rows, selection)
-        selection = row.identity if row is not None else ""
-    elif selection and selection not in identities:
-        if f"session:{selection}" in identities:
-            selection = f"session:{selection}"
-        elif not selection.startswith(_REQUEST_ROWS):
-            selection = ""                         # request rows are judged below, once tabs are known
-    sessions = [row for row in rows if row.kind == "session"]
-    if not selection and sessions:
-        selection = sessions[0].identity
-    focus = state.focus
-    held = _row_session(rows, selection)
-    if held is not None:
-        focus = _session_ref(held)
-    elif not any(_session_ref(row) == focus for row in sessions):
-        focus = _session_ref(sessions[0]) if sessions else focus
-    state = replace(state, selection=selection, focus=focus,
-                    nav_fold=_fold_identities(state.nav_fold, rows))
-    if tabs is not None:
-        before = state.tab
-        state = reconcile(state, tabs)
-        if state.tab != before:
-            state = replace(state, stage="")
-        ids = {str(getattr(tab, "identity", tab.get("identity", "") if isinstance(tab, Mapping) else ""))
-               for tab in tabs}
-        if state.tab and state.tab not in ids:
-            state = replace(state, tab="", stage="")          # nothing left to neighbor: the overview
-        if selection.startswith(_REQUEST_ROWS[:3]) and selection.split(":", 2)[1] not in ids:
-            fallback = f"request:{state.tab}" if state.tab and f"request:{state.tab}" in identities else \
-                _row_session_identity(rows, focus)
-            state = replace(state, selection=fallback or state.selection)
-        elif selection.startswith(("worker:", "previous-generation:", "generation:")) and selection not in identities:
-            state = replace(state, selection=_row_session_identity(rows, focus) or state.selection)
-    return state
-
-
-def _row_session_identity(rows, focus):
-    return next((row.identity for row in rows if row.kind == "session" and _session_ref(row) == focus), "")
-
-
-GENERATION_PREFIX = "generation:"
-
-
-def generation_ref(selection, focus):
-    """``harness:sid`` of the earlier generation a ``generation:`` row names, when it belongs to ``focus``."""
-    if not str(selection).startswith(GENERATION_PREFIX):
-        return ""
-    parts = selection.split(":", 4)
-    return f"{parts[3]}:{parts[4]}" if len(parts) == 5 and f"{parts[1]}:{parts[2]}" == focus else ""
-
-
-def focus_key(state):
-    """The selected-scope key the pump reads for: session, request tab, stage (or earlier generation)."""
-    from .types import FocusKey
-    state = coerce(state)
-    harness, _, sid = state.focus.partition(":")
-    if not sid:
-        return None
-    return FocusKey(harness, sid, state.tab, state.stage if state.tab else "",
-                    generation=generation_ref(state.selection, state.focus))
-
-
-# -- keyboard ------------------------------------------------------------------------------------
-
-def _toggle(items, value):
-    items = set(items)
-    items.symmetric_difference_update((value,))
-    return tuple(sorted(items))
-
-
-def _scroll_key(state):
-    if state.active_region == "nav":
-        return "nav"
-    return f"{state.active_region}:{state.tab}"
-
-
-def _move_selection(state, rows, step):
-    identities = [str(getattr(row, "identity", "")) for row in rows]
-    if not identities:
-        return state
-    if state.selection not in identities:
-        return replace(state, selection=identities[0 if step > 0 else -1])
-    index = identities.index(state.selection) + step
-    return replace(state, selection=identities[max(0, min(len(identities) - 1, index))])
-
-
-def _open_toggle(state, row):
-    identity = row.identity
-    if row.open:
-        return replace(state, nav_fold=tuple(sorted(set(state.nav_fold) | {identity})),
-                       nav_open=tuple(x for x in state.nav_open if x != identity))
-    return replace(state, nav_open=tuple(sorted(set(state.nav_open) | {identity})),
-                   nav_fold=tuple(x for x in state.nav_fold if x != identity))
-
-
-def _select_tab(state, identity):
-    keep = state.keep
-    if state.tab and state.tab != identity:
-        keep = (state.tab,)
-    return replace(state, tab=identity, keep=keep)
-
-
-def _enter(state, rows):
-    if state.active_region == "ledger":
-        return replace(state, history=_toggle(state.history, state.tab)) if state.tab else state
-    if state.active_region == "tabs":
-        return replace(state, active_region="ledger")
-    if state.active_region != "nav":
-        return state
-    row = next((r for r in rows if getattr(r, "identity", None) == state.selection), None)
-    if row is None:
-        return state
-    if row.kind == "request":
-        return replace(_select_tab(state, row.identity[len("request:"):]), stage="", active_region="ledger")
-    if row.kind == "stage":
-        request, _, node = row.identity[len("stage:"):].partition(":")
-        return replace(_select_tab(state, request), stage=node, active_region="ledger")
-    if row.identity == "section:todo":
-        return replace(_select_tab(state, ""), active_region="nav")
-    if row.identity == "section:relations":
-        return replace(state, active_region="relations")
-    if row.kind == "system" and row.open is None:
-        return replace(state, active_region="system")
-    if row.open is not None:
-        return _open_toggle(state, row)
-    return state
-
-
-def _cycle_tab(state, step):
-    order = list(state.tab_order)
-    stops = [""] + order
-    index = stops.index(state.tab) if state.tab in stops else 0
-    return _select_tab(state, stops[(index + step) % len(stops)])
-
-
-def _viewport(frame, region):
-    """Height of the rectangle ``region`` scrolls in (pages other than nav / output live in the ledger rect)."""
-    rect = frame.region(region if region in ("nav", "ledger", "output") else "ledger") if hasattr(frame, "region") else None
-    return getattr(rect, "h", 0)
-
-
-def _frame_rows(frame):
-    return tuple(getattr(frame, "nav_rows", ()) or ())
-
-
-def reduce_key(state, key, frame=None):
-    """Apply one key/event and return a new state; performs no I/O."""
-    state = coerce(state)
-    event = key if isinstance(key, Mapping) else {"key": key}
-    key = event.get("key")
-    rows = tuple(event.get("nav_rows") or _frame_rows(frame))
-    if key in ("resize", "RESIZE"):
-        cols = int(event.get("cols", WIDE_NAV_COLS))
-        return replace(state, nav_visible=bool(state.nav_visible and cols >= WIDE_NAV_COLS))
-    if state.searching:
-        if key in ("escape", "esc"):
-            return replace(state, search="", searching=False)
-        if key in ("enter", "\n"):
-            return replace(state, searching=False)
-        if key in ("backspace", "KEY_BACKSPACE"):
-            return replace(state, search=state.search[:-1])
-        if isinstance(key, str) and key.startswith("text:"):
-            return replace(state, search=state.search + key[5:])
-        if key not in ("up", "k", "down", "j"):
-            return state
-    if key in ("e", "E"):
-        shown = not state.nav_visible
-        region = state.active_region
-        if not shown and region == "nav":
-            region = "ledger"
-        return replace(state, nav_visible=shown, active_region=region)
-    if key in ("F", "f"):
-        return replace(state, events_visible=not state.events_visible)
-    if key in ("left", "h", "right", "l"):
-        order = [r for r in REGIONS if r != "nav" or state.nav_visible]
-        index = order.index(state.active_region) if state.active_region in order else 0
-        step = -1 if key in ("left", "h") else 1
-        return replace(state, active_region=order[(index + step) % len(order)])
-    if key in ("tab", "TAB", "\t"):
-        return _cycle_tab(state, 1)
-    if key in ("btab", "shift-tab", "BTAB"):
-        return _cycle_tab(state, -1)
-    if key in ("/", "search"):
-        return replace(state, search="", searching=True, active_region="nav" if state.nav_visible else state.active_region)
-    if key in ("escape", "esc"):
-        return replace(state, search="", searching=False) if state.search else state
-    if key in ("up", "k", "down", "j", "pageup", "pagedown", "home", "end"):
-        if state.active_region == "nav" and key in ("up", "k", "down", "j") and rows:
-            return _move_selection(state, rows, -1 if key in ("up", "k") else 1)
-        offsets = state.scroll_map()
-        slot = _scroll_key(state)
-        viewport = int(event.get("viewport") or _viewport(frame, state.active_region) or 1)
-        delta = {"up": -1, "k": -1, "down": 1, "j": 1, "pageup": -viewport, "pagedown": viewport}.get(key, 0)
-        limit = event.get("max_scroll", dict(getattr(frame, "scroll_max", ()) or ()).get(slot))
-        current = offsets.get(slot)
-        if current is None:                       # never scrolled: the raw output follows its newest rows
-            current = max(0, int(limit)) if (slot.startswith("output:") and limit is not None) else 0
-        if key == "home":
-            current = 0
-        elif key == "end":
-            current = max(0, int(limit if limit is not None else current))
-        else:
-            current = max(0, current + delta)
-            if limit is not None:
-                current = min(current, max(0, int(limit)))
-        offsets[slot] = current
-        return replace(state, scrolls=tuple(sorted(offsets.items())))
-    if key in ("enter", "\n"):
-        return _enter(state, rows)
-    return state
+def restore(value=None):
+    return NavState.from_value(value)

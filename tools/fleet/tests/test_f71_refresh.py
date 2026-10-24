@@ -96,7 +96,7 @@ class RefreshPumpTest(unittest.TestCase):
             release.wait()
             return calls
 
-        pump = RefreshPump(producer, 2.0, clock=lambda: clock[0])
+        pump = RefreshPump(producer, 2.0, clock=lambda: clock[0], adaptive_cadence=True)
         pump.start()
         self.assertTrue(entered.wait(1.0))
         clock[0] = 20.0
@@ -105,8 +105,41 @@ class RefreshPumpTest(unittest.TestCase):
         release.set()
         self._wait(lambda: pump.generation == 1 and not pump.running)
         self.assertEqual(calls, 1)
-        self.assertFalse(pump.request_due(now=21.9))
-        self.assertTrue(pump.request_due(now=22.0))
+        self.assertFalse(pump.request_due(now=39.9))
+        self.assertTrue(pump.request_due(now=40.0))
+        self._wait(lambda: pump.generation == 2 and not pump.running)
+        pump.stop()
+
+    def test_slow_collection_uses_base_interval_unless_adaptive_cadence_is_enabled(self):
+        clock = [0.0]
+        entered = threading.Event()
+        release = threading.Event()
+
+        def producer():
+            entered.set()
+            release.wait()
+            clock[0] = 10.0
+            return "done"
+
+        pump = RefreshPump(producer, 2.0, clock=lambda: clock[0])
+        self.assertTrue(pump.start())
+        self.assertTrue(entered.wait(1.0))
+        release.set()
+        self._wait(lambda: pump.generation == 1 and not pump.running)
+        self.assertTrue(pump.request_due(now=12.0))
+        self._wait(lambda: pump.generation == 2 and not pump.running)
+        pump.stop()
+
+        clock[0] = 0.0
+        entered.clear()
+        release.clear()
+        pump = RefreshPump(producer, 2.0, clock=lambda: clock[0], adaptive_cadence=True)
+        self.assertTrue(pump.start())
+        self.assertTrue(entered.wait(1.0))
+        release.set()
+        self._wait(lambda: pump.generation == 1 and not pump.running)
+        self.assertFalse(pump.request_due(now=19.9))
+        self.assertTrue(pump.request_due(now=20.0))
         self._wait(lambda: pump.generation == 2 and not pump.running)
         pump.stop()
 
@@ -132,6 +165,34 @@ class RefreshPumpTest(unittest.TestCase):
         pump.request(force=True)
         self._wait(lambda: pump.generation == 2)
         self.assertEqual(pump.poll(1), (2, "new"))
+        pump.stop()
+
+    def test_repeated_failures_use_bounded_cooldown_and_success_resets_it(self):
+        clock = [0.0]
+        calls = [0]
+        finished = threading.Event()
+
+        def producer():
+            calls[0] += 1
+            finished.set()
+            if calls[0] <= 4:
+                raise RuntimeError("temporary")
+            return "ok"
+
+        pump = RefreshPump(producer, 2.0, clock=lambda: clock[0], adaptive_cadence=True)
+        for expected_cooldown in (4.0, 8.0, 16.0, 16.0):
+            finished.clear()
+            self.assertTrue(pump.request(force=True))
+            self.assertTrue(finished.wait(1.0))
+            self._wait(lambda: not pump.running)
+            self.assertFalse(pump.request_due(now=clock[0] + expected_cooldown - 0.1))
+            clock[0] += expected_cooldown
+        finished.clear()
+        self.assertTrue(pump.request_due())
+        self.assertTrue(finished.wait(1.0))
+        self._wait(lambda: pump.generation == 1 and not pump.running)
+        self.assertFalse(pump.request_due(now=clock[0] + 1.9))
+        self.assertTrue(pump.request_due(now=clock[0] + 2.0))
         pump.stop()
 
     def test_stop_has_bounded_join_for_stuck_daemon_worker(self):

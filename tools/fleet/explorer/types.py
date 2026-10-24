@@ -1,35 +1,13 @@
-"""Immutable values shared by the Fleet explorer's pure projections."""
+"""Typed source-reader requests and results consumed by the immutable view model."""
 
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional, Tuple
 
 
 @dataclass(frozen=True)
-class Rect:
-    x: int
-    y: int
-    w: int
-    h: int
-
-    def contains(self, x: int, y: int) -> bool:
-        return self.x <= x < self.x + self.w and self.y <= y < self.y + self.h
-
-
-@dataclass(frozen=True)
-class Hit:
-    rect: Rect
-    identity: Any
-    action: str = "select"
-
-
-@dataclass(frozen=True)
 class FocusKey:
     harness: str
     sid: str
-    request_id: str = ""
-    stage_id: str = ""
-    attempt_id: str = ""
-    # "harness:sid" of an earlier generation of the session, when its raw output is the selection.
     generation: str = ""
 
 
@@ -41,33 +19,18 @@ class Health:
 
 
 @dataclass(frozen=True)
-class NavRow:
-    """One navigation row.
-
-    ``label`` is the text after the fold marker; ``marker`` is the fold glyph the row wears
-    (``▾`` open, ``▸`` closed, ``""`` for a leaf or an entry that only selects a page).
-    ``parent`` is the identity of the row whose fold hides this one. ``target_ref`` is set
-    only on session and worker rows (the rows s/x may act on).
-    """
-    identity: str
-    kind: str
-    depth: int
-    label: str
-    meta: Tuple[Tuple[str, Any], ...] = ()
-    health: Health = Health()
-    target_ref: Any = None
-    marker: str = ""
-    parent: str = ""
-    open: Optional[bool] = None
+class ModelCatalog:
+    """A bounded, read-only runtime catalog observation for one harness."""
+    harness: str
+    state: str = "unknown"
+    source: Optional[str] = None
+    models: Tuple[str, ...] = ()
+    observed_at: Optional[float] = None
 
 
 @dataclass(frozen=True)
 class AttemptRow:
-    """One registry attempt (latest row) with the decision Fleet already holds for it.
-
-    ``liveness`` is the live job's own value, or ``unknown`` when no live job carries the
-    attempt; the explorer never classifies liveness or outcome itself.
-    """
+    """One exact registry attempt and its already-projected source facts."""
     attempt_id: str
     line: int
     status: str
@@ -98,72 +61,12 @@ class AttemptRow:
 
 
 @dataclass(frozen=True)
-class RequestTab:
-    identity: str
-    label: str
-    route_id: Optional[str] = None
-    cycle_id: Optional[str] = None
-    complete: bool = False
-    verified: bool = False
-    frame_route_id: Optional[str] = None
-    owner_route_ids: Tuple[str, ...] = ()
-    attempt_ids: Tuple[str, ...] = ()
-    started_at: str = ""
-    reason: str = ""
-
-
-@dataclass(frozen=True)
-class RequestHeader:
-    total: int = 0
-    open: int = 0
-    latest_failed: int = 0
-    review: int = 0
-
-
-@dataclass(frozen=True)
-class LedgerRow:
-    route_node: str
-    harness: str
-    liveness: str
-    outcome: Optional[str]
-    gate: Optional[str]
-    attempt_id: str
-    note: str = ""
-    attempts: int = 1
-    history: Tuple[Tuple[int, str, str], ...] = ()
-    request_id: str = ""
-    route_id: str = ""
-    # Every attempt of the step, oldest first: (attempt_id, note, harness abbr, liveness, outcome).
-    trail: Tuple[Tuple[str, str, str, str, Optional[str]], ...] = field(default=(), compare=False)
-
-
-@dataclass(frozen=True)
-class RequestLedger:
-    """Everything the ledger column shows for one request tab."""
-    request_id: str
-    title: str
-    rows: Tuple[LedgerRow, ...] = ()
-    start_chain: str = ""
-    attempt_chain: str = ""
-    supervisor_liveness: str = "unknown"
-    supervisor_outcome: Optional[str] = None
-    gate_passed: int = 0
-    gate_total: int = 0
-    gate_hold: Tuple[str, ...] = ()
-    gate_mismatch: bool = False
-    others: Tuple[Tuple[str, str, Optional[str]], ...] = ()
-    responsible: str = ""
-    # Frame and supervisor attempts of the request, oldest first: (harness abbr, outcome, attempt_id).
-    supervision: Tuple[Tuple[str, Optional[str], str], ...] = field(default=(), compare=False)
-    owner_count: int = 0
-
-
-@dataclass(frozen=True)
 class FocusRequest:
     key: FocusKey
     epoch: int
     snapshot_generation: int
     expanded_sessions: Tuple[str, ...] = ()
+    wants: Tuple[str, ...] = ()        # extra bounded reads for what is open: seat, pane, cards, dialogue:<i>, raw:<route>
 
 
 @dataclass(frozen=True)
@@ -171,48 +74,50 @@ class FocusResult:
     key: FocusKey
     epoch: int
     snapshot_generation: int
-    tabs: Tuple[RequestTab, ...] = ()
-    ledger: Tuple[LedgerRow, ...] = ()
-    output: Tuple[str, ...] = ()
-    overview: Tuple[str, ...] = ()
+    output: Tuple[Any, ...] = ()
+    output_events: Tuple[Any, ...] = ()
     health: Health = Health()
-    header: RequestHeader = RequestHeader()
-    request_ledger: Optional[RequestLedger] = None
     obligations: Optional[Tuple[Mapping[str, Any], ...]] = None
-    open_results: Tuple[Tuple[str, str, Optional[str], Optional[str]], ...] = ()
-    # Recent event rows of the focused session (registry / peer-ledger projections).
     events: Tuple[Mapping[str, Any], ...] = ()
-    # Per-source health the screen shows when a source fails: (name, Health).
     sources: Tuple[Tuple[str, Health], ...] = ()
-    # The raw output pane of the selected request / stage: its title, the rows (OutputLine), what
-    # the sources said about themselves, the reading health and whether older records exist.
     output_title: str = ""
     output_notes: Tuple[str, ...] = ()
     output_health: Optional[Health] = None
     output_more: bool = False
-    # The earlier generations of the focused main session, read only while it is unfolded:
-    # a tuple of lineage entries, or None when not read; ``lineage_health`` says why not.
     lineage: Optional[Tuple[Mapping[str, Any], ...]] = None
     lineage_health: Optional[Health] = None
+    source_records: Mapping[str, Any] = field(default_factory=dict, compare=False)
 
-    def source_health(self, name: str) -> Optional[Health]:
-        return dict(self.sources).get(name)
+
+class SelectionReader:
+    """Adapt a selected-scope provider to the common immutable result shape."""
+
+    def __init__(self, providers):
+        self.providers = providers
+
+    def read(self, request):
+        result = self.providers(request)
+        if isinstance(result, FocusResult):
+            return result
+        return FocusResult(request.key, request.epoch, request.snapshot_generation,
+                           output=tuple(result.get("output", ())),
+                           events=tuple(result.get("events", ())),
+                           health=Health("success"),
+                           source_records=result.get("source_records", {}))
 
 
 @dataclass(frozen=True)
-class Frame:
-    lines: Tuple[str, ...]
-    regions: Tuple[Tuple[str, Rect], ...]
-    hits: Tuple[Hit, ...] = ()
-    nav_rows: Tuple[NavRow, ...] = ()
-    last_good: Tuple[Tuple[str, Tuple[str, ...]], ...] = ()
-    errors: Tuple[Tuple[str, str], ...] = ()
-    geometry: Tuple[int, int] = (0, 0)
-    good_at: Tuple[Tuple[str, float], ...] = ()
-    page: str = ""
-    # First visible navigation row drawn, and how far each scroll slot may go (slot, max offset).
-    nav_offset: int = 0
-    scroll_max: Tuple[Tuple[str, int], ...] = ()
+class ExplorerDetail:
+    """What the explorer feed hands the view-model builder: the newest accepted read of each kind.
 
-    def region(self, name: str) -> Optional[Rect]:
-        return dict(self.regions).get(name)
+    ``focus`` is the selected session's result; ``seats`` maps ``harness:sid`` to that session's seat
+    history (the list views), ``panes`` maps a session id to its herdr pane, ``config`` is the cached
+    model/dispatch observation. Every part is the
+    last good value; a part that was never read stays ``None``/empty.
+    """
+    focus: Optional[FocusResult] = None
+    seats: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    config: Optional[Mapping[str, Any]] = field(default=None, compare=False)
+    panes: Mapping[str, str] = field(default_factory=dict, compare=False)
+    catalogs: Mapping[str, ModelCatalog] = field(default_factory=dict, compare=False)
+    source_records: Mapping[str, Any] = field(default_factory=dict, compare=False)

@@ -320,6 +320,16 @@ def request_refresh(harness, now=None):
     return True
 
 
+def refresh_in_flight(harness, now=None, max_age=LEASE_MAX):
+    """Whether a live usage refresh still owns a non-expired harness lease."""
+    now = time.time() if now is None else float(now)
+    try:
+        lease_age = now - os.stat(_lease_path(harness)).st_mtime
+        return 0 <= lease_age < min(LEASE_MAX, float(max_age))
+    except OSError:
+        return False
+
+
 def account_usage(harness, usage="cache-only", now=None):
     snapshot = read(harness, now=now)
     if usage == "refresh":

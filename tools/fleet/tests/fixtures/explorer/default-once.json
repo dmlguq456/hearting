@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "baseline_commit": "00b4ba0168efc35eaf74603b8c9364f259c5adc4",
+  "fixture": "empty-snapshot",
+  "widths": [
+    80,
+    100,
+    140,
+    168
+  ],
+  "capture": {
+    "entrypoint": "tools.fleet.fleet.main(['--once'])",
+    "snapshot": "LiveSnapshot()",
+    "environment": "non-tty stdout with inherited environment; fixed terminal size 80/100/140/168 by 45",
+    "isolated": {
+      "installinfo": "empty",
+      "compute_hosts": [],
+      "governor": null,
+      "memory": null
+    },
+    "clock": 1800000000
+  },
+  "outputs": {
+    "80": {
+      "exit": 0,
+      "stdout": "  hearting unknown · unmanaged\n\n  fleet ⠋ 0 working  ● 0 idle  \n─────\n\n  SESSIONS   narrow · press w to cycle  \n  no observed sessions/jobs\n\n  session: ⠹ working   ● idle   \n  project: ● active\n  resource: ● running · ◇ unknown · UTIL/VRAM · ↳ command\n  stage: ● current  ✓ done  ✕ failed  ○ planned\n",
+      "stderr": ""
+    },
+    "100": {
+      "exit": 0,
+      "stdout": "  hearting unknown · unmanaged\n\n  fleet ⠋ 0 working  ● 0 idle  \n─────\n\n  SESSIONS   narrow · press w to cycle  \n  no observed sessions/jobs\n\n  session: ⠹ working   ● idle   \n  project: ● active\n  resource: ● running · ◇ unknown · UTIL/VRAM · ↳ command\n  stage: ● current  ✓ done  ✕ failed  ○ planned\n",
+      "stderr": ""
+    },
+    "140": {
+      "exit": 0,
+      "stdout": "  hearting unknown · unmanaged\n\n  fleet ⠋ 0 working  ● 0 idle  \n─────\n\n  no observed sessions/jobs\n\n  session: ⠹ working   ● idle   \n  project: ● active\n  resource: ● running · ◇ unknown · UTIL/VRAM · ↳ command\n  stage: ● current  ✓ done  ✕ failed  ○ planned\n",
+      "stderr": ""
+    },
+    "168": {
+      "exit": 0,
+      "stdout": "  hearting unknown · unmanaged\n\n  fleet ⠋ 0 working  ● 0 idle  \n─────\n\n  no observed sessions/jobs\n\n  session: ⠹ working   ● idle   \n  project: ● active\n  resource: ● running · ◇ unknown · UTIL/VRAM · ↳ command\n  stage: ● current  ✓ done  ✕ failed  ○ planned\n",
+      "stderr": ""
+    }
+  }
+}

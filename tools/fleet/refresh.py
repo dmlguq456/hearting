@@ -114,12 +114,13 @@ class RefreshPump:
 
     def __init__(self, producer, interval, clock=time.monotonic,
                  thread_factory=threading.Thread, name="fleet-refresh",
-                 stall_after=None):
+                 stall_after=None, adaptive_cadence=False):
         self._producer = producer
         self._interval = max(0.1, float(interval))
         self._clock = clock
         self._thread_factory = thread_factory
         self._name = str(name)
+        self._adaptive_cadence = bool(adaptive_cadence)
         self._lock = threading.RLock()
         self._thread = None
         self._running = False
@@ -130,7 +131,9 @@ class RefreshPump:
         self._latest = None
         self._last_error = None
         self._started_at = None
+        self._last_duration = 0.0
         self._last_success_at = None
+        self._failure_streak = 0
         self._stall_after = (
             float(stall_after) if stall_after is not None
             else _resolve_stall_after(self._interval)
@@ -278,17 +281,29 @@ class RefreshPump:
             error = exc
 
         with self._lock:
+            finished_at = self._clock()
+            if self._started_at is not None:
+                self._last_duration = max(0.0, finished_at - self._started_at)
             if error is None:
                 self._latest = value
                 self._generation += 1
                 self._last_error = None
                 self._last_success_at = self._clock()
+                self._failure_streak = 0
             else:
                 self._last_error = error
+                self._failure_streak = min(3, self._failure_streak + 1)
             self._running = False
-            # Schedule from completion, not start. A slow producer therefore
-            # gets a real cooldown instead of immediately chasing elapsed ticks.
-            self._next_due = self._clock() + self._interval
+            if self._adaptive_cadence:
+                # Explorer snapshots leave an idle interval after slow reads
+                # and back off repeated failures, bounded at eight intervals.
+                cooldown = self._interval * (2 ** self._failure_streak)
+                adaptive_delay = max(self._interval, self._last_duration)
+                delay = max(cooldown, adaptive_delay)
+            else:
+                # Preserve the original shared-pump cadence for board callers.
+                delay = self._interval
+            self._next_due = finished_at + delay
             if self._pending and not self._stopped:
                 self._pending = False
                 self._running = True

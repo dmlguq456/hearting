@@ -12,12 +12,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tools.fleet.explorer import frame
 from tools.fleet.explorer.output import (CLEANED, RESET_NOTE, SUPERVISOR_ONLY, TAIL_RECORDS, OutputLine,
                                          OutputReader, SourcePlan, attempt_view, fit_row, line_row,
                                          render_output)
-from tools.fleet.explorer.state import ExplorerState
-from tools.fleet.explorer.types import FocusKey, FocusResult, Health, Rect
+from tools.fleet.explorer.types import FocusKey, Health
 from tools.fleet.tests import explorer_fixture as ef
 
 VIEW = attempt_view()
@@ -109,6 +107,18 @@ class RowFormat(unittest.TestCase):
 
 
 class Harnesses(TempCase):
+    def test_typed_events_keep_multiline_bodies_while_legacy_rows_stay_single_line(self):
+        path = self.dir / "multiline.codex.jsonl"
+        write_jsonl(path, [command("printf fixture", "first line\nsecond line", 0, "c1")])
+        view = self.reader().read("k", "t", [plan(path)])
+        output_rows = [row for row in view.rows if "first line" in row.text]
+        output_events = [event for event in view.events if "first line" in event.text]
+        self.assertEqual(len(output_rows), 1)
+        self.assertIn("(+1줄)", output_rows[0].text)
+        self.assertEqual(len(output_events), 1)
+        self.assertEqual(output_events[0].kind, "output")
+        self.assertIn("first line\nsecond line", output_events[0].text)
+
     def test_user_and_assistant_are_told_apart_for_codex(self):
         path = self.dir / "a.codex.jsonl"
         write_jsonl(path, [message("what now?", "u1", user=True), message("do this", "m1")])
@@ -404,90 +414,6 @@ class Streaming(TempCase):
         view = self.reader_.read("k", "t", [self.owner])
         self.assertEqual(self.rows(view), ["[owner] OC » new world"])
         self.assertEqual(view.notes, (RESET_NOTE,))
-
-
-class Scopes(unittest.TestCase):
-    """Which sources a request, a stage or a hidden tab reads."""
-
-    @classmethod
-    def setUpClass(cls):
-        cls.temp = tempfile.TemporaryDirectory()
-        cls.fx = ef.materialize(cls.temp.name)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temp.cleanup()
-
-    def test_a_selected_stage_reads_only_that_stages_latest_attempt(self):
-        reader = ef.output_reader()
-        result = ef.collect(self.fx, request_id=self.request("b6-report"), stage_id="test", output=reader)
-        self.assertEqual(reader.resolved, 1)
-        self.assertEqual(result.output_title, "test · CX · 원래 출력")
-        self.assertTrue(all(row.text.startswith("[test] CX ") for row in result.output))
-
-    def test_without_a_stage_the_supervisor_and_each_stage_are_mixed_with_the_time(self):
-        reader = ef.output_reader()
-        result = ef.collect(self.fx, request_id=self.request("b6-report"), output=reader)
-        self.assertEqual(result.output_title, "b6-report · 감독 CL + 단계 CX")
-        self.assertEqual(reader.resolved, 6)               # the owner and the five stages
-        self.assertIn("[owner] 감독 기록만 남음 · 원천 정리됨", result.output_notes)
-
-    def test_no_selected_request_reads_nothing(self):
-        reader = ef.output_reader()
-        result = ef.collect(self.fx, output=reader)
-        self.assertEqual((reader.resolved, reader.reads), (0, 0))
-        self.assertEqual((result.output, result.output_title), ((), ""))
-
-    def test_the_overview_and_the_other_tabs_are_never_read(self):
-        reader = ef.output_reader()
-        ef.collect(self.fx, request_id=self.request("b6-report"), stage_id="test", output=reader)
-        before = (reader.resolved, reader.reads)
-        ef.collect(self.fx, request_id="", output=reader)
-        self.assertEqual((reader.resolved, reader.reads), before)
-
-    def test_a_scope_read_before_continues_from_its_cursor(self):
-        reader = ef.output_reader()
-        for _ in range(3):
-            ef.collect(self.fx, request_id=self.request("b6-report"), stage_id="test", output=reader)
-        self.assertEqual(reader.resolved, 1)               # resolved once, then only incremental reads
-        self.assertEqual(reader.reads, 3)
-
-    def request(self, label):
-        return ef.tab(ef.collect(self.fx), label).identity
-
-
-class Pane(unittest.TestCase):
-    def view(self, **fields):
-        return FocusResult(FocusKey("claude", "sid", "t"), 1, 1, **fields)
-
-    def test_title_notes_and_rows_scroll_independently_and_follow_the_newest(self):
-        rows = tuple(OutputLine(f"row{i}") for i in range(30))
-        result = self.view(output=rows, output_title="title", output_notes=("note",),
-                           output_health=Health("success", 1.0))
-        state = ExplorerState(tab="t")
-        shown, limit = frame.output_pane(result, state, Rect(0, 0, 40, 10), 2.0)
-        self.assertEqual(shown[:2], ("title", "note"))
-        self.assertEqual(shown[-1], "row29")
-        self.assertEqual(limit, 22)
-        scrolled, _ = frame.output_pane(result, ExplorerState(tab="t", scrolls=(("output:t", 3),)),
-                                        Rect(0, 0, 40, 10), 2.0)
-        self.assertEqual(scrolled[2], "row3")
-
-    def test_a_stale_read_says_how_old_the_rows_are_and_why(self):
-        result = self.view(output=(OutputLine("kept"),), output_title="title",
-                           output_health=Health("stale", 100.0, "PermissionError"))
-        shown, _ = frame.output_pane(result, ExplorerState(tab="t"), Rect(0, 0, 60, 6), 130.0)
-        self.assertEqual(shown[1], "직전 값 30초 전 · PermissionError")
-        self.assertEqual(shown[2], "kept")
-
-    def test_an_empty_but_healthy_source_says_so(self):
-        result = self.view(output_title="title", output_health=Health("success", 1.0))
-        shown, _ = frame.output_pane(result, ExplorerState(tab="t"), Rect(0, 0, 60, 6), 2.0)
-        self.assertEqual(shown, ("title", "출력 기록 없음"))
-
-    def test_no_output_data_falls_back_to_the_ledger_summary_path(self):
-        shown, limit = frame.output_pane(self.view(), ExplorerState(tab="t"), Rect(0, 0, 60, 6), 2.0)
-        self.assertEqual((shown, limit), (None, 0))
 
 
 if __name__ == "__main__":

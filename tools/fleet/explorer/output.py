@@ -38,6 +38,16 @@ class OutputLine:
     omitted_lines: int = 0
 
 
+@dataclass(frozen=True)
+class OutputEvent:
+    """One formatted source event, retaining its complete (possibly multiline) body."""
+    kind: str
+    text: str
+    label: str = ""
+    abbr: str = ""
+    stamp: str = ""
+
+
 def cell_width(text: str) -> int:
     width = 0
     for char in text:
@@ -193,7 +203,13 @@ def line_row(line, label, abbr, stamp="") -> Optional[OutputLine]:
     else:
         glyph, body = _GLYPH.get(kind, "·"), _without(text, _STRIP.get(kind, ()))
     lines = body.splitlines() or [""]
-    return OutputLine(head + (glyph + " " if glyph else "") + lines[0], len(lines) - 1)
+    omitted = len(lines) - 1
+    # Tool output is a compact native block; keep its continuation count on the
+    # event row while retaining the full body in OutputEvent for the transcript.
+    if kind == "output" and omitted:
+        return OutputLine(head + (glyph + " " if glyph else "") +
+                          lines[0] + f" (+{omitted}줄)", 0)
+    return OutputLine(head + (glyph + " " if glyph else "") + lines[0], omitted)
 
 
 def record_time(record) -> Optional[float]:
@@ -243,6 +259,7 @@ class OutputView:
     notes: Tuple[str, ...] = ()
     health: Health = Health()
     more: bool = False                           # records exist before the oldest row shown
+    events: Tuple[OutputEvent, ...] = ()
 
 
 class _Src:
@@ -251,6 +268,7 @@ class _Src:
         self.cursor = attempt_view().Cursor(source.path)
         self.format_state = {}
         self.rows = {}                           # entry key -> ((time, key), [OutputLine, ...])
+        self.events = {}                         # entry key -> ((time, key), [OutputEvent, ...])
         self.last_time = 0.0
         self.state, self.reason = "ok", ""
         self.reset_at = None                     # when the source was last found truncated or replaced
@@ -370,6 +388,10 @@ class OutputReader:
                 previous = stamp
             lines = module.format_stream(src.source.harness, [entry.record], src.format_state)
             prefix = clock_text(stamp, self.tz) if stamped and stamp else ""
+            src.events[entry.key] = ((stamp, entry.key), [
+                OutputEvent(line.kind, str(line.text), src.plan.label, src.plan.abbr, prefix)
+                for line in lines if line.kind != "supervisor"
+            ])
             rows = [row for row in (line_row(line, src.plan.label, src.plan.abbr, prefix) for line in lines)
                     if row is not None]
             src.rows[entry.key] = ((stamp, entry.key), rows)
@@ -390,6 +412,7 @@ class OutputReader:
         src.state, src.reason = "ok", ""
         if result.reset:
             src.rows.clear()
+            src.events.clear()
             src.format_state.clear()
             src.reset_at = self.clock()
         self._absorb(src, result.entries, stamped, older=earlier)
@@ -428,16 +451,21 @@ class OutputReader:
 
     def _view(self, scope, title, plans, problems):
         module = attempt_view()
-        held, more = [], False
+        held, held_events, more = [], [], False
         for order, plan in enumerate(plans):
             slot = scope.slots.get(plan.attempt_id)
             for number, src in enumerate(slot.sources if slot else ()):
                 for (stamp, key), rows in src.rows.values():
                     for index, row in enumerate(rows):
                         held.append(((stamp or 0.0, order, number, key, index), row))
+                for (stamp, key), events in src.events.values():
+                    for index, event in enumerate(events):
+                        held_events.append(((stamp or 0.0, order, number, key, index), event))
                 more = more or module.has_earlier(src.source, src.cursor)
         held.sort(key=lambda item: item[0])
+        held_events.sort(key=lambda item: item[0])
         rows = tuple(row for _, row in held)[-MAX_ROWS:]
+        events = tuple(event for _, event in held_events)[-MAX_ROWS:]
         unreadable = [item for item in problems if item[1] == "unreadable"]
         if not unreadable:
             scope.last_success = self.clock()
@@ -454,7 +482,7 @@ class OutputReader:
         else:
             health = Health("success", scope.last_success)
         shown = tuple(notes[:3]) + ((f"+{len(notes) - 3}",) if len(notes) > 3 else ())
-        return OutputView(title, rows, shown, health, more)
+        return OutputView(title, rows, shown, health, more, events)
 
 
 # -- an earlier generation of the focused main session ----------------------------------------------
@@ -551,5 +579,6 @@ def read_generation(reader, entry, now=None) -> OutputView:
 
 
 def _abbr(harness):
-    from .ledger import harness_abbr
-    return harness_abbr(harness)
+    value = str(harness or "").lower()
+    return {"claude": "CL", "codex": "CX", "opencode": "OC"}.get(
+        value, "?" if not harness else value[:2].upper())

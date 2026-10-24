@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Fresh-process Fleet peer preview, PTY latency, scale and retention probe.
 
-All rows and peer records are synthetic. Collector/provider/network/install and
-control actions are blocked. The only host observation exercised by selection
-is Fleet's read-only existing exclusion check against the test child ancestry.
+Synthetic modes isolate renderer and navigation cost. The
+``explorer-collecting`` mode opts into real read-only Fleet collection and records
+the first complete Explorer frame plus key-to-paint latency while collection
+runs; its private terminal capture belongs only in the supplied evidence root.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tracemalloc
 from pathlib import Path
@@ -344,8 +346,36 @@ def _emit(fd, record):
 
 
 def _pty_child(source_tree, fixture_path, telemetry_fd, width, mode):
-    fixture, fixture_hash, render = _setup(source_tree, fixture_path)
-    rows = _sessions(fixture, 100, protected=True)
+    live_collecting = mode == "explorer-collecting"
+    live_collect_all = None
+    if live_collecting:
+        tools_dir = str(Path(source_tree) / "tools")
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        fixture, fixture_hash = _load_fixture(fixture_path)
+        from fleet import render
+        from fleet.collectors import collect_all as live_collect_all
+        render._API_DISABLED = True
+        render._EXPLORER_ENABLED = True
+        if not hasattr(render, "_EXPLORER_RUNTIME"):
+            class RuntimeProbe:
+                def collection_options(self, first_complete):
+                    return {"fast_first": bool(first_complete)}
+
+                def prepare(self, _snapshot, _detail, *, vm, generation, now):
+                    return vm, {"ready": True, "generation": generation}
+
+                def loading_frame(self, _cols, _rows):
+                    return None
+
+                def apply_effects(self, _effects, _vm):
+                    return None
+
+            render._explorer_runtime = lambda: RuntimeProbe()
+        rows = []
+    else:
+        fixture, fixture_hash, render = _setup(source_tree, fixture_path)
+        rows = _sessions(fixture, 100, protected=True)
     current = {"event_id": 0, "record": None, "last_build_ns": 0,
                "merge": None, "input_cpu_ns": 0}
     counts = {"build": 0, "project_of": 0, "tag_resolver": 0}
@@ -357,6 +387,7 @@ def _pty_child(source_tree, fixture_path, telemetry_fd, width, mode):
     orig_merge = details.merge
     orig_project, orig_model_project = render.project_of, model.project_of
     orig_tag = render._resolve_session_tag
+    first_frame = {"start_ns": time.perf_counter_ns(), "reported": False}
 
     def project(*args, **kwargs):
         counts["project_of"] += 1
@@ -420,6 +451,16 @@ def _pty_child(source_tree, fixture_path, telemetry_fd, width, mode):
 
     def draw(stdscr, *args, **kwargs):
         result = orig_draw(stdscr, *args, **kwargs)
+        if (live_collecting and not first_frame["reported"]
+                and getattr(render, "_EXPLORER_GENERATION", 0) > 0
+                and getattr(render, "_EXPLORER_FRAME", None) is not None):
+            first_frame["reported"] = True
+            _emit(telemetry_fd, {
+                "kind": "first-complete-frame",
+                "elapsed_ms": (time.perf_counter_ns() - first_frame["start_ns"]) / 1e6,
+                "generation": render._EXPLORER_GENERATION,
+                "readiness": getattr(render, "_EXPLORER_READINESS", None),
+            })
         record = current.get("record")
         if record is not None and record.get("reported") is not True:
             record["draw_end_ns"] = time.perf_counter_ns()
@@ -458,20 +499,66 @@ def _pty_child(source_tree, fixture_path, telemetry_fd, width, mode):
     render._CURSOR_ID = None
     render._OFFSET = 0
 
+    collector_state = {"snapshot": None, "ready": threading.Event(),
+                       "stop": threading.Event(), "thread": None}
+
+    def live_collection_loop():
+        index = 0
+        while not collector_state["stop"].is_set():
+            started = time.perf_counter_ns()
+            _emit(telemetry_fd, {"kind": "collection-start", "index": index,
+                                 "time_ns": started})
+            try:
+                value = live_collect_all(harness_filter=None, fast_first=(index == 0))
+                collector_state["snapshot"] = value
+                collector_state["ready"].set()
+                _emit(telemetry_fd, {"kind": "collection-done", "index": index,
+                                     "duration_ms": (time.perf_counter_ns() - started) / 1e6,
+                                     "sessions": len(getattr(value, "sessions", ())),
+                                     "jobs": len(getattr(value, "jobs", ()))})
+            except BaseException as exc:
+                _emit(telemetry_fd, {"kind": "collection-error", "index": index,
+                                     "error": repr(exc)})
+                if index == 0:
+                    collector_state["ready"].set()
+                return
+            index += 1
+            if collector_state["stop"].wait(0.01):
+                return
+
+    if live_collecting:
+        collector_state["thread"] = threading.Thread(
+            target=live_collection_loop, name="benchmark-live-collection", daemon=True)
+        collector_state["thread"].start()
+
     def collect_all(**_kwargs):
         start = time.perf_counter_ns()
-        value = _live_snapshot(rows)
+        if live_collecting:
+            if not collector_state["ready"].wait(240):
+                raise TimeoutError("live collector did not publish its first snapshot")
+            value = collector_state["snapshot"]
+            if value is None:
+                raise RuntimeError("live collector failed before first snapshot")
+        else:
+            value = _live_snapshot(rows)
         current["last_collection_ns"] = time.perf_counter_ns() - start
         _emit(telemetry_fd, {"kind": "snapshot-produced", "duration_ns": current["last_collection_ns"],
                              "project_lookups": counts["project_of"], "pid": os.getpid()})
         return value
 
     collect_all.__name__ = "synthetic_collect_all"
+    if live_collecting:
+        def close():
+            collector_state["stop"].set()
+            thread = collector_state["thread"]
+            if thread is not None:
+                thread.join(2.0)
+        collect_all.close = close
     _emit(telemetry_fd, {"kind": "child-start", "pid": os.getpid(),
                          "proc_start": _proc_start(os.getpid()),
                          "source_tree": str(source_tree), "fixture_sha256": fixture_hash,
                          "width": width, "mode": mode,
-                         "safety_fixture_pids": [rows[0].pid, rows[1].pid],
+                         "safety_fixture_pids": [row.pid for row in rows[:2]],
                          "counts": counts})
     curses.wrapper(render._loop, collect_all, None, "both", 20.0)
 
@@ -542,6 +629,18 @@ def _pty_run(source_tree, fixture_path, evidence_dir, width, mode, replicate, ke
                 raise RuntimeError("PTY child exited before event %d: %r" % (event_id, child_error))
         raise TimeoutError("timed out waiting for PTY paint event %d" % event_id)
 
+    def wait_first_complete(timeout=240):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            drain(0.02)
+            frame = next((item for item in telemetry
+                          if item.get("kind") == "first-complete-frame"), None)
+            if frame is not None:
+                return frame
+            if child_error or os.waitpid(pid, os.WNOHANG)[0]:
+                raise RuntimeError("PTY child exited before first complete frame: %r" % child_error)
+        raise TimeoutError("timed out waiting for first complete Explorer frame")
+
     def send(data, warmup=False):
         nonlocal counter
         counter += 1
@@ -564,6 +663,8 @@ def _pty_run(source_tree, fixture_path, evidence_dir, width, mode, replicate, ke
         other = b"\x1b[A"
         for i in range(10):
             send(key_bytes if i % 2 == 0 else other, warmup=True)
+        if mode == "explorer-collecting":
+            wait_first_complete()
         measured = []
         for i in range(keys):
             data = key_bytes if i % 2 == 0 else other
@@ -591,6 +692,16 @@ def _pty_run(source_tree, fixture_path, evidence_dir, width, mode, replicate, ke
         (run_dir / "pty.raw").write_bytes(transcript)
         _json(run_dir / "telemetry.json", telemetry)
         values = [row["end_to_paint_ms"] for row in measured]
+        collection_started = {item["index"]: item["time_ns"] for item in telemetry
+                              if item.get("kind") == "collection-start"}
+        collection_done = {item["index"]: item["duration_ms"] for item in telemetry
+                           if item.get("kind") == "collection-done"}
+        last_paint_ns = max((row.get("draw_end_ns", 0) for row in measured), default=0)
+        active_samples = sum(1 for row in measured if any(
+            started <= row.get("decoded_ns", 0)
+            and (index not in collection_done
+                 or row.get("decoded_ns", 0) < started + collection_done[index] * 1e6)
+            for index, started in collection_started.items()))
         return {"source_tree": str(source_tree), "mode": mode, "width": width,
                 "replicate": replicate, "keys": len(measured),
                 "median_ms": statistics.median(values),
@@ -605,6 +716,14 @@ def _pty_run(source_tree, fixture_path, evidence_dir, width, mode, replicate, ke
                     row.get("flush_ns", 0) for row in measured) / 1e6,
                 "mean_child_draw_after_decode_ms": statistics.mean(
                     row.get("draw_ns", 0) for row in measured) / 1e6,
+                "first_complete_frame_ms": next((item["elapsed_ms"] for item in telemetry
+                                                  if item.get("kind") == "first-complete-frame"), None),
+                "key_samples_during_collection": active_samples,
+                "collection_runs_started": len(collection_started),
+                "collection_runs_completed": len(collection_done),
+                "last_paint_ns": last_paint_ns,
+                "collection_durations_ms": [item["duration_ms"] for item in telemetry
+                                             if item.get("kind") == "collection-done"],
                 "parent_raw_pty_bytes": len(transcript),
                 "child_start_ticks": start,
                 "sample_events": measured,
@@ -692,6 +811,19 @@ def _run(args):
                                        event_timeout=args.event_timeout))
         _json(output / "latency.json", values)
         result["latency"] = str(output / "latency.json")
+    if mode == "explorer-collecting":
+        values = [_pty_run(args.source_tree, args.fixture, output, 168,
+                           "explorer-collecting", replicate, keys=100,
+                           event_timeout=args.event_timeout)
+                  for replicate in range(1, 4)]
+        _json(output / "explorer-collecting.json", values)
+        result["explorer_collecting"] = str(output / "explorer-collecting.json")
+        result["first_complete_frame_ms"] = [item["first_complete_frame_ms"] for item in values]
+        result["latency_p50_ms"] = [statistics.median(
+            sample["end_to_paint_ms"] for sample in item["sample_events"]) for item in values]
+        result["latency_p95_ms"] = [sorted(
+            sample["end_to_paint_ms"] for sample in item["sample_events"])[94]
+            for item in values]
     return result
 
 
@@ -701,7 +833,7 @@ def main():
     parser.add_argument("--fixture", required=True)
     parser.add_argument("--phase", choices=("baseline", "after"), required=True)
     parser.add_argument("--evidence-dir", default=".")
-    parser.add_argument("--mode", choices=("latency", "retention", "preview", "scale", "all",
+    parser.add_argument("--mode", choices=("latency", "explorer-collecting", "retention", "preview", "scale", "all",
                                              "_scale-one", "_retention"), required=True)
     parser.add_argument("--scale-count", type=int, default=3)
     parser.add_argument("--scale-width", type=int, default=168)
@@ -709,7 +841,8 @@ def main():
     parser.add_argument("--event-timeout", type=float, default=15)
     args = parser.parse_args()
     fixture, _fixture_hash = _load_fixture(args.fixture)
-    _isolate_runtime(args.evidence_dir, fixture, args.registry_count)
+    if args.mode != "explorer-collecting":
+        _isolate_runtime(args.evidence_dir, fixture, args.registry_count)
     if args.mode == "_scale-one":
         value = _scale_one(args.source_tree, args.fixture, args.scale_count,
                            args.scale_width, args.registry_count)

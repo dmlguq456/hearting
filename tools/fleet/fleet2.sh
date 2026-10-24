@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# fleet2.sh — the in-development B explorer screen (work ledger + output).
+# fleet2.sh — the Fleet explorer screen.
 #   `fleet` keeps the group/process screen until this one is ready to replace it.
 #   Same options as fleet.sh (including --window); this only adds --explorer.
 set -euo pipefail

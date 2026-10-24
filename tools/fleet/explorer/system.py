@@ -7,8 +7,11 @@ the snapshot does not carry is shown as ``?`` — never as 0 and never as a succ
 
 from collections.abc import Mapping
 
-from .ledger import HARNESS_ABBR, LIVENESS_GLYPH, LIVENESS_WORD
-from .output import clip
+from .grid import clip_cells as clip
+
+HARNESS_ABBR = {"claude": "CL", "codex": "CX", "opencode": "OC"}
+LIVENESS_GLYPH = {"working": "⠇", "idle": "·", "unknown": "?", "blocked": "◑"}
+LIVENESS_WORD = {"working": "도는 중", "idle": "쉼", "unknown": "확인 불가", "blocked": "답 대기"}
 
 HARNESS_ORDER = ("claude", "codex", "opencode")
 _WINDOW_LABEL = {"5h": "5h", "week": "주", "month": "월"}
@@ -155,10 +158,10 @@ def usage_gauges(snapshot):
 
 
 def usage_text(snapshot, spaced=False):
-    """'CL 5h29% · CX 주8% · OC 5h0%' (spaced: 'CL 5h 29%'); '사용량 ?' when nothing is known."""
+    """'CL 5h29% · CX 주8% · OC 5h0%' (spaced: 'CL 5h 29%'); '·' when nothing is known."""
     gauges = usage_gauges(snapshot)
     if not gauges:
-        return "사용량 ?"
+        return "·"
     parts = []
     for abbr, label, value in gauges:
         if label is None:

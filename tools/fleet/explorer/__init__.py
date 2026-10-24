@@ -1,10 +1,6 @@
-"""Pure data and frame composition for the Fleet explorer."""
+"""Immutable view model and cell-accurate drawing for the Fleet explorer."""
 
-from .frame import compose
-from .types import (AttemptRow, Frame, FocusKey, FocusRequest, FocusResult, Health, Hit, LedgerRow, NavRow,
-                    Rect, RequestHeader, RequestLedger, RequestTab)
+from .frame import CellFrame, draw
+from .view_model import ExplorerViewModel
 
-__all__ = [
-    "AttemptRow", "Frame", "FocusKey", "FocusRequest", "FocusResult", "Health", "Hit",
-    "LedgerRow", "NavRow", "Rect", "RequestHeader", "RequestLedger", "RequestTab", "compose",
-]
+__all__ = ["CellFrame", "ExplorerViewModel", "draw"]

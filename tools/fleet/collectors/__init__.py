@@ -18,6 +18,7 @@ from ..refresh import LiveSnapshot
 
 _JOB_OBSERVATIONS = {}
 _OBSERVATION_SUCCESSES = {}
+FIRST_FRAME_USAGE_WAIT = 5.0
 
 
 def _observation_health(key, source, error=None):
@@ -520,6 +521,16 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
             snap = usage_cache.account_usage(harness, usage=usage if usage == "refresh" else "cache-only")
             usage_snapshots[harness] = snap
             usage_meta[harness] = {k: snap.get(k) for k in ("freshness", "observed_at")}
+            freshness = snap.get("freshness")
+            if freshness == "fresh":
+                observations["usage:" + harness] = {"state": "ok"}
+            elif usage == "refresh" and usage_cache.refresh_in_flight(
+                    harness, max_age=FIRST_FRAME_USAGE_WAIT):
+                observations["usage:" + harness] = {
+                    "state": "pending", "reason": "usage-refresh-in-flight"}
+            else:
+                observations["usage:" + harness] = {
+                    "state": "unavailable", "reason": "usage-not-fresh"}
             if harness == "opencode":
                 try:
                     utilities = Path(__file__).resolve().parents[3] / "utilities"
@@ -619,6 +630,9 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
                 s._usage_freshness = snap.get("freshness")
                 s._usage_observed_at = snap.get("observed_at")
     except Exception:
+        for harness in ("claude", "codex", "opencode"):
+            observations.setdefault("usage:" + harness, {
+                "state": "unavailable", "reason": "usage-collection-failed"})
         usage_meta = {}
         usage_snapshots = {}
     collect_all.last_usage = usage_meta

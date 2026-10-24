@@ -132,11 +132,11 @@ class F51OptOutTest(unittest.TestCase):
             out = self._run(["--once", "--no-usage-api"])
             self.assertEqual(out.count("no usage api"), 0)
             self.assertEqual(out.count("Go usage unavailable"), 1)
-            # The B surface (--explorer): each harness without a passive-tap value is one
-            # unknown gauge ("?") in the status band, never a made-up percentage.
+            # The opt-in explorer owns its usage vocabulary; it does not reuse the removed
+            # B status band. The normal renderer still reports the disabled API above.
             explorer = self._run(["--once", "--no-usage-api", "--explorer"])
             self.assertEqual(explorer.count("no usage api"), 0)
-            self.assertEqual(explorer.count("CL ? · CX ? · OC ?"), 1)
+            self.assertIn("VIEWS", explorer)
 
             json_out = self._run(["--json", "--no-usage-api"])
         data = json.loads(json_out)

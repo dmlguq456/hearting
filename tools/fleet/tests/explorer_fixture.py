@@ -1,175 +1,22 @@
-"""Readers for the checked-in, redacted Fleet B canonical fixture.
-
-``load_source`` / ``load_screens`` return the frozen JSON. ``materialize`` expands the
-source into real files under a directory (jobs.log, route and cycle records, completion
-markers with their evidence files, peer-steward duties) so the explorer's readers can be
-exercised against actual paths instead of in-memory stand-ins.
-"""
+"""Small synthetic source helpers shared by Fleet explorer reader tests."""
 
 import contextlib
 import json
-import os
 import sqlite3
-from datetime import timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
+from datetime import timedelta, timezone
 
-
-FIXTURE_DIR = Path(__file__).with_name("fixtures") / "explorer_b"
-TOKEN = "$FIXTURE_ROOT"
-
-
-def _read(name):
-    return json.loads((FIXTURE_DIR / name).read_text(encoding="utf-8"))
-
-
-def load_source():
-    return _read("source.json")
-
-
-def load_screens():
-    return _read("screens.json")
-
-
-def load_output():
-    """The reduced raw-output records behind the canonical screens (see README)."""
-    return _read("output_synthetic.json")
-
-
+FIXTURE_DIR = Path(__file__).with_name("fixtures") / "explorer"
 KST = timezone(timedelta(hours=9))
 
 
-def expand(value, root):
-    """Replace the ``$FIXTURE_ROOT`` token with a real directory, recursively."""
-    if isinstance(value, str):
-        return value.replace(TOKEN, str(root))
-    if isinstance(value, list):
-        return [expand(item, root) for item in value]
-    if isinstance(value, dict):
-        return {key: expand(item, root) for key, item in value.items()}
-    return value
-
-
-def _write_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
-
-
-def jobs_log_text(registry):
-    """jobs.log lines (six tab fields, pipe metadata) for the given registry rows."""
-    lines = []
-    for row in registry:
-        pipe = ",".join(f"{key}={value}" for key, value in row["metadata"].items())
-        lines.append("\t".join((row["timestamp"], row["status"], row["location"],
-                                row["worktree"], row["slug"], pipe)))
-    return "\n".join(lines) + "\n"
-
-
-def json_route_loader(path, expect_id=None):
-    """Reads a fixture route record without the hash check (the fixture keeps the captured
-    ``route_hash`` while its paths are tokenized, so the recomputed hash cannot match)."""
-    try:
-        record = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if expect_id is not None and record.get("route_id") != expect_id:
-        return None
-    return record
-
-
-def materialize(root, source=None, drop_cycles=(), drop_routes=()):
-    """Write the fixture under ``root`` and describe where everything is.
-
-    ``drop_cycles`` / ``drop_routes`` omit those ids, to model an unreadable join record.
-    """
-    root = Path(root)
-    source = expand(source if source is not None else load_source(), root)
-    artifacts, state = root / "artifacts", root / "state"
-    jobs_path = state / "jobs.log"
-    state.mkdir(parents=True, exist_ok=True)
-    jobs_path.write_text(jobs_log_text(source["registry"]), encoding="utf-8")
-    for record in source["routes"]:
-        if record["route_id"] not in drop_routes:
-            _write_json(artifacts / ".runtime" / "routes" / (record["route_id"] + ".json"), record)
-    for record in source["cycles"]:
-        if record["cycle_id"] not in drop_cycles:
-            _write_json(artifacts / ".runtime" / "artifact-producer" / "v1" / "cycles"
-                        / (record["cycle_id"] + ".json"), record)
-    for route_id, markers in source["markers"].items():
-        for name, record in markers["files"].items():
-            _write_json(state / "completion" / route_id / name, record)
-        for node, text in markers["evidence"].items():
-            for record in markers["files"].values():
-                evidence = record.get("evidence")
-                if record.get("node_id") == node and isinstance(evidence, dict) and evidence.get("path"):
-                    path = Path(evidence["path"])
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(text, encoding="utf-8")
-    for name, record in source["obligations"].items():
-        _write_json(state / "peer-steward" / "obligations" / name, record)
-    live_jobs = {job.get("attempt_id") or job["key"]: job for job in source["snapshot"]["jobs"]}
-    raw = source["snapshot"]
-    snapshot = SimpleNamespace(
-        sessions=raw["sessions"], jobs=list(live_jobs.values()), pending_delivery=None,
-        observations=raw.get("observations", {}), session_order=tuple(raw.get("session_order", ())),
-        usage_snapshots=raw.get("usage_snapshots", {}), governor=raw.get("governor"),
-        compute_hosts=raw.get("compute_hosts"), unregistered_gpu=raw.get("unregistered_gpu", ()))
-    return SimpleNamespace(
-        root=root, source=source, jobs_path=str(jobs_path), artifact_root=str(artifacts),
-        state_roots=[str(state)], live_jobs=live_jobs, snapshot=snapshot,
-        sid=source["main_session"]["sid"], now=source["now"], route_loader=json_route_loader)
-
-
-def _registry_meta(fx, attempt_id):
-    return next(row["metadata"] for row in fx.source["registry"] if row["metadata"].get("attempt_id") == attempt_id)
-
-
-def _write_lines(path, rows):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
-
-
-def supervisor_rows(attempt_id, session_id, cwd):
-    return [{"type": "dispatch.supervisor.session", "parent_attempt_id": attempt_id,
-             "session_id": session_id, "cwd": cwd},
-            {"type": "dispatch.supervisor.turn-started", "parent_attempt_id": attempt_id, "turn_ordinal": 1},
-            {"type": "dispatch.supervisor.turn-completed", "parent_attempt_id": attempt_id, "turn_ordinal": 1}]
-
-
-def materialize_output(fx):
-    """Write the raw-output sources of the fixture: the Codex attempt logs, the supervised Claude owner
-    (supervisor log + native transcript under its worker home) and the cleaned b6 Claude owner (supervisor
-    log only: its worker home is gone)."""
-    if getattr(fx, "output_written", False):
-        return fx
-    from claude_project_dir import encode_project_dir
-    data = expand(load_output(), fx.root)
-    for attempt_id, item in data["logs"].items():
-        _write_lines(_registry_meta(fx, attempt_id)["log_file"], item["records"])
-    owner = data["claude_owner"]
-    meta = _registry_meta(fx, owner["attempt_id"])
-    row = next(r for r in fx.source["registry"] if r["metadata"]["attempt_id"] == owner["attempt_id"])
-    cwd = row["worktree"]
-    _write_lines(meta["log_file"], supervisor_rows(owner["attempt_id"], owner["session_id"], cwd))
-    _write_lines(Path(owner["runtime_home"]) / "projects" / encode_project_dir(cwd) / (owner["session_id"] + ".jsonl"),
-                 owner["records"])
-    cleaned = data["cleaned_owner"]
-    cmeta = _registry_meta(fx, cleaned["attempt_id"])
-    crow = next(r for r in fx.source["registry"] if r["metadata"]["attempt_id"] == cleaned["attempt_id"])
-    _write_lines(cmeta["log_file"], supervisor_rows(cleaned["attempt_id"], cleaned["session_id"], crow["worktree"]))
-    fx.output_written = True
-    return fx
-
-
-@contextlib.contextmanager
-def fixture_env(fx, jobs_path=None):
-    """Point the shared viewer's registry lookup at the fixture (never at this machine's registry)."""
-    env = {"AGENT_DISPATCH_JOBS": str(jobs_path or fx.jobs_path), "AGENT_HOME": str(Path(fx.root) / "agent-home"),
-           "XDG_STATE_HOME": str(Path(fx.root) / "xdg-state"), "HOME": str(Path(fx.root) / "home")}
-    with mock.patch.dict(os.environ, env):
-        yield
+def load_source():
+    source = json.loads((FIXTURE_DIR / "source.json").read_text(encoding="utf-8"))
+    if "view_model" in source:
+        view_model = json.loads((FIXTURE_DIR / source["view_model"]).read_text(encoding="utf-8"))
+        from tools.fleet.explorer.view_model import decode_fixture_values
+        return {**source, "sources": [decode_fixture_values(view_model["values"])]}
+    return source
 
 
 def output_reader(**options):
@@ -178,164 +25,266 @@ def output_reader(**options):
     return OutputReader(**options)
 
 
-def collect(fx, request_id="", stage_id="", epoch=1, sid=None, snapshot=True, output=None, expanded=(),
-            generation="", **overrides):
-    """One ``collect_focus`` over the materialized fixture for ``sid`` (default: the main session).
-
-    ``output`` is an ``OutputReader`` (or True for a fresh one): without it no raw output is opened.
-    """
-    from tools.fleet.explorer.focus import collect_focus
-    from tools.fleet.explorer.types import FocusKey, FocusRequest
-    request = FocusRequest(FocusKey("claude", sid or fx.sid, request_id, stage_id, generation=generation),
-                           epoch, 1, tuple(expanded))
-    options = dict(jobs_path=fx.jobs_path, artifact_root=fx.artifact_root, route_loader=fx.route_loader,
-                   now=fx.now, live_jobs=fx.live_jobs, state_roots=fx.state_roots,
-                   snapshot=fx.snapshot if snapshot else None)
-    if output:
-        materialize_output(fx)
-        options["output_reader"] = output_reader() if output is True else output
-    options.update(overrides)
-    with fixture_env(fx):
-        return collect_focus(request, **options)
-
-
-def tab(result, label):
-    return next(item for item in result.tabs if item.label == label)
-
-
-def screen_main(scene, width, first=3, count=None):
-    """Main-column text (right of the nav border) of a canonical scene at ``width`` columns.
-
-    The 100-column scenes hold the whole ledger/overview text in that column, so they are
-    the exact comparison target; ``first`` is the zero-based screen row to start from.
-    """
-    rows = load_screens()["scenes"][scene]["widths"][str(width)]["rows"]
-    lines = [row.split("\u2503", 1)[1].rstrip() for row in rows[first:] if "\u2503" in row]
-    return lines if count is None else lines[:count]
-
-
-def cells(text, x0, x1=None):
-    """The part of ``text`` that covers terminal cells [x0, x1) (W/F characters take two)."""
-    from tools.fleet.explorer.output import cell_width
-    out, col = [], 0
-    for char in text:
-        if col >= x0 and (x1 is None or col < x1):
-            out.append(char)
-        col += cell_width(char)
-    return "".join(out)
-
-
-def scene_state(fx, scene, result):
-    """The viewer state a screens.json scene stands for (labels resolved to request identities)."""
-    from tools.fleet.explorer.state import ExplorerState
-
-    def identity(label):
-        return next((item.identity for item in result.tabs if item.label == label), "") if label else ""
-
-    request = identity(scene.get("request"))
-    return ExplorerState(
-        selection="request:" + request if request else "", tab=identity(scene.get("tab")),
-        stage=scene.get("stage", ""), active_region=scene.get("region", "nav"),
-        scrolls=((f"output:{identity(scene.get('tab'))}", scene["output_scroll"]),) if "output_scroll" in scene else (),
-        history=(identity(scene.get("tab")),) if scene.get("history") else (),
-        keep=tuple(identity(label) for label in scene.get("keep", ())),
-        tab_order=tuple(item.identity for item in result.tabs))
-
-
-def scene_result(fx, scene):
-    """The selected-scope result of a scene, with the fixture's events and any injected source failure."""
-    import dataclasses
-    from tools.fleet.explorer.types import Health
-
-    base = collect(fx)
-    labels = {item.label: item.identity for item in base.tabs}
-    result = collect(fx, request_id=labels.get(scene.get("request"), ""), stage_id=scene.get("stage", ""),
-                     output=bool(scene.get("output_rows")))
-    result = dataclasses.replace(result, events=tuple(fx.source["events"]))
-    failed = scene.get("failed_source")
-    if failed:
-        result = dataclasses.replace(result, sources=(
-            (failed["name"], Health(state="failed", last_success_at=fx.now - failed["age_s"], error="timeout")),))
-    return result
-
-
-def scene_frame(fx, scene, cols, rows=45):
-    """Compose one scene at ``cols`` columns; a broken-tab scene is composed after its healthy screen."""
-    from tools.fleet.explorer.frame import compose
-
-    result = scene_result(fx, scene)
-    state = scene_state(fx, scene, result)
-    broken = scene.get("broken_tab")
-    if not broken:
-        return compose(fx.snapshot, result, state, cols, rows, now=fx.now)
-    healthy = compose(fx.snapshot, result, state, cols, rows, now=fx.now - broken["previous_age_s"])
-
-    def fails(_rect):
-        raise RuntimeError("tab renderer failed")
-
-    return compose(fx.snapshot, result, state, cols, rows, providers={"ledger": fails},
-                   last_good=healthy, now=fx.now)
-
-
-def model_snapshot(fx):
-    """The fixture snapshot with real ``Session`` / ``DispatchJob`` rows and a pid + start time on every
-    process, so the s/x entry builders and the old group renderer can read it like a live one."""
-    from tools.fleet.model import DispatchJob, Session
-    raw = fx.snapshot
-    sessions, jobs = [], []
-    for index, row in enumerate(raw.sessions):
-        row = dict(row)
-        row["proc_start"] = row.get("proc_start") or str(1000 + index)
-        sessions.append(Session(**row))
-    for index, row in enumerate(raw.jobs):
-        row = dict(row)
-        row["key"] = row.get("key") or row.get("attempt_id") or row.get("slug")
-        row["pid"] = row.get("pid") or 700000 + index
-        row["proc_start"] = row.get("proc_start") or str(5000 + index)
-        jobs.append(DispatchJob(**row))
-    return SimpleNamespace(**{**vars(raw), "sessions": sessions, "jobs": jobs})
-
-
-# -- an OpenCode owner with its database (the B-output-oc request) ------------------------------------------
-
-def materialize_opencode(root, generation="v1", rows=None, attempt_suffix=""):
-    """A one-attempt registry whose owner is OpenCode: supervisor log announcing the session and a read-only
-    database of the requested generation built from ``output_synthetic.json`` (or ``rows``).
-
-    Returns ``(jobs_path, attempt_id, session_id, database_path)``.
-    """
-    data = load_output()["opencode"]
-    root = Path(root)
-    state = root / "oc-state"
-    attempt, sid = data["attempt_id"], data["session_id"]
-    runtime = root / "oc-runtime"
-    database = runtime / "data" / "opencode" / "opencode.db"
-    database.parent.mkdir(parents=True, exist_ok=True)
-    cwd = str(root / "worktree")
-    log = state / "logs" / f"oc-owner.{attempt}.opencode.jsonl"
-    _write_lines(log, [{"type": "dispatch.supervisor.session", "runtime": "opencode", "parent_attempt_id": attempt,
-                        "session_id": sid, "cwd": cwd}])
-    meta = {"attempt_id": attempt, "harness": "opencode", "worker_type": "owner", "log_file": str(log),
-            "opencode_runtime_dir": str(runtime), "parent_sid": "ses_parentfixture0", "dispatch_depth": "1"}
-    pipe = ",".join(f"{key}={value}" for key, value in meta.items())
-    jobs = state / "jobs.log"
-    jobs.write_text("\t".join(("2026-10-13T00:32:29.740698Z", "done", cwd, cwd, "oc-owner", pipe)) + "\n", encoding="utf-8")
-    write_opencode_db(database, sid, generation, rows if rows is not None else data[generation])
-    return str(jobs), attempt, sid, database
+def supervisor_rows(attempt_id, session_id, cwd):
+    return [{"type": "dispatch.supervisor.session", "parent_attempt_id": attempt_id,
+             "session_id": session_id, "cwd": cwd},
+            {"type": "dispatch.supervisor.turn-started", "parent_attempt_id": attempt_id,
+             "turn_ordinal": 1},
+            {"type": "dispatch.supervisor.turn-completed", "parent_attempt_id": attempt_id,
+             "turn_ordinal": 1}]
 
 
 def write_opencode_db(path, sid, generation, rows):
-    with contextlib.closing(sqlite3.connect(path)) as con:
+    """Write synthetic v1/v2 OpenCode transcript rows for bounded reader tests."""
+    with contextlib.closing(sqlite3.connect(path)) as connection:
         if generation == "v1":
-            con.execute("CREATE TABLE IF NOT EXISTS message (id TEXT, session_id TEXT, role TEXT)")
-            con.execute("CREATE TABLE IF NOT EXISTS part (session_id TEXT, message_id TEXT, data TEXT)")
+            connection.execute("CREATE TABLE IF NOT EXISTS message (id TEXT, session_id TEXT, role TEXT)")
+            connection.execute("CREATE TABLE IF NOT EXISTS part (session_id TEXT, message_id TEXT, data TEXT)")
             for row in rows:
-                con.execute("INSERT INTO message VALUES (?, ?, ?)", (row["message"], sid, row["role"]))
-                con.execute("INSERT INTO part (rowid, session_id, message_id, data) VALUES (?, ?, ?, ?)",
-                            (row["rowid"], sid, row["message"], json.dumps(row["data"], ensure_ascii=False)))
+                connection.execute("INSERT INTO message VALUES (?, ?, ?)",
+                                   (row["message"], sid, row["role"]))
+                connection.execute("INSERT INTO part (rowid, session_id, message_id, data) VALUES (?, ?, ?, ?)",
+                                   (row["rowid"], sid, row["message"],
+                                    json.dumps(row["data"], ensure_ascii=False)))
         else:
-            con.execute("CREATE TABLE IF NOT EXISTS session_message (session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
+            connection.execute("CREATE TABLE IF NOT EXISTS session_message "
+                               "(session_id TEXT, type TEXT, seq INTEGER, data TEXT)")
             for row in rows:
-                con.execute("INSERT INTO session_message VALUES (?, ?, ?, ?)",
-                            (sid, row["type"], row["seq"], json.dumps(row["data"], ensure_ascii=False)))
-        con.commit()
+                connection.execute("INSERT INTO session_message VALUES (?, ?, ?, ?)",
+                                   (sid, row["type"], row["seq"],
+                                    json.dumps(row["data"], ensure_ascii=False)))
+        connection.commit()
+
+
+# -- demo snapshot, state exploration and frame invariants (end-to-end sweep) ------------------
+
+DECOR = frozenset("─━│┃┈┌┐└┘├┤┬┴┼┳┻┫┣╋╌╍═║┗┏┓┛╭╮╯╰ ")
+KEYS_LINE = " ↑↓ move · ←→ focus · ⏎ go to pane · Tab next view · / filter · u usage · F feed · q quit"
+
+
+def demo_snapshot(now=None):
+    """The ``--demo`` rows, projected the way a live tick projects them, plus fixed host rows.
+
+    Hermetic: no home, registry, herdr or network read. The compute-host block and peer records are
+    attached so every section the screens read has a source.
+    """
+    import time
+    from tools.fleet import demo
+    from tools.fleet.projection import attach_projections
+    from tools.fleet.refresh import LiveSnapshot
+    sessions, jobs = demo.collect()
+    sessions, jobs = attach_projections(sessions, jobs, spec_markers={}, capability_groundings={})
+    now = time.time() if now is None else now
+    by_sid = {s.session_id: s for s in sessions}
+    claude, codex = by_sid["demo-claude-1"], by_sid["demo-codex-1"]
+    claude.peer_last_sent = {"to_name": "demo-app", "to_session_id": "demo-codex-1",
+                             "to_harness": "codex", "kind": "steer", "age_min": 12}
+    codex.peer_last_recv = {"from_name": "demo-app-a7", "from_session_id": "demo-claude-1",
+                            "from_harness": "claude", "kind": "steer", "age_min": 12}
+    import dataclasses
+    claude.work_projection = dataclasses.replace(
+        claude.work_projection, result={"name": "demo release notes", "result": "success",
+                                        "at": now - 41 * 60, "source": "route"})
+    hosts = {"configured": True, "observed_at": now, "hosts": [
+        {"host": "base", "self": True, "reachable": True, "cpu_utilization_pct": 23.0, "cpu_count": 64,
+         "memory_used_mib": 40960, "memory_total_mib": 128000,
+         "gpus": [{"index": 0, "name": "RTX 6000 Ada", "utilization_gpu_pct": 91, "memory_used_mib": 27648,
+                   "memory_total_mib": 49152,
+                   "processes": [{"pid": 4242, "session_owner": {"harness": "claude", "session_id": "demo-claude-1"}}]},
+                  {"index": 1, "name": "RTX 6000 Ada", "utilization_gpu_pct": 0, "memory_used_mib": 0,
+                   "memory_total_mib": 49152, "processes": []}]},
+        {"host": "remote", "self": False, "reachable": True, "cpu_utilization_pct": 4.0, "cpu_count": 32,
+         "memory_used_mib": 8192, "memory_total_mib": 64000, "gpus": []},
+        {"host": "gone", "self": False, "reachable": False, "gpus": []}]}
+    memory = demo.memory_snapshot()
+    memory["today"] = {"added": 2, "expired": 1}
+    memory["by_repo"] = {"demo-app": [
+        {"ts": "2026-10-23T12:00:00+00:00", "action": "add", "type": "decision", "snippet": "keep the row"},
+        {"ts": "2026-10-23T11:00:00+00:00", "action": "update", "type": "artifact-pointer", "snippet": None}]}
+    memory["recent"] = [memory["by_repo"]["demo-app"][0]]
+    return LiveSnapshot(sessions=sessions, jobs=jobs, memory=memory,
+                        usage_snapshots={}, hearting={"version": "v3.42.0-2-gdc406c55a-dirty",
+                                                      "install_method": "unmanaged"}), hosts
+
+
+def demo_seat_entries(now, sid, harness="claude", full=True):
+    """A seat history as the reader returns it: an earlier session with two cards, the running one last."""
+    def card(generation, title, hours):
+        entry = {"generation": generation, "status": "available", "at": now - hours * 3600, "title": title,
+                 "chars": 120}
+        if full:
+            entry["lines"] = [title, "", "- next step", "A **bold** line with `code` in it."]
+        return entry
+    return (
+        {"harness": harness, "sid": "older-" + sid[-4:], "started_at": now - 9 * 3600, "source": "startup",
+         "relation": "chronological", "transcript": {}, "current": False,
+         "cards": [card(1, "first card", 8), card(2, "second card", 7)]},
+        {"harness": harness, "sid": sid, "started_at": now - 3600, "source": "clear",
+         "relation": "confirmed", "transcript": {}, "current": True, "cards": []})
+
+
+def demo_models():
+    """A MODELS record of the shape the config reader returns (one profile table, one pool, one line)."""
+    profiles = ["top", "deep", "balanced-deep", "balanced", "light", "mini"]
+    cell = lambda model, effort: [model, effort]
+    return {
+        "profiles": profiles,
+        "profile_map": {"claude": {p: cell("opus", "high") for p in profiles},
+                        "codex": {p: cell("gpt-5.5", "medium") for p in profiles},
+                        "opencode": {**{p: cell("glm-5.2", "high") for p in profiles}, "top": None}},
+        "model_choices": {"claude": ["opus", "sonnet"], "codex": ["gpt-5.5"], "opencode": ["glm-5.2"]},
+        "main_only": {"claude": "fable"}, "efforts": ["low", "medium", "high", "xhigh", "max"],
+        "pools": {"deep": [[["codex", "claude"]], "relief opencode below 25%"], "top": None},
+        "effort_keys": {"low": "dim", "medium": "eff_medium", "high": "soft", "xhigh": "eff_xhigh", "max": "dead"},
+        "shown": {"opus": "Opus", "sonnet": "Sonnet", "fable": "Fable"},
+        "context": {"claude": 800000, "codex": 800000, "opencode": 800000},
+        "context_source": {"claude": "→ CLAUDE_CODE_AUTO_COMPACT_WINDOW", "codex": "→ model_context_window",
+                           "opencode": "→ limit.context capped at start"},
+        "tidy": None, "token_units": {"400k": 400000, "800k": 800000, "1M": 1000000},
+        "allocation": {"fields": [["strategy:", [["balanced", "soft"], ["   window ", "label"], ["30 attempts", "soft"]]]],
+                       "note": "these keys have no setter command yet"}}
+
+
+def demo_detail(snapshot, now=None):
+    """What the selection pumps would hand over for the demo rows: seats of every main session, the
+    first Claude session's cards, conversation, pane text and a route's owner output, the models."""
+    import time
+    from tools.fleet.explorer.types import ExplorerDetail, FocusKey, FocusResult
+    now = time.time() if now is None else now
+    sid = "demo-claude-1"
+    seats = {f"{s.harness}:{s.session_id}": demo_seat_entries(now, s.session_id, s.harness, full=False)
+             for s in snapshot.sessions if not s.is_child and not s.mem_worker}
+    focus = FocusResult(
+        FocusKey("claude", sid), 1, 1,
+        events=({"time_kst": "2026-10-23T12:00:00+09:00", "kind": "registry", "tag": "a7", "status": "running",
+                 "worker_type": "stage", "route_node": "execute", "note": "a note"},),
+        source_records={
+            "seat": demo_seat_entries(now, sid),
+            "dialogue": {"index": 2, "harness": "claude", "sid": sid,
+                         "lines": ["user: hello", "assistant: hi there", "tool Bash: ls", "tool output: a b",
+                                   "assistant: " + "a long reply that has to wrap across the box " * 4]},
+            "pane_read": {"pane": "w1:p1", "at": now, "lines": ["$ ls", "a b", "x" * 300]},
+            "raw": {"att": "att-0123456789ab", "route": "rt-271492e352d13180",
+                    "lines": ["assistant: working", "tool Bash: ls", "tool output: a b"] * 8}})
+    return ExplorerDetail(focus=focus, seats=seats, config=demo_models(), panes={sid: "w1:p1"})
+
+
+def demo_model(now=None, detail=False):
+    import time
+    from tools.fleet.explorer.live import build_view_model
+    snapshot, hosts = demo_snapshot(now)
+    view = type("View", (), {})()
+    view.__dict__.update({name: getattr(snapshot, name) for name in snapshot.__dataclass_fields__})
+    view.compute_hosts = hosts
+    clock = time.time() if now is None else now
+    return build_view_model(view, accepted_detail=demo_detail(snapshot, clock) if detail else None, now=clock)
+
+
+def trace_draw(draw, vm, state, cols, rows):
+    """``draw`` a frame while recording every grid write; returns ``(frame, trace)``."""
+    from tools.fleet.explorer.grid import CellGrid
+    trace = []
+    CellGrid.default_trace = trace
+    try:
+        frame = draw(vm, state, cols, rows, beat=1)
+    finally:
+        CellGrid.default_trace = None
+    return frame, trace
+
+
+def frame_violations(frame, trace, cols, rows):
+    """Everything wrong with one painted frame: overlaps, overflow, covered bottom lines, bad hits."""
+    from tools.fleet.explorer.grid import cell_width
+    problems = []
+    if len(frame.cells) != rows or any(len(row) != cols for row in frame.cells):
+        return ["frame is not %dx%d" % (cols, rows)]
+    for y, row in enumerate(frame.cells):
+        if sum(cell_width(cell[0]) for cell in row) != cols:
+            problems.append("row %d is not %d cells wide" % (y, cols))
+        for x, cell in enumerate(row):
+            width = cell_width(cell[0])
+            if width == 2 and (x + 1 >= cols or row[x + 1][0] != ""):
+                problems.append("wide glyph %r at (%d,%d) lost its second cell" % (cell[0], x, y))
+            if cell[0] == "" and (x == 0 or cell_width(row[x - 1][0]) != 2):
+                problems.append("orphan continuation at (%d,%d)" % (x, y))
+    owners = {}
+    for entry in trace:
+        if entry[0] == "reset":
+            owners.clear()
+        elif entry[0] == "fill":
+            _kind, y, lo, hi, glyph = entry
+            for x in range(lo, hi):
+                if glyph == " ":
+                    owners.pop((x, y), None)
+                else:
+                    owners[(x, y)] = (-1, glyph)
+        elif entry[0] == "clip":
+            _kind, _serial, y, dropped, past_screen = entry
+            if past_screen and dropped.strip():
+                problems.append("text runs past the screen edge on row %d: %r" % (y, dropped[:20]))
+        else:
+            _kind, serial, y, glyph, x, width = entry
+            for offset in range(width):
+                key = (x + offset, y)
+                prior = owners.get(key)
+                if (prior is not None and prior[0] != serial and glyph not in DECOR
+                        and prior[1] not in DECOR and prior[1] != glyph):
+                    problems.append("%r overwrites %r at (%d,%d)" % (glyph, prior[1], x + offset, y))
+                owners[key] = (serial, glyph)
+    text = frame.text_rows()
+    body_end = rows - 4
+    if not text[rows - 2].startswith(" ↑↓ move · ←→ focus"):
+        problems.append("key line is covered: %r" % text[rows - 2][:60])
+    if not text[rows - 1].startswith(" hearting ›"):
+        problems.append("status line is covered: %r" % text[rows - 1][:60])
+    feed = text[rows - 3]
+    if feed.strip() and not feed.startswith(" ≋ "):
+        problems.append("feed line is covered: %r" % feed[:60])
+    for hit in frame.hits:
+        if hit.y == -1:
+            continue
+        if not (0 <= hit.y < body_end) and not (hit.y == 1 and hit.action == ("usage",)):
+            problems.append("hit below the pane rule: %r" % (hit,))
+            continue
+        if not (0 <= hit.x0 < hit.x1 <= cols):
+            problems.append("hit outside the screen: %r" % (hit,))
+            continue
+        if hit.action[:2] == ("root", "COMPUTE"):
+            continue                    # the COMPUTE panel is one click target, blank rows included
+        cells = frame.cells[hit.y][hit.x0:hit.x1]
+        if not any(cell[0].strip() or cell[2] is not None for cell in cells):
+            problems.append("hit over empty cells: %r" % (hit,))
+    return problems
+
+
+def explore_states(vm, draw, reduce, start, cols, rows, depth, seen=None):
+    """Yield ``(state, frame, trace)`` for every state reachable from ``start`` by clicking hits
+    (and wheeling scroll strips) up to ``depth`` steps; each distinct state is drawn once."""
+    seen = set() if seen is None else seen
+
+    def key(state):
+        return (state.view, state.scope, state.folds, state.usage_open, state.scroll)
+
+    def walk(state, remaining):
+        if key(state) in seen:
+            return
+        seen.add(key(state))
+        frame, trace = trace_draw(draw, vm, state, cols, rows)
+        yield state, frame, trace
+        if not remaining:
+            return
+        actions = []
+        for hit in frame.hits:
+            if hit.y < 0 or hit.action[0] in ("pane", "parent"):
+                continue
+            event = ({"type": "wheel", "x": hit.x0, "y": hit.y, "direction": direction}
+                     if hit.action[0] == "scroll" else {"type": "click", "action": hit.action})
+            for direction in ((-1, 1) if hit.action[0] == "scroll" else (0,)):
+                event = (dict(event, direction=direction) if hit.action[0] == "scroll" else event)
+                if event not in actions:
+                    actions.append(event)
+        for event in actions:
+            after, _effects = reduce(state, event, frame)
+            yield from walk(after, remaining - 1)
+
+    yield from walk(start, depth)

@@ -1,0 +1,1 @@
+../../../../../tools/fleet/tests/test_registry_parsed_rows.py

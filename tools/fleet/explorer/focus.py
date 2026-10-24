@@ -17,10 +17,7 @@ import re
 import threading
 import time
 
-from .ledger import build_request_ledger, harness_abbr
-from .output import MAX_STAGE_SOURCES, OutputReader, SourcePlan, read_generation, utility
-from .overview import build_overview
-from .requests import build_tabs, latest_results, request_header
+from .output import OutputReader, read_generation, utility
 from .types import AttemptRow, FocusRequest, FocusResult, Health
 from ..refresh import RefreshPump
 
@@ -30,6 +27,12 @@ _MAX_RECORD_BYTES = 256 * 1024
 _MAX_OBLIGATION_FILES = 256
 _MAX_CYCLE_FILES = 2048
 _DONE_DUTY_STATES = frozenset(("complete", "cancelled"))
+
+
+def harness_abbr(value):
+    value = str(value or "").lower()
+    return {"claude": "CL", "codex": "CX", "opencode": "OC"}.get(
+        value, "?" if not value else value[:2].upper())
 
 
 def _get(value, key, default=None):
@@ -93,22 +96,11 @@ def _registry_paths(jobs_path):
 def session_entries(jobs_path, parent_sid):
     """Every registry line (number, fields, meta) naming ``parent_sid`` as its parent, in file order."""
     dispatch = _dispatch()
-    entries, number = [], 0
+    entries = []
     for path in _registry_paths(jobs_path):
-        try:
-            lines = dispatch._dispatch_registry_cache.registry_view(Path(path)).lines
-        except FileNotFoundError:
-            continue
-        for line in lines:
-            number += 1
-            if not line.strip():
-                continue
-            fields = line.split("\t")
-            if len(fields) != 6:
-                continue
-            meta = dispatch._parse_pipe_meta(fields[5] or "")
+        for line_number, fields, meta in dispatch.parsed_registry_rows(path):
             if meta.get("parent_sid") == parent_sid:
-                entries.append((number, fields, meta))
+                entries.append((line_number, list(fields), dict(meta)))
     return entries
 
 
@@ -312,46 +304,6 @@ def read_obligations(state_roots, session_id, now, cache):
     return tuple(items)
 
 
-def _plan_of(row, label, role):
-    meta = {key: row.meta.get(key) for key in ("artifact_root", "launch_home") if row.meta.get(key)}
-    return SourcePlan(row.attempt_id, label, row.harness, harness_abbr(row.harness), role,
-                      row.meta.get("log_file") or "", tuple(sorted(meta.items())))
-
-
-def output_plans(key, tab, rows):
-    """(title, plans, stamped) for the selected request: the chosen attempt, the chosen stage's current
-    attempt, or the supervisor plus the current attempt of each stage (mixed by native time)."""
-    by_id = {row.attempt_id: row for row in rows}
-    mine = [by_id[a] for a in tab.attempt_ids if a in by_id]
-    stages = [row for row in mine if row.worker_type not in ("owner", "frame") and row.route_node]
-    if key.attempt_id and key.attempt_id in by_id:
-        row = by_id[key.attempt_id]
-        label = "owner" if row.worker_type == "owner" else (row.route_node or row.worker_type or "시도")
-        return f"{label} · {harness_abbr(row.harness)} · 원래 출력", [_plan_of(row, label, "stage")], False
-    if key.stage_id:
-        picked = [row for row in stages if row.route_node == key.stage_id]
-        if not picked:
-            return f"{key.stage_id} · 원래 출력", [], False
-        row = max(picked, key=lambda r: r.rank)
-        return f"{key.stage_id} · {harness_abbr(row.harness)} · 원래 출력", [_plan_of(row, key.stage_id, "stage")], False
-    owners = [row for row in mine if row.worker_type == "owner"]
-    latest = {}
-    for row in stages:
-        if row.route_node not in latest or row.rank > latest[row.route_node].rank:
-            latest[row.route_node] = row
-    chosen = sorted(sorted(latest.values(), key=lambda r: r.line)[-MAX_STAGE_SOURCES:], key=lambda r: r.line)
-    plans, parts = [], []
-    if owners:
-        owner = max(owners, key=lambda r: r.line)
-        plans.append(_plan_of(owner, "owner", "owner"))
-        parts.append(f"감독 {harness_abbr(owner.harness)}")
-    if chosen:
-        plans.extend(_plan_of(row, row.route_node, "stage") for row in chosen)
-        abbrs = list(dict.fromkeys(harness_abbr(row.harness) for row in chosen))
-        parts.append("단계 " + "+".join(abbrs))
-    return f"{tab.label} · " + " + ".join(parts or ["원래 출력"]), plans, len(plans) > 1
-
-
 LINEAGE_LIMIT = 12
 
 
@@ -362,10 +314,7 @@ def _card_title(module, card):
         return ""
     data = module.read_json(Path(path))
     body = data.get("body") if isinstance(data, dict) else None
-    for line in str(body or "").splitlines():
-        if line.strip():
-            return line.strip()[:48]
-    return ""
+    return _first_body_line(body)
 
 
 def read_lineage(session, harness, sid):
@@ -402,6 +351,242 @@ def read_lineage(session, harness, sid):
     return tuple(entries), Health("success", time.time())
 
 
+
+# -- seat history, cards, dialogue, pane (bounded reads for what is open) ----------------------
+
+SEAT_SESSION_LIMIT = 12
+CARD_LINES_MAX = 600
+CARD_TITLE_MAX = 400
+DIALOGUE_LINES_MAX = 400
+PANE_ROWS = 14
+_ROLE_LINE = re.compile(r"\[([A-Za-z_ ]+)\] ")
+
+
+_TAG_ONLY = re.compile(r"^</?[A-Za-z_][\w-]*>$")
+
+
+def _first_body_line(body):
+    """What the card says first (see ``nav.card_title``); a bare ``<analysis>``-style tag line is not a title."""
+    from . import nav
+    lines = [line for line in str(body or "").splitlines() if not _TAG_ONLY.match(line.strip())]
+    return nav.card_title(lines)[:CARD_TITLE_MAX]
+
+
+def _read_card(module, card, *, full):
+    """One card of the seat: its generation, when it was written, its first line and (``full``) its body."""
+    entry = {"generation": card.get("generation"), "status": card.get("status")}
+    path = card.get("path")
+    if not path or card.get("status") != "available":
+        return entry
+    data = module.read_json(Path(path))
+    if not isinstance(data, dict):
+        return entry
+    body = str(data.get("body") or "")
+    at = data.get("authored_at_epoch")
+    entry.update(at=float(at) if isinstance(at, (int, float)) and not isinstance(at, bool) else None,
+                 title=_first_body_line(body), chars=len(body))
+    if full:
+        entry["lines"] = body.splitlines()[:CARD_LINES_MAX]
+    return entry
+
+
+def read_seat_history(session, harness, sid, *, cards=False, pane=None):
+    """``(entries, pane, Health)``: every session of the seat, oldest first and the current one last.
+
+    Each entry carries its start source, its handover relation, where its transcript is and its
+    cards. Only the newest card of the whole seat is opened unless ``cards`` is set (the opened
+    seat), in which case every card is read with its body. ``entries`` is None when the seat could
+    not be read, never a guess.
+    """
+    from . import nav
+    try:
+        module = utility("session_tidy")
+        pane = pane or nav._get(session, "herdr_pane", "pane", "pane_id")
+        if pane:
+            # The viewer is not the pane's runtime, so a verified-caller seat cannot be resolved; the
+            # seat a session's own hooks wrote under is exactly this (endpoint scope, pane id).
+            endpoint = module._endpoint_scope()
+            key = module._digest("pane", endpoint, str(pane)) if endpoint else module._digest("pane", str(pane))
+            seat = module.Seat("pane", key, str(pane), harness or "", "", endpoint=endpoint)
+        else:
+            seat = module.resolve_seat(harness, cwd=nav._get(session, "cwd", "project"), env={}, sid=sid)
+    except Exception as exc:
+        return None, "", Health("failed", None, f"seat 없음 · {type(exc).__name__}")
+    try:
+        rows = module.seat_lineage(seat, sid=sid)
+    except Exception as exc:
+        return None, "", Health("failed", None, type(exc).__name__)
+    rows = [row for row in rows[:SEAT_SESSION_LIMIT + 1]]
+    current = [row for row in rows if row.get("harness") == harness and row.get("sid") == sid]
+    earlier = [row for row in rows if row not in current]
+    ordered = list(reversed(earlier)) + current
+    newest_card_owner = None
+    for row in reversed(ordered):
+        if row.get("cards"):
+            newest_card_owner = id(row)
+            break
+    entries = []
+    for row in ordered:
+        row_cards = list(row.get("cards") or ())
+        read = []
+        for index, card in enumerate(row_cards):
+            last = id(row) == newest_card_owner and index == len(row_cards) - 1
+            read.append(_read_card(module, card, full=cards) if (cards or last)
+                        else {"generation": card.get("generation"), "status": card.get("status")})
+        entries.append({"harness": row.get("harness"), "sid": row.get("sid"),
+                        "started_at": row.get("started_at"), "source": row.get("source"),
+                        "relation": row.get("relation"),
+                        "transcript": dict(row.get("transcript") or {}),
+                        "current": bool(row in current), "cards": read})
+    return tuple(entries), (seat.pane if seat.kind == "pane" else ""), Health("success", time.time())
+
+
+def lineage_from_seat(entries):
+    """The older ``lineage`` shape (earlier sessions, newest first) from a seat history."""
+    items = []
+    for entry in reversed(tuple(entries or ())):
+        if entry.get("current"):
+            continue
+        cards = entry.get("cards") or ()
+        titled = next((card.get("title") for card in reversed(cards) if card.get("title")), "")
+        items.append({"harness": entry.get("harness"), "sid": entry.get("sid"), "source": entry.get("source"),
+                      "relation": entry.get("relation"), "title": titled,
+                      "card_status": (cards[-1].get("status") if cards else None),
+                      "transcript": dict(entry.get("transcript") or {})})
+    return tuple(items[:LINEAGE_LIMIT])
+
+
+def read_dialogue(entry):
+    """The last conversation rows of one generation's transcript as ``role: text`` lines."""
+    where = (entry or {}).get("transcript") or {}
+    path, status = where.get("path"), where.get("status")
+    harness, sid = str(entry.get("harness") or ""), str(entry.get("sid") or "")
+    if not path or status != "available":
+        return None
+    try:
+        module = utility("tidy_transcripts")
+        from .output import TAIL_BYTES
+        if harness == "opencode":
+            cursor, texts = 0, []
+            for _ in range(64):
+                chunk = module.read_chunk(harness, path, cursor, sid=sid, limit_bytes=TAIL_BYTES)
+                if chunk.error:
+                    return None
+                if chunk.text:
+                    texts.append(chunk.text)
+                texts = texts[-2:]
+                if chunk.eof or chunk.cursor_to <= cursor:
+                    break
+                cursor = chunk.cursor_to
+            text = "\n".join(texts)
+        else:
+            size = os.stat(path).st_size
+            text = ""
+            for window in (TAIL_BYTES, 8 * TAIL_BYTES, 32 * TAIL_BYTES):
+                # whole rows only: a window that starts inside one very long row yields nothing, so widen it
+                chunk = module.read_chunk(harness, path, max(0, size - window), sid=sid, limit_bytes=window)
+                if chunk.error:
+                    return None
+                text = chunk.text
+                if text.strip() or size <= window:
+                    break
+    except Exception:
+        return None
+    lines = []
+    for raw in str(text).split("\n"):
+        match = _ROLE_LINE.match(raw)
+        lines.append(f"{match.group(1).lower()}: {raw[match.end():]}" if match else raw)
+    return lines[-DIALOGUE_LINES_MAX:]
+
+
+def _herdr_argv(*args):
+    argv = ["herdr"]
+    try:
+        endpoint = utility("herdr_observation").endpoint_name()
+    except Exception:
+        endpoint = "default"
+    if endpoint and endpoint != "default":
+        argv += ["--session", str(endpoint)]
+    return argv + list(args)
+
+
+def read_pane_map(timeout=3.0):
+    """``{session id: pane id}`` from one ``herdr pane list``; empty when herdr is not reachable."""
+    import subprocess
+    try:
+        proc = subprocess.run(_herdr_argv("pane", "list"), capture_output=True, text=True, timeout=timeout)
+        if proc.returncode:
+            return {}
+        panes = ((json.loads(proc.stdout or "{}").get("result") or {}).get("panes")) or ()
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    found = {}
+    for pane in panes:
+        owner = (pane.get("agent_session") or {}).get("value") if isinstance(pane, dict) else None
+        if isinstance(owner, str) and owner and isinstance(pane.get("pane_id"), str):
+            found.setdefault(owner, pane["pane_id"])
+    return found
+
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+
+def read_pane_visible(pane, *, rows=PANE_ROWS, timeout=2.5):
+    """The open session's visible pane text: its last non-blank rows, nothing else of the screen."""
+    import subprocess
+    if not isinstance(pane, str) or not pane:
+        return None
+    try:
+        proc = subprocess.run(_herdr_argv("pane", "read", pane, "--source", "visible", "--format", "text"),
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    text = proc.stdout if isinstance(proc.stdout, str) else ""
+    if proc.returncode or not text or len(text.encode("utf-8")) > 262144:
+        return None
+    if text.lstrip().startswith("{"):
+        try:
+            payload = json.loads(text)
+            if payload.get("error"):
+                return None
+            text = str(((payload.get("result") or {}).get("read") or {}).get("text") or "")
+        except ValueError:
+            pass
+    lines = [_CONTROL.sub("", line).rstrip() for line in text.splitlines()]
+    lines = [line for line in lines if line.strip()]
+    return lines[-rows:]
+
+
+def read_owner_raw(route_id, attempt_id, rows, live, reader):
+    """Raw owner output of a route (``attempt_view`` lines through the shared reader), or None.
+
+    The owner attempt is the live job the snapshot names (it carries its log file and registry), else
+    the registry row of the focused session that is that route's owner."""
+    from .output import SourcePlan, _abbr
+    if reader is None:
+        return None
+    job = live.get(attempt_id) if attempt_id else None
+    if job is not None:
+        harness = str(_get(job, "harness") or "")
+        meta = tuple((name, str(_get(job, attr))) for name, attr in (
+            ("registry_path", "_registry_path"), ("artifact_root", "artifact_root"),
+            ("launch_home", "_launch_home")) if _get(job, attr))
+        plan = SourcePlan(attempt_id, "owner", harness, _abbr(harness), "owner",
+                          log_file=str(_get(job, "_log_file") or ""), meta=meta)
+    else:
+        owner = next((row for row in rows if row.worker_type == "owner"
+                      and (row.owner_route_id or row.route_id) == route_id), None)
+        if owner is None:
+            return None
+        harness = owner.harness or ""
+        plan = SourcePlan(owner.attempt_id, "owner", harness, _abbr(harness), "owner",
+                          meta=tuple((k, v) for k, v in owner.meta.items()
+                                     if k in ("registry_path", "artifact_root", "launch_home")))
+    view = reader.read(("route-raw", route_id), "owner raw", [plan])
+    return {"att": plan.attempt_id, "route": route_id,
+            "lines": [event.text for event in getattr(view, "events", ()) if event.text][-300:]}
+
+
 def nav_tag(session):
     tag = _get(session, "session_tag")
     return str(tag) if tag else None
@@ -419,16 +604,7 @@ def _as_mapping(value):
 def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=None, now=None,
                   live_jobs=None, snapshot=None, state_roots=None, cache=None, output_reader=None,
                   earlier=False):
-    """Read everything the selected main session's request tabs, ledger and overview need.
-
-    ``live_jobs`` (mapping or list of the current snapshot's jobs, or a callable returning
-    them) supplies liveness and process evidence for rows that are still live; every other
-    row is ``unknown`` and decided without process proof. ``snapshot`` is the already
-    published immutable snapshot, used only to build the overview text. ``output_reader`` (an
-    ``OutputReader``) reads the raw output of the selected request, or of its selected stage; without
-    one nothing is opened, and a request tab that is not selected never reaches it. ``earlier`` asks
-    that reader to read further back first.
-    """
+    """Read only the focused session's bounded source facts and optional earlier transcript."""
     from .. import route as route_module
     route_loader = route_loader or route_module.load
     cache = cache or SourceCache()
@@ -446,42 +622,10 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
         artifact_root = derive_artifact_root(rows)
     errors = []
 
-    wanted = key.request_id
     owner_routes = _load_routes(rows, artifact_root, route_loader)
     cycles = _load_cycles(rows, owner_routes, artifact_root, cache)
-    tabs = build_tabs(rows, owner_routes, cycles)
-    header = request_header(tabs, rows)
-    tab = next((t for t in tabs if t.identity == wanted), None) if wanted else None
-
-    request_ledger, ledger_rows, open_results = None, (), ()
-    try:
-        records = dict(owner_routes)
-        if tab is not None:
-            ids = set(tab.attempt_ids)
-            selected_rows = [row for row in rows if row.attempt_id in ids]
-            records.update(_load_routes([], artifact_root, route_loader, selected_rows, records))
-            gates = {}
-            current = tab.owner_route_ids[-1] if tab.owner_route_ids else tab.route_id
-            record = records.get(current)
-            if isinstance(record, dict) and current:
-                for node in record.get("nodes", ()):
-                    node_id = node.get("id") if isinstance(node, dict) else None
-                    if node_id:
-                        gates[(current, node_id)] = _gate(record, current, node_id,
-                                                          state_roots, route_module)
-            request_ledger = build_request_ledger(tab, tabs, rows, records, gates)
-            ledger_rows = request_ledger.rows
-        results = []
-        for row in latest_results(tabs, rows):
-            if row.outcome in ("failed", "review-blocked"):
-                record = owner_routes.get(row.route_id)
-                gate = (_gate(record, row.route_id, row.route_node, state_roots, route_module)
-                        if isinstance(record, dict) else None)
-                results.append((row.route_id, row.route_node, row.outcome, gate))
-        open_results = tuple(results)
-    except Exception as exc:                     # a ledger fault must not hide the tabs
-        errors.append(f"ledger: {type(exc).__name__}")
-        request_ledger, ledger_rows = None, ()
+    records = dict(owner_routes)
+    gates = {}
 
     sources = []
     output, lineage = {}, {}
@@ -490,7 +634,32 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
         from . import nav
         session = nav.find_session(snapshot, key.sid)
     focus_ref = f"{key.harness}:{key.sid}"
-    if focus_ref in tuple(getattr(request, "expanded_sessions", ()) or ()) and session is not None:
+    from . import nav
+    wants = tuple(getattr(request, "wants", ()) or ())
+    seat_entries, pane_id, extra = None, "", {}
+    panes = read_pane_map() if (session is not None and wants) else {}
+    session_ids = (key.sid, *(_get(session, "session_aliases") or ())) if session is not None else ()
+    pane_id = next((panes[i] for i in session_ids if i in panes), "")
+    if session is not None and any(w in ("seat", "cards") or w.startswith("dialogue:") for w in wants):
+        seat_entries, seat_pane, seat_health = read_seat_history(
+            session, key.harness, key.sid, cards="cards" in wants, pane=pane_id or None)
+        pane_id = pane_id or seat_pane
+        if seat_entries is None:
+            errors.append("seat: " + str(seat_health.error))
+        else:
+            extra["seat"] = seat_entries
+    if seat_entries is not None:
+        lineage = {"lineage": lineage_from_seat(seat_entries), "lineage_health": seat_health}
+        for want in wants:
+            if want.startswith("dialogue:") and (want[9:].isdigit() or want[9:] == "last"):
+                chain = nav.generation_chain(seat_entries, key.harness, key.sid)
+                index = nav.default_generation(chain) if want[9:] == "last" else int(want[9:])
+                if 0 <= index < len(chain) and chain[index].get("entry") is not None:
+                    lines = read_dialogue(chain[index]["entry"])
+                    if lines is not None:
+                        extra["dialogue"] = {"index": index, "harness": chain[index]["harness"],
+                                             "sid": chain[index]["sid"], "lines": lines}
+    elif focus_ref in tuple(getattr(request, "expanded_sessions", ()) or ()) and session is not None:
         try:
             earlier_sessions, health = read_lineage(session, key.harness, key.sid)
         except Exception as exc:                 # a lineage fault is the entry row's ``?``, nothing else
@@ -500,18 +669,15 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
     if key.generation and lineage.get("lineage"):
         generation = next((item for item in lineage["lineage"]
                            if f"{item['harness']}:{item['sid']}" == key.generation), None)
-    if output_reader is not None and (generation is not None or tab is not None):
+    if output_reader is not None and generation is not None:
         title = ""
         try:
-            if generation is not None:
-                view = read_generation(output_reader, generation)
-            else:
-                title, plans, stamped = output_plans(key, tab, rows)
-                view = output_reader.read(key, title, plans, stamped=stamped, earlier=earlier)
-            output = {"output": view.rows, "output_title": view.title, "output_notes": view.notes,
+            view = read_generation(output_reader, generation)
+            output = {"output": view.rows, "output_events": view.events,
+                      "output_title": view.title, "output_notes": view.notes,
                       "output_health": view.health, "output_more": view.more}
             sources.append(("output", view.health))
-        except Exception as exc:                 # an output fault must not hide the tabs or the ledger
+        except Exception as exc:
             errors.append(f"output: {type(exc).__name__}")
             sources.append(("output", Health("failed", None, type(exc).__name__)))
             output = {"output_title": title, "output_health": Health("failed", None, type(exc).__name__)}
@@ -524,16 +690,240 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
         sources.append(("obligations", Health("failed", None, type(exc).__name__)))
     events = read_events(entries, nav_tag(session))
 
+    pane = None
+    if session is not None:
+        for field_name in ("herdr_pane", "pane", "pane_id"):
+            pane = _get(session, field_name)
+            if pane is not None:
+                break
+    if session is not None and "pane" in wants:
+        lines = read_pane_visible(pane_id) if pane_id else None
+        if lines is not None:
+            extra["pane_read"] = {"pane": pane_id, "at": wall, "lines": lines}
+    raw_want = next((w[4:] for w in wants if w.startswith("raw:")), "")
+    if raw_want and output_reader is not None:
+        raw_route, _, raw_attempt = raw_want.partition(":")
+        try:
+            raw = read_owner_raw(raw_route, raw_attempt, rows, live, output_reader)
+        except Exception as exc:
+            raw = None
+            errors.append(f"raw: {type(exc).__name__}")
+        if raw is not None:
+            extra["raw"] = raw
+    source_records = {
+        **extra,
+        "registry_entries": tuple(entries),
+        "attempts": tuple(rows),
+        "routes": tuple(sorted(records.items())),
+        "cycles": tuple(sorted(cycles.items())),
+        "gates": tuple((route_id, node_id, value)
+                       for (route_id, node_id), value in sorted(gates.items())),
+        "lineage": lineage.get("lineage"),
+        "pane": pane,
+        "obligations": obligations,
+        "output_events": tuple(output.get("output_events", ())),
+        "warnings": tuple(errors),
+    }
     result = FocusResult(
         key=key, epoch=request.epoch, snapshot_generation=request.snapshot_generation,
-        tabs=tabs, ledger=ledger_rows, header=header, request_ledger=request_ledger,
-        obligations=obligations, open_results=open_results, events=events, sources=tuple(sources),
+        obligations=obligations, events=events, sources=tuple(sources),
         health=Health("partial" if errors else "success", wall, "; ".join(errors) or None),
-        **output, **lineage)
-    if snapshot is not None:
-        lines = build_overview(snapshot, result, sid=key.sid)
-        result = FocusResult(**{**result.__dict__, "overview": lines})
+        **output, **lineage, source_records=source_records)
     return result
+
+
+
+# -- models / dispatch configuration (cached observation) and the list-view reads -----------------
+
+_PROFILES = ("top", "deep", "balanced-deep", "balanced", "light", "mini")
+_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_CONTEXT_SOURCE = {"claude": "→ CLAUDE_CODE_AUTO_COMPACT_WINDOW", "codex": "→ model_context_window",
+                   "opencode": "→ limit.context capped at start"}
+_TOKEN_UNITS = {"400k": 400000, "600k": 600000, "800k": 800000, "1M": 1000000, "300K": 300000,
+                "400K": 400000, "500K": 500000, "600K": 600000, "650K": 650000, "700K": 700000,
+                "750K": 750000}
+_EFFORT_KEYS = {"low": "dim", "medium": "eff_medium", "high": "soft", "xhigh": "eff_xhigh", "max": "dead"}
+
+
+def _profile_cell(values, profile):
+    """``[model, effort]`` a harness's models.conf gives one profile, or None (unset or collapsed)."""
+    name = profile.upper().replace("-", "_")
+    if str(values.get("CFG_MODEL_PROFILE_GRANULARITY_" + name, "")).startswith("collapsed"):
+        return None
+    raw = values.get("CFG_MODEL_PROFILE_" + name)
+    if not raw or ":" not in raw:
+        return None
+    target, effort = raw.rsplit(":", 1)
+    if target.startswith("model/"):
+        model = target[len("model/"):]
+    else:
+        tier = target.upper().replace("-", "_")
+        model = values.get(f"CFG_TIER_{tier}_MODEL")
+    if not model:
+        return None
+    return [model.replace("opencode-go/", "", 1), effort]
+
+
+def _allocation_fields(policy):
+    """The DISPATCH ALLOCATION lines as ``[label, [[text, colour key], ...]]``."""
+    allocation = policy.get("allocation") or {}
+    fields = []
+    if allocation:
+        fields.append(["strategy:", [[str(allocation.get("strategy", "·")), "soft"],
+                                     ["   usage gate ", "label"],
+                                     [f"{allocation.get('usage_gate_used_percent', '·')}%", "lvl_y"],
+                                     ["   window ", "label"], [f"{allocation.get('window', '·')} attempts", "soft"],
+                                     ["   headroom exponent ", "label"],
+                                     [str(allocation.get("usage_headroom_exponent", "·")), "soft"]]])
+        weights = allocation.get("harness_weights") or {}
+        if allocation.get("strategy") == "balanced":
+            parts = []
+            for harness in ("codex", "opencode", "claude"):
+                weight = float(weights.get(harness, 1.0))
+                parts += [[harness, "hb_" + harness], [" ", "dim"],
+                          ["▮" * max(1, round(10 * weight)), "hb_" + harness], [f" {weight:.1f}    ", "dim"]]
+            fields.append(["weights:", parts])
+        affinity = allocation.get("depth_affinity") or {}
+        parts = []
+        if affinity.get("worker"):
+            parts += [["worker → ", "dim"], [str(affinity["worker"]), "hb_" + str(affinity["worker"])],
+                      [f" ({allocation.get('depth_affinity_weight', '·')})", "dim"]]
+        if affinity.get("owner"):
+            parts += [["   owner → ", "dim"], [str(affinity["owner"]), "hb_" + str(affinity["owner"])]]
+        else:
+            parts += [["   owner → ", "dim"], ["usage-weighted, no fixed harness", "soft"]]
+        fields.append(["affinity:", parts])
+    for capability, stages in (policy.get("capabilities") or {}).items():
+        values = sorted({str(value) for value in stages.values()})
+        if len(values) == 1:                       # one choice for every stage reads as one
+            fields.append(["per capability:", [[f"{capability}  ", "soft"], ["all stages", "dim"],
+                                               ["  →  ", "line"], [values[0], "soft"]]])
+            continue
+        fields.append(["per capability:", [[f"{capability}  ", "soft"],
+                                           [" · ".join(f"{name} {value}" for name, value in stages.items()), "dim"]]])
+    confirmation = (policy.get("confirmation") or {}).get("mode")
+    permission = (policy.get("headless") or {}).get("claude_permission_mode")
+    if confirmation or permission:
+        fields.append(["confirmation:", [[str(confirmation or "·"), "soft"], ["   permissions ", "label"],
+                                         [str(permission or "·"), "soft"]]])
+    return fields
+
+
+def _read_tidy_points():
+    """Read the context alert thresholds; unavailable or malformed source stays unknown."""
+    try:
+        points = utility("context_alert").THRESHOLDS
+    except (ImportError, AttributeError, OSError):
+        return None
+    if not isinstance(points, (tuple, list)) or len(points) != 2 or any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in points):
+        return None
+    return tuple(points)
+
+
+def read_model_config():
+    """MODELS view data from the harnesses' models.conf and the dispatch defaults (read once, cached)."""
+    import importlib.util
+    model_config = utility("model_config")
+    profile_map, choices, main_only, context = {}, {}, {}, {}
+    for adapter in ("claude", "codex", "opencode"):
+        try:
+            values, _receipt = model_config.resolve_config(adapter)
+        except Exception:
+            continue
+        profile_map[adapter] = {profile: _profile_cell(values, profile) for profile in _PROFILES}
+        picked = []
+        for cell in profile_map[adapter].values():
+            if cell and cell[0] not in picked:
+                picked.append(cell[0])
+        choices[adapter] = picked
+        hidden = [item for item in str(values.get("CFG_MAIN_SESSION_ONLY_MODELS", "")).split() if item]
+        if hidden:
+            main_only[adapter] = hidden
+        window = values.get("CFG_MODEL_CONTEXT_WINDOW")
+        if str(window).isdigit():
+            context[adapter] = int(window)
+    catalog_sources = {}
+    try:
+        from .model_catalog import read_catalogs
+        catalogs = read_catalogs()
+        for adapter, catalog in catalogs.items():
+            catalog_sources[adapter] = {"state": catalog.state, "source": catalog.source,
+                                        "observed_at": catalog.observed_at}
+            if catalog.models:
+                choices[adapter] = list(catalog.models)
+    except Exception:
+        catalogs = {}
+    if not profile_map and not any(catalog.models for catalog in catalogs.values()):
+        return None
+    pools, allocation = {}, {}
+    try:
+        path = Path(__file__).resolve().parents[3] / "utilities" / "dispatch-defaults.py"
+        spec = importlib.util.spec_from_file_location("fleet_dispatch_defaults", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        policy, _warnings = module.load_validated(module.default_config_path(), module.default_topology_path())
+        for profile, bands in (policy.get("profiles") or {}).items():
+            note = ""
+            if bands.get("relief"):
+                note = "relief " + " ".join(bands["relief"]) + f" below {bands.get('promote_relief_below')}%"
+            elif bands.get("last_resort"):
+                note = "last resort " + " ".join(bands["last_resort"])
+            pools[profile] = [[list(bands.get("primary") or ())], note]
+        pools.setdefault("top", None)
+        allocation = {"fields": _allocation_fields(policy),
+                      "note": "these keys have no setter command yet — Fleet would edit the YAML and run its validator"}
+    except Exception:
+        pools, allocation = {}, {}
+    try:
+        from .. import render
+        shown = {}
+        for models in choices.values():
+            for model in models:
+                shown[model] = render._clean_model(render._dispatch_display_model(model)) or model
+        for model in main_only.values():
+            shown[model] = render._clean_model(render._dispatch_display_model(model)) or model
+    except Exception:
+        shown = {}
+    return {"profiles": [p for p in _PROFILES if any(m.get(p) for m in profile_map.values())],
+            "profile_map": profile_map, "model_choices": choices, "main_only": main_only,
+            "efforts": list(_EFFORTS), "pools": pools, "effort_keys": dict(_EFFORT_KEYS), "shown": shown,
+            "context": context, "context_source": dict(_CONTEXT_SOURCE), "catalog_sources": catalog_sources,
+            "tidy": _read_tidy_points(),
+            "token_units": dict(_TOKEN_UNITS), "allocation": allocation}
+
+
+def collect_aux(request, *, snapshot=None, now=None):
+    """The reads that belong to no single session: panes of every session, the seats of the list
+    views, the model configuration. The request's key is ``FocusKey("*", <kind>)``."""
+    from . import nav
+    kind = request.key.sid
+    wall = time.time() if now is None else float(now)
+    records, errors = {}, []
+    if kind == "panes":
+        records["panes"] = read_pane_map()
+    elif kind == "seats":
+        seats, panes = {}, read_pane_map()
+        for ref in request.expanded_sessions:
+            harness, _, sid = ref.partition(":")
+            session = nav.find_session(snapshot, sid)
+            if session is None:
+                continue
+            pane = next((panes[i] for i in (sid, *(nav._get(session, "session_aliases") or ())) if i in panes), None)
+            entries, _pane, health = read_seat_history(session, harness, sid, cards=False, pane=pane)
+            if entries is None:
+                errors.append(f"{ref}: {health.error}")
+            else:
+                seats[ref] = entries
+        records["seats"] = seats
+    elif kind == "models":
+        config = read_model_config()
+        if config is None:
+            errors.append("models: no configuration")
+        records["models"] = config
+    return FocusResult(request.key, request.epoch, request.snapshot_generation,
+                       health=Health("partial" if errors else "success", wall, "; ".join(errors) or None),
+                       source_records=records)
 
 
 class FocusReader:
@@ -559,6 +949,9 @@ class FocusReader:
             self._earlier.add(key)
 
     def __call__(self, request):
+        if request.key.harness == "*":
+            return collect_aux(request, snapshot=self.snapshot() if callable(self.snapshot) else self.snapshot,
+                               now=self.now() if callable(self.now) else self.now)
         with self._lock:
             earlier = request.key in self._earlier
             self._earlier.discard(request.key)
@@ -580,8 +973,9 @@ class SelectionReader:
         if isinstance(result, FocusResult):
             return result
         return FocusResult(request.key, request.epoch, request.snapshot_generation,
-                           tabs=tuple(result.get("tabs", ())), ledger=tuple(result.get("ledger", ())),
-                           output=tuple(result.get("output", ())), overview=tuple(result.get("overview", ())),
+                           output=tuple(result.get("output", ())),
+                           events=tuple(result.get("events", ())),
+                           source_records=result.get("source_records", {}),
                            health=Health("success", time.time()))
 
 
@@ -612,10 +1006,11 @@ class SelectionPump:
         self._good = OrderedDict()                 # key -> last result published for it
         self._pump = RefreshPump(self._produce, interval, clock=clock, name="fleet-selection")
 
-    def select(self, key, snapshot_generation=0, expanded_sessions=()):
+    def select(self, key, snapshot_generation=0, expanded_sessions=(), wants=()):
         with self._lock:
             self._epoch += 1
-            self._request = FocusRequest(key, self._epoch, snapshot_generation, tuple(expanded_sessions))
+            self._request = FocusRequest(key, self._epoch, snapshot_generation, tuple(expanded_sessions),
+                                         tuple(wants))
             return self._request
 
     def _produce(self):

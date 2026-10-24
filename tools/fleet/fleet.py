@@ -70,8 +70,8 @@ def parse_args(argv):
                         "the same state either way (plan §P3 — this is --once's ONLY entry "
                         "point into the process view, since `p` is a curses-live-only key).")
     p.add_argument("--explorer", action="store_true",
-                   help="use the in-development B explorer screen (work ledger + output); "
-                        "`fleet2` launches this. --view does not apply to it.")
+                   help="use the Fleet explorer screen; `fleet2` launches this. "
+                        "--view does not apply to it.")
     return p.parse_args(argv)   # argparse exits 2 on bad args (matches PRD §3 exit codes)
 
 
@@ -347,8 +347,8 @@ def main(argv=None):
     render.set_show_all(args.show_all)
     render.set_api_disabled(disabled["api_disabled"])
     render.set_hearting(hearting)
-    # The B explorer is opt-in (`--explorer`, launched as `fleet2`) until it is ready to be
-    # the default; plain `fleet` keeps the group/process screen.
+    # The explorer remains opt-in (`--explorer`, launched as `fleet2`); plain `fleet` keeps
+    # the group/process screen.
     render.set_explorer_mode(args.explorer)
     # F-30 (v10, plan §P3/§9): --view is additive and honors the SAME single _PROCESS_VIEW
     # state the `p` key flips — never a second decision path. FLEET_VIEW env is the reduction

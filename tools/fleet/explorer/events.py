@@ -7,8 +7,13 @@ not say what it was (stage / owner / frame) is shown by the plain word it does c
 
 from collections.abc import Mapping
 
-from .ledger import harness_abbr
 from .output import cell_width, clip
+
+
+def harness_abbr(harness):
+    value = str(harness or "").lower()
+    return {"claude": "CL", "codex": "CX", "opencode": "OC"}.get(
+        value, "?" if not harness else value[:2].upper())
 
 SEPARATOR = " · "
 _PEER_WORD = {"notice": "메시지 알림", "steer": "메시지 지시"}
