@@ -215,12 +215,31 @@ class ResourceRegistryTest(unittest.TestCase):
         self.assertEqual(registry.classify_identity(
             unreadable, lambda _pid: None)[0], "stale")
 
+    def test_launched_identity_waits_out_the_empty_cmdline_after_exec(self):
+        child = mock.Mock(pid=4242)
+        child.poll.return_value = None
+        found = {"pid": 4242, "starttime": "7", "command_hash": "abc"}
+        with mock.patch.object(registry, "proc_identity", side_effect=[None, None, found]) as probe, \
+                mock.patch.object(registry.time, "sleep") as sleep:
+            self.assertEqual(registry.launched_identity(child), found)
+        self.assertEqual(probe.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_launched_identity_stops_once_the_child_has_exited(self):
+        child = mock.Mock(pid=4242)
+        child.poll.return_value = 0
+        with mock.patch.object(registry, "proc_identity", return_value=None) as probe, \
+                mock.patch.object(registry.time, "sleep") as sleep:
+            self.assertIsNone(registry.launched_identity(child))
+        self.assertEqual(probe.call_count, 1)
+        sleep.assert_not_called()
+
     def test_supervised_success_waits_for_its_recorded_process_group_to_drain(self):
         leader = subprocess.Popen(
             [sys.executable, "-c", "import subprocess,sys; subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])"],
             start_new_session=True,
         )
-        identity = registry.proc_identity(leader.pid)
+        identity = registry.launched_identity(leader)
         self.assertIsNotNone(identity)
         namespace = os.readlink("/proc/self/ns/pid")
         leader.wait(timeout=5)

@@ -601,7 +601,7 @@ def _start_successor(armed, successor, key):
     finally:
         if handle is not None:
             handle.close()
-    identity = RR.proc_identity(proc.pid) or {}
+    identity = RR.launched_identity(proc) or {}
     return {"started": True, "surface": "detached", "pid": proc.pid,
             "starttime": identity.get("starttime"), "command": command,
             "log": log_path}

@@ -11,6 +11,7 @@ from gpu_execution_sandbox import gpu_resource_nodes
 from resource_run_registry import (
     classify_identity,
     is_alive,
+    launched_identity,
     proc_identity,
     register_registry,
     resource_never_started,
@@ -315,14 +316,7 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
                     pass_fds=(wait_read,), stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
         finally:
             os.close(wait_read)
-        ident = None
-        for _ in range(20):
-            ident = proc_identity(proc.pid)
-            if ident:
-                break
-            if proc.poll() is not None:
-                break
-            time.sleep(.01)
+        ident = launched_identity(proc)
         if not ident or not RESOURCE_RESUME.supervisor_alive(supervision):
             raise ValueError("resource-launch-identity-unconfirmed")
         if gpu_lease:
@@ -664,11 +658,7 @@ def _main(argv=None, *, controller=None):
             locked_update(registry,lambda data:data["runs"].pop(args.run_id,None))
             raise
         os.close(wait_read)
-        ident=None
-        for _ in range(20):
-            ident=proc_identity(proc.pid)
-            if ident: break
-            time.sleep(.01)
+        ident=launched_identity(proc)
         if not ident:
             os.close(release)
             proc.kill()

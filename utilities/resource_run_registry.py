@@ -65,6 +65,21 @@ def proc_identity(pid) -> dict | None:
         return None
 
 
+def launched_identity(proc, attempts: int = 20, delay: float = 0.01) -> dict | None:
+    """proc_identity() of a child this process has just started.
+
+    Popen returns once exec has closed the child's close-on-exec pipe, before the
+    kernel sets up the new program's arguments, so /proc/<pid>/cmdline can still be
+    empty. Retry briefly, and stop as soon as the child has exited.
+    """
+    for _ in range(attempts):
+        identity = proc_identity(proc.pid)
+        if identity or proc.poll() is not None:
+            return identity
+        time.sleep(delay)
+    return None
+
+
 def boot_identity() -> dict:
     """Bind new local resource identities to their host and kernel lifetime."""
     try:
