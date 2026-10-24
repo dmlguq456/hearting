@@ -24,11 +24,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WorkerHomes(unittest.TestCase):
     def setUp(self):
-        runtime_version = patch.dict(os.environ, {'OPENCODE_RUNTIME_VERSION': '1.19.0'})
-        runtime_version.start()
-        self.addCleanup(runtime_version.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.base = Path(self.tmp.name)
+        # The launch observation needs an `opencode` on PATH even when the
+        # version is pinned; keep the suite independent of the host install.
+        fake_bin = self.base / 'fake-bin'
+        fake_bin.mkdir()
+        fake_opencode = fake_bin / 'opencode'
+        fake_opencode.write_text('#!/bin/sh\necho 1.19.0\n', encoding='utf-8')
+        fake_opencode.chmod(0o755)
+        runtime_version = patch.dict(os.environ, {
+            'OPENCODE_RUNTIME_VERSION': '1.19.0',
+            'PATH': os.pathsep.join(filter(None, (str(fake_bin), os.environ.get('PATH')))),
+        })
+        runtime_version.start()
+        self.addCleanup(runtime_version.stop)
         self.source = self.base / 'user'
         self.source.mkdir()
         self.env = {'AGENT_DISPATCH_JOBS': str(self.base / 'dispatch/jobs.log')}
