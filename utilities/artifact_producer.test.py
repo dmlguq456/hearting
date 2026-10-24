@@ -118,11 +118,20 @@ class ProducerTestBase(unittest.TestCase):
         self.root.mkdir(parents=True, exist_ok=True)
         self.jobs = Path(self._tmp.name) / "jobs.log"
         self.jobs.write_text("", encoding="utf-8")
+        home = Path(self._tmp.name) / "home"
+        config = Path(self._tmp.name) / "config"
+        state = Path(self._tmp.name) / "state"
+        for path in (home, config, state):
+            path.mkdir(parents=True, exist_ok=True)
         home = Path(self._tmp.name) / "agent-home"
         (home / "core").mkdir(parents=True, exist_ok=True)
         (home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
-        self._env = {k: v for k, v in os.environ.items() if k == "AGENT_HOME" or k.startswith((
-            "AGENT_DISPATCH_", "AGENT_ROUTE_", "AGENT_REVIEW_", "AGENT_ARTIFACT_"))}
+        self._env = {k: os.environ.get(k) for k in ("AGENT_HOME", "HOME", "XDG_CONFIG_HOME", "XDG_STATE_HOME")}
+        self._env.update({k: v for k, v in os.environ.items() if k.startswith((
+            "AGENT_DISPATCH_", "AGENT_ROUTE_", "AGENT_REVIEW_", "AGENT_ARTIFACT_"))})
+        os.environ["HOME"] = str(Path(self._tmp.name) / "home")
+        os.environ["XDG_CONFIG_HOME"] = str(config)
+        os.environ["XDG_STATE_HOME"] = str(state)
         os.environ["AGENT_HOME"] = str(home)
         os.environ["AGENT_DISPATCH_JOBS"] = str(self.jobs)
         for key in tuple(os.environ):
@@ -1669,6 +1678,33 @@ class BrowserProfileCollectionTest(ProducerTestBase):
 
 
 class SelfExclusionPayloadTest(ProducerTestBase):
+    def test_conda_meta_history_is_exact_no_follow_marker_and_snapshot_parity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "payload"
+            directory.mkdir()
+            conda = directory / "conda-meta"
+            conda.mkdir()
+            history = conda / "history"
+            history.write_bytes(b"do not read this payload\n")
+            excluded, observed = artifact_payload.observe_directory(directory)
+            self.assertTrue(excluded)
+            self.assertEqual(observed, artifact_payload.directory_snapshot(directory))
+            snapshot = artifact_payload.directory_snapshot(directory)
+            history.write_bytes(b"replaced history\n")
+            self.assertEqual(artifact_payload.snapshot_differences(directory, snapshot), (False, True))
+            history.unlink()
+            self.assertFalse(artifact_payload.self_excluded_directory(directory))
+            history.symlink_to(directory / "elsewhere")
+            self.assertFalse(artifact_payload.self_excluded_directory(directory))
+            history.unlink()
+            if hasattr(os, "mkfifo"):
+                os.mkfifo(history)
+                self.assertFalse(artifact_payload.self_excluded_directory(directory))
+                history.unlink()
+            conda.rename(directory / "conda-meta-real")
+            conda.symlink_to(directory / "conda-meta-real", target_is_directory=True)
+            self.assertFalse(artifact_payload.self_excluded_directory(directory))
+
     def test_marker_predicates_are_independent_exact_and_no_follow(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory = Path(tmp) / "payload"
@@ -1768,6 +1804,13 @@ class SelfExclusionPayloadTest(ProducerTestBase):
         marker = cache / ".gitignore"
         marker.write_bytes(b"*\r\n")
         (cache / "bad|locator.txt").write_bytes(b"must not be read")
+        conda_cache = cycle / "artifacts" / "environment"
+        (conda_cache / "conda-meta").mkdir(parents=True)
+        history = conda_cache / "conda-meta" / "history"
+        history.write_bytes(b"environment records\n")
+        (conda_cache / "bad|locator.txt").write_bytes(b"must not be read")
+        conda_payload = conda_cache / "package.bin"
+        conda_payload.write_bytes(b"keep this file")
         invalid_raw = cache / "raw-results"
         invalid_raw.symlink_to(self.root, target_is_directory=True)
         self.write_output(result, "plans/report.md", b"report")
@@ -1793,8 +1836,12 @@ class SelfExclusionPayloadTest(ProducerTestBase):
         bundle_artifact = artifacts_by_id[bundle_rows[0]["artifact_id"]]
         self.assertEqual(bundle_artifact["title"], "run/raw-results")
         self.assertNotIn("artifacts/cache/bad|locator.txt", paths)
+        self.assertNotIn("artifacts/environment/bad|locator.txt", paths)
+        self.assertNotIn("artifacts/environment/package.bin", paths)
         self.assertIn("artifacts/cache/", sealed["excluded_hidden"])
         self.assertEqual(marker.read_bytes(), marker_bytes)
+        self.assertEqual((history.read_bytes(), conda_payload.read_bytes()),
+                         (b"environment records\n", b"keep this file"))
         self.assertEqual(P.artifact_lifecycle.verify_artifact_revisions(document, cycle), ())
 
     def test_marker_below_raw_results_prevents_bundle_bypass_but_keeps_sibling_leaf(self):
@@ -4764,10 +4811,25 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                     with mock.patch.dict(os.environ,{"AGENT_DISPATCH_JOBS":str(jobs),"AGENT_ARTIFACT_ROOT":str(fixture.root)}):
                         gates=R.terminal_gate_observation(route,jobs=jobs,exact_terminal=True)
                         self.assertTrue(gates["prd-transaction"]["passed"],gates)
+                        cycle_dir = Path(cycle["cycle_dir"])
+                        conda = cycle_dir / "artifacts" / "environment" / "conda-meta"
+                        conda.mkdir(parents=True)
+                        bad_locator = cycle_dir / "artifacts" / "environment" / "bad|name.txt"
+                        bad_locator.write_bytes(b"invalid locator")
+                        self.assertFalse(P.artifact_payload.self_excluded_directory(conda.parent))
+                        violations = P._enumerate_output(cycle_dir)[1]
+                        self.assertEqual(violations, ["locator-invalid-component:artifacts/environment/bad|name.txt"])
+                        terminal._record_attempt(request, "output-invalid", ";".join(violations))
                         snapshot={str(p):p.read_bytes() for p in fixture.root.rglob("*") if p.is_file()}
                         diagnosis=terminal.inspect_owner_completion(jobs,"done",meta)
                         self.assertEqual((diagnosis["state"],diagnosis["checkpoint"]),("closure-pending","not-claimed"))
+                        self.assertEqual(diagnosis["last_refusal_reason"], "output-invalid")
+                        self.assertEqual(diagnosis["last_refusal"]["detail"],
+                                         "locator-invalid-component:artifacts/environment/bad|name.txt")
+                        self.assertTrue(diagnosis["last_refusal"]["record_path"].endswith(".json"))
+                        self.assertIn("Correct the reported locator", diagnosis["last_refusal"]["remediation"])
                         self.assertEqual(snapshot,{str(p):p.read_bytes() for p in fixture.root.rglob("*") if p.is_file()})
+                        bad_locator.unlink()
                         marker=R.completion_dir(route["route_id"],jobs=jobs)/"prd-transaction.json"
                         marker.write_text("{}")
                         self.assertFalse(R.terminal_gate_observation(route,jobs=jobs)["prd-transaction"]["passed"])

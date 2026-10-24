@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import sys
 import tempfile
 import time
@@ -281,6 +282,79 @@ def _record_attempt(request: TerminalCommitRequest, reason: str, detail: str = "
     _atomic_json(path, {"reason": reason, "detail": detail, "event": event,
                         "count": (count if isinstance(count, int) and count > 0 else 0) + 1,
                         "first_ns": first if isinstance(first, int) else now, "last_ns": now})
+
+
+def last_owner_refusal(request: TerminalCommitRequest) -> Optional[dict[str, Any]]:
+    """Read the newest valid refusal for this exact owner transaction only."""
+    directory = _commit_state_path(request).parent / "attempts"
+    directory_fd = None
+    try:
+        if not getattr(os, "O_NOFOLLOW", 0) or not getattr(os, "O_DIRECTORY", 0):
+            return None
+        directory_fd = os.open(str(directory), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        entries = sorted(os.listdir(directory_fd))
+    except OSError:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        return None
+    valid = []
+    try:
+        for name in entries[:4096]:
+            if not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+                continue
+            fd = None
+            try:
+                before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                if not stat.S_ISREG(before.st_mode):
+                    continue
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0),
+                             dir_fd=directory_fd)
+                opened = os.fstat(fd)
+                if ((not stat.S_ISREG(opened.st_mode))
+                        or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                        or opened.st_size > 64 * 1024):
+                    continue
+                with os.fdopen(os.dup(fd), "rb") as stream:
+                    raw = stream.read(64 * 1024 + 1)
+                if len(raw) > 64 * 1024:
+                    continue
+                after = os.fstat(fd)
+                if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns) != (
+                        after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+                    continue
+                record = json.loads(raw.decode("utf-8"))
+                if not isinstance(record, dict):
+                    continue
+                reason, detail = record.get("reason"), record.get("detail")
+                count, last_ns, event = record.get("count"), record.get("last_ns"), record.get("event")
+                first_ns = record.get("first_ns")
+                if (not isinstance(reason, str) or not reason or not isinstance(detail, str)
+                        or isinstance(count, bool) or not isinstance(count, int) or count < 1
+                        or isinstance(first_ns, bool) or not isinstance(first_ns, int) or first_ns < 0
+                        or isinstance(last_ns, bool) or not isinstance(last_ns, int) or last_ns < first_ns
+                        or event != Path(name).stem
+                        or hashlib.sha256(f"{reason}:{detail}".encode()).hexdigest() != event):
+                    continue
+                remediation = None
+                if (reason == "output-invalid"
+                        or (reason == "producer-finalize-failed" and detail.startswith("output-invalid:"))):
+                    remediation = ("Correct the reported locator, add an existing self-exclusion marker to that exact "
+                                   "payload directory, or move it outside the cycle; the controller retries closure automatically.")
+                valid.append((last_ns, name, {
+                    "reason": reason, "detail": detail, "count": count, "last_ns": last_ns,
+                    "record_path": str(directory / name), "remediation": remediation,
+                }))
+            except (OSError, ValueError, TypeError, UnicodeError):
+                continue
+            finally:
+                if fd is not None:
+                    os.close(fd)
+        if not valid:
+            return None
+        return max(valid, key=lambda item: (item[0], item[1]))[2]
+    finally:
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 @contextmanager
@@ -2028,6 +2102,11 @@ def inspect_owner_completion(jobs, status, metadata):
                       reason=completion.reason, next_action=completion.next_action, retry_when=completion.retry_when)
         path = _commit_state_path(request)
         result["checkpoint"] = json.loads(path.read_text()).get("state") if path.exists() else "not-claimed"
+        if result["state"] == "closure-pending":
+            refusal = last_owner_refusal(request)
+            if refusal is not None:
+                result["last_refusal"] = refusal
+                result["last_refusal_reason"] = refusal["reason"]
         if producer_lifecycle_applies(route):
             binding = load_producer_binding(artifact_root=request.artifact_root, route_id=route["route_id"],
                                             owner_attempt_id=request.owner_attempt_id).binding

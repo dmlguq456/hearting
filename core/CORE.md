@@ -284,11 +284,13 @@ Invalid paths identify the locator and reason before payload reads or manifest
 publication.
 
 A payload directory may opt itself and its descendants out of new candidate
-collection with any one of three independent markers: a regular, no-follow
+collection with any one of the following independent markers: a regular, no-follow
 `CACHEDIR.TAG` whose first 43 bytes are exactly
 `Signature: 8a477f597d28d172789f06886806bc55`; a regular, no-follow
 `pyvenv.cfg` of any contents; or a regular, no-follow `.gitignore` whose entire
-contents are exactly `*`, `*\n`, or `*\r\n`. Marker checks apply only to the
+contents are exactly `*`, `*\n`, or `*\r\n`; or an actual no-follow
+`conda-meta/` directory containing a regular, no-follow `history` file. The
+history contents are not read. Marker checks apply only to the
 exact cycle payload roots `artifacts/` and `_internal/` and directories below
 them; a marker in a repository, artifact-root, or cycle-root ancestor has no
 effect. The marked directory is pruned before descending into it, reading its
@@ -299,6 +301,20 @@ the current candidate set: existing manifest rows remain unchanged under
 continues to describe the recorded close under D-127. Candidate bundle search
 uses this rule; validation of already-published bundle descriptors retains its
 recorded coverage behavior.
+
+Open-cycle interim checkpoints read `${XDG_CONFIG_HOME:-$HOME/.config}/hearting/checkpoint-limits.json`
+on each call. It is an optional flat JSON object with positive integer byte or
+file-count limits; for example
+`{"max_files":20000,"max_total_bytes":2147483648,"max_scanned_files":200000,"max_file_bytes":33554432}`.
+Missing settings use the existing defaults (2,000 candidates, 256 MiB total,
+20,000 scanned candidates, and 32 MiB per file). Invalid files are ignored as
+a whole. `max_scanned_files` controls the count of eligible checkpoint
+candidates considered, after hidden, binary, oversize, invalid-locator,
+symlink, and other exclusions. It does not count physical filesystem entries.
+The internal `max_walk_entries` setting remains an accepted alias. An explicit
+checkpoint limits object takes precedence over this user configuration. These
+interim limits do not alter final manifests: finalization still declares and
+digests valid payload files under the sealed-manifest contract.
 
 **Cycle payload buckets.** The top-level table above closes only the names
 directly under the artifact root. Inside a cycle, the first segment below

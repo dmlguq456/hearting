@@ -73,6 +73,8 @@ binds `direct`, `quick`, and `standard+`; only the acting owner differs.
 2. **write only inside the open cycle.** Every durable artifact goes under
    the current node's declared outputs under `AGENT_ARTIFACT_OUTPUT_DIR`.
    `artifact_producer.py` owns cycle output paths and shared revisions.
+   Keep datasets, environments, and caches outside the cycle or mark their
+   exact payload directories for self-exclusion as documented in `core/CORE.md`.
 3. **stage workers join, never fork.** `standard+` stage workers receive
    `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
    from the owner (dispatch env pass-through); the resolver applies the

@@ -47,6 +47,49 @@ def _stat_marker(directory_fd: int, name: str) -> Any:
         return ("error", exc.errno)
 
 
+def _conda_meta_observation(directory_fd: int) -> Tuple[Any, bool]:
+    """Observe conda's directory marker and history without following links."""
+    try:
+        before = os.stat("conda-meta", dir_fd=directory_fd, follow_symlinks=False)
+    except OSError as exc:
+        return (None if exc.errno == errno.ENOENT else ("error", exc.errno), False)
+    meta_id = _identity(before)
+    if not stat.S_ISDIR(before.st_mode):
+        return (meta_id, None), False
+    child_fd = None
+    history_id: Any = None
+    valid = False
+    try:
+        child_fd = os.open("conda-meta", _DIR_FLAGS, dir_fd=directory_fd)
+        opened = os.fstat(child_fd)
+        if _identity(opened) != meta_id:
+            return (("unstable", meta_id, _identity(opened)), None), False
+        try:
+            history = os.stat("history", dir_fd=child_fd, follow_symlinks=False)
+            history_id = _identity(history)
+            if stat.S_ISREG(history.st_mode) and getattr(os, "O_NOFOLLOW", 0):
+                history_fd = None
+                try:
+                    history_fd = os.open("history", _LEAF_FLAGS, dir_fd=child_fd)
+                    observed = os.fstat(history_fd)
+                    valid = stat.S_ISREG(observed.st_mode) and _identity(observed) == history_id
+                    if not valid:
+                        history_id = ("unstable", history_id, _identity(observed))
+                except OSError:
+                    valid = False
+                finally:
+                    if history_fd is not None:
+                        os.close(history_fd)
+        except OSError as exc:
+            history_id = None if exc.errno == errno.ENOENT else ("error", exc.errno)
+    except OSError as exc:
+        return (("error", exc.errno), None), False
+    finally:
+        if child_fd is not None:
+            os.close(child_fd)
+    return (meta_id, history_id), valid
+
+
 def directory_snapshot(directory: Path) -> Any:
     """Return no-follow directory/marker identities without reading marker bytes."""
     fd = None
@@ -54,7 +97,8 @@ def directory_snapshot(directory: Path) -> Any:
         fd = _open_directory_chain(Path(directory))
         directory_id = _identity(os.fstat(fd))
         markers = tuple((name, _stat_marker(fd, name)) for name in _MARKERS)
-        return directory_id, markers
+        conda = _conda_meta_observation(fd)[0]
+        return directory_id, markers + (("conda-meta", conda),)
     except OSError as exc:
         return ("error", exc.errno)
     finally:
@@ -83,6 +127,8 @@ def observe_directory(directory: Path) -> Tuple[bool, Any]:
 
     Unreadable, replaced, linked, and non-regular markers are not exclusion evidence.
     At most 43 bytes are read from CACHEDIR.TAG and 4 bytes from .gitignore.
+    Conda exclusion requires a no-follow directory and regular `history` file;
+    neither is read.
     """
     fd = None
     excluded = False
@@ -124,7 +170,9 @@ def observe_directory(directory: Path) -> Tuple[bool, Any]:
                         os.close(marker_fd)
             observations.append((name, marker_id))
             excluded = excluded or valid
-        return excluded, (directory_id, tuple(observations))
+        conda, conda_valid = _conda_meta_observation(fd)
+        observations.append(("conda-meta", conda))
+        return excluded or conda_valid, (directory_id, tuple(observations))
     except OSError as exc:
         return False, ("error", exc.errno)
     finally:

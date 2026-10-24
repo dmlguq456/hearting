@@ -419,6 +419,57 @@ def _acknowledged_completion_result(receipt: dict) -> dict | None:
         return None
 
 
+def _completion_refusal_notice(receipt: dict) -> str:
+    """Render late-bound refusal details from this receipt's exact owner row."""
+    try:
+        utility = _printed("dispatch_terminal_commit.py")
+    except Exception:  # noqa: BLE001 -- a read-only path fallback keeps the pending notice useful
+        utility = str(Path(__file__).resolve().parents[1] / "utilities" / "dispatch_terminal_commit.py")
+    clean = lambda value: re.sub(r"[\x00-\x1f\x7f]", "", str(value))[:2048]
+    command = shlex.join(["python3", str(utility), "inspect",
+                          "--jobs", clean(receipt["job_registry"]),
+                          "--attempt", clean(receipt["owner_attempt_id"])])
+    try:
+        from dispatch_completion_join import exact_attempt_row
+        import dispatch_terminal_commit
+        row = exact_attempt_row(Path(receipt["job_registry"]), receipt["owner_attempt_id"])
+        diagnosis = dispatch_terminal_commit.inspect_owner_completion(
+            Path(receipt["job_registry"]), row.status, row.metadata)
+    except Exception:  # noqa: BLE001 -- closure remains controller-owned if the exact row is unavailable
+        diagnosis = {}
+    refusal = diagnosis.get("last_refusal") if isinstance(diagnosis, dict) else None
+    if not isinstance(refusal, dict):
+        checkpoint = diagnosis.get("checkpoint") if isinstance(diagnosis, dict) else None
+        detail = f" The current checkpoint is {checkpoint}." if isinstance(checkpoint, str) else ""
+        return ("No current refusal record is available." + detail
+                + " The existing controller retries closure automatically; read-only diagnosis: " + command)
+    reason = refusal.get("reason")
+    raw_detail = refusal.get("detail", "")
+    nested_output_invalid = reason == "producer-finalize-failed" and isinstance(raw_detail, str) \
+        and raw_detail.startswith("output-invalid:")
+    if reason != "output-invalid" and not nested_output_invalid:
+        safe_reason = reason if isinstance(reason, str) and re.fullmatch(r"[a-z0-9-]{1,80}", reason) else "closure-refused"
+        return (f"The latest closure refusal is {safe_reason}. The existing controller retries when possible; "
+                "read-only diagnosis: " + command)
+    # Producer validation records a semicolon-separated list of code:locator
+    # values. Keep only that known shape and strip control characters.
+    details = []
+    if isinstance(raw_detail, str):
+        for item in raw_detail.split(";"):
+            match = re.match(r"[a-z0-9-]{1,80}:[^;\x00-\x1f\x7f]{1,500}", item)
+            if match:
+                details.append(match.group(0))
+    safe_detail = "; ".join(details) if details else "invalid payload locator"
+    path = refusal.get("record_path")
+    safe_path = clean(path) if isinstance(path, str) else "record path unavailable"
+    remediation = refusal.get("remediation")
+    safe_remediation = (remediation if isinstance(remediation, str) and "\n" not in remediation and "\r" not in remediation
+                        else "Correct the locator, mark its exact payload directory for self-exclusion, or move it outside the cycle.")
+    cause = "producer-finalize-failed (output-invalid)" if nested_output_invalid else "output-invalid"
+    return (f"The latest closure refusal is {cause}: {safe_detail}. Record: {safe_path}. "
+            f"{safe_remediation} The existing controller retries closure automatically; read-only diagnosis: {command}")
+
+
 def _cleanup_only_result(receipt: dict) -> dict | None:
     if receipt["reason"] in {"process-unverifiable", "join-deadline", "join-observer-failed",
                               "supervisor-exited", "watch-deadline", "receiver-unavailable"}:
@@ -541,14 +592,9 @@ def render_text(receipt: dict, *, continued: dict | None = None) -> str:
                 "The execution result is unchanged. Read the exact input receipts, tell the user "
                 "what remains unconfirmed, and do not resend an unknown input automatically. " + command)
     if receipt["reason"] == "workflow-completion-pending":
-        utility = _printed("dispatch_terminal_commit.py")
-        command = (f"python3 {shlex.quote(str(utility))} finish --jobs {shlex.quote(receipt['job_registry'])} "
-                   f"--attempt {shlex.quote(receipt['owner_attempt_id'])}")
         return ("The owner result remains PASS, but workflow/route/report closure is pending. "
                 "The completion controller owns closure; this is not a running model. "
-                "Explain the outstanding closure to the user; this notice authorizes no new execution. "
-                "Use inspect instead of finish to read the exact gates, cleanup state and checkpoint. "
-                "Existing transaction recovery: " + command)
+                "The notice authorizes no new execution. " + _completion_refusal_notice(receipt))
     if receipt["reason"] == "closure-blocked":
         utility = _printed("dispatch_terminal_commit.py")
         command = (f"python3 {shlex.quote(str(utility))} inspect --jobs {shlex.quote(receipt['job_registry'])} "

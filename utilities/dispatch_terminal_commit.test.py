@@ -146,6 +146,31 @@ class ProducerBindingTests(unittest.TestCase):
         self.assertLessEqual(records[0]["first_ns"], records[0]["last_ns"])
         self.assertEqual(records[1]["first_ns"], records[1]["last_ns"])
 
+    def test_latest_refusal_is_request_bound_and_skips_corrupt_records(self):
+        request = T.TerminalCommitRequest(self.route_file, "att-owner", self.jobs, self.root)
+        T._record_attempt(request, "output-invalid", "locator-invalid-component:artifacts/bad|name.txt")
+        T._record_attempt(request, "recovery-unavailable", "material-primary-required")
+        attempts = T._commit_state_path(request).parent / "attempts"
+        rows = {json.loads(path.read_text())["reason"]: path for path in attempts.glob("*.json")}
+        output = json.loads(rows["output-invalid"].read_text())
+        recovery = json.loads(rows["recovery-unavailable"].read_text())
+        output["first_ns"], output["last_ns"] = 50, 100
+        recovery["first_ns"], recovery["last_ns"] = 150, 200
+        rows["output-invalid"].write_text(json.dumps(output))
+        rows["recovery-unavailable"].write_text(json.dumps(recovery))
+        latest = T.last_owner_refusal(request)
+        self.assertEqual((latest["reason"], latest["last_ns"]), ("recovery-unavailable", 200))
+        self.assertIsNone(latest["remediation"])
+
+        rows["recovery-unavailable"].write_text("not-json")
+        foreign = T.TerminalCommitRequest(self.route_file, "att-foreign", self.jobs, self.root)
+        T._record_attempt(foreign, "transaction-conflict", "foreign-owner")
+        fallback = T.last_owner_refusal(request)
+        self.assertEqual(fallback["reason"], "output-invalid")
+        self.assertEqual(fallback["detail"], "locator-invalid-component:artifacts/bad|name.txt")
+        self.assertEqual(fallback["record_path"], str(rows["output-invalid"]))
+        self.assertIn("Correct the reported locator", fallback["remediation"])
+
     def test_owner_prerequisites_keep_resource_evidence_and_do_not_invent_a_second_owner(self):
         # SD-154 A-2: `_marker_identity_row`'s own evidence-sha recompute is now
         # `evidence_currency`'s result (single recompute site, A-SD154-8), which
@@ -513,7 +538,7 @@ class RelatedOwnerDiscoveryTests(unittest.TestCase):
         self.assertEqual((proof.status, proof.reason), ("proved", None))
         # A row that did claim its launch but has lost its process identity still blocks.
         claimed = self.row("done", "att-unlaunched", **{**stage, "launch_claimed": "1"})
-        self.jobs.write_text(latest + "\n" + claimed + "\n", encoding="utf-8")
+        T.dispatch_contract._atomic_registry_replace(self.jobs, [latest.rstrip("\n"), claimed.rstrip("\n")])
         proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
         self.assertEqual((proof.status, proof.reason), ("rejected", "child-not-quiescent"))
         # Any process identity keeps the ordinary quiescence check, whatever the launch flags say.
@@ -521,7 +546,7 @@ class RelatedOwnerDiscoveryTests(unittest.TestCase):
         try:
             identity = T.dispatch_contract.process_launch_identity(process.pid)
             live = self.row("done", "att-unlaunched", **{**stage, **identity, "launch_outcome": "running"})
-            self.jobs.write_text(latest + "\n" + live + "\n", encoding="utf-8")
+            T.dispatch_contract._atomic_registry_replace(self.jobs, [latest.rstrip("\n"), live.rstrip("\n")])
             proof = T._prove_route_children(self.request(), self.route, self.owner_gate())
             self.assertEqual((proof.status, proof.reason), ("rejected", "child-not-quiescent"))
         finally:
@@ -1766,6 +1791,65 @@ class OwnerTerminalPlacementReplayTest(unittest.TestCase):
         fixture._closed_owner(jobs, owner)
         meta = exact_attempt_row(jobs, owner).metadata
         return fixture, terminal, route, path, jobs, owner, report, meta
+
+    def test_first_finalize_refusal_reaches_inspect_and_late_completion_notice(self):
+        import dispatch_supervision as supervision
+        from dispatch_completion_join import exact_attempt_row
+
+        fixture = PRODUCER_FIXTURE.TerminalTransactionIntegrationTest()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        route, route_file, jobs, owner, cycle, _artifact, request = fixture._prepare_fixture("codex")
+        # The marker must be absent so the ordinary invalid-locator validator
+        # remains responsible for this first close attempt.
+        conda = Path(cycle["cycle_dir"]) / "artifacts" / "environment" / "conda-meta"
+        conda.mkdir(parents=True)
+        bad = conda / "bad|name.txt"
+        bad.write_bytes(b"preserve invalid locator payload")
+        self.assertFalse((conda / "history").exists())
+
+        log = jobs.parent / "owner.jsonl"
+        text = f"artifact: {bad}\nverdict: PASS\nblocker: none"
+        log.write_text(json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": text}}) + "\n" +
+            json.dumps({"type": "turn.completed"}) + "\n", encoding="utf-8")
+        jobs.write_text(jobs.read_text().replace("worker_type=owner",
+            f"attempt_schema_version=2,worker_type=owner,log_file={log},workflow_completion=runtime-v1"))
+        fixture._closed_owner(jobs, owner)
+        meta = exact_attempt_row(jobs, owner).metadata
+        before_bad = bad.read_bytes()
+
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs),
+                                          "AGENT_ARTIFACT_ROOT": str(fixture.root)}):
+            refused = T.settle_terminal_commit(request)
+            self.assertEqual((refused.result, refused.reason), ("recoverable", "producer-finalize-failed"), refused)
+            attempts = T._commit_state_path(request).parent / "attempts"
+            records = [json.loads(path.read_text(encoding="utf-8")) for path in attempts.glob("*.json")]
+            record = next(row for row in records if row.get("reason") == "producer-finalize-failed")
+            self.assertIn("output-invalid: locator-invalid-component:artifacts/environment/conda-meta/bad|name.txt",
+                          record["detail"])
+            diagnosis = T.inspect_owner_completion(jobs, "done", meta)
+            self.assertNotEqual(diagnosis.get("checkpoint"), "file-count-limit", diagnosis)
+            refusal = diagnosis.get("last_refusal")
+            self.assertIsInstance(refusal, dict, diagnosis)
+            self.assertEqual(refusal["reason"], "producer-finalize-failed")
+            self.assertIn("output-invalid: locator-invalid-component:artifacts/environment/conda-meta/bad|name.txt",
+                          refusal["detail"])
+            self.assertTrue(Path(refusal["record_path"]).is_file())
+            self.assertEqual(Path(refusal["record_path"]), next(attempts.glob("*.json")))
+            self.assertIn("Correct the reported locator", refusal["remediation"])
+
+            notices = supervision.materialize(jobs, {owner}, reason="workflow-completion-pending")
+            receipt = notices[0]["receipt"]
+            receipt_digest = supervision.receipt_digest(receipt)
+            notice = supervision.render_text(receipt)
+            self.assertIn("output-invalid", notice)
+            self.assertIn("conda-meta/bad|name.txt", notice)
+            self.assertIn(Path(refusal["record_path"]).name, notice)
+            self.assertIn("Correct the reported locator", notice)
+            self.assertIn("retries closure automatically", notice)
+            self.assertEqual(supervision.receipt_digest(receipt), receipt_digest)
+        self.assertEqual(bad.read_bytes(), before_bad)
 
     def test_a_replayed_settlement_after_a_checkpoint_completes_for_every_harness(self):
         for harness in ("claude", "codex", "opencode"):

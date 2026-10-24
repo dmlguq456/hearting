@@ -4074,6 +4074,8 @@ def _checkpoint_lock_path(root: Path, cycle_id: str) -> Path:
 
 
 CLOSED_CYCLE_REFRESH_OFF_FILE = "cycle-refresh.off"
+CHECKPOINT_LIMITS_FILE = "checkpoint-limits.json"
+CHECKPOINT_LIMITS_MAX_BYTES = 64 * 1024
 
 
 def closed_cycle_refresh_off() -> bool:
@@ -4097,6 +4099,70 @@ def checkpoint_interval_seconds() -> float:
     except ValueError:
         return CHECKPOINT_MIN_INTERVAL_SECONDS
     return value if value >= 0 else CHECKPOINT_MIN_INTERVAL_SECONDS
+
+
+def _checkpoint_limits_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return Path(base) / "hearting" / CHECKPOINT_LIMITS_FILE
+
+
+def checkpoint_limits_from_config() -> Tuple[CheckpointLimits, str]:
+    """Read optional interim limits on every call; malformed files use defaults."""
+    defaults = CheckpointLimits()
+    path = _checkpoint_limits_path()
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return defaults, "missing"
+    except OSError:
+        return defaults, "unreadable"
+    if not stat.S_ISREG(before.st_mode) or not getattr(os, "O_NOFOLLOW", 0):
+        return defaults, "not-regular-no-follow"
+    fd = None
+    try:
+        fd = os.open(str(path), os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            return defaults, "changed-during-open"
+        if opened.st_size > CHECKPOINT_LIMITS_MAX_BYTES:
+            return defaults, "too-large"
+        with os.fdopen(os.dup(fd), "rb") as stream:
+            raw = stream.read(CHECKPOINT_LIMITS_MAX_BYTES + 1)
+        if len(raw) > CHECKPOINT_LIMITS_MAX_BYTES:
+            return defaults, "too-large"
+        after = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns) != (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            return defaults, "changed-during-read"
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate-key")
+                result[key] = value
+            return result
+        document = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object,
+                              parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+        if not isinstance(document, dict):
+            raise ValueError("not-object")
+        allowed = {"max_files", "max_total_bytes", "max_scanned_files", "max_walk_entries", "max_file_bytes"}
+        if set(document) - allowed:
+            raise ValueError("unknown-key")
+        if "max_scanned_files" in document and "max_walk_entries" in document:
+            if document["max_scanned_files"] != document["max_walk_entries"]:
+                raise ValueError("alias-conflict")
+        values = defaults.to_payload()
+        for key, value in document.items():
+            target = "max_walk_entries" if key in {"max_scanned_files", "max_walk_entries"} else key
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 2**63 - 1:
+                raise ValueError("invalid-value")
+            values[target] = value
+        return CheckpointLimits(**values), "loaded"
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+        return defaults, "invalid"
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 @contextlib.contextmanager
@@ -4404,9 +4470,6 @@ def _checkpoint_scan(directory: Path, previous: Mapping[str, Any], limits: Check
                 rel = Path(path).relative_to(directory).as_posix()
                 if rel in excluded_paths:
                     continue
-                visited += 1
-                if visited > limits.max_walk_entries:
-                    return {"skip": "walk-limit", "visited": visited}
                 try:
                     info = os.lstat(path)
                 except OSError:
@@ -4432,6 +4495,9 @@ def _checkpoint_scan(directory: Path, previous: Mapping[str, Any], limits: Check
                     reasons = excluded.setdefault("invalid-locator-reasons", {})
                     reasons[reason] = reasons.get(reason, 0) + 1
                     continue
+                visited += 1
+                if visited > limits.max_walk_entries:
+                    return {"skip": "walk-limit", "visited": visited}
                 candidates.append((rel, path, info))
                 total += info.st_size
                 if len(candidates) > limits.max_files:
@@ -4575,7 +4641,8 @@ def _checkpoint_cycle(
     if (isinstance(observed_scan, (int, float)) and not isinstance(observed_scan, bool)
             and clock - observed_scan < interval):
         return skipped("min-interval", next_eligible_at=_rfc3339(observed_scan + interval))
-    limits = limits or CheckpointLimits()
+    if limits is None:
+        limits, _limits_source = checkpoint_limits_from_config()
     previous_stats = state.get("stats") if isinstance(state.get("stats"), dict) else {}
     owned = _read_json(journal_path(root, cid)) or {}
     owned_paths = [row.get("locator") for row in owned.get("directory_bundles", [])

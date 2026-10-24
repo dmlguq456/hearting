@@ -410,6 +410,31 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
             expected_epoch=1, expected_attempts={"att-owner"}, expected_sealed_batch_id="batch-test")
         self.assertIn("not workflow completion", supervision.render_text(first["receipt"]))
 
+    def test_completion_pending_notice_late_renders_exact_refusal_without_finish_requirement(self):
+        import dispatch_terminal_commit
+        self._notice_rows()
+        receipt = supervision.materialize(
+            self.jobs, {"att-child"}, reason="workflow-completion-pending")[0]["receipt"]
+        digest = supervision.receipt_digest(receipt)
+        diagnosis = {"state": "closure-pending", "checkpoint": "route-closed",
+                     "last_refusal": {
+                         "reason": "output-invalid",
+                         "detail": "locator-invalid-component:artifacts/bad|name.txt\nignored",
+                         "record_path": str(self.root / "attempts" / "event.json"),
+                         "remediation": "Correct the reported locator, mark the exact directory, or move it outside the cycle; the controller retries automatically.",
+                     }}
+        with mock.patch.object(dispatch_terminal_commit, "inspect_owner_completion", return_value=diagnosis):
+            text = supervision.render_text(receipt)
+        self.assertIn("output-invalid", text)
+        self.assertIn("artifacts/bad|name.txt", text)
+        self.assertNotIn("ignored", text)
+        self.assertIn("event.json", text)
+        self.assertIn("Correct the reported locator", text)
+        self.assertIn("retries closure automatically", text)
+        self.assertIn("read-only diagnosis", text)
+        self.assertNotIn(" finish ", text)
+        self.assertEqual(supervision.receipt_digest(receipt), digest)
+
     def test_residue_pid_is_named_in_the_notice_only_while_it_runs(self):
         self._notice_rows()
         receipt = supervision.materialize(self.jobs, {"att-child"}, reason="join-deadline")[0]["receipt"]

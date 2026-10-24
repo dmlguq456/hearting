@@ -64,6 +64,83 @@ class CheckpointTestBase(F.ProducerTestBase):
 
 
 class InterimManifestTest(CheckpointTestBase):
+    def test_checkpoint_config_reload_fallback_alias_and_invalid_whole_file(self):
+        xdg_config = P._checkpoint_limits_path()
+        xdg_config.parent.mkdir(parents=True)
+        xdg_config.write_text('{"max_files":7,"max_scanned_files":8}', encoding="utf-8")
+        loaded, reason = P.checkpoint_limits_from_config()
+        self.assertEqual((loaded.max_files, loaded.max_walk_entries, reason), (7, 8, "loaded"))
+        xdg_config.write_text('{"max_walk_entries":9,"max_scanned_files":9}', encoding="utf-8")
+        self.assertEqual(P.checkpoint_limits_from_config()[0].max_walk_entries, 9)
+
+        home_config = Path(os.environ["HOME"]) / ".config" / "hearting" / P.CHECKPOINT_LIMITS_FILE
+        home_config.parent.mkdir(parents=True)
+        home_config.write_text('{"max_files":11}', encoding="utf-8")
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": ""}):
+            self.assertEqual(P.checkpoint_limits_from_config()[0].max_files, 11)
+
+        defaults = P.CheckpointLimits()
+        for invalid in (
+            '{"max_files":0}', '{"max_files":true}', '{"max_files":1.5}',
+            '{"max_files":1,"max_files":2}', '{"unknown":1}',
+            '{"max_walk_entries":2,"max_scanned_files":3}', '[]', 'NaN',
+        ):
+            with self.subTest(invalid=invalid):
+                xdg_config.write_text(invalid, encoding="utf-8")
+                loaded, reason = P.checkpoint_limits_from_config()
+                self.assertEqual((loaded, reason), (defaults, "invalid"))
+
+    def test_conda_history_marker_is_shared_by_checkpoint_candidates(self):
+        cycle = Path(self.result["cycle_dir"])
+        env = cycle / "artifacts" / "environment"
+        conda = env / "conda-meta"
+        conda.mkdir(parents=True)
+        (conda / "history").write_bytes(b"history is never payload")
+        bad = env / "bad|locator.txt"
+        bad.write_bytes(b"invalid and excluded")
+        report = self.write_output(self.result, "reports/final_report.md", b"report")
+        scan = P._checkpoint_scan(cycle, {}, P.CheckpointLimits())
+        self.assertNotIn("skip", scan)
+        self.assertEqual([fact[0] for fact in scan["facts"]], ["artifacts/reports/final_report.md"])
+        self.assertEqual(scan["excluded"]["self-excluded"], 1)
+        self.assertEqual(bad.read_bytes(), b"invalid and excluded")
+        emitted = P.checkpoint(self.root, cycle_id=self.cycle_id)
+        self.assertEqual(emitted["status"], "emitted", emitted)
+        self.assertEqual(set(_ids_by_path(self.interim())), {"artifacts/reports/final_report.md"})
+        self.assertEqual((conda / "history").read_bytes(), b"history is never payload")
+
+    def test_checkpoint_user_limits_control_candidate_scan(self):
+        self.write_output(self.result, "reports/one.md", b"one")
+        self.write_output(self.result, "reports/two.md", b"two")
+        # Exercise the public checkpoint consumer with the documented config
+        # path. Keeping this path literal makes the regression runnable on
+        # baseline source that does not yet provide a config-path helper.
+        config_home = Path(os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config"))
+        config = config_home / "hearting" / "checkpoint-limits.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"max_files": 1, "max_scanned_files": 10}), encoding="utf-8")
+        constrained = P.checkpoint(self.root, cycle_id=self.cycle_id)
+        self.assertEqual(constrained.get("status"), "skipped", constrained)
+        self.assertEqual(constrained.get("reason"), "file-count-limit", constrained)
+        config.write_text(json.dumps({"max_files": 10, "max_scanned_files": 10}), encoding="utf-8")
+        expanded = P.checkpoint(self.root, cycle_id=self.cycle_id)
+        self.assertEqual(expanded["status"], "emitted", expanded)
+        self.assertEqual(self.state()["limits"]["max_walk_entries"], 10)
+
+    def test_checkpoint_excluded_files_do_not_consume_scan_limit(self):
+        cycle = Path(self.result["cycle_dir"])
+        root = cycle / "artifacts"
+        (root / "a.bin").write_bytes(b"binary")
+        (root / "b|invalid.txt").write_bytes(b"invalid locator")
+        report = self.write_output(self.result, "reports/final_report.md", b"report")
+        limits = P.CheckpointLimits(
+            max_walk_entries=1, max_files=1, max_file_bytes=100, max_total_bytes=100)
+        result = P.checkpoint(self.root, cycle_id=self.cycle_id,
+                              limits=limits)
+        self.assertEqual(result["status"], "emitted", result)
+        self.assertEqual(report.read_bytes(), b"report")
+        self.assertTrue(P.open_manifest_path(self.root, self.cycle_id).exists())
+
     def test_checkpoint_prunes_each_marked_payload_tree_before_limits(self):
         cycle = Path(self.result["cycle_dir"])
         cache = cycle / "artifacts" / "experiments" / "cache"
