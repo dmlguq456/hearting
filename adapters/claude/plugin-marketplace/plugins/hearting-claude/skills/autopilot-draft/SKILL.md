@@ -33,9 +33,21 @@ stage workers load only their assigned stage contracts.
 
 ## Reference Index
 
-| File | Load when | Obligation |
-|---|---|---|
-| [`references/owner-execution.md`](references/owner-execution.md) | After approval, by the selected direct/quick session or dispatch-depth-1 owner | Read the complete execution procedure before material work. This is the router's only post-approval reference edge. |
+After approval, read the portable procedure set:
+
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/autopilot-draft/references/convention-common.md`
+- `capabilities/autopilot-draft/references/convention-doc.md`
+- `capabilities/autopilot-draft/references/convention-paper.md`
+- `capabilities/autopilot-draft/references/convention-presentation.md`
+- `capabilities/autopilot-draft/references/invocation-and-args.md`
+- `capabilities/autopilot-draft/references/owner-execution.md`
+- `capabilities/autopilot-draft/references/pipeline-steps.md`
+- `capabilities/autopilot-draft/references/review-and-qa.md`
+- `capabilities/autopilot-draft/references/summary-and-safety.md`
 
 ## Guard pointer
 

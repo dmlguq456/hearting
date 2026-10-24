@@ -59,9 +59,9 @@ need adapters/opencode/AGENTS.md 'otherwise omit .--shape. and let the frame dec
 
 # 5. Claude skill realization
 need skills/autopilot-lab/SKILL.md 'core/WORKFLOW.md §0.2'         'lab SKILL semantic routing 참조'
-need skills/autopilot-lab/references/eval-procedure.md 'pre-execution gate' 'lab eval-procedure gate 참조'
-need adapters/claude/skills/autopilot-lab/references/eval-procedure.md 'WAV, MP3, or OGG' 'Claude lab audio parity projection 존재'
-need adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/autopilot-lab/references/eval-procedure.md 'WAV, MP3, or OGG' 'Claude plugin lab audio parity projection 존재'
+need capabilities/autopilot-lab/references/eval-procedure.md 'pre-execution gate' 'lab eval-procedure gate 참조'
+need adapters/codex/plugins/hearting-codex/capabilities/autopilot-lab/references/eval-procedure.md 'WAV, MP3, or OGG' 'Codex lab audio projection 존재'
+need adapters/claude/plugin-marketplace/plugins/hearting-claude/capabilities/autopilot-lab/references/eval-procedure.md 'WAV, MP3, or OGG' 'Claude plugin lab audio parity projection 존재'
 
 # 6. 행동 드릴 fixture 존재 (Cases A–E)
 for c in r_route_lab_eval_primary r_route_refine_doc_only r_route_spec_policy_lab_exec \
@@ -126,8 +126,14 @@ for name in ('autopilot-lab', 'autopilot-draft', 'autopilot-refine', 'autopilot-
         for field in ('use_when', 'not_for'):
             assert manifest[name]['invocation'][field] in text, (path, field)
 
-for path in [root / 'core/WORKFLOW.md', root / 'capabilities/autopilot-lab.md'] + [
-    root / tree / 'autopilot-lab/references' / name for tree in trees[:3]
+capability_trees = (
+    '',
+    'adapters/claude/plugin-marketplace/plugins/hearting-claude',
+    'adapters/codex/plugins/hearting-codex',
+)
+for path in [root / 'core/WORKFLOW.md'] + [
+    root / tree / 'capabilities/autopilot-lab/references' / name
+    for tree in capability_trees
     for name in ('eval-procedure.md', 'data-contract.md', 'owner-execution.md')
 ]:
     text = ' '.join(path.read_text().split())
@@ -137,12 +143,12 @@ for path in [root / 'core/WORKFLOW.md', root / 'capabilities/autopilot-lab.md'] 
                      'Draft owns prose generation',
                      'Lab does not generate prose HTML itself'):
         assert obsolete not in text, (path, obsolete)
-for tree in trees[:3]:
-    text = (root / tree / 'autopilot-lab/references/eval-procedure.md').read_text()
+for tree in capability_trees:
+    text = (root / tree / 'capabilities/autopilot-lab/references/eval-procedure.md').read_text()
     assert 'Do not rerun inference' in text, tree
     assert 'report-only failure does not relabel a completed evaluation' in text, tree
-for tree in trees[:3]:
-    text = ' '.join((root / tree / 'autopilot-ship/references/owner-execution.md').read_text().split())
+for tree in capability_trees:
+    text = ' '.join((root / tree / 'capabilities/autopilot-ship/references/owner-execution.md').read_text().split())
     for phrase in ('relative links', 'named model versions', 'ZIP',
                    'do not continue into the deployment procedure', 'not a reusable default'):
         assert phrase in text, (tree, phrase)

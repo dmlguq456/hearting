@@ -92,10 +92,10 @@ Adapters must preserve the portable invariants relevant to this capability:
 
 | Adapter | Realization |
 |---|---|
-| Claude Code | `adapters/claude/skills/audit/SKILL.md` and `skills/audit/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/audit/SKILL.md`, while `skills/audit/SKILL.md` remains the compatibility reference kept for parity/drift checks. |
+| Claude Code | `adapters/claude/skills/audit/SKILL.md` and `skills/audit/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/audit/SKILL.md`, while `skills/audit/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks. |
 | Codex | Read this spec and run `adapters/codex/bin/preflight.sh capability-info audit`. Use `adapters/codex/skills/audit/SKILL.md` as the native Codex Skill projection; do not consume `skills/audit/SKILL.md` or Claude command files as native Codex configuration. |
 | OpenCode | Read this spec and run `adapters/opencode/bin/preflight.sh capability-info audit`. Use `adapters/opencode/skills/audit/SKILL.md` and `adapters/opencode/commands/audit.md` as native OpenCode projections; do not consume `skills/audit/SKILL.md` or Claude command files as native OpenCode configuration. |
 
 ## Compatibility Reference
 
-`skills/audit/SKILL.md` and `adapters/claude/skills/audit/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/audit/SKILL.md`, while `skills/audit/SKILL.md` remains the compatibility reference kept for parity/drift checks.
+`skills/audit/SKILL.md` and `adapters/claude/skills/audit/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/audit/SKILL.md`, while `skills/audit/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks.

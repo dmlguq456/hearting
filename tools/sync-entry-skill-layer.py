@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Generate compact entry routers and Claude mirrors from canonical Skills.
+"""Generate compact entry routers and Claude mirrors from portable capabilities.
 
-The first write captures the existing canonical procedure in a one-level owner
-reference.  Later runs preserve that reference and deterministically project
-the compact router and its reference tree to Claude.
+Procedure references are owned by capabilities; Skill trees contain generated
+routing projections and deterministic compatibility mirrors.
 """
 from __future__ import annotations
 
@@ -49,9 +48,9 @@ stage workers load only their assigned stage contracts.
 
 ## Reference Index
 
-| File | Load when | Obligation |
-|---|---|---|
-| [`references/owner-execution.md`](references/owner-execution.md) | After approval, by the selected direct/quick session or dispatch-depth-1 owner | Read the complete execution procedure before material work. This is the router's only post-approval reference edge. |
+After approval, read the portable procedure set:
+
+{harness_manifest.render_procedure_index(identifier).rstrip()}
 
 ## Guard pointer
 
@@ -100,16 +99,16 @@ def expected(manifest: dict) -> dict[Path, str]:
             continue
         skill = ROOT / "skills" / identifier / "SKILL.md"
         front, body = split_frontmatter(skill.read_text(encoding="utf-8"))
-        owner = skill.parent / "references" / "owner-execution.md"
-        if not owner.exists():
-            out[owner] = relocate_owner_links(body)
-        else:
-            out[owner] = relocate_owner_links(owner.read_text(encoding="utf-8"))
         out[skill] = front + "\n\n" + router(identifier)
     return out
 
 
 def copy_tree(source: Path, dest: Path) -> None:
+    # Empty reference directories remain after canonical files move to capabilities.
+    # They are not part of the generated read-set and should not appear in mirrors.
+    for directory in sorted((path for path in source.rglob("*") if path.is_dir()), reverse=True):
+        if not any(directory.iterdir()):
+            directory.rmdir()
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(source, dest)
@@ -156,7 +155,7 @@ def main() -> int:
         copy_tree(ROOT / "skills" / identifier, ROOT / "adapters" / "claude" / "skills" / identifier)
     for orphan in orphans:
         shutil.rmtree(orphan)
-    print(f"generated compact routers and owner references for {len(entries)} entry Skills; mirrored {len(mirrors)} Skill trees")
+    print(f"generated compact routers for {len(entries)} entry Skills; mirrored {len(mirrors)} Skill trees")
     return 0
 
 

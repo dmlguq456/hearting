@@ -34,6 +34,16 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 - Portable meaning: Code-work entrypoint that detects spec context and closes the plan→execute→test→report loop.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/autopilot-code/references/arguments-and-decisions.md`
+- `capabilities/autopilot-code/references/context-and-guards.md`
+- `capabilities/autopilot-code/references/debug-audit.md`
+- `capabilities/autopilot-code/references/dev-pipeline.md`
+- `capabilities/autopilot-code/references/owner-execution.md`
+- `capabilities/autopilot-code/references/pipeline-summary-safety.md`
 
 ## Workflow Evidence
 

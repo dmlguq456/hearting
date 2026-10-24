@@ -34,6 +34,19 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 - Portable meaning: Draft independent documents through strategy, verification, and editing.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/autopilot-draft/references/convention-common.md`
+- `capabilities/autopilot-draft/references/convention-doc.md`
+- `capabilities/autopilot-draft/references/convention-paper.md`
+- `capabilities/autopilot-draft/references/convention-presentation.md`
+- `capabilities/autopilot-draft/references/invocation-and-args.md`
+- `capabilities/autopilot-draft/references/owner-execution.md`
+- `capabilities/autopilot-draft/references/pipeline-steps.md`
+- `capabilities/autopilot-draft/references/review-and-qa.md`
+- `capabilities/autopilot-draft/references/summary-and-safety.md`
 
 ## Workflow Evidence
 

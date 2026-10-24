@@ -69,7 +69,7 @@ def markdown_section_raw(text: str, heading: str) -> str:
     return "\n".join(body).strip()
 
 
-def portable_sections(source: str) -> str:
+def portable_sections(source: str, identifier: str) -> str:
     sections: list[str] = []
     for heading in (
         "Artifact Ownership",
@@ -84,8 +84,10 @@ def portable_sections(source: str) -> str:
         if section:
             sections.append(section)
     if not sections:
-        return ""
-    return "\n\n## Projected Portable Details\n\n" + "\n\n".join(sections) + "\n"
+        projected = ""
+    else:
+        projected = "\n\n## Projected Portable Details\n\n" + "\n\n".join(sections) + "\n"
+    return projected
 
 
 def render(identifier: str, spec: dict, capability_file: Path) -> tuple[str, str]:
@@ -103,7 +105,8 @@ def render(identifier: str, spec: dict, capability_file: Path) -> tuple[str, str
 
 - Invocation semantics: {invocation_semantics}
 """
-    projected_details = "" if invocation_class == "entry-router" else portable_sections(source)
+    projected_details = "" if invocation_class == "entry-router" else portable_sections(source, identifier)
+    procedure_index = harness_manifest.render_procedure_index(identifier)
     description = compact(f"{invocation['use_when']} {invocation['not_for']}")
     if invocation_class == "entry-router":
         use_steps = f"""1. Before approval, route from this compact metadata and `core/WORKFLOW.md §0.2`; do not read the full portable source merely to propose the route.
@@ -167,7 +170,7 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 - Portable meaning: {meaning}
 {portable_contract}
 {projected_details}
-
+{procedure_index}
 ## Workflow Evidence
 
 {workflow_evidence}

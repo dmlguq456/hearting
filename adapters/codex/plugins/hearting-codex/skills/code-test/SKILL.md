@@ -121,6 +121,11 @@ Additional test-entry gates:
    standalone work-cycle summary.
 6. Return a concise report path plus verdict to the caller.
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/code-test/references/procedure.md`
 
 ## Workflow Evidence
 

@@ -87,6 +87,8 @@ Adapters must preserve the portable invariants relevant to this capability:
 - resolve artifact root through `utilities/artifact-root.sh` or equivalent logic;
 - use DB memory paths, not runtime-native memory files.
 
+Portable procedure and reference documents are owned under `capabilities/code-execute/references/` when present. Claude, Codex, and OpenCode Skill bodies are generated projections of this capability and use the same logical procedure read-set.
+
 ## Portable Procedure
 
 ### Recover only edits owned by the failed work
@@ -103,6 +105,11 @@ When only part of the work can be reversed, or ownership is unclear, preserve th
 
 Apply this procedure to phase recovery, total failure, cascading errors, failed debug verification, and an exhausted dev test retry. A parallel sub-session slice retains its no-Git-write and no-rollback boundary and hands recovery to its owner.
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/code-execute/references/procedure.md`
 
 ## Workflow Evidence
 

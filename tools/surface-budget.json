@@ -43,11 +43,11 @@
    "bytes": 11311,
    "directives": 28
   },
-  "skills/autopilot-code/references/dev-pipeline.md": {
+  "capabilities/autopilot-code/references/dev-pipeline.md": {
    "bytes": 33975,
    "directives": 40
   },
-  "skills/autopilot-code/references/owner-execution.md": {
+  "capabilities/autopilot-code/references/owner-execution.md": {
    "bytes": 15277,
    "directives": 25
   }
@@ -81,11 +81,11 @@
    "bytes": 10981,
    "directives": 26
   },
-  "skills/autopilot-code/references/dev-pipeline.md": {
+  "capabilities/autopilot-code/references/dev-pipeline.md": {
    "bytes": 32985,
    "directives": 38
   },
-  "skills/autopilot-code/references/owner-execution.md": {
+  "capabilities/autopilot-code/references/owner-execution.md": {
    "bytes": 14832,
    "directives": 23
   }

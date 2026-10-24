@@ -34,6 +34,15 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 - Portable meaning: Read-oriented post-run inspection for artifact drift, inconsistency, and omissions.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/audit/references/aspect-lints.md`
+- `capabilities/audit/references/examples-and-checklist.md`
+- `capabilities/audit/references/owner-execution.md`
+- `capabilities/audit/references/report-and-autofix.md`
+- `capabilities/audit/references/scope-and-baseline.md`
 
 ## Workflow Evidence
 

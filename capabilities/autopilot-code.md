@@ -262,10 +262,10 @@ can run.
 
 | Adapter | Realization |
 |---|---|
-| Claude Code | `adapters/claude/skills/autopilot-code/SKILL.md` and `skills/autopilot-code/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/autopilot-code/SKILL.md`, while `skills/autopilot-code/SKILL.md` remains the compatibility reference kept for parity/drift checks. |
+| Claude Code | `adapters/claude/skills/autopilot-code/SKILL.md` and `skills/autopilot-code/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/autopilot-code/SKILL.md`, while `skills/autopilot-code/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks. |
 | Codex | Read this spec and run `adapters/codex/bin/preflight.sh capability-info autopilot-code`. Use `adapters/codex/skills/autopilot-code/SKILL.md` as the native Codex Skill projection; do not consume `skills/autopilot-code/SKILL.md` or Claude command files as native Codex configuration. |
 | OpenCode | Read this spec and run `adapters/opencode/bin/preflight.sh capability-info autopilot-code`. Use `adapters/opencode/skills/autopilot-code/SKILL.md` and `adapters/opencode/commands/autopilot-code.md` as native OpenCode projections; do not consume `skills/autopilot-code/SKILL.md` or Claude command files as native OpenCode configuration. |
 
 ## Compatibility Reference
 
-`skills/autopilot-code/SKILL.md` and `adapters/claude/skills/autopilot-code/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/autopilot-code/SKILL.md`, while `skills/autopilot-code/SKILL.md` remains the compatibility reference kept for parity/drift checks.
+`skills/autopilot-code/SKILL.md` and `adapters/claude/skills/autopilot-code/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/autopilot-code/SKILL.md`, while `skills/autopilot-code/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks.

@@ -856,8 +856,8 @@ class ReportContractTest(unittest.TestCase):
         lab = SimpleNamespace(worker_type="stage", completion_gate="lab-report", assigned_contract="autopilot-lab")
         for harness in ("claude", "codex", "opencode"):
             prompt = W.contract_read_prompt(lab, harness)
-            self.assertIn(str(ROOT / "skills/autopilot-lab/references/eval-procedure.md"), prompt)
-            self.assertIn(str(ROOT / "skills/autopilot-lab/references/data-contract.md"), prompt)
+            self.assertIn(str(ROOT / "capabilities/autopilot-lab/references/eval-procedure.md"), prompt)
+            self.assertIn(str(ROOT / "capabilities/autopilot-lab/references/data-contract.md"), prompt)
         code = SimpleNamespace(worker_type="stage", completion_gate="code-report", assigned_contract="code-report")
         self.assertNotIn("report format is specified in", W.contract_read_prompt(code, "claude"))
         review = SimpleNamespace(worker_type="review", completion_gate="lab-report", assigned_contract="autopilot-lab")

@@ -368,8 +368,12 @@ def validate_idle_request(path, nonce: Optional[str] = None, *, now: Optional[fl
 def reply_card_guide(nonce: str) -> str:
     begin, end = st.reply_card_markers(nonce)
     return ("Skill·지침·도구를 쓰지 말고 답 하나로 끝내세요. 답의 첫 줄은 정확히 " + begin + ", 마지막 줄은 정확히 "
-            + end + " 로 쓰고, 그 사이에 카드 본문으로 진행 중, 기다리는 결정, 다음 할 일, 관련(경로·PR·세션), "
-            "오늘 한 일, 사용자 지시(끝남/남음/보류) 여섯 항목을 사용자의 언어로 90줄 이내로 씁니다. "
+            + end + " 로 쓰고, 그 사이에 카드 본문을 다음 순서로 사용자의 언어로 90줄 이내로 씁니다: "
+            + " → ".join(st.CARD_FIELDS) + ". "
+            "이전 카드의 " + "·".join(st.CARD_FIXED_FIELDS)
+            + "은 다시 요약하지 말고 그대로 이어받으세요. 날짜 있는 사용자 원문 인용을 보존하고, "
+            "새 내용은 다시 요약하지 말고 이어 붙이세요. "
+            "사용자가 대체한 항목만 제거하세요. 실제 작업 전에 카드 전체와 PRD를 다시 읽으세요. "
             "턴이 끝나면 하팅이 이 답을 카드로 저장하고 기억 정리를 접수합니다. ")
 
 

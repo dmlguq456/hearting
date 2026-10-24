@@ -307,8 +307,8 @@ class PrdReadabilityTest(unittest.TestCase):
     def test_u17_documented_limits_match_the_code(self):
         expected = {RD.LIMITS["summary_lines"], RD.LIMITS["summary_item_chars"], RD.LIMITS["summary_chars"]}
         self.assertEqual(expected, {40, 160, 2500})
-        docs = ("skills/autopilot-spec/references/prd-authoring.md",
-                "skills/autopilot-spec/references/owner-execution.md",
+        docs = ("capabilities/autopilot-spec/references/prd-authoring.md",
+                "capabilities/autopilot-spec/references/owner-execution.md",
                 "capabilities/autopilot-spec.md")
         for rel in docs:
             text = (ROOT / rel).read_text(encoding="utf-8")

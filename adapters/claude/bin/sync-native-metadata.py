@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """Generate manifest-owned frontmatter of Claude-native Skills.
 
-Entry router bodies and owner references are projected by
-``tools/sync-entry-skill-layer.py`` from canonical ``skills/`` before this
-metadata pass; this generator remains responsible only for frontmatter.
+Claude Skill bodies are generated from portable capability procedures before this
+metadata pass; this generator remains responsible only for manifest frontmatter.
 """
 
 from __future__ import annotations
@@ -48,13 +47,23 @@ metadata:
 
 
 def project_body(path: Path, identifier: str, spec: dict) -> str:
-    text = path.read_text(encoding="utf-8")
-    if not text.startswith("---"):
-        raise harness_manifest.ManifestError(f"Claude Skill lacks frontmatter: {path}")
-    parts = text.split("---", 2)
-    if len(parts) != 3:
-        raise harness_manifest.ManifestError(f"Claude Skill frontmatter is unterminated: {path}")
-    return generated_frontmatter(identifier, spec) + parts[2]
+    if spec["invocation"]["class"] == "entry-router":
+        text = path.read_text(encoding="utf-8")
+        if not text.startswith("---"):
+            raise harness_manifest.ManifestError(f"Claude Skill lacks frontmatter: {path}")
+        parts = text.split("---", 2)
+        if len(parts) != 3:
+            raise harness_manifest.ManifestError(f"Claude Skill frontmatter is unterminated: {path}")
+        body = parts[2]
+    else:
+        references = harness_manifest.render_procedure_index(identifier)
+        body = (
+            f"\n\n# {identifier}\n\n"
+            f"Portable source: `capabilities/{identifier}.md`.\n\n"
+            f"{references}"
+        )
+        body = body.rstrip("\n") + "\n"
+    return generated_frontmatter(identifier, spec) + body
 
 
 def main() -> int:
@@ -67,8 +76,8 @@ def main() -> int:
     for output_root in OUTPUT_ROOTS:
         for identifier, spec in harness_manifest.skill_capabilities(manifest).items():
             path = output_root / identifier / "SKILL.md"
-            if not path.is_file():
-                raise harness_manifest.ManifestError(f"Claude Skill missing: {path}")
+            if not path.is_file() and spec["invocation"]["class"] == "entry-router":
+                raise harness_manifest.ManifestError(f"Claude entry Skill missing: {path}")
             expected[path] = project_body(path, identifier, spec)
 
     existing = set()
@@ -77,7 +86,7 @@ def main() -> int:
     extras = sorted(existing - set(expected))
     stale = [
         path for path, body in expected.items()
-        if path.read_text(encoding="utf-8") != body
+        if not path.is_file() or path.read_text(encoding="utf-8") != body
     ] + extras
     if args.check:
         if stale:
@@ -88,6 +97,7 @@ def main() -> int:
         return 0
 
     for path, body in expected.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(body, encoding="utf-8")
     for path in extras:
         path.unlink()

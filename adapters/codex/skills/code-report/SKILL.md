@@ -88,6 +88,13 @@ Adapters must preserve the portable invariants relevant to this capability:
 - resolve artifact root through `utilities/artifact-root.sh` or equivalent logic;
 - use DB memory paths, not runtime-native memory files.
 
+Portable procedure and reference documents are owned under `capabilities/code-report/references/` when present. Claude, Codex, and OpenCode Skill bodies are generated projections of this capability and use the same logical procedure read-set.
+
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/code-report/references/procedure.md`
 
 ## Workflow Evidence
 

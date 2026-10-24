@@ -17,7 +17,7 @@ This is the portable capability contract for `session-tidy`. It defines runtime-
 
 Whenever a seat card is injected, its fixed header instructs the receiving session to
 start its first reply, before any tool call, with one summary in the user's language,
-about five lines using the three headings `하던 일 · 남은 일 · 다음 할 일`, then continue.
+about five lines beginning with `원래 목표`, then `진행 중 · 기다리는 결정 · 다음 할 일 · 관련`. Preserve `사용자 요구 원문 발췌` with its date and `요구사항·PRD 위치` with the current-requirements section, followed by `오늘 한 일` and `사용자 지시`.
 If the user first gives a different instruction instead of continuing, skip the summary
 and follow only that instruction. This guidance survives body truncation within the
 2,400-byte injection limit, including bundled memory references; it is absent from
@@ -35,8 +35,7 @@ At the due time, the existing helper and `utilities/peer-steward.py idle-card-re
 
 At a shared project fallback seat each session keeps its own card, so one session's card never replaces another's; a different session receives only the seat's newest card, once, and only if it first appeared after that card's author was last active.
 
-The main-authored card keeps work in progress, waiting decisions, the next step
-and related references first. Below those four fields, add "오늘 한 일"
+The main-authored card starts with the original goal, then work in progress, waiting decisions, the next step and related references. It preserves dated original user wording and the related PRD location. Preserve the fixed fields `사용자 요구 원문 발췌` (with its date) and `요구사항·PRD 위치` below them, then add "오늘 한 일"
 (today's work, with PR/version/result pointers) and "사용자 지시" (brief user
 quotations marked finished, remaining or deferred), within about 90 lines.
 Write it from the conversation the main session already holds.
@@ -72,6 +71,22 @@ Adapters may expose this capability through native commands, skill files, prompt
 
 ## Portable Procedure
 
+Modes are `정리` (default), `정리만` (keep this window), and `인계 <받을 세션>`
+(pass the card to an already-running peer while only this window may clear). Use
+`python3 $AGENT_HOME/utilities/session_tidy.py tidy`; add `--no-clear` for
+`정리만`, `--no-continue` when asked to stop after tidying, and
+`--handoff <받을 세션>` for a peer handoff. Card writing, queueing and optional
+handoff keep their existing one-call behavior. Reply with the command's `say=`
+line; report its `prompted=` line for handoff and do not retry an uncertain send.
+
+A nonce-bounded idle or compact card request is answered with the card itself
+between the request's marker lines, with no tool call. The turn-end observer
+stores that reply and queues the tidy. For a peer successor at this seat, use
+`peer-steward.py start <name> --kind <harness>`, then the existing tidy command
+with `--no-clear --handoff <name>`. The successor retires the predecessor only
+after its ACK and the predecessor's final idle result, using the existing
+`peer-steward.py retire <predecessor>` flow.
+
 Write the card yourself in the user's language, using the conversation you
 already hold. Keep the four continuation fields first: work in progress,
 decisions waiting, the next step, and related paths, PRs and sessions. Add
@@ -88,13 +103,22 @@ when they affect meaning. Record failed, interrupted and unfinished work in
 the same fields with its actual status and next action; do not guess what an
 unexplained identifier means.
 
+Keep the dated original user wording and PRD location verbatim across generations:
+append to the prior card without re-summarizing those fixed fields, and remove an
+item only when the user replaces it. Before the first real work in a resumed
+session, reread the full card and the referenced PRD current-requirements section;
+this is context reading, not a new gate.
+
 Example fields (use the user's language):
 
 ```text
+원래 목표: …
 진행 중: …
 기다리는 결정: …
 다음 할 일: …
 관련: …
+사용자 요구 원문 발췌: "…" (YYYY-MM-DD)
+요구사항·PRD 위치: <path> — 현재 요구사항
 오늘 한 일: … (PR·설치 버전·결과 파일)
 사용자 지시: "…" — 끝남 / 남음 / 보류
 ```
@@ -160,13 +184,13 @@ Adapters must preserve the portable invariants relevant to this capability:
 
 | Adapter | Realization |
 |---|---|
-| Claude Code | `adapters/claude/skills/session-tidy/SKILL.md` and `skills/session-tidy/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/session-tidy/SKILL.md`, while `skills/session-tidy/SKILL.md` remains the compatibility reference kept for parity/drift checks. |
+| Claude Code | `adapters/claude/skills/session-tidy/SKILL.md` and `skills/session-tidy/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/session-tidy/SKILL.md`, while `skills/session-tidy/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks. |
 | Codex | Read this spec and run `adapters/codex/bin/preflight.sh capability-info session-tidy`. Use `adapters/codex/skills/session-tidy/SKILL.md` as the native Codex Skill projection; do not consume `skills/session-tidy/SKILL.md` or Claude command files as native Codex configuration. |
 | OpenCode | Read this spec and run `adapters/opencode/bin/preflight.sh capability-info session-tidy`. Use `adapters/opencode/skills/session-tidy/SKILL.md` and `adapters/opencode/commands/session-tidy.md` as native OpenCode projections; do not consume `skills/session-tidy/SKILL.md` or Claude command files as native OpenCode configuration. |
 
 ## Compatibility Reference
 
-`skills/session-tidy/SKILL.md` and `adapters/claude/skills/session-tidy/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/session-tidy/SKILL.md`, while `skills/session-tidy/SKILL.md` remains the compatibility reference kept for parity/drift checks.
+`skills/session-tidy/SKILL.md` and `adapters/claude/skills/session-tidy/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/session-tidy/SKILL.md`, while `skills/session-tidy/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks.
 
 Only a valid current typed cross-seat handoff receives the existing explicit
 read-and-accept command. It is not user approval and does not change registered

@@ -38,6 +38,12 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 - Portable meaning: Prepare deployment/release setup or package existing artifacts.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/autopilot-ship/references/examples.md`
+- `capabilities/autopilot-ship/references/owner-execution.md`
 
 ## Workflow Evidence
 

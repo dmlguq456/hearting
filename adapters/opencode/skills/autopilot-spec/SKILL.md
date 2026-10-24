@@ -38,6 +38,15 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 - Portable meaning: Create or update requirements/blueprints while keeping `prd.md` as the only spec-change path.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/autopilot-spec/references/invocation-and-modes.md`
+- `capabilities/autopilot-spec/references/operations-and-examples.md`
+- `capabilities/autopilot-spec/references/owner-execution.md`
+- `capabilities/autopilot-spec/references/prd-authoring.md`
+- `capabilities/autopilot-spec/references/scaffolding.md`
 
 ## Workflow Evidence
 

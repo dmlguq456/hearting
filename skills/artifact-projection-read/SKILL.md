@@ -14,12 +14,4 @@ metadata:
 
 # artifact-projection-read
 
-Use `utilities/cairn-artifact-read.sh` for a read-only Cairn artifact
-projection query. Provide exactly one JSON object on stdin, set `CAIRN_ROOT`
-to the W3a checkout at commit `1fa0d99e4b714b5ce305f78c8f7c7773255e8f87`, and
-provide read-only `CAIRN_READ_ENDPOINT` and optional `CAIRN_READ_TOKEN` through
-the environment. The bridge passes request and cursor semantics to Cairn's
-`ArtifactProjectionClient`; it emits one JSON value on stdout and diagnostics
-only on stderr. Use flat browse, `rg`, or memory `artifact-pointer` as the
-existing fallback when this projection is unavailable. Never place tokens,
-database URLs, or credentials in requests or prose.
+Portable source: `capabilities/artifact-projection-read.md`.

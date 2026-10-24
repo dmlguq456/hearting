@@ -38,6 +38,15 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 - Portable meaning: Creates persistent analysis of existing code, papers, or documents; initial analysis defaults here unless read-only/no-file or another primary applies.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/analyze-project/references/mode-code.md`
+- `capabilities/analyze-project/references/mode-doc.md`
+- `capabilities/analyze-project/references/mode-paper.md`
+- `capabilities/analyze-project/references/outputs-and-integration.md`
+- `capabilities/analyze-project/references/owner-execution.md`
 
 ## Workflow Evidence
 

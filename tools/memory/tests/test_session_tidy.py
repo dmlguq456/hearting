@@ -2832,6 +2832,10 @@ class TidyOneCallTest(TidyCase):
         self.assertIn("다음 입력", line("clear=pending reason=x"))
 
     def test_the_automatic_requests_ask_for_one_marked_reply(self):
+        self.assertEqual(st.CARD_FIELDS, (
+            "원래 목표", "진행 중", "기다리는 결정", "다음 할 일", "관련",
+            "사용자 요구 원문 발췌", "요구사항·PRD 위치", "오늘 한 일", "사용자 지시",
+        ))
         for origin in ("idle", "compact"):
             text = clear.idle_card_request_text({"nonce": "n1", "origin": origin})
             begin, end = st.reply_card_markers("n1")
@@ -2839,11 +2843,106 @@ class TidyOneCallTest(TidyCase):
             self.assertIn(end, text)
             self.assertNotIn("\n", text)
             self.assertNotIn("enqueue", text)
+            for field in st.CARD_FIELDS:
+                self.assertIn(field, text)
+            self.assertIn("날짜 있는 사용자 원문 인용을 보존", text)
+            self.assertIn("다시 요약하지 말고 이어 붙이세요", text)
+            self.assertIn("사용자가 대체한 항목만 제거", text)
+            self.assertIn("카드 전체와 PRD를 다시 읽으세요", text)
             self.assertTrue(text.endswith("요청 식별자: n1"))
         self.assertEqual(st.reply_card_body(f"{begin}\n 진행 중: x \n{end}\n", "n1"), "진행 중: x")
         for broken in (f"{begin}\n진행 중: x", f"앞말\n{begin}\n진행 중: x\n{end}", f"{begin}\n\n{end}",
                        f"{begin}\n진행 중: x\n{end} 뒷말"):
             self.assertIsNone(st.reply_card_body(broken, "n1"), broken)
+
+
+class CardContractTest(TidyCase):
+
+    def assert_fields_in_order(self, text, fields):
+        positions = [text.index(field) for field in fields]
+        self.assertEqual(positions, sorted(positions), text)
+
+    def test_compact_reply_and_receiver_instructions_keep_the_card_contract(self):
+        reply_rules = (
+            "날짜 있는 사용자 원문 인용", "다시 요약하지 말고 이어 붙이세요",
+            "사용자가 대체한 항목만 제거", "다시 읽으세요",
+        )
+        compact_rules = (
+            "verbatim", "dated original user quotes", "append", "Remove only items", "reread",
+        )
+        self.assert_fields_in_order(st.COMPACT_CARD_INSTRUCTIONS, st.CARD_FIELDS)
+        for rule in compact_rules:
+            self.assertIn(rule, st.COMPACT_CARD_INSTRUCTIONS)
+        for field in st.CARD_FIXED_FIELDS:
+            self.assertIn(field, st.COMPACT_CARD_INSTRUCTIONS)
+        for origin in ("idle", "compact"):
+            text = clear.idle_card_request_text({"nonce": "n1", "origin": origin})
+            with self.subTest(exposure=text[:48]):
+                self.assert_fields_in_order(text, st.CARD_FIELDS)
+                for rule in reply_rules:
+                    self.assertIn(rule, text)
+                for field in st.CARD_FIXED_FIELDS:
+                    self.assertIn(field, text)
+        guide = clear.reply_card_guide("n1")
+        self.assert_fields_in_order(guide, st.CARD_FIELDS)
+        for rule in reply_rules:
+            self.assertIn(rule, guide)
+
+        receiver = st.CARD_FIRST_REPLY_GUIDANCE
+        self.assert_fields_in_order(receiver, ("하던 일", "남은 일", "다음 할 일"))
+        self.assertIn("첫 실작업 전에", receiver)
+        self.assertIn("그 칸이 가리키는 PRD 절을 다시 읽으세요", receiver)
+        self.assertIn("다른 지시를 먼저 주면 요약을 생략", receiver)
+        self.assertIn("그 지시만 따르세요", receiver)
+        for field in st.CARD_FIXED_FIELDS:
+            self.assertIn(field, receiver)
+
+    def test_receiver_header_is_once_only_and_injection_stays_within_budget(self):
+        for harness in st.HARNESSES:
+            pane = f"card-contract-{harness}"
+            self.card("author", "원래 목표: 원천 조건 포함\n진행 중: 카드 계약", harness=harness, pane=pane)
+            with self.library({"HERDR_PANE_ID": pane}):
+                output = st.run_hook(harness, "start", "receiver", cwd=str(self.cwd))
+            self.assertEqual(output.count(st.CARD_FIRST_REPLY_GUIDANCE), 1)
+            self.assertLessEqual(len(output.encode("utf-8")), 2400)
+            self.assertLess(output.index("원래 목표:"), output.index("진행 중:"))
+            self.assertIn("다른 지시를 먼저 주면 요약을 생략", output)
+
+    def test_two_card_generations_preserve_fixed_fields_quotes_and_prd_location(self):
+        gen0 = (
+            "원래 목표: 동일 capability의 절차 투영을 정리한다; 같은 이름의 별도 capability는 제외한다\n"
+            "진행 중: 기준 조사\n기다리는 결정: 없음\n다음 할 일: 계획 구현\n관련: PR #746\n"
+            "사용자 요구 원문 발췌: [2026-10-20] \"원문 문구 A를 그대로 유지\"\n"
+            "요구사항·PRD 위치: spec/session-tidy.md#현재-요구사항\n오늘 한 일: 기준 확인\n사용자 지시: 이어서 진행"
+        )
+        gen1 = gen0.replace("진행 중: 기준 조사", "진행 중: 구현 완료") + (
+            "\n사용자 요구 원문 발췌 추가: [2026-10-21] \"새 dated quote B\""
+        )
+        gen2 = gen1.replace(
+            "사용자 요구 원문 발췌: [2026-10-20] \"원문 문구 A를 그대로 유지\"",
+            "사용자 요구 원문 발췌: [2026-10-22] \"사용자가 명시적으로 대체한 문구 C\"",
+        ) + "\n진행 중: 두 번째 카드 작성"
+
+        self.card("sid-A", gen1)
+        path = next((self.state / "cards").glob("*.json"))
+        first = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(first["generation"], 1)
+        self.card("sid-A", gen2)
+        second = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(second["generation"], 2)
+        for fixed in ("원래 목표:", "요구사항·PRD 위치:"):
+            self.assertEqual(first["body"].split(fixed, 1)[1].splitlines()[0],
+                             second["body"].split(fixed, 1)[1].splitlines()[0])
+        self.assertIn("[2026-10-21] \"새 dated quote B\"", second["body"])
+        self.assertIn("[2026-10-22] \"사용자가 명시적으로 대체한 문구 C\"", second["body"])
+        self.assertNotIn("[2026-10-20] \"원문 문구 A를 그대로 유지\"", second["body"])
+        self.assertIn("#현재-요구사항", second["body"])
+        injection = st.build_card_injection(second, path.with_suffix(".md"), st.now_epoch(), st.INJECTION_MAX_BYTES)
+        self.assertLess(injection.index("원래 목표:"), injection.index("진행 중:"))
+        self.assertIn("[2026-10-21] \"새 dated quote B\"", injection)
+        self.assertIn("[2026-10-22] \"사용자가 명시적으로 대체한 문구 C\"", injection)
+        self.assertIn("#현재-요구사항", injection)
+        self.assertLessEqual(len(injection.encode("utf-8")), st.INJECTION_MAX_BYTES)
 
 
 class OpenCodeTransactionReadTest(TidyCase):

@@ -33,9 +33,16 @@ stage workers load only their assigned stage contracts.
 
 ## Reference Index
 
-| File | Load when | Obligation |
-|---|---|---|
-| [`references/owner-execution.md`](references/owner-execution.md) | After approval, by the selected direct/quick session or dispatch-depth-1 owner | Read the complete execution procedure before material work. This is the router's only post-approval reference edge. |
+After approval, read the portable procedure set:
+
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/analyze-user/references/arguments-and-decisions.md`
+- `capabilities/analyze-user/references/integration-and-usage.md`
+- `capabilities/analyze-user/references/owner-execution.md`
+- `capabilities/analyze-user/references/pipeline-phases.md`
 
 ## Guard pointer
 

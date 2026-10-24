@@ -27,6 +27,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools"))
+import harness_manifest
+
 # S-5d (owner-supervisor-liveness, core/OPERATIONS.md §5.10): enforce the
 # generated-plugin-JSON mode invariant on every write rather than trusting
 # the platform default, since it is umask-dependent and has been observed
@@ -167,6 +171,32 @@ def write_json(path: Path, payload: dict) -> None:
                 pass
 
 
+
+def sync_portable_bundle() -> None:
+    expected = harness_manifest.portable_bundle_files(ROOT)
+    for output_root in (PLUGIN_ROOT / "capabilities", PLUGIN_ROOT / "core", PLUGIN_ROOT / "roles", PLUGIN_ROOT / "adapters"):
+        if output_root.exists():
+            shutil.rmtree(output_root)
+    for source in expected:
+        destination = PLUGIN_ROOT / source.relative_to(ROOT)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
+def check_portable_bundle(stale: list[str]) -> None:
+    expected = harness_manifest.portable_bundle_files(ROOT)
+    expected_targets = {PLUGIN_ROOT / source.relative_to(ROOT) for source in expected}
+    for source in expected:
+        target = PLUGIN_ROOT / source.relative_to(ROOT)
+        if not target.is_file() or target.read_bytes() != source.read_bytes():
+            stale.append(str(target.relative_to(ROOT)))
+    for section in ("capabilities", "core", "roles", "adapters"):
+        tree = PLUGIN_ROOT / section
+        if tree.exists():
+            for target in tree.rglob("*"):
+                if target.is_file() and target not in expected_targets:
+                    stale.append(str(target.relative_to(ROOT)))
+
 def sync() -> None:
     if not SKILLS.exists():
         raise SystemExit(f"Claude native skills are missing: {SKILLS}")
@@ -205,6 +235,7 @@ def sync() -> None:
     plugin_utils.mkdir(parents=True)
     for name in UTIL_BUNDLE:
         shutil.copy2(UTILITIES_SOURCE / name, plugin_utils / name)
+    sync_portable_bundle()
 
 
 def check_file(path: Path, expected: str, stale: list[str]) -> None:
@@ -228,6 +259,7 @@ def _bytecode_cache(path: Path) -> bool:
 
 def check() -> int:
     stale: list[str] = []
+    check_portable_bundle(stale)
 
     check_file(
         PLUGIN_ROOT / ".claude-plugin" / "plugin.json",

@@ -1,0 +1,271 @@
+# Capability: autopilot-code
+
+This is the portable capability contract for `autopilot-code`. It defines runtime-neutral meaning and adapter obligations. It is not a Claude Skill file.
+
+## Contract
+<!-- GENERATED: harness-manifest.json -->
+
+| Field | Value |
+|---|---|
+| Identifier | `autopilot-code` |
+| Group | `entry` |
+| Supported modes | `dev, debug, audit` |
+| Portable meaning | Code-work entrypoint that detects spec context and closes the plan→execute→test→report loop. |
+| Argument shape | `--mode dev\|debug <task/plan/error description> [--from <step>] [--intensity direct\|quick\|standard\|strong\|thorough\|adversarial] [--user-refine]` |
+| Execution topology | `staged`; registry `capabilities/topologies.json` |
+| Entry load phase | `post-approval`; owner contract `capabilities/autopilot-code.md` |
+
+## Invocation Semantics
+
+General code-work entrypoint for libraries, research code, and applications,
+whether new or existing; it detects the cwd automatically. It supports `dev`
+(features/new work) and `debug` (diagnosis/fixes). When `spec/` exists, read it
+and branch by spec mode: app adds design critique, migration safety, and
+push/deploy handling; library checks public API consistency; CLI checks command
+and option consistency; research checks reproducibility, configs, and metrics.
+Non-code decisions such as PRDs, stack selection, skeletons, and ship setup
+belong to autopilot-spec.
+
+Reusable evaluation drivers and HTML/report-generator bugs are code work.
+Experiment execution and result reporting belong to lab/eval, whose small
+support scripts do not automatically require a separate code cycle.
+Code review within implementation/debug work uses `--mode audit`; independent
+inspection of completed work uses `audit`. Both may inspect code.
+
+Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
+
+## Artifact Ownership
+
+Artifact root: `core/CONVENTIONS.md §5.1`.
+
+The standalone default is `$AGENT_ARTIFACT_OUTPUT_DIR/plans/<date>_<slug>/`, even when a `spec/` directory exists. Routed stages use their sealed node outputs and write scope; `AGENT_ARTIFACT_OUTPUT_DIR` supplies only the cycle base.
+
+Artifact intensity policy:
+
+- `direct`: no new plan root, no `plan.md`, and no durable pipeline artifact unless the adapter or current repo policy explicitly requires one;
+- `quick`: no durable `plan.md` by default; record a short summary/evidence only when a work-cycle artifact is already required;
+- `standard+`: the selected route graph declares its plan, implementation, test, and report outputs.
+
+The default full graph produces the following public artifacts. A selected
+subgraph produces only its declared outputs; omitted planning does not require
+a substitute plan or checklist:
+
+- `plan.md` at the plan root;
+- `checklist.md` at the plan root when the plan is multi-step;
+- `pipeline_summary.md` at the plan root before completion;
+- `dev_logs/` and `test_logs/` for implementation and verification evidence.
+
+Internal artifacts belong under `_internal/`, including plan reviews, dev reviews, test reviews, retry notes, raw command logs, and model/team deliberation notes.
+
+## Artifact Producer Lifecycle
+
+W7C write-cutover contract (`utilities/artifact_producer.py`, registry table
+`producer_lifecycle` in `capabilities/topologies.json`). The same lifecycle
+binds `direct`, `quick`, and `standard+`; only the acting owner differs.
+
+1. **prepare the route's cycle.** Registered frame/owner launch prepares or
+   resumes the route's cycle and carries its exact `AGENT_ARTIFACT_*` context.
+   Inline `compose --start` / `start` prepares the same cycle and returns
+   `artifact_env` with its exact output path; no separate `begin` is needed.
+   While the cutover is inactive and the root already holds legacy content,
+   inline start returns `legacy-compat` (`AGENT_ARTIFACT_ROOT` only) and the
+   legacy `<artifact-root>/plans/` layout stays writable.
+2. **write only inside the open cycle.** Every durable artifact goes under
+   the current node's declared outputs under `AGENT_ARTIFACT_OUTPUT_DIR`.
+   `artifact_producer.py` owns cycle output paths and shared revisions.
+3. **stage workers join, never fork.** `standard+` stage workers receive
+   `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
+   from the owner (dispatch env pass-through); the resolver applies the
+   sealed node's outputs and write scope.
+4. **runtime-owned closure.** New registered owners write their report and
+   return the final handoff. After exact PASS and process cleanup, the shared
+   completion controller completes the workflow, closes the route and seals
+   the exact cycle. It retries interrupted settlement without another model
+   turn; pending closure preserves PASS and carries a recovery notice.
+   Inline work and legacy recovery retain explicit route close and producer
+   finalize. Runtime-owned owners and their parents have no separate finalize
+   command to remember. The controller retains observation, terminal delivery,
+   follow-up, display, and cleanup duties after the model turn or bounded
+   observer exits; startup and reconnect resume the exact unfinished duty
+   without replaying the assignment or requiring a manual rearm.
+   Campaign satisfaction is a separate optional owner judgment. An exact owner
+   primary may contain a `campaign-goal` JSON fence with `campaign_id`,
+   `verdict: "satisfied"`, and optional `reason`; a JSON primary uses the
+   `campaign_goal` key. Normal completion records the official close through
+   the existing durable terminal transaction. Claude, Codex, and OpenCode use
+   this shared consumer. A missing, malformed, scoped, child, or ambiguous
+   judgment never infers campaign completion from PASS or sealed cycles.
+   Interrupted close retains PASS and its recovery duty; a later begin cannot
+   be closed again by an older goal judgment. No new confirmation or required
+   report field is introduced.
+5. **shared admission.** This capability's output is cycle-local; it is never admitted to `shared/` (only `spec`, `analysis`, and explicitly promoted `research` are shared kinds).
+
+## Role Requirements
+
+Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concrete model names, subagent frontmatter, and runtime-specific tool lists belong in adapter files.
+
+Minimum role mapping:
+
+- planning: planning role for `code-plan`;
+- implementation: development role for `code-execute`;
+- verification: QA role for `code-test`;
+- review: QA/reviewer role for plan, code, and test review;
+- app UI changes: design role as critic or handoff verifier when design artifacts exist.
+
+Pipeline intensity is the primary ceremony selector. `direct` is inline and `quick` is one registered one-shot conductor (default `balanced-deep`); both `quick` and `standard+` open with a fixed two-leg frame bootstrap that depth-0 launches itself before the owner starts, both legs `top` (a pin with a profile or an explicit profile wins and is never lowered automatically; a frame-rule `top` that stops at a usage limit is retried once at `deep` and the lowering is recorded) — there is no third frame leg at any intensity. A route made from an approved proposal (`compose --route-plan`) has no frame nodes; `core/WORKFLOW.md §0.2.1` owns the `framed` default. The standard+ owner defaults to `deep`; an explicit profile such as `light` takes precedence, including through `compose --profile light`. `strong` opens width-two plan (`deep + balanced-deep`) and implementation-review (`balanced-deep + light`) groups. `thorough|adversarial` add the declared light implementation-risk plan leg and deep failure-mode review leg. Those groups are dispatch-depth-2 siblings with disjoint artifacts, exact all-join, and route-sealed role/profile/perspective; other stages remain sequential. The selected graph determines which stages run; intensity supplies their default review and verification rigor without a separate user-facing QA axis. Concrete models remain adapter-specific.
+
+## Stage Mapping
+
+| Common stage | `autopilot-code` realization |
+|---|---|
+| `intake` | parse `dev|debug|audit`, classify spec significance, choose intensity and QA override |
+| `orient` | read `spec/prd.md` and relevant source context; `orient-lite` reads only the touched area |
+| `plan` | none for `direct`; registered-headless dispatch-depth-1 one-shot conductor micro-plan for `quick`; `code-plan` durable artifact for `standard+` |
+| `plan-check` | none for `direct`; 3-4 question gate inside the registered-headless dispatch-depth-1 quick conductor; lightweight plan QA for `standard`; risk/adversarial critique only for `strong+` |
+| `produce` | direct edit for `direct`; quick is one registered-headless dispatch-depth-1 one-shot conductor and `code-execute` or scoped implementation for `quick+` |
+| `verify` | sanity check for `direct`; focused command/review inside the quick one-shot worker; `code-test` evidence for `standard+` |
+| `synth` | only when dispatch-depth-2 perspective/verifier/adversary workers ran |
+| `report` | concise user report for `direct`; quick returns its concise report from its registered-headless dispatch-depth-1 one-shot conductor; `code-report`/`pipeline_summary.md` for `standard+` |
+
+Stage-local gates must not become full independent QA loops after every sub-stage. Keep plan-check small, concentrate expensive independent review in the selected risk point or final verification, and keep raw logs in artifacts rather than parent context. A stage remains one semantic gate even when the dispatch-depth-1 owner realizes it as several bounded sessions; those sub-sessions have no gate authority and return phase-brief/ledger/handoff evidence only. `code-plan`, `code-refine`, and `code-test` inherit the selected graph: `code-plan` is standard+ durable planning, `code-refine` is optional correction, and `code-test` is final concrete verification rather than hardcoded-thorough QA.
+
+**Corrections are batched, never atomic.** A failed review gate (`plan-check`, `impl-review`, `test`) is followed by exactly one correction pass that closes every 🔴 finding of that round together, plus the follow-on gaps the review named; the owner never redispatches the full `plan` or `execute` node to fix a single finding. The plan correction runs through the `code-refine` boundary and the code correction re-enters the `execute` boundary as a bounded fix under the same node. A re-review of the same implementation source is a **closure check** under the review unit's Round Protocol — the assignment names the prior blocking review and asks whether its 🔴 items are closed and the delta is clean. A changed implementation source receives its own ordinary independent review budget and full independent review; a prior subject's PASS is historical and cannot satisfy it. Each same-subject correction consumes one unit of the `core/CONVENTIONS.md §1.1` retry budget. Owner-closure remains available only for an exhausted history with an eligible blocking review; an exhausted all-PASS history cannot be converted into owner-closure. When the existing writer admits owner-closure, the owner completes that exact blocking attempt with the evidence contract in `core/OPERATIONS.md §5.10`.
+
+When continuation would reuse an implementation-review PASS for a different
+source, or reaches a legacy PASS with no source binding, it automatically
+resumes at that review node for the ordinary independent review. It does not
+infer a legacy subject or ask for a new command or approval.
+
+**Pre-owner direction gate (SD-123).** Depth-0 compiles/binds the route and
+begins its producer cycle before launching the frame pair. The direction gate
+binds at `one-shot` entry for `quick`, `plan` entry for `standard+`. Legacy
+sealed routes remain unchanged. Depth-0 joins both direction briefs and builds
+`shards/frame/frame-summary.json` (five fields — 방향/대안/위험/범위 변경/비용,
+≤1KB) plus the **frame interview** `shards/frame/interview.json` (SD-129: a
+restatement the user confirms, a readable brief, and at most
+`frame_interview.py`'s `QUESTION_CAP` questions, each with 2–4 options and one
+recommendation, only about decisions the user alone can make;
+`utilities/frame_interview.py validate` checks semantic bindings and finite
+input size. `writing_guidance()` recommends clear, focused wording without
+rejecting a valid question for style. Depth-0 puts those questions to the user;
+the receipt's `resume_command --answers <file>` validates the answers, renders
+`shards/frame/intent.md`, releases the gate and starts the owner.
+
+The owner **receives** `intent.md`'s path as an input. It raises no gate, waits
+on no release, and renders no intent of its own — all of that is finished before
+it is launched. The runtime also renders the released understanding and answers
+into every owner and stage prompt, including graphs without plan. Each assigned
+stage stays inside that scope and records the relevant decisions; the owner
+does not have to copy the intent into each dispatch prompt. `revise` re-runs the frame pair
+before owner launch and `stop` cancels the prepared workflow, so
+neither consumes the owner's `code-refine` retry budget. A first-work-node
+start whose entry gate is not released is refused by every launch surface
+(`human-gate-unreleased`). `direct` has no gate: the depth-0 session asks its
+one question of the same kind inline inside the §0.4 card step — a documented
+obligation on the acting session, not a machine-checked cap, since a `direct`
+route carries no gate binding.
+
+The declared `confirmation.mode` (default `hybrid`) governs the ordered pair —
+blocking direction gate first, route notice after; `core/WORKFLOW.md` §0.4 owns
+the user-facing card.
+
+A declared `plan-check` parallel group is a 2-way read-only review: two plan-check verdicts merge under the existing review-anchor merge contract (stricter-wins plus the union of blocking findings). When the two legs nominate different plan legs as winner, `plan.md` materialization is blocked unless the owner writes a bounded merge-arbitration memo, which is the only path into the existing bounded `code-refine` flow. `plan-check` itself never mutates the plan.
+
+At `thorough+` the group realizes a third `simplicity-check` leg with `leg_class: auxiliary`. Its arbiter is the **owner**, not the group's anchor — the anchor runs concurrently with it. After the group joins, the owner puts `auxiliary_findings_considered` in the merge memo's frontmatter with exactly one entry per realized auxiliary leg (adopted or rejected, with the reason) and registers it with `capability-route.py arbitrate --group plan-check`. Until that record exists, `code-execute` is refused at the start-gate with `auxiliary-arbitration-missing` and the route's terminal-gate observation carries a failed `parallel_group:plan-check` row. `core/OPERATIONS.md §5.10` owns the transaction and its typed refusals.
+
+## Guard Requirements
+
+A code one-shot owner owns the approved task's deliverables beneath its own
+bound cycle's `artifacts/`. The recipe's `plans/<cycle>/**` names its reporting
+folder, not an exclusion of other approved deliverables such as `approval/`.
+This applies to existing sealed one-shot routes too, without rewriting their
+scope or identity. Stage and review nodes keep their narrower declared ranges;
+other cycles, source scope and external execution access remain separate.
+
+Adapters must preserve the portable invariants relevant to this capability:
+
+- resolve artifact root through `utilities/artifact-root.sh` or equivalent logic;
+- in a linked task worktree, treat the local artifact snapshot as read-only and
+  write plans/logs/reports only to the canonical root passed through
+  `AGENT_ARTIFACT_ROOT`;
+- use DB memory paths, not runtime-native memory files.
+
+Additional code-entry gates:
+
+- before any code edit, classify the request against existing `spec/prd.md` when present and emit a one-line `spec-significance` verdict;
+- route `spec-significant` changes through `autopilot-spec` update before implementation unless the user explicitly defers;
+- detect whether `spec/pipeline_state.yaml` has changed since the last relevant plan and re-read newer spec/design artifacts before editing;
+- for app mode, treat design tokens and handoff artifacts as source contracts, not suggestions;
+- for destructive DB/schema/migration work, explain the command and risk, but do not auto-run destructive operations without explicit user approval;
+- for every approved start whose selected graph changes source, use the common preparation boundary in `core/OPERATIONS.md` before collecting eligibility evidence, sealing, publishing, or launching. It applies to direct and staged work, explicit or omitted primary cwd, first source-changing framed legs, and successor/printed next-leg starts. A framed start also prepares its read cwd: on an implicit linked cwd, dirty or unmerged state is retained for frame reading without approving a source-changing leg to use it; that leg still needs the existing proposed `cwd` approval. The first source-changing leg carries forward the frame's newly allocated worktree when that allocation is sealed. New independent work starts from the commit SHA resolved by a successful fetch of the remote default; when there are no remotes, it uses the primary worktree's current `HEAD` commit without fetching. Explicit approved task worktrees and exact saved route/cursor/receipt/continuation state retain their existing changes and identity. Probe the final cwd and seal only tuples whose `checked_worktree` exactly matches the route `cwd`. Source-changing preparation failure prevents publication and launch and remains retryable through the same start; framed-start preparation failure records a one-line reason and continues from the original cwd.
+- after main/orchestrator merges, verifies the integrated tree, and pushes the
+  integration ref, invoke the guarded worktree cleanup check/apply path; never
+  infer cleanup eligibility from a runtime session-end event.
+- when the route seals `entry_execution_scope: complete`, the depth-1 owner has
+  capacity to publish only its current task branch, create or update that
+  branch's PR, and observe checks for the final head. This capacity does not
+  authorize performing a command outside the actual request; request wording,
+  negation, and quoted history are not a second permission test. Use an ordinary
+  non-force push. Write the PR body to
+  `$AGENT_ARTIFACT_OUTPUT_DIR/dev_logs/pr-description.md` and pass it with
+  `--body-file` after inspecting any existing PR for that branch. CI fixes stay
+  within the approved scope and return through the existing review/test/commit path.
+  Stage and review workers do not publish; integration push, main merge,
+  release, installation, and cleanup stay with the supervisor.
+
+## Portable Procedure
+
+1. Parse arguments and infer `dev`, `debug`, or `audit` when the adapter allows natural-language entry.
+2. Use the selected route node's declared outputs; standalone work keeps the `plans/<date>_<slug>/` default.
+3. Run git/worktree preflight and remember the starting `HEAD`.
+4. If `spec/` exists, read `spec/prd.md` plus relevant mode contracts before planning.
+5. Emit `spec-significance: within-spec` or `spec-significance: SPEC-SIGNIFICANT (...)`.
+6. Select the stage graph from pipeline intensity, then map common stages to code sub-capabilities. `direct` skips `code-plan`; `quick` runs as one registered-headless dispatch-depth-1 one-shot conductor with an inline micro-plan and plan-check-lite; `standard+` uses `code-plan`, optional `code-refine`, `code-execute`, `code-test`, and `code-report` according to the selected graph, QA override, and resume point. For `standard+`, a dispatch-depth-1 capability owner may dispatch bounded dispatch-depth-2 planner/verifier/adversary workers when the task is separable and must synthesize their short reports before final write-back. It may also split any one stage into declared serial sub-sessions under the same route node, or use an existing sealed parallel group for disjoint ownership. The owner preserves exactly one stage gate, treats planned subdivision as non-retry capacity, and after a failed gate opens only a gap session for unfinished handoff items. `direct` stays inline; `quick` is one registered-headless dispatch-depth-1 one-shot conductor unless explicitly escalated.
+
+   `code-execute` is the one node in this capability that carries a subdivision permission, so this is where the surface is used: the owner runs `dispatch-batch.py --parallel-group execute --slices <plan.md> --action start` (one command from the plan's `slices` block to started slices; slices may run in a linked worktree of the same repository) and passes the receipt's `chain_manifest` to `capability-route.py complete --subsession-manifest` at the gate, and reads the typed `single-session-required` receipt (its `next_action` is the single-session command) as "run this stage as one ordinary session" rather than as a failure. Slices are no-commit workers, and the owner commits once after quiescence — **in that order: close the stage gate first, then commit.** A commit made before the gate that carries the slices' own files is refused, because the gate cannot tell it apart from a slice having committed; a commit made after it is ordinary, and replaying the same gate resumes the published marker. The gate judges by what a commit carries, so a pre-gate commit that carries no slice's `fixed_files` and leaves content identical to the admission baseline passes — in that one shape the no-commit rule is stated but not enforced, which `core/OPERATIONS.md §5.10` declares as the accepted cost of not judging by HEAD movement alone. History off the baseline commit's first-parent line, a change outside the declared file union whether committed or not, and a missing admission baseline each refuse the stage marker with their own typed reason. `core/OPERATIONS.md §5.10` owns the full surface, the refusal vocabulary, and the gap-retry derivation.
+   The owner never sets an `AGENT_DISPATCH_*` lifecycle override and never reads harness utility sources looking for one — the runtime evidence-binds that assertion (SD-72, `core/OPERATIONS.md` §5.10). When the runtime hands a foreground `dispatch-batch` call to the background, that call has not failed: poll `dispatch-current --route <id>` or wait at the runtime join rather than switching lifecycle.
+7. Before each durable write-back or commit, re-run git/worktree safety and stop if `HEAD` or merge state changed unexpectedly.
+8. Record implementation evidence and verification results in `pipeline_summary.md`.
+9. After the durable report terminal, evaluate the route-sealed optional
+   artifact-sink extension. When available, offer `final_report.md` through the
+   app-neutral receipt contract; otherwise record
+   `skipped/extension-unavailable` without changing code-cycle completion.
+
+If Git reports an index-lock error, preserve that failure and its partial
+state; attach only the shared read-only diagnosis in core/OPERATIONS.md §5.9.
+Do not remove the lock or rerun Git automatically.
+
+## Mode-Specific Semantics
+
+| Spec mode | Extra requirement |
+|---|---|
+| `app` | Use design handoff and token artifacts when present; UI changes get design review; destructive migration work requires explicit approval. |
+| `library` | Check public API, exports, semver impact, compatibility notes, and examples. |
+| `api` | Check endpoint/body/error/auth/rate-limit contracts and security implications. |
+| `cli` | Check command names, options, input/output formats, and exit codes. |
+| `research` | Check train/eval entry points, configs, seeds, reproducibility commands, and metrics. |
+
+When no spec exists, infer mode lightly from project files, report the inference, and keep the stricter spec-only gates disabled.
+
+Model-role/profile mapping selects the requested execution candidate; runtime
+availability is a separate provider/account/model-scoped decision. Automatic
+fallback keeps the task within existing provider and billing policy, and every
+candidate ordering consumes confirmed unavailability before headroom or
+preference. Automatic selection admits only usable evidence or the unknown of a
+provider Hearting verifies before placement; an unverified provider is left to
+explicit choice. Explicit pins stay exact and surface the selected provider's
+error. Unknown credential or entitlement evidence remains unknown; model
+inventory and saved credential presence alone do not establish that a request
+can run.
+
+## Adapter Realization
+
+| Adapter | Realization |
+|---|---|
+| Claude Code | `adapters/claude/skills/autopilot-code/SKILL.md` and `skills/autopilot-code/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/autopilot-code/SKILL.md`, while `skills/autopilot-code/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks. |
+| Codex | Read this spec and run `adapters/codex/bin/preflight.sh capability-info autopilot-code`. Use `adapters/codex/skills/autopilot-code/SKILL.md` as the native Codex Skill projection; do not consume `skills/autopilot-code/SKILL.md` or Claude command files as native Codex configuration. |
+| OpenCode | Read this spec and run `adapters/opencode/bin/preflight.sh capability-info autopilot-code`. Use `adapters/opencode/skills/autopilot-code/SKILL.md` and `adapters/opencode/commands/autopilot-code.md` as native OpenCode projections; do not consume `skills/autopilot-code/SKILL.md` or Claude command files as native OpenCode configuration. |
+
+## Compatibility Reference
+
+`skills/autopilot-code/SKILL.md` and `adapters/claude/skills/autopilot-code/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/autopilot-code/SKILL.md`, while `skills/autopilot-code/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks.

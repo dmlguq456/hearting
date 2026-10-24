@@ -1,0 +1,665 @@
+# Hearting Core
+
+> Model-agnostic contract. This file defines the portable workflow substrate. Tool-specific files such as `adapters/claude/CLAUDE.md` are adapters that map this contract onto one runtime.
+
+## 1. Layers
+
+[Loop Engineering](LOOP_ENGINEERING.md) is Hearting's maintainer design standard:
+responsibility through execution, recovery, closure and acknowledged handoff,
+with a simpler caller surface. It distinguishes principles from verified implementation.
+
+A registered non-subsession review worker publishing its exact assigned node is
+an independent reviewer whether it names itself or leaves the reviewer claim
+implicit. Another named reviewer's authority comes from its existing terminal judgment.
+Owner-inline and owner-overridden review retain their reduced independence.
+The exact historical named-self publication defect may receive a provenance
+disposition through normal completion replay, preserving its original judgment,
+history, attempt link, evidence and round census. This requires the original
+bound self claim, settled completion and current actor authority;
+an ordinary late claim cannot promote a degraded review.
+The original review judgment and its later operational handback are separate
+results. An exact provenance-only BLOCKED handback can retain the original
+independent PASS only when the registered successful publication, bound JSON,
+distinct primary report, historical report-byte receipt and settled terminal
+jointly prove that same judgment. Neither registry success nor report prose
+overrides a terminal result. Original PASS and BLOCKED bytes remain unchanged.
+Publication and observation share the exact registered subject, terminal artifact
+and historical actor-lineage judgment. Recorded authority survives ordinary owner
+replacement; a current authorized actor may finish an interrupted publication.
+Upstream invalidation and disposition commit serialize through the existing
+completion and registry locks, so a historical replay cannot replace a tombstone.
+
+| Layer | Owns | Portable? |
+|---|---|---|
+| Core | workflow, artifact layout, memory lifecycle, QA tiers, model roles, safety invariants | yes |
+| Adapter | tool bootstrap, hook schema, slash commands, status UI, permission model, concrete model mapping, runtime-home projection | no |
+| Local runtime | credentials, session state, caches, daemon logs | no |
+
+`adapters/claude/CLAUDE.md`, `adapters/codex/AGENTS.md`, and `adapters/opencode/AGENTS.md` are runtime adapter entry files. Runtime-specific adapter notes live under `adapters/`; future adapters should keep their own bootstrap instructions there and point back to this core contract.
+
+## 2. Agent Home
+
+The canonical neutral name for the installed harness root is:
+
+```text
+<agent-home>
+```
+
+Runtime code should resolve it in this order:
+
+1. `AGENT_HOME` (the active runtime root, including an explicitly activated checkout)
+2. adapter-specific compatibility variables such as `CLAUDE_HOME`
+3. `${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current` when a managed release is installed
+4. `$HOME/hearting` when a canonical linked checkout is present
+5. `$HOME/agent_setting` when a legacy linked checkout is present
+6. otherwise the managed-release default path from step 3, unvalidated (both
+   resolvers converge on it in a bare environment). `$HOME/.claude` is the Claude
+   Code runtime home, not a harness root, since managed releases replaced the
+   `~/.claude`-as-`AGENT_HOME` layout (2026-08-25).
+
+Use `utilities/agent-home.sh` in shell code when a concrete path is needed.
+
+Supported physical layouts:
+
+```text
+$HOME/.local/share/hearting/releases/<version>/  # immutable managed release
+$HOME/.local/share/hearting/current              # atomic pointer to active release
+$HOME/hearting/                                       # canonical linked maintainer checkout
+$HOME/agent_setting/                                  # legacy linked checkout fallback
+$HOME/.claude/              # Claude Code runtime home, mostly runtime-owned
+$HOME/.codex/               # Codex runtime home, mostly runtime-owned
+```
+
+General-user installation uses a checksum-verified managed release. Maintainer
+development uses a linked checkout. Release updates stage and validate a new
+root before switching `current`; they must not fetch, pull, or rewrite a linked
+checkout. Runtime activation remains local after the release has been
+downloaded, and session reload or restart boundaries remain runtime-specific.
+
+Runtime homes should be adapter projections, not the source repository. Keep credentials, sessions, logs, SQLite state, caches, and other runtime-owned files in the runtime home. Expose the harness into each runtime home with symlinks or adapter-owned bootstrap files.
+
+For managed releases, set `AGENT_HOME` to
+`${XDG_DATA_HOME:-$HOME/.local/share}/hearting/current` (or the exact release
+root sealed by an existing route). A runtime home such as `$HOME/.claude`,
+even with symlinked harness files, is not that installed root: its tree identity
+does not match the sealed release identity. Launch mismatch diagnostics must
+name the expected root and how to invoke its tooling; never relax the identity
+check to accept a projection tree.
+
+Portable model profiles belong to core, while each adapter owns its shipped
+concrete model mapping. Installation seeds that mapping once as
+`<runtime-home>/agent-config/models.conf`. The seeded file is user-owned: it is
+never symlinked, refreshed, reapplied, or removed by a harness update or
+uninstall. Runtime consumers select a valid, complete user file as one unit and
+otherwise fall back to the shipped adapter default as one unit; they never merge
+the two. INST-D-20 permits one narrow, memory-only normalization: when only
+the new balanced profile and its optional granularity are absent, retain the
+entire selected user file and derive balanced from that user's light operating
+point (high effort on supported adapters; the complete existing light budget
+on a reduced-granularity adapter). Explicit balanced wins. Missing any other
+required key retains whole-file fallback. No loader or installer writes this
+normalization back, including on install/update/reapply/uninstall. The same
+rule derives a missing balanced dispatch policy from the user's entire light
+policy without enabling any disabled vendor. Explicit edits follow
+[Model Configuration](MODEL_CONFIG.md).
+Native runtime settings and adapter fragments remain outside
+`agent-config`.
+
+Project-independent global runtime state (the dispatch attempt registry and
+similar cross-project bookkeeping) lives under `<agent-home>/.dispatch/` or an
+XDG state directory, never inside a project artifact root — this is the
+existing convention (see `core/OPERATIONS.md` §5.10/§5.12), restated here as
+policy rather than changed.
+
+Projection example:
+
+```text
+<runtime-home>/<adapter-bootstrap> -> <agent-home>/<adapter-projection>/<adapter-bootstrap>
+<runtime-home>/core                -> <agent-home>/<adapter-projection>/core
+<runtime-home>/<capability-surface> -> <agent-home>/<adapter-projection>/<capability-surface>
+<runtime-home>/<role-surface>      -> <agent-home>/<adapter-projection>/<role-surface>
+<runtime-home>/<hook-surface>      -> <agent-home>/<adapter-projection>/<hook-surface>
+```
+
+Legacy runtime homes remain adapter-owned compatibility paths during migration.
+New cross-tool documentation should prefer `<agent-home>` and `<runtime-home>`
+unless it is intentionally describing a specific adapter runtime home.
+
+## 3. Artifact Root
+
+**Ordinary file cleanup.** A person or agent may edit, move, or delete artifacts,
+cycles, campaigns and their generated records with ordinary filesystem tools.
+No cleanup command, approval, recovery step or intact cache is required. Normal
+runtime operations observe changes and append a history line automatically;
+readers use surviving identity records and omit absent material. A deleted
+campaign or parent does not prevent the next work from starting. Generated
+locator and producer records are bookkeeping, not locks on the files. Recorded
+completion remains a past result, distinct from new completion or execution
+authority. Cleanup leaves running work and deleted payloads alone.
+
+Route-child and cycle-route lookups may keep a disposable on-disk index bound
+to the current directory listing digest. Writers maintain it as part of their
+ordinary publication; readers re-read and validate only the selected records.
+Missing, stale, corrupt or unwritable indexes fall back to the existing scan.
+The index grants no lineage or completion authority and adds no caller step.
+
+The canonical project artifact directory is:
+
+```text
+.agent_reports/
+```
+
+Existing projects may still use:
+
+```text
+.claude_reports/
+```
+
+`.claude_reports/` is a legacy alias. Runtime code must recognize both names during migration. New projects and new documentation should prefer `.agent_reports/`.
+
+The artifact root is a **project-wide canonical write surface**, not a
+per-worktree directory. Resolve it with `utilities/artifact-root.sh <cwd>`:
+
+1. an explicit absolute `AGENT_ARTIFACT_ROOT`;
+2. for Git, the primary worktree's `.agent_reports/`, falling back to its
+   existing legacy `.claude_reports/` only when the new root is absent;
+3. for non-Git, `cwd`'s own root first (self is not inheritance, no marker
+   needed); otherwise a strict ancestor's root is inherited only when that
+   ancestor also holds an `.agent-workspace` marker file; otherwise
+   `<cwd>/.agent_reports/`.
+
+Linked task worktrees are source-only execution surfaces. A tracked artifact
+directory may appear there as a Git snapshot, but it is read-only shadow state
+and must never receive agent output. Dispatch adapters pass the canonical root
+to workers and grant only the runtime-specific access needed for that path.
+
+The artifact root's top-level population is closed. Every top-level name is one
+of the following, and its disposition class states how the harness treats it.
+Declaring a name here is classification only: it never assigns a new owner and
+never orders a move or a delete.
+
+| Folder | Meaning | Disposition class |
+|---|---|---|
+| `analysis_project/` | project source analysis | `C-DUR` |
+| `research/` | topic research and external references | `C-DUR` |
+| `spec/` | current product/code blueprint | `C-DUR` |
+| `plans/` | implementation cycles | `C-DUR` |
+| `documents/` | document drafts and refinement artifacts | `C-DUR` |
+| `experiments/` | experiment setup, evaluation, and run logs (declared, currently absent — a reserved boundary, not an error) | `C-DUR` |
+| `designs/` | standalone design decision records (declared, currently absent — a reserved boundary, not an error; spec-owned design instead anchors at `spec/design/`) | `C-DUR` |
+| `campaigns/` | W7C producer output: `campaigns/<campaign-locator>/<cycle-locator>/artifacts/<bucket>/…` plus machine-managed `campaign.json`, optional campaign-level `workflow-groups.json`, per-cycle `.cycle.json` stable-ID binding (with the cycle's start time), and `manifest.json` commit point; an optional digest-bound campaign-level `RUNLOG.md` may preserve a migrated aggregate run log without manufacturing a cycle; the only new-write target once the write-cutover is active (`utilities/artifact_producer.py`) | `C-DUR` |
+| `shared/` | immutable shared revisions `shared/<spec\|analysis\|research>/<ref>/revisions/<rrev>/…`; created only by `admit-shared` from a finalized cycle, research only with an explicit promotion; never a direct write target | `C-DUR` |
+| `_internal/` | cycle-internal support material — a cycle's child, not an independent entry | `C-INT` |
+| `reviews/` | review support material | `C-INT` |
+| `shards/` | parallel-leg support material | `C-INT` |
+| `.runtime/` | artifact-root-scoped runtime state (route lifecycle records, producer cutover/cycle records, stage-session ledgers under `.runtime/stage-sessions/<route_id>/`, and similar); the only bucket name for this, legacy `_runtime/` is read-only | `C-RT` |
+| `.core-grounding/` | legacy core-read marker state (no longer written) | `C-RT` |
+| `.spec-grounding/` | spec read-guard state | `C-RT` |
+| `routes/`, `_routes/` | legacy route-record locations outside `.runtime/` | `C-LRT` |
+| `notes/`, `proposals/`, `spec-research-alternative/`, `research-alternative/` | present containers whose owner is not declared — recognized, not adopted | `C-LEG(undeclared-container)` |
+| `.git/`, `.agents/`, `.codex/`, `.probe-*/` | runtime residue that lives beside artifacts without being one | `C-LEG(runtime-residue)` |
+| `_scratch/` | the sole exact census exclusion | `C-SCR` |
+
+The following paths are a sealed-evidence exception set. These exact prefixes
+(and their descendants) or exact files take precedence over their parent
+top-level class. Census does not follow symlinks. The set is closed: adding,
+removing, or widening an entry requires a product-spec revision. W7H (PRD v15 §31 D-85-b) moved the
+content of every row into a sealed residue cycle of the campaign named in the last column; the exact
+prefix now names the compat-row source and stays protected in the census and retire exclusions, and the
+core-sync check (`artifact_cutover._core_sync_observation`) requires both the prefix and its relocation
+locator to be declared here.
+
+| Exact path | Meaning | Disposition class | Relocated to (W7H, 2026-09-05; campaign `campaigns/2026-09-05_2026-08-24-artifact-knowledge-index-w7/`) |
+|---|---|---|---|
+| `plans/2026-08-24_artifact-knowledge-index-w7/` | sealed W7 knowledge-index evidence | `C-LEG(sealed-evidence)` | `campaigns/2026-09-05_2026-08-24-artifact-knowledge-index-w7/2026-08-24_2026-08-24-artifact-knowledge-index-w7/` |
+| `plans/2026-08-25_artifact-knowledge-index-w7-e1/` | sealed W7 E1 evidence | `C-LEG(sealed-evidence)` | `campaigns/2026-09-05_2026-08-24-artifact-knowledge-index-w7/2026-08-25_2026-08-25-artifact-knowledge-index-w7-e1/` |
+| `plans/2026-08-25_artifact-knowledge-index-w7-e2-e3/` | sealed W7 E2/E3 evidence | `C-LEG(sealed-evidence)` | `campaigns/2026-09-05_2026-08-24-artifact-knowledge-index-w7/2026-08-25_2026-08-25-artifact-knowledge-index-w7-e2-e3/` |
+| `plans/2026-08-25_artifact-write-cutover-w7c/` | sealed W7C cutover evidence | `C-LEG(sealed-evidence)` | `campaigns/2026-09-05_2026-08-24-artifact-knowledge-index-w7/2026-08-25_2026-08-25-artifact-write-cutover-w7c/` |
+| `spec/artifact-path-contract/_internal/research/` | retained artifact-path-contract research evidence | `C-LEG(sealed-evidence)` | `campaigns/2026-09-05_2026-08-24-artifact-knowledge-index-w7/2026-08-24_artifact-path-contract/` |
+| `research/hermes-agent/.gitignore` | retained research repository-control evidence | `C-LEG(sealed-evidence)` | `campaigns/2026-09-05_2026-08-24-artifact-knowledge-index-w7/2026-06-29_hermes-agent/` |
+
+**Write cutover.** The legacy `C-DUR` buckets above (`analysis_project/`, `research/`, `spec/`, `plans/`, `documents/`, `experiments/`, `designs/`) are writable only while the producer cutover is inactive (`.runtime/artifact-producer/v1/cutover.json` absent). Once activated by the approval package, normal outputs land under a cycle's `campaigns/<campaign-locator>/<cycle-locator>/artifacts/`; cycle-bound internal support may also use that exact cycle's `_internal/<non-empty-valid-relative-locator>`. These are actual cycle-relative paths, with no move or alias between them. IDs are issued by `begin` before the first write, and `artifact_producer.py check-write` is the location judgment (legacy top level, `shared/`, campaign records, unknown cycles, containment) a writer may call; no hook calls it. Finalizing a cycle records its completion at that moment and does not lock it: a finalized cycle's files can still be written, edited, moved or deleted (artifact-path-contract §45 D-123). The approval-gated follow-ups run through `utilities/artifact_cutover.py`: `migrate-delta`/`migrate-seal` copy the census-classified legacy delta into one sealed cycle and new shared revisions (sources preserved, journaled), `compat-close` records the map set legacy readers resolve through (`resolve-legacy`; the spec gate falls back to the latest `shared/spec/` revision), and `retire` deletes only digest-verified, backed-up sources. Existing legacy content stays readable; nothing is moved or deleted by activation. Readers resolve a bucket through `utilities/artifact_reader.py` (cycle dirs → latest shared revision → the legacy bucket as a read-only fallback, missing legacy paths via `resolve-legacy`); a reader that still opens `<root>/<bucket>/` directly sees only the retirement exclusions. A gated lump cycle from an earlier migration is retro-split into D-23-bounded cycles through `artifact_resplit.py resplit-legacy-cycle` (gates `r1`/`r2`/`r3`), never by editing the lump tree in place. `fleet_cutover_gate.py complete --require-resplit` additionally blocks a root that still has an unresplit lump remaining. The historical `campaigns/<camp-id>/cycles/<cyc-id>/` layout is moved into readable `<date>_<slug>` locators by `utilities/artifact_relayout.py` (`plan` is a pure read; `apply` is a journaled same-filesystem rename with per-operation inverse rows, D-92 retroactive naming, and a D-82 compat-map append so old ID locators keep resolving; `resume`/`rollback` replay the journal; a nonterminal run is a typed `relayout-in-progress` hold that `artifact_reader.py hold` reports). Completion closes the D-91 transition window for that root, after which `begin` refuses a slugless route (`route-slug-missing`), and `fleet_cutover_gate.py complete --require-relayout` blocks a root that still has a legacy-shaped campaign or cycle directory. What W7C/W7G left at the legacy top level (stage internals, project materials, route containers, sealed W7 evidence, trash) is disposed of by `utilities/artifact_residue.py` (`plan` pure read; `apply --route-file` derives one route per residue cycle, moves files by rename into sealed residue cycles that cite their origin, into `documents` cycles, or into `.runtime/routes/legacy/`, appends compat rows and re-points a moved map file; `retire-trash --approval` is the only deletion path and backs up first; a live symlink whose siblings already migrated rejoins them by rename — link bytes preserved, a `kind: symlink` compat row with `relocated_from`, the sealed manifest untouched — while a link with no mapped ancestor, a relative link that would not resolve at its new home, and a dangling link stay typed deferrals; `spec/` stays a typed deferral while consumers still read it, and moves as root support residue only under `--include-spec-top`); `fleet_cutover_gate.py complete --require-residue` blocks a root whose top level holds anything but typed deferrals.
+
+**Cutover 이전 상태.** 아직 cutover되지 않은 root는 두 상태로 갈린다. runtime-owned 이름
+(`.`-prefix, `_scratch/`) 밖에 내용이 하나도 없는 root의 첫 `begin`은 legacy로 떨어지지 않고
+`activation_kind: "bootstrap-empty-root"`(승인 receipt 없음)로 activation·campaign·cycle을 먼저
+발급한다. legacy 내용이 있는 root의 activation은 여전히 승인 package 경로만 쓰며, 그 root의
+`begin`/`check-write`/`resolve-output`은 typed `legacy_fallback` block(기본 `warn`,
+`AGENT_ARTIFACT_INACTIVE_FALLBACK=deny`로 거부 전환)을 싣는다. `deny`를 뒤집는 유일한 수단은
+root-specific·만료 필수 compatibility override
+`.runtime/artifact-producer/v1/compat-override.json` 하나뿐이다. 복수 root의 완료 판정은
+read-only 도구 `utilities/fleet_cutover_gate.py`가 소유한다. 상태·필드·검증 규칙의 정본은
+`spec/artifact-path-contract/prd.md` §27이며 여기서 되풀이하지 않는다.
+
+**Population.** `_scratch/` is the sole exact census exclusion; no other name is
+excluded by name. Census never follows symlinks: a symlink is recorded as its own
+row and produces no descendant rows, and a symlink whose target resolves outside
+the canonical root is not canonical content.
+
+**Sealed bytes maintenance.** (§45 이후 마감된 cycle의 파일은 이 명령 없이 고치고 지울 수 있다. 아래는 남아 있는 명시적 복구 도구의 계약이다.) `utilities/artifact_restore_sealed.py`의 명시적
+operator `apply`는 sealed manifest가 이미 선언한 부재 regular file의 exact
+SHA/size bytes만 no-follow dirfd·no-replace 게시로 복구한다. 전체 요청은
+lock·staging·기록 생성 전에 검증하며 source identity/bytes와 target을 게시
+전후 다시 검증한다. request digest는 입력 일치만 증명하며 사람 승인이나
+새 실행권을 발급하지 않는다. 일반 `check-write`, producer state/recovery와
+기존 manifest/map/receipt/marker는 변경하지 않는다. 별도 OPEN 작업 cycle의
+prepared 기록으로 결속한 자기 staging↔target의 일시 hardlink만 허용하고
+archive/foreign link는 거부한다. 기존 exact 파일은 보존하고, crash 재개는
+부재 파일만 이어가며 이전 성공을 덮어쓰거나 삭제하지 않는다. dry-run은
+같은 전체 검증을 쓰기 없이 수행한다. 결과는 실제 파일 관측과 새 작업
+기록이며 봉인 상태 승격이나 비협조 writer의 전역 원자성 보장이 아니다.
+
+**Runtime records.** The canonical route lifecycle record is
+`<artifact-root>/.runtime/routes/<route_id>.json`, with the sole terminal sidecar
+`<route_id>.outcome.json` beside it. No other location or basename is a valid
+target for a new route record — including root-level `*route*.json`, `routes/`,
+`_routes/`, and `.routes/`, and including alias basenames inside the canonical
+directory. Records that already exist in those places are legacy migration
+input: they stay readable and closeable so no route is stranded, and only new
+writes to them are blocked.
+
+**Cycle boundaries.** A cycle boundary is a bucket-specific function, not a
+global depth-1 rule. The per-shape boundary table is owned by the component
+blueprint `spec/artifact-path-contract/prd.md` D-23; it is not restated here.
+
+**Cycle payload paths.** Producer collection and manifest validation share one
+locator check, and finalization and every later refresh share one inclusion rule
+(§45 D-123). The closed-cycle refresh pauses on one machine while `${XDG_CONFIG_HOME:-~/.config}/hearting/cycle-refresh.off` exists, so a reader that does not yet follow updated closed-cycle manifests can catch up; open-cycle checkpoints are unaffected. The two payload locations are the exact cycle-relative `artifacts/<non-empty-locator>` and `_internal/<non-empty-locator>`; `artifacts/` remains the normal output directory and bucket root, while root `_internal/` holds ordinary internal support. Inside either payload subtree, hidden components
+(dot-prefixed names such as `.git/` or `.pytest_cache/`), `__pycache__/`,
+`*.pyc`, editor temporaries (`*.swp`, `*~`, `.#*`), `*.tmp`/`*.part` and symbolic
+links are not output: a link is only `lstat`-ed and its target is not followed or read, and each
+such path is left out of the manifest and listed as excluded instead of failing
+the close. The browser review workspace also reserves
+`artifacts/reviews/**/browser/profile/` and `profile-*/` for Chromium runtime
+profiles. These directories and their descendants are excluded before locator
+validation and payload reads, on both first close and later refreshes; existing
+profiles remain in place. Screenshots, browser logs and review reports beside
+them remain output. New browser work uses a process-owned temporary profile
+outside the cycle payload. `_internal/` and other non-hidden support paths, binary and large
+files are output. A payload name keeps UTF-8, spaces and the ASCII punctuation
+`_ . - ~ + ( ) @ , =` up to 255 bytes; other ASCII punctuation (quotes, `$`,
+backquotes, `;`, `|`, `&`, `<`/`>` and glob characters among them) makes it
+invalid. Absolute/escaping paths and out-of-payload files remain invalid. Cycle controls and legacy relocation/exclusion retain their contracts.
+Invalid paths identify the locator and reason before payload reads or manifest
+publication.
+
+A payload directory may opt itself and its descendants out of new candidate
+collection with any one of three independent markers: a regular, no-follow
+`CACHEDIR.TAG` whose first 43 bytes are exactly
+`Signature: 8a477f597d28d172789f06886806bc55`; a regular, no-follow
+`pyvenv.cfg` of any contents; or a regular, no-follow `.gitignore` whose entire
+contents are exactly `*`, `*\n`, or `*\r\n`. Marker checks apply only to the
+exact cycle payload roots `artifacts/` and `_internal/` and directories below
+them; a marker in a repository, artifact-root, or cycle-root ancestor has no
+effect. Prune marked and structurally recognized runtime trees before descent
+on first collection, checkpoint and refresh, payload reads, or descendant
+locator validation. Marker symlinks and special files
+are not markers, and their targets are not followed. Below (never at) the exact
+payload roots, the collector also recognizes nested Git checkouts (`.git`
+directory or bounded regular `gitdir:` file), conda environments
+(`conda-meta/`), exact `node_modules`, `site-packages`, and `dist-packages`
+directories, structurally complete Hugging Face `models--*`/`datasets--*` hub
+repositories, pip HTTP caches, and torch hub checkpoint caches. These checks
+use no-follow structure and bounded observations; similarly named ordinary
+result directories remain output. On the next normal refresh, current
+artifact/revision rows beneath positively recognized runtime
+roots and their dispensable artifact-recording events leave the current
+document; physical files and all previously published document snapshots
+remain untouched. Retained events, terminal proof and identity remain
+unchanged. Record one history line per excluded root, not one per retired file;
+full excluded-root details belong to the cycle record. This exception applies
+to self-exclusion markers and the structural runtime signals described here;
+historical rows remain unchanged for unrelated inclusion changes. Candidate
+bundle search uses this rule; validation of already-published bundle
+descriptors retains its recorded coverage behavior.
+
+**Cycle payload buckets.** The top-level table above closes only the names
+directly under the artifact root. Inside a cycle, the first segment below
+`artifacts/` is the bucket, and this table closes the bucket names: it lists
+exactly the keys of `BUCKET_TYPES` in `utilities/artifact_producer.py`, and
+`artifact_producer.test.py` fails when the two differ. Another first segment (for example `shards/`) is not a
+bucket. A file outside a bucket stays where it was written and carries type
+`file`; nothing moves it. A `raw-results` directory and its ancestors also stay at their exact payload paths; first-seal finalize may register a non-empty tree with one directory-bundle descriptor, while `raw-results` is not a bucket. Compose shows the capability's default bucket as the
+output folder.
+Payload paths retain valid UTF-8 names, so report images and audio with Korean
+filenames remain in checkpoint and sealed manifests.
+The class is the display intent readers
+such as Cairn use: `C-DUR` is a durable work product meant to be shown, `C-INT`
+is support material that is kept but not listed. When `finalize` picks a
+primary artifact itself, it skips any path through a top-level `C-INT` name
+that is not a cycle bucket (`_internal/`, `shards/`) while the cycle holds
+another file, then takes the first `PRIMARY_CANDIDATES` name (including nested
+`report.html`), then a Markdown or HTML document, then the first remaining file;
+an explicit `--primary` is kept as given. Exact cycle-root `_internal/**`
+rows have support role and no authority as an automatic or explicit primary or
+terminal evidence. Without another primary candidate, the outcome has no required
+primary role.
+When the registered owner supplies a valid primary in its exact PASS handoff,
+terminal settlement uses that same artifact for the producer manifest and the
+sealed owner envelope. Without a valid owner primary, existing selection
+fallbacks continue to apply.
+
+| Bucket | Meaning | Disposition class |
+|---|---|---|
+| `plans/` | implementation cycle plans, reports and evidence (`autopilot-code`) | `C-DUR` |
+| `documents/` | document drafts, refinements and cheatsheets (`autopilot-draft`, `autopilot-refine`) | `C-DUR` |
+| `designs/` | design references, tokens, components and handoff (`autopilot-design`) | `C-DUR` |
+| `spec/` | blueprint components (`autopilot-spec`); the source for `admit-shared --kind spec` | `C-DUR` |
+| `research/` | topic research and external references (`autopilot-research`) | `C-DUR` |
+| `experiments/` | experiment setup, evaluation and run logs (`autopilot-lab`) | `C-DUR` |
+| `analysis_project/` | whole-project source analysis (`analyze-project`) | `C-DUR` |
+| `analysis/` | analysis reports that are not a whole-project analysis, such as diagnoses and measurements | `C-DUR` |
+| `apply-log/` | the report of applying a draft cheatsheet to the real source and verifying it (`autopilot-apply`) | `C-DUR` |
+| `release-config/` | release configuration and ship checklist (`autopilot-ship`); a root-level `release-config/` stays wrong-base residue | `C-DUR` |
+| `user_profile/` | the evidence and report behind a cross-project user-preference profile (`analyze-user`) | `C-DUR` |
+| `reviews/` | audit and review reports (`audit`, stage reviews); a root-level `reviews/` stays support material | `C-DUR` |
+
+**Cycle display titles.** Checkpoints publish human-readable display titles for
+open cycles alongside their interim manifest, using the same record, request,
+and primary Markdown-heading rules as sealing. Updated outputs refresh both
+the title and its manifest binding. No-output cycles and cycles without a usable
+title publish no new declaration. Title publication is best-effort and never
+blocks the checkpoint; a later checkpoint retries it automatically. An owner
+resuming the same open cycle with an explicit `begin --title` updates its title
+and republishes the declaration against the current interim manifest, without
+rescanning or moving outputs. A worker `begin --node`, an omitted title, or an
+unchanged title does not rewrite title metadata. Existing identities, locators,
+other cycles, and sealed records stay unchanged.
+
+**Campaign and cycle metadata.** `campaigns/<campaign-locator>/meta.json`
+(`artifact-meta/v1`) and `.runtime/artifact-producer/v1/project-meta.json`
+(`artifact-project-meta/v1`) carry an easy title, a one-line summary, branch and
+kind tags, and a short ID for each campaign and cycle; every change adds one line
+to the single history recorder under `.runtime/artifact-producer/v1/history/`.
+The one background job — the workflow-group review right after a seal — decides
+the groups and these fields together with one model call per campaign; a person or
+an agent corrects them with `utilities/artifact_meta.py` (one command for all three
+harnesses). The campaign title is read from a valid `meta.json`, else from
+`campaign-display-titles.json` (read-only: a title there is a person's title and is
+never overwritten), else from the folder name. `campaign_title_repair.py` keeps the
+explicit declaration repair; its `auto`/`backfill` run that same job, and a seal
+starts no second one. `HEARTING_WORKFLOW_GROUP_REVIEW=off` disables the whole
+automatic job; `HEARTING_CAMPAIGN_TITLE_AUTO=off` keeps only the automatic
+campaign title out of it (everything else is still judged). Files, limits, the
+history line, and failure semantics: [ARTIFACT_META.md](ARTIFACT_META.md). No gate,
+input, or agent obligation results.
+
+**Campaign closure.** `artifact_producer.py campaign-status|campaign-close|campaign-reopen|campaign-recover`
+reports, closes, reopens, and repairs a campaign. An agent that judges the
+recorded completion condition met runs `campaign-close` (`--reason` optional);
+a sealed cycle alone does not close the stream. `cycle-move`, `cycle-mark` and
+`delete --cycle|--campaign` move, mark, and delete cycles.
+The next cycle selected by key, ID, or parent reopens it with an appended
+`campaign.reopened` event. One validated fold over `campaign.events/` (legacy
+`campaign.satisfied.json` is sequence 1) decides state for begin, compose, list,
+locator scan, and manifest checks. The event stream is append-only; campaign.json
+holds a recoverable state projection. Metadata writers preserve folded state,
+and cycle manifests and route evidence remain immutable. Membership uses member
+records: an output-less cycle removed from `campaign.cycles` remains auditable
+as detached rather than causing membership drift. Abandoned cycles remain
+abandoned; closure adds neither route repair nor a residual-zero condition.
+
+Presentation is independent of lifecycle: `campaign.presentation_kind`
+(`archive_bundle`, [ARTIFACT_META.md](ARTIFACT_META.md)) only marks how a
+campaign is shown while preserving its lifecycle state.
+`campaign-export` ([artifact-campaign-current/v1](ARTIFACT_CAMPAIGN_CURRENT.md)) is the pure read of that
+current state; `campaign-status`, `campaign-list`, and `campaign-export`
+repair nothing — reconcile, history flush, and index heals belong to writer
+commands (`campaign-close`, `compose`). A legacy close event survives a root
+rename when its snapshot rows still bind, byte-exact, to surviving manifests
+under the stable RootIdentity (the old absolute path stays as provenance, not
+proof). Only an explicit goal judgment in the owner's own final report lets
+normal settlement record a `campaign.satisfied` event; completed or sealed
+cycles alone leave the stream open, and the next begin on the same key still
+reopens it.
+
+**Campaign workflow groups.** A producer-owned versioned declaration at
+`campaigns/<campaign-locator>/workflow-groups.json` may group existing cycles by
+an explicitly named subgoal without changing cycle boundaries, sealed
+manifests, artifacts, route lineage, or campaign membership. Each group has an
+opaque stable ID, a human title, cycle members with display-stage labels, and
+only evidence-backed relations. `precedes` means that one cycle's material or
+criterion was used as another cycle's input; it does not claim the first cycle
+finished before the second began. `followup` means a result or handoff was
+continued, `retry` means an unsuccessful result was retried, and `parallel`
+means explicit concurrent work. A missing relation stays unspecified. The
+producer rejects cross-campaign membership, duplicate membership, missing
+references, directional cycles, and a contradictory parallel/directional pair.
+The declaration binds stable root, repository, campaign and cycle identities;
+individual evidence files bind to their observed artifact revisions. A new
+checkpoint revision does not require redeclaring a group. Readers derive each
+member's current status and primary artifact from the current sealed or open
+manifest rather than treating a historical evidence revision as current
+success. `artifact_workflow_groups.py prepare|apply|verify` owns a checked
+single-file replacement, including corrections and withdrawal; no route
+parent/`depends_on` meaning or extra workflow gate is introduced.
+`artifact_workflow_group_review.py sweep` reviews newly sealed cycles in the
+background (groups and metadata in one model call per campaign, written together
+under one lock). The exact v1 schema and verification semantics are in
+[WORKFLOW_GROUPS.md](WORKFLOW_GROUPS.md); the metadata is in
+[ARTIFACT_META.md](ARTIFACT_META.md).
+
+**Campaign metadata amendment.** `artifact_metadata_amendment.py
+prepare|apply|verify` is the sole supported correction surface for an active
+`_unassigned` campaign whose missing assignment is the exact and only degraded
+condition. It changes only `campaign.json.key` and `.goal`, removes only the
+exact `degraded=true` / `degraded_reason=campaign-unassigned` marker, and writes
+the producer-owned
+`.runtime/artifact-producer/v1/campaign-metadata-amendments.json` and
+`cycle-display-titles.json` declarations. Each declaration is bound to the
+sealed evidence by sorted, duplicate-free manifest revision IDs and canonical
+parsed-JSON digests. The transaction holds the producer admission lock,
+revalidates a prepared byte preimage before writing, journals exact rollback
+bytes, rejects races or foreign bindings, and makes an identical replay
+idempotent. Stable root, repository, campaign, cycle, manifest, artifact and
+revision IDs; campaign membership; parent lineage; locator names; existing
+campaign display-title declarations; and sealed manifest, cycle, payload,
+route, shared-reference and artifact bytes remain unchanged. Any other
+degraded reason, closed campaign, non-placeholder key or incomplete sealed
+cycle set is refused before mutation.
+
+**Campaign/cycle locator amendment.** `artifact_locator_amendment.py
+prepare|apply|verify` is the sole supported correction surface when an applied
+campaign metadata amendment has left an `_unassigned` physical locator or
+sealed cycle names that hide their revision order. It moves the campaign and
+its named cycle directories to collision-free `<date>_<slug>` canonical
+locators, updates only the corresponding locator/slug/title record fields,
+the cycle display-title declaration, campaign display-title locator, and both
+derived indexes. Stable IDs, campaign membership and order, parent lineage,
+sealed manifest, `.cycle.json`, artifact, route/outcome and shared-reference
+bytes remain unchanged. Old route evidence paths stay readable through
+root-contained relative symlink redirects; authoritative locator scans ignore
+those redirects and index only real canonical directories. Prepare and apply
+hold the producer admission lock, bind exact directory and byte preimages to a
+durable journal, reject target collisions or foreign manifest bindings, roll
+back interrupted partial moves only from recognized pre/post states, and make
+an identical committed replay verify-only and idempotent.
+
+**Campaign run log correction.** A legacy aggregate `experiments/_RUNLOG.md`
+that W7G mechanically promoted into a one-file cycle has no independent work
+boundary. `artifact_resplit.py repair-runlog-cycle` is the sole correction
+surface: it accepts only an active campaign's sealed resplit cycle whose one
+primary experiment revision is exactly that locator, requires an exact dry-run
+expectation and an external verified backup, preserves the Markdown bytes as
+`campaigns/<campaign-locator>/RUNLOG.md`, records its digest and source cycle in
+`campaign.json.runlog`, removes only that cycle's live projection, appends a
+compatibility redirect, and rebuilds derived indexes. The campaign run log is
+metadata, not a cycle or closure criterion. Historical manifests, migration
+journals, and compatibility maps outside the named projection remain
+byte-identical; the named manifest and route records are retired whole after
+backup rather than rewritten.
+
+**Exactly one disposition.** Except for `_scratch/`, every regular file and
+container under the artifact root has exactly one disposition, and none is left
+unclassified. Classification implies no destructive action: a `C-LEG` name is
+quarantine-typed, never a delete instruction. The disposition rule sequence, its
+measurement definitions, and its measured counts are owned by
+`spec/artifact-path-contract/prd.md` §16; this section owns only the vocabulary
+and the top-level assignment.
+
+## 3.1. Report Bundle Root
+
+Published reports use a user-installed, cross-project storage root named
+`REPORT_BUNDLE_ROOT`. It is separate from the project artifact root: artifacts
+record how work was produced, while the bundle root holds immutable,
+self-contained reports for read-only consumers.
+
+```text
+<report-bundle-root>/<project>/<experiment-id>/<version>/report/
+├── index.html
+├── REPORT.md
+├── report_manifest.json
+└── media/
+```
+
+The installer records the absolute root once under the user Hearting config
+and thereafter preserves it. Runtime resolution uses an explicit environment
+override before that config. Source and database records carry only stable
+`project/experiment/version` identity and `report/index.html`, never the
+absolute bundle path. `bundle_id` is the reproducible `project/experiment`.
+
+## 3.2. Agent Notes And Worklog Board
+
+The canonical neutral name for the cross-project continuity board data root is:
+
+```text
+<agent-notes-root>
+```
+
+It is not the project artifact root and not the unified memory store. It is a
+mutable operator-facing state layer used to carry agent work across projects and
+sessions:
+
+| Folder | Meaning | Commit policy |
+|---|---|---|
+| `cards/` | Layer 1 user-owned task/project cards | user data; never commit to the harness repo |
+| `_layer2/` | Layer 2 agent-owned notes, catalogs, and source-to-card routing rows | mutable board data; never commit to the harness repo |
+| `_triage/` | retired review queue (read-only history) | runtime history; never commit to the harness repo |
+| `_feedback/`, `_change_review/` | feedback and change-review queues | runtime/user state; never commit to the harness repo |
+| `digests/`, `oncall/`, `study/`, `manual/` | daily summaries, operator reports, study proposals, and board manual content | state/docs for the notes root; never commit to the harness repo unless intentionally mirrored in a separate notes repo |
+
+The neutral name for the UI/application that reads and updates this state is:
+
+```text
+<worklog-board-app>
+```
+
+The app may live in its own repository or local runtime workspace. Its source,
+build output, local DBs, caches, `.env*`, dispatch logs, and worktrees are not
+part of this harness repository unless a future migration explicitly promotes a
+runtime-neutral board component into `tools/` or another portable source
+directory.
+
+Cycles may move between artifact roots through `cycle-move`, including merging
+same-key campaigns and attaching explicitly named unregistered logs. The move
+records original roots, identities and locators automatically. Historical reads
+follow committed provenance; writer addresses remain local to their root. Moving intact
+history with no live work transfers no parent or successor execution authority.
+Source routes and outcomes retain their original bytes and remain historical.
+A new current manifest names the target root and campaign while preserving
+origin-qualified route rows and every earlier manifest snapshot.
+Same-filesystem moves use atomic rename and file-list/size inventories;
+cross-device moves use durable copies and byte digests.
+Directory publication holds the ordered root admission locks. On filesystems
+without no-replace rename support, it checks the destination remains absent
+under those same locks and uses ordinary atomic rename, as producer admission does.
+
+## 4. Workflow Invariants
+
+Transport deaths have no cumulative automatic replacement count limit. The
+existing controller may replace each settled, resultless, proven-dead attempt
+with one stable successor per exact predecessor. A join carries one bounded
+original-to-final projection while the registry retains every verified edge.
+Carriers use their verified jobs path when the sealed terminal receipt
+intentionally has an empty `job_registry`; a registered or merely claimed
+successor is not execution or consumption. Intermediate failure stays pending
+while a launched successor owns the result, and the final result or inability
+to continue follows the existing delivery path. Original rows and receipts,
+completed stages, review ceilings, runtime pins, live or unknown work,
+unsettled cleanup, semantic FAIL or BLOCKED, and human decisions retain their
+existing handling. Automatic replacement currently follows the existing
+controller timing; no per-generation delay is persisted. A route paused only
+by the old replacement count resumes through its ordinary `start` surface.
+
+Artifacts move forward in one direction:
+
+```text
+research / analysis_project -> spec -> plans
+research / analysis_project -> documents -> refinement
+```
+
+Each artifact should be changed through the capability that owns it:
+
+| Artifact | Owner |
+|---|---|
+| `spec/` | spec capability |
+| `plans/` | code capability |
+| `documents/` | draft/refine capability |
+| `experiments/` | lab capability |
+| user profile records | analyze-user / mem profile-append |
+
+Where work runs is a separate axis from who owns its output. The installed
+`compute-hosts` command is the common PATH operator surface; the session host
+runs everything by default. When an operator keeps more than one machine, the
+user-owned inventory at
+`${XDG_CONFIG_HOME:-$HOME/.config}/hearting/compute-hosts.yaml` names them, and
+`utilities/compute-hosts.py` both measures their live state and starts detached
+work on them. Its exact detached-process claim surface reconnects a live root
+PID to the launcher session only while PID start time, command hash, and current
+ancestry still match. Consult it before starting anything that needs a GPU the session
+host lacks, or that would occupy the session host long enough to slow the
+conversation; a run started that way survives the session that launched it and
+is reachable by id from any host sharing the run root. Nothing chooses a host
+automatically — the acting agent does, and having read the inventory is the
+difference between choosing and defaulting. `OPERATIONS.md#513-operator-compute-hosts`
+owns the mechanics and the boundary against registry-owned resource jobs.
+Install and update repair only the exact owned launcher link; foreign files and
+symlinks are preserved. Full uninstall removes that shared launcher, while a
+partial runtime uninstall retains it. No startup file is edited, no scheduler
+selects a host, and no remote agent dispatch is involved.
+
+Destructive filesystem mutation is authority-scoped. Before any unlink,
+directory removal, overwriting rename, or rollback, the operation must prove a
+canonical target inside an exact allowed root or closed allowlist, an explicit
+ownership record, and the current expected state (kind, device/inode, plus
+content digest or link target where applicable). Validation of the complete
+request happens before snapshots, lock creation, temporary files, or state
+writes. A rollback may restore its preimage only while the current path is its
+sealed postimage; a different successor is preserved and reported as a typed
+conflict. Backups, ambient environment paths, string-prefix containment, and a
+path's mere existence never grant deletion authority. External user paths use
+stable canonical target locks and atomic replacement without an
+unlink-then-write window.
+
+## 5. Adapter Responsibilities
+
+Each adapter should provide:
+
+- a bootstrap note that declares it is derived from core and that edits start in
+  core before adapter changes;
+- a bootstrap file that loads this core contract;
+- a way to expose portable capabilities (`capabilities/`) and portable role profiles (`roles/`);
+- a concrete mapping from portable model roles (`fast reviewer`, `deep reviewer`, `external adversary`, etc.) to runtime-specific models, tools, or prompt profiles;
+- a projection from the neutral `<agent-home>` repository into the runtime home using symlinks, generated files, or runtime-native registration;
+- non-blocking hooks for memory, workflow signals, and session records;
+- compatibility with both `.agent_reports/` and `.claude_reports/` until legacy projects are migrated;
+- canonical artifact-root propagation for linked-worktree output;
+- a documented realization of `<agent-notes-root>` and `<worklog-board-app>` if
+  that runtime reads or updates cross-project worklog state.
+
+## 6. Naming Policy
+
+Use neutral names for new cross-tool concepts:
+
+| Prefer | Avoid for new core concepts |
+|---|---|
+| agent harness | Claude setting |
+| artifact root | `.claude_reports` as a generic term |
+| capability | Claude-only Skill semantics |
+| role profile | Claude-only Agent semantics |
+| model role | vendor model names as portable semantics |
+| adapter | tool-specific bootstrap |
+
+Settled terminal history is read from exact immutable transaction identities, not
+from current launch eligibility. Root movement and cleaned cwd leave it settled.
+Current publication, goal, process and cleanup obligations remain independent.

@@ -20,8 +20,9 @@ dereference, and closed-error semantics.
 Run `utilities/cairn-artifact-read.sh` with exactly one JSON object on stdin.
 The command emits exactly one JSON value on stdout and diagnostics only on
 stderr. Set `CAIRN_ROOT` to the checkout containing W3a commit
-`1fa0d99e4b714b5ce305f78c8f7c7773255e8f87`; set `CAIRN_READ_TOKEN` only when
-the read service requires it. The request is validated by W3a's
+`1fa0d99e4b714b5ce305f78c8f7c7773255e8f87`, provide the read-only
+`CAIRN_READ_ENDPOINT`, and set `CAIRN_READ_TOKEN` only when the service
+requires it. The request is validated by W3a's
 `validateReadOptions`, then passed to W3a's `ArtifactProjectionClient` and
 `HttpReadTransport` without local query, cursor, or authorization
 interpretation. The token is never printed.
@@ -30,6 +31,8 @@ This capability is intentionally narrower than browse/search fallback paths.
 It has no write, ingest, apply, activate, deactivate, migrate, or namespace
 switch operation and never accepts a database URL. Missing or mismatched W3a
 sources fail closed using W3a's imported contract errors.
+
+If the W3a query fails, Hearting does not take ownership of a fallback; the caller may use the separately owned browse/search or memory paths.
 
 Hearting may add a separate `hearting_verification_display` field to a
 successful read response. It joins only exact stable IDs and locally verified
@@ -77,6 +80,8 @@ failed projection read as ownership of the external fallback paths.
 3. When the projection is unavailable or rejected, retain flat browse, `rg`,
    and memory `artifact-pointer` recall as additive external fallbacks. This
    capability does not own or replace those paths.
+
+Portable procedure and reference documents are owned under `capabilities/artifact-projection-read/references/` when present. Claude, Codex, and OpenCode Skill bodies are generated projections of this capability and use the same logical procedure read-set.
 
 ## Adapter Realization
 

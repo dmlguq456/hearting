@@ -106,8 +106,8 @@ SURFACES: tuple[str, ...] = (
     "core/HOOKS.md",
     "core/MEMORY.md",
     "adapters/claude/CLAUDE.md",
-    "skills/autopilot-code/references/dev-pipeline.md",
-    "skills/autopilot-code/references/owner-execution.md",
+    "capabilities/autopilot-code/references/dev-pipeline.md",
+    "capabilities/autopilot-code/references/owner-execution.md",
 )
 # English imperatives plus the Korean forms the documents actually use.
 # Hangul lookarounds are the word boundary: 반드시 is an adverb (반드시성 is

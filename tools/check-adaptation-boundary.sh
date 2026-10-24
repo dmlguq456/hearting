@@ -1628,17 +1628,9 @@ check_codex_native_plugin_projection() {
   if [ ! -f "$marketplace" ]; then
     fail_msg "Codex native plugin marketplace is missing"
   fi
-  if [ ! -f "$plugin_root/skills/autopilot-code/SKILL.md" ]; then
-    fail_msg "Codex native plugin must include generated capability skills"
-  fi
   if ! grep -Fq 'five-field confirmation card' "$plugin_root/skills/autopilot-lab/SKILL.md" \
     || grep -Fq '## Projected Portable Details' "$plugin_root/skills/autopilot-lab/SKILL.md"; then
     fail_msg "Codex native plugin entry Skill must preserve the compact confirmation boundary"
-  fi
-  if ! grep -Fq 'five-field confirmation card' "$plugin_root/skills/autopilot-code/SKILL.md" \
-    || ! grep -Fq 'dispatch-depth-1 owner reads it' "$plugin_root/skills/autopilot-code/SKILL.md" \
-    || grep -Fq '## Projected Portable Details' "$plugin_root/skills/autopilot-code/SKILL.md"; then
-    fail_msg "Codex native plugin autopilot-code entry projection must stay compact"
   fi
   for skill in "$plugin_root"/skills/*/SKILL.md; do
     [ -f "$skill" ] || continue
@@ -1670,6 +1662,19 @@ check_codex_native_plugin_projection() {
   if ! grep -Fq 'native_plugin_skill_path=' adapters/codex/bin/capability-map.sh \
     || ! grep -Fq 'codex-native-skill-plugin' adapters/codex/bin/capability-map.sh; then
     fail_msg "adapters/codex/bin/capability-map.sh must report Codex native plugin skill realization"
+  fi
+}
+
+check_codex_native_plugin_entry_skill() {
+  skill="adapters/codex/plugins/hearting-codex/skills/autopilot-code/SKILL.md"
+  if [ ! -f "$skill" ]; then
+    fail_msg "$skill is missing"
+    return
+  fi
+  if ! grep -Fq 'five-field confirmation card' "$skill" \
+    || ! grep -Fq 'dispatch-depth-1 owner reads it' "$skill" \
+    || grep -Fq '## Projected Portable Details' "$skill"; then
+    fail_msg "Codex native plugin autopilot-code entry projection must stay compact"
   fi
 }
 
@@ -3760,7 +3765,7 @@ check_language_neutrality_contract() {
     fail_msg "roles/response-policy.md must define the terminal-safe enumeration contract"
   fi
   if rg -n '[\x{2460}-\x{2473}\x{24EA}\x{24F5}-\x{24FE}\x{2776}-\x{2793}\x{3251}-\x{325F}\x{32B1}-\x{32BF}]' \
-    roles/response-policy.md skills/autopilot-spec/references/prd-authoring.md >/dev/null 2>&1; then
+    roles/response-policy.md capabilities/autopilot-spec/references/prd-authoring.md >/dev/null 2>&1; then
     fail_msg "terminal-facing response policy and choice templates must not contain enclosed numeral glyphs"
   fi
   # 재홈 2026-07-22: the retired editorial-team router's audience-language contract now
@@ -3871,6 +3876,7 @@ check_codex_native_agent_projection
 check_codex_model_pin_role_map_consistency
 check_codex_native_mode_projection
 check_codex_native_hook_projection
+check_codex_native_plugin_entry_skill
 check_portable_agent_home_resolution
 check_opencode_tool_projection
 check_opencode_native_skill_projection

@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "lab-config-manifest.schema.json",
+  "title": "Lab config provenance manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "config_ref", "run_id", "source_path",
+    "source_sha256", "source_commit", "source_dirty", "source_git_state",
+    "snapshot_path", "snapshot_sha256", "config_layout"
+  ],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 2},
+    "config_ref": {"type": "string", "minLength": 1, "pattern": "^(config|exp|legacy|path):[^\\x00-\\x1f\\x7f]+$"},
+    "run_id": {"type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "source_path": {"type": "string", "minLength": 1},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_commit": {"type": "string", "minLength": 1},
+    "source_dirty": {"type": "boolean"},
+    "source_git_state": {
+      "type": "string",
+      "enum": ["clean", "staged", "unstaged", "staged+unstaged", "untracked", "ignored", "unknown-no-git"]
+    },
+    "snapshot_path": {"type": "string", "minLength": 1},
+    "snapshot_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "config_layout": {"type": "string", "minLength": 1}
+  }
+}

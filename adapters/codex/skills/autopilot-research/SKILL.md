@@ -34,6 +34,15 @@ contract. It is adapter-owned output, not a legacy compatibility Skill copy.
 - Portable meaning: Shared upfront research that surveys academic, technology, or market sources before downstream routing.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/autopilot-research/references/invocation-and-modes.md`
+- `capabilities/autopilot-research/references/owner-execution.md`
+- `capabilities/autopilot-research/references/pipeline-search-analysis.md`
+- `capabilities/autopilot-research/references/report-generation.md`
+- `capabilities/autopilot-research/references/summary-and-briefing.md`
 
 ## Workflow Evidence
 

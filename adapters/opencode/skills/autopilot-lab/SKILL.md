@@ -38,6 +38,17 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 - Portable meaning: Set up experiments, evaluate, and report results, including fixed results.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/autopilot-lab/references/auto-load-context.md`
+- `capabilities/autopilot-lab/references/config-provenance.md`
+- `capabilities/autopilot-lab/references/data-contract.md`
+- `capabilities/autopilot-lab/references/eval-procedure.md`
+- `capabilities/autopilot-lab/references/outputs-and-examples.md`
+- `capabilities/autopilot-lab/references/owner-execution.md`
+- `capabilities/autopilot-lab/references/setup-procedure.md`
 
 ## Workflow Evidence
 

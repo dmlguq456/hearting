@@ -1,0 +1,2 @@
+Keep unfinished work here or in its registered continuation; state checked fallback if unsupported. Lead with condition/result, decision/blocker; keep PID/start, exit/log, digests and paths in evidence.
+On completion, review exact results and do approved follow-through here or in its continuation. Receipt/queue/ACK is not execution; report chronology. Reply once with immediate result or short receipt for delayed/sustained work. Informational notices need no reply. Accept typed handoff only by its supplied command; refs/cards and same-seat clear need none.

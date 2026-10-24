@@ -52,14 +52,16 @@ Adapters must preserve the portable invariants relevant to this capability:
 - resolve artifact root through `utilities/artifact-root.sh` or equivalent logic;
 - use DB memory paths, not runtime-native memory files.
 
+Portable procedure and reference documents are owned under `capabilities/design-components/references/` when present. Claude, Codex, and OpenCode Skill bodies are generated projections of this capability and use the same logical procedure read-set.
+
 ## Adapter Realization
 
 | Adapter | Realization |
 |---|---|
-| Claude Code | `adapters/claude/skills/design-components/SKILL.md` and `skills/design-components/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/design-components/SKILL.md`, while `skills/design-components/SKILL.md` remains the compatibility reference kept for parity/drift checks. |
+| Claude Code | `adapters/claude/skills/design-components/SKILL.md` and `skills/design-components/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/design-components/SKILL.md`, while `skills/design-components/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks. |
 | Codex | Read this spec and run `adapters/codex/bin/preflight.sh capability-info design-components`. Use `adapters/codex/skills/design-components/SKILL.md` as the native Codex Skill projection; do not consume `skills/design-components/SKILL.md` or Claude command files as native Codex configuration. |
 | OpenCode | Read this spec and run `adapters/opencode/bin/preflight.sh capability-info design-components`. Use `adapters/opencode/skills/design-components/SKILL.md` and `adapters/opencode/commands/design-components.md` as native OpenCode projections; do not consume `skills/design-components/SKILL.md` or Claude command files as native OpenCode configuration. |
 
 ## Compatibility Reference
 
-`skills/design-components/SKILL.md` and `adapters/claude/skills/design-components/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/design-components/SKILL.md`, while `skills/design-components/SKILL.md` remains the compatibility reference kept for parity/drift checks.
+`skills/design-components/SKILL.md` and `adapters/claude/skills/design-components/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/design-components/SKILL.md`, while `skills/design-components/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks.

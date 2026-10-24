@@ -76,6 +76,17 @@ from typing import Callable, Iterator, Optional
 SCHEMA = 1
 HARNESSES = ("claude", "codex", "opencode")
 CARD_BODY_MAX_BYTES = 8 * 1024
+CARD_FIELDS = (
+    "원래 목표", "진행 중", "기다리는 결정", "다음 할 일", "관련",
+    "사용자 요구 원문 발췌", "요구사항·PRD 위치", "오늘 한 일", "사용자 지시",
+)
+CARD_FIELD_IDS = (
+    "original_goal", "in_progress", "waiting_decisions", "next_actions", "related",
+    "user_request_quote", "requirements_prd_location", "today", "user_instructions",
+)
+CARD_FIELDS_BY_ID = dict(zip(CARD_FIELD_IDS, CARD_FIELDS))
+CARD_FIXED_FIELD_IDS = ("original_goal", "user_request_quote", "requirements_prd_location")
+CARD_FIXED_FIELDS = tuple(CARD_FIELDS_BY_ID[field_id] for field_id in CARD_FIXED_FIELD_IDS)
 COMPACT_SUMMARY_MAX_BYTES = 256 * 1024
 COMPACT_RECENT_MAX_BYTES = 8 * 1024
 COMPACT_METADATA_MAX_BYTES = 1024
@@ -88,6 +99,7 @@ CARD_FIRST_REPLY_GUIDANCE = (
     "'하던 일 · 남은 일 · 다음 할 일' 세 머리말을 써서 5줄 안팎 요약을 한 번 보여 준 뒤 "
     "이어서 하세요. 사용자가 이어서하기 대신 다른 지시를 먼저 주면 요약을 생략하고 그 지시만 따르세요."
     " 요약에는 대상의 원천 설명과 구별 조건을 먼저 쓰고 원래 번호를 덧붙이세요. "
+    "첫 실작업 전에 카드의 " + "·".join(CARD_FIXED_FIELDS) + "와 그 칸이 가리키는 PRD 절을 다시 읽으세요. "
     "미완료·중단 상태와 다음 행동을 유지하고, 뜻이 확인되지 않은 식별자는 추측하지 마세요."
 )
 # Keep the previous body allowance when memory references ride along.
@@ -107,13 +119,14 @@ COMPACT_CARD_SEAT_KINDS = ("pane", "native")   # seats of one session; never the
 # The runtime compaction summary doubles as the seat card (capabilities/session-tidy.md):
 # the card's fields and order, in the user's language.
 COMPACT_CARD_INSTRUCTIONS = (
-    "Write this summary as a session handoff card in the user's language, with these six "
-    "fields in this order: work in progress; waiting decisions; next actions; related "
-    "references (paths, PRs, sessions); today's work (with PR, installed version or result "
-    "file pointers); user instructions (brief quotes, each marked finished, remaining or "
-    "deferred). Keep the details needed to continue the work inside those fields, within "
-    "about 90 lines."
-    " Carry the source description and distinguishing comparison condition before the "
+    "Write this summary as a session handoff card in the user's language, with these fields "
+    "in this order: " + " → ".join(CARD_FIELDS) + ". Keep the details needed to continue the work "
+    "inside those fields, within about 90 lines. Carry forward the previous card's "
+    + " / ".join(CARD_FIXED_FIELDS)
+    + " verbatim; do not re-summarize them. Preserve dated original user quotes and append "
+    "new material without re-summarizing. Remove only items the user explicitly replaced. "
+    "Before the first real work, reread the full card and the PRD section its fixed fields point to. "
+    "Carry the source description and distinguishing comparison condition before the "
     "original identifier; preserve document/revision and checkpoint references when they "
     "affect meaning. Keep failed, interrupted and unfinished states with their next action, "
     "and leave unexplained identifiers unresolved."

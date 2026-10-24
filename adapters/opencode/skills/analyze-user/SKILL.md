@@ -38,6 +38,14 @@ capability contract. It is adapter-owned output, not a legacy compatibility Skil
 - Portable meaning: Create or update a cross-project user-preference profile from coding, writing, and analysis patterns.
 
 
+## Shared Procedure References
+
+Read the complete portable procedure files listed here when they apply; this logical read-set is shared across Claude, Codex, and OpenCode.
+
+- `capabilities/analyze-user/references/arguments-and-decisions.md`
+- `capabilities/analyze-user/references/integration-and-usage.md`
+- `capabilities/analyze-user/references/owner-execution.md`
+- `capabilities/analyze-user/references/pipeline-phases.md`
 
 ## Workflow Evidence
 

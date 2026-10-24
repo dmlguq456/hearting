@@ -6407,7 +6407,7 @@ class OwnerFinishCorrectionRegressionTest(OwnerFinishBudgetRegressionTest):
 
 class FrameSummaryContractTest(unittest.TestCase):
  """A50-9 / N3 / R2-3: shards/frame/frame-summary.json contract, documented in
- skills/autopilot-code/references/owner-execution.md and
+ capabilities/autopilot-code/references/owner-execution.md and
  capabilities/autopilot-code.md. `utilities/dispatch_completion_join.py`
  (the module owning the actual v2/v3 receipt body -- StageAdvanceReceiptNegotiationTest,
  dispatch_completion_join.test.py:1908-2032) is outside this slice's fixed-file
@@ -6548,10 +6548,9 @@ class InlineStageCompletionRecipeTest(unittest.TestCase):
   # one published recipe (`--jobs --attempt-id`) is the only one an owner sees
   # -- and an inline run cannot satisfy it.
   for relative in (
-   "skills/autopilot-code/references/dev-pipeline.md",
-   "adapters/claude/skills/autopilot-code/references/dev-pipeline.md",
-   "adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/"
-   "autopilot-code/references/dev-pipeline.md",
+   "capabilities/autopilot-code/references/dev-pipeline.md",
+   "adapters/claude/plugin-marketplace/plugins/hearting-claude/capabilities/autopilot-code/references/dev-pipeline.md",
+   "adapters/codex/plugins/hearting-codex/capabilities/autopilot-code/references/dev-pipeline.md",
   ):
    text=(Path(R.ROOT)/relative).read_text(encoding="utf-8")
    with self.subTest(relative):

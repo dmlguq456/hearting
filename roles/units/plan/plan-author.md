@@ -25,7 +25,7 @@ baseline.
 ## Language Rule
 
 - The audience and artifact language contract in
-  `<agent-home>/skills/autopilot-code/references/arguments-and-decisions.md#language-rule`
+  `<agent-home>/capabilities/autopilot-code/references/arguments-and-decisions.md#language-rule`
   is the single source, realized through `<agent-home>/roles/response-policy.md`;
   this unit imposes no fixed chat locale.
 - Write the canonical plan in the selected artifact language; code identifiers,

@@ -29,7 +29,7 @@ divergences to reconcile. Residue items:
 
 3. **Adapter-flavored path in Language Rule** (`adapters/claude/agents/plan-team.md:16-19`):
    the unit body keeps the pointer
-   `<agent-home>/skills/autopilot-code/references/arguments-and-decisions.md#language-rule`
+   `<agent-home>/capabilities/autopilot-code/references/arguments-and-decisions.md#language-rule`
    verbatim because that file is the declared single source. Note `skills/` is a
    Claude compatibility mirror; if the language-rule source relocates during this
    migration, this ref (and `roles/response-policy.md`) must be re-pointed.

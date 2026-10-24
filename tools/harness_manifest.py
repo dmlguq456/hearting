@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Iterable
 
@@ -48,6 +49,71 @@ UNIT_FIELDS = ("family", "role", "worker_type", "floor")
 class ManifestError(ValueError):
     """The canonical product manifest is missing or internally inconsistent."""
 
+
+
+def procedure_paths(identifier: str, root: Path | None = None) -> list[Path]:
+    """Return the canonical, ordered Markdown procedure set for one capability."""
+    base = (root or ROOT) / "capabilities" / identifier / "references"
+    return sorted((path for path in base.glob("*.md") if path.is_file()), key=lambda path: path.relative_to(root or ROOT).as_posix())
+
+
+def portable_bundle_files(root: Path | None = None) -> list[Path]:
+    """Portable bundle plus tracked Markdown targets linked from its documents."""
+    base = root or ROOT
+    paths = [
+        path for section in ("core", "capabilities", "roles")
+        for path in (base / section).rglob("*")
+        if path.is_file() and not path.is_symlink()
+    ]
+    adapter_doc = base / "adapters" / "claude" / "references" / "design-runtime.md"
+    if adapter_doc.is_file():
+        paths.append(adapter_doc)
+
+    tracked = set(subprocess.run(
+        ["git", "-C", str(base), "ls-files", "--cached", "--", "*.md"],
+        check=True, capture_output=True, text=True,
+    ).stdout.splitlines())
+    included = {path.relative_to(base).as_posix() for path in paths}
+    pending = list(paths)
+    markdown_link = re.compile(r"!?\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))")
+    while pending:
+        source = pending.pop()
+        text = source.read_text(encoding="utf-8")
+        for match in markdown_link.finditer(text):
+            target = match.group(1) or match.group(2)
+            target = target.split("#", 1)[0].split("?", 1)[0]
+            if not target or target.startswith(("/", "\\")) or "://" in target:
+                continue
+            candidate = (source.parent / target).resolve()
+            try:
+                relative = candidate.relative_to(base.resolve()).as_posix()
+            except ValueError:
+                continue
+            if not relative.lower().endswith(".md") or relative not in tracked:
+                continue
+            if candidate.is_file() and relative not in included:
+                included.add(relative)
+                paths.append(candidate)
+                pending.append(candidate)
+
+    return sorted(set(paths), key=lambda path: path.relative_to(base).as_posix())
+
+
+def render_procedure_index(identifier: str, root: Path | None = None) -> str:
+    """Render the same logical procedure read-set edge for every native adapter."""
+    base = root or ROOT
+    files = procedure_paths(identifier, base)
+    if not files:
+        return ""
+    rows = "\n".join(
+        f"- `{path.relative_to(base).as_posix()}`" for path in files
+    )
+    return (
+        "## Shared Procedure References\n\n"
+        "Read the complete portable procedure files listed here when they apply; "
+        "this logical read-set is shared across Claude, Codex, and OpenCode.\n\n"
+        f"{rows}\n"
+    )
 
 def skill_capabilities(manifest: dict) -> dict:
     """The capabilities that project as Skills and native commands: every class except compiler-internal.

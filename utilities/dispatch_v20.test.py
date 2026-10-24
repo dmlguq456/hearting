@@ -422,7 +422,7 @@ class DispatchV20ConformanceTest(unittest.TestCase):
 
     def test_standard_pipeline_and_drills_pin_exact_current_attempt_contract(self):
         pipeline = (
-            ROOT / "skills/autopilot-code/references/dev-pipeline.md"
+            ROOT / "capabilities/autopilot-code/references/dev-pipeline.md"
         ).read_text(encoding="utf-8")
         for required in (
             "utilities/stage-dispatch-fallback.py",

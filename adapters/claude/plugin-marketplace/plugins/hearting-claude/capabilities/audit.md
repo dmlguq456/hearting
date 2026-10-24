@@ -1,0 +1,101 @@
+# Capability: audit
+
+This is the portable capability contract for `audit`. It defines runtime-neutral meaning and adapter obligations. It is not a Claude Skill file.
+
+## Contract
+<!-- GENERATED: harness-manifest.json -->
+
+| Field | Value |
+|---|---|
+| Identifier | `audit` |
+| Group | `ops` |
+| Supported modes | `none` |
+| Portable meaning | Read-oriented post-run inspection for artifact drift, inconsistency, and omissions. |
+| Argument shape | `<artifact_path> [--scope auto\|facts\|style\|structure\|cross-ref\|coverage\|all] [--read-only] [--report-only] [--no-fact-check]` |
+| Entry load phase | `post-approval`; owner contract `capabilities/audit.md` |
+
+## Invocation Semantics
+
+Read-only multi-aspect audit/lint for
+`<artifact-root>/{plans,research,documents}/*` artifacts. A single global entry
+auto-detects artifact type from the path prefix (`plans`=code,
+`research`=field survey, `documents`=document deliverable). Per-type aspects:
+documents use facts/style/structure/cross-reference/coverage; research uses card
+integrity/tier consistency/coverage/cross-card checks; plans use test results,
+lint, code review, TODOs, and unimplemented work. `--scope auto` selects from
+artifact characteristics by default; an explicit user scope overrides it.
+Report only—never modify the artifact. This complements autopilot-refine:
+refine edits, while audit inspects.
+
+Use this capability for independent inspection of completed work, including
+code and experiment provenance. Code review within an implementation/debug
+cycle stays `autopilot-code --mode audit`. Measuring new data quality or
+reproducing an experimental failure is lab/eval; inspecting already completed
+evidence is audit. This boundary preserves both code-review capabilities.
+
+The preset is `inspect → report`. An explicit graph may borrow the research
+map-reduce parts for a parallel survey and synthesis inside the audit cycle,
+`--graph inspect,autopilot-research:retrieval,autopilot-research:synthesis,report`
+(written under `parts/autopilot-research/<stage>/`; audit's `map_anchor` for
+them is declared in `part_catalog.hosts`), and may pick
+`report:research/research-survey` when the report is a proposal rather than a
+polish of findings. `capability-route.py stages --capability audit` lists the
+parts.
+
+Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
+
+## Artifact Ownership
+
+Artifact root: `core/CONVENTIONS.md §5.1`; output placement: `§5`.
+
+## Artifact Producer Lifecycle
+
+W7C write-cutover contract (`utilities/artifact_producer.py`, registry table
+`producer_lifecycle` in `capabilities/topologies.json`). The same lifecycle
+binds `direct`, `quick`, and `standard+`; only the acting owner differs.
+
+1. **begin before the first write.** After the route is compiled and bound,
+   the owner (the inline session for `direct`, the dispatch-depth-1 owner for
+   `quick` and `standard+`) runs `artifact_producer.py begin --artifact-root
+   <root> --route <route file> --capability audit --intensity <intensity>`.
+   While the cutover is inactive this returns `legacy-compat` and the legacy
+   `<artifact-root>/reviews/audit/` layout stays writable; once active it
+   issues `campaign_id`/`cycle_id`/`producer_id` and the cycle directory
+   `campaigns/<campaign-locator>/<cycle-locator>/artifacts/` before any artifact exists.
+2. **write only inside the open cycle.** Every durable artifact goes under
+   `<cycle_dir>/artifacts/reviews/audit/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).
+   `artifact_producer.py` owns cycle output paths and shared revisions.
+3. **stage workers join, never fork.** `standard+` stage workers receive
+   `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
+   from the owner (dispatch env pass-through) and call `begin --node <id>`
+   on the same route, which resumes the owner's open cycle.
+4. **runtime-owned closure.** A new registered owner returns its final report;
+   the shared completion controller owns workflow/route closure and exact-cycle
+   sealing after PASS and process cleanup. Interrupted closure retains the
+   result and transaction, retries without a model turn, and carries a recovery
+   notice. `roles/worker-types/owner.md` defines this shared contract. Explicit
+   close/finalize commands remain for inline work and legacy recovery.
+5. **shared admission.** This capability's output is cycle-local; it is never admitted to `shared/` (only `spec`, `analysis`, and explicitly promoted `research` are shared kinds).
+
+## Role Requirements
+
+Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concrete model names, subagent frontmatter, and runtime-specific tool lists belong in adapter files.
+
+## Guard Requirements
+
+Adapters must preserve the portable invariants relevant to this capability:
+
+- resolve artifact root through `utilities/artifact-root.sh` or equivalent logic;
+- use DB memory paths, not runtime-native memory files.
+
+## Adapter Realization
+
+| Adapter | Realization |
+|---|---|
+| Claude Code | `adapters/claude/skills/audit/SKILL.md` and `skills/audit/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/audit/SKILL.md`, while `skills/audit/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks. |
+| Codex | Read this spec and run `adapters/codex/bin/preflight.sh capability-info audit`. Use `adapters/codex/skills/audit/SKILL.md` as the native Codex Skill projection; do not consume `skills/audit/SKILL.md` or Claude command files as native Codex configuration. |
+| OpenCode | Read this spec and run `adapters/opencode/bin/preflight.sh capability-info audit`. Use `adapters/opencode/skills/audit/SKILL.md` and `adapters/opencode/commands/audit.md` as native OpenCode projections; do not consume `skills/audit/SKILL.md` or Claude command files as native OpenCode configuration. |
+
+## Compatibility Reference
+
+`skills/audit/SKILL.md` and `adapters/claude/skills/audit/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/audit/SKILL.md`, while `skills/audit/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks.

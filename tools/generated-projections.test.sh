@@ -81,17 +81,34 @@ fi
 grep -q '^name: session-tidy$' "$ROOT/adapters/codex/skills/session-tidy/SKILL.md"
 grep -q '^name: session-tidy$' "$ROOT/adapters/opencode/skills/session-tidy/SKILL.md"
 
-# The shared code-execute recovery procedure must reach each native skill that
-# projects it, while Claude keeps the canonical Skill reference in every mirror.
+# The shared recovery contract and the renamed canonical procedure must both
+# reach each native Skill projection.
 RECOVERY_CONTRACT="$ROOT/capabilities/code-execute.md"
+RECOVERY_PROCEDURE="$ROOT/capabilities/code-execute/references/procedure.md"
 cp "$RECOVERY_CONTRACT" "$TMP/code-execute-contract.md"
-python3 - "$RECOVERY_CONTRACT" <<'PY'
+python3 - "$RECOVERY_CONTRACT" "$RECOVERY_PROCEDURE" <<'PY'
 from pathlib import Path
 import re
 import sys
 
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8")
+contract = Path(sys.argv[1])
+procedure = Path(sys.argv[2])
+procedure_text = procedure.read_text(encoding="utf-8")
+required = (
+    "## Failure Recovery",
+    "clearly attributable edits in reverse order",
+    "same file",
+    "staged content",
+    "untracked files",
+    "never replay a failed command automatically",
+    "route closure to the runtime",
+    "direct/inline and legacy recovery paths",
+)
+missing = [item for item in required if item not in procedure_text]
+if missing:
+    raise SystemExit(f"not ok - renamed canonical recovery procedure is incomplete: {missing}")
+
+text = contract.read_text(encoding="utf-8")
 heading = "## Portable Procedure\n"
 if heading not in text:
     raise SystemExit("not ok - code-execute Portable Procedure is missing")
@@ -99,7 +116,7 @@ sentinel = "\nProjection fixture: PORTABLE_RECOVERY_PROCEDURE_SENTINEL.\n"
 start = text.index(heading) + len(heading)
 next_heading = re.search(r"^## ", text[start:], re.MULTILINE)
 end = start + next_heading.start() if next_heading else len(text)
-path.write_text(text[:end].rstrip() + sentinel + text[end:], encoding="utf-8")
+contract.write_text(text[:end].rstrip() + sentinel + text[end:], encoding="utf-8")
 PY
 python3 "$ROOT/tools/generate.py" >/dev/null
 python3 - \
@@ -125,12 +142,19 @@ for path in sys.argv[2:]:
     if portable_section(path) != expected:
         raise SystemExit(f"not ok - Portable Procedure differs in {path}")
 PY
-for claude_copy in \
+grep -Fq 'capabilities/code-execute.md#portable-procedure' "$RECOVERY_PROCEDURE" || {
+  echo "not ok - renamed canonical procedure omits the shared recovery contract" >&2
+  exit 1
+}
+for skill_copy in \
   "$ROOT/skills/code-execute/SKILL.md" \
   "$ROOT/adapters/claude/skills/code-execute/SKILL.md" \
-  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/code-execute/SKILL.md"; do
-  grep -Fq 'capabilities/code-execute.md#portable-procedure' "$claude_copy" || {
-    echo "not ok - Claude recovery-contract reference missing from $claude_copy" >&2
+  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/code-execute/SKILL.md" \
+  "$ROOT/adapters/codex/skills/code-execute/SKILL.md" \
+  "$ROOT/adapters/codex/plugins/hearting-codex/skills/code-execute/SKILL.md" \
+  "$ROOT/adapters/opencode/skills/code-execute/SKILL.md"; do
+  grep -Fq 'capabilities/code-execute/references/procedure.md' "$skill_copy" || {
+    echo "not ok - renamed canonical procedure reference missing from $skill_copy" >&2
     exit 1
   }
 done
@@ -413,9 +437,8 @@ for projected in \
 done
 grep -Fq 'agent-chosen memory recall' "$ROOT/capabilities/analyze-project.md"
 for owner in \
-  "$ROOT/skills/analyze-project/references/owner-execution.md" \
-  "$ROOT/adapters/claude/skills/analyze-project/references/owner-execution.md" \
-  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/skills/analyze-project/references/owner-execution.md"; do
+  "$ROOT/capabilities/analyze-project/references/owner-execution.md" \
+  "$ROOT/adapters/claude/plugin-marketplace/plugins/hearting-claude/capabilities/analyze-project/references/owner-execution.md"; do
   grep -Fq 'agent-chosen memory recall' "$owner" || {
     echo "not ok - post-approval owner contract missing from $owner" >&2
     exit 1
@@ -448,8 +471,8 @@ printf '%s\n' "$opencode_mode" | grep -Fq 'report_tool_contract_check=adapters/o
 test -x "$ROOT/tools/figure-semantic-verify.py"
 test -f "$ROOT/tools/figure-semantic-manifest.schema.json"
 test -L "$ROOT/adapters/claude/tools/figure-semantic-verify.py"
-grep -Fq '### Step 4c: Report figure semantic gate' "$ROOT/skills/autopilot-draft/references/pipeline-steps.md"
-grep -Fq 'PNG existence, dimensions, count, and links alone are not a pass' "$ROOT/skills/code-test/SKILL.md"
+grep -Fq '### Step 4c: Report figure semantic gate' "$ROOT/capabilities/autopilot-draft/references/pipeline-steps.md"
+grep -Fq 'PNG existence, dimensions, count, and links alone are not a pass' "$ROOT/capabilities/code-test/references/procedure.md"
 cmp -s "$ROOT/adapters/codex/skills/analyze-project/SKILL.md" \
   "$ROOT/adapters/codex/plugins/hearting-codex/skills/analyze-project/SKILL.md"
 cmp -s "$ROOT/adapters/claude/skills/code-test/SKILL.md" \

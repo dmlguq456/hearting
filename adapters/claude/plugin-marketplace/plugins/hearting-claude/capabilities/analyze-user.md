@@ -1,0 +1,84 @@
+# Capability: analyze-user
+
+This is the portable capability contract for `analyze-user`. It defines runtime-neutral meaning and adapter obligations. It is not a Claude Skill file.
+
+## Contract
+<!-- GENERATED: harness-manifest.json -->
+
+| Field | Value |
+|---|---|
+| Identifier | `analyze-user` |
+| Group | `pre` |
+| Supported modes | `init, update` |
+| Portable meaning | Create or update a cross-project user-preference profile from coding, writing, and analysis patterns. |
+| Argument shape | `<aspect> [--source <path>] [--mode init\|update] [--from discover\|analyze\|verify\|qa\|output\|summary] [--user-refine]` |
+| Entry load phase | `post-approval`; owner contract `capabilities/analyze-user.md` |
+
+## Invocation Semantics
+
+Scan and analyze the user's cross-project artifacts (papers, presentations,
+reports, code, and memory) in stages, then accumulate general working
+preferences in DB `type=profile` records (`mem profile <stem>`). This uses the
+same ceremony level as autopilot entrypoints because every sub-agent treats the
+resulting profile as a default, so even small errors propagate. The six phases
+are source discovery, per-aspect analysis, cross-aspect consistency checks,
+multiple QA gates, artifact creation, and pipeline summary. QA is always
+adversarial and is not user-adjustable.
+
+Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
+
+## Artifact Ownership
+
+Artifact root: `core/CONVENTIONS.md §5.1`; output placement: `§5`.
+
+## Artifact Producer Lifecycle
+
+W7C write-cutover contract (`utilities/artifact_producer.py`, registry table
+`producer_lifecycle` in `capabilities/topologies.json`). The same lifecycle
+binds `direct`, `quick`, and `standard+`; only the acting owner differs.
+
+1. **begin before the first write.** After the route is compiled and bound,
+   the owner (the inline session for `direct`, the dispatch-depth-1 owner for
+   `quick` and `standard+`) runs `artifact_producer.py begin --artifact-root
+   <root> --route <route file> --capability analyze-user --intensity <intensity>`.
+   While the cutover is inactive this returns `legacy-compat` and the legacy
+   `<artifact-root>/user_profile/` layout stays writable; once active it
+   issues `campaign_id`/`cycle_id`/`producer_id` and the cycle directory
+   `campaigns/<campaign-locator>/<cycle-locator>/artifacts/` before any artifact exists.
+2. **write only inside the open cycle.** Every durable artifact goes under
+   `<cycle_dir>/artifacts/user_profile/...` (`AGENT_ARTIFACT_OUTPUT_DIR`).
+   `artifact_producer.py` owns cycle output paths and shared revisions.
+3. **stage workers join, never fork.** `standard+` stage workers receive
+   `AGENT_ARTIFACT_CAMPAIGN_ID`/`CYCLE_ID`/`PRODUCER_ID`/`CYCLE_DIR`/`OUTPUT_DIR`
+   from the owner (dispatch env pass-through) and call `begin --node <id>`
+   on the same route, which resumes the owner's open cycle.
+4. **runtime-owned closure.** A new registered owner returns its final report;
+   the shared completion controller owns workflow/route closure and exact-cycle
+   sealing after PASS and process cleanup. Interrupted closure retains the
+   result and transaction, retries without a model turn, and carries a recovery
+   notice. `roles/worker-types/owner.md` defines this shared contract. Explicit
+   close/finalize commands remain for inline work and legacy recovery.
+5. **shared admission.** This capability's output is cycle-local; it is never admitted to `shared/` (only `spec`, `analysis`, and explicitly promoted `research` are shared kinds).
+
+## Role Requirements
+
+Use portable role names from `roles/README.md` and `core/CONVENTIONS.md`. Concrete model names, subagent frontmatter, and runtime-specific tool lists belong in adapter files.
+
+## Guard Requirements
+
+Adapters must preserve the portable invariants relevant to this capability:
+
+- resolve artifact root through `utilities/artifact-root.sh` or equivalent logic;
+- use DB memory paths, not runtime-native memory files.
+
+## Adapter Realization
+
+| Adapter | Realization |
+|---|---|
+| Claude Code | `adapters/claude/skills/analyze-user/SKILL.md` and `skills/analyze-user/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/analyze-user/SKILL.md`, while `skills/analyze-user/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks. |
+| Codex | Read this spec and run `adapters/codex/bin/preflight.sh capability-info analyze-user`. Use `adapters/codex/skills/analyze-user/SKILL.md` as the native Codex Skill projection; do not consume `skills/analyze-user/SKILL.md` or Claude command files as native Codex configuration. |
+| OpenCode | Read this spec and run `adapters/opencode/bin/preflight.sh capability-info analyze-user`. Use `adapters/opencode/skills/analyze-user/SKILL.md` and `adapters/opencode/commands/analyze-user.md` as native OpenCode projections; do not consume `skills/analyze-user/SKILL.md` or Claude command files as native OpenCode configuration. |
+
+## Compatibility Reference
+
+`skills/analyze-user/SKILL.md` and `adapters/claude/skills/analyze-user/SKILL.md` are byte-identical (enforced by `check-adaptation-boundary.sh`'s `diff -qr`); the only difference is the runtime discovery path — Claude Code discovers `adapters/claude/skills/analyze-user/SKILL.md`, while `skills/analyze-user/SKILL.md` remains a generated compatibility projection sourced from `capabilities/` and kept for parity/drift checks.

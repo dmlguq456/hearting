@@ -1,0 +1,1 @@
+- Reach compute hosts through `compute-hosts` and its inventory (`~/.config/hearting/compute-hosts.yaml`). `run` receipts include measured GPU headroom; `probe` remains available for host comparison.

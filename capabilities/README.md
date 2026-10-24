@@ -9,7 +9,7 @@ Claude, Codex, and OpenCode realize this catalog as sibling adapter outputs;
 none is the source or completion proxy for another. Claude owns concrete Skill
 files under `adapters/claude/skills/`, Codex owns generated native Skill/plugin
 projections, and OpenCode owns generated native Skill/command projections.
-Historical `skills/` files remain Claude compatibility references only.
+Portable procedures and reference documents are owned under `capabilities/`; `skills/` and all native Skill bodies are generated projections, with `skills/` retained as the Claude compatibility discovery mirror.
 
 ## Capability Contract
 
@@ -25,8 +25,7 @@ Each capability has:
 
 For each manifest `entry-router`, discovery and execution are separate
 surfaces. The compact pre-approval router carries routing metadata; after
-approval, the selected portable capability contract and its one owner
-reference govern execution. Assigned stage workers read only their stage
+approval, the selected portable capability contract and the procedure references listed by the shared projection govern execution. Assigned stage workers read only their stage
 contracts. Parent-invoked and model-support capabilities never enter the
 primary-router candidate set.
 
