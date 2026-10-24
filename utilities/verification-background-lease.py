@@ -9,13 +9,15 @@ in that scope is terminated. A test that left a runner or refresher behind
 used to keep it running on a shared host until something else killed it.
 
 The scope's resident memory has one ceiling, so a leak ends this command
-instead of the kernel's OOM killer ending other work on the host.
+instead of the kernel's OOM killer ending other work on the host. The
+--memory-budget SIZE option replaces the default ceiling with an approved value.
 """
 
 from __future__ import annotations
 
 import argparse
 import ctypes
+from fractions import Fraction
 import hashlib
 import json
 import os
@@ -107,12 +109,53 @@ MEMORY_EXCEEDED_EXIT = 125
 
 def memory_budget_bytes() -> int:
     """16 GiB, or a quarter of this host's memory when that is smaller."""
-    try:
-        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-    except (OSError, ValueError):
-        total = 0
+    total = host_memory_bytes()
     budget = 16 * 1024 ** 3
     return min(budget, total // 4) if total > 0 else budget
+
+
+def host_memory_bytes() -> int:
+    try:
+        return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (OSError, ValueError):
+        return 0
+
+
+def parse_size(text: str) -> int:
+    import re
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([A-Za-z]*)", text.strip())
+    if not match:
+        raise ValueError("invalid size")
+    number, unit = match.groups()
+    unit = unit.lower()
+    if unit in ("", "b"):
+        if "." in number:
+            raise ValueError("fractional bytes")
+        multiplier = 1
+    else:
+        decimal = unit in {"kb", "mb", "gb", "tb"}
+        prefix = unit[:-2] if unit.endswith("ib") else unit[:-1] if unit.endswith("b") else unit
+        if prefix not in ("k", "m", "g", "t"):
+            raise ValueError("unknown size unit")
+        exponent = ("k", "m", "g", "t").index(prefix) + 1
+        multiplier = (1000 if decimal else 1024) ** exponent
+    result = int(Fraction(number) * multiplier)
+    if result < 1:
+        raise ValueError("size is less than one byte")
+    return result
+
+
+def resolve_memory_budget(raw: str | None) -> tuple[int, str]:
+    if raw is None:
+        return memory_budget_bytes(), "default"
+    try:
+        value = parse_size(raw)
+    except ValueError:
+        raise ValueError(f"{raw!r}: expected a positive size such as 140GB, 8GiB or 1073741824") from None
+    host = host_memory_bytes()
+    if host > 0 and value > host:
+        raise ValueError(f"{raw!r} is {value} bytes, above this host's {host} bytes")
+    return value, "option"
 
 
 def become_subreaper() -> bool:
@@ -210,9 +253,10 @@ def end_scope(scope: str | None, *, grace: float = 2.0) -> list[int]:
     return ended
 
 
-def wait_within_budget(process: subprocess.Popen[bytes], timeout: float, scope: str) -> int | None:
+def wait_within_budget(process: subprocess.Popen[bytes], timeout: float, scope: str,
+                       budget: int | None = None, source: str = "default") -> int | None:
     """The command's exit status; None on expiry. Raises MemoryError past the budget."""
-    budget = memory_budget_bytes()
+    budget = memory_budget_bytes() if budget is None else budget
     deadline = time.monotonic() + timeout
     while True:
         remaining = deadline - time.monotonic()
@@ -226,7 +270,7 @@ def wait_within_budget(process: subprocess.Popen[bytes], timeout: float, scope: 
         resident = sum(table[pid][1] for pid in scope_pids(table, scope) if pid in table)
         if resident > budget:
             raise MemoryError(f"verification-memory-budget-exceeded resident_bytes={resident} "
-                              f"budget_bytes={budget}")
+                              f"budget_bytes={budget} budget_source={source}")
 
 
 def _stop(signum, _frame):
@@ -247,6 +291,7 @@ def terminate_group(process: subprocess.Popen[bytes]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout", type=float, required=True)
+    parser.add_argument("--memory-budget", metavar="SIZE", help="approved scope memory ceiling")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     command = list(args.command)
@@ -254,6 +299,10 @@ def main(argv: list[str] | None = None) -> int:
         command = command[1:]
     if args.timeout <= 0 or not command:
         parser.error("a positive --timeout and command are required")
+    try:
+        budget, source = resolve_memory_budget(args.memory_budget)
+    except ValueError as exc:
+        parser.error(f"--memory-budget {exc}")
     become_subreaper()
     for signum in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(signum, _stop)
@@ -274,13 +323,17 @@ def main(argv: list[str] | None = None) -> int:
                     "pid": process.pid,
                     "pid_start": identity["pid_start"],
                     "pgid": process.pid,
+                    "memory_budget_bytes": budget,
+                    "memory_budget_source": source,
                 }
             )
+            if args.memory_budget is not None:
+                value["memory_budget_option"] = args.memory_budget
             atomic_json(lease_path, value)
         else:
             lease_path = None
     try:
-        status = wait_within_budget(process, args.timeout, scope)
+        status = wait_within_budget(process, args.timeout, scope, budget, source)
         if status is None:
             terminate_group(process)
             return 124

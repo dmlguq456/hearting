@@ -1735,11 +1735,14 @@ the cancelled row from its active set without granting successor readiness.
 starts: it is the command's child subreaper and tags the command's environment,
 and when the command exits, expires or the lease is stopped it ends whatever is
 still in that scope, detached fixtures included. The scope's resident memory has
-one ceiling (16 GiB, or a quarter of host memory when smaller); past it the lease
-ends the scope and returns 125, so a leaking check ends instead of other work on
-a shared host. The test runner likewise reaps each suite's fixtures when that
-suite ends, and ends its running suites when it is stopped. A peer obligation
-runner whose state root was removed or replaced ends on its next pass.
+one ceiling: 16 GiB, or a quarter of host memory when smaller, unless
+`--memory-budget SIZE` replaces it with the value an approved task or receipt
+names; the lease record and the 125 message name which one applied. Past it the
+lease ends the scope and returns 125, so a leaking check ends instead of other
+work on a shared host. The test runner likewise reaps each suite's fixtures when
+that suite ends, and ends its running suites when it is stopped. A peer
+obligation runner whose state root was removed or replaced ends on its next
+pass.
 
 **Exact reconcile stays attempt-scoped.** A normal `dispatch-reconcile
 --attempt <id> --apply` covers that attempt, its process drain, and its
@@ -2870,7 +2873,7 @@ result. `write_stdin` can confirm or preserve it for the exact matching handle
 and an ongoing structured response. The handle establishes native continuation,
 not OS process liveness. Command display may unwrap an exact native shell
 `-c`/`-lc` argv shape and the verification-lease delimiter
-`utilities/verification-background-lease.py --timeout N -- <argv>`, while
+`utilities/verification-background-lease.py --timeout N [--memory-budget SIZE] -- <argv>`, while
 retaining the original command. Outer `functions.exec` source and arbitrary
 script text provide no reliable inner command.
 

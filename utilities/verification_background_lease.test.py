@@ -55,8 +55,8 @@ class LeaseScopeTest(unittest.TestCase):
             except OSError:
                 pass
 
-    def run_lease(self, command, timeout=30):
-        return subprocess.run([sys.executable, str(LEASE), "--timeout", str(timeout), "--", *command],
+    def run_lease(self, command, timeout=30, options=()):
+        return subprocess.run([sys.executable, str(LEASE), "--timeout", str(timeout), *options, "--", *command],
                               capture_output=True, text=True, timeout=60)
 
     def test_a_detached_descendant_ends_with_its_command(self):
@@ -93,9 +93,49 @@ class LeaseScopeTest(unittest.TestCase):
         self.addCleanup(process.wait)
         self.addCleanup(process.kill)
         with mock.patch.object(L, "memory_budget_bytes", return_value=1), \
-                self.assertRaisesRegex(MemoryError, "verification-memory-budget-exceeded"):
+                self.assertRaisesRegex(MemoryError, "verification-memory-budget-exceeded.*budget_source=default"):
             L.wait_within_budget(process, 30, "unused-scope")
         self.assertIsNone(process.poll())  # the caller, not the check, ends the scope
+
+    def test_default_budget_is_unchanged(self):
+        self.assertEqual(L.resolve_memory_budget(None), (L.memory_budget_bytes(), "default"))
+
+    def test_size_grammar(self):
+        expected = {"1048576": 1048576, "1K": 1024, "1KiB": 1024, "1k": 1024,
+                    "1KB": 1000, "140GB": 140 * 10**9, "8GiB": 8 * 1024**3,
+                    "1.5GiB": 1610612736, "2T": 2 * 1024**4}
+        for raw, value in expected.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(L.parse_size(raw), value)
+        for raw in ("", "abc", "0", "-1", "1.5", "1XB", "nan", "inf", "0.0001K"):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                L.parse_size(raw)
+
+    def test_budget_above_host_memory_is_refused(self):
+        with mock.patch.object(L, "host_memory_bytes", return_value=8 * 1024**3):
+            with self.assertRaisesRegex(ValueError, "9GiB"):
+                L.resolve_memory_budget("9GiB")
+            self.assertEqual(L.resolve_memory_budget("8GiB"), (8 * 1024**3, "option"))
+        with mock.patch.object(L, "host_memory_bytes", return_value=0):
+            self.assertEqual(L.resolve_memory_budget("9GiB"), (9 * 1024**3, "option"))
+
+    def test_bad_budget_is_a_usage_error_before_the_command_runs(self):
+        host = L.host_memory_bytes()
+        for option in ("0", "-5", "lots", f"{host * 2}B"):
+            with self.subTest(option=option):
+                done = self.run_lease([sys.executable, "-c", "print('ran')"],
+                                      options=("--memory-budget", option))
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertIn("--memory-budget", done.stderr)
+                self.assertNotIn("ran", done.stdout)
+
+    def test_option_applies_and_the_message_names_its_source(self):
+        done = self.run_lease(["sleep", self.marker], options=("--memory-budget", "1"))
+        self.assertEqual(done.returncode, 125, done.stderr)
+        self.assertIn("verification-memory-budget-exceeded", done.stderr)
+        self.assertIn("budget_bytes=1", done.stderr)
+        self.assertIn("budget_source=option", done.stderr)
+        self.assertEqual(marked(self.marker), [])
 
     def test_the_budget_is_a_quarter_of_a_small_host(self):
         with mock.patch.object(L.os, "sysconf", side_effect=lambda name: {
