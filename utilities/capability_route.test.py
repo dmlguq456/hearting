@@ -9124,15 +9124,19 @@ class ComposeRouteTest(TestRoute):
    # an explicit --spec-read keeps the caller's provenance and needs no notice
    self.assertEqual(R.compose_spec_read(root,root,"read shared spec")["source"],"read shared spec")
    self.assertNotIn("공유 spec",R.compose_card(self.compose(artifact_root=root,spec_read="read shared spec")))
-   # a spec/prd.md next to a shared spec still refuses, on spec/prd.md alone
+   # The latest shared revision governs; an older legacy copy is not a marker gate.
    (root/"spec").mkdir(); (root/"spec"/"prd.md").write_text("# prd\n",encoding="utf-8")
-   with self.assertRaisesRegex(ValueError,"compose-spec-read-required:[^,]*spec/prd.md$") as ctx: R.compose_spec_read(root,root,"auto")
-   self.assertNotIn("shared",str(ctx.exception))
+   got=R.compose_spec_read(root,root,"auto")
+   self.assertTrue(got["satisfied"])
+   self.assertIn("rrev_02/prd.md",got["source"])
+   self.assertNotIn("spec/prd.md",got["source"])
    (root/"spec"/"prd.md").unlink()
-   # an unreadable reference.json is ignored: the plain no-spec record, no notice
+   # The artifact-cutover resolver falls back to the newest available revision.
    (ref/"reference.json").write_text("{not json",encoding="utf-8")
-   self.assertEqual(R.compose_spec_read(root,root,"auto")["source"],"compose-auto: no spec/prd.md under cwd or artifact root")
-   self.assertNotIn("공유 spec",R.compose_card(self.compose(artifact_root=root)))
+   got=R.compose_spec_read(root,root,"auto")
+   self.assertTrue(got["source"].startswith(R.SPEC_READ_SHARED_PREFIX))
+   self.assertIn("rrev_02/prd.md",got["source"])
+   self.assertIn("공유 spec",R.compose_card(self.compose(artifact_root=root)))
  def test_preset_compile_records_preset_origin_and_derived_shape(self):
   route=R.compile_route(**self.args())
   self.assertEqual(route["selection"]["route_origin"],"preset"); self.assertEqual(route["selection"]["shape"],"direct")
@@ -10693,6 +10697,78 @@ class TerminalGateRegistrySnapshotTest(unittest.TestCase):
                     "owner absence checks must receive the full view, not its selected owner row")
 
 
+
+class SpecReadCandidateAlignmentTest(unittest.TestCase):
+ def auto_read(self,cwd,root):
+  try:
+   return R.compose_spec_read(cwd,root,"auto")
+  except ValueError as exc:
+   return {"satisfied":False,"source":str(exc)}
+
+ def test_shared_revision_supersedes_unmarkable_legacy_prd(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)/".agent_reports"
+   older=root/"shared"/"spec"/"ref_aaa"
+   latest=root/"shared"/"spec"/"ref_zzz"
+   for ref,rrevs in ((older,("rrev_01","rrev_02")),(latest,("rrev_03",))):
+    for rrev in rrevs:
+     (ref/"revisions"/rrev).mkdir(parents=True)
+     (ref/"revisions"/rrev/"prd.md").write_text(f"# {rrev}\n",encoding="utf-8")
+   (older/"reference.json").write_text(json.dumps({"latest_revision_id":"rrev_02","updated_on":"2025-01-01"}),encoding="utf-8")
+   (latest/"reference.json").write_text(json.dumps({"latest_revision_id":"rrev_03","updated_on":"2026-01-01"}),encoding="utf-8")
+   (root/"spec").mkdir(parents=True)
+   (root/"spec"/"prd.md").write_text("# stale legacy\n",encoding="utf-8")
+   try:
+    got=R.compose_spec_read(Path(tmp),root,"auto")
+   except ValueError as exc:
+    got={"satisfied":False,"source":str(exc)}
+   self.assertTrue(got["satisfied"],got)
+   self.assertEqual(got,{"satisfied":True,"source":R.SPEC_READ_SHARED_PREFIX+
+                         str(latest/"revisions"/"rrev_03"/"prd.md")})
+
+ def test_checkout_prd_outside_artifact_root_is_not_required(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp)/"repo"/".agent_reports"
+   checkout=Path(tmp)/"repo"
+   (checkout/"spec").mkdir(parents=True)
+   (checkout/"spec"/"prd.md").write_text("# checkout\n",encoding="utf-8")
+   linked=Path(tmp)/"linked-checkout"
+   (linked/"spec").mkdir(parents=True)
+   (linked/"spec"/"prd.md").write_text("# linked checkout\n",encoding="utf-8")
+   for cwd in (checkout,linked):
+    with self.subTest(cwd=cwd.name):
+     self.assertTrue((cwd/"spec"/"prd.md").is_file())
+     result=self.auto_read(cwd,root)
+     self.assertTrue(result["satisfied"],result)
+     self.assertEqual(result["source"],
+                      "compose-auto: no governing artifact-root PRD; checkout spec/prd.md is informational")
+
+ def test_legacy_only_spec_keeps_session_and_mtime_guard(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   repo=Path(tmp)/"repo"; root=repo/".agent_reports"; prd=root/"spec"/"prd.md"
+   prd.parent.mkdir(parents=True); prd.write_text("# legacy\n",encoding="utf-8")
+   from types import SimpleNamespace
+   import harness_state_roots as STATE_ROOTS
+   home=Path(tmp)/"home"; state=Path(tmp)/"state"
+   env_patch=mock.patch.dict(os.environ,{"HARNESS_STATE_ROOT":str(state),"AGENT_HOME":str(home)})
+   env_patch.start(); self.addCleanup(env_patch.stop)
+   marker_dir=STATE_ROOTS.spec_grounding_dir(SimpleNamespace(agent_home=str(home)))
+   marker_dir.mkdir(parents=True)
+   key=str(root.parent).replace("/","_").replace(" ","_")
+   marker=marker_dir/f"sess-a__{key}"
+   with mock.patch.object(R,"resolve_agent_home",return_value=str(home)), \
+        mock.patch.object(R.ROUTE_AUTHORITY,"default_parent_session_id",return_value="sess-a"):
+    with self.assertRaisesRegex(ValueError,"compose-spec-read-required"):
+     R.compose_spec_read(repo,root,"auto")
+    (marker_dir/f"sess-b__{key}").write_text(str(int(prd.stat().st_mtime)),encoding="utf-8")
+    with self.assertRaisesRegex(ValueError,"compose-spec-read-required"):
+     R.compose_spec_read(repo,root,"auto")
+    marker.write_text(str(int(prd.stat().st_mtime)),encoding="utf-8")
+    self.assertEqual(R.compose_spec_read(repo,root,"auto")["source"],R.SPEC_READ_MARKER_PREFIX+str(prd))
+    os.utime(prd,(prd.stat().st_atime,prd.stat().st_mtime+5))
+    with self.assertRaisesRegex(ValueError,"compose-spec-read-required"):
+     R.compose_spec_read(repo,root,"auto")
+
 class NonGitArtifactDeltaTest(unittest.TestCase):
  def test_artifact_snapshot_delta_tracks_create_modify_delete_and_skips_symlinks(self):
   with tempfile.TemporaryDirectory() as td:
@@ -10707,6 +10783,7 @@ class NonGitArtifactDeltaTest(unittest.TestCase):
    created=output/"created.md";created.write_text("new\n")
    delta=R._artifact_delta(baseline,output)
    self.assertEqual(delta,{changed,deleted,created})
+
 
 
 if __name__=="__main__": unittest.main()

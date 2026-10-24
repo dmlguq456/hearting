@@ -472,10 +472,13 @@ reason and continues from the original cwd. Preview, explain, non-start
 `compose`, and low-level `compile` remain read-only), artifact root
 (`utilities/artifact-root.sh`), tracking and workflow mode by shape, a
 default drift verdict, the spec-read gate (it refuses with
-`compose-spec-read-required` when a `spec/prd.md` exists under the cwd or the
-artifact root and neither this session's read hook recorded reading it unchanged
-nor the caller named what was read; the latest `prd.md` of
-a `shared/spec/<ref>/` revision only adds one `[경로]` card line with its path), and both
+`compose-spec-read-required` when the artifact root's governing legacy
+`spec/prd.md` is selected and this session's read hook has not recorded reading
+it unchanged, unless the caller named what was read; the governing candidates
+come from `artifact_cutover.prd_candidates`, so a shared revision supersedes a
+legacy copy and only adds one `[경로]` card line with its path. A checkout PRD
+outside the artifact root is informational and is not a marker-gate input;
+absence evidence distinguishes that checkout file from a governing PRD), and both
 eligibility probes (`dispatch-readiness`). The result is sealed, verified,
 bound, and guarded exactly like a recipe route: `selection.route_origin`
 records `compose` or `preset`, `selection.shape` records the shape, a staged

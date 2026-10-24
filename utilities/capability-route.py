@@ -2773,7 +2773,6 @@ SELECTION_PIN_CONTRACT_VERSION = 1
 # "|" or ",".  Deliberately narrower than model_profile.SAFE_VALUE.
 SELECTION_PIN_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:-]*$")
 SELECTION_PIN_EFFORT = re.compile(r"^[a-z]+$")
-COMPOSE_SPEC_CANDIDATES = ("spec/prd.md",)
 
 
 def shape_for_intensity(effective):
@@ -3556,22 +3555,18 @@ DEFAULT_ARTIFACT_GUARD = "compose-prechecked"
 
 
 def compose_spec_read(cwd, artifact_root, explicit):
-    """`auto` is honest, not permissive: with no spec candidate it records the
-    absence; with a `spec/prd.md` present it is satisfied when this session's read
-    hook recorded reading that file unchanged, and otherwise refuses and names the
-    file the caller must read (or assert with `--spec-read <source>`). The spec-read gate is
-    a real invariant (WORKFLOW §7.0); compose only removes the boilerplate case.
-    A shared-spec `prd.md` never blocks compose: the record says which file is
-    there to read and `compose_card` passes that path on as one line."""
+    """Require this session's unchanged read only for the artifact root's governing
+    legacy `spec/prd.md`. Resolve that decision with the same `prd_candidates`
+    function as the read hook; shared revisions are informational, and a checkout
+    PRD outside the artifact root cannot satisfy or block the hook's marker gate."""
     if explicit not in (None, "", "auto"):
         return {"satisfied": explicit.lower() not in ("0", "false", "no"), "source": explicit}
-    present, shared = [], []
-    for root in (Path(cwd), Path(artifact_root)):
-        for rel in COMPOSE_SPEC_CANDIDATES:
-            candidate = root / rel
-            if candidate.is_file():
-                present.append(str(candidate))
-        shared.extend(_compose_shared_spec_prds(root))
+    import artifact_cutover as ARTIFACT_CUTOVER
+
+    root = Path(artifact_root).resolve()
+    candidates = ARTIFACT_CUTOVER.prd_candidates(root)
+    present = [str(root / "spec" / "prd.md")] if str(root / "spec" / "prd.md") in candidates else []
+    shared = _compose_shared_spec_prds(root)
     unread = sorted(set(present) - set(_spec_reads_recorded(present, artifact_root) if present else ()))
     if unread:
         raise ValueError("compose-spec-read-required:" + ",".join(unread))
@@ -3579,6 +3574,8 @@ def compose_spec_read(cwd, artifact_root, explicit):
         return {"satisfied": True, "source": SPEC_READ_MARKER_PREFIX + ",".join(sorted(set(present)))}
     if shared:
         return {"satisfied": True, "source": SPEC_READ_SHARED_PREFIX + ",".join(sorted(set(shared)))}
+    if (Path(cwd) / "spec" / "prd.md").is_file():
+        return {"satisfied": True, "source": "compose-auto: no governing artifact-root PRD; checkout spec/prd.md is informational"}
     return {"satisfied": True, "source": "compose-auto: no spec/prd.md under cwd or artifact root"}
 
 
@@ -3622,19 +3619,22 @@ def _compose_spec_read_notice(route):
 
 
 def _compose_shared_spec_prds(root):
-    """Latest `prd.md` of each admitted shared spec (`shared/spec/<ref>/revisions/<rrev>/`,
-    CORE artifact layout); older revisions are history, not what the caller must read."""
+    """The shared governing PRDs selected by artifact_cutover.prd_candidates.
+
+    Older revisions and other shared refs are history, not independent compose
+    requirements; the same candidate list controls both the hook and this notice.
+    """
+    import artifact_cutover as ARTIFACT_CUTOVER
+
+    root = Path(root).resolve()
+    shared_root = root / "shared" / "spec"
     found = []
-    for reference in sorted((root / "shared" / "spec").glob("*/reference.json")):
+    for candidate in ARTIFACT_CUTOVER.prd_candidates(root):
         try:
-            latest = json.loads(reference.read_text(encoding="utf-8")).get("latest_revision_id")
-        except (OSError, ValueError, AttributeError):
+            Path(candidate).relative_to(shared_root)
+        except ValueError:
             continue
-        if not isinstance(latest, str) or not re.fullmatch(r"rrev_[0-9a-f]+", latest):
-            continue
-        candidate = reference.parent / "revisions" / latest / "prd.md"
-        if candidate.is_file():
-            found.append(str(candidate))
+        found.append(str(candidate))
     return found
 
 
