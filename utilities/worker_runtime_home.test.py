@@ -24,11 +24,21 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WorkerHomes(unittest.TestCase):
     def setUp(self):
-        runtime_version = patch.dict(os.environ, {'OPENCODE_RUNTIME_VERSION': '1.19.0'})
-        runtime_version.start()
-        self.addCleanup(runtime_version.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.base = Path(self.tmp.name)
+        # The launch observation needs an `opencode` on PATH even when the
+        # version is pinned; keep the suite independent of the host install.
+        fake_bin = self.base / 'fake-bin'
+        fake_bin.mkdir()
+        fake_opencode = fake_bin / 'opencode'
+        fake_opencode.write_text('#!/bin/sh\necho 1.19.0\n', encoding='utf-8')
+        fake_opencode.chmod(0o755)
+        runtime_version = patch.dict(os.environ, {
+            'OPENCODE_RUNTIME_VERSION': '1.19.0',
+            'PATH': os.pathsep.join(filter(None, (str(fake_bin), os.environ.get('PATH')))),
+        })
+        runtime_version.start()
+        self.addCleanup(runtime_version.stop)
         self.source = self.base / 'user'
         self.source.mkdir()
         self.env = {'AGENT_DISPATCH_JOBS': str(self.base / 'dispatch/jobs.log')}
@@ -933,6 +943,30 @@ class WorkerHomes(unittest.TestCase):
         self.assertEqual(projected['mcp'], {'servers': {}})
         self.assertFalse((home / 'runtime/data/opencode/auth.json').exists())
         self.assertFalse((home / 'runtime/data/opencode/opencode.db').exists())
+
+    def test_opencode_home_uses_the_launch_observation_instead_of_process_probe(self):
+        import opencode_runtime
+        data_home = self.base / 'observed-v2-data'
+        data_home.mkdir()
+        config_source = self.base / 'observed-v2-config'
+        config_source.mkdir()
+        (config_source / 'opencode.json').write_text('{}', encoding='utf-8')
+        env = {**self.env, 'HOME': str(self.base),
+               'OPENCODE_CONFIG_DIR': str(config_source),
+               'XDG_DATA_HOME': str(data_home),
+               'OPENCODE_RUNTIME_VERSION': '2.0.32'}
+        observation = opencode_runtime.OpenCodeLaunchObservation(
+            binary='/usr/bin/opencode', version=(2, 0, 32), generation='v2',
+            cwd=str(Path.cwd().resolve()))
+        with patch.dict(os.environ, {'OPENCODE_RUNTIME_VERSION': '1.19.0'}), \
+             patch.object(opencode_runtime, 'is_v2', side_effect=AssertionError('re-probed')):
+            result = prepare_worker_home(
+                ROOT, 'opencode', 'stage', 'observed-v2', env=env,
+                destination=self.base / 'observed-v2-home',
+                runtime_observation=observation)
+        self.assertNotIn('XDG_DATA_HOME', result)
+        self.assertNotIn('OPENCODE_CONFIG_DIR', result)
+        self.assertEqual((data_home / 'opencode').exists(), False)
 
     def test_opencode_all_worker_types_override_snapshot_without_changing_user_config(self):
         config = {'snapshot': True, 'permission': {'bash': {'secret *': 'deny'}}}

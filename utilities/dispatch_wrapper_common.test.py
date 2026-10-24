@@ -491,6 +491,46 @@ class CloseJobRowTest(unittest.TestCase):
             self.assertIn("failure_class=capacity,detected_by=anchored-early-exit", line)
             self.assertIn("reset=3pm", line)
 
+    def test_candidate_preparation_close_is_shared_by_all_adapters_and_exactly_proven(self):
+        from unittest import mock
+        import route_authority
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs = Path(tmp) / "jobs.log"
+            attempt = "att-candidate-preparation"
+            metadata = {
+                "attempt_schema_version": "2", "dispatch_depth": "2",
+                "transport": "headless", "execution_surface": "registered-headless",
+                "registered_worker": "1", "fallback_hop": "same-harness-headless",
+                "worker_type": "stage", "route_id": "rt-fixture",
+                "route_hash": "sha256:fixture", "route_node": "execute",
+                "attempt_id": attempt, "harness": "codex", "child_harness": "codex",
+                "parent_harness": "codex", "parent_transport": "headless",
+                "parent_sandbox": "workspace-write", "launch_authority": "conductor",
+                "fallback_ordinal": "1",
+            }
+            jobs.write_text("now\topen\t/repo\t/repo\tstage\t" +
+                            ",".join(f"{key}={value}" for key, value in metadata.items()) + "\n",
+                            encoding="utf-8")
+            materialize = mock.Mock()
+            self.assertTrue(C.close_candidate_preparation_failure(
+                jobs, attempt, "opencode-context-limit-unavailable", materialize=materialize))
+            materialize.assert_called_once_with(jobs, attempt)
+            fields = jobs.read_text(encoding="utf-8").strip().split("\t")
+            row = C.parse_registry_metadata(fields[5])
+            self.assertEqual(fields[1], "done")
+            self.assertEqual(row["note"], "dead-candidate-preparation")
+            self.assertEqual(row["failure_class"], "launch-tuple")
+            self.assertEqual(row["launch_outcome"], "never-launched")
+            self.assertEqual(route_authority._replacement_kind(fields[1], row),
+                             "candidate-preparation")
+
+        for harness in ("claude", "codex", "opencode"):
+            wrapper = load(harness)
+            with self.subTest(harness=harness):
+                self.assertIs(wrapper.WRAPPER_COMMON.close_candidate_preparation_failure,
+                              C.close_candidate_preparation_failure)
+
+
     def test_every_wrapper_injects_its_own_materialize_at_call_time(self):
         # foreground_terminal_outcome patches the wrapper's
         # materialize_after_terminal_close in place; the delegation must look

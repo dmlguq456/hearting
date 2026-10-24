@@ -9,12 +9,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import lru_cache
 import json
 import hashlib
 import os
 from pathlib import Path
 import re
+from functools import lru_cache
+import shutil
 import shlex
 import sqlite3
 import stat
@@ -52,6 +53,20 @@ TYPED_TRANSIENT_ERRORS = {
 
 class OpenCodeRuntimeError(RuntimeError):
     """A bounded runtime or credential read could not be completed safely."""
+
+
+@dataclass(frozen=True)
+class OpenCodeLaunchObservation:
+    """One launch's executable generation and working directory."""
+
+    binary: str
+    version: tuple[int, int, int]
+    generation: str
+    cwd: str
+
+    @property
+    def version_text(self) -> str:
+        return ".".join(str(part) for part in self.version)
 
 
 @dataclass(frozen=True)
@@ -96,25 +111,123 @@ def parse_version(value: str | None) -> tuple[int, int, int] | None:
     return tuple(int(item) for item in match.groups()) if match else None
 
 
-@lru_cache(maxsize=16)
-def runtime_version(binary: str = "opencode") -> tuple[int, int, int] | None:
-    """Read the executable version once per process; never start a session."""
-    configured = os.environ.get("OPENCODE_RUNTIME_VERSION")
-    if configured:
-        return parse_version(configured)
+def _resolved_executable(binary: str, env: Mapping[str, str]) -> str | None:
+    candidate = Path(binary).expanduser()
+    if candidate.is_absolute() or os.sep in binary:
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return None
+        return str(resolved) if resolved.is_file() and os.access(resolved, os.X_OK) else None
+    found = shutil.which(binary, path=env.get("PATH"))
+    if not found:
+        return None
+    try:
+        return str(Path(found).resolve(strict=True))
+    except OSError:
+        return None
+
+
+def _probe_version(binary: str, *, cwd: str | None, env: Mapping[str, str], retries: int,
+                   named_opencode: bool = False) -> tuple[int, int, int] | None:
     # Test/injected command overrides are often scripts with unrelated
     # ``--version`` semantics. Never execute an arbitrary command merely to
     # identify it as OpenCode; callers can pass a known version through the
     # runtime-owned environment when their executable is not named opencode.
-    if Path(binary).name != "opencode":
+    if Path(binary).name != "opencode" and not named_opencode:
         return None
+    for _ in range(retries):
+        try:
+            result = subprocess.run([binary, "--version"], cwd=cwd, check=False, text=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=3, env=dict(env))
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            version = parse_version((result.stdout or "") + "\n" + (result.stderr or ""))
+            if version is not None:
+                return version
+    return None
+
+
+def observe_launch(*, binary: str = "opencode", cwd: str | os.PathLike | None = None,
+                   environ: Mapping[str, str] | None = None) -> OpenCodeLaunchObservation:
+    """Resolve one launch's generation using its exact PATH, environment and cwd.
+
+    A failed probe is retried once, with a bounded three-second timeout per
+    attempt. Unknown remains an error; callers must not construct a V1 launch
+    from missing version evidence.
+    """
+    env = dict(os.environ if environ is None else environ)
+    resolved = _resolved_executable(binary, env)
+    if resolved is None:
+        raise OpenCodeRuntimeError("opencode-runtime-executable-unavailable")
+    launch_cwd = str(Path(cwd or os.getcwd()).expanduser().resolve(strict=False))
+    configured = env.get("OPENCODE_RUNTIME_VERSION")
+    version = parse_version(configured) if configured else None
+    if configured and version is None:
+        raise OpenCodeRuntimeError("opencode-runtime-version-invalid")
+    if version is None:
+        version = _probe_version(resolved, cwd=launch_cwd, env=env, retries=2,
+                                 named_opencode=Path(binary).name == "opencode")
+    if version is None:
+        raise OpenCodeRuntimeError("opencode-runtime-generation-unavailable")
+    return OpenCodeLaunchObservation(
+        binary=resolved, version=version,
+        generation="v2" if version[0] >= 2 else "v1", cwd=launch_cwd,
+    )
+
+
+def validate_observation_environment(observation: OpenCodeLaunchObservation,
+                                     environ: Mapping[str, str]) -> None:
+    """Reject a contradictory runtime version injected into a launch environment."""
+    configured = environ.get("OPENCODE_RUNTIME_VERSION")
+    if configured:
+        version = parse_version(configured)
+        if version is None or version != observation.version:
+            raise OpenCodeRuntimeError("opencode-runtime-observation-environment-mismatch")
+
+
+def runtime_version(binary: str = "opencode", *, environ: Mapping[str, str] | None = None,
+                    cwd: str | os.PathLike | None = None) -> tuple[int, int, int] | None:
+    """Read a successful executable version; unknown probes are never cached."""
+    env = dict(os.environ if environ is None else environ)
+    configured = env.get("OPENCODE_RUNTIME_VERSION")
+    if configured:
+        return parse_version(configured)
+    resolved = _resolved_executable(binary, env)
+    if resolved is None or Path(resolved).name != "opencode":
+        if resolved is None or Path(binary).name != "opencode":
+            return None
     try:
-        result = subprocess.run([binary, "--version"], check=False, text=True,
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                timeout=3, env=os.environ.copy())
-    except (OSError, subprocess.TimeoutExpired):
+        executable_stat = Path(resolved).stat()
+        identity = (executable_stat.st_dev, executable_stat.st_ino,
+                    executable_stat.st_mtime_ns, executable_stat.st_size)
+    except OSError:
         return None
-    return parse_version((result.stdout or "") + "\n" + (result.stderr or ""))
+    working_directory = str(Path(cwd or os.getcwd()).resolve(strict=False))
+    environment_digest = hashlib.sha256(repr(sorted(env.items())).encode("utf-8")).hexdigest()
+    cache_key = (resolved, identity, working_directory, environment_digest)
+    cached = _RUNTIME_VERSION_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    version = _probe_version(resolved, cwd=working_directory, env=env, retries=2,
+                             named_opencode=Path(binary).name == "opencode")
+    if version is not None:
+        _RUNTIME_VERSION_CACHE[cache_key] = version
+    return version
+
+
+_RUNTIME_VERSION_CACHE: dict[tuple, tuple[int, int, int]] = {}
+
+
+def _clear_runtime_version_cache() -> None:
+    _RUNTIME_VERSION_CACHE.clear()
+
+
+# Existing read-only consumers clear this process cache when replacing a
+# synthetic environment. Failed probes are absent from the cache by design.
+runtime_version.cache_clear = _clear_runtime_version_cache
 
 
 def is_v2(binary: str = "opencode", version: tuple[int, int, int] | None = None,
@@ -126,7 +239,7 @@ def is_v2(binary: str = "opencode", version: tuple[int, int, int] | None = None,
     if configured:
         version = parse_version(configured)
         return bool(version and version[0] >= 2)
-    version = runtime_version(binary)
+    version = runtime_version(binary, environ=env)
     # Database generation and executable generation can differ after a
     # downgrade or migration. An unavailable version probe stays unknown and
     # must never turn a retained V2 database into a V2 CLI assumption.

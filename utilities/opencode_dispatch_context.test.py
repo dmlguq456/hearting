@@ -10,6 +10,7 @@ import tempfile
 import types
 import unittest
 from unittest import mock
+import dispatch_contract as DC
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
@@ -168,8 +169,12 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
         return result, stream.getvalue(), calls, spawn, worker_commands
 
     def test_v2_cap_is_applied_to_worker_home_and_dispatch_reaches_spawn(self):
-        result, receipt, calls, spawn, worker_commands = self._invoke()
+        real_observer = DISPATCH.opencode_runtime.observe_launch
+        with mock.patch.object(DISPATCH.opencode_runtime, "observe_launch",
+                               wraps=real_observer) as observe:
+            result, receipt, calls, spawn, worker_commands = self._invoke()
         self.assertEqual(result, 0, receipt)
+        self.assertEqual(observe.call_count, 1)
         self.assertIn("child_spawned=1", receipt)
         self.assertEqual([call[0][1:] for call in calls], [
             ["api", "--standalone", "GET", "/api/model"],
@@ -186,6 +191,9 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
         self.assertEqual(len(launch_calls), 1)
         child_env = launch_calls[0].kwargs["env"]
         self.assertEqual(child_env["OPENCODE_CONFIG_CONTENT"], calls[1][2]["OPENCODE_CONFIG_CONTENT"])
+        self.assertEqual(child_env["OPENCODE_RUNTIME_VERSION"], "2.0.32")
+        self.assertEqual(child_env["XDG_DATA_HOME"], calls[0][2]["XDG_DATA_HOME"])
+        self.assertIn(calls[0][0][0], worker_commands[0])
         self.assertNotIn("OPENCODE_DB", child_env)
         self.assertNotIn("OPENCODE_AUTH", child_env)
         self.assertEqual(len(worker_commands), 1)
@@ -196,6 +204,76 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
         self.assertIn("context_window_execution_mode=standalone", receipt)
         self.assertIn("context_window_runtime_target=standalone-per-command", receipt)
         self.assertIn("context_window_server_identity=unavailable", receipt)
+
+    def test_persistent_native_version_unknown_closes_registered_attempt_without_spawn(self):
+        environment = dict(self.environment)
+        environment.pop("OPENCODE_RUNTIME_VERSION")
+        real_cancel = DISPATCH.cancel_governor_reservation
+        with mock.patch.object(DISPATCH, "cancel_governor_reservation",
+                               wraps=real_cancel) as cancel:
+            result, receipt, calls, spawn, worker_commands = self._invoke(environment=environment)
+        self.assertEqual(result, 69, receipt)
+        self.assertIn("reason=opencode-runtime-generation-unavailable", receipt)
+        self.assertIn("child_spawned=0", receipt)
+        self.assertEqual(calls, [])
+        self.assertEqual(worker_commands, [])
+        self.assertFalse(any(any("launch-fence.py" in str(arg) for arg in call.args[0])
+                             for call in spawn.call_args_list))
+        self.assertEqual(cancel.call_count, 1)
+        self.assertTrue(cancel.call_args.args[2])
+        rows = self.jobs.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rows), 1)
+        fields = rows[0].split("\t")
+        metadata = DC.parse_registry_metadata(fields[5])
+        self.assertEqual(fields[1], "done")
+        self.assertEqual(metadata["attempt_id"], "att-context-fixture")
+        self.assertEqual(metadata["note"], "dead-candidate-preparation")
+        self.assertEqual(metadata["failure_class"], "launch-tuple")
+        self.assertEqual(metadata["reconcile_reason"], "opencode-runtime-generation-unavailable")
+        self.assertEqual(metadata["launch_outcome"], "never-launched")
+        self.assertEqual(metadata["launch_fence"], "registry-v1")
+        self.assertNotEqual(metadata.get("launch_started"), "1")
+        self.assertNotIn("pid", metadata)
+
+    def test_native_executable_observation_failure_uses_registered_preparation_close(self):
+        runtime_error = DISPATCH.opencode_runtime.OpenCodeRuntimeError(
+            "opencode-runtime-executable-unavailable")
+        real_cancel = DISPATCH.cancel_governor_reservation
+        with mock.patch.object(DISPATCH.opencode_runtime, "observe_launch", side_effect=runtime_error), \
+                mock.patch.object(DISPATCH.shutil, "which", return_value=None), \
+                mock.patch.object(DISPATCH, "cancel_governor_reservation", wraps=real_cancel) as cancel:
+            result, receipt, calls, spawn, worker_commands = self._invoke()
+        self.assertEqual(result, 69, receipt)
+        self.assertIn("reason=opencode-runtime-executable-unavailable", receipt)
+        self.assertIn("child_spawned=0", receipt)
+        self.assertEqual(calls, [])
+        self.assertEqual(worker_commands, [])
+        self.assertFalse(any(any("launch-fence.py" in str(arg) for arg in call.args[0])
+                             for call in spawn.call_args_list))
+        self.assertEqual(cancel.call_count, 1)
+        self.assertTrue(cancel.call_args.args[2])
+        rows = self.jobs.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(rows), 1)
+        fields = rows[0].split("\t")
+        metadata = DC.parse_registry_metadata(fields[5])
+        self.assertEqual(fields[1], "done")
+        self.assertEqual(metadata["attempt_id"], "att-context-fixture")
+        self.assertEqual(metadata["note"], "dead-candidate-preparation")
+        self.assertEqual(metadata["failure_class"], "launch-tuple")
+        self.assertEqual(metadata["reconcile_reason"], "opencode-runtime-executable-unavailable")
+        self.assertEqual(metadata["launch_outcome"], "never-launched")
+        self.assertNotIn("pid", metadata)
+
+    def test_invalid_configured_runtime_version_remains_an_unregistered_refusal(self):
+        environment = dict(self.environment, OPENCODE_RUNTIME_VERSION="not-a-version")
+        result, receipt, calls, spawn, worker_commands = self._invoke(environment=environment)
+        self.assertEqual(result, 69, receipt)
+        self.assertIn("reason=opencode-runtime-version-invalid", receipt)
+        self.assertIn("child_spawned=0", receipt)
+        self.assertEqual(calls, [])
+        self.assertEqual(worker_commands, [])
+        self.assertFalse(self.jobs.exists())
+        self.assertEqual(spawn.call_count, 0)
 
     def test_v2_spawns_when_the_user_environment_sets_no_xdg_homes(self):
         # A real user shell often leaves XDG_*_HOME unset; the V2 worker keeps the
@@ -236,8 +314,13 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
                              for call in spawn.call_args_list))
         rows = self.jobs.read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].split("\t")[1], "done")
-        self.assertIn("launch_outcome=never-launched", rows[0])
+        fields = rows[0].split("\t")
+        self.assertEqual(fields[1], "done")
+        metadata = DC.parse_registry_metadata(fields[5])
+        self.assertEqual(metadata["note"], "dead-candidate-preparation")
+        self.assertEqual(metadata["failure_class"], "launch-tuple")
+        self.assertEqual(metadata["reconcile_reason"], "opencode-context-limit-unavailable")
+        self.assertEqual(metadata["launch_outcome"], "never-launched")
 
     def test_reused_shared_server_with_unchanged_model_fails_before_worker_spawn(self):
         result, receipt, calls, spawn, worker_commands = self._invoke(shared_stale=True)

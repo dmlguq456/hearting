@@ -327,8 +327,10 @@ def partial_source_assignments(
     nodes: list[dict[str, object]],
     partial: dict[str, object],
     parent_identity: dict[str, str],
+    *,
+    automatic_replacement: bool = False,
 ) -> list[tuple[dict[str, object], str, str, int]]:
-    """Reuse source placement and admit its tuple against the current parent."""
+    """Reuse sealed peer placement; automatic replacement reselects only its gap."""
 
     try:
         with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
@@ -343,9 +345,15 @@ def partial_source_assignments(
         try:
             validate_attempt_metadata(metadata)
             adapter = metadata.get("batch_harness") or metadata["harness"]
-            selected = DISPATCH_NODE.resolve_checked_tuple(
-                route, node, adapter, parent_identity=parent_identity
-            )
+            if automatic_replacement:
+                assignments.append((
+                    node, adapter,
+                    str(metadata.get("batch_fallback_hop") or metadata.get("fallback_hop") or ""),
+                    int(metadata.get("batch_fallback_ordinal") or metadata.get("fallback_ordinal") or 0),
+                ))
+                continue
+            selected = DISPATCH_NODE.resolve_checked_tuple(route, node, adapter,
+                                                           parent_identity=parent_identity)
         except (
             DispatchContractError,
             DISPATCH_NODE.DispatchNodeError,
@@ -356,10 +364,35 @@ def partial_source_assignments(
                 "partial-continuation-source-assignment-invalid",
                 f"node={node_id}:{exc}",
             ) from exc
-        # Original tuple integrity belongs to the history reader.  A current
-        # parent can legitimately realize a different same/cross-harness hop.
+        # A manual continuation keeps the source adapter and uses the current
+        # checked hop. Automatic replacement reselects the gap as a fresh
+        # single-leg allocation while successful peers retain their source rows.
         assignments.append((node, adapter, selected.fallback_hop, selected.ordinal))
     return assignments
+
+
+def automatic_partial_assignments(
+    jobs: Path,
+    route: dict[str, object],
+    nodes: list[dict[str, object]],
+    partial: dict[str, object],
+    parent_identity: dict[str, str],
+    *,
+    allow_degraded: bool,
+    recheck: bool,
+) -> tuple[list[tuple[dict[str, object], str, str, int]], dict[str, object]]:
+    """Allocate the single replacement gap under current policy; preserve peers."""
+    assignments = partial_source_assignments(
+        jobs, route, nodes, partial, parent_identity, automatic_replacement=True)
+    gap_node = next(node for node in nodes if node["id"] == partial["gap_leg_id"])
+    selected, _independence, diagnostics = assign_harnesses(
+        route, [gap_node], allow_degraded=allow_degraded,
+        parent_identity=parent_identity, jobs=jobs, recheck=recheck)
+    replacement = selected[0]
+    assignments = [replacement if node["id"] == partial["gap_leg_id"]
+                   else (node, adapter, hop, ordinal)
+                   for node, adapter, hop, ordinal in assignments]
+    return assignments, diagnostics
 
 
 def registry_batch_input(rows: list[dict], route: dict, nodes: list[dict], group: str,
@@ -1896,8 +1929,8 @@ def batch_receipt(
     interrupted_signal: int = 0,
     selection_diagnostics: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], bool]:
-    order = {str(leg["attempt_id"]): index for index, leg in enumerate(legs)}
-    results.sort(key=lambda leg: order[str(leg["attempt_id"])])
+    order = {str(leg["node"]): index for index, leg in enumerate(legs)}
+    results.sort(key=lambda leg: order[str(leg["node"])])
     started_count = sum(leg.get("launch_state") == "started" for leg in results)
     existing_count = sum(leg.get("launch_state") == "existing" for leg in results)
     success = (
@@ -1959,6 +1992,47 @@ def batch_receipt(
     if interrupted_signal:
         receipt["signal"] = interrupted_signal
     return receipt, success
+
+
+def _consume_initial_replacement_checkpoint(jobs: Path, results: list[dict[str, object]]) -> None:
+    """Let the shared SD-157 controller consume exact failures found at collection."""
+    attempts = {str(row.get("attempt_id")) for row in results if row.get("attempt_id")}
+    if not attempts or not Path(jobs).is_file():
+        return
+    import dispatch_replacement
+    observed_rows = dispatch_replacement._rows(
+        Path(jobs).read_text(encoding="utf-8", errors="replace").splitlines())
+    if any(attempt not in observed_rows or observed_rows[attempt][0][1] in {"open", "running"}
+           for attempt in attempts):
+        # The join/supervisor checkpoint will consume the same controller once
+        # all collected members have terminal evidence; an open peer cannot be
+        # counted as the successful sibling needed by SD-104.
+        return
+    effective, lineage, _attention = dispatch_replacement.advance_batch(jobs, attempts)
+    if not lineage:
+        return
+    rows = dispatch_replacement._rows(Path(jobs).read_text(encoding="utf-8").splitlines())
+    for edge in lineage:
+        source_id = str(edge.get("original_attempt_id") or "")
+        final_id = str(edge.get("replacement_attempt_id") or "")
+        if not source_id or not final_id or source_id in effective or final_id not in rows:
+            continue
+        _fields, metadata = rows[final_id]
+        if metadata.get("launch_started") != "1":
+            continue
+        for result in results:
+            if str(result.get("attempt_id") or "") != source_id:
+                continue
+            result.update({
+                "attempt_id": final_id,
+                "adapter": metadata.get("batch_harness") or metadata.get("harness") or result.get("adapter"),
+                "hop": metadata.get("batch_fallback_hop") or metadata.get("fallback_hop") or result.get("hop"),
+                "launch_state": "started",
+                "child_spawned": "1",
+                "duplicate_attempt": "0",
+                "check": "ok",
+                "reason": "automatic-replacement",
+            })
 
 
 def _bind_subdivision_sessions(
@@ -2510,18 +2584,32 @@ def main(argv: list[str] | None = None) -> int:
                            "sole_gate": "not-applicable"}
         elif partial is not None:
             partial_input = partial_batch_input(jobs, route, nodes, partial)
-            assignments = partial_source_assignments(
-                jobs, route, nodes, partial, parent_identity
-            )
-            # Successful peers retain their sealed placement and consume no
-            # fresh capacity. Reallocating the whole group could reject a dead
-            # gap merely because its successful sibling's backend is now busy.
+            automatic_replacement = bool(partial.get("automatic_replacement_evidence"))
+            if automatic_replacement:
+                assignments, gap_diagnostics = automatic_partial_assignments(
+                    jobs, route, nodes, partial, parent_identity,
+                    allow_degraded=args.allow_degraded_independence,
+                    recheck=args.action == "start",
+                )
+                diagnostics = {
+                    **gap_diagnostics,
+                    "allocation_source": "automatic-single-gap-policy",
+                }
+            else:
+                assignments = partial_source_assignments(
+                    jobs, route, nodes, partial, parent_identity)
+                diagnostics = {"families_considered": [], "usable_families": [],
+                               "family_exclusions": {}, "capacity": {},
+                               "degradation_cause": "", "sole_gate": "not-applicable",
+                               "allocation_source": "sealed-source-manifest"}
+            # Successful peers retain their source placement and consume no
+            # fresh capacity. The automatic path allocates only its one gap.
             families = sorted({adapter for _, adapter, _, _ in assignments})
             independence = "persona"
-            diagnostics = {"families_considered": families, "usable_families": families,
-                           "family_exclusions": {}, "capacity": {},
-                           "degradation_cause": "", "sole_gate": "not-applicable",
-                           "allocation_source": "sealed-source-manifest"}
+            diagnostics["families_considered"] = sorted(
+                set(diagnostics.get("families_considered") or ()) | set(families))
+            diagnostics["usable_families"] = sorted(
+                set(diagnostics.get("usable_families") or ()) | set(families))
         else:
             assignments, independence, diagnostics = assign_harnesses(
                 route, nodes, allow_degraded=args.allow_degraded_independence,
@@ -3188,6 +3276,11 @@ def main(argv: list[str] | None = None) -> int:
                         cancel_unclaimed(governor, governor_root, token)
 
         interrupted_signal = relay.received[-1] if relay.received else 0
+
+    if args.action == "start":
+        _consume_initial_replacement_checkpoint(
+            jobs, [row for row in results if row.get("attempt_id")]
+        )
 
     receipt, success = batch_receipt(
         args=args,

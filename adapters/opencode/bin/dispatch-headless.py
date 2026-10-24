@@ -520,15 +520,22 @@ def _select_model_settings(args: argparse.Namespace) -> dict[str, str]:
 
 def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
     selected = _select_model_settings(args)
+    observation = getattr(args, "opencode_launch_observation", None)
+    generation_env = None
+    if observation is not None:
+        generation_env = dict(os.environ)
+        generation_env["OPENCODE_RUNTIME_VERSION"] = observation.version_text
+    v2_runtime = (observation.generation == "v2" if observation is not None
+                  else opencode_runtime.is_v2())
     if (selected.get("source") in {"profile", "role"}
-            and opencode_runtime.is_v2()):
+            and v2_runtime):
         # The first automatically eligible candidate runs. Without one, an
         # unverified primary still runs here (automatic placement has already
         # left OpenCode out, so only an explicit harness choice reaches this),
         # and only a confirmed rejection is refused.
         original = selected["model"]
         model, variant, evidence = opencode_runtime.select_automatic_model(
-            original, selected["variant"])
+            original, selected["variant"], environ=generation_env)
         if evidence.get("state") == "unavailable" and model == original:
             raise ModelSelectionError(
                 "opencode-model-unavailable",
@@ -545,7 +552,8 @@ def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
 
 
 def prepare_nested_runtime(worktree: Path, attempt_id: str, environ=None,
-                           state_root: Path | str | None = None) -> dict[str, str]:
+                           state_root: Path | str | None = None,
+                           runtime_observation=None) -> dict[str, str]:
     """Keep each attempt's OpenCode state beside the canonical dispatch registry.
 
     OpenCode writes dependency state beside its config as well as under XDG
@@ -569,10 +577,12 @@ def prepare_nested_runtime(worktree: Path, attempt_id: str, environ=None,
     config_root = Path(env.get("XDG_CONFIG_HOME") or Path(env.get("HOME") or Path.home()) / ".config")
     inventory = env.get("COMPUTE_HOSTS_CONFIG") or config_root / "hearting/compute-hosts.yaml"
     values = {"COMPUTE_HOSTS_CONFIG": str(Path(inventory).expanduser().absolute())}
-    try:
-        v2_runtime = opencode_runtime.is_v2()
-    except Exception:
-        v2_runtime = False
+    if runtime_observation is None:
+        probe_env = dict(os.environ)
+        probe_env.update(env)
+        runtime_observation = opencode_runtime.observe_launch(
+            cwd=worktree, environ=probe_env)
+    v2_runtime = runtime_observation.generation == "v2"
     if v2_runtime:
         # V2 owns credentials and sessions in its normal shared service. Let
         # the CLI discover that service through the user's existing XDG
@@ -675,8 +685,10 @@ def scoped_external_directory_config(
     task_publish_scope: dict[str, str] | None = None,
     merge_observation_only: bool = False,
     recordish: bool = False,
+    runtime_observation=None,
 ) -> str:
-    v2 = opencode_runtime.is_v2()
+    v2 = (runtime_observation.generation == "v2" if runtime_observation is not None
+          else opencode_runtime.is_v2())
     raw = os.environ.get("OPENCODE_CONFIG_CONTENT", "").strip()
     try:
         config = json.loads(raw) if raw else {}
@@ -969,14 +981,16 @@ def scoped_external_directory_config(
     return json.dumps(config, ensure_ascii=False, separators=(",", ":"))
 
 
-def deny_commands(config_content: str, commands, selected_agent: str | None = None) -> str:
+def deny_commands(config_content: str, commands, selected_agent: str | None = None,
+                  runtime_observation=None) -> str:
     """Add `bash` deny rules for `commands` to an OpenCode config, globally and for the agent.
 
     Native permissions apply in order and the last match wins, so the merged
     `bash` entry moves last; a selected agent's permissions merge after the
     global ones, so it receives the same rules.
     """
-    v2 = opencode_runtime.is_v2()
+    v2 = (runtime_observation.generation == "v2" if runtime_observation is not None
+          else opencode_runtime.is_v2())
     config = json.loads(config_content) if config_content else {}
     original_v2 = config if v2 else None
     if v2:
@@ -1098,6 +1112,7 @@ def initialize_supervised_owner_input(args: argparse.Namespace, jobs: Path) -> N
 def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -> str:
     settings = args.resolved_model_settings
     standalone = settings.get("context_window_execution_mode") == "standalone"
+    observation = getattr(args, "opencode_launch_observation", None)
     if _supervised_owner(args):
         lease = (supervisor_lease_path(args.jobs_path, args.attempt_id) if args.attempt_id
                  else dispatch_state_root(args.jobs_path) / "supervisor-state" / "preview-only.lease")
@@ -1107,6 +1122,8 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
             "--jobs", str(args.jobs_path), "--parent-attempt-id", args.attempt_id or "unassigned",
             "--state-file", str(lease.with_suffix(".json")), "--lease-file", str(lease),
         ]
+        if observation is not None:
+            cmd += ["--opencode-command", observation.binary]
         route = _supervisor_route(args)
         if route:
             cmd += ["--route-file", route[0], "--route-id", route[1], "--route-hash", route[2]]
@@ -1118,14 +1135,19 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
                     "--variant", args.resolved_model_settings["variant"]]
         return (" ".join(shlex.quote(x) for x in cmd)
                 + f" < {shlex.quote(str(prompt_path))} >> {shlex.quote(str(log_path))} 2>&1")
+    version = observation.version if observation is not None else None
+    binary = observation.binary if observation is not None else "opencode"
+    v2_runtime = (observation.generation == "v2" if observation is not None
+                  else opencode_runtime.is_v2())
     title = ("hearting-worker-" + str(args.attempt_id)
-             if opencode_runtime.is_v2() and getattr(args, "attempt_id", None) else None)
+             if v2_runtime and getattr(args, "attempt_id", None) else None)
     cmd = opencode_runtime.run_argv(
-        binary="opencode", cwd=args.worktree, agent=args.agent,
+        binary=binary, cwd=args.worktree, agent=args.agent,
         model=(settings["model"] if settings["source"] != "inherit" else None),
         variant=(settings["variant"] if settings["source"] != "inherit" else None),
         title=title,
         standalone=standalone,
+        version=version,
     )
     prompt_arg = f'"$(cat -- {shlex.quote(os.path.abspath(prompt_path))})"'
     # V2 dropped `--dir`: the worker's Location is its process cwd, and a worker left
@@ -1134,7 +1156,7 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
              if args.worktree and "--dir" not in cmd else "")
     log = shlex.quote(os.path.abspath(log_path))
     run = enter + " ".join(shlex.quote(x) for x in cmd) + f" {prompt_arg} >> {log} 2>&1"
-    if not opencode_runtime.is_v2():
+    if not v2_runtime:
         return run
     # V2 ends its stream at the final text with no stop event; close the run with the
     # owner runtime's rule (exact session, error-free final text, exit 0), same exit code.
@@ -1365,6 +1387,22 @@ def main(argv: list[str]) -> int:
     worktree = Path(args.worktree)
     if not worktree.is_dir():
         return fail("worktree-not-found", 66, worktree=args.worktree)
+    args.opencode_launch_observation = None
+    args.opencode_launch_observation_error = None
+    if action == "start":
+        try:
+            args.opencode_launch_observation = opencode_runtime.observe_launch(
+                cwd=args.worktree, environ=os.environ)
+        except opencode_runtime.OpenCodeRuntimeError as exc:
+            # Only failure to resolve/probe the native runtime is an eligible
+            # candidate-preparation failure. Invalid caller configuration
+            # remains the ordinary refusal path.
+            if str(exc) not in {
+                "opencode-runtime-executable-unavailable",
+                "opencode-runtime-generation-unavailable",
+            }:
+                return fail(str(exc), 69, worktree=args.worktree, child_spawned="0")
+            args.opencode_launch_observation_error = exc
     try:
         from dispatch_contract import launch_repository_identity
         args.repository_identity, args.repository_kind = launch_repository_identity(
@@ -1375,15 +1413,21 @@ def main(argv: list[str]) -> int:
         args.artifact_root = resolve_artifact_root(args.worktree)
         args.runtime_dir = WRAPPER_COMMON.prepare_runtime_root(args.artifact_root)
         args.report_bundle_root = resolve_report_bundle_root(args.route_file, args.route_node)
-        args.opencode_config_content = scoped_external_directory_config(
-            args.artifact_root,
-            str(args.report_bundle_root) if args.report_bundle_root is not None else None,
-            execution_access_roots=((Path(args.runtime_dir),) if args.runtime_dir else ()),
-            agent_home=args.agent_home,
-            worktree=args.worktree,
-            selected_agent=args.agent,
-            recordish=args.repository_kind == "non-git",
-        )
+        if args.opencode_launch_observation_error is None:
+            args.opencode_config_content = scoped_external_directory_config(
+                args.artifact_root,
+                str(args.report_bundle_root) if args.report_bundle_root is not None else None,
+                execution_access_roots=((Path(args.runtime_dir),) if args.runtime_dir else ()),
+                agent_home=args.agent_home,
+                worktree=args.worktree,
+                selected_agent=args.agent,
+                recordish=args.repository_kind == "non-git",
+                runtime_observation=args.opencode_launch_observation,
+            )
+        else:
+            # Keep the caller's config opaque while generation is unknown. It
+            # is never projected into a V1/V2 form or used to launch a worker.
+            args.opencode_config_content = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
     except ValueError as e:
         return fail("artifact-root-access-config-failed", 64, detail=str(e), worktree=args.worktree)
     args.worker_type = resolve_worker_type(
@@ -1497,7 +1541,12 @@ def main(argv: list[str]) -> int:
     except DispatchContractError as exc:
         return fail(exc.reason, 69, detail=exc.detail, child_spawned="0")
     try:
-        args.resolved_model_settings = resolve_model_settings(args)
+        if args.opencode_launch_observation_error is None:
+            args.resolved_model_settings = resolve_model_settings(args)
+        else:
+            # Validate the sealed/direct selection without inferring a runtime
+            # generation. The attempt is closed before these settings are used.
+            args.resolved_model_settings = _select_model_settings(args)
         from model_profile import selection_receipt, ModelProfileError
         try:
             args.profile_selection_receipt = selection_receipt(args)
@@ -1508,7 +1557,8 @@ def main(argv: list[str]) -> int:
         if args.model_role:
             fields["model_role"] = args.model_role
         return fail(e.reason, 64, **fields)
-    if args.start and shutil.which("opencode") is None:
+    if (args.start and args.opencode_launch_observation_error is None
+            and shutil.which("opencode") is None):
         return fail("opencode-command-unavailable", 69, worktree=args.worktree)
     if args.start:
         rc = check_runtime_projection(args.worktree)
@@ -1596,20 +1646,24 @@ def main(argv: list[str]) -> int:
             args, runtime="opencode", default_roots=default_roots)
         grant = args.execution_access_grant
         args.opencode_config_base_content = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
-        args.opencode_config_content = scoped_external_directory_config(
-            args.artifact_root,
-            str(args.report_bundle_root) if args.report_bundle_root is not None else None,
-            (*((Path(args.runtime_dir),) if args.runtime_dir else ()),
-             *(grant.additional_writable_roots if grant is not None else ())),
-            grant.read_roots if grant is not None else (),
-            agent_home=args.agent_home,
-            contract_read_roots=args.contract_read_roots,
-            worktree=args.worktree,
-            selected_agent=args.agent,
-            task_publish_scope=args.task_publish_scope,
-            merge_observation_only=args.merge_observation_only,
-            recordish=args.repository_kind == "non-git",
-        )
+        if args.opencode_launch_observation_error is None:
+            args.opencode_config_content = scoped_external_directory_config(
+                args.artifact_root,
+                str(args.report_bundle_root) if args.report_bundle_root is not None else None,
+                (*((Path(args.runtime_dir),) if args.runtime_dir else ()),
+                 *(grant.additional_writable_roots if grant is not None else ())),
+                grant.read_roots if grant is not None else (),
+                agent_home=args.agent_home,
+                contract_read_roots=args.contract_read_roots,
+                worktree=args.worktree,
+                selected_agent=args.agent,
+                task_publish_scope=args.task_publish_scope,
+                merge_observation_only=args.merge_observation_only,
+                recordish=args.repository_kind == "non-git",
+                runtime_observation=args.opencode_launch_observation,
+            )
+        else:
+            args.opencode_config_content = os.environ.get("OPENCODE_CONFIG_CONTENT", "")
     except ExecutionAccessError as exc:
         return fail(exc.reason, 64, detail=exc.detail, child_spawned="0")
     except ValueError as exc:
@@ -1619,18 +1673,24 @@ def main(argv: list[str]) -> int:
             detail=str(exc),
             child_spawned="0",
         )
-    if commit_policy.no_commit_stage(args):
+    if args.opencode_launch_observation_error is not None:
+        pass
+    elif commit_policy.no_commit_stage(args):
         # A no-commit worker (commit_policy) is refused `git commit` by the runtime too.
         args.opencode_config_content = deny_commands(
-            args.opencode_config_content, commit_policy.COMMIT_COMMANDS, args.agent)
+            args.opencode_config_content, commit_policy.COMMIT_COMMANDS, args.agent,
+            runtime_observation=args.opencode_launch_observation)
     elif (args.worker_type == "owner" and args.merge_observation_only):
         args.opencode_config_content = deny_commands(
-            args.opencode_config_content, commit_policy.MERGE_MUTATION_COMMANDS, args.agent)
+            args.opencode_config_content, commit_policy.MERGE_MUTATION_COMMANDS, args.agent,
+            runtime_observation=args.opencode_launch_observation)
     args.nested_runtime_env = {}
-    if action == "start" and args.dispatch_depth == 2 and args.parent_harness == "codex":
+    if (args.opencode_launch_observation_error is None and action == "start"
+            and args.dispatch_depth == 2 and args.parent_harness == "codex"):
         try:
             args.nested_runtime_env = prepare_nested_runtime(
-                Path(args.worktree), args.attempt_id, state_root=dispatch_state_root(args.jobs_path))
+                Path(args.worktree), args.attempt_id, state_root=dispatch_state_root(args.jobs_path),
+                runtime_observation=args.opencode_launch_observation)
         except (DispatchContractError, OSError) as exc:
             return fail(getattr(exc, "reason", "nested-opencode-runtime-unavailable"), 73,
                         detail=str(exc), child_spawned="0")
@@ -1669,15 +1729,16 @@ def main(argv: list[str]) -> int:
                 if args.command_attempt_id else f"{args.slug}.opencode.jsonl")
     log_path = log_dir / log_name
     args.log_path = log_path
-    if action == "start":
+    if action == "start" and args.opencode_launch_observation_error is None:
         # V2 execution mode is selected at the existing command-construction
         # boundary. The later context probe must confirm this mode before spawn.
-        v2_execution = opencode_runtime.is_v2()
+        v2_execution = args.opencode_launch_observation.generation == "v2"
         args.resolved_model_settings["context_window_execution_mode"] = (
             "standalone" if v2_execution else "shared-service")
         args.resolved_model_settings["context_window_runtime_target"] = (
             "standalone-per-command" if v2_execution else "shared-service")
-    command = shell_command(args, prompt_path, log_path)
+    command = (shell_command(args, prompt_path, log_path)
+               if args.opencode_launch_observation_error is None else "")
 
     governor = ROOT / "utilities" / "model-worker-governor.py"
     try:
@@ -1742,6 +1803,17 @@ def main(argv: list[str]) -> int:
                     cancel_governor_reservation(governor, governor_root, reservation_token)
                     close_job_row(jobs, args.slug, args.worktree, "producer-binding-failed", "", args.attempt_id)
                     return fail(exc.code, 73, detail=exc.detail, child_spawned="0")
+            if args.opencode_launch_observation_error is not None:
+                reason = str(args.opencode_launch_observation_error)
+                closed = WRAPPER_COMMON.close_candidate_preparation_failure(
+                    jobs, args.attempt_id, reason,
+                    materialize=materialize_after_terminal_close,
+                )
+                cancel_governor_reservation(governor, governor_root, reservation_token)
+                if not closed:
+                    return fail("candidate-preparation-close-failed", 73,
+                                attempt_id=args.attempt_id, child_spawned="0")
+                return fail(reason, 69, attempt_id=args.attempt_id, child_spawned="0")
     else:
         args.attempt_claimed = False
     if action == "start" and not args.attempt_claimed:
@@ -1819,6 +1891,7 @@ def main(argv: list[str]) -> int:
                 "supervised" if _supervised_owner(args) else "poll"
             ),
             "OPENCODE_CONFIG_CONTENT": args.opencode_config_content,
+            "OPENCODE_RUNTIME_VERSION": args.opencode_launch_observation.version_text,
             **args.nested_runtime_env,
             # Headless liveness contract: the OpenCode runtime child exposes
             # the dispatch slug to the plugin, which records a plugin-load
@@ -1827,9 +1900,19 @@ def main(argv: list[str]) -> int:
             # secondary alive signal independent of the OpenCode SQLite mtime.
             "OPENCODE_DISPATCH_SLUG": args.slug,
         }
-        args.worker_runtime_env = prepare_worker_home(args.agent_home, 'opencode',
-                                                     args.worker_type, args.attempt_id,
-                                                     env=dispatch_env)
+        try:
+            args.worker_runtime_env = prepare_worker_home(args.agent_home, 'opencode',
+                                                         args.worker_type, args.attempt_id,
+                                                         env=dispatch_env,
+                                                         runtime_observation=args.opencode_launch_observation)
+        except OSError as exc:
+            WRAPPER_COMMON.close_candidate_preparation_failure(
+                jobs, args.attempt_id, "worker-home-io-failed",
+                materialize=materialize_after_terminal_close)
+            cancel_governor_reservation(governor, governor_root, reservation_token)
+            return fail("worker-home-preparation-failed", 73,
+                        detail=type(exc).__name__, attempt_id=args.attempt_id,
+                        child_spawned="0")
         for key, value in args.worker_runtime_env.items():
             if value is None:
                 dispatch_env.pop(key, None)
@@ -1843,6 +1926,7 @@ def main(argv: list[str]) -> int:
                 config_content=str(dispatch_env.get("OPENCODE_CONFIG_CONTENT") or "{}"),
                 cwd=args.worktree,
                 environ=dispatch_env,
+                runtime_observation=args.opencode_launch_observation,
             )
             selected_mode = args.resolved_model_settings.get("context_window_execution_mode")
             observed_mode = context_capture.get("execution_mode")
@@ -1868,12 +1952,10 @@ def main(argv: list[str]) -> int:
                     )
                 args.opencode_config_base_content = permission_base
         except opencode_context.OpenCodeContextError as exc:
-            annotate_attempt_row(jobs, args.attempt_id, {"launch_outcome": "never-launched"})
+            WRAPPER_COMMON.close_candidate_preparation_failure(
+                jobs, args.attempt_id, "opencode-context-limit-unavailable",
+                materialize=materialize_after_terminal_close)
             cancel_governor_reservation(governor, governor_root, reservation_token)
-            close_job_row(
-                jobs, args.slug, args.worktree,
-                "opencode-context-limit-unavailable", "", args.attempt_id,
-            )
             return fail("opencode-context-limit-unavailable", 69,
                         detail=str(exc), attempt_id=args.attempt_id, child_spawned="0")
         args.opencode_config_content = str(context_capture["config_content"])
@@ -2147,11 +2229,9 @@ def main(argv: list[str]) -> int:
                     os.close(fd)
                 except OSError:
                     pass
-            annotate_attempt_row(
-                jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-            )
+            WRAPPER_COMMON.close_candidate_preparation_failure(
+                jobs, args.attempt_id, "launch-error", materialize=materialize_after_terminal_close)
             cancel_governor_reservation(governor, governor_root, reservation_token)
-            close_job_row(jobs, args.slug, args.worktree, "launch-error", "", args.attempt_id)
             return fail("child-launch-failed", 70, detail=str(exc), attempt_id=args.attempt_id)
         start_ticks = launch_metadata.get("pid_start", "")
         try:

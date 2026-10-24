@@ -2114,9 +2114,18 @@ def main(argv: list[str]) -> int:
             dispatch_env.pop("AGENT_DISPATCH_SUPERVISOR_LEASE_FILE", None)
         # All types receive a minimal home, including first-level reviews and
         # support callers. The nested owner remains inside its declared scope.
-        args.worker_runtime_env = prepare_worker_home(
-            args.agent_home, 'codex', args.worker_type, args.attempt_id,
-            env=dispatch_env, destination=args.nested_codex_home, profile=args.profile)
+        try:
+            args.worker_runtime_env = prepare_worker_home(
+                args.agent_home, 'codex', args.worker_type, args.attempt_id,
+                env=dispatch_env, destination=args.nested_codex_home, profile=args.profile)
+        except OSError as exc:
+            WRAPPER_COMMON.close_candidate_preparation_failure(
+                jobs, args.attempt_id, "worker-home-io-failed",
+                materialize=materialize_after_terminal_close)
+            cancel_governor_reservation(governor, governor_root, reservation_token)
+            return fail("worker-home-preparation-failed", 73,
+                        detail=type(exc).__name__, attempt_id=args.attempt_id,
+                        child_spawned="0")
         dispatch_env.update(args.worker_runtime_env)
         command = shell_command(args, prompt_path, log_path)
         launch_parent_completion_sidecar(args, jobs)
@@ -2292,11 +2301,9 @@ def main(argv: list[str]) -> int:
                     os.close(fd)
                 except OSError:
                     pass
-            annotate_attempt_row(
-                jobs, args.attempt_id, {"launch_outcome": "never-launched"}
-            )
+            WRAPPER_COMMON.close_candidate_preparation_failure(
+                jobs, args.attempt_id, "launch-error", materialize=materialize_after_terminal_close)
             cancel_governor_reservation(governor, governor_root, reservation_token)
-            close_job_row(jobs, args.slug, args.worktree, "launch-error", "", args.attempt_id)
             return fail("child-launch-failed", 70, detail=str(exc), attempt_id=args.attempt_id)
         try:
             args.governor_reservation = wait_governor_reservation_claim(

@@ -3429,6 +3429,41 @@ class TestContinuation(unittest.TestCase):
    self.assertTrue(partial["reused_peer_set_proof_digest"].startswith("sha256:"))
    self.assertTrue(partial["replacement_attempt_id"].startswith("att-"))
 
+ def test_multiple_gaps_and_zero_successful_peers_keep_typed_refusal(self):
+  from replica_batch_contract import build_manifest
+  with tempfile.TemporaryDirectory() as tmp:
+   source=self._source(Path(tmp)/"artifacts")
+   members=[node for node in source["nodes"] if node.get("parallel_group")=="plan-check"]
+   attempts={members[0]["id"]:"att-failed-one",members[1]["id"]:"att-failed-two"}
+   raw_members=[]
+   for index,node in enumerate(members):
+    raw_members.append({
+     "assignment_sha256":"sha256:"+"b"*64,
+     "attempt_id":attempts[node["id"]],"route_node":node["id"],
+     "harness":("codex","claude")[index],"fallback_hop":"same-harness-headless",
+     "fallback_ordinal":1,"model_profile":node["model_profile"],
+     "perspective":node["perspective"],"parallel_leg_index":index,
+     "leg_class":node.get("leg_class") or "peer",
+    })
+   realized=["cross-harness"]
+   if len({row["model_profile"] for row in raw_members})>1:
+    realized.append("model-profile")
+   realized.append("perspective")
+   manifest,_,_=build_manifest(
+    parallel_group="plan-check",route_id=source["route_id"],
+    parent_attempt_id="att-parent",independence="cross-harness",
+    members=raw_members,required_independence_axes=["cross-harness"],
+    realized_independence_axes=realized,
+   )
+   # The other failed leg has no current PASS marker, so it cannot be treated
+   # as a reusable peer for a one-gap continuation.
+   with self.assertRaisesRegex(ValueError,"continuation-source-node-unverified"):
+    R.partial_group_continuation(
+     source,source_group_id="plan-check",source_batch_manifest=manifest,
+     failed_source_attempt_id=attempts[members[1]["id"]],gap_leg_id=members[1]["id"],
+    )
+
+
  def test_compile_cli_attaches_generation_zero_to_route_less_owner(self):
   import subprocess,sys
   with tempfile.TemporaryDirectory() as tmp:

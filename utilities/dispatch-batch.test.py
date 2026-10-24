@@ -3533,7 +3533,7 @@ class DispatchBatchTest(unittest.TestCase):
 
 
 class CompiledStrongGroupPlacementTest(unittest.TestCase):
-    def test_compiled_strong_width_two_groups_choose_distinct_harnesses(self):
+    def test_compiled_strong_groups_preserve_personas_without_forcing_cross_harness(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             base = Path(temp_dir)
             repo = base / "repo"
@@ -3593,7 +3593,19 @@ class CompiledStrongGroupPlacementTest(unittest.TestCase):
                 assignments, _independence, _diagnostics = BATCH.assign_harnesses(
                     route, nodes, allow_degraded=False, parent_identity=parent,
                 )
-                self.assertEqual(len({row[1] for row in assignments}), 2, group)
+                self.assertEqual(len({node["perspective"] for node in nodes}), 2, group)
+                self.assertEqual(len({node["model_profile"] for node in nodes}), 2, group)
+                checked = []
+                for node, harness, hop, ordinal in assignments:
+                    selection = BATCH.DISPATCH_NODE.resolve_checked_tuple(
+                        route, node, harness, parent_identity=parent)
+                    checked.append((selection.tuple_row["child_harness"], selection.fallback_hop,
+                                    selection.ordinal))
+                    self.assertEqual((harness, hop, ordinal),
+                                     (selection.tuple_row["child_harness"], selection.fallback_hop,
+                                      selection.ordinal), group)
+                quality_peers = set(_diagnostics["quality_peer_families"])
+                self.assertTrue(any(row[0] in quality_peers for row in checked), group)
 
 
 class DispatchBatchIntegrationTest(unittest.TestCase):

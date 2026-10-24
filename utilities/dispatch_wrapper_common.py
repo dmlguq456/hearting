@@ -32,7 +32,7 @@ from dispatch_contract import (
     dispatch_state_root, dispatch_state_roots, resolve_dispatch_state_root, runtime_ancestry_binding,
     sealed_launch_home, source_lineage_row_fields, supervisor_lease_path, workflow_completion_receipt,
     ensure_terminal_claim_absent, _atomic_registry_replace, close_attempt_row,
-    parse_registry_metadata,
+    annotate_attempt_row, parse_registry_metadata,
     diagnostic_line,
 )
 import commit_policy
@@ -901,6 +901,27 @@ def close_job_row(jobs: Path, slug: str, worktree: str, reason: str, reset: str,
             # Lock-free readers (join, owner input) must never see a truncated registry.
             _atomic_registry_replace(jobs, "".join(lines).splitlines())
         return changed
+
+
+def close_candidate_preparation_failure(jobs: Path, attempt_id: str, reason: str, *, materialize) -> bool:
+    """Close a pre-payload preparation failure with the existing launch proof.
+
+    The shared note is intentionally narrow: only callers that know the
+    payload launch fence was never crossed may use it. The detail stays in the
+    existing terminal diagnostic field and carries no task or credential data.
+    """
+    if (not attempt_id or reason not in route_authority.CANDIDATE_PREPARATION_REASONS
+            or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", str(reason))):
+        return False
+    if not annotate_attempt_row(Path(jobs), attempt_id, {"launch_outcome": "never-launched"}):
+        return False
+    closed = close_attempt_row(
+        Path(jobs), attempt_id, "dead-candidate-preparation",
+        evidence={"failure_class": "launch-tuple", "reconcile_reason": str(reason)},
+    )
+    if closed:
+        materialize(Path(jobs), attempt_id)
+    return closed
 
 
 def attach_summary_owner(args, log_path: Path, prompt_path: Path, identity, *,

@@ -50,6 +50,10 @@ class ContinuationDecision(NamedTuple):
 PROVEN_BLOCKED_GATE_REASONS = frozenset({
     "completion-attempt-not-current", "completion-evidence-revised-unrecorded",
 })
+CANDIDATE_PREPARATION_REASONS = frozenset({
+    "launch-error", "opencode-context-limit-unavailable", "worker-home-io-failed",
+    "opencode-runtime-executable-unavailable", "opencode-runtime-generation-unavailable",
+})
 
 
 def _replacement_kind(status, meta, *, jobs=None, lines=None):
@@ -62,6 +66,15 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
         # The launch fence is the execution boundary. A reservation may carry a
         # claim, but its absence of launch_started means it has no worker result.
         return 'unlaunched'
+    if (meta.get('worker_type') in {'stage', 'frame', 'review', 'test', 'support'}
+            and meta.get('note') == 'dead-candidate-preparation'
+            and meta.get('failure_class') == 'launch-tuple'
+            and meta.get('reconcile_reason') in CANDIDATE_PREPARATION_REASONS
+            and DR.never_started(status, meta)):
+        # Only the shared wrapper close for a known pre-payload preparation
+        # failure writes this note. Generic never-launched, authority, input,
+        # cancellation and unreadable-result rows retain their own settlement.
+        return 'candidate-preparation'
     if jobs is not None and meta.get('note') == 'dead-worker-blocked':
         found = DR.owner_parked_gate(jobs, meta.get('attempt_id'), lines=lines)
         if found and found['status'] == 'proceed':
@@ -810,19 +823,67 @@ def owns(meta, session, jobs, *, read_context=None) -> bool:
     return seat_owns(meta, session, jobs, read_context=read_context)
 
 
+def _route_owner_correction_successor(source, successor_attempt_id, jobs, *, candidate=None) -> bool:
+    """Prove a depth-2 row's parent moved to its launched same-route correction owner."""
+    original_attempt_id = source.get("parent_attempt_id")
+    if not jobs or not original_attempt_id or not successor_attempt_id \
+            or original_attempt_id == successor_attempt_id:
+        return False
+    try:
+        import dispatch_replacement as replacement
+        rows = replacement._rows(Path(jobs).read_text(encoding="utf-8").splitlines())
+        original = rows.get(original_attempt_id)
+        successor = rows.get(successor_attempt_id)
+        if original is None or successor is None:
+            return False
+        original_fields, original_meta = original
+        successor_fields, successor_meta = successor
+        original_route = (original_meta.get("owner_route_id") or original_meta.get("route_id"),
+                          original_meta.get("owner_route_hash") or original_meta.get("route_hash"))
+        successor_route = (successor_meta.get("owner_route_id") or successor_meta.get("route_id"),
+                           successor_meta.get("owner_route_hash") or successor_meta.get("route_hash"))
+        source_route = (source.get("owner_route_id") or source.get("route_id"),
+                        source.get("owner_route_hash") or source.get("route_hash"))
+        if (original_meta.get("worker_type") != "owner"
+                or original_meta.get("dispatch_depth") != "1"
+                or successor_meta.get("worker_type") != "owner"
+                or successor_meta.get("dispatch_depth") != "1"
+                or original_fields[1] != "done"
+                or successor_fields[1] not in {"open", "running"}
+                or successor_meta.get("launch_started") != "1"
+                or not original_route[0] or original_route != successor_route
+                or source_route != original_route
+                or answerable_owner_end(original_fields[1], original_meta) not in {"BLOCKED", "FAIL"}
+                or not replacement._retained_corrections(jobs, original_attempt_id)):
+            return False
+        if candidate is not None and candidate.get("parent_sid") != successor_meta.get("parent_sid"):
+            return False
+        effective, lineage = replacement.effective_attempts(jobs, {original_attempt_id})
+        return (effective == {successor_attempt_id}
+                and any(edge.get("original_attempt_id") == original_attempt_id
+                        and edge.get("replacement_attempt_id") == successor_attempt_id
+                        for edge in lineage))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return False
+
+
 def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
     """Only the attempt's parent may start its replacement.
 
-    Dispatch depth 2: the caller's own attempt is the registered, live parent
-    attempt. Otherwise: the registered parent session or its same-seat
-    successor. ``current_session`` is called only on that second path.
+    At depth 2, the caller is the registered live parent attempt or its exact
+    launched same-route owner correction successor. At depth 1, the caller is
+    the registered parent session or its same-seat successor. ``current_session``
+    is called only on the depth-1 path.
     """
     if meta.get('dispatch_depth') == '2':
         import dispatch_contract as DC
         parent = meta.get('parent_attempt_id')
-        if not parent or os.environ.get('AGENT_DISPATCH_ATTEMPT_ID') != parent or parent not in rows:
+        current_attempt = os.environ.get('AGENT_DISPATCH_ATTEMPT_ID')
+        if (not parent or not current_attempt or current_attempt not in rows
+                or current_attempt != parent
+                and not _route_owner_correction_successor(meta, current_attempt, jobs)):
             raise DC.DispatchContractError('replacement-parent-identity-unproven')
-        fields, parent_meta = rows[parent]
+        fields, parent_meta = rows[current_attempt]
         if fields[1] not in {'open', 'running'} or not DC._parent_liveness_evidence(Path(jobs), parent_meta)[0]:
             raise DC.DispatchContractError('replacement-parent-not-live')
     elif not meta.get('parent_sid') or not owns(meta, current_session(), jobs):
@@ -830,9 +891,12 @@ def require_replacement_parent(jobs, rows, meta, *, current_session) -> None:
 
 
 def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> bool:
-    """Keep the parent attempt exact; a depth-1 session may be its recorded successor."""
+    """Keep parent identity exact, allowing only recorded owner/session successors."""
     if candidate.get('parent_attempt_id') != source.get('parent_attempt_id'):
-        return False
+        if (source.get('dispatch_depth') != '2'
+                or not _route_owner_correction_successor(
+                    source, candidate.get('parent_attempt_id'), jobs, candidate=candidate)):
+            return False
     if candidate.get('parent_sid') == source.get('parent_sid'):
         return True
     if source.get('dispatch_depth') != '1':
@@ -1332,13 +1396,25 @@ def recovery_node_task(record, source, history, *, attempt_id, route, node, harn
     if source.get("parent") != parent:
         candidate["parent_sid"] = default_parent_session_id()
     require_recovery_binding(record, source, candidate, jobs)
-    selected = sealed_pin_harness(route, worker_type=source.get("worker_type")) or source.get("harness")
+    pinned = sealed_pin_harness(route, worker_type=source.get("worker_type"))
+    batch_group = node.get("parallel_group") or node.get("replica_group")
+    batch_replacement = (
+        isinstance(source.get("batch_manifest_sha256"), str)
+        and re.fullmatch(r"sha256:[0-9a-f]{64}", source["batch_manifest_sha256"]) is not None
+        and source.get("batch_group") == batch_group
+        and source.get("route_node") == node.get("id")
+    )
+    # SD-104 has already selected and sealed this exact candidate tuple in the
+    # batch reservation. A route pin still wins; without one, the original
+    # member harness is not a constraint on the one authorized gap replacement.
+    selected = pinned or (harness if batch_replacement else source.get("harness"))
     if harness != selected:
         raise _contract_error("replacement-launch-binding-mismatch")
     return recovery_task(record, source, history)
 
 
-def _work_options(argv, *, harness=None):
+def _work_options(argv, *, harness=None, batch_selection=False, batch_parent_rebind=False,
+                  batch_adapter_change=False):
     """Read stored semantic options, without synthesizing a new original argv."""
     values = []; index = 0
     while index < len(argv):
@@ -1347,14 +1423,112 @@ def _work_options(argv, *, harness=None):
         if "=" not in token and index + 1 < len(argv) and not argv[index + 1].startswith("--"):
             index += 1; group.append(argv[index])
         if (key not in RECOVERY_SELECTION_OPTIONS
+                and not (batch_selection and key in {"--fallback-hop", "--fallback-ordinal"})
+                and not (batch_parent_rebind and key == "--parent-attempt-id")
+                and not (batch_adapter_change and key in {"--sandbox", "--permission-mode"})
                 and not (harness == "opencode" and key == "--agent")):
             values.append(group)
         index += 1
     return sorted(values, key=lambda value: value[0])
 
 
+def _batch_gap_recovery_authorized(candidate, history, route, worker_type, recovery):
+    """Allow SD-104's checked tuple to change only for its exact candidate-prep gap."""
+    if worker_type not in {"stage", "frame", "review", "test", "support"}:
+        return False
+    if not isinstance(recovery, dict):
+        return False
+    record = recovery.get("record")
+    source_fields = recovery.get("source_fields")
+    source = recovery.get("source")
+    reservation = recovery.get("reservation")
+    jobs = recovery.get("jobs")
+    if not all(isinstance(value, dict) for value in (record, source, reservation)):
+        return False
+    if (not isinstance(source_fields, (list, tuple)) or len(source_fields) != 6
+            or source_fields[1] != "done"):
+        return False
+    proof = record.get("proof") or {}
+    if (proof.get("death_kind") != "candidate-preparation"
+            or proof.get("state") != "quiescent"
+            or record.get("original_attempt_id") != source.get("attempt_id")
+            or record.get("replacement_attempt_id") != candidate.get("attempt_id")):
+        return False
+    if (source.get("note") != "dead-candidate-preparation"
+            or source.get("failure_class") != "launch-tuple"
+            or source.get("reconcile_reason") not in CANDIDATE_PREPARATION_REASONS
+            or source.get("launch_outcome") != "never-launched"
+            or source.get("launch_started") == "1" or source.get("pid")):
+        return False
+    digest = r"sha256:[0-9a-f]{64}"
+    source_manifest = str(source.get("batch_manifest_sha256") or "")
+    if (not re.fullmatch(digest, source_manifest)
+            or not re.fullmatch(digest, str(reservation.get("batch_manifest_sha256") or ""))
+            or reservation.get("batch_manifest_sha256") == source_manifest
+            or not re.fullmatch(digest, str(reservation.get("batch_leg_sha256") or ""))
+            or not re.fullmatch(digest, str(reservation.get("batch_peer_set_sha256") or ""))):
+        return False
+    group = source.get("batch_group")
+    node_id = source.get("route_node")
+    node_group = (route or {}).get("nodes")
+    members = [node for node in node_group or [] if isinstance(node, dict)
+               and (node.get("parallel_group") or node.get("replica_group")) == group]
+    declared = str(source.get("batch_declared_size") or "")
+    if (not group or not node_id or not members
+            or len(members) != len({node.get("id") for node in members})
+            or not any(node.get("id") == node_id for node in members)
+            or declared != str(len(members))
+            or reservation.get("batch_peer_count") != str(len(members) - 1)):
+        return False
+    node = next(node for node in members if node.get("id") == node_id)
+    resolved = candidate.get("resolved") or {}
+    argv = candidate.get("argv") or []
+    def option_value(name):
+        for index, token in enumerate(argv):
+            if token == name and index + 1 < len(argv):
+                return str(argv[index + 1])
+            if isinstance(token, str) and token.startswith(name + "="):
+                return token.split("=", 1)[1]
+        return ""
+    exact = {
+        "batch_attempt_id": str(candidate.get("attempt_id") or ""),
+        "batch_route_id": str((route or {}).get("route_id") or ""),
+        "batch_route_node": node_id,
+        "batch_group": group,
+        "batch_harness": candidate.get("harness"),
+        "batch_fallback_hop": str(resolved.get("fallback_hop") or ""),
+        "batch_fallback_ordinal": option_value("--fallback-ordinal"),
+        "batch_model_profile": str(node.get("model_profile") or ""),
+        "batch_perspective": str(node.get("perspective") or ""),
+        "batch_parallel_leg_index": str(node.get("parallel_leg_index") or 0),
+        "batch_assignment_sha256": source.get("batch_assignment_sha256"),
+    }
+    if any(reservation.get(key) != value for key, value in exact.items()):
+        return False
+    current_parent = str(resolved.get("parent_attempt_id") or "")
+    if (reservation.get("batch_parent_attempt_id") != current_parent
+            or (current_parent != source.get("parent_attempt_id")
+                and not _route_owner_correction_successor(source, current_parent, jobs,
+                    candidate={"parent_sid": resolved.get("parent_session_id")}))):
+        return False
+    return (
+        reservation.get("reservation_kind") in {"parallel-batch", "replica-batch"}
+        and reservation.get("batch_declared_size") == declared
+        and reservation.get("batch_admission_count") == "1"
+        and resolved.get("model_profile") == reservation.get("batch_model_profile")
+        and candidate.get("route_id") == record.get("route_id")
+        and candidate.get("route_node") == node_id
+        and history.get("route_node") == node_id
+        and route.get("route_id") == record.get("route_id")
+        and route.get("route_hash") == record.get("route_hash")
+        and source.get("route_id") == record.get("route_id")
+        and source.get("route_hash") == record.get("route_hash")
+    )
+
+
 def require_recovery_work(candidate, history, *, route=None, worker_type=None,
-                          transition=None, access=None, parent_values=None):
+                          transition=None, access=None, parent_values=None,
+                          batch_recovery=None):
     """Bind the candidate to stored work and grants, while selection follows current authority.
 
     A route-less call is the compatibility check for an old standalone launch;
@@ -1362,7 +1536,22 @@ def require_recovery_work(candidate, history, *, route=None, worker_type=None,
     """
     owner = worker_type == "owner"
     pinned = sealed_pin_harness(route, worker_type=worker_type) if route else None
-    keys = ("jobs", "worktree") if owner or pinned else REPLACEMENT_FIXED_KEYS
+    batch_authorized = _batch_gap_recovery_authorized(
+        candidate, history, route, worker_type, batch_recovery)
+    reservation = (batch_recovery or {}).get("reservation") or {}
+    source = (batch_recovery or {}).get("source") or {}
+    old_hop = (history.get("resolved") or {}).get("fallback_hop") or source.get("fallback_hop")
+    tuple_changed = batch_authorized and any((
+        candidate.get("harness") != history.get("harness"),
+        reservation.get("batch_fallback_hop") != old_hop,
+        str(reservation.get("batch_fallback_ordinal")) != str(source.get("fallback_ordinal")),
+    ))
+    cross_harness_batch = tuple_changed and candidate.get("harness") != history.get("harness")
+    batch_parent_rebind = (batch_authorized
+        and (candidate.get("resolved") or {}).get("parent_attempt_id")
+        != (history.get("resolved") or {}).get("parent_attempt_id"))
+    keys = (("jobs", "worktree") if owner or pinned or cross_harness_batch
+            else REPLACEMENT_FIXED_KEYS)
     for key in keys:
         if candidate.get(key) != history.get(key):
             raise _contract_error("replacement-input-tuple-mismatch", key)
@@ -1375,6 +1564,15 @@ def require_recovery_work(candidate, history, *, route=None, worker_type=None,
     ignored = RECOVERY_SELECTION_VALUES if route else frozenset()
     if owner and route and candidate.get("harness") != history.get("harness"):
         ignored = ignored | {"sandbox", "permission_mode", "parent_sandbox", "parent_transport"}
+    elif cross_harness_batch or batch_parent_rebind:
+        # These are adapter-native permission labels; the same task addresses
+        # and network grant are checked below against the sealed route. The
+        # parent attempt is separately bound to the live same-route correction
+        # owner and the exact batch reservation above.
+        if cross_harness_batch:
+            ignored = ignored | {"sandbox", "permission_mode"}
+        if batch_parent_rebind:
+            ignored = ignored | {"parent_attempt_id"}
     for key in sorted(set(old) | set(new)):
         expected = (parent_values or {}).get(key, old.get(key))
         if expected == new.get(key) or key in ignored:
@@ -1407,7 +1605,7 @@ def require_recovery_work(candidate, history, *, route=None, worker_type=None,
             raise _contract_error("replacement-argv-mismatch", flag)
     sealed, granted = _granted_permission_pair(history, candidate)
     cross_owner = owner and candidate.get("harness") != history.get("harness")
-    if cross_owner:
+    if cross_owner or cross_harness_batch:
         require_recovery_grant_addresses(candidate, history, route=route, access=access)
     elif (candidate.get("harness") == "opencode"
           and "opencode_selected_agent_permission" not in
@@ -1426,11 +1624,17 @@ def require_recovery_work(candidate, history, *, route=None, worker_type=None,
     # A cross-harness owner goes through the ordinary access-grant launcher.
     # Its runtime permission spelling differs, while the exact approved request
     # and addresses above remain bound. Same-harness grants stay comparable.
-    if not cross_owner and granted != sealed:
+    if not cross_owner and not cross_harness_batch and granted != sealed:
         detail = permission_mismatch_detail(history, candidate)
         raise _contract_error("replacement-input-tuple-mismatch", detail or "applied_permissions")
-    if (not owner and _work_options(candidate.get("argv", []), harness=candidate.get("harness"))
-            != _work_options(history.get("argv", []), harness=history.get("harness"))):
+    if (not owner and _work_options(candidate.get("argv", []), harness=candidate.get("harness"),
+                                    batch_selection=tuple_changed,
+                                    batch_parent_rebind=batch_parent_rebind,
+                                    batch_adapter_change=cross_harness_batch)
+            != _work_options(history.get("argv", []), harness=history.get("harness"),
+                             batch_selection=tuple_changed,
+                             batch_parent_rebind=batch_parent_rebind,
+                             batch_adapter_change=cross_harness_batch)):
         raise _contract_error("replacement-argv-mismatch")
 
 

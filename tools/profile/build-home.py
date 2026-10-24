@@ -499,7 +499,8 @@ def _resolve_worker_account_path(value, *, env, cwd=None):
     return path.resolve(strict=False)
 
 
-def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, destination=None, profile=None):
+def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, destination=None, profile=None,
+                      runtime_observation=None):
     """Default typed profile for every launch; never changes the caller's home.
 
     Runtime-owned credentials stay linked. User permissions and hooks retain
@@ -737,10 +738,12 @@ def build_worker_home(agent_home, harness, worker_type, identity, *, env=None, d
         if str(utilities) not in sys.path:
             sys.path.insert(0, str(utilities))
         import opencode_runtime
-        try:
-            v2_runtime = opencode_runtime.is_v2()
-        except Exception:
-            v2_runtime = False
+        if runtime_observation is None:
+            probe_env = dict(os.environ)
+            probe_env.update(env)
+            runtime_observation = opencode_runtime.observe_launch(environ=probe_env)
+        opencode_runtime.validate_observation_environment(runtime_observation, env)
+        v2_runtime = runtime_observation.generation == 'v2'
         source = Path(env.get('OPENCODE_CONFIG_DIR') or Path(env.get('XDG_CONFIG_HOME') or Path.home() / '.config') / 'opencode')
         config = read_json(first_existing(source / 'opencode.jsonc', source / 'opencode.json') or source / 'opencode.json')
         config = deepcopy(config)

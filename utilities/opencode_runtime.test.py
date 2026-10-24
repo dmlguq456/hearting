@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -15,6 +16,47 @@ import opencode_runtime as runtime
 
 
 class OpenCodeRunCodecTest(unittest.TestCase):
+    def test_launch_observation_retries_a_failed_probe_and_binds_v2_binary_and_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "opencode"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            env = {"PATH": str(Path(tmp)), "HOME": str(Path(tmp)), "XDG_DATA_HOME": str(Path(tmp) / "data")}
+            failed = subprocess.CompletedProcess([str(executable), "--version"], 73, "", "unavailable")
+            succeeded = subprocess.CompletedProcess([str(executable), "--version"], 0, "opencode v2.0.32\n", "")
+            with unittest.mock.patch.object(runtime.shutil, "which", return_value=str(executable)), \
+                 unittest.mock.patch.object(runtime.subprocess, "run", side_effect=[failed, succeeded]) as run:
+                observation = runtime.observe_launch(cwd=tmp, environ=env)
+            self.assertEqual(observation.binary, str(executable.resolve()))
+            self.assertEqual(observation.version, (2, 0, 32))
+            self.assertEqual(observation.generation, "v2")
+            self.assertEqual(observation.cwd, str(Path(tmp).resolve()))
+            self.assertEqual(run.call_count, 2)
+            self.assertTrue(all(call.args[0] == [str(executable.resolve()), "--version"]
+                                and call.kwargs["cwd"] == str(Path(tmp).resolve())
+                                and call.kwargs["env"] == env for call in run.call_args_list))
+
+    def test_unknown_probe_is_not_cached_and_actual_v1_remains_observable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "opencode"
+            executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            executable.chmod(0o755)
+            env = {"PATH": str(Path(tmp))}
+            failed = subprocess.CompletedProcess([str(executable), "--version"], 1, "", "probe failed")
+            known = subprocess.CompletedProcess([str(executable), "--version"], 0, "1.19.0\n", "")
+            with unittest.mock.patch.object(runtime.shutil, "which", return_value=str(executable)), \
+                 unittest.mock.patch.object(runtime.subprocess, "run",
+                                            side_effect=[failed, failed, failed, failed, known]) as run:
+                self.assertIsNone(runtime.runtime_version(environ=env))
+                self.assertIsNone(runtime.runtime_version(environ=env))
+                self.assertEqual(runtime.runtime_version(environ=env), (1, 19, 0))
+            self.assertEqual(run.call_count, 5)
+            with unittest.mock.patch.object(runtime.shutil, "which", return_value=str(executable)):
+                v1 = runtime.observe_launch(
+                    environ={"PATH": str(Path(tmp)), "OPENCODE_RUNTIME_VERSION": "1.19.0"}, cwd=tmp)
+            self.assertEqual(v1.generation, "v1")
+            self.assertFalse(runtime.is_v2(version=v1.version))
+
     def test_v1_flags_and_v2_provider_variant_are_separate(self):
         v1 = runtime.run_argv(binary="opencode", cwd="/work", agent="build",
                               model="opencode-go/model", variant="high", pure=True,
