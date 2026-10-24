@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "utilities"))
 sys.path.insert(0, str(ROOT / "tools"))
 import pane_ownership as po
 import session_tidy as st
+import session_tidy_native as native
 
 
 class PaneOwnershipTest(unittest.TestCase):
@@ -188,6 +189,67 @@ class PaneOwnershipTest(unittest.TestCase):
                         self.assertEqual(self.verify(foreground.pid, harness, sid), "wB:p3N")
                 else:
                     self.assertEqual(self.verify(foreground.pid, harness, sid), "wB:p3N")
+
+    def test_claude_bg_job_exact_attach_owns_only_its_foreground_pane(self):
+        from fleet import herdr_projection as hp
+        job, sid = "deadbeef", "bg-session-one"
+        bg, attach = self.runtime(), self.runtime()
+        self.foreground(attach)
+        bg_record = po._process(bg.pid)
+        native_record = {"pid": bg.pid, "procStart": bg_record[5], "kind": "bg",
+                         "jobId": job, "sessionId": sid}
+        sessions = self.root / "sessions"
+        sessions.mkdir()
+        declaration = sessions / f"{bg.pid}.json"
+        declaration.write_text(json.dumps(native_record))
+        original_read = Path.read_bytes
+        attach_argv = [b"claude\0attach\0deadbeef\0"]
+
+        def cmdline(path):
+            if str(path) == f"/proc/{attach.pid}/cmdline":
+                return attach_argv[0]
+            if str(path) == f"/proc/{bg.pid}/cmdline":
+                return b"claude bg-spare\0"
+            return original_read(path)
+
+        with mock.patch.object(po, "_caller_runtime", return_value=(bg_record, True)), \
+                mock.patch.object(native, "_caller_runtime", return_value=(bg_record, True)), \
+                mock.patch.object(po.os, "getpid", return_value=bg.pid), \
+                mock.patch.object(Path, "read_bytes", cmdline), \
+                mock.patch.object(po.shutil, "which", return_value=str(self.herdr)), \
+                mock.patch.object(hp, "runtime_identity", return_value=("claude", sid)), \
+                mock.patch.dict(os.environ, {"HERDR_PANE_ID": "wB:p3N", "CLAUDE_CONFIG_DIR": str(self.root)}):
+            for executable in (b"claude", b"/home/u/.local/share/claude/versions/2.1.30"):
+                with self.subTest(executable=executable):
+                    attach_argv[0] = executable + b"\0attach\0deadbeef\0"
+                    self.assertEqual(po._runtime(attach.pid), ("claude", False))
+                    self.assertEqual(po.verified_pane("wB:p3N", "claude", sid,
+                                                      executable=str(self.herdr)), "wB:p3N")
+                    self.assertTrue(hp.may_report("claude", sid, worker=False))
+            for argv in (b"/opt/unrelated/2.1.30\0attach\0deadbeef\0",
+                         b"/home/u/.local/share/claude/versions/2.1.30\0attach\0badc0ffe\0"):
+                with self.subTest(argv=argv):
+                    attach_argv[0] = argv
+                    self.assertEqual(po.verified_pane("wB:p3N", "claude", sid,
+                                                      executable=str(self.herdr)), "")
+                    self.assertFalse(hp.may_report("claude", sid, worker=False))
+            attach_argv[0] = b"/home/u/.local/share/claude/versions/2.1.30\0attach\0deadbeef\0"
+            self.assertEqual(po.verified_pane("wB:p3N", "claude", "wrong", executable=str(self.herdr)), "")
+            self.assertFalse(hp.may_report("claude", "wrong", worker=False))
+            self.foreground(attach, "other-pane")
+            self.assertEqual(po.verified_pane("wB:p3N", "claude", sid, executable=str(self.herdr)), "")
+            self.assertFalse(hp.may_report("claude", sid, worker=False))
+            self.foreground(attach)
+            self.assertEqual(po.verified_pane("wB:p3N", "claude", sid, pid=attach.pid, executable=str(self.herdr)), "")
+            for key, value in (("jobId", "other"), ("procStart", "old"),
+                               ("sessionId", "other-session"), ("kind", "fg")):
+                declaration.write_text(json.dumps(dict(native_record, **{key: value})))
+                self.assertEqual(po.verified_pane("wB:p3N", "claude", sid, executable=str(self.herdr)), "")
+                self.assertFalse(hp.may_report("claude", sid, worker=False))
+            declaration.write_text(json.dumps(native_record))
+            declaration.unlink()
+            declaration.symlink_to(self.info)
+            self.assertEqual(po.verified_pane("wB:p3N", "claude", sid, executable=str(self.herdr)), "")
 
     def test_inherited_label_different_pty_cannot_overwrite_or_consume_foreground_card(self):
         foreground, unrelated = self.runtime(), self.runtime()

@@ -132,6 +132,10 @@ def _process(pid):
         return None
 
 
+def _native_claude_executable(command):
+    return Path(command).name == "claude" or "/claude/versions/" in command
+
+
 def _runtime(pid):
     try:
         argv = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
@@ -141,7 +145,7 @@ def _runtime(pid):
         # remain service-side processes, never physical pane owners.
         if name in {"claude bg-spare", "claude bg-pty-host"}:
             return "claude", True
-        if name == "claude" or "/claude/versions/" in words[0]:
+        if _native_claude_executable(words[0]):
             return "claude", any(w in {"daemon", "bg-pty-host", "bg-spare"} for w in words[1:3])
         if name == "codex" or name.startswith("codex-"):
             if name != "codex":
@@ -566,6 +570,31 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
             exact = bool(sid and native_sid == sid
                          and ((service and harness in {"codex", "opencode"})
                               or _native_session(own[0], harness) == sid))
+            attached_bg = False
+            if (harness == "claude" and sid and service
+                    and (pid is None or int(pid) == os.getpid())):
+                # A promoted bg-spare has no foreground tty. Its exact live
+                # job declaration and this pane's attach argv form one proof.
+                from session_tidy_native import caller_target, live
+                target = caller_target("claude")
+                record = live(target) if target else None
+                if (target and record and target["pid"] == own[0]
+                        and str(target["start"]) == str(own[5])
+                        and record.get("sessionId") == sid
+                        and record.get("jobId") == target["job"]):
+                    words = [part for part in Path(f"/proc/{foreground[0]}/cmdline")
+                             .read_bytes().split(b"\0") if part]
+                    job = target["job"].encode()
+                    attached_bg = (len(words) == 3 and _native_claude_executable(os.fsdecode(words[0]))
+                                   and words[1:] == [b"attach", job])
+                    if attached_bg:
+                        latest = _pane_process_info(pane, executable=executable,
+                                                    server=server, socket_path=socket_path)
+                        latest_pids = {int(item.get("pid")) for item in (latest or {}).get("foreground_processes") or []
+                                       if isinstance(item, dict) and str(item.get("pid", "")).isdigit()}
+                        attached_bg = bool(int((latest or {}).get("foreground_process_group_id") or 0) == group
+                                           and foreground[0] in latest_pids
+                                           and live(target) == record)
             codex_current = bool(harness == "codex" and sid
                                  and (pid is None or own[0] == int(pid)))
             footer_exact = bool(
@@ -573,7 +602,7 @@ def verified_pane(pane, harness, sid=None, *, pid=None, executable=None, server=
                 and _footer_proves_current_thread(
                     pane, sid, foreground[0], foreground, group, executable=executable,
                     server=server, socket_path=socket_path))
-            binding = (footer_exact if codex_current else physical or exact)
+            binding = (footer_exact if codex_current else physical or exact or attached_bg)
             if (binding
                     and _process(foreground[0]) == foreground and _process(own[0]) == own):
                 return str(pane)
