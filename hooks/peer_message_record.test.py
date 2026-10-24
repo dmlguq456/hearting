@@ -217,6 +217,57 @@ class NativeContextReceiptTest(_BaseTest):
         self.assertEqual(duplicate.stdout, b"")
         self.assertEqual([row for row in self._all_records() if row.get("transfer_ref") == ref], records)
 
+    def test_subagent_post_tool_leaves_parent_message_pending_until_main_prompt(self):
+        text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message()
+        post = self._run("post-tool", {
+            "session_id": sid, "cwd": str(self.tmp_root), "tool_name": "Bash",
+            "agent_id": "agent-child-123", "agent_type": "Explore",
+        })
+        self.assertEqual(post.returncode, 0, post.stderr)
+        self.assertEqual(post.stdout, b"")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertEqual(peer_message._read_pending(ref)["state"], "pending")
+            self.assertEqual(pending_delivery.read(root, sid, delivery_id)["state"], "claimed")
+            self.assertEqual(peer_obligations.ObligationStore(root).get(duty_id)["state"], "pending")
+
+        main = self._prompt(sid)
+        self.assertEqual(main.returncode, 0, main.stderr)
+        self.assertEqual(json.loads(main.stdout)["hookSpecificOutput"]["additionalContext"], text)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertEqual(peer_message._read_pending(ref)["state"], "received")
+            self.assertEqual(pending_delivery.read(root, sid, delivery_id)["state"], "acked")
+            self.assertEqual(peer_obligations.ObligationStore(root).get(duty_id)["state"], "complete")
+
+    def test_agent_type_alone_still_delivers_main_context(self):
+        text, _ref = self._seed_message()
+        spec = importlib.util.spec_from_file_location("agent_type_main_hook", _HOOK)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        payload = {"session_id": "sid-native-context", "cwd": str(self.tmp_root),
+                   "prompt": "", "agent_type": "Explore"}
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))), \
+                mock.patch.object(sys, "argv", [str(_HOOK), "prompt"]):
+            output = io.StringIO()
+            with mock.patch.object(sys, "stdout", output):
+                hook.main()
+        self.assertEqual(json.loads(output.getvalue())["hookSpecificOutput"]["additionalContext"], text)
+
+    def test_subagent_sendmessage_is_still_recorded(self):
+        payload = {
+            "session_id": "sid-subagent-sender", "cwd": str(self.tmp_root),
+            "tool_name": "SendMessage", "agent_id": "agent-child-456",
+            "tool_input": {"to": {"session_id": "sid-recipient", "name": "recipient"},
+                           "message": "[steer] recorded from subagent"},
+        }
+        result = self._run("post-tool", payload)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        records = self._all_records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["from"]["session_id"], "sid-subagent-sender")
+        self.assertEqual(records[0]["body_sha256"],
+                         hashlib.sha256(b"[steer] recorded from subagent").hexdigest())
+
     def test_runtime_completion_keeps_runtime_identity_through_native_receipt_and_ack(self):
         text, ref, sid, duty_id, delivery_id, root = self._seed_registered_message(runtime=True)
         self.assertIn("(runtime-from:", text)

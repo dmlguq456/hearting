@@ -283,7 +283,11 @@ def main():
             handle_post_tool(payload)
         finally:
             mod = _peer_message_module()
-            if mod:
+            # PostToolUse runs inside subagents too, but its session_id names the
+            # parent conversation. Leave parent-directed messages pending until
+            # that conversation's next receiving hook. SendMessage recording above
+            # remains active for subagent calls.
+            if mod and not str(payload.get("agent_id") or "").strip():
                 mod.emit_peer_context({"harness": "claude", "session_id": payload.get("session_id")},
                                       "PostToolUse", native_delivery=True)
     elif mode == "prompt":

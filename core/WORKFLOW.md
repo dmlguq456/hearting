@@ -964,7 +964,11 @@ evidence or a complete empty-group observation can establish execution end.
 Exact inspection reads the worker's result; requesting more failure detail is
 optional and cannot become a second completion gate.
 The runtime acknowledges a delivered notification after its receiving turn
-finishes. Delivery does not restrict the owner's tools or prove stage success;
+finishes. Claude PostToolUse events with a nonempty `agent_id` belong to a
+subagent or teammate even when `session_id` names the parent conversation; they
+record outbound SendMessage calls but leave inbound parent context pending for
+the main session. `agent_type` alone does not identify that case. Delivery does
+not restrict the owner's tools or prove stage success;
 launch dependencies, write authorization and terminal cleanup scopes own those
 decisions. Repeating a notification cannot declare the owner abandoned.
 
