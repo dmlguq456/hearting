@@ -202,12 +202,29 @@ def _claude_compact_observation(sid: str, source: Path, anchor: dict) -> dict:
         if isinstance(boundary, bool) or not isinstance(boundary, int) or boundary < 0 or boundary > size:
             return {"state": "unknown", "reason": "compact-boundary-unknown", "source": str(source)}
         start = max(0, size - COMPACT_SCAN_BYTES)
+        boundary_raw = b""
+        boundary_start = max(0, boundary - COMPACT_SCAN_BYTES + 1)
         with source.open("rb") as handle:
             handle.seek(start)
             if start:
                 handle.readline()       # the first row may start before the bounded window
                 start = handle.tell()
             raw = handle.read()
+            if start > boundary:
+                if boundary_start:
+                    handle.seek(boundary_start - 1)
+                    boundary_prefix = handle.read(1)
+                else:
+                    boundary_prefix = b""
+                handle.seek(boundary_start)
+                boundary_raw = handle.read(boundary - boundary_start)
+            after = os.fstat(handle.fileno())
+        current = source.lstat()
+        identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+        if (source.is_symlink()
+                or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != identity
+                or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns) != identity):
+            return {"state": "unknown", "reason": "transcript-changed-during-read", "source": str(source)}
     except OSError as exc:
         return {"state": "unknown", "reason": f"transcript-read-{type(exc).__name__}", "source": str(source)}
     if raw and not raw.endswith(b"\n"):
@@ -234,14 +251,42 @@ def _claude_compact_observation(sid: str, source: Path, anchor: dict) -> dict:
                  if row.get("type") in ("user", "assistant")
                  and row.get("isSidechain") is not True and row.get("isMeta") is not True
                  and row.get("isCompactSummary") is not True]
+    boundary_rows = []
+    boundary_partial = False
+    if boundary_raw:
+        boundary_offset = boundary_start
+        boundary_lines = boundary_raw.splitlines(keepends=True)
+        if boundary_start:
+            # The preceding byte tells whether this bounded window starts on a row boundary.
+            if boundary_prefix != b"\n" and boundary_lines:
+                boundary_offset += len(boundary_lines.pop(0))
+        for line in boundary_lines:
+            if not line.endswith(b"\n"):
+                break
+            payload = line.rstrip(b"\r\n")
+            if payload:
+                try:
+                    row = json.loads(payload)
+                except (UnicodeDecodeError, ValueError, TypeError):
+                    row = None
+                if isinstance(row, dict):
+                    boundary_rows.append((boundary_offset, row))
+                else:
+                    boundary_partial = True
+            boundary_offset += len(line)
+        boundary_rows = [(pos, row) for pos, row in boundary_rows
+                         if row.get("type") in ("user", "assistant")
+                         and row.get("isSidechain") is not True and row.get("isMeta") is not True
+                         and row.get("isCompactSummary") is not True]
     if not main_rows:
         return {"state": "unknown", "reason": "no-main-transcript-row", "source": str(source)}
+    reply_rows = sorted(main_rows + boundary_rows, key=lambda item: item[0])
     _last_pos, latest = main_rows[-1]
     message = latest.get("message") if isinstance(latest.get("message"), dict) else {}
     terminal = latest.get("type") == "assistant" and message.get("stop_reason") == "end_turn"
     # If the exact boundary has fallen before this scan window, only the latest
     # terminal row remains provable; the omitted earlier tail is reported as partial.
-    partial = start > boundary
+    partial = start > boundary or boundary_partial
     recent_rows, seen_uuids = [], set()
     def add_recent(pos, row):
         uid = str(row.get("uuid") or f"offset:{pos}")
@@ -252,19 +297,44 @@ def _claude_compact_observation(sid: str, source: Path, anchor: dict) -> dict:
         if text:
             recent_rows.append(f"[{row['type']}] {text}")
     preserved = None
+    boundary_row = None
     for _pos, row in reversed(rows):
-        metadata = row.get("compactMetadata")
-        segment = metadata.get("preservedSegment") if isinstance(metadata, dict) else None
-        if row.get("isCompactSummary") is True and isinstance(segment, dict):
-            preserved = segment
+        if _pos == boundary and row.get("type") == "system" and row.get("subtype") == "compact_boundary":
+            boundary_row = row
+            metadata = row.get("compactMetadata")
+            if isinstance(metadata, dict):
+                preserved = metadata
             break
+    if boundary_row is None:
+        for _pos, row in reversed(rows):
+            if _pos > boundary:
+                continue
+            if row.get("isCompactSummary") is True:
+                metadata = row.get("compactMetadata")
+                segment = metadata.get("preservedSegment") if isinstance(metadata, dict) else None
+                if isinstance(segment, dict):
+                    preserved = {"preservedSegment": segment}
+                break
     if preserved is None:
         partial = True
     if isinstance(preserved, dict):
-        start_uuid = preserved.get("startUuid") or preserved.get("start_uuid")
-        end_uuid = preserved.get("endUuid") or preserved.get("end_uuid")
-        by_uuid = {str(row.get("uuid")): (pos, row) for pos, row in rows if row.get("uuid")}
-        if start_uuid and end_uuid and start_uuid in by_uuid and end_uuid in by_uuid:
+        messages = preserved.get("preservedMessages") if isinstance(preserved.get("preservedMessages"), dict) else {}
+        segment = preserved.get("preservedSegment") if isinstance(preserved.get("preservedSegment"), dict) else preserved
+        explicit_uuids = messages.get("uuids") if isinstance(messages.get("uuids"), list) else []
+        keep_uuids = {str(uid) for uid in explicit_uuids if uid}
+        start_uuid = segment.get("headUuid") or segment.get("startUuid") or segment.get("start_uuid")
+        end_uuid = segment.get("tailUuid") or segment.get("endUuid") or segment.get("end_uuid")
+        by_uuid = {str(row.get("uuid")): (pos, row) for pos, row in reply_rows if row.get("uuid")}
+        if keep_uuids:
+            kept_rows = [(pos, row) for uid in explicit_uuids for pos, row in [by_uuid.get(str(uid), (None, None))]
+                         if row is not None and row.get("type") in ("user", "assistant")
+                         and row.get("isSidechain") is not True and row.get("isMeta") is not True
+                         and row.get("isCompactSummary") is not True]
+            if len({str(row.get("uuid")) for _pos, row in kept_rows}) != len(keep_uuids):
+                partial = True
+            for pos, row in kept_rows:
+                add_recent(pos, row)
+        elif start_uuid and end_uuid and start_uuid in by_uuid and end_uuid in by_uuid:
             lo = by_uuid[start_uuid][0]
             hi = by_uuid[end_uuid][0]
             def on_lineage(uid):
@@ -289,14 +359,51 @@ def _claude_compact_observation(sid: str, source: Path, anchor: dict) -> dict:
                 partial = True
         else:
             partial = True
+    preserved_recent = "\n".join(recent_rows)
     for pos, row in main_rows:
         if pos < boundary:
             continue
         add_recent(pos, row)
     recent = "\n".join(recent_rows)
     recent = recent.encode("utf-8")[-COMPACT_RECENT_BYTES:].decode("utf-8", "ignore")
+    post_rows = [(pos, row) for pos, row in main_rows if pos >= boundary]
+    post_recent_rows, post_seen = [], set()
+    for pos, row in post_rows:
+        uid = str(row.get("uuid") or f"offset:{pos}")
+        if uid in post_seen:
+            continue
+        post_seen.add(uid)
+        text = _compact_text(row, "claude")
+        if text:
+            post_recent_rows.append(f"[{row['type']}] {text}")
+    post_recent = "\n".join(post_recent_rows).encode("utf-8")[-COMPACT_RECENT_BYTES:].decode("utf-8", "ignore")
+    reply_candidates = []
+    preserved_reply_uuids = keep_uuids if isinstance(preserved, dict) else set()
+    for pos, row in reply_rows:
+        if pos >= boundary or (preserved_reply_uuids and str(row.get("uuid") or "") not in preserved_reply_uuids):
+            continue
+        msg = row.get("message") if isinstance(row.get("message"), dict) else {}
+        text = _compact_text(row, "claude")
+        if row.get("type") == "assistant" and msg.get("stop_reason") == "end_turn" and text:
+            reply_candidates.append((pos, row, text))
+    if not reply_candidates:
+        for pos, row in reply_rows:
+            if pos >= boundary:
+                continue
+            msg = row.get("message") if isinstance(row.get("message"), dict) else {}
+            text = _compact_text(row, "claude")
+            if row.get("type") == "assistant" and msg.get("stop_reason") == "end_turn" and text:
+                reply_candidates.append((pos, row, text))
+    last_reply = None
+    if reply_candidates:
+        pos, row, text = reply_candidates[-1]
+        first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        first_line = first_line.encode("utf-8")[:1024].decode("utf-8", "ignore")
+        last_reply = {"uuid": str(row.get("uuid") or ""), "byte_offset": pos,
+                      "timestamp": str(row.get("timestamp") or ""), "first_line": first_line}
     return {"state": "ready" if terminal else "pending", "reason": "" if terminal else "turn-not-ended",
             "source": str(source), "boundary": boundary, "recent": recent,
+            "recent_preserved": preserved_recent, "recent_post": post_recent, "last_reply": last_reply,
             "recent_partial": bool(partial or not recent_rows), "latest_type": latest.get("type"),
             "latest_stop_reason": message.get("stop_reason")}
 

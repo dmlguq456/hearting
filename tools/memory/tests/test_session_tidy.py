@@ -1171,6 +1171,40 @@ class TailFirstReadingTest(TidyCase):
 class CompactObservationTest(TidyCase):
     SID = "sid-compact"
 
+    def test_last_reply_priority_precedes_conflicting_summary(self):
+        summary = "요약 원문: 마지막 요청은 전달되지 않았고 결과도 미완료입니다."
+        priority = "위 마지막 답과 요약 뒤 그대로 남은 대화를 요약의 미전달·미완료 서술보다 우선하세요."
+        body = st._compact_body({
+            "summary": summary,
+            "last_reply": {"first_line": "요청을 처리했고 결과는 42입니다.",
+                           "timestamp": "2026-10-21T13:46:13.510Z"},
+            "recent_preserved": "[assistant] 요약 뒤 남은 확인 기록",
+            "recent_post": "[user] 확인 질문",
+        })
+        self.assertIn(priority, body)
+        self.assertLess(body.index("요청을 처리했고 결과는 42입니다."), body.index(priority))
+        self.assertLess(body.index(priority), body.index(summary))
+        self.assertIn(summary, body)
+        self.assertIn("[assistant] 요약 뒤 남은 확인 기록", body)
+
+    def test_compact_instructions_conditionally_account_for_preserved_tail(self):
+        instructions = st.COMPACT_CARD_INSTRUCTIONS
+        self.assertIn("may remain verbatim", instructions)
+        self.assertIn("Do not infer that an omitted request or reply was undelivered", instructions)
+        self.assertIn("which last turn this summary covers", instructions)
+        self.assertIn("preserved transcript needs checking", instructions)
+        self.assertIn("Do not assume a later turn is visible or available", instructions)
+        claude_before = st.run_hook("claude", "compact", self.SID, phase="before")
+        opencode_before = st.run_hook("opencode", "compact", self.SID, phase="before")
+        self.assertEqual(claude_before, instructions)
+        self.assertEqual(opencode_before, instructions)
+
+    def test_no_last_reply_has_no_last_reply_priority(self):
+        summary = "요약 원문: 작업 중입니다."
+        body = st._compact_body({"summary": summary, "recent_post": "[assistant] 뒤 답"})
+        self.assertTrue(body.startswith(summary))
+        self.assertNotIn("요약의 미전달·미완료", body)
+
     def append_claude(self, path, row):
         with path.open("ab") as handle:
             handle.write((json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -1218,6 +1252,131 @@ class CompactObservationTest(TidyCase):
         self.assertEqual(observation["state"], "ready")
         self.assertIn("요약이 못 본 요청", observation["recent"])
         self.assertEqual(observation["recent"].count("남겨 둘 시작 대화"), 1)
+
+    def test_system_compact_boundary_preserves_last_reply_and_refreshes_card(self):
+        path = self.iso.root / f"{self.SID}.jsonl"
+        rows = [
+            {**self.claude_row("user", "u1", "질문"), "parentUuid": None},
+            {**self.claude_row("assistant", "a1", "압축 직전 마지막 답\n세부 내용", stop="end_turn"),
+             "parentUuid": "u1", "timestamp": "2026-10-21T13:46:13.510Z"},
+        ]
+        for row in rows:
+            self.append_claude(path, row)
+        boundary = path.stat().st_size
+        preserved = {"anchorUuid": "a1", "uuids": ["u1", "a1"], "allUuids": ["u1", "a1", "tool"]}
+        self.append_claude(path, {"type": "system", "subtype": "compact_boundary", "uuid": "boundary",
+                                  "timestamp": "2026-10-21T13:46:14Z", "compactMetadata": {
+                                      "preservedMessages": preserved,
+                                      "preservedSegment": {"headUuid": "u1", "anchorUuid": "a1", "tailUuid": "a1"}}})
+        info = path.stat()
+        anchor = {"boundary_offset": boundary, "transcript_identity": f"{info.st_dev}:{info.st_ino}"}
+        self.append_claude(path, {**self.claude_row("assistant", "fake-tool", "secret", stop="end_turn"),
+                                  "isSidechain": True})
+        self.append_claude(path, self.claude_row("user", "after", "후속 질문"))
+        self.append_claude(path, self.claude_row("assistant", "after-answer", "후속 답", stop="end_turn"))
+        observation = tt.compact_observation("claude", self.SID, str(path), anchor)
+        self.assertEqual(observation["state"], "ready")
+        self.assertEqual(observation["last_reply"], {
+            "uuid": "a1", "byte_offset": len((json.dumps(rows[0], ensure_ascii=False) + "\n").encode()) + 0,
+            "timestamp": "2026-10-21T13:46:13.510Z", "first_line": "압축 직전 마지막 답"})
+        self.assertIn("[assistant] 압축 직전 마지막 답", observation["recent_preserved"])
+        self.assertNotIn("secret", observation["recent_preserved"])
+        self.assertIn("[user] 후속 질문", observation["recent_post"])
+        self.assertNotIn("압축 직전 마지막 답", observation["recent_post"])
+
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            seat = st.resolve_seat("claude", str(self.cwd))
+            with st.seat_lock(seat.key):
+                st.write_card(seat, "claude", self.SID, "요약", cwd=str(self.cwd), origin="runtime-compact",
+                              compact_context={"identity": "compact-1", "transcript": str(path)})
+                card = st.read_latest_card(seat)
+                self.assertTrue(st.update_compact_card_locked(
+                    seat, card["generation"], "compact-1", recent=observation["recent_post"],
+                    recent_preserved=observation["recent_preserved"], last_reply=observation["last_reply"],
+                    source=observation["source"], recent_partial=observation["recent_partial"]))
+            card = st.read_latest_card(seat)
+            first_line = card["body"].splitlines()[0]
+            self.assertEqual(first_line,
+                             "압축 직전 마지막 답 (2026-10-21 13:46:13 UTC / 2026-10-21 22:46:13 KST): 압축 직전 마지막 답")
+            self.assertIn("[요약 뒤 그대로 남은 대화]", card["body"])
+            self.assertIn("[압축 뒤 이어진 대화]", card["body"])
+
+    def test_compact_card_shares_recent_budget_with_maximum_summary(self):
+        reply = {"uuid": "last-answer", "byte_offset": 42,
+                 "timestamp": "2026-10-21T13:46:13.510Z", "first_line": "완료 보고 " + "답" * 1000}
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            seat = st.resolve_seat("claude", str(self.cwd))
+            for recent in ("", "[assistant] 후속 답", "[assistant] " + "후" * 6000):
+                with self.subTest(recent_bytes=len(recent.encode("utf-8"))):
+                    with st.seat_lock(seat.key):
+                        st.write_card(seat, "claude", self.SID, "s" * st.COMPACT_SUMMARY_MAX_BYTES,
+                                      cwd=str(self.cwd), origin="runtime-compact",
+                                      compact_context={"identity": "budget"})
+                        original = st.read_latest_card(seat)
+                        self.assertTrue(st.update_compact_card_locked(
+                            seat, original["generation"], "budget", recent=recent,
+                            recent_preserved="[assistant] " + "보" * 6000,
+                            last_reply=reply, source="p" * st.COMPACT_METADATA_MAX_BYTES))
+                    card = st.read_latest_card(seat)
+                    compact = card["compact"]
+                    self.assertEqual(compact["summary"], "s" * st.COMPACT_SUMMARY_MAX_BYTES)
+                    self.assertEqual(card["generation"], original["generation"])
+                    self.assertEqual(compact["identity"], "budget")
+                    expected_recent = st._cut_bytes(st._normalize_body(recent), st.COMPACT_RECENT_MAX_BYTES)[0]
+                    self.assertEqual(compact["recent_post"], expected_recent)
+                    self.assertLessEqual(len((compact["recent_post"] + compact["recent_preserved"]).encode("utf-8")),
+                                         st.COMPACT_RECENT_MAX_BYTES)
+                    self.assertTrue(compact["recent_partial"])
+                    self.assertTrue(card["body"].startswith("압축 직전 마지막 답 ("))
+                    self.assertIn("완료 보고", card["body"].splitlines()[0])
+                    self.assertLessEqual(len(card["body"].encode("utf-8")), st.COMPACT_CARD_BODY_MAX_BYTES)
+
+    def test_compact_renderer_distinguishes_empty_post_from_legacy_missing_post(self):
+        compact = {"summary": "요약", "recent": "보존된 원문", "recent_preserved": "보존된 원문",
+                   "recent_post": ""}
+        body = st._compact_body(compact)
+        self.assertEqual(body.count("보존된 원문"), 1)
+        self.assertNotIn("[압축 뒤 이어진 대화]", body)
+        legacy = st._compact_body({"summary": "요약", "recent": "예전 후속 대화"})
+        self.assertIn("[압축 뒤 이어진 대화]\n예전 후속 대화", legacy)
+
+    def test_large_transcript_reads_last_reply_from_bounded_exact_boundary_window(self):
+        path = self.iso.root / f"{self.SID}.jsonl"
+        self.append_claude(path, {**self.claude_row("assistant", "old-sidechain", "가짜 완료", stop="end_turn"),
+                                  "isSidechain": True})
+        # Make the transcript exceed the bounded window before the valid reply too, so
+        # the boundary read starts inside this row and must discard its partial prefix.
+        with path.open("ab") as handle:
+            handle.write((json.dumps(self.claude_row("assistant", "large-sidechain", "x" * (tt.COMPACT_SCAN_BYTES + 64),
+                                                     stop="end_turn"), ensure_ascii=False) + "\n").encode())
+        self.append_claude(path, {**self.claude_row("assistant", "near-sidechain", "가짜 최근 완료", stop="end_turn"),
+                                  "isSidechain": True})
+        reply_offset = path.stat().st_size
+        self.append_claude(path, {**self.claude_row("assistant", "before-boundary", "압축 직전 보존 답", stop="end_turn"),
+                                  "timestamp": "2026-10-21T13:46:13.510Z"})
+        boundary = path.stat().st_size
+        self.append_claude(path, {"type": "system", "subtype": "compact_boundary", "uuid": "boundary",
+                                  "compactMetadata": {"preservedMessages": {"uuids": ["unknown-preserved-uuid"]}}})
+        info = path.stat()
+        anchor = {"boundary_offset": boundary, "transcript_identity": f"{info.st_dev}:{info.st_ino}"}
+        with path.open("ab") as handle:
+            for index in range(1100):
+                row = self.claude_row("user", f"post-{index}", "뒤쪽 행 " + "z" * 1000)
+                handle.write((json.dumps(row, ensure_ascii=False) + "\n").encode())
+            row = self.claude_row("user", "later-user", "아직 답하지 않은 새 요청")
+            handle.write((json.dumps(row, ensure_ascii=False) + "\n").encode())
+
+        observation = tt.compact_observation("claude", self.SID, str(path), anchor)
+        self.assertGreater(path.stat().st_size, tt.COMPACT_SCAN_BYTES)
+        self.assertGreater(path.stat().st_size - tt.COMPACT_SCAN_BYTES, observation["boundary"])
+        self.assertEqual(observation["state"], "pending")
+        self.assertEqual(observation["latest_type"], "user")
+        self.assertEqual(observation["last_reply"], {
+            "uuid": "before-boundary", "byte_offset": reply_offset,
+            "timestamp": "2026-10-21T13:46:13.510Z", "first_line": "압축 직전 보존 답"})
+        self.assertTrue(observation["recent_partial"])
+        self.assertNotIn("가짜 완료", observation["recent_preserved"])
+        self.assertNotIn("large-sidechain", observation["recent_preserved"])
 
     def test_partial_latest_row_and_replaced_transcript_fail_closed(self):
         path = self.iso.root / f"{self.SID}.jsonl"
@@ -4241,7 +4400,8 @@ class SeatHandoverTest(TidyCase):
                 {"harness": "unknown", "name": "-"}, "explicit", "1", source="explicit"))
             with st.seat_lock(seat.key):
                 st.record_event(seat, "claude", "sid-A", "start", cwd=str(self.cwd))
-                st.write_card(seat, "claude", "sid-A", "work", cwd=str(self.cwd))
+                st.write_card(seat, "claude", "sid-A", "compact summary", cwd=str(self.cwd),
+                              origin="runtime-compact", compact_context={"identity": "fixture-compact"})
             card = st.read_latest_card(seat)
             request = {"schema": clear.SCHEMA, "seat": seat.as_dict(),
                        "harness": "claude", "sid": "sid-A",
@@ -4257,12 +4417,35 @@ class SeatHandoverTest(TidyCase):
 
             with st.seat_lock(seat.key):
                 st.atomic_write_json(self.handover._snapshot_path(seat.key), {})
-            with mock.patch.object(st, "update_compact_card_locked", return_value=True):
-                clear._refresh_compact_card(request, {"recent": "summary", "source": "fixture"})
+            observation = {"recent": "후속 답", "recent_post": "[assistant] 후속 답",
+                           "recent_preserved": "[assistant] 압축 전 답", "source": "fixture",
+                           "recent_partial": False, "last_reply": {
+                               "uuid": "answer-1", "byte_offset": 42,
+                               "timestamp": "2026-10-21T13:46:13.510Z",
+                               "first_line": "압축 직전 마지막 답"}}
+            clear._refresh_compact_card(request, observation)
             refreshed = self.handover.read_snapshot(seat.key)
             self.assertEqual(refreshed["bindings"], [])
             self.assertEqual(refreshed["steward"]["roles"][0]["generation"],
                              prepared["steward"]["roles"][0]["generation"])
+            compact_card = st.read_latest_card(seat)
+            self.assertEqual(compact_card["compact"]["last_reply"], observation["last_reply"])
+            self.assertEqual(compact_card["compact"]["recent_preserved"], observation["recent_preserved"])
+            self.assertEqual(compact_card["body"].splitlines()[0],
+                             "압축 직전 마지막 답 (2026-10-21 13:46:13 UTC / 2026-10-21 22:46:13 KST): 압축 직전 마지막 답")
+
+            # An explicit empty new post field must not fall back to the legacy
+            # combined tail, which includes the preserved pre-compaction reply.
+            clear._refresh_compact_card(request, {
+                "recent": "[assistant] 보존 원문", "recent_post": "",
+                "recent_preserved": "[assistant] 보존 원문", "source": "fixture"})
+            empty_post_card = st.read_latest_card(seat)
+            self.assertEqual(empty_post_card["compact"]["recent_post"], "")
+            self.assertEqual(empty_post_card["body"].count("[assistant] 보존 원문"), 1)
+            self.assertNotIn("[압축 뒤 이어진 대화]", empty_post_card["body"])
+            # Old callers without the new field still supply their recent tail.
+            clear._refresh_compact_card(request, {"recent": "예전 후속 대화", "source": "fixture"})
+            self.assertEqual(st.read_latest_card(seat)["compact"]["recent_post"], "예전 후속 대화")
 
     def test_watch_snapshot_keeps_exact_unresolved_watch_identity_across_handover(self):
         pm = self.handover._peer_message()

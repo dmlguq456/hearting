@@ -1078,9 +1078,11 @@ def _refresh_compact_card(req: dict, observation: dict) -> None:
             held["snapshot_count"] = len(bindings)
             _write_reservation(held)
             st.update_compact_card_locked(seat, int(req.get("card_generation", 0) or 0), identity,
-                                          recent=str(observation.get("recent") or ""),
+                                          recent=str(observation.get("recent_post", observation.get("recent")) or ""),
                                           source=str(observation.get("source") or ""),
-                                          recent_partial=bool(observation.get("recent_partial")))
+                                          recent_partial=bool(observation.get("recent_partial")),
+                                          recent_preserved=str(observation.get("recent_preserved") or ""),
+                                          last_reply=observation.get("last_reply"))
     except BaseException:
         # The original complete summary remains authoritative; best-effort enrichment
         # and the extra snapshot do not turn missing transcript detail into a clear gate.
