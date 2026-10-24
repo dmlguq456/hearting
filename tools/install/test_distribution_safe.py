@@ -1066,6 +1066,7 @@ class ManagedRuntimeAdoptionTest(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.activations = []
+        self.activation_preserved = []
         for name, replacement in (
             ("_activate_release", self._fake_activate),
             ("_probe_command", lambda command: (False, "probe unavailable")),
@@ -1106,7 +1107,20 @@ class ManagedRuntimeAdoptionTest(unittest.TestCase):
         self.activations.append((Path(release_root).name, tuple(selected)))
         for runtime in selected:
             self._record_activation(Path(release_root), runtime)
-        return {"runtimes": selected, "session_action": {}}
+        report = {
+            "runtimes": [
+                {"runtime": runtime, "preserved": [
+                    path for owner, path in self.activation_preserved if owner == runtime
+                ]}
+                for runtime in selected
+            ],
+            "lines": ["activate: claude projection refreshed"],
+            "report_lines": [
+                f"preserved user-changed: {path}"
+                for _runtime, path in self.activation_preserved
+            ],
+        }
+        return {"runtimes": selected, "session_action": {}, "report": report}
 
     def _bootstrap_claude_codex_then_activate_opencode(self) -> None:
         self._make_release("v1.0.0")
@@ -1134,6 +1148,19 @@ class ManagedRuntimeAdoptionTest(unittest.TestCase):
         distribution.update(runtimes=["opencode"])
         self.assertEqual(self.activations, [("v1.1.0", ("opencode",))])
         self.assertEqual(distribution.managed_status()["runtimes"], ["claude", "codex", "opencode"])
+
+    def test_update_forwards_only_preservation_lines_from_multi_runtime_report(self) -> None:
+        self._bootstrap_claude_codex_then_activate_opencode()
+        self._make_release("v1.1.0")
+        self.activation_preserved = [("claude", "/fixture/home/.claude/skills/user-edit")]
+        result = distribution.update()
+        self.assertEqual(result["preserved"], [{
+            "runtime": "claude", "path": "/fixture/home/.claude/skills/user-edit"
+        }])
+        self.assertEqual(result["report_lines"], [
+            "preserved user-changed: /fixture/home/.claude/skills/user-edit"
+        ])
+        self.assertNotIn("activate: claude projection refreshed", result["report_lines"])
 
 
 class ActivationFailureDiagnosticTest(unittest.TestCase):

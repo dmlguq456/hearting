@@ -2600,6 +2600,36 @@ def _safe_existing_dest(
     raise ActivationError(f"destination collision; refusing to overwrite: {dest}")
 
 
+def _preservable_user_changes(
+    state: dict, desired: List[dict], user_changed: dict
+) -> dict:
+    """Return only changed paths that refresh would preserve as collisions."""
+    allowed_link_roots = [
+        Path(state[key]) for key in ("source_root", "active_root") if state.get(key)
+    ]
+    desired_by_dest = {item["dest"]: item for item in desired}
+    preserved = {}
+    for value, prior in user_changed.items():
+        entry = desired_by_dest.get(value)
+        try:
+            _safe_existing_dest(
+                Path(value),
+                entry.get("kind", "remove") if entry else "remove",
+                set(),
+                allowed_link_roots,
+                Path(entry["source"]) if entry and entry.get("source") else None,
+            )
+        except ActivationError as exc:
+            if str(exc).startswith((
+                "foreign destination symlink collision:",
+                "destination collision; refusing to overwrite:",
+            )):
+                preserved[value] = prior
+            else:
+                raise
+    return preserved
+
+
 def _snapshot_record(dest: Path, backup_root: Path, index: int) -> dict:
     record = {
         "dest": str(dest),
@@ -2855,7 +2885,7 @@ def _recover_transactions(runtime: str, scope: str = "global") -> None:
 
 def _trusted_owned(
     runtime: str, state: Optional[dict], desired: List[dict], scope: str
-) -> set:
+) -> tuple[set, dict]:
     """Treat activation.json as untrusted input before using deletion paths."""
     # Profile activation adopts only links that resolve to a canonical harness
     # manifest. This lets a refresh remove stale native links left by the
@@ -2864,7 +2894,7 @@ def _trusted_owned(
         str(path) for path in _discovered_harness_links(runtime, scope)
     }
     if not state:
-        return trusted
+        return trusted, {}
     allowed = {item["dest"] for item in desired}
     roots = []
     for key in ("source_root", "active_root"):
@@ -2877,33 +2907,65 @@ def _trusted_owned(
         except ActivationError:
             pass
 
+    user_changed = {}
     for item in state.get("owned_paths", []):
         value = item.get("dest")
         if not value:
             continue
         dest = Path(value)
         _ensure_runtime_destination(runtime, dest, scope)
-        if value in allowed:
-            trusted.add(value)
+        if value not in allowed and not _journal_dest_allowed(runtime, dest, scope):
+            trusted.discard(value)
             continue
+        if not (dest.exists() or dest.is_symlink()):
+            trusted.discard(value)
+            continue
+
+        matches = False
         if item.get("kind") == "symlink" and dest.is_symlink():
-            raw_target = Path(os.readlink(dest))
-            target = raw_target if raw_target.is_absolute() else dest.parent / raw_target
             try:
-                resolved_target = target.resolve(strict=False)
-            except RuntimeError:
-                resolved_target = None
-            if resolved_target is not None and _journal_dest_allowed(runtime, dest, scope):
-                for root in roots:
-                    try:
-                        resolved_target.relative_to(root.resolve(strict=False))
-                        trusted.add(value)
-                        break
-                    except (ValueError, RuntimeError):
-                        continue
-            if value in trusted:
-                continue
-    return trusted
+                current_target = os.readlink(dest)
+                matches = current_target == item.get("source")
+                if not matches and _journal_dest_allowed(runtime, dest, scope):
+                    raw_target = Path(current_target)
+                    target = raw_target if raw_target.is_absolute() else dest.parent / raw_target
+                    resolved_target = target.resolve(strict=False)
+                    matches = any(
+                        resolved_target.is_relative_to(root.resolve(strict=False))
+                        for root in roots
+                    )
+            except (OSError, RuntimeError, ValueError):
+                matches = False
+        elif item.get("kind") == "copy" and not dest.is_symlink() and dest.is_file():
+            try:
+                current_digest = hashlib.sha256(dest.read_bytes()).hexdigest()
+                expected = item.get("digest")
+                if isinstance(expected, str):
+                    matches = current_digest == expected
+                else:
+                    source = Path(item.get("source", ""))
+                    matches = source.is_file() and not source.is_symlink() and (
+                        dest.read_bytes() == source.read_bytes()
+                    )
+            except OSError:
+                matches = False
+        elif item.get("kind") == "copytree" and not dest.is_symlink() and dest.is_dir():
+            try:
+                expected = item.get("digest")
+                if isinstance(expected, str):
+                    matches = _tree_digest(dest) == expected
+                else:
+                    source = Path(item.get("source", ""))
+                    matches = source.is_dir() and _tree_digest(dest) == _tree_digest(source)
+            except (OSError, RuntimeError):
+                matches = False
+
+        if matches and (value in allowed or _journal_dest_allowed(runtime, dest, scope)):
+            trusted.add(value)
+        else:
+            trusted.discard(value)
+            user_changed[value] = item
+    return trusted, user_changed
 
 
 # destructive-ok: reason=discard the active runtime transaction after commit or exact rollback; boundary=one UUID transaction root created below runtime harness state
@@ -2920,9 +2982,10 @@ def _apply_transaction(
     state_dir = paths.harness_state_dir(runtime, scope)
     tx_root = state_dir / "transactions" / uuid.uuid4().hex
     backup_root = tx_root / "backup"
-    owned = _trusted_owned(runtime, previous, desired, scope)
+    owned, user_changed = _trusted_owned(runtime, previous, desired, scope)
     desired_by_dest = {entry["dest"]: entry for entry in desired}
     removal = [Path(item) for item in owned if item not in desired_by_dest]
+    removal.extend(Path(item) for item in user_changed if item not in desired_by_dest)
 
     allowed_link_roots = list(source_roots)
     if previous:
@@ -2931,6 +2994,7 @@ def _apply_transaction(
                 allowed_link_roots.append(Path(previous[key]))
 
     changed: List[dict] = []
+    preserved: List[dict] = []
     snapshots: List[dict] = []
     seen = set()
     fail_after = int(os.environ.get("HARNESS_RUNTIME_FAIL_AFTER", "0") or "0")
@@ -2955,8 +3019,18 @@ def _apply_transaction(
             _ensure_owned_destination(runtime, dest, scope)
             kind = desired_by_dest.get(key, {}).get("kind", "remove")
             source = desired_by_dest.get(key, {}).get("source")
-            _safe_existing_dest(dest, kind, owned, allowed_link_roots,
-                                Path(source) if source else None)
+            try:
+                _safe_existing_dest(dest, kind, owned, allowed_link_roots,
+                                    Path(source) if source else None)
+            except ActivationError as exc:
+                prior = user_changed.get(key)
+                if prior is None or not str(exc).startswith((
+                    "foreign destination symlink collision:",
+                    "destination collision; refusing to overwrite:",
+                )):
+                    raise
+                preserved.append(dict(prior))
+                continue
             record = _snapshot_record(dest, backup_root, len(snapshots))
             record["postimage"] = (
                 safe_fs.PathState("missing").public()
@@ -2972,6 +3046,8 @@ def _apply_transaction(
         _write_journal(journal_path, runtime, "applying", snapshots)
 
         for dest in removal:
+            if any(entry.get("dest") == str(dest) for entry in preserved):
+                continue
             for record in snapshots:
                 if record["dest"] == str(dest):
                     record["postimage"] = safe_fs.PathState("missing").public()
@@ -2990,6 +3066,8 @@ def _apply_transaction(
         for item in desired:
             source = Path(item["source"])
             dest = Path(item["dest"])
+            if any(entry.get("dest") == str(dest) for entry in preserved):
+                continue
             for record in snapshots:
                 if record["dest"] == str(dest):
                     record["postimage"] = safe_fs.PathState("missing").public()
@@ -3033,12 +3111,17 @@ def _apply_transaction(
                     record["postimage"] = safe_fs.capture_state(dest).public()
                     break
             _write_journal(journal_path, runtime, "applying", snapshots)
-            changed.append(dict(item))
+            applied = dict(item)
+            if item["kind"] == "copy":
+                applied["digest"] = hashlib.sha256(dest.read_bytes()).hexdigest()
+            elif item["kind"] == "copytree":
+                applied["digest"] = _tree_digest(dest)
+            changed.append(applied)
             operation_count += 1
             if fail_after and operation_count >= fail_after:
                 raise ActivationError(f"injected failure after operation {operation_count}")
 
-        owned_entries = changed
+        owned_entries = changed + preserved
         if commit_callback is not None:
             try:
                 commit_callback(owned_entries)
@@ -3662,8 +3745,8 @@ def activate(
     )
     retired_memory_state.retire()  # distiller-era state files, once; silent
     report = status(runtime, scope)
-    if context_report_lines:
-        report["report_lines"] = context_report_lines
+    report["preserved"] = list(report.get("user_changed", []))
+    report["report_lines"] = list(context_report_lines) + list(report.get("report_lines", []))
     return report
 
 
@@ -3678,6 +3761,9 @@ def _status_missing(runtime: str, scope: str) -> dict:
         "projection_digest": None,
         "discovery_paths": [],
         "duplicate_sources": duplicate_sources(runtime, scope),
+        "user_changed": [],
+        "preserved": [],
+        "report_lines": [],
         "config_conflicts": [],
         "model_config_path": str(config_path),
         "model_config_present": config_path.is_file() and not config_path.is_symlink(),
@@ -3702,6 +3788,8 @@ def status(runtime: str, scope: str = "global") -> dict:
     source_root = Path(state["source_root"])
     active_root = Path(state.get("active_root") or state["source_root"])
     source_rev = source_revision(source_root) if source_root.exists() else "missing"
+    changed_owned_items = {}
+    user_changed_items = {}
     try:
         entries = _desired_entries(
             runtime,
@@ -3714,18 +3802,25 @@ def status(runtime: str, scope: str = "global") -> dict:
         digest = _projection_digest(entries)
         missing, stale = _entries_healthy(entries)
         unexpected = _unexpected_harness_links(runtime, entries, scope)
+        _, changed_owned_items = _trusted_owned(runtime, state, entries, scope)
+        user_changed_items = _preservable_user_changes(
+            state, entries, changed_owned_items
+        )
         desired_destinations = {item["dest"] for item in entries}
         for item in state.get("owned_paths", []):
             dest = Path(item.get("dest", ""))
             if (
                 item.get("kind") == "symlink"
                 and str(dest) not in desired_destinations
+                and str(dest) not in changed_owned_items
                 and dest.is_symlink()
                 and _journal_dest_allowed(runtime, dest, scope)
             ):
                 missing = True
     except ActivationError:
         entries, digest, missing, stale, unexpected = [], None, True, False, []
+        changed_owned_items = {}
+        user_changed_items = {}
 
     config_conflicts: List[str] = []
     if runtime == "claude":
@@ -3758,7 +3853,13 @@ def status(runtime: str, scope: str = "global") -> dict:
             or current_bundle_checksum != state.get("bundle_checksum")
         )
 
+    user_changed = sorted(user_changed_items)
     duplicates = duplicate_sources(runtime, scope)
+    runtime_home = paths.runtime_home(runtime, scope)
+    duplicates.extend(
+        f"user-changed:{Path(value).relative_to(runtime_home).as_posix()}"
+        for value in user_changed
+    )
     duplicates.extend(
         f"unmanaged-extra:{path.relative_to(paths.runtime_home(runtime, scope))}"
         for path in unexpected
@@ -3766,7 +3867,20 @@ def status(runtime: str, scope: str = "global") -> dict:
     duplicates.extend(f"config-conflict:{item}" for item in config_conflicts)
     if duplicates:
         freshness = "duplicate"
-        if config_conflicts:
+        if config_conflicts and user_changed:
+            label = "Claude settings" if runtime == "claude" else f"{runtime.capitalize()} config"
+            conflict_paths = ",".join(config_conflicts)
+            next_action = (
+                f"resolve {label} conflicts ({conflict_paths}) and review preserved "
+                f"user-changed paths ({', '.join(user_changed)}), then "
+                f"harness runtime refresh --runtime {runtime}"
+            )
+        elif user_changed:
+            next_action = (
+                f"review preserved user-changed paths ({', '.join(user_changed)}); restore or remove "
+                f"them before harness runtime refresh --runtime {runtime}"
+            )
+        elif config_conflicts:
             label = "Claude settings" if runtime == "claude" else f"{runtime.capitalize()} config"
             next_action = (
                 f"resolve {label} conflicts ({','.join(config_conflicts)}), "
@@ -3805,6 +3919,9 @@ def status(runtime: str, scope: str = "global") -> dict:
         "projection_digest": digest,
         "discovery_paths": [item["dest"] for item in entries],
         "duplicate_sources": duplicates,
+        "user_changed": user_changed,
+        "preserved": user_changed,
+        "report_lines": [f"preserved user-changed: {value}" for value in user_changed],
         "config_conflicts": config_conflicts,
         "model_config_path": str(model_config_path),
         "model_config_present": model_config_present,
@@ -3947,7 +4064,8 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
     state_file = _state_path(runtime, scope)
     state = _load_json(state_file)
     if state is None:
-        return {"runtime": runtime, "status": "not-active", "removed": [], "restored_configs": []}
+        return {"runtime": runtime, "status": "not-active", "removed": [],
+                "preserved": [], "restored_configs": [], "report_lines": []}
     desired: List[dict] = []
     try:
         source_root = Path(state["source_root"])
@@ -3962,7 +4080,8 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
         )
     except ActivationError:
         desired = []
-    trusted = _trusted_owned(runtime, state, desired, scope)
+    trusted, user_changed_items = _trusted_owned(runtime, state, desired, scope)
+    preserved = sorted(user_changed_items)
     desired_by_dest = {item["dest"]: item for item in desired}
     replaced_installer_symlink_targets = state.get("replaced_installer_symlink_targets") or {}
     removed = []
@@ -4023,6 +4142,8 @@ def deactivate(runtime: str, scope: str = "global", dry_run: bool = False) -> di
         "runtime": runtime,
         "status": "planned" if dry_run else "deactivated",
         "removed": removed,
+        "preserved": preserved,
+        "report_lines": [f"preserved user-changed: {value}" for value in preserved],
         "restored_installer_links": restored_installer_links,
         "restored_configs": restored,
     }

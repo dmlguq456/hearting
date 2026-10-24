@@ -11,7 +11,9 @@ a failure can be injected precisely after legacy launcher removal
 (`HARNESS_INSTALLER_FAIL_AFTER_LAUNCHER=1`) and asserts the launcher state is
 restored to its exact pre-transaction bytes.
 """
+import hashlib
 import os
+import shutil
 import stat
 import sys
 import tempfile
@@ -500,6 +502,7 @@ class UpdateSkipHintTest(unittest.TestCase):
         return {
             "status": "updated", "version": "9.9.9", "runtimes": [],
             "session_action": {}, "skipped": skipped, "release_root": "/releases/9.9.9",
+            "preserved": [], "report_lines": [],
         }
 
     def test_each_closed_reason_gets_its_own_hint(self):
@@ -535,6 +538,236 @@ class UpdateSkipHintTest(unittest.TestCase):
             result = installer.cmd_update(self._update_args())
         self.assertIn("skipped: claude (some-new-reason)", result["lines"])
         self.assertNotIn("skipped_hints", result)
+
+    def test_managed_update_prints_activation_preserved_paths(self):
+        release = self._managed_result({})
+        release["preserved"] = [{"runtime": "claude", "path": "/fixture/.claude/skill"}]
+        release["report_lines"] = ["activation report detail"]
+        with mock.patch.object(installer.distribution, "is_managed", return_value=True), \
+             mock.patch.object(installer.distribution, "update", return_value=release):
+            result = installer.cmd_update(self._update_args())
+        self.assertIn("activation report detail", result["lines"])
+        self.assertIn("preserved user-changed: /fixture/.claude/skill", result["lines"])
+
+
+class ReapplyDryRunTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        environment = fixture_env.patched_environment(
+            self._tmp.name,
+            Path(__file__).resolve().parents[2],
+            base={"PATH": os.environ.get("PATH", "")},
+        )
+        environment.__enter__()
+        self.addCleanup(environment.__exit__, None, None, None)
+
+    def test_manifest_dry_run_classifies_without_changing_runtime_tree(self):
+        runtime_home = paths.runtime_home("claude")
+        target = runtime_home / "settings.json"
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"user setting\n")
+        state = paths.harness_state_dir("claude")
+        pristine = state / "pristine" / "settings.json"
+        pristine.parent.mkdir(parents=True)
+        pristine.write_bytes(b"old setting\n")
+        source = Path(self._tmp.name) / "canonical-settings.json"
+        source.write_bytes(b"new setting\n")
+        manifest._write_manifest(
+            manifest._manifest_path("claude", "global"),
+            {"version": "fixture", "files": {"settings.json": "old-hash"}},
+        )
+        before = {
+            path.relative_to(runtime_home): path.read_bytes()
+            for path in runtime_home.rglob("*")
+            if path.is_file()
+        }
+        with mock.patch.object(
+            manifest, "check_drift",
+            return_value=[{"runtime": "claude", "path": "settings.json", "detail": "hash mismatch"}],
+        ), mock.patch.object(
+            manifest, "_three_way_merge",
+            return_value=(True, b"user setting\nmerged setting\n", False, False),
+        ):
+            result = manifest.reapply(
+                ["claude"], sources={"claude": {"settings.json": source}}, dry_run=True
+            )
+        after = {
+            path.relative_to(runtime_home): path.read_bytes()
+            for path in runtime_home.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(result["reapplied"], [{"runtime": "claude", "path": "settings.json"}])
+        self.assertEqual(before, after)
+
+    def test_cli_forwards_dry_run_and_reports_each_reapply_classification(self):
+        args = Namespace(
+            dry_run=True, scope="global", plugin=False, reapply=True,
+            version="latest", runtimes=["claude"], auto=False,
+            force_prune_unproven=False,
+        )
+        classified = {
+            "reapplied": [{"runtime": "claude", "path": "settings.json"}],
+            "conflicts": [{"runtime": "claude", "path": "conflict.json", "status": "conflict"}],
+            "verify_failed": [{"runtime": "claude", "path": "verify.json", "status": "verify_failed"}],
+            "missing": [{"runtime": "claude", "path": "missing.json"}],
+        }
+        with mock.patch.object(installer.distribution, "is_managed", return_value=False), \
+             mock.patch.object(installer.manifest, "check_drift", return_value=[]), \
+             mock.patch.object(installer.projector, "plan", return_value={"claude": []}), \
+             mock.patch.object(installer.manifest, "reapply", return_value=classified) as reapply:
+            result = installer.cmd_update(args)
+        self.assertTrue(reapply.call_args.kwargs["dry_run"])
+        self.assertIn("would reapply: claude/settings.json", result["lines"])
+        self.assertIn("would reapply 1 file(s)", result["lines"])
+        self.assertIn("conflict: claude/conflict.json (conflict)", result["lines"])
+        self.assertIn("verify_failed: claude/verify.json (verify_failed)", result["lines"])
+        self.assertIn("missing: claude/missing.json", result["lines"])
+
+    def _tree_signature(self, root):
+        if not root.exists():
+            return ()
+        entries = [root, *sorted(root.rglob("*"), key=os.fspath)]
+        signature = []
+        for path in entries:
+            info = os.lstat(path)
+            if stat.S_ISREG(info.st_mode):
+                payload = hashlib.sha256(path.read_bytes()).hexdigest()
+            elif stat.S_ISLNK(info.st_mode):
+                payload = os.readlink(path)
+            else:
+                payload = None
+            signature.append((
+                str(path.relative_to(root)),
+                stat.S_IFMT(info.st_mode),
+                stat.S_IMODE(info.st_mode),
+                payload,
+                info.st_mtime_ns,
+            ))
+        return tuple(signature)
+
+    def test_cli_dry_run_matches_real_git_merge_file_without_mutating_tree(self):
+        if shutil.which("git") is None:
+            self.skipTest("git is not installed")
+
+        for scenario in ("clean", "conflict"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as root:
+                environment = fixture_env.build_environment(
+                    root,
+                    Path(__file__).resolve().parents[2],
+                    base={"PATH": os.environ.get("PATH", "")},
+                )
+                fixture_env.prepare_environment(environment)
+                with mock.patch.dict(os.environ, environment, clear=True):
+                    runtime_home = paths.runtime_home("claude")
+                    state = paths.harness_state_dir("claude")
+                    runtime_home.mkdir(parents=True, exist_ok=True)
+                    pristine_dir = state / "pristine"
+                    pristine_dir.mkdir(parents=True, exist_ok=True)
+                    base = b"managed=old\nshared=base\n"
+                    if scenario == "clean":
+                        local = b"managed=old\nshared=base\nlocal=user\n"
+                        canonical = b"managed=new\nshared=base\n"
+                    else:
+                        local = b"managed=local\nshared=base\n"
+                        canonical = b"managed=canonical\nshared=base\n"
+                    dest = runtime_home / "settings.json"
+                    dest.write_bytes(local)
+                    pristine = pristine_dir / "settings.json"
+                    pristine.write_bytes(base)
+                    no_source = runtime_home / "no-source.json"
+                    no_source.write_bytes(b"user-only\n")
+                    missing_path = "missing.json"
+                    no_source_pristine = pristine_dir / "no-source.json"
+                    no_source_pristine.write_bytes(b"canonical-old\n")
+                    source = Path(root) / "canonical-settings.json"
+                    source.write_bytes(canonical)
+                    manifest._write_manifest(
+                        manifest._manifest_path("claude", "global"),
+                        {
+                            "schema": 1,
+                            "runtime": "claude",
+                            "scope": "global",
+                            "version": "fixture",
+                            "timestamp": "fixture",
+                            "files": {
+                                "settings.json": hashlib.sha256(base).hexdigest(),
+                                "no-source.json": hashlib.sha256(b"canonical-old\n").hexdigest(),
+                                missing_path: hashlib.sha256(b"missing\n").hexdigest(),
+                            },
+                        },
+                    )
+                    args = Namespace(
+                        dry_run=True, scope="global", plugin=False, reapply=True,
+                        version="latest", runtimes=["claude"], auto=False,
+                        force_prune_unproven=False,
+                    )
+                    plan = {"claude": [{
+                        "action": "copy_once", "dest": str(dest), "source": str(source)
+                    }]}
+
+                    def update(dry_run):
+                        args.dry_run = dry_run
+                        with mock.patch.object(
+                            installer.distribution, "is_managed", return_value=False
+                        ), mock.patch.object(
+                            installer.projector, "plan", return_value=plan
+                        ):
+                            return installer.cmd_update(args)
+
+                    before_home = self._tree_signature(runtime_home)
+                    before_state = self._tree_signature(state)
+                    dry = update(True)
+                    self.assertEqual(before_home, self._tree_signature(runtime_home))
+                    self.assertEqual(before_state, self._tree_signature(state))
+                    self.assertFalse((state / "local-patches" / "settings.json").exists())
+                    self.assertFalse((state / "local-patches" / "backup-meta.json").exists())
+                    self.assertIn("missing: claude/missing.json", dry["lines"])
+                    self.assertIn(
+                        "verify_failed: claude/no-source.json (no canonical source provided)",
+                        dry["lines"],
+                    )
+
+                    args.dry_run = False
+                    real = update(False)
+                    self.assertEqual(
+                        [line.replace("would reapply:", "reapplied:") for line in dry["lines"]
+                         if line.startswith(("would reapply:", "conflict:", "verify_failed:", "missing:"))],
+                        [line for line in real["lines"]
+                         if line.startswith(("reapplied:", "conflict:", "verify_failed:", "missing:"))],
+                    )
+
+
+_MODULE_HOME = None
+_MODULE_ENVIRONMENT = None
+_PREVIOUS_TEMP_DIR = None
+
+
+def setUpModule():
+    global _MODULE_HOME, _MODULE_ENVIRONMENT, _PREVIOUS_TEMP_DIR
+    _MODULE_HOME = tempfile.TemporaryDirectory(prefix="ir-")
+    _MODULE_ENVIRONMENT = fixture_env.patched_environment(
+        Path(_MODULE_HOME.name) / "fixture",
+        Path(__file__).resolve().parents[2],
+        base={"PATH": os.environ.get("PATH", "")},
+    )
+    _MODULE_ENVIRONMENT.__enter__()
+    temporary_root = Path(os.environ["HEARTING_FIXTURE_ROOT"]) / "tests-temp"
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    _PREVIOUS_TEMP_DIR = tempfile.tempdir
+    tempfile.tempdir = str(temporary_root)
+
+
+def tearDownModule():
+    global _MODULE_HOME, _MODULE_ENVIRONMENT, _PREVIOUS_TEMP_DIR
+    tempfile.tempdir = _PREVIOUS_TEMP_DIR
+    _PREVIOUS_TEMP_DIR = None
+    if _MODULE_ENVIRONMENT is not None:
+        _MODULE_ENVIRONMENT.__exit__(None, None, None)
+        _MODULE_ENVIRONMENT = None
+    if _MODULE_HOME is not None:
+        _MODULE_HOME.cleanup()
+        _MODULE_HOME = None
 
 
 if __name__ == "__main__":

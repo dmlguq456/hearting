@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+from contextlib import chdir
 import json
 import socket
 import subprocess
@@ -288,7 +289,10 @@ class RuntimeSnapshotTest(unittest.TestCase):
             current.write_text("before\n", encoding="utf-8")
             socket_path = managed / "app-server.sock"
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            listener.bind(str(socket_path))
+            # Bind the same real socket without spending AF_UNIX's path budget
+            # on the runner's potentially long temporary-directory prefix.
+            with chdir(root):
+                listener.bind(str(socket_path.relative_to(root)))
             try:
                 record = activation._copy_snapshot(
                     state, root / "backup", 0,
@@ -786,6 +790,217 @@ class LinkedReleaseBundleTest(unittest.TestCase):
 
 
 class RuntimeActivationOwnershipTest(unittest.TestCase):
+    def test_status_reports_tampered_owned_destination_as_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                activation.activate("codex", "linked", str(source))
+                state_path = activation._state_path("codex")
+                state = activation._load_json(state_path)
+                state["owned_paths"][0]["dest"] = str(root / "outside-runtime-home")
+                activation._atomic_json(state_path, state)
+
+                report = activation.status("codex")
+
+                self.assertEqual(report["freshness"], "missing")
+                self.assertEqual(report["user_changed"], [])
+
+    def test_status_excludes_destinations_refresh_would_adopt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            home = root / "runtime-home"
+            source_root = root / "harness"
+            source_root.mkdir()
+
+            herdr_source = source_root / "integration.js"
+            herdr_source.write_text(
+                "// installed by herdr\n// HERDR_INTEGRATION_ID=opencode\n"
+                "// HERDR_INTEGRATION_VERSION=13\n",
+                encoding="utf-8",
+            )
+            herdr_dest = home / "plugins/integration.js"
+            herdr_dest.parent.mkdir(parents=True)
+            herdr_dest.write_text(
+                "// installed by herdr\n// HERDR_INTEGRATION_ID=opencode\n"
+                "// HERDR_INTEGRATION_VERSION=9\n",
+                encoding="utf-8",
+            )
+
+            link_dest = home / "skills/adopted-link"
+            link_dest.parent.mkdir(parents=True)
+            link_target = source_root / "alternate-target"
+            link_target.write_text("harness target\n", encoding="utf-8")
+            link_dest.symlink_to(link_target)
+
+            plugin_source = source_root / "plugin-source"
+            plugin_source.mkdir()
+            plugin_dest = home / "plugins/plugin-dir"
+            (plugin_dest / ".codex-plugin").mkdir(parents=True)
+
+            state = {"source_root": str(source_root), "active_root": str(source_root)}
+            cases = (
+                (
+                    {"dest": str(herdr_dest), "kind": "copy", "source": str(herdr_source)},
+                    {"dest": str(herdr_dest), "kind": "copy", "source": str(herdr_source)},
+                ),
+                (
+                    {"dest": str(link_dest), "kind": "symlink", "source": str(source_root / "expected")},
+                    {"dest": str(link_dest), "kind": "symlink", "source": str(source_root / "expected")},
+                ),
+                (
+                    {"dest": str(plugin_dest), "kind": "copytree", "source": str(plugin_source)},
+                    {"dest": str(plugin_dest), "kind": "copytree", "source": str(plugin_source)},
+                ),
+            )
+            for prior, desired in cases:
+                with self.subTest(kind=prior["kind"]):
+                    self.assertEqual(
+                        activation._preservable_user_changes(
+                            state, [desired], {prior["dest"]: prior}
+                        ),
+                        {},
+                    )
+
+    def test_status_does_not_mark_carried_user_changed_stale_link_missing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                activation.activate("codex", "linked", str(source))
+                state_path = activation._state_path("codex")
+                state = activation._load_json(state_path)
+                dest = activation.paths.runtime_home("codex") / "skills/obsolete-skill"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                outside = root / "user-owned-target"
+                outside.write_text("user target\n", encoding="utf-8")
+                dest.symlink_to(outside)
+                state["owned_paths"].append({
+                    "dest": str(dest),
+                    "kind": "symlink",
+                    "source": str(Path(state["active_root"]) / "obsolete-skill"),
+                })
+                activation._atomic_json(state_path, state)
+
+                report = activation.status("codex")
+
+                self.assertEqual(report["freshness"], "duplicate")
+                self.assertIn(str(dest), report["user_changed"])
+                self.assertTrue(dest.is_symlink())
+                self.assertEqual(os.readlink(dest), str(outside))
+
+    def test_refresh_carries_user_replaced_projection_through_deactivate(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                activation.activate("codex", "linked", str(source))
+                state_path = activation._state_path("codex")
+                state = activation._load_json(state_path)
+                owned = next(item for item in state["owned_paths"]
+                             if item.get("kind") == "symlink")
+                dest = Path(owned["dest"])
+                original_source = owned["source"]
+                # destructive-ok: reason=simulate a user replacing an activated link; boundary=dest leaf in this TemporaryDirectory's fixture HOME
+                dest.unlink()
+                user_bytes = b"user-owned replacement\n"
+                dest.write_bytes(user_bytes)
+
+                for _ in range(2):
+                    refreshed = activation.refresh("codex")
+                    self.assertEqual(dest.read_bytes(), user_bytes)
+                    self.assertIn(str(dest), refreshed["preserved"])
+                    self.assertIn(f"preserved user-changed: {dest}", refreshed["report_lines"])
+                    self.assertIn(f"user-changed:{dest.relative_to(activation.paths.runtime_home('codex'))}",
+                                  refreshed["duplicate_sources"])
+                    carried = next(item for item in activation._load_json(state_path)["owned_paths"]
+                                   if item["dest"] == str(dest))
+                    self.assertEqual(carried["source"], original_source)
+                    self.assertEqual(activation.status("codex")["user_changed"], [str(dest)])
+
+                result = activation.deactivate("codex")
+                self.assertIn(str(dest), result["preserved"])
+                self.assertEqual(dest.read_bytes(), user_bytes)
+
+    def test_refresh_preserves_repointed_and_dangling_owned_links(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                activation.activate("claude", "linked", str(source))
+                state = activation._load_json(activation._state_path("claude"))
+                owned = next(item for item in state["owned_paths"]
+                             if item.get("kind") == "symlink")
+                dest = Path(owned["dest"])
+                external = root / "outside-user-target"
+                external.write_text("user target\n", encoding="utf-8")
+                # destructive-ok: reason=repoint this test's activated link; boundary=dest leaf in this TemporaryDirectory's fixture HOME
+                dest.unlink()
+                dest.symlink_to(external)
+
+                for target in (external, root / "dangling-user-target"):
+                    if dest.is_symlink():
+                        # destructive-ok: reason=change this test's simulated user link target; boundary=dest leaf in this TemporaryDirectory's fixture HOME
+                        dest.unlink()
+                    dest.symlink_to(target)
+                    raw_target = os.readlink(dest)
+                    refreshed = activation.refresh("claude")
+                    self.assertTrue(dest.is_symlink())
+                    self.assertEqual(os.readlink(dest), raw_target)
+                    self.assertIn(str(dest), refreshed["preserved"])
+
+                result = activation.deactivate("claude")
+                self.assertIn(str(dest), result["preserved"])
+                self.assertTrue(dest.is_symlink())
+                self.assertEqual(os.readlink(dest), str(root / "dangling-user-target"))
+
+    def test_modified_copy_is_preserved_with_legacy_record_without_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                activation.activate("codex", "linked", str(source))
+                state_path = activation._state_path("codex")
+                state = activation._load_json(state_path)
+                owned = next(item for item in state["owned_paths"]
+                             if item.get("kind") == "copy")
+                dest = Path(owned["dest"])
+                legacy_item = dict(owned)
+                legacy_item.pop("digest", None)
+                state["owned_paths"] = [
+                    legacy_item if item["dest"] == owned["dest"] else item
+                    for item in state["owned_paths"]
+                ]
+                activation._atomic_json(state_path, state)
+                user_bytes = b"modified copied integration\n"
+                dest.write_bytes(user_bytes)
+
+                refreshed = activation.refresh("codex")
+                self.assertEqual(dest.read_bytes(), user_bytes)
+                self.assertIn(str(dest), refreshed["preserved"])
+                carried = next(item for item in activation._load_json(state_path)["owned_paths"]
+                               if item["dest"] == str(dest))
+                self.assertEqual(carried, legacy_item)
+                result = activation.deactivate("codex")
+                self.assertIn(str(dest), result["preserved"])
+                self.assertEqual(dest.read_bytes(), user_bytes)
+
+    def test_clean_refresh_replaces_all_owned_paths_without_preserving(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = Path(__file__).resolve().parents[2]
+            with fixture_env.patched_environment(root / "fixture", source):
+                first = activation.activate("codex", "linked", str(source))
+                before = activation._load_json(activation._state_path("codex"))["owned_paths"]
+                refreshed = activation.refresh("codex")
+                after = activation._load_json(activation._state_path("codex"))["owned_paths"]
+                self.assertEqual(first["preserved"], [])
+                self.assertEqual(refreshed["preserved"], [])
+                self.assertEqual(len(after), len(before))
+                self.assertTrue(all("digest" in item for item in after if item["kind"] == "copy"))
+                self.assertTrue(all(Path(item["dest"]).is_symlink()
+                                    for item in after if item["kind"] == "symlink"))
+
     def test_capture_excludes_runtime_local_harness_siblings(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1955,6 +2170,42 @@ class HerdrIntegrationAdoptionTest(unittest.TestCase):
                 with self.subTest(name):
                     with self.assertRaisesRegex(activation.ActivationError, "destination collision"):
                         activation._safe_existing_dest(dest, "copy", set(), [], src)
+
+_TEST_HOME = None
+_TEST_ENVIRONMENT = None
+_PREVIOUS_TEMP_DIR = None
+
+
+def setUpModule():
+    """Run the complete module against an isolated default runtime home.
+
+    A few tests exercise public installer entry points without installing their
+    own fixture environment. Module-level setup keeps those tests safe under
+    both direct execution and unittest discovery.
+    """
+    global _TEST_HOME, _TEST_ENVIRONMENT, _PREVIOUS_TEMP_DIR
+    _TEST_HOME = tempfile.TemporaryDirectory(prefix="ra-")
+    _TEST_ENVIRONMENT = fixture_env.patched_environment(
+        Path(_TEST_HOME.name) / "f", REPO_ROOT
+    )
+    _TEST_ENVIRONMENT.__enter__()
+    temporary_root = Path(os.environ["HEARTING_FIXTURE_ROOT"]) / "t"
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    _PREVIOUS_TEMP_DIR = tempfile.tempdir
+    tempfile.tempdir = str(temporary_root)
+
+
+def tearDownModule():
+    global _TEST_HOME, _TEST_ENVIRONMENT, _PREVIOUS_TEMP_DIR
+    tempfile.tempdir = _PREVIOUS_TEMP_DIR
+    _PREVIOUS_TEMP_DIR = None
+    if _TEST_ENVIRONMENT is not None:
+        _TEST_ENVIRONMENT.__exit__(None, None, None)
+        _TEST_ENVIRONMENT = None
+    if _TEST_HOME is not None:
+        _TEST_HOME.cleanup()
+        _TEST_HOME = None
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

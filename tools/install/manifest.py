@@ -302,11 +302,12 @@ def check_drift(runtimes, scope="global"):
     return drift
 
 
-def reapply(runtimes, scope="global", sources=None):
+def reapply(runtimes, scope="global", sources=None, dry_run=False):
     """Reapply new files while preserving local-patch backups.
 
     ``sources`` maps runtimes and relative paths to current canonical sources.
-    Report three-way conflicts instead of forcing a merge.
+    Report three-way conflicts instead of forcing a merge.  With ``dry_run``,
+    classify the same outcomes without changing the runtime home or manifest.
     """
     sources = sources or {}
 
@@ -334,18 +335,22 @@ def reapply(runtimes, scope="global", sources=None):
             pristine_path = _pristine_path(rt, scope, relpath)
             backup_path = _backup_path(rt, scope, relpath)
 
-            # Step 1 — pre-wipe backup.
-            _atomic_write_bytes(backup_path, dest_abs.read_bytes())
+            # Step 1 — pre-wipe backup. A dry run uses the exact bytes that
+            # would be backed up, but keeps the runtime tree read-only.
+            backup_bytes = dest_abs.read_bytes()
+            if not dry_run:
+                _atomic_write_bytes(backup_path, backup_bytes)
 
             backup_meta_path = _backup_path(rt, scope, "backup-meta.json").parent / "backup-meta.json"
-            backup_meta = _load_manifest(backup_meta_path) or {
-                "from_version": manifest.get("version"),
-                "pristine_hashes": {},
-            }
-            backup_meta["from_version"] = manifest.get("version")
-            if pristine_path.exists():
-                backup_meta["pristine_hashes"][relpath] = _sha256(pristine_path)
-            _write_manifest(backup_meta_path, backup_meta)
+            if not dry_run:
+                backup_meta = _load_manifest(backup_meta_path) or {
+                    "from_version": manifest.get("version"),
+                    "pristine_hashes": {},
+                }
+                backup_meta["from_version"] = manifest.get("version")
+                if pristine_path.exists():
+                    backup_meta["pristine_hashes"][relpath] = _sha256(pristine_path)
+                _write_manifest(backup_meta_path, backup_meta)
 
             source_abs = rt_sources.get(relpath)
             if source_abs is None:
@@ -376,9 +381,7 @@ def reapply(runtimes, scope="global", sources=None):
                 continue
 
             # Step 3 — deterministic post-merge verifier.
-            backup_lines = [
-                line for line in backup_path.read_bytes().splitlines() if line.strip()
-            ]
+            backup_lines = [line for line in backup_bytes.splitlines() if line.strip()]
             verify_ok = all(line in merged_bytes for line in backup_lines)
 
             if not verify_ok:
@@ -388,14 +391,15 @@ def reapply(runtimes, scope="global", sources=None):
                 continue
 
             # Step 4 — write merged output, refresh pristine, update manifest hash.
-            _atomic_write_bytes(dest_abs, merged_bytes)
-            _atomic_write_bytes(pristine_path, Path(source_abs).read_bytes())
-            manifest.setdefault("files", {})[relpath] = _sha256(dest_abs)
-            touched_runtimes.add(rt)
+            if not dry_run:
+                _atomic_write_bytes(dest_abs, merged_bytes)
+                _atomic_write_bytes(pristine_path, Path(source_abs).read_bytes())
+                manifest.setdefault("files", {})[relpath] = _sha256(dest_abs)
+                touched_runtimes.add(rt)
 
             result["reapplied"].append({"runtime": rt, "path": relpath})
 
-        if rt in touched_runtimes:
+        if not dry_run and rt in touched_runtimes:
             manifest["version"] = _git_head_or_unknown()
             manifest["timestamp"] = datetime.now(timezone.utc).isoformat()
             _write_manifest(manifest_path, manifest)

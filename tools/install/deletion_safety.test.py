@@ -258,7 +258,9 @@ class DeletionSafetyTest(unittest.TestCase):
             (before.st_dev, before.st_ino), (during.st_dev, during.st_ino)
         )
 
-    def _uninstall_fixture(self, *, modified_copy: bool, repointed_link: bool) -> tuple[dict, Path, Path]:
+    def _uninstall_fixture(self, *, modified_copy: bool, repointed_link: bool,
+                           activation_preserved: bool = False,
+                           dry_run: bool = False) -> tuple[dict, Path, Path]:
         runtime_home = self.fixture / "opencode-home"
         runtime_home.mkdir(parents=True, exist_ok=True)
         copy_path = runtime_home / "models.conf"
@@ -288,7 +290,7 @@ class DeletionSafetyTest(unittest.TestCase):
             },
         )
         args = Namespace(
-            runtimes=["opencode"], target="opencode", scope="global", dry_run=False
+            runtimes=["opencode"], target="opencode", scope="global", dry_run=dry_run
         )
         plan = {
             "opencode": [
@@ -300,7 +302,10 @@ class DeletionSafetyTest(unittest.TestCase):
             mock.patch.object(
                 runtime_activation,
                 "deactivate",
-                return_value={"status": "not-active", "removed": []},
+                return_value={
+                    "status": "deactivated", "removed": [],
+                    "preserved": [str(link)] if activation_preserved else [],
+                },
             ),
             mock.patch.object(manifest, "_manifest_path", return_value=manifest_path),
             mock.patch.object(installer.paths, "runtime_home", return_value=runtime_home),
@@ -313,21 +318,63 @@ class DeletionSafetyTest(unittest.TestCase):
         result, copy_path, link = self._uninstall_fixture(
             modified_copy=True, repointed_link=False
         )
-        self.assertEqual(result["exit"], installer.EXIT_BLOCKED)
-        self.assertIn("expected-state-mismatch", json.dumps(result))
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+        self.assertEqual(result["preserved"], [{"runtime": "opencode", "path": str(copy_path)}])
+        self.assertIn(f"preserved user-changed: {copy_path}", result["lines"])
         self.assertEqual(copy_path.read_bytes(), b"user modification\n")
-        self.assertTrue(link.is_symlink())
+        self.assertFalse(link.is_symlink())
 
     def test_uninstall_preserves_repointed_projection(self) -> None:
         result, copy_path, link = self._uninstall_fixture(
             modified_copy=False, repointed_link=True
         )
         successor = os.readlink(link)
-        result_text = json.dumps(result)
-        self.assertEqual(result["exit"], installer.EXIT_BLOCKED)
-        self.assertIn("expected-state-mismatch", result_text)
-        self.assertEqual(copy_path.read_bytes(), b"canonical model config\n")
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+        self.assertEqual(result["preserved"], [{"runtime": "opencode", "path": str(link)}])
+        self.assertIn(f"preserved user-changed: {link}", result["lines"])
+        self.assertFalse(copy_path.exists())
         self.assertEqual(os.readlink(link), successor)
+
+    def test_activation_and_manifest_preservation_is_deduplicated(self) -> None:
+        result, copy_path, link = self._uninstall_fixture(
+            modified_copy=True, repointed_link=True, activation_preserved=True
+        )
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+        self.assertEqual(result["preserved"], [
+            {"runtime": "opencode", "path": str(link)},
+            {"runtime": "opencode", "path": str(copy_path)},
+        ])
+        self.assertEqual(sum(line == f"preserved user-changed: {link}" for line in result["lines"]), 1)
+        self.assertEqual(copy_path.read_bytes(), b"user modification\n")
+        self.assertTrue(link.is_symlink())
+
+    def test_uninstall_dry_run_counts_only_removable_paths(self) -> None:
+        result, copy_path, link = self._uninstall_fixture(
+            modified_copy=True, repointed_link=True, dry_run=True
+        )
+        detail = next(check["detail"] for check in result["checks"]
+                      if check["id"] == "opencode.uninstall")
+        self.assertEqual(detail, "dry-run: would remove 0 copy-once file(s) and 0 symlink(s); preserved 2 user-changed path(s)")
+        self.assertTrue(copy_path.exists())
+        self.assertTrue(link.is_symlink())
+
+    def test_full_uninstall_returns_success_result(self) -> None:
+        args = Namespace(runtimes=["all"], target="all", scope="global", dry_run=False)
+        with (
+            mock.patch.object(installer, "resolve_runtimes", return_value=list(installer.RUNTIMES)),
+            mock.patch.object(runtime_activation, "validate_scope"),
+            mock.patch.object(codex_launcher, "uninstall", return_value={"status": "not-installed"}),
+            mock.patch.object(runtime_activation, "deactivate", return_value={
+                "status": "not-active", "removed": [], "preserved": []
+            }),
+            mock.patch.object(manifest, "load_ownership_manifest", return_value=(None, None)),
+            mock.patch.object(installer.herdr_integration, "restore_history_key", return_value={"status": "retained"}),
+            mock.patch.object(installer.bootstrap, "uninstall_compute_hosts", return_value={"status": "removed"}),
+        ):
+            result = installer.cmd_uninstall(args)
+        self.assertIsInstance(result, dict)
+        self.assertEqual(result["exit"], installer.EXIT_OK)
+        self.assertEqual(result["preserved"], [])
 
     def test_corrupt_manifest_fails_closed(self) -> None:
         manifest_path = self.fixture / "corrupt-manifest.json"
@@ -1055,6 +1102,37 @@ class RouteStaleOpenMirrorTest(unittest.TestCase):
         results, reason = self._scan(base)
         self.assertTrue(reason.startswith("route-record-unparsable:"), reason)
         self.assertEqual(results, [])
+
+_MODULE_HOME = None
+_MODULE_ENVIRONMENT = None
+_PREVIOUS_TEMP_DIR = None
+
+
+def setUpModule() -> None:
+    global _MODULE_HOME, _MODULE_ENVIRONMENT, _PREVIOUS_TEMP_DIR
+    _MODULE_HOME = tempfile.TemporaryDirectory(prefix="ds-")
+    _MODULE_ENVIRONMENT = fixture_env.patched_environment(
+        Path(_MODULE_HOME.name) / "fixture", Path(__file__).resolve().parents[2],
+        base={"PATH": os.environ.get("PATH", "")},
+    )
+    _MODULE_ENVIRONMENT.__enter__()
+    temporary_root = Path(os.environ["HEARTING_FIXTURE_ROOT"]) / "tests-temp"
+    temporary_root.mkdir(parents=True, exist_ok=True)
+    _PREVIOUS_TEMP_DIR = tempfile.tempdir
+    tempfile.tempdir = str(temporary_root)
+
+
+def tearDownModule() -> None:
+    global _MODULE_HOME, _MODULE_ENVIRONMENT, _PREVIOUS_TEMP_DIR
+    tempfile.tempdir = _PREVIOUS_TEMP_DIR
+    _PREVIOUS_TEMP_DIR = None
+    if _MODULE_ENVIRONMENT is not None:
+        _MODULE_ENVIRONMENT.__exit__(None, None, None)
+        _MODULE_ENVIRONMENT = None
+    if _MODULE_HOME is not None:
+        _MODULE_HOME.cleanup()
+        _MODULE_HOME = None
+
 
 if __name__ == "__main__":
     unittest.main()

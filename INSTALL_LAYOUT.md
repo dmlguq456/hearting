@@ -237,10 +237,11 @@ harness install claude
   automatically. Regular user files (`settings.json`, `keybindings.json`, and
   anything not in either owner's name set) and the runtime-generated state
   listed below remain unowned by both and are never touched by reconciliation.
-  Deactivate/uninstall restores each union member to the exact target the
-  installer would have produced, but only when the current link is still the
-  activation-owned target recorded at the most recent activate — a link a user
-  repointed after activation is left alone.
+  Deactivate/uninstall restores each unchanged union member to the exact target
+  the installer would have produced. A user-repointed link or replaced file is
+  preserved and reported; its original ownership record carries across refreshes
+  until the user restores or removes that path. Unchanged owned entries continue
+  to be refreshed normally.
 
 Keep these local to `$HOME/.claude`: `.credentials.json`, `.dispatch/`, `cache/`, `daemon/`, `history.jsonl`, `ide/`, `projects/`, `sessions/`, `session-env/`, `shell-snapshots/`, runtime logs, and other runtime-generated state.
 

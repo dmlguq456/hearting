@@ -691,6 +691,15 @@ def cmd_update(args):
         lines = [
             f"update: managed release {result['status']} version={result['version']}"
         ]
+        lines.extend(
+            line for line in result.get("report_lines", []) if isinstance(line, str)
+        )
+        for item in result.get("preserved", []):
+            if not isinstance(item, dict) or not item.get("path"):
+                continue
+            line = f"preserved user-changed: {item['path']}"
+            if line not in lines:
+                lines.append(line)
         for runtime in result.get("runtimes", []):
             action = result.get("session_action", {}).get(runtime)
             lines.append(f"updated: {runtime} session_action={action}")
@@ -770,10 +779,15 @@ def cmd_update(args):
                 relpath = Path(entry["dest"]).name
                 sources[rt][relpath] = entry["source"]
 
-    result = manifest.reapply(runtimes, scope=args.scope, sources=sources)
+    result = manifest.reapply(
+        runtimes, scope=args.scope, sources=sources, dry_run=args.dry_run
+    )
 
     for r in result["reapplied"]:
-        lines.append(f"reapplied: {r['runtime']}/{r['path']}")
+        action = "would reapply" if args.dry_run else "reapplied"
+        lines.append(f"{action}: {r['runtime']}/{r['path']}")
+    if args.dry_run:
+        lines.append(f"would reapply {len(result['reapplied'])} file(s)")
     for c in result["conflicts"]:
         lines.append(f"conflict: {c['runtime']}/{c['path']} ({c.get('status')})")
     for v in result["verify_failed"]:
@@ -896,6 +910,13 @@ def cmd_uninstall(args):
     runtimes = resolve_runtimes(args)
     lines = []
     checks = []
+    preserved = []
+
+    def preserve(runtime, path):
+        item = {"runtime": runtime, "path": str(path)}
+        if not any(existing["path"] == item["path"] for existing in preserved):
+            preserved.append(item)
+            lines.append(f"preserved user-changed: {path}")
 
     try:
         for runtime in runtimes:
@@ -972,6 +993,9 @@ def cmd_uninstall(args):
                 deactivated = None
                 lines.append(f"uninstall: {rt} — projection deactivation blocked: {exc}")
                 checks.append({"id": f"{rt}.deactivate", "ok": False, "detail": str(exc)})
+            if deactivated is not None:
+                for path in deactivated.get("preserved", []):
+                    preserve(rt, path)
             if deactivated is not None and deactivated["status"] != "not-active":
                 verb = "would remove" if args.dry_run else "removed"
                 lines.append(
@@ -1007,16 +1031,44 @@ def cmd_uninstall(args):
             symlink_dests = [Path(e["dest"]) for e in symlink_entries]
 
             if args.dry_run:
+                would_remove_copy_once = 0
+                would_remove_symlinks = 0
                 for d in copy_once_dests:
-                    lines.append(f"uninstall(dry-run): {rt} — remove copy-once file {d}")
+                    relpath = str(d.relative_to(runtime_home))
+                    current = safe_fs.capture_state(d)
+                    if current.kind == "missing":
+                        continue
+                    if current.kind != "file" or current.digest != manifest_data["files"][relpath]:
+                        preserve(rt, d)
+                    else:
+                        would_remove_copy_once += 1
+                        lines.append(f"uninstall(dry-run): {rt} — remove copy-once file {d}")
                 for d in symlink_dests:
-                    lines.append(f"uninstall(dry-run): {rt} — remove symlink {d}")
+                    entry = next(e for e in symlink_entries if Path(e["dest"]) == d)
+                    current = safe_fs.capture_state(d)
+                    if current.kind == "missing":
+                        continue
+                    raw_target = Path(os.readlink(d)) if current.kind == "symlink" else None
+                    resolved = (
+                        raw_target if raw_target is None or raw_target.is_absolute()
+                        else d.parent / raw_target
+                    )
+                    if current.kind != "symlink" or resolved.resolve(strict=False) != Path(entry["source"]).resolve(strict=False):
+                        preserve(rt, d)
+                    else:
+                        would_remove_symlinks += 1
+                        lines.append(f"uninstall(dry-run): {rt} — remove symlink {d}")
                 lines.append(f"uninstall(dry-run): {rt} — remove manifest {manifest_path}")
                 checks.append(
                     {
                         "id": f"{rt}.uninstall",
                         "ok": True,
-                        "detail": f"dry-run: would remove {len(copy_once_dests)} copy-once file(s) and {len(symlink_dests)} symlink(s)",
+                        "detail": (
+                            f"dry-run: would remove {would_remove_copy_once} copy-once file(s) "
+                            f"and {would_remove_symlinks} symlink(s); preserved "
+                            f"{sum(1 for item in preserved if item['runtime'] == rt)} "
+                            "user-changed path(s)"
+                        ),
                     }
                 )
                 continue
@@ -1030,18 +1082,16 @@ def cmd_uninstall(args):
                     if current.kind == "missing":
                         continue
                     if current.kind != "symlink":
-                        raise RuntimeError(
-                            f"ownership-unproved: projection is no longer a symlink: {d}"
-                        )
+                        preserve(rt, d)
+                        continue
                     raw_target = Path(os.readlink(d))
                     resolved = (
                         raw_target if raw_target.is_absolute() else d.parent / raw_target
                     ).resolve(strict=False)
                     expected_target = Path(entry["source"]).resolve(strict=False)
                     if resolved != expected_target:
-                        raise RuntimeError(
-                            f"expected-state-mismatch: repointed projection preserved: {d}"
-                        )
+                        preserve(rt, d)
+                        continue
                     symlink_states.append((d, current))
 
                 copy_states = []
@@ -1054,9 +1104,8 @@ def cmd_uninstall(args):
                         continue
                     expected_hash = manifest_data["files"][relpath]
                     if current.kind != "file" or current.digest != expected_hash:
-                        raise RuntimeError(
-                            f"expected-state-mismatch: modified copy-once file preserved: {d}"
-                        )
+                        preserve(rt, d)
+                        continue
                     copy_states.append((relpath, d, current))
 
                 manifest_state = safe_fs.capture_state(manifest_path)
@@ -1115,7 +1164,12 @@ def cmd_uninstall(args):
                 {
                     "id": f"{rt}.uninstall",
                     "ok": True,
-                    "detail": f"removed {len(copy_once_dests)} copy-once file(s) and {len(symlink_dests)} symlink(s)",
+                    "detail": (
+                        f"removed {len(copy_states)} copy-once file(s) and "
+                        f"{len(symlink_states)} symlink(s); preserved "
+                        f"{sum(1 for item in preserved if item['runtime'] == rt)} "
+                        "user-changed path(s)"
+                    ),
                 }
             )
         except Exception as exc:
@@ -1135,6 +1189,7 @@ def cmd_uninstall(args):
                 "drift": [],
                 "exit": EXIT_BLOCKED,
                 "lines": lines,
+                "preserved": preserved,
             }
         if launcher_snapshot is not None:
             codex_launcher.discard_snapshot(launcher_snapshot)
@@ -1165,7 +1220,16 @@ def cmd_uninstall(args):
             "ok": True,
             "detail": "retained for partial runtime uninstall",
         })
-    return {"runtime": runtimes, "channel": "dev", "checks": checks, "drift": [], "exit": EXIT_OK, "lines": lines}
+        return {"runtime": runtimes, "channel": "dev", "checks": checks, "drift": [], "exit": EXIT_OK, "lines": lines, "preserved": preserved}
+    return {
+        "runtime": runtimes,
+        "channel": "dev",
+        "checks": checks,
+        "drift": [],
+        "exit": EXIT_OK,
+        "lines": lines,
+        "preserved": preserved,
+    }
 
 
 # Commands that read an existing activation: for them ``all`` names the

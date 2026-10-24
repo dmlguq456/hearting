@@ -4986,6 +4986,31 @@ def _install_or_update(
                 f"harness release: dispatch state migration deferred: {exc}",
                 file=sys.stderr,
             )
+        activation_report = activation.get("report")
+        activation_rows = (
+            activation_report.get("runtimes", [])
+            if isinstance(activation_report, dict)
+            else []
+        )
+        if isinstance(activation_report, dict) and not isinstance(activation_rows, list):
+            activation_rows = []
+        if isinstance(activation_report, dict) and not activation_rows and activation_report.get("runtime"):
+            activation_rows = [activation_report]
+        preserved = []
+        for row in activation_rows:
+            if not isinstance(row, dict):
+                continue
+            values = row.get("preserved", [])
+            if isinstance(values, list):
+                for value in values:
+                    path = value.get("path") if isinstance(value, dict) else value
+                    item = {"runtime": row.get("runtime"), "path": str(path)}
+                    if path and item not in preserved:
+                        preserved.append(item)
+        report_lines = [
+            f"preserved user-changed: {item['path']}"
+            for item in preserved
+        ]
         return {
             "status": "installed" if previous_state is None else "updated",
             "version": release["version"],
@@ -5000,6 +5025,8 @@ def _install_or_update(
                 if isinstance(activation.get("report"), dict)
                 else None
             ),
+            "preserved": preserved,
+            "report_lines": report_lines,
         }
 
 
