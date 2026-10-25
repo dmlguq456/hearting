@@ -271,6 +271,8 @@ class ProgressTest(unittest.TestCase):
                 str(helper),
                 "--timeout",
                 "2",
+                "--memory-budget",
+                "64MiB",
                 "--",
                 sys.executable,
                 "-c",
@@ -291,6 +293,9 @@ class ProgressTest(unittest.TestCase):
         value = json.loads(lease.read_text(encoding="utf-8"))
         self.assertEqual(value["attempt_id"], self.attempt)
         self.assertEqual(value["route_id"], "rt-1")
+        self.assertEqual(value["memory_budget_bytes"], 64 * 1024**2)
+        self.assertEqual(value["memory_budget_source"], "option")
+        self.assertEqual(value["memory_budget_option"], "64MiB")
         self.assertIsNotNone(P.verification_lease(self.args(), time.time()))
         self.assertEqual(runner.wait(timeout=3), 0)
         self.assertFalse(lease.exists())
