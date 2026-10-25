@@ -883,6 +883,8 @@ class ResourceJob:
     training_progress: Optional[dict] = None
     progress_file: Optional[str] = None
     progress: Optional[dict] = None  # declared workload counters; never a state verdict
+    experiment_observation: Optional[dict] = None
+    experiment_run_record: Optional[dict] = None
     # Display-only remote production candidates (no liveness verdict); joined
     # to non-self compute hosts by host-qualified identity, never consumed as
     # local proof. Emitted by the registry scanner, hence a pinned field.

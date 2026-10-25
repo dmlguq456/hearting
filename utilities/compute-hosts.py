@@ -3051,6 +3051,9 @@ def cmd_run(args):
         raise ConfigError("invalid GPU launch receipt" + detail) from exc
     meta = {"run_id": run_id, "host": name, "command": command,
             "cwd": workdir, "env": env, "gpus": admission["gpus"],
+            "artifact_root": os.environ.get("AGENT_ARTIFACT_ROOT") or None,
+            "run_root": str(config["run_root"]), "host_is_local": is_self(host),
+            "path_namespace": host.get("path_namespace"),
             "gpu_lease": admission.get("gpu_lease"), "share": share,
             "launch_receipt": admission.get("receipt"),
             "tmux_transport": admission.get("tmux_transport"),
@@ -3083,6 +3086,112 @@ def cmd_run(args):
 
 COMPLETION_WATCH_SECONDS = 14 * 24 * 3600
 COMPLETION_POLL_SECONDS = 60
+
+
+def _observe_compute_experiment(meta, run_dir, now, *, final=False):
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
+    resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
+    route_doc = {}
+    route_file = route.get("route_file")
+    try:
+        path = Path(route_file)
+        if path.is_absolute() and not path.is_symlink():
+            route_doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        pass
+    artifact_root = (resource.get("artifact_root") or route_doc.get("artifact_root")
+                     or meta.get("artifact_root")
+                     or os.environ.get("AGENT_ARTIFACT_ROOT"))
+    output_dir = meta.get("output_dir") or resource.get("output_dir")
+    mapping = meta.get("path_namespace")
+    if isinstance(output_dir, str) and isinstance(mapping, dict):
+        mapped = []
+        candidate = Path(output_dir)
+        if candidate.is_absolute():
+            for target, source in mapping.items():
+                try:
+                    relative = candidate.relative_to(Path(target))
+                except (ValueError, TypeError):
+                    continue
+                mapped.append(Path(source) / relative)
+        output_dir = str(mapped[0]) if len(mapped) == 1 else None
+    elif (isinstance(output_dir, str) and meta.get("host_is_local") is False
+          and isinstance(meta.get("run_root"), str)):
+        try:
+            if not Path(output_dir).is_relative_to(Path(meta["run_root"])):
+                output_dir = None
+        except (OSError, TypeError, ValueError):
+            output_dir = None
+    try:
+        started = datetime.datetime.fromisoformat(str(meta.get("started_at"))).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        started = None
+    record = {
+        "run_id": meta.get("run_id") or Path(run_dir).name,
+        "campaign_id": resource.get("campaign_id") or os.environ.get("AGENT_ARTIFACT_CAMPAIGN_ID"),
+        "cycle_id": resource.get("cycle_id") or os.environ.get("AGENT_ARTIFACT_CYCLE_ID"),
+        "route_id": route.get("route_id") or route_doc.get("route_id"),
+        "node": resource.get("node"), "host": meta.get("host"),
+        "output_dir": output_dir, "artifact_root": artifact_root,
+        "route": route_file, "jobs": resource.get("jobs") or os.environ.get("AGENT_DISPATCH_JOBS"),
+        "command": meta.get("command"), "cwd": meta.get("cwd"),
+        "config_sha256": ((resource.get("contract") or {}).get("sealed") or {}).get("config_sha256"),
+        "run_root": meta.get("run_root"), "path_namespace": meta.get("path_namespace"),
+        "session": provenance.get("session"), "notify": provenance.get("notify"),
+        "started_at": started, "ended_at": now if final else None,
+        "planned_seconds": resource.get("planned_seconds"),
+        "status": "finished" if final else "running",
+    }
+    if not artifact_root:
+        return None
+    try:
+        import resource_progress
+        return resource_progress.observe_experiment(record, Path(run_dir) / "meta.json", now,
+            root=output_dir, row_key=record["run_id"], started_at=started,
+            planned_seconds=record["planned_seconds"], final=final,
+            status=record["status"], notify_events=not final)
+    except Exception:  # noqa: BLE001 -- observation must never change run completion
+        return None
+
+
+def _compute_observation_summary(result):
+    if not isinstance(result, dict) or not isinstance(result.get("observation"), dict):
+        return "; 지표 없음; 계획 시간 미상; run 기록 경로 없음"
+    observation = result["observation"]
+    summary = observation.get("summary") or {}
+    latest, best = summary.get("latest"), summary.get("best")
+    metric = summary.get("metric")
+    def points(field, fallback):
+        values = summary.get(field) if isinstance(summary.get(field), dict) else {}
+        names = list(values)
+        if metric in names:
+            names.remove(metric)
+            names.insert(0, metric)
+        parts = []
+        for name in names[:3]:
+            value = values.get(name)
+            if isinstance(value, dict):
+                number = value.get("value") if not value.get("nonfinite") else "NaN/Inf"
+                parts.append(f"{name}={number}@{value.get('epoch')}")
+        if parts:
+            return ",".join(parts)
+        return (f"{metric}={fallback.get('value')}@{fallback.get('epoch')}"
+                if isinstance(fallback, dict) and metric else "지표 없음")
+    record = result.get("record_path") or "run 기록 경로 없음"
+    plan = observation.get("planned_seconds")
+    actual = observation.get("elapsed_seconds")
+    return (f"; 마지막 {points('latest_metrics', latest)}; 최고 {points('best_metrics', best)}; 추세 {summary.get('trend') or '판정 불가'}"
+            f"; 실제 {_duration_text(actual)} / 계획 {_duration_text(plan)}"
+            f"; run 기록 {record}")
+
+
+def _duration_text(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return "미상"
+    value = max(0, int(value))
+    hours, remainder = divmod(value, 3600)
+    return f"{hours}h{remainder // 60:02d}m" if hours else f"{remainder // 60}m"
 
 
 def _spawn_completion_watch(run_dir, meta, *, environ=None, spawn=subprocess.Popen):
@@ -3122,7 +3231,7 @@ def _spawn_completion_watch(run_dir, meta, *, environ=None, spawn=subprocess.Pop
 
 
 def cmd_watch_run(args, *, sleep=time.sleep, now=time.time):
-    """Internal: wait for `<run_dir>/exit_code`, then leave the launcher one notice."""
+    """Internal: observe the existing run and report once its exit is recorded."""
     try:
         config = load_config()
     except ConfigError as exc:
@@ -3133,9 +3242,15 @@ def cmd_watch_run(args, *, sleep=time.sleep, now=time.time):
     run_dir = Path(args.run_dir)
     deadline = now() + COMPLETION_WATCH_SECONDS
     exit_path = run_dir / "exit_code"
+    last_observation = None
     while not exit_path.is_file():
         if now() >= deadline or not run_dir.is_dir():
             return 0
+        try:
+            meta_live = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
+            last_observation = _observe_compute_experiment(meta_live, run_dir, now()) or last_observation
+        except (OSError, ValueError, TypeError):
+            pass
         sleep(COMPLETION_POLL_SECONDS)
     try:
         meta = json.loads((run_dir / "meta.json").read_text(encoding="utf-8"))
@@ -3145,26 +3260,43 @@ def cmd_watch_run(args, *, sleep=time.sleep, now=time.time):
     if ((meta.get("provenance") or {}).get("resource") is not None):
         with contextlib.suppress(OSError, ValueError, TypeError):
             _record_compute_outputs(run_dir, meta)
+    final_observation = _observe_compute_experiment(meta, run_dir, now(), final=True) \
+        or last_observation
     provenance = meta.get("provenance") or {}
     route = provenance.get("route") or {}
-    session = provenance.get("notify") or provenance.get("session") or {}
     run_id = meta.get("run_id") or run_dir.name
-    if not session.get("harness") or not session.get("id"):
+    notice_targets = []
+    try:
+        import resource_progress
+        notice_targets = resource_progress._notice_targets({
+            "session": provenance.get("session"), "notify": provenance.get("notify")})
+    except Exception:
+        pass
+    if not notice_targets:
         return 0
     stop = _read_stop_reason(run_dir)
     text = (f"run {run_id} on {meta.get('host', '-')} ended with exit {code}"
             + (f" ({stop})" if stop else "")
             + (f"; started by attempt {provenance.get('attempt_id')} in route {route.get('route_id')}"
                if provenance.get("notify") else "")
+            + _compute_observation_summary(final_observation)
             + f"; read it with: compute-hosts tail {run_id}")
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
     try:
         from session_notice import notify
-        notify(session["harness"], session["id"], key=f"compute-run:{run_id}",
-               subject="compute run", text=text, route_id=route.get("route_id") or "route-free",
-               required_action="report-to-user")
+        for target in notice_targets:
+            if isinstance(target, dict):
+                harness, session_id = target.get("harness"), target.get("session_id")
+                lineage = target.get("lineage")
+            else:
+                harness, session_id = target
+                lineage = None
+            notify(harness, session_id,
+                   key=f"compute-run:{run_id}:{harness}:{session_id}",
+                   subject="compute run", text=text, route_id=route.get("route_id") or "route-free",
+                   required_action="report-to-user", lineage=lineage)
     except Exception:  # noqa: BLE001 -- the run and its exit code are already recorded
         return 0
     return 0
@@ -3205,9 +3337,33 @@ def _run_state(config, run_id):
                 receipt = candidate
         except (OSError, ValueError):
             pass
+    experiment_record = None
+    experiment_record_path = None
+    provenance = meta.get("provenance") if isinstance(meta.get("provenance"), dict) else {}
+    route = provenance.get("route") if isinstance(provenance.get("route"), dict) else {}
+    resource = provenance.get("resource") if isinstance(provenance.get("resource"), dict) else {}
+    artifact_root = resource.get("artifact_root") or meta.get("artifact_root")
+    if not artifact_root and isinstance(route.get("route_file"), str):
+        try:
+            route_path = Path(route["route_file"])
+            if route_path.is_absolute() and not route_path.is_symlink():
+                route_doc = json.loads(route_path.read_text(encoding="utf-8"))
+                if not route.get("route_id") or route_doc.get("route_id") == route.get("route_id"):
+                    artifact_root = route_doc.get("artifact_root")
+        except (OSError, ValueError, TypeError):
+            pass
+    if artifact_root:
+        try:
+            import resource_progress
+            experiment_record_path = resource_progress.public_record_path(artifact_root, run_id)
+            experiment_record = resource_progress.read_public_run_record(artifact_root, run_id)
+        except (OSError, ValueError, TypeError):
+            pass
     return {"run_id": run_id, "dir": run_dir, "meta": meta,
             "exit_code": exit_code, "stop_reason": stop_reason,
             "launch_receipt": receipt,
+            "experiment_observation": experiment_record,
+            "experiment_record_path": str(experiment_record_path) if experiment_record_path else None,
             "state": state}
 
 

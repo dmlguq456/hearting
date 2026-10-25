@@ -1502,7 +1502,7 @@ def valid_resource_state(value: object) -> bool:
             or box["receipt"].get("type") != "resource-completion"):
         return False
     receipt = box["receipt"]
-    if (set(receipt).difference({"launch_error"}) != {"type", "parent_attempt_id", "session_id", "route_id", "route_hash",
+    if (set(receipt).difference({"launch_error", "experiment_result"}) != {"type", "parent_attempt_id", "session_id", "route_id", "route_hash",
             "jobs", "node", "run_id", "resource_key", "resource_sha256", "state", "exit_code",
             "reason", "verification_pass", "workflow_complete", "successors"}
             or any(not isinstance(receipt[k], str) or not _safe_identity(receipt[k])
@@ -1518,6 +1518,8 @@ def valid_resource_state(value: object) -> bool:
             or any(not isinstance(n, str) or not _safe_identity(n) for n in receipt["successors"])
             or (receipt["state"] != "succeeded" and receipt["successors"])
             or (receipt["state"] == "succeeded" and receipt["exit_code"] != 0)):
+        return False
+    if "experiment_result" in receipt and not isinstance(receipt["experiment_result"], str):
         return False
     if "launch_error" in receipt:
         error = receipt["launch_error"]

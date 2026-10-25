@@ -1922,6 +1922,14 @@ def poll_once(route, ledger):
                     "resource_binding": OWNER_RESOURCE.resource_body_digest(row),
                     "evidence": resource_evidence(armed),
                 }
+        else:
+            try:
+                import resource_run_registry
+                resource_run_registry.observe_run_if_due(
+                    str(row.get("run_id") or armed.get("predecessor_id")), row,
+                    Path(armed["resource_registry"]), now=time.time())
+            except Exception:  # noqa: BLE001 -- observation cannot change lifecycle evidence
+                pass
     with ledger.lock():
         results = _poll_once_locked(route, ledger, compute_observations=compute_observations)
         import route_parent_close

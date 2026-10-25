@@ -393,6 +393,221 @@ class ResourceRegistryTest(unittest.TestCase):
             self.assertEqual({row["cwd"] for row in rows}, {"/projects/a", "/projects/b"})
             self.assertTrue(any(d["kind"] == "malformed-registry" for d in diagnostics))
 
+    def test_registry_view_uses_exact_route_config_and_public_record(self):
+        import hashlib
+        import resource_progress
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            artifact = root / "artifacts"
+            artifact.mkdir()
+            project = root / "project"
+            (project / "configs").mkdir(parents=True)
+            output = project / "results"
+            output.mkdir()
+            (output / "logs").mkdir()
+            (output / "logs" / "epochs.jsonl").write_text(
+                '{"epoch":1,"split":"valid","losses":{"L_se":-8.77}}\n')
+            config = project / "configs" / "run.json"
+            config.write_text(json.dumps({"output_dir": "results"}))
+            route = artifact / "route.json"
+            route.write_text(json.dumps({"route_id": "route-fixture",
+                                         "artifact_root": str(artifact)}))
+            state_path = root / "runtime" / "state.json"
+            state_path.parent.mkdir()
+            identity = {"pid": 77, "starttime": "9", "command_hash": "a" * 64,
+                        "process_group": 77}
+            row = {**identity, "cwd": str(project), "status": "running",
+                   "started_at": 0, "route": str(route), "route_id": "route-fixture",
+                   "command": ["python", "train.py", "--config", "configs/run.json"],
+                   "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest()}
+            with mock.patch.object(resource_progress, "_observation_state_path", return_value=state_path), \
+                    mock.patch.object(registry, "proc_identity", return_value=identity):
+                view = registry.normalize_run("run-view", row, root / "resource-runs.json",
+                    identity_reader=lambda _pid: identity, now=7200)
+            self.assertEqual(view["liveness"], "working")
+            self.assertIsNone(view["experiment_run_record"])
+            self.assertFalse(state_path.exists())
+            self.assertFalse((artifact / "resource-runs" / "run-view.json").exists())
+            with mock.patch.object(resource_progress, "_observation_state_path", return_value=state_path), \
+                    mock.patch.object(registry, "proc_identity", return_value=identity):
+                observed = registry.observe_run_if_due(
+                    "run-view", row, root / "resource-runs.json", now=7200)
+                view = registry.normalize_run("run-view", row, root / "resource-runs.json",
+                    identity_reader=lambda _pid: identity, now=7201)
+            self.assertEqual(observed["experiment_run_record"]["route_id"], "route-fixture")
+            self.assertEqual(view["experiment_run_record"]["output_dir"], str(output))
+            self.assertEqual(view["experiment_run_record"]["metric_summary"]["latest"]["value"], -8.77)
+
+    def test_explicit_observer_requires_exact_terminal_evidence_and_reuses_one_notice(self):
+        import resource_progress
+        import dispatch_pending_delivery
+        from peer_obligations import ObligationStore
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            jobs = root / "dispatch" / "jobs.log"
+            jobs.parent.mkdir()
+            jobs.write_text("")
+            artifact = root / "artifact"
+            artifact.mkdir()
+            output = root / "run"
+            (output / "logs").mkdir(parents=True)
+            (output / "logs" / "epochs.jsonl").write_text(
+                '{"epoch":1,"split":"valid","losses":{"L_se":-8.0}}\n')
+            registry_path = root / "resource-runs.json"
+            run_id = "observer-terminal-evidence"
+            row = {
+                "run_id": run_id, "pid": 99999999, "starttime": "1",
+                "command_hash": "c" * 64, "status": "running", "started_at": 100,
+                "output_dir": str(output), "artifact_root": str(artifact),
+                "jobs": str(jobs), "notify": {"harness": "claude", "id": "fixture-supervisor"},
+            }
+            registry_path.write_text(json.dumps({"schema_version": 1, "runs": {run_id: row}}))
+            state_path = resource_progress._observation_state_path(row, registry_path, "run")
+            statuses = (("unknown", "unknown"), ("stale", "stale"),
+                        ("reaping", "reaping"), ("exited", "unknown"))
+            with mock.patch.object(resource_progress, "observe_experiment",
+                                   wraps=resource_progress.observe_experiment) as observe, \
+                    mock.patch("session_notice.notify",
+                               side_effect=AssertionError("unverified state sent a notice")):
+                for index, (liveness, public_status) in enumerate(statuses):
+                    with self.subTest(liveness=liveness), \
+                            mock.patch.object(registry, "classify_identity",
+                                return_value=(liveness, None, "fixture-" + liveness)):
+                        view = registry.observe_run_if_due(run_id, row, registry_path,
+                            now=120 + index)
+                    self.assertFalse(observe.call_args.kwargs["final"])
+                    public = view["experiment_run_record"]
+                    self.assertEqual(public["status"], public_status)
+                    self.assertIsNone(public["ended_at"])
+                    self.assertIsNone(public["rows"][0]["ended_at"])
+                    state = resource_progress._read_observation_state(state_path)
+                    self.assertNotIn("final:run", state.get("event_keys", []))
+                    self.assertFalse(any(event.get("kind") == "final"
+                                         for event in state.get("outbox", [])))
+            self.assertEqual(ObligationStore(jobs.parent).list(kinds={"run-notice"}), [])
+            self.assertFalse((jobs.parent / "pending-delivery").exists())
+
+            sentinel = root / "run.exit"
+            sentinel.write_text("7\n")
+            ended_at = 125.0
+            terminal = {**row, "status": "failed", "workflow_state": "FAILED_RETRYABLE",
+                        "failure_class": "exit-7", "exit_code": 7, "sentinel": str(sentinel),
+                        "ended_at": ended_at}
+            registry_path.write_text(json.dumps({"schema_version": 1,
+                                                  "runs": {run_id: terminal}}))
+            with mock.patch.object(resource_progress, "observe_experiment",
+                                   wraps=resource_progress.observe_experiment) as observe, \
+                    mock.patch("peer_obligations.ensure_normal_runner", return_value=False), \
+                    mock.patch("peer_obligations.request_dispatch_reconciliation", return_value=False), \
+                    mock.patch.object(registry, "classify_identity",
+                        return_value=("exited", None, "process-absent")):
+                final_view = registry.observe_run_if_due(run_id, terminal, registry_path, now=180)
+                self.assertTrue(observe.call_args.kwargs["final"])
+                repeat_view = registry.observe_run_if_due(run_id, terminal, registry_path, now=181)
+                self.assertTrue(observe.call_args.kwargs["final"])
+
+            public = final_view["experiment_run_record"]
+            repeated_public = repeat_view["experiment_run_record"]
+            self.assertEqual(public["status"], "failed")
+            self.assertEqual(public["ended_at"], ended_at)
+            self.assertEqual(public["rows"][0]["ended_at"], ended_at)
+            self.assertEqual(repeated_public["status"], "failed")
+            self.assertEqual(repeated_public["ended_at"], ended_at)
+            self.assertEqual(terminal["exit_code"], 7)
+            self.assertEqual(terminal["failure_class"], "exit-7")
+            record_path = resource_progress.public_record_path(artifact, run_id)
+            self.assertEqual(list(record_path.parent.glob("*.json")), [record_path])
+            state = resource_progress._read_observation_state(state_path)
+            final_events = [event for event in state.get("outbox", [])
+                            if event.get("kind") == "final"]
+            self.assertEqual(len(final_events), 1)
+            self.assertEqual(final_events[0]["key"], "final:run")
+            duties = ObligationStore(jobs.parent).list(kinds={"run-notice"})
+            self.assertEqual(len(duties), 1)
+            delivery_id = duties[0]["intent"]["delivery_id"]
+            notice = dispatch_pending_delivery.read(jobs.parent, "fixture-supervisor", delivery_id)
+            self.assertIsNotNone(notice)
+            self.assertEqual(notice["state"], "pending")
+
+    def test_normalize_scan_and_read_cli_leave_observation_record_and_pending_unchanged(self):
+        import resource_progress
+        import dispatch_session_sweep as sweep
+        import session_notice
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            jobs = root / "jobs.log"
+            jobs.touch()
+            artifact = root / "artifact"
+            artifact.mkdir()
+            output = root / "run"
+            (output / "logs").mkdir(parents=True)
+            (output / "logs" / "epochs.jsonl").write_text(
+                '{"epoch":1,"split":"valid","losses":{"L_se":-8.0}}\n')
+            registry_path = root / "resource-runs.json"
+            identity = {"pid": 71, "starttime": "12", "command_hash": "b" * 64,
+                        "process_group": 71}
+            row = {**identity, "run_id": "read-only-run", "status": "running",
+                   "started_at": 0, "output_dir": str(output),
+                   "artifact_root": str(artifact), "jobs": str(jobs),
+                   "route_id": "route-read-only", "node": "eval",
+                   "notify": {"harness": "claude", "id": "fixture-supervisor"}}
+            registry_path.write_text(json.dumps({"schema_version": 1,
+                                                  "runs": {"read-only-run": row}}))
+            state_path = root / "runtime" / "resource-observations" / "row.json"
+            state_path.parent.mkdir(parents=True)
+            resource_progress._write_observation_state(state_path, {
+                "schema_version": 1, "run_id": "read-only-run", "row_key": "run",
+                "outbox": [], "event_keys": [], "sources": [], "samples": [], "warnings": [],
+            })
+            record_path = resource_progress.write_public_run_record(artifact, "read-only-run", {
+                "run_id": "read-only-run", "route_id": "route-read-only", "status": "running",
+                "metrics": [], "rows": [],
+            })
+            with mock.patch("peer_obligations.ensure_normal_runner", return_value=False), \
+                    mock.patch("peer_obligations.request_dispatch_reconciliation", return_value=False):
+                existing = session_notice.notify("claude", "fixture-supervisor",
+                    key="existing-notice", subject="existing", text="existing pending notice",
+                    jobs=jobs)
+            pending_root = root / "pending-delivery"
+            duties_root = root / "peer-steward" / "obligations"
+
+            def snapshot():
+                return {
+                    "state": state_path.read_bytes(),
+                    "record": record_path.read_bytes(),
+                    "pending": {str(path.relative_to(pending_root)): path.read_bytes()
+                                for path in sorted(pending_root.rglob("*.json"))},
+                    "duties": {path.name: path.read_bytes()
+                               for path in sorted(duties_root.glob("*.json"))},
+                    "notice": sweep.pending_delivery.read(root, "fixture-supervisor",
+                                                          existing["delivery_id"]),
+                }
+
+            before = snapshot()
+            with mock.patch.object(resource_progress, "_observation_state_path",
+                                   return_value=state_path), \
+                    mock.patch.object(registry, "proc_identity", return_value=identity), \
+                    mock.patch.object(registry, "indexed_paths", return_value=([registry_path], [])), \
+                    mock.patch("session_notice.notify",
+                               side_effect=AssertionError("read triggered delivery")):
+                normalized = registry.normalize_run("read-only-run", row, registry_path, now=7200)
+                scanned, diagnostics = registry.scan(identity_reader=lambda _pid: identity, now=7200)
+            self.assertIsNotNone(normalized["experiment_run_record"])
+            self.assertEqual([item["run_id"] for item in scanned], ["read-only-run"])
+            self.assertEqual(diagnostics, [])
+            cli_env = {**os.environ, "AGENT_ARTIFACT_ROOT": str(artifact),
+                       "AGENT_DISPATCH_JOBS": str(jobs), "AGENT_RUNTIME_DIR": str(root / "runtime"),
+                       "HOME": str(root / "home"), "CODEX_HOME": str(root / "codex")}
+            cli = subprocess.run([sys.executable, "-B",
+                                  str(Path(__file__).with_name("resource-runner.py")),
+                                  "--registry", str(registry_path), "observation", "--run-id",
+                                  "read-only-run", "--json"], capture_output=True, text=True,
+                                 env=cli_env, check=False)
+            self.assertEqual(cli.returncode, 0, cli.stderr)
+            self.assertEqual(json.loads(cli.stdout)["route_id"], "route-read-only")
+            self.assertEqual(snapshot(), before)
+
 
 if __name__ == "__main__":
     unittest.main()

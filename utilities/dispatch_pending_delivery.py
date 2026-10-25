@@ -265,7 +265,13 @@ def _validate_record(value: object) -> dict:
         raise PendingDeliveryError("delivery-persistence-refused", "recipient-kind-invalid")
     if value.get("state") not in STATES:
         raise PendingDeliveryError("delivery-persistence-refused", "state-invalid")
-    if not isinstance(value.get("attempt_ids"), list) or not value["attempt_ids"]:
+    ordinary_notice = (isinstance(value.get("receipt"), dict)
+                       and value["receipt"].get("kind") == "notice"
+                       and value.get("route_node") == "notice"
+                       and value.get("parent_attempt_id") == ""
+                       and value.get("row_revisions") == {})
+    if (not isinstance(value.get("attempt_ids"), list)
+            or (not value["attempt_ids"] and not ordinary_notice)):
         raise PendingDeliveryError("delivery-persistence-refused", "attempt-ids-invalid")
     if not isinstance(value.get("attempts"), int):
         raise PendingDeliveryError("delivery-persistence-refused", "attempts-invalid")
@@ -896,7 +902,11 @@ def create(
 
     if recipient_kind not in RECIPIENT_KINDS:
         raise PendingDeliveryError("delivery-persistence-refused", "recipient-kind-unknown")
-    if not attempt_ids or not parent_attempt_id or not route_id or not route_node:
+    ordinary_notice = (isinstance(receipt, dict) and receipt.get("kind") == "notice"
+                       and route_node == "notice" and parent_attempt_id == ""
+                       and not attempt_ids and not row_revisions)
+    if ((not attempt_ids or not parent_attempt_id) and not ordinary_notice) \
+            or not route_id or not route_node:
         raise PendingDeliveryError("pending-delivery-identity-conflict", "identity-incomplete")
     computed_digest = _canonical_receipt_digest(receipt)
     if computed_digest != receipt_digest:

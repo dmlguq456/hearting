@@ -637,6 +637,9 @@ class ClaimCasTest(IsolatedRootMixin, unittest.TestCase):
         source = subprocess.run(
             ["git", "show", f"{sealed}:utilities/dispatch_pending_delivery.py"],
             cwd=HERE.parent, check=True, capture_output=True, text=True,
+            env={**os.environ, "GIT_CONFIG_COUNT": "1",
+                 "GIT_CONFIG_KEY_0": "safe.directory",
+                 "GIT_CONFIG_VALUE_0": str(HERE.parent)},
         ).stdout
         old_path = Path(self._tmp.name) / f"{module_name}.py"
         old_path.write_text(source, encoding="utf-8")

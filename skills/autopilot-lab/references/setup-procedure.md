@@ -91,6 +91,14 @@ Required outputs:
 - For parent fine-tuning, a new `_ftNN_` config with parent checkpoint and new data, without overwriting the parent config or model
 - Or a `_ft01_` file under the base-model directory when project convention requires it
 
+Matrix plans default to queueing each completed row's decision-metric evaluation
+on the existing approved queue while the next row trains, then updating the
+leaderboard artifact; successive halving is a default option for many rows.
+Known metric/proxy/rules/time budget/baselines are optional. A long CPU scoring or
+inference stage may call `write_progress(done, "item", total=n)` for an earlier ETA.
+New per-epoch JSON output folders belong beneath a folder containing `CACHEDIR.TAG`;
+running experiments stay in place.
+
 Do not introduce new layers, modify in-use layers in the parent/reference model directory, or perform library refactoring; those belong to autopilot-code. Return the created-file list and a concise variation summary.
 
 **S2-3. Confirm in one screen:** list scaffold files, logger inclusion, optional variant path, parent checkpoint when applicable, and the one-line changed surface. Offer continue to run, revise scaffold, or stop.

@@ -2062,6 +2062,10 @@ row uses the existing stalled-age warning rather than forcing fresh-age or
 basis explanations onto it. Original phase/metric names are preserved, and
 combined arm totals, ETA, speed and epoch-mean loss are not inferred.
 
+Detached training, CPU scoring, and inference receive declaration-free checkpoints
+from fixed metric paths: first min(10% plan, 2h), then 25/50/75% or 12h; without a
+plan, 2h then 12h. Missing data is explicit; exit, sentinel, and approval stay unchanged.
+
 `run` and GPU `resource-runner start` automatically reserve their devices in
 one host-local `gpu-leases.json` beside the canonical dispatch registry. All
 launchers targeting that host share the same locked selection and publication;
