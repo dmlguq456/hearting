@@ -31,6 +31,8 @@ class ForegroundActivityContext:
     jobs: Path | None = None
     runtime_executable: str = ""
     opencode_db: Path | None = None
+    exact_files: tuple[Path, ...] = ()
+    owner_turn: bool = False
 
 
 @dataclass(frozen=True)
@@ -38,6 +40,47 @@ class ActivityObservation:
     active: bool
     uncertain: bool
     reasons: tuple[str, ...]
+
+
+OWNER_BINDING_STATUSES = {
+    "owner-route-launch-binding",
+    "owner-route-post-launch-attachment",
+    "owner-route-advance-current",
+}
+
+
+def resolve_owner_activity_binding(jobs: Path, attempt_id: str,
+                                   metadata: Mapping[str, str]):
+    """Resolve the exact route identity shared by an owner observer and lease.
+
+    Depth-1 owners carry ``owner_route_*`` and own no route node. Keep that
+    identity on the existing attachment/adoption lifecycle; stage-shaped
+    route metadata is a conflict, not an owner binding.
+    """
+    from owner_route_binding import (
+        OwnerRouteBinding,
+        resolve_owner_route_lifecycle,
+    )
+
+    if any(metadata.get(key) for key in ("route_id", "route_hash", "route_node")):
+        raise RuntimeError("owner activity has stage-shaped route identity")
+    sealed_values = (
+        metadata.get("owner_route_file", ""),
+        metadata.get("owner_route_id", ""),
+        metadata.get("owner_route_hash", ""),
+    )
+    if any(sealed_values) and not all(sealed_values):
+        raise RuntimeError("owner activity route binding is incomplete")
+    sealed = OwnerRouteBinding(
+        str(Path(sealed_values[0]).resolve(strict=False)),
+        sealed_values[1], sealed_values[2],
+    ) if all(sealed_values) else None
+    binding, status = resolve_owner_route_lifecycle(
+        jobs, owner_attempt_id=attempt_id, sealed_binding=sealed,
+    )
+    if binding is None or status not in OWNER_BINDING_STATUSES:
+        raise RuntimeError(f"owner activity route binding unavailable: {status}")
+    return binding
 
 
 def resolve_activity_policy(worker_type: str | None) -> ActivityPolicy:
@@ -131,6 +174,92 @@ def build_activity_context(*, worker_type: str, harness: str, log_path: Path,
         return None
 
 
+def owner_turn_activity(args, process, *, harness: str,
+                        session_id: str | None = None,
+                        window_seconds: float = 7200.0):
+    """Bind one owner-turn observer to its registered attempt and native PID.
+
+    Any missing or conflicting identity becomes an uncertain observer. That
+    preserves the owner turn when local evidence cannot prove inactivity.
+    """
+    from session_supervisor_decisions import OwnerTurnActivity
+
+    def uncertain_observation():
+        return ActivityObservation(True, True, ("owner-activity-binding-unavailable",))
+
+    try:
+        from dispatch_completion_join import exact_attempt_row
+        attempt_id = str(args.parent_attempt_id)
+        jobs = Path(args.jobs)
+        row = exact_attempt_row(jobs, attempt_id)
+        metadata = dict(row.metadata or {})
+        route_id = str(getattr(args, "route_id", "") or "")
+        route_hash = str(getattr(args, "route_hash", "") or "")
+        route_file = str(getattr(args, "route_file", "") or "")
+        if (
+            row.attempt_id != attempt_id
+            or row.status not in {"open", "running"}
+            or metadata.get("worker_type") != "owner"
+            or metadata.get("dispatch_depth") != "1"
+            or not metadata.get("log_file")
+            or not route_id or not route_hash or not route_file
+        ):
+            raise RuntimeError("owner activity attempt identity mismatch")
+        binding = resolve_owner_activity_binding(jobs, attempt_id, metadata)
+        if (
+            binding.route_id != route_id
+            or binding.route_hash != route_hash
+            or str(Path(binding.route_file).resolve(strict=False))
+                != str(Path(route_file).resolve(strict=False))
+        ):
+            raise RuntimeError("owner activity current route binding mismatch")
+        pid = int(process.pid)
+        proc = Path("/proc") / str(pid)
+        start = _stat(proc / "stat")["start"]
+        exact_files: tuple[Path, ...] = ()
+        opencode_db = None
+        if harness == "claude" and session_id:
+            from claude_project_dir import encode_project_dir
+            config_home = os.environ.get("CLAUDE_CONFIG_DIR")
+            if config_home:
+                exact_files = (Path(config_home) / "projects" /
+                               encode_project_dir(Path(args.worktree)) /
+                               f"{session_id}.jsonl",)
+        elif harness == "opencode":
+            from opencode_runtime import opencode_db_path
+            opencode_db = opencode_db_path(os.environ)
+        elif harness != "codex":
+            raise ValueError(f"unsupported owner activity harness: {harness}")
+        context = ForegroundActivityContext(
+            window_seconds=float(window_seconds),
+            harness=harness,
+            log_path=Path(metadata["log_file"]),
+            metadata={
+                "attempt_id": attempt_id,
+                "route_id": route_id,
+                "route_hash": route_hash,
+                "runtime_pid": str(pid),
+                "runtime_start": str(start),
+            },
+            jobs=jobs,
+            runtime_executable=harness,
+            opencode_db=opencode_db,
+            exact_files=exact_files,
+            owner_turn=True,
+        )
+        monitor = ForegroundActivityMonitor(pid, start, context)
+        return OwnerTurnActivity(
+            monitor.sample, window_seconds=window_seconds,
+            sample_seconds=min(1.0, max(0.05, float(window_seconds) / 4.0)),
+            bind_session=monitor.bind_session,
+        )
+    except Exception:
+        return OwnerTurnActivity(
+            uncertain_observation, window_seconds=window_seconds,
+            sample_seconds=min(1.0, max(0.05, float(window_seconds) / 4.0)),
+        )
+
+
 def _stat(path: Path):
     raw = path.read_text(encoding="utf-8")
     end = raw.rfind(")")
@@ -164,12 +293,17 @@ class ForegroundActivityMonitor:
         self._lease_baseline = False
         self._session_baseline = None
 
+    def bind_session(self, session_id: str) -> None:
+        if not isinstance(self.context.metadata, dict):
+            raise RuntimeError("owner activity session binding is immutable")
+        self.context.metadata["session_id"] = session_id
+
     def _opencode_session_state(self):
         if self.context.opencode_db is None:
             return None
         from opencode_server_log import bind_session
         from opencode_runtime import read_session_observation
-        session = bind_session(self.context.log_path)
+        session = self.context.metadata.get("session_id") or bind_session(self.context.log_path)
         if not session:
             return None
         observation = read_session_observation(
@@ -184,15 +318,18 @@ class ForegroundActivityMonitor:
 
     def _files(self):
         states = {}
-        paths = [self.context.log_path]
-        for root in self.context.transcript_roots:
-            try:
-                if root.is_file():
-                    paths.append(root)
-                elif root.is_dir():
-                    paths.extend(p for p in root.rglob("*") if p.is_file())
-            except OSError:
-                raise
+        if self.context.owner_turn:
+            paths = list(self.context.exact_files)
+        else:
+            paths = [self.context.log_path]
+            for root in self.context.transcript_roots:
+                try:
+                    if root.is_file():
+                        paths.append(root)
+                    elif root.is_dir():
+                        paths.extend(p for p in root.rglob("*") if p.is_file())
+                except OSError:
+                    raise
         for path in paths:
             try:
                 states[str(path)] = _file_state(path)
@@ -215,11 +352,16 @@ class ForegroundActivityMonitor:
             deadline = float(data["deadline"])
             argv = (Path("/proc") / str(pid) / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
             digest = hashlib.sha256(b"\0".join(argv)).hexdigest()
+            if self.context.owner_turn:
+                from dispatch_completion_join import OWNER_ROUTE_NODE
+                expected_route_node = OWNER_ROUTE_NODE
+            else:
+                expected_route_node = self.context.metadata.get("route_node")
             return (
                 data.get("attempt_id") == attempt
                 and data.get("schema_version") == 1
                 and data.get("route_id") == self.context.metadata.get("route_id")
-                and data.get("route_node") == self.context.metadata.get("route_node")
+                and data.get("route_node") == expected_route_node
                 and math.isfinite(deadline) and deadline > time.time()
                 and _stat(Path("/proc") / str(pid) / "stat")["start"] == start
                 and pgid == pid and _stat(Path("/proc") / str(pid) / "stat")["pgid"] == pgid
@@ -258,8 +400,9 @@ class ForegroundActivityMonitor:
                        if pid == self.proc_pid and start == self.leader_start), None)
         if leader is None:
             raise RuntimeError("leader identity changed or disappeared")
-        members = {key for key, info in table.items() if info["pgid"] == self.proc_pid}
-        members.add((self.proc_pid, self.leader_start))
+        members = {(self.proc_pid, self.leader_start)}
+        if not self.context.owner_turn:
+            members.update(key for key, info in table.items() if info["pgid"] == self.proc_pid)
         by_pid = {pid: (pid, start) for pid, start in table}
         changed = True
         while changed:
@@ -270,7 +413,7 @@ class ForegroundActivityMonitor:
                     members.add(key)
                     changed = True
         metadata = dict(self.context.metadata)
-        if metadata.get("attempt_id"):
+        if metadata.get("attempt_id") and not self.context.owner_turn:
             from dispatch_contract import attempt_tagged_descendants
             tagged = attempt_tagged_descendants(metadata)
             if tagged.state == "unverifiable":
@@ -355,6 +498,10 @@ class ForegroundActivityMonitor:
                 self._lease_baseline = lease
                 self._session_baseline = session_state
                 return ActivityObservation(False, session_uncertain, ("baseline",))
+            if (self.context.owner_turn and session_state is not None
+                    and self._session_baseline is not None
+                    and session_state[0] != self._session_baseline[0]):
+                session_uncertain = True
             if files != self._file_baseline:
                 reasons.append("attempt-file-change")
             if (session_state is not None and self._session_baseline is not None
@@ -367,11 +514,12 @@ class ForegroundActivityMonitor:
                 if previous is None:
                     if key not in runtime_lineage:
                         reasons.append("new-process-identity")
-                    if children_ticks > 0:
+                    if children_ticks > 0 and not self.context.owner_turn:
                         reasons.append("children-cpu")
                 elif key not in runtime_lineage and self_ticks > previous[0]:
                     reasons.append("process-cpu")
-                if previous is not None and children_ticks > previous[1]:
+                if (previous is not None and children_ticks > previous[1]
+                        and not self.context.owner_turn):
                     reasons.append("children-cpu")
             if lease:
                 reasons.append("exact-verification-lease")

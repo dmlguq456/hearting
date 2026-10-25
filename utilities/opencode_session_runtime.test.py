@@ -13,6 +13,7 @@ import selectors
 from types import SimpleNamespace
 import unittest
 import unittest.mock
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
@@ -552,6 +553,55 @@ paced('step_finish', part={'reason':'stop'})
         self.program(self.CHATTY)
         with self.assertRaisesRegex(self.supervisor.SupervisorError, "opencode-turn-timeout"):
             self.virtual_turn(handoff_intent={"intent_id": "handoff"})
+
+    def test_silent_owner_turn_survives_when_exact_tool_activity_is_observed(self):
+        from foreground_activity import ActivityObservation
+        from session_supervisor_decisions import OwnerTurnActivity
+        self.program(
+            "time.sleep(0.9)\n"
+            "event('text', part={'text':'done'})\n"
+            "event('step_finish', part={'reason':'stop'})\n"
+        )
+        activity = OwnerTurnActivity(
+            lambda: ActivityObservation(True, False, ("exact-tool-cpu",)),
+            window_seconds=self.WINDOW, sample_seconds=0.05,
+        )
+        with mock.patch("foreground_activity.owner_turn_activity", return_value=activity):
+            started = time.monotonic()
+            result, code = self.turn(ordinary_owner_turn=True)
+        self.assertGreater(time.monotonic() - started, self.WINDOW)
+        self.assertEqual((result["result"], code), ("done", 0))
+
+    def test_owner_transport_ignores_bookkeeping_output_and_expires_confirmed_idle(self):
+        from foreground_activity import ActivityObservation
+        from session_supervisor_decisions import OwnerTurnActivity
+        self.program("print('supervisor bookkeeping', flush=True)\ntime.sleep(10)\n")
+        activity = OwnerTurnActivity(
+            lambda: ActivityObservation(False, False, ("quiet",)),
+            window_seconds=self.WINDOW, sample_seconds=0.05,
+        )
+        with mock.patch("foreground_activity.owner_turn_activity", return_value=activity):
+            with self.assertRaisesRegex(self.supervisor.SupervisorError, "opencode-turn-timeout"):
+                self.turn(ordinary_owner_turn=True)
+
+    def test_owner_activity_also_applies_after_eof_while_native_process_lives(self):
+        from foreground_activity import ActivityObservation
+        from session_supervisor_decisions import OwnerTurnActivity
+        self.program(
+            "import os\n"
+            "event('step_start', part={})\n"
+            "os.close(1)\n"
+            "time.sleep(0.9)\n"
+        )
+        activity = OwnerTurnActivity(
+            lambda: ActivityObservation(True, False, ("exact-tool-cpu",)),
+            window_seconds=self.WINDOW, sample_seconds=0.05,
+        )
+        with mock.patch("foreground_activity.owner_turn_activity", return_value=activity):
+            started = time.monotonic()
+            with self.assertRaisesRegex(self.supervisor.SupervisorError, "opencode-final-stop-missing"):
+                self.turn(ordinary_owner_turn=True)
+        self.assertGreater(time.monotonic() - started, self.WINDOW)
 
 
 class SharedControllerTest(unittest.TestCase):

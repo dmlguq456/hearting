@@ -620,6 +620,7 @@ class AppServer:
         self.next_id = 1
         self.pending: list[dict[str, Any]] = []
         self.input_control = None
+        self.owner_turn_activity = None
         self.git_failure_feedback = CodexGitFailureFeedback(self)
         self.messages = queue.Queue()
         def receive():
@@ -645,6 +646,9 @@ class AppServer:
                 line = self.messages.get(timeout=0.2)
                 break
             except queue.Empty:
+                activity = self.owner_turn_activity
+                if activity is not None and activity.expired():
+                    raise SupervisorError("codex-turn-no-progress")
                 continue
         if not line:
             raise SupervisorError("app-server-eof")
@@ -655,8 +659,14 @@ class AppServer:
         if not isinstance(value, dict):
             raise SupervisorError("app-server-protocol-shape-invalid")
         if self.input_control is not None and self.input_control.response(value):
+            activity = self.owner_turn_activity
+            if activity is not None and activity.expired():
+                raise SupervisorError("codex-turn-no-progress")
             return self.read()
         if self.git_failure_feedback.response(value):
+            activity = self.owner_turn_activity
+            if activity is not None and activity.expired():
+                raise SupervisorError("codex-turn-no-progress")
             return self.read()
         return value
 
@@ -861,6 +871,7 @@ def run_turn(
     thread_id: str,
     prompt: str,
     args: argparse.Namespace,
+    activity=None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     apply_owner_runtime_permissions(args)
     params: dict[str, Any] = {
@@ -917,75 +928,85 @@ def run_turn(
     final_text: str | None = None
     final_item: dict[str, Any] | None = None
     turn_error: dict[str, Any] | None = None
-    while True:
-        event = server.next_event()
-        if "id" in event and "method" in event:
-            raise SupervisorError("app-server-unexpected-request")
-        method = event.get("method")
-        raw_params = event.get("params")
-        event_params = raw_params if isinstance(raw_params, dict) else {}
-        # The exact notification method that carries a same-turn TurnError
-        # ahead of `turn/completed` is not confirmed from observed traffic
-        # (plan.md item 4 sampling found zero structured-error rows); match
-        # on shape (this turn's id + an `error` object) rather than bet on
-        # one method name, so this still works whatever that method is
-        # called. `turn/completed.turn.error` below remains the primary,
-        # confirmed source either way.
-        if event_params.get("turnId") == turn_id and isinstance(
-            event_params.get("error"), dict
-        ):
-            turn_error = event_params["error"]
-        if (method == "thread/tokenUsage/updated"
-                and event_params.get("threadId") == thread_id
-                and event_params.get("turnId") == turn_id):
-            usage = normalize_token_usage(event_params.get("tokenUsage"))
-            if usage is not None:
-                emit({
-                    "type": "dispatch.supervisor.token_usage",
-                    "thread_id": thread_id,
-                    "turn_id": event_params.get("turnId"),
-                    "token_usage": usage,
-                })
-        if method == "item/started" and event_params.get("turnId") == turn_id:
-            raw_item = event_params.get("item")
-            if isinstance(raw_item, dict) and raw_item.get("type") == "commandExecution":
-                emit({"type": "item.started", "item": normalize_item(raw_item)})
-        if method == "item/completed" and event_params.get("turnId") == turn_id:
-            raw_item = event_params.get("item")
-            if isinstance(raw_item, dict):
-                if event_params.get("threadId") == thread_id and feedback is not None:
-                    feedback.consider(thread_id, turn_id, raw_item)
-                item = normalize_item(raw_item)
-                emit({"type": "item.completed", "item": item})
-                if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
-                    final_text = item["text"]
-                    final_item = item
-        completed = event_params.get("turn")
-        if (
-            method == "turn/completed"
-            and isinstance(completed, dict)
-            and completed.get("id") == turn_id
-        ):
-            emit({"type": "dispatch.supervisor.turn.completed", "thread_id": thread_id,
-                  "turn_id": turn_id, "status": completed.get("status")})
-            if completed.get("status") != "completed":
+    server.owner_turn_activity = activity
+    try:
+        while True:
+            event = server.next_event()
+            if "id" in event and "method" in event:
+                raise SupervisorError("app-server-unexpected-request")
+            method = event.get("method")
+            raw_params = event.get("params")
+            event_params = raw_params if isinstance(raw_params, dict) else {}
+            completed_turn = event_params.get("turn")
+            terminal_event = (method == "turn/completed" and isinstance(completed_turn, dict)
+                              and completed_turn.get("id") == turn_id)
+            if activity is not None and not terminal_event and activity.expired(
+                    payload_progress=codex_payload_progress(event, thread_id, turn_id)):
+                raise SupervisorError("codex-turn-no-progress")
+            # The exact notification method that carries a same-turn TurnError
+            # ahead of `turn/completed` is not confirmed from observed traffic
+            # (plan.md item 4 sampling found zero structured-error rows); match
+            # on shape (this turn's id + an `error` object) rather than bet on
+            # one method name, so this still works whatever that method is
+            # called. `turn/completed.turn.error` below remains the primary,
+            # confirmed source either way.
+            if event_params.get("turnId") == turn_id and isinstance(
+                event_params.get("error"), dict
+            ):
+                turn_error = event_params["error"]
+            if (method == "thread/tokenUsage/updated"
+                    and event_params.get("threadId") == thread_id
+                    and event_params.get("turnId") == turn_id):
+                usage = normalize_token_usage(event_params.get("tokenUsage"))
+                if usage is not None:
+                    emit({
+                        "type": "dispatch.supervisor.token_usage",
+                        "thread_id": thread_id,
+                        "turn_id": event_params.get("turnId"),
+                        "token_usage": usage,
+                    })
+            if method == "item/started" and event_params.get("turnId") == turn_id:
+                raw_item = event_params.get("item")
+                if isinstance(raw_item, dict) and raw_item.get("type") == "commandExecution":
+                    emit({"type": "item.started", "item": normalize_item(raw_item)})
+            if method == "item/completed" and event_params.get("turnId") == turn_id:
+                raw_item = event_params.get("item")
+                if isinstance(raw_item, dict):
+                    if event_params.get("threadId") == thread_id and feedback is not None:
+                        feedback.consider(thread_id, turn_id, raw_item)
+                    item = normalize_item(raw_item)
+                    emit({"type": "item.completed", "item": item})
+                    if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                        final_text = item["text"]
+                        final_item = item
+            completed = event_params.get("turn")
+            if (
+                method == "turn/completed"
+                and isinstance(completed, dict)
+                and completed.get("id") == turn_id
+            ):
+                emit({"type": "dispatch.supervisor.turn.completed", "thread_id": thread_id,
+                      "turn_id": turn_id, "status": completed.get("status")})
+                if completed.get("status") != "completed":
+                    if feedback is not None:
+                        feedback.finish_turn(turn_id)
+                    raw_completed_error = completed.get("error")
+                    error = (
+                        raw_completed_error
+                        if isinstance(raw_completed_error, dict)
+                        else turn_error
+                    )
+                    payload = _turn_failed_payload(turn_id, error)
+                    emit(payload)
+                    raise TurnFailed(payload)
+                if control is not None:
+                    control.completed(turn_id)
                 if feedback is not None:
                     feedback.finish_turn(turn_id)
-                raw_completed_error = completed.get("error")
-                error = (
-                    raw_completed_error
-                    if isinstance(raw_completed_error, dict)
-                    else turn_error
-                )
-                payload = _turn_failed_payload(turn_id, error)
-                emit(payload)
-                raise TurnFailed(payload)
-            if control is not None:
-                control.completed(turn_id)
-            if feedback is not None:
-                feedback.finish_turn(turn_id)
-            return final_text, final_item
-
+                return final_text, final_item
+    finally:
+        if server.owner_turn_activity is activity:
+            server.owner_turn_activity = None
 
 _apply_notice = DECISIONS.apply_notice
 
@@ -1051,6 +1072,102 @@ def parser() -> argparse.ArgumentParser:
 def context_window_arguments(args: argparse.Namespace) -> list[str]:
     value = getattr(args, "model_context_window", None)
     return [] if value is None else ["-c", f"model_context_window={value}"]
+
+
+CODEX_THREAD_ITEM_TYPES = frozenset({
+    "userMessage", "hookPrompt", "agentMessage", "functionCallOutput", "plan",
+    "reasoning", "commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall",
+    "collabAgentToolCall", "subAgentActivity", "webSearch", "imageView", "sleep",
+    "imageGeneration", "enteredReviewMode", "exitedReviewMode", "contextCompaction",
+})
+
+
+def codex_payload_progress(event: dict[str, Any], thread_id: str, turn_id: str) -> bool:
+    """Accept shaped, attributable App Server work payloads for this turn."""
+    method = event.get("method")
+    params = event.get("params")
+    if (not isinstance(method, str) or not isinstance(params, dict)
+            or params.get("threadId") != thread_id or params.get("turnId") != turn_id):
+        return False
+
+    def nonempty_string(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    if method in {"item/started", "item/completed"}:
+        item = params.get("item")
+        if not isinstance(item, dict):
+            return False
+        item_type = item.get("type")
+        item_id = item.get("id")
+        return (isinstance(item_type, str) and item_type in CODEX_THREAD_ITEM_TYPES
+                and nonempty_string(item_id))
+
+    if method == "turn/plan/updated":
+        plan = params.get("plan")
+        explanation = params.get("explanation")
+        if (not isinstance(plan, list) or not plan
+                or "explanation" not in params
+                or (explanation is not None and not isinstance(explanation, str))):
+            return False
+        return all(
+            isinstance(step, dict)
+            and nonempty_string(step.get("step"))
+            and isinstance(step.get("status"), str)
+            and step["status"] in {"pending", "inProgress", "completed"}
+            for step in plan
+        )
+
+    if method == "turn/diff/updated":
+        return nonempty_string(params.get("diff"))
+
+    if method == "item/fileChange/patchUpdated":
+        changes = params.get("changes")
+        if not nonempty_string(params.get("itemId")) or not isinstance(changes, list) or not changes:
+            return False
+        for change in changes:
+            if (not isinstance(change, dict) or not nonempty_string(change.get("path"))
+                    or not isinstance(change.get("diff"), str)):
+                return False
+            kind = change.get("kind")
+            if (not isinstance(kind, dict) or not isinstance(kind.get("type"), str)
+                    or kind["type"] not in {"add", "delete", "update"}):
+                return False
+            if kind.get("type") == "update":
+                if "move_path" not in kind:
+                    return False
+                move_path = kind.get("move_path")
+                if move_path is not None and not nonempty_string(move_path):
+                    return False
+        return True
+
+    if method == "item/mcpToolCall/progress":
+        return (nonempty_string(params.get("itemId"))
+                and nonempty_string(params.get("message")))
+
+    if method == "item/commandExecution/terminalInteraction":
+        return (nonempty_string(params.get("itemId"))
+                and nonempty_string(params.get("processId"))
+                and isinstance(params.get("stdin"), str) and bool(params["stdin"]))
+
+    if method in {
+        "item/agentMessage/delta",
+        "item/plan/delta",
+        "item/commandExecution/outputDelta",
+        "item/reasoning/summaryTextDelta",
+        "item/reasoning/textDelta",
+    }:
+        item_id = params.get("itemId")
+        delta = params.get("delta")
+        if not nonempty_string(item_id) or not isinstance(delta, str) or not delta:
+            return False
+        if method == "item/reasoning/summaryTextDelta":
+            index = params.get("summaryIndex")
+            return isinstance(index, int) and not isinstance(index, bool) and index >= 0
+        if method == "item/reasoning/textDelta":
+            index = params.get("contentIndex")
+            return isinstance(index, int) and not isinstance(index, bool) and index >= 0
+        return True
+    return False
 
 
 def run_one_turn(args: argparse.Namespace) -> int:
@@ -1299,8 +1416,14 @@ def main(argv: list[str] | None = None) -> int:
                 receipt_id=active_outbox.receipt_id if active_outbox is not None else None,
             )
             next_prompt = control.prepare(next_prompt)
+            from foreground_activity import owner_turn_activity
+            activity = owner_turn_activity(
+                args, server.process, harness="codex",
+                window_seconds=DECISIONS.OWNER_TURN_IDLE_SECONDS,
+            )
             final_text, _final_item = run_turn(
-                server, thread_id=thread_id, prompt=next_prompt, args=args
+                server, thread_id=thread_id, prompt=next_prompt, args=args,
+                activity=activity,
             )
             pending_notice = ""
             DECISIONS.refresh_owner_route(args)

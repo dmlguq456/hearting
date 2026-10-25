@@ -24,6 +24,61 @@ SUPERVISORS = {"claude": load("claude-session-supervisor"), "codex": load("codex
 
 
 class SharedDecisionsTest(unittest.TestCase):
+    def test_owner_default_idle_window_remains_7200_seconds(self):
+        clock = SimpleNamespace(now=0.0)
+        quiet = SimpleNamespace(active=False, uncertain=False)
+        activity = D.OwnerTurnActivity(lambda: quiet, clock=lambda: clock.now)
+        self.assertEqual(activity.window_seconds, 7200.0)
+        self.assertFalse(activity.expired(now=0))
+        clock.now = 7199
+        self.assertFalse(activity.expired(now=7199))
+        clock.now = 7200
+        self.assertTrue(activity.expired(now=7200))
+
+    def test_owner_idle_window_renews_on_payload_or_attributed_activity(self):
+        clock = SimpleNamespace(now=0.0)
+        observation = SimpleNamespace(active=False, uncertain=False)
+        activity = D.OwnerTurnActivity(
+            lambda: observation, window_seconds=10, sample_seconds=1,
+            clock=lambda: clock.now,
+        )
+        self.assertFalse(activity.expired(now=0))
+        clock.now = 9
+        self.assertFalse(activity.expired(now=9))
+        clock.now = 12
+        self.assertFalse(activity.expired(payload_progress=True, now=12))
+        clock.now = 21
+        self.assertFalse(activity.expired(now=21))
+        observation.active = True
+        clock.now = 22
+        self.assertFalse(activity.expired(now=22))
+        observation.active = False
+        clock.now = 31
+        self.assertFalse(activity.expired(now=31))
+        clock.now = 32
+        self.assertTrue(activity.expired(now=32))
+
+    def test_owner_unknown_never_expires_and_restarts_a_full_confirmed_quiet_window(self):
+        clock = SimpleNamespace(now=0.0)
+        observation = SimpleNamespace(active=False, uncertain=False)
+        activity = D.OwnerTurnActivity(
+            lambda: observation, window_seconds=10, sample_seconds=1,
+            clock=lambda: clock.now,
+        )
+        self.assertFalse(activity.expired(now=0))
+        clock.now = 7
+        observation.uncertain = True
+        self.assertFalse(activity.expired(now=7))
+        clock.now = 100
+        self.assertFalse(activity.expired(now=100))
+        observation.uncertain = False
+        clock.now = 101
+        self.assertFalse(activity.expired(now=101))
+        clock.now = 110
+        self.assertFalse(activity.expired(now=110))
+        clock.now = 111
+        self.assertTrue(activity.expired(now=111))
+
     def test_both_supervisors_use_the_shared_error_and_notice(self):
         for name, module in SUPERVISORS.items():
             with self.subTest(supervisor=name):

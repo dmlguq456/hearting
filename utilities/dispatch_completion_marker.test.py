@@ -789,6 +789,145 @@ class CompletionMarkerTest(unittest.TestCase):
         self.assertIn("tombstoned=execute,plan-check", result.stderr)
         self.assertIn("kept=-", result.stderr)
 
+    def test_automatic_history_continuation_consumers_late_revise_and_later_change(self):
+        """The reused B digest survives late recording, while a later C edit reopens consumers."""
+        from datetime import datetime, timezone
+        with mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": "off"}, clear=True):
+            self.jobs = self.stable_dispatch / "jobs.log"
+            self.jobs.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            route, route_path, evidence, marker_path = self._gates_off_cycle_route(
+                "route-auto-continuation-consumed-revise.json")
+            nodes = {node["id"]: node for node in route["nodes"]}
+            original_digest = json.loads(marker_path.read_text())["evidence"]["sha256"]
+            evidence.write_text("plan B: automatic evidence change\n", encoding="utf-8")
+            D.note_evidence_change(route, nodes["plan"], marker_path)
+            reused, _last_turn = ROUTE._continuation_reused_evidence(route, nodes["plan"])
+            self.assertEqual(reused["new_attempt_count"], 0)
+            self.assertEqual(reused["output_evidence_digest"], ROUTE.evidence_digest(evidence))
+            auto = ROUTE._route_revisions(route)
+            self.assertEqual([(row["sequence"], row["basis"], row["recorded_by"])
+                              for row in auto], [(1, "automatic", "runtime-auto")])
+            self.assertEqual(auto[0]["of_evidence_sha256"], original_digest)
+            self.assertEqual(auto[0]["evidence_sha256"], ROUTE.evidence_digest(evidence))
+
+            launched = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            review = evidence.parent / "_internal" / "plan_reviews" / "round_1.md"
+            review.parent.mkdir(parents=True, exist_ok=True)
+            review.write_text("plan-check consumes B\n", encoding="utf-8")
+            self.write_row("open", "plan-check-r1", "att-auto-consumed-pc",
+                           "worker_type=review", node_id="plan-check", ts=launched)
+            ROUTE.complete_node(route, nodes["plan-check"], "plan-check", review,
+                                self.jobs, "att-auto-consumed-pc")
+            log = evidence.parent / "dev_logs" / "implementation.md"
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text("execute consumes B\n", encoding="utf-8")
+            self.write_row("open", "execute", "att-auto-consumed-ex",
+                           node_id="execute", ts=launched)
+            completed = self.complete(route_path, "execute", log, jobs=self.jobs,
+                                      attempt_id="att-auto-consumed-ex")
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            history = D.evidence_change_history_path(marker_path, "plan")
+            observed_history = history.read_bytes()
+            plan_history = (marker_path.parent / "plan.1.json").read_bytes()
+            downstream_bytes = {
+                node_id: (marker_path.parent / f"{node_id}.json").read_bytes()
+                for node_id in ("plan-check", "execute")
+            }
+            late = self.revise(route_path, "plan", evidence, basis="owner-correction",
+                               reason="fixture: record B after its consumers", jobs=self.jobs)
+            self.assertEqual(late.returncode, 0, late.stdout + late.stderr)
+            self.assertIn("kept=execute,plan-check", late.stderr)
+            self.assertEqual(history.read_bytes(), observed_history)
+            self.assertEqual((marker_path.parent / "plan.1.json").read_bytes(), plan_history)
+            for node_id, expected in downstream_bytes.items():
+                path = marker_path.parent / f"{node_id}.json"
+                self.assertEqual(path.read_bytes(), expected)
+                marker = json.loads(path.read_bytes())
+                self.assertEqual(marker["sequence"], 1)
+                self.assertEqual(marker["attempt_id"], {
+                    "plan-check": "att-auto-consumed-pc",
+                    "execute": "att-auto-consumed-ex",
+                }[node_id])
+
+            evidence.write_text("plan C: real later change\n", encoding="utf-8")
+            D.note_evidence_change(route, nodes["plan"], marker_path)
+            later = self.revise(route_path, "plan", evidence, basis="owner-correction",
+                                reason="fixture: change B to C", jobs=self.jobs)
+            self.assertEqual(later.returncode, 0, later.stdout + later.stderr)
+            self.assertIn("tombstoned=execute,plan-check", later.stderr)
+            for node_id in ("plan-check", "execute"):
+                marker = json.loads((marker_path.parent / f"{node_id}.json").read_text())
+                self.assertEqual((marker["sequence"], marker["state"]),
+                                 (2, "superseded-by-upstream-revision"))
+
+    def test_execute_revision_keeps_same_effective_source_and_reopens_after_real_source_change(self):
+        from datetime import datetime, timezone
+        source = self.repo / "source" / "api.py"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("value = 1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "source/api.py"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "source fixture"], check=True)
+
+        with mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": "off"}, clear=True):
+            self.jobs = self.stable_dispatch / "jobs.log"
+            self.jobs.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            route, route_path, _plan_evidence, _plan_marker = self._gates_off_cycle_route(
+                "route-source-revision-boundary.json")
+            nodes = {node["id"]: node for node in route["nodes"]}
+            execute_evidence = _plan_evidence.with_name("execute.md")
+            execute_evidence.write_text("execute evidence A\n", encoding="utf-8")
+            plan_check_evidence = _plan_evidence.with_name("plan-check.md")
+            plan_check_evidence.write_text("plan-check pass\n", encoding="utf-8")
+            plan_check = self.complete(route_path, "plan-check", plan_check_evidence)
+            self.assertEqual(plan_check.returncode, 0, plan_check.stdout + plan_check.stderr)
+            execute = self.complete(route_path, "execute", execute_evidence)
+            self.assertEqual(execute.returncode, 0, execute.stdout + execute.stderr)
+            execute_marker_path = self.stable_dispatch / "completion" / route["route_id"] / "execute.json"
+            original_subject = json.loads(execute_marker_path.read_text())["source_subject"]
+
+            execute_evidence.write_text("execute evidence B\n", encoding="utf-8")
+            D.note_evidence_change(route, nodes["execute"], execute_marker_path)
+            docs = self.repo / "docs" / "outside-source.md"
+            docs.parent.mkdir(parents=True, exist_ok=True)
+            docs.write_text("does not change effective source bytes\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(self.repo), "add", "docs/outside-source.md"], check=True)
+            subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "non-source commit"], check=True)
+            self.assertEqual(SUBJECT.observe(route, nodes["execute"], worktree=self.repo)["digest"],
+                             original_subject["digest"])
+
+            launched = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            downstream_ids = [node_id for node_id in ("impl-review", "test") if node_id in nodes]
+            for node_id in downstream_ids:
+                attempt_id = f"att-source-consumer-{node_id}"
+                evidence = _plan_evidence.parent / "_internal" / "source-revision" / f"{node_id}.md"
+                evidence.parent.mkdir(parents=True, exist_ok=True)
+                evidence.write_text(f"{node_id} consumed the current source\n", encoding="utf-8")
+                self.write_source_bound_row("open", node_id, attempt_id,
+                                           node_id=node_id, ts=launched)
+                result = self.complete(route_path, node_id, evidence,
+                                       jobs=self.jobs, attempt_id=attempt_id)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+            import artifact_producer
+            with mock.patch.object(artifact_producer, "require_cycle_output", return_value=None):
+                same_source = ROUTE.publish_revision_locked(
+                    route, "execute", execute_evidence, basis="owner-correction",
+                    reason="fixture: record evidence after a non-source commit",
+                    author_attempt_id="att-source-revise-same", jobs=self.jobs)
+            self.assertEqual(same_source["tombstoned"], [])
+            self.assertEqual(set(same_source["kept"]), set(downstream_ids))
+
+            source.write_text("value = 2\n", encoding="utf-8")
+            execute_evidence.write_text("execute evidence C\n", encoding="utf-8")
+            D.note_evidence_change(route, nodes["execute"], execute_marker_path)
+            with mock.patch.object(artifact_producer, "require_cycle_output", return_value=None):
+                changed_source = ROUTE.publish_revision_locked(
+                    route, "execute", execute_evidence, basis="owner-correction",
+                    reason="fixture: real source content changed",
+                    author_attempt_id="att-source-revise-changed", jobs=self.jobs)
+            self.assertEqual(set(changed_source["tombstoned"]), set(downstream_ids))
+
     def test_start_restores_a_consumed_tombstone_and_a_later_revise_supersedes_it_again(self):
         with mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": "off"}, clear=True):
             route, route_path, evidence, directory = self._consumed_incident_route("route-consumed-restore.json")
@@ -1047,6 +1186,9 @@ class CompletionMarkerTest(unittest.TestCase):
         blocking round as its `answers` -- once, idempotently.
         """
         route, plan_check_node = self._a_sd154_10_fixture("route-a10.json")
+        marker_dir = self.stable_dispatch / "completion" / route["route_id"]
+        predecessor_bytes = (marker_dir / "plan.1.json").read_bytes()
+        predecessor_marker = json.loads(predecessor_bytes)
         with mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": "on"}, clear=True):
             admission = DISPATCH_NODE.admit_round(
                 route, plan_check_node, self.jobs, owner_attempt_id="att-owner-1",
@@ -1054,11 +1196,28 @@ class CompletionMarkerTest(unittest.TestCase):
         self.assertEqual(len(admission.auto_revisions), 1, admission.auto_revisions)
         recorded = admission.auto_revisions[0]
         self.assertEqual(recorded["stage_authority"], "revision")
+        self.assertEqual(recorded["sequence"], 2)
         self.assertEqual(recorded["revision"]["basis"], "review-findings")
+        self.assertEqual(recorded["revision"]["of_sequence"], 1)
+        self.assertEqual(recorded["revision"]["of_marker_sha256"],
+                         hashlib.sha256(predecessor_bytes).hexdigest())
+        self.assertEqual(recorded["revision"]["of_evidence_sha256"],
+                         predecessor_marker["evidence"]["sha256"])
+        self.assertEqual(recorded["revision"]["evidence_sha256"],
+                         ROUTE.evidence_digest(self.base / "plan.md"))
         self.assertEqual(recorded["revision"]["answers"], ["att-plancheck-1"])
         self.assertEqual(recorded["revision"]["recorded_by"], "runtime-auto")
         self.assertEqual(recorded["revision"]["author_attempt_id"], "att-owner-1")
+        self.assertEqual((marker_dir / "plan.1.json").read_bytes(), predecessor_bytes)
         self.assertEqual(admission.budget.round_kind, "closure-check")
+
+        # A real continuation reader consumes the formal runtime-auto marker;
+        # its label is not itself the reuse proof.
+        plan_node = next(node for node in route["nodes"] if node["id"] == "plan")
+        with mock.patch.dict(os.environ, {**self.base_env(), "HEARTING_GATES": "on"}, clear=True):
+            reused, _last_turn = ROUTE._continuation_reused_evidence(route, plan_node)
+        self.assertEqual(reused["new_attempt_count"], 0)
+        self.assertEqual(reused["output_evidence_digest"], ROUTE.evidence_digest(self.base / "plan.md"))
 
         # Idempotent: `plan` is `current` again, so a second call records nothing.
         with mock.patch.dict(os.environ, self.base_env(), clear=True):
@@ -1450,14 +1609,15 @@ class CompletionMarkerTest(unittest.TestCase):
         with self.jobs.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
-    def write_source_bound_row(self, status, slug, attempt_id, extra="", node_id="test"):
+    def write_source_bound_row(self, status, slug, attempt_id, extra="", node_id="test",
+                               ts="2026-07-19T00:00:00Z"):
         node = next(item for item in self.current_route["nodes"] if item["id"] == node_id)
         binding = SUBJECT.seal_attempt(
             self.jobs, self.current_route, node, attempt_id, worktree=self.repo)
         binding_fields = ",".join(f"{key}={value}" for key, value in binding.items())
         route_file = f"route_file={self.current_route_file}"
         combined = ",".join(value for value in (extra, binding_fields, route_file) if value)
-        self.write_row(status, slug, attempt_id, combined, node_id)
+        self.write_row(status, slug, attempt_id, combined, node_id, ts=ts)
 
     def complete_source_bound_native(self, route, evidence, attempt_id, surface, axes):
         node = next(item for item in route["nodes"] if item["id"] == "test")

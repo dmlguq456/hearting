@@ -127,7 +127,8 @@ def command(args, session: str) -> list[str]:
     return prefix[:-1] + argv
 
 
-def run_turn(args, prompt: str, *, emit, idle_reset: bool = False) -> tuple[dict, int]:
+def run_turn(args, prompt: str, *, emit, idle_reset: bool = False,
+             ordinary_owner_turn: bool = False) -> tuple[dict, int]:
     """Stream one exact native turn, then return the portable result envelope.
 
     `idle_reset` turns `args.turn_timeout` into a no-progress window: each read
@@ -173,15 +174,16 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False) -> tuple[dict
     buffer = b""
     oversized = False
     deadline = time.monotonic() + args.turn_timeout
+    activity = None
 
-    def event(line: bytes) -> None:
+    def event(line: bytes) -> bool:
         nonlocal session, final_text, terminal_stop, runtime_error
         try:
             value = json.loads(line)
         except (ValueError, UnicodeDecodeError):
-            return  # Native CLI diagnostics are not result evidence.
+            return False  # Native CLI diagnostics are not result evidence.
         if not isinstance(value, dict):
-            return
+            return False
         # Keep the supervisor's established V1 event envelope exactly intact;
         # the reusable normalizer is used by passive consumers, while this
         # identity-bearing stream validates the raw event before forwarding it.
@@ -190,7 +192,7 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False) -> tuple[dict
         if not native:
             if kind == "error":
                 runtime_error = opencode_runtime.safe_provider_error(value.get("error"))
-                return
+                return False
             raise OpenCodeTransportError("opencode-event-session-missing")
         if not isinstance(native, str) or not SESSION_ID.fullmatch(native):
             raise OpenCodeTransportError("opencode-event-session-missing")
@@ -199,6 +201,8 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False) -> tuple[dict
         if not session:
             bind_session(args, native)
             session = native
+            if activity is not None:
+                activity.bind_session(session)
             emit({"type": "dispatch.supervisor.session", "runtime": "opencode",
                   "parent_attempt_id": args.parent_attempt_id,
                   "session_id": session, "cwd": args.worktree})
@@ -221,6 +225,7 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False) -> tuple[dict
                   "sessionID": session, "part": {"type": "tool",
                       "tool": part.get("tool"), "callID": part.get("callID"),
                       "id": part.get("id"), "state": {"status": state.get("status")}}})
+        return kind in {"step_start", "step_finish", "text", "tool_use"}
 
     # Credit the outcome to the account this request starts with.
     account = (opencode_runtime.model_account_observation(getattr(args, "model", None))
@@ -230,20 +235,31 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False) -> tuple[dict
         input_file.seek(0)
         process = subprocess.Popen(command(args, session), cwd=args.worktree,
                                    stdin=input_file, stdout=subprocess.PIPE, stderr=None)
+        if ordinary_owner_turn:
+            from foreground_activity import owner_turn_activity
+            activity = owner_turn_activity(
+                args, process, harness="opencode", window_seconds=args.turn_timeout,
+            )
         try:
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
                 eof = False
                 while not eof:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise OpenCodeTransportError("opencode-turn-timeout")
-                    for key, _ in selector.select(min(1.0, remaining)):
+                    if activity is None:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise OpenCodeTransportError("opencode-turn-timeout")
+                        wait = min(1.0, remaining)
+                    else:
+                        wait = activity.sample_seconds
+                    events = selector.select(wait)
+                    payload_progress = False
+                    for key, _ in events:
                         chunk = os.read(key.fd, 65536)
                         if not chunk:
                             eof = True
                             break
-                        if idle_reset:
+                        if idle_reset and activity is None:
                             deadline = time.monotonic() + args.turn_timeout
                         buffer += chunk
                         while b"\n" in buffer:
@@ -251,15 +267,28 @@ def run_turn(args, prompt: str, *, emit, idle_reset: bool = False) -> tuple[dict
                             if oversized or len(line) > MAX_EVENT_BYTES:
                                 oversized = False
                                 continue
-                            event(line)
+                            payload_progress = event(line) or payload_progress
                         if len(buffer) > MAX_EVENT_BYTES:
                             buffer, oversized = b"", True
+                    if activity is not None and activity.expired(payload_progress=payload_progress):
+                        raise OpenCodeTransportError("opencode-turn-timeout")
                 if buffer and not oversized:
-                    event(buffer)
-            try:
-                code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
-            except subprocess.TimeoutExpired as exc:
-                raise OpenCodeTransportError("opencode-turn-timeout") from exc
+                    payload_progress = event(buffer)
+                    if activity is not None and activity.expired(payload_progress=payload_progress):
+                        raise OpenCodeTransportError("opencode-turn-timeout")
+            if activity is not None:
+                while process.poll() is None:
+                    try:
+                        process.wait(timeout=activity.sample_seconds)
+                    except subprocess.TimeoutExpired:
+                        if activity.expired():
+                            raise OpenCodeTransportError("opencode-turn-timeout")
+                code = process.returncode
+            else:
+                try:
+                    code = process.wait(timeout=max(0.01, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired as exc:
+                    raise OpenCodeTransportError("opencode-turn-timeout") from exc
         finally:
             if process.poll() is None:
                 process.kill()

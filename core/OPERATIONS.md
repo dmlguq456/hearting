@@ -334,9 +334,15 @@ For every non-owner foreground worker (stage, review, support, or frame), the
 launcher also samples activity and may seal `no-progress` after the optional
 `headless.no_progress_minutes` window (default 30 minutes; 0 disables it).
 This conservative activity check treats runtime/tool uncertainty as activity;
-owners and detached workers are outside its scope. The existing launch-origin
-4h default / 24h maximum remains the final hard deadline and retains cleanup
-authority.
+owners and detached workers are outside that launcher policy. An ordinary
+supervised owner turn still uses its existing 7200-second timeout as a
+no-progress window: validated payload output or exact activity attributed to
+that turn restarts the window. A quiet turn expires only after a full,
+successfully observed idle window; uncertainty suspends expiry until a known
+quiet window can be measured. This is not an owner lifetime cap. Direct bounded
+calls and terminal handoff turns keep their fixed deadlines. The existing
+launch-origin 4h default / 24h maximum remains the final hard deadline and
+retains cleanup authority.
 
 Each SD item below keeps the rule an agent acts on; its full decision record is verbatim in `core/ADAPTATION.md §8`.
 
@@ -1769,12 +1775,17 @@ lease) to stop a quiet non-owner foreground child after the optional
 `headless.no_progress_minutes` window (default 30; 0 disables it). Any activity
 or observation uncertainty keeps the child alive. A confirmed quiet window ends
 the child as `no-progress`; the launcher's finite execution budget remains the
-final hard timeout and cleanup authority. Owners and detached children are not
-covered by this foreground activity window. Progress recovery leaves a delayed
-success intact. Per-tool bookkeeping is runtime-owned. Optional heartbeats
-are work hints: test→tool is legal, and a terminal heartbeat cannot commit a
-successful result. Prose, log mtime, and repeated tool events grant no progress.
-Only declared sub-sessions receive the chain ledger/helper instructions.
+final hard timeout and cleanup authority. For an ordinary owner turn, the same
+conservative sampler is bound to the live native process and exact session or
+lease evidence; supervisor logs, unrelated sessions, broad transcript roots,
+and unrelated child activity leave its 7200-second idle window running.
+Observation uncertainty counts as unknown, not as inactivity. Direct bounded calls,
+terminal cleanup, and the distinction between activity and semantic completion
+remain unchanged. Progress recovery leaves a delayed success intact. Per-tool
+bookkeeping is runtime-owned. Optional heartbeats are work hints: test→tool is
+legal, and a terminal heartbeat cannot commit a successful result. Prose, log
+mtime, and repeated tool events grant no progress. Only declared sub-sessions
+receive the chain ledger/helper instructions.
 
 A committed result and process cleanup are separate obligations. The runtime
 join retains every owned attempt, including `done` rows, until the exact process

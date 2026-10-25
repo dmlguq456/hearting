@@ -3426,6 +3426,74 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
                                   return_value=SimpleNamespace(allow=True)):
             return R._reuse_snapshot(self.jobs, self.route, [])
 
+    def test_shared_reader_reuses_both_automatic_record_forms_and_rejects_history_conflict(self):
+        spec = importlib.util.spec_from_file_location(
+            "replacement_completion_marker_fixture",
+            Path(__file__).with_name("dispatch_completion_marker.test.py"),
+        )
+        completion_tests = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(completion_tests)
+
+        def fixture():
+            case = completion_tests.CompletionMarkerTest("runTest")
+            case.setUp()
+            self.addCleanup(case.tearDown)
+            return case
+
+        formal = fixture()
+        formal_env = {**formal.base_env(), "HEARTING_GATES": "on"}
+        with mock.patch.dict(os.environ, formal_env, clear=True):
+            route, _route_path, evidence, marker_path = formal._gates_off_cycle_route(
+                "replacement-formal-auto.json")
+            jobs = Path(route["launch_compatibility_tuple"]["jobs_path"]["path"])
+            jobs.parent.mkdir(parents=True, exist_ok=True)
+            plan_check = next(node for node in route["nodes"] if node["id"] == "plan-check")
+            pipe = ("capability=autopilot-code,attempt_schema_version=2,registered_worker=1,"
+                    f"route_id={route['route_id']},route_node=plan-check,worker_type=review,"
+                    "note=completed-review-blocking,attempt_id=att-replacement-formal-pc")
+            with jobs.open("a", encoding="utf-8") as handle:
+                handle.write(f"2026-10-25T00:00:00Z\tdone\t{formal.repo}\t{formal.repo}\tpc\t{pipe}\n")
+            evidence.write_text("formal runtime-auto evidence\n", encoding="utf-8")
+            admission = completion_tests.DISPATCH_NODE.admit_round(
+                route, plan_check, jobs, owner_attempt_id="att-replacement-formal-owner")
+            self.assertEqual(len(admission.auto_revisions), 1)
+            self.assertEqual(admission.auto_revisions[0]["revision"]["recorded_by"], "runtime-auto")
+            snapshot = R._reuse_snapshot(jobs, route, jobs.read_text().splitlines())
+            self.assertIn("plan", {row["node"] for row in snapshot["completed"]})
+            self.assertEqual(json.loads(marker_path.read_text())["sequence"], 2)
+
+        gates_off = fixture()
+        gates_off_env = {**gates_off.base_env(), "HEARTING_GATES": "off"}
+        with mock.patch.dict(os.environ, gates_off_env, clear=True):
+            route, route_path, evidence, marker_path = gates_off._gates_off_cycle_route(
+                "replacement-gates-off-auto.json")
+            jobs = Path(route["launch_compatibility_tuple"]["jobs_path"]["path"])
+            jobs.parent.mkdir(parents=True, exist_ok=True)
+            jobs.touch(exist_ok=True)
+            nodes = {node["id"]: node for node in route["nodes"]}
+            evidence.write_text("gates-off runtime-auto evidence\n", encoding="utf-8")
+            D.note_evidence_change(route, nodes["plan"], marker_path)
+            reused, _turn = completion_tests.ROUTE._continuation_reused_evidence(
+                route, nodes["plan"])
+            self.assertEqual(reused["new_attempt_count"], 0)
+            self.assertEqual(reused["output_evidence_digest"],
+                             completion_tests.ROUTE.evidence_digest(evidence))
+            review = evidence.with_name("plan-check.md")
+            review.write_text("plan-check consumed gates-off evidence\n", encoding="utf-8")
+            completed = gates_off.complete(route_path, "plan-check", review)
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            snapshot = R._reuse_snapshot(jobs, route, jobs.read_text().splitlines())
+            self.assertEqual({row["node"] for row in snapshot["completed"]},
+                             {"plan", "plan-check"})
+
+            history = completion_tests.D.evidence_change_history_path(marker_path, "plan")
+            plan_history = marker_path.parent / "plan.1.json"
+            plan_history.write_text("{\"tampered\":true}\n", encoding="utf-8")
+            with self.assertRaises(D.DispatchContractError) as broken:
+                R._reuse_snapshot(jobs, route, jobs.read_text().splitlines())
+            self.assertEqual(broken.exception.reason, "replacement-completion-unproven")
+            self.assertTrue(history.is_file())
+
     def previous_snapshot(self):
         return {
             "cycle_id": "cyc-reuse", "producer_id": "prod-reuse", "gates": [],

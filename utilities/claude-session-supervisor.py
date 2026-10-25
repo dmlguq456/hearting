@@ -13,6 +13,7 @@ from pathlib import Path
 import selectors
 import shlex
 import subprocess
+import tempfile
 from dispatch_owner_input import OwnerInput
 import dispatch_resource_wait as RESOURCE_WAIT
 import sys
@@ -79,6 +80,7 @@ import commit_policy
 
 ROOT = Path(__file__).resolve().parents[1]
 TERMINAL_COMMIT_GATE_DEFAULT = False
+MAX_CLAUDE_STREAM_RECORD_BYTES = 16_777_216
 
 
 def terminal_commit_enabled(args: argparse.Namespace) -> bool:
@@ -767,6 +769,21 @@ def result_answers_turn(result: dict[str, Any], turn_uuid: str | None = None) ->
     return not result.get("origin")
 
 
+def claude_payload_progress(value: dict[str, Any], turn_uuid: str) -> bool:
+    """Recognize current-turn payload events, excluding runtime bookkeeping."""
+    kind = value.get("type")
+    if kind == "result":
+        return result_answers_turn(value, turn_uuid)
+    if value.get("origin"):
+        return False
+    if value.get("user_message_uuid") == turn_uuid or value.get("parent_uuid") == turn_uuid:
+        return kind in {"assistant", "user", "tool_progress"}
+    # A stream has one submitted turn at a time. In the absence of an
+    # autonomous origin, assistant/user/tool payload records belong to it;
+    # system, status, and control records do not.
+    return kind in {"assistant", "user", "tool_progress"}
+
+
 class ClaudeStreamSession:
     """One long-lived realtime-input Claude process for every owner boundary."""
 
@@ -803,6 +820,7 @@ class ClaudeStreamSession:
         # output from the live process restarts it); a sealed handoff keeps the
         # fixed deadline its lease is sized for.
         self.idle_reset = False
+        self.owner_activity = None
 
     def run_turn(self, prompt: str, timeout: float) -> tuple[dict[str, Any], int]:
         if self.closed or self.process.stdin is None or self.process.stdout is None:
@@ -834,10 +852,19 @@ class ClaudeStreamSession:
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if self.owner_activity is None and remaining <= 0:
                 raise SupervisorError("claude-turn-process-failed")
-            events = self.selector.select(remaining)
+            events = self.selector.select(
+                min(1.0, self.owner_activity.sample_seconds)
+                if self.owner_activity is not None else remaining
+            )
             if not events:
+                if self.process.poll() is not None:
+                    raise SupervisorError("claude-result-missing")
+                if self.owner_activity is not None:
+                    if self.owner_activity.expired():
+                        raise SupervisorError("claude-turn-process-failed")
+                    continue
                 raise SupervisorError("claude-turn-process-failed")
             try:
                 chunk = os.read(self.process.stdout.fileno(), 65_536)
@@ -845,23 +872,32 @@ class ClaudeStreamSession:
                 raise SupervisorError("claude-stream-read-failed") from exc
             if not chunk:
                 raise SupervisorError("claude-result-missing")
-            if self.idle_reset:
+            if self.idle_reset and self.owner_activity is None:
                 deadline = time.monotonic() + timeout
             self.output_buffer += chunk
-            if len(self.output_buffer) > 16_777_216:
+            if len(self.output_buffer) > MAX_CLAUDE_STREAM_RECORD_BYTES:
                 raise SupervisorError("claude-stream-message-oversized")
+            parsed_event = False
             while b"\n" in self.output_buffer:
                 raw_line, self.output_buffer = self.output_buffer.split(b"\n", 1)
                 try:
                     value = json.loads(raw_line.decode("utf-8"))
                 except (UnicodeDecodeError, ValueError):
                     continue
+                parsed_event = True
+                progress = isinstance(value, dict) and claude_payload_progress(value, turn_uuid)
+                if self.owner_activity is not None and self.owner_activity.expired(
+                    payload_progress=progress
+                ):
+                    raise SupervisorError("claude-turn-process-failed")
                 if isinstance(value, dict) and value.get("type") == "result":
                     if result_answers_turn(value, turn_uuid):
                         return value, self.process.poll() or 0
                     origin = value.get("origin")
                     self.skipped_result_origins.append(
                         str(origin.get("kind")) if isinstance(origin, dict) else str(origin))
+            if self.owner_activity is not None and not parsed_event and self.owner_activity.expired():
+                raise SupervisorError("claude-turn-process-failed")
 
     def submit(self, prompt: str, *, timeout: float = 60) -> tuple[dict[str, Any], int]:
         """Expose the common submission seam for the stream transport."""
@@ -1018,6 +1054,7 @@ def run_turn(
     stream_session: ClaudeStreamSession | None = None,
     handoff_intent: dict | None = None,
     owner_input: OwnerInput | None = None,
+    ordinary_owner_turn: bool = False,
 ) -> tuple[dict[str, Any], int]:
     refresh_owner_runtime_permissions(args)
     if getattr(args, "runtime_harness", "claude") == "opencode":
@@ -1030,7 +1067,11 @@ def run_turn(
                 owner_input.bind_initial_thread(value["session_id"])
             emit(value)
         try:
-            return native_turn(args, prompt, emit=native_event, idle_reset=handoff_intent is None)
+            return native_turn(
+                args, prompt, emit=native_event,
+                idle_reset=handoff_intent is None and not ordinary_owner_turn,
+                ordinary_owner_turn=ordinary_owner_turn,
+            )
         except OpenCodeTransportError as exc:
             raise SupervisorError(str(exc)) from exc
     permission_event = commit_policy.permission_projection_event(
@@ -1069,8 +1110,17 @@ def run_turn(
                   "effective_reserved_charge": budget_record.read_effective_charge(state_root, handoff_intent)})
         return submission
     if stream_session is not None:
-        stream_session.idle_reset = handoff_intent is None
-        submission = submit(stream_session)
+        stream_session.idle_reset = handoff_intent is None and not ordinary_owner_turn
+        if ordinary_owner_turn:
+            from foreground_activity import owner_turn_activity
+            stream_session.owner_activity = owner_turn_activity(
+                args, stream_session.process, harness="claude", session_id=session_id,
+                window_seconds=args.turn_timeout,
+            )
+        try:
+            submission = submit(stream_session)
+        finally:
+            stream_session.owner_activity = None
         if submission.status != "submitted":
             raise SupervisorError(f"turn-{submission.status}")
         return submission.result or {}, submission.rc
@@ -1079,25 +1129,102 @@ def run_turn(
         # seam unconverted so the process transport reports the same three
         # values (submitted/not-submitted/submission-unknown) as the stream
         # transport. Do not catch-and-rewrap them here.
+        input_file = None
+        command = claude_command(args, session_id, resume)
+        if ordinary_owner_turn:
+            input_file = tempfile.TemporaryFile()
+            input_file.write(_prompt.encode("utf-8"))
+            input_file.seek(0)
         try:
             process = subprocess.Popen(
-            claude_command(args, session_id, resume),
-            cwd=args.worktree,
-            env={
-                **os.environ,
-                **(
-                    {"AGENT_DISPATCH_COMPLETION_STATE_FILE": args.state_file}
-                    if args.state_file
-                    else {}
-                ),
-            },
-            text=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
+                command,
+                cwd=args.worktree,
+                env={
+                    **os.environ,
+                    **(
+                        {"AGENT_DISPATCH_COMPLETION_STATE_FILE": args.state_file}
+                        if args.state_file
+                        else {}
+                    ),
+                },
+                text=not ordinary_owner_turn,
+                stdin=input_file if input_file is not None else subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=None,
             )
         except OSError as exc:
+            if input_file is not None:
+                input_file.close()
             raise SubmissionNotStarted("claude-process-not-started") from exc
+        if ordinary_owner_turn:
+            from foreground_activity import owner_turn_activity
+            activity = owner_turn_activity(
+                args, process, harness="claude", session_id=session_id,
+                window_seconds=timeout,
+            )
+            pending = b""
+            final: dict[str, Any] | None = None
+            fallback: dict[str, Any] | None = None
+            try:
+                with selectors.DefaultSelector() as selector:
+                    if process.stdout is None:
+                        raise SupervisorError("claude-process-pipe-missing")
+                    selector.register(process.stdout, selectors.EVENT_READ)
+                    eof = False
+                    while not eof or process.poll() is None:
+                        events = selector.select(activity.sample_seconds)
+                        payload_progress = False
+                        for key, _ in events:
+                            chunk = os.read(key.fd, 65_536)
+                            if not chunk:
+                                eof = True
+                                selector.unregister(key.fileobj)
+                                continue
+                            pending += chunk
+                            while b"\n" in pending:
+                                raw_line, pending = pending.split(b"\n", 1)
+                                if len(raw_line) > MAX_CLAUDE_STREAM_RECORD_BYTES:
+                                    raise SupervisorError("claude-stream-message-oversized")
+                                try:
+                                    value = json.loads(raw_line.decode("utf-8"))
+                                except (UnicodeDecodeError, ValueError):
+                                    continue
+                                if not isinstance(value, dict):
+                                    continue
+                                if claude_payload_progress(value, ""):
+                                    payload_progress = True
+                                if value.get("type") == "result":
+                                    fallback = value
+                                    if result_answers_turn(value):
+                                        final = value
+                            if len(pending) > MAX_CLAUDE_STREAM_RECORD_BYTES:
+                                raise SupervisorError("claude-stream-message-oversized")
+                        if activity.expired(payload_progress=payload_progress):
+                            raise subprocess.TimeoutExpired(command, timeout)
+                    if pending:
+                        try:
+                            value = json.loads(pending.decode("utf-8"))
+                        except (UnicodeDecodeError, ValueError):
+                            value = None
+                        if isinstance(value, dict) and value.get("type") == "result":
+                            fallback = value
+                            if result_answers_turn(value):
+                                final = value
+                if final is None:
+                    final = fallback
+                if final is None:
+                    raise SupervisorError("claude-result-missing")
+                return final, process.wait()
+            except BaseException:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+                raise
+            finally:
+                if input_file is not None:
+                    input_file.close()
+                if process.stdout is not None:
+                    process.stdout.close()
         try:
             output, _ = process.communicate(_prompt, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -1350,6 +1477,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             turn_kwargs = ({"handoff_intent": pending_handoff_intent}
                            if pending_handoff_intent is not None else {})
+            if pending_handoff_intent is None:
+                turn_kwargs["ordinary_owner_turn"] = True
             if args.runtime_harness == "opencode":
                 turn_kwargs["owner_input"] = control
             if pending_handoff_intent is None:

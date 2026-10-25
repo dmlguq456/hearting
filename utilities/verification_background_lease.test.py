@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """A verification lease ends everything its command started, and caps its memory."""
 import importlib.util
+import hashlib
 import io
+import json
 import os
 from pathlib import Path
 import signal
@@ -15,9 +17,58 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 LEASE = HERE / "verification-background-lease.py"
 sys.path.insert(0, str(HERE))
+import foreground_activity as ACTIVITY
+import owner_route_binding as OWNER_BINDING
 spec = importlib.util.spec_from_file_location("verification_background_lease", LEASE)
 L = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(L)
+
+
+def owner_registry_fixture(root: Path, *, conflicting_stage_identity=False):
+    attempt = "att-owner-lease"
+    route = {
+        "route_id": "rt-owner-lease",
+        "route_hash": "sha256:rt-owner-lease",
+        "advance_generation": 0,
+        "route_family_key": "family-owner-lease",
+        "owner_attempt_id": attempt,
+        "cwd": str(root),
+        "repo": str(root),
+        "capability": "autopilot-code",
+        "capability_mode": "debug",
+        "effective_intensity": "standard",
+        "artifact_root": str(root / "artifacts"),
+        "reused_nodes": [],
+    }
+    route_path = root / "route.json"
+    route_path.write_text(json.dumps(route), encoding="utf-8")
+    metadata = {
+        "attempt_id": attempt,
+        "worker_type": "owner",
+        "unit": "_kernel/owner",
+        "attempt_schema_version": "2",
+        "dispatch_depth": "1",
+        "registered_worker": "1",
+        "execution_surface": "registered-headless",
+        "owner_harness": "codex",
+        "capability": route["capability"],
+        "capability_mode": route["capability_mode"],
+        "intensity": "standard",
+        "artifact_root": route["artifact_root"],
+        "parent_sid": "launch-parent-session",
+        "owner_route_file": str(route_path),
+        "owner_route_id": route["route_id"],
+        "owner_route_hash": route["route_hash"],
+        "log_file": str(root / "owner.log"),
+    }
+    if conflicting_stage_identity:
+        metadata.update({"route_id": "rt-conflict", "route_node": "fabricated"})
+    jobs = root / "jobs.log"
+    row = "\t".join(("2026-10-25T00:00:00Z", "running", str(root), str(root), "owner",
+                      ",".join(f"{key}={value}" for key, value in metadata.items())))
+    jobs.write_text(row + "\n", encoding="utf-8")
+    (root / "owner.log").write_text("owner\n", encoding="utf-8")
+    return attempt, route, jobs
 
 
 def marked(marker):
@@ -156,6 +207,69 @@ raise SystemExit(lease.main(["--timeout","20","--",*{command!r}]))
             status = L.main(["--timeout", "1", "--require-subreaper", "--", "fixture"])
         self.assertEqual(status, L.SUBREAPER_UNAVAILABLE_EXIT)
         spawn.assert_not_called()
+
+    def test_registered_owner_lease_round_trips_through_writer_and_observer(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            attempt, route, jobs = owner_registry_fixture(root)
+            lease = root / "verification-leases" / f"{attempt}.json"
+            command = [sys.executable, "-c", "import time; time.sleep(0.2)"]
+            observed = {}
+
+            def inspect_from_wait(process, timeout, _scope):
+                record = json.loads(lease.read_text(encoding="utf-8"))
+                observed["record"] = record
+                stat = ACTIVITY._stat(Path("/proc") / str(process.pid) / "stat")
+                context = ACTIVITY.ForegroundActivityContext(
+                    window_seconds=7200, harness="codex", log_path=root / "owner.log",
+                    metadata={"attempt_id": attempt, "route_id": route["route_id"]},
+                    jobs=jobs, owner_turn=True,
+                )
+                monitor = ACTIVITY.ForegroundActivityMonitor(process.pid, stat["start"], context)
+                observed["active"] = monitor._lease_active()
+                observed["monitor"] = monitor
+                return process.wait(timeout=timeout)
+
+            signals = (signal.SIGTERM, signal.SIGHUP, signal.SIGCHLD)
+            handlers = {signum: signal.getsignal(signum) for signum in signals}
+            try:
+                with mock.patch.dict(os.environ, {
+                    "AGENT_DISPATCH_ATTEMPT_ID": attempt,
+                    "AGENT_DISPATCH_JOBS": str(jobs),
+                }), mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+                                      side_effect=lambda raw, **_kwargs: raw), \
+                     mock.patch.object(L, "wait_within_budget", side_effect=inspect_from_wait):
+                    status = L.main(["--timeout", "3", "--", *command])
+            finally:
+                for signum, handler in handlers.items():
+                    signal.signal(signum, handler)
+
+            record = observed["record"]
+            self.assertEqual(status, 0)
+            self.assertTrue(observed["active"])
+            self.assertEqual(record["schema_version"], 1)
+            self.assertEqual(record["attempt_id"], attempt)
+            self.assertEqual(record["route_id"], route["route_id"])
+            self.assertEqual(record["route_node"], "_owner")
+            self.assertEqual(record["command_digest"], hashlib.sha256(
+                "\0".join(command).encode("utf-8")).hexdigest())
+            self.assertGreater(record["deadline"], time.time())
+            self.assertEqual(record["pgid"], record["pid"])
+            self.assertTrue(record["pid_start"])
+            self.assertFalse(lease.exists())
+            self.assertFalse(observed["monitor"]._lease_active())
+
+    def test_registered_owner_with_conflicting_stage_identity_gets_no_lease(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            attempt, _route, jobs = owner_registry_fixture(
+                root, conflicting_stage_identity=True)
+            with mock.patch.dict(os.environ, {
+                "AGENT_DISPATCH_ATTEMPT_ID": attempt,
+                "AGENT_DISPATCH_JOBS": str(jobs),
+            }), mock.patch.object(OWNER_BINDING.ROUTE, "verify_route",
+                                  side_effect=lambda raw, **_kwargs: raw):
+                self.assertIsNone(L.lease_context(["python3", "verify"], 10))
 
     def test_the_scope_past_its_memory_budget_is_refused(self):
         process = subprocess.Popen(["sleep", self.marker], start_new_session=True)

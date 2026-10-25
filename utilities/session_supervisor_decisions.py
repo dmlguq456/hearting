@@ -30,6 +30,61 @@ class SupervisorError(RuntimeError):
     """A session supervisor could not preserve its completion contract."""
 
 
+OWNER_TURN_IDLE_SECONDS = 7200.0
+
+
+class OwnerTurnActivity:
+    """Shared idle-window decision for an ordinary supervised owner turn.
+
+    Transports provide payload progress and a conservative, exact activity
+    observer. Unknown samples discard accumulated quiet time; a later known
+    quiet sample starts a fresh full window. Sampling is throttled separately
+    from transport polling so App Server queue bookkeeping cannot drive a broad
+    process scan on every event.
+    """
+
+    def __init__(self, observer, *, window_seconds=OWNER_TURN_IDLE_SECONDS,
+                 sample_seconds=1.0, clock=time.monotonic, bind_session=None):
+        self.observer = observer
+        self.window_seconds = float(window_seconds)
+        self.sample_seconds = float(sample_seconds)
+        self.clock = clock
+        self._bind_session = bind_session
+        self.quiet_since = None
+        self.next_sample = None
+        self.last_uncertain = True
+
+    def bind_session(self, session_id: str) -> None:
+        if self._bind_session is not None:
+            self._bind_session(session_id)
+
+    def expired(self, *, payload_progress=False, now=None) -> bool:
+        stamp = self.clock() if now is None else float(now)
+        new_sample = self.next_sample is None or stamp >= self.next_sample
+        if new_sample:
+            self.next_sample = stamp + self.sample_seconds
+            try:
+                observation = self.observer()
+                uncertain = bool(observation.uncertain)
+                active = bool(observation.active)
+            except Exception:
+                uncertain, active = True, False
+            self.last_uncertain = uncertain
+            if uncertain:
+                self.quiet_since = None
+            elif payload_progress or active:
+                self.quiet_since = stamp
+            elif self.quiet_since is None:
+                self.quiet_since = stamp
+        elif self.last_uncertain:
+            self.quiet_since = None
+        elif payload_progress:
+            self.quiet_since = stamp
+        if self.quiet_since is None:
+            return False
+        return stamp - self.quiet_since >= self.window_seconds
+
+
 def refresh_owner_route(args) -> None:
     """Follow the same owner's adopted continuation before selecting children.
 

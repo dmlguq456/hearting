@@ -82,8 +82,21 @@ def lease_context(command: list[str], timeout: float) -> tuple[Path, dict[str, o
     if row is None or row[0] not in {"open", "running"}:
         return None
     metadata = row[1]
-    route_id = metadata.get("route_id", "")
-    route_node = metadata.get("route_node", "")
+    if metadata.get("worker_type") == "owner":
+        if metadata.get("dispatch_depth") != "1":
+            return None
+        try:
+            from dispatch_completion_join import OWNER_ROUTE_NODE
+            from foreground_activity import resolve_owner_activity_binding
+            binding = resolve_owner_activity_binding(jobs, attempt, metadata)
+        except Exception:
+            # A verification lease is optional. An owner without a uniquely
+            # resolved current binding runs under the existing no-lease path.
+            return None
+        route_id, route_node = binding.route_id, OWNER_ROUTE_NODE
+    else:
+        route_id = metadata.get("route_id", "")
+        route_node = metadata.get("route_node", "")
     if not route_id or not route_node:
         return None
     digest = hashlib.sha256("\0".join(command).encode("utf-8")).hexdigest()
