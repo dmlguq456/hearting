@@ -489,7 +489,12 @@ class GovernorTest(unittest.TestCase):
                     },
                 )
 
-    def test_partial_continuation_supersedes_only_gap_and_reuses_retry_claim(self):
+    def test_partial_continuation_replacement_owner_keeps_original_pass_peer_binding(self):
+        self.test_partial_continuation_supersedes_only_gap_and_reuses_retry_claim(
+            replacement_parent="att-replacement-owner")
+
+    def test_partial_continuation_supersedes_only_gap_and_reuses_retry_claim(
+            self, replacement_parent="att-parent-governor"):
         with tempfile.TemporaryDirectory() as temp_dir:
             source, source_digest, source_legs = self.manifest()
             replacement_members = json.loads(json.dumps(source["members"]))
@@ -497,7 +502,7 @@ class GovernorTest(unittest.TestCase):
             replacement, replacement_digest, replacement_legs = build_manifest(
                 parallel_group="plan",
                 route_id="rt-governor",
-                parent_attempt_id="att-parent-governor",
+                parent_attempt_id=replacement_parent,
                 independence="cross-harness",
                 members=replacement_members,
                 required_independence_axes=[
@@ -743,6 +748,7 @@ class GovernorTest(unittest.TestCase):
             token = self.reserve_batch(temp_dir, 1, batch)[0]
             receipt = GOVERNOR.reservation_check(temp_dir, token)
             self.assertEqual(receipt["batch_attempt_id"], "att-retry-verbatim")
+            self.assertEqual(receipt["batch_parent_attempt_id"], replacement_parent)
             self.assertEqual(receipt["batch_manifest_sha256"], replacement_digest)
             self.assertEqual(
                 receipt["batch_leg_sha256"],
@@ -807,6 +813,119 @@ class GovernorTest(unittest.TestCase):
         if failure_class:
             value += f",failure_class={failure_class}"
         return value
+
+    def _replacement_owner_peer_fixture(self, root, harness="claude"):
+        from dispatch_contract import parse_registry_metadata
+        from recovery_history import INPUT_SCHEMA, batch_input_path
+        original, _, _ = self.manifest()
+        prompt = "same visual verification request"
+        members = json.loads(json.dumps(original["members"]))
+        for index, member in enumerate(members):
+            member["route_node"] = ("visual-verify", "visual-verify-alternative")[index]
+            member["assignment_sha256"] = "sha256:" + hashlib.sha256(prompt.encode()).hexdigest()
+        members[1]["harness"] = harness
+        members[0]["harness"] = "claude" if harness == "codex" else "codex"
+        options = dict(parallel_group="visual-verify", route_id="rt-governor",
+                       independence="cross-harness", required_independence_axes=original["required_independence_axes"],
+                       realized_independence_axes=original["realized_independence_axes"])
+        source, digest, legs = build_manifest(parent_attempt_id="att-parent-governor", members=members, **options)
+        route = {"route_id": "rt-governor", "route_hash": "sha256:source-route",
+                 "capability": "autopilot-design", "cwd": str(root),
+                 "nodes": [{"id": m["route_node"], "parallel_group": "visual-verify"} for m in members]}
+        route_path = root / "route.json"
+        route_path.write_text(json.dumps(route))
+        jobs = root / "jobs.log"
+        rows = []
+        for index, member in enumerate(source["members"]):
+            metadata = parse_registry_metadata(self._peer_row_metadata(
+                member, manifest_digest=digest, legs=legs,
+                note="completed-marker" if index == 1 else "completed-review-blocking", failure_class="fail"))
+            metadata.update(parent="owner", route_file=str(route_path), parallel_group="visual-verify",
+                            replica_group="visual-verify", batch_group="visual-verify")
+            rows.append(f"now\tdone\t{root}\t{root}\tworker\t" +
+                        ",".join(f"{key}={value}" for key, value in metadata.items()))
+        jobs.write_text("\n".join(rows) + "\n")
+        path = batch_input_path(jobs, digest)
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({"schema": INPUT_SCHEMA, "jobs": str(jobs), "route_id": route["route_id"],
+            "route_hash": route["route_hash"], "manifest": source, "manifest_digest": digest,
+            "options": {"parallel_group": "visual-verify", "route": str(route_path),
+                        "parent": "owner", "prompt_text": prompt}}))
+        marker_path = root / "completion" / "rt-governor" / "visual-verify-alternative.json"
+        marker_path.parent.mkdir(parents=True)
+        marker_path.write_text(json.dumps({"attempt_id": members[1]["attempt_id"],
+            "review_gate_closure": "owner-closure", "review_independence": "owner-overridden"}))
+        current = json.loads(json.dumps(members))
+        current[0]["attempt_id"] = "att-new-primary"
+        manifest, _, _ = build_manifest(parent_attempt_id="att-owner-new", members=current, **options)
+        return {"manifest": manifest, "selected_attempt_ids": ["att-new-primary"],
+                "peers": [{"agent_home": str(root), "attempt_id": members[1]["attempt_id"],
+                           "jobs": str(jobs), "route": str(route_path)}]}, jobs, marker_path
+
+    def _peer_completion_probes(self, root):
+        import contextlib
+        import dispatch_contract as contract
+        from types import SimpleNamespace
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(contract, "completion_marker_is_current", return_value=True))
+        stack.enter_context(mock.patch.object(contract, "completion_attempt_readiness",
+            return_value=SimpleNamespace(state="ready", reason="settled")))
+        stack.enter_context(mock.patch.object(contract, "dispatch_state_roots", return_value=[root]))
+        stack.enter_context(mock.patch.object(contract, "resolve_dispatch_state_root", return_value=root))
+        return stack
+
+    def test_replacement_owner_reserves_only_pending_leg_with_original_failed_closure(self):
+        import dispatch_contract as contract
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                batch, jobs, marker = self._replacement_owner_peer_fixture(root, harness)
+                before, closure = jobs.read_bytes(), marker.read_bytes()
+                with self._peer_completion_probes(root), mock.patch.object(
+                        contract, "review_self_disposition_lineage",
+                        return_value=["att-parent-governor", "att-owner-new"]) as ancestry:
+                    tokens = self.reserve_batch(td, 1, batch)
+                self.assertEqual(len(tokens), 1)
+                receipt = GOVERNOR.reservation_check(td, tokens[0])
+                self.assertEqual(receipt["batch_attempt_id"], "att-new-primary")
+                self.assertEqual(receipt["batch_parent_attempt_id"], "att-owner-new")
+                self.assertEqual(receipt["batch_admission_count"], 1)
+                self.assertEqual(receipt["batch_peer_set"][0]["state"], "completed")
+                self.assertTrue(receipt["batch_peer_set"][0]["legacy_owner_closure"])
+                ancestry.assert_called_once()
+                self.assertEqual(jobs.read_bytes(), before)
+                self.assertEqual(marker.read_bytes(), closure)
+
+    def test_replacement_peer_rejects_unverified_parent_and_immutable_identity_drift(self):
+        import dispatch_contract as contract
+        for fault in ("unverified-owner", "other-owner", "harness", "batch_leg_sha256",
+                      "parent_attempt_id", "assignment", "marker", "live-peer"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                batch, jobs, marker = self._replacement_owner_peer_fixture(root)
+                if fault in {"harness", "batch_leg_sha256", "parent_attempt_id"}:
+                    lines = jobs.read_text().splitlines()
+                    fields = lines[1].split("\t")
+                    metadata = contract.parse_registry_metadata(fields[5])
+                    metadata[fault] = "tampered"
+                    fields[5] = ",".join(f"{key}={value}" for key, value in metadata.items())
+                    lines[1] = "\t".join(fields)
+                    jobs.write_text("\n".join(lines) + "\n")
+                elif fault == "assignment":
+                    batch["manifest"]["members"][0]["assignment_sha256"] = "sha256:" + "b" * 64
+                elif fault == "marker":
+                    marker.write_text(json.dumps({"attempt_id": "att-plan-two"}))
+                elif fault == "live-peer":
+                    lines = jobs.read_text().splitlines()
+                    lines[1] = lines[1].replace("\tdone\t", "\topen\t", 1)
+                    jobs.write_text("\n".join(lines) + "\n")
+                with self._peer_completion_probes(root) as stack:
+                    if fault != "unverified-owner":
+                        stack.enter_context(mock.patch.object(contract, "review_self_disposition_lineage",
+                            return_value=["att-parent-governor", "att-wrong-owner" if fault == "other-owner" else "att-owner-new"]))
+                    with self.assertRaises(ValueError):
+                        self.reserve_batch(td, 1, batch)
+                self.assertFalse((root / "state.json").exists())
 
     def test_validate_batch_peer_deferred_completion(self):
         """C17 (S3a): `require_terminal_success` via `verdict_pass`.

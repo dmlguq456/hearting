@@ -28,6 +28,7 @@ EXPECTED = Counter({
     "test_one_sided_revision_uses_canonical_writer_and_reader": 1,
     "test_terminal_no_start_reuses_group_start_for_the_exact_gap": 1,
     "test_current_owner_closure_peer_precedes_round_admission": 1,
+    "test_replacement_owner_starts_only_primary_and_preserves_original_fail_peer": 1,
 })
 
 
