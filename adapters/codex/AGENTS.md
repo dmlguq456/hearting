@@ -140,7 +140,7 @@ Default to this session's route; start an interactive peer with `hearting run
 peer-steward start` only for long work needing human answers or recovery.
 Command output panes use `hearting run pane open <command>`.
 
-Message another session only with `hearting run peer-steward prompt
+Message another session with `hearting run peer-steward prompt
 <name-or-pane> --body-file <file>`; reply text addressed to it reaches nobody.
 <!-- END generated from core/fragments/bootstrap-dispatch.md -->
 

@@ -34,7 +34,7 @@ another adapter.
 - Repo-root `skills/` is the canonical Skill authoring tree; `tools/sync-entry-skill-layer.py` projects it into `adapters/claude/skills/` (generated — do not hand-edit the projection). Claude-native hooks, commands, settings, and kernel helper agents live under `adapters/claude/`; behavior personas live in the portable unit catalog `roles/units/`.
 - Task-specific detail is progressively disclosed through the selected Skill and adapter README/ADAPTATION docs; do not preload unrelated procedures.
 - Run harness utilities as `hearting run <utility>` (Routing and Execution); a checkout-relative call is for dev activation only (`AGENT_HOME` is that checkout itself).
-- Peer-session steering (`OPERATIONS §5.14`): watch a peer depth-0 session with the checked `utilities/peer-steward.py watch`; its armed line carries the next-action field `parent_next=` (§5.10a), and `join`/`status`/`rearm`/`ack` read the watcher's disk receipt. `wait` stays a bounded foreground surface and must never be backgrounded; `peer-steward.py start` defaults a launched child session to `bypass` permissions (`dispatch-defaults.yaml` `steward.child_permission_mode`, opt-out is `inherit`). `peer-steward.py prompt` seals a ref for the exact sender, recipient session and body digest, then uses the receiver's native carrier. `prompted=queued` means the ref is pending or accepted by a native queue; only `prompted=true` with exact native receipt means it was received. Claude's plain interactive TUI may keep the ref pending until its next native callback. A blocked target is never sent to. Peer steering does not inspect a composer or type through a pane/PTY; never call `herdr agent prompt` or `pane send-text` directly.
+- Peer-session steering (`OPERATIONS §5.14`): watch a peer depth-0 session with the checked `utilities/peer-steward.py watch`; its armed line carries the next-action field `parent_next=` (§5.10a), and `join`/`status`/`rearm`/`ack` read the watcher's disk receipt. `wait` stays a bounded foreground surface and must never be backgrounded; `peer-steward.py start` defaults a launched child session to `bypass` permissions (`dispatch-defaults.yaml` `steward.child_permission_mode`, opt-out is `inherit`). `peer-steward.py prompt` seals a ref for the exact sender, recipient session and body digest, then uses the receiver's native carrier. `prompted=queued` means the ref is pending or accepted by a native queue; only `prompted=true` with exact native receipt means it was received. Claude's plain interactive TUI may keep the ref pending until its next native callback. A blocked target is never sent to.
 
 ## Routing and Execution
 
@@ -76,7 +76,7 @@ Default to this session's route; start an interactive peer with `hearting run
 peer-steward start` only for long work needing human answers or recovery.
 Command output panes use `hearting run pane open <command>`.
 
-Message another session only with `hearting run peer-steward prompt
+Message another session with `hearting run peer-steward prompt
 <name-or-pane> --body-file <file>`; reply text addressed to it reaches nobody.
 <!-- END generated from core/fragments/bootstrap-dispatch.md -->
 
