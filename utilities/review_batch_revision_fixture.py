@@ -1099,7 +1099,7 @@ print(json.dumps({'type':'result','subtype':'success','is_error':False,'result':
 
 
 class CurrentDesignPeerSelectionTest(unittest.TestCase):
-    def _case_test_current_owner_closure_peer_precedes_round_admission(self):
+    def _case_test_current_owner_closure_peer_precedes_round_admission(self, *, replacement_owner=False):
         import importlib.util
         from types import SimpleNamespace
         import replica_batch_contract as BATCH_CONTRACT
@@ -1159,6 +1159,7 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                           "depends_on": []}, *nodes, *critic_nodes, handoff]}
             route_file = base / "route.json"
             route_file.write_text(json.dumps(route), encoding="utf-8")
+            source_parent = "att-owner-original" if replacement_owner else "att-owner-current"
             attempts = ("att-visual-primary", "att-visual-alternative")
             prompt_text = "Verify the current design payload."
             assignment_digest = "sha256:" + hashlib.sha256(prompt_text.encode("utf-8")).hexdigest()
@@ -1173,7 +1174,7 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                     "parallel_leg_index": index, "leg_class": "peer",
                 })
             manifest, digest, leg_digests = BATCH_CONTRACT.build_manifest(
-                parallel_group=group, route_id=route_id, parent_attempt_id="att-owner-current",
+                parallel_group=group, route_id=route_id, parent_attempt_id=source_parent,
                 independence="cross-harness", members=members,
                 required_independence_axes=["cross-harness", "perspective"],
                 realized_independence_axes=["cross-harness", "perspective"],
@@ -1185,13 +1186,13 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                     "transport": "headless", "execution_surface": "registered-headless",
                     "registered_worker": "1", "fallback_hop": member["fallback_hop"],
                     "attempt_id": attempt, "route_id": route_id, "route_hash": route_hash,
-                    "route_node": node["id"], "parent_attempt_id": "att-owner-current",
+                    "route_node": node["id"], "parent_attempt_id": source_parent,
                     "parent": "owner", "route_file": str(route_file.resolve()),
                     "harness": member["harness"], "child_harness": member["harness"],
                     "fallback_ordinal": member["fallback_ordinal"],
                     "reservation_kind": "parallel-batch", "batch_declared_size": len(nodes),
                     "parallel_group": group, "replica_group": group, "batch_group": group,
-                    "batch_route_id": route_id, "batch_parent_attempt_id": "att-owner-current",
+                    "batch_route_id": route_id, "batch_parent_attempt_id": source_parent,
                     "batch_attempt_id": attempt, "batch_route_node": node["id"],
                     "batch_harness": member["harness"],
                     "batch_fallback_hop": member["fallback_hop"],
@@ -1205,7 +1206,8 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                     "batch_leg_class": member["leg_class"], "batch_auxiliary_check": "-",
                     "note": ("completed-review-blocking" if node["id"] == nodes[0]["id"]
                              else "completed-marker"), "launch_claimed": "1",
-                    "failure_class": ("review" if node["id"] == nodes[0]["id"] else "pass"),
+                    "failure_class": ("review" if node["id"] == nodes[0]["id"]
+                                      else "fail" if replacement_owner else "pass"),
                     "launch_outcome": "reaped-before-publish",
                 }
                 fields = ["fixture", "done", str(base), str(base), attempt,
@@ -1316,9 +1318,13 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                                            return_value=SimpleNamespace(state="ready", reason="settled")), \
                          mock.patch.object(DC, "dispatch_state_roots", return_value=[state]), \
                          mock.patch.object(DC, "resolve_dispatch_state_root", return_value=state):
-                        call["owner_closure_proof"] = governor._validate_legacy_visual_closure_peer(
-                            peers[0], current_manifest, current_digest, current_leg_digests,
-                            [leg["attempt_id"] for leg in pending])
+                        with contextlib.ExitStack() as ancestry:
+                            if replacement_owner:
+                                ancestry.enter_context(mock.patch.object(DC, "review_self_disposition_lineage",
+                                    return_value=[source_parent, "att-owner-current"]))
+                            call["owner_closure_proof"] = governor._validate_legacy_visual_closure_peer(
+                                peers[0], current_manifest, current_digest, current_leg_digests,
+                                [leg["attempt_id"] for leg in pending])
                 return [f"reservation-fixture-{index}" for index, _leg in enumerate(pending)]
 
             def collect(item):
@@ -1441,6 +1447,12 @@ class CurrentDesignPeerSelectionTest(unittest.TestCase):
                 self.assertEqual(closure_proof["source_manifest_sha256"], digest)
                 self.assertEqual(closure_proof["attempt_id"], attempts[1])
                 self.assertEqual(len(spawned), 1)
+                self.assertEqual(first_reservation["manifest"]["parent_attempt_id"], "att-owner-current")
+                if replacement_owner:
+                    self.assertNotEqual(manifest["parent_attempt_id"], "att-owner-current")
+                    self.assertEqual(closure_proof["source_manifest_sha256"], digest)
+                    self.assertIn("failure_class=fail", next(line for line in jobs.read_text().splitlines()
+                        if "attempt_id=" + attempts[1] + "," in line))
 
                 repeat_exit, repeat_receipt = public_start(group)
                 self.assertEqual(repeat_exit, 0, repeat_receipt)

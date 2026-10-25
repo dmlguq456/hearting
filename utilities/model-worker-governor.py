@@ -1203,7 +1203,10 @@ def _validate_batch_peer(
         # non-pass class still refuses here -- except a completion-budget deferred class
         # (6번), where `verdict_pass` reads the marker/classifier_source pair instead of
         # the literal (permanently `infrastructure`, never rewritten to `pass`).
-        or (metadata.get("failure_class") not in (None, "", "-") and not verdict_pass(metadata))
+        # An owner-closure retains the original FAIL class; its exact current
+        # owner-overridden marker and settled readiness are checked below.
+        or (not require_owner_closure
+            and metadata.get("failure_class") not in (None, "", "-") and not verdict_pass(metadata))
     ):
         raise ValueError(
             "partial continuation peer is not immutable terminal success"
@@ -1411,11 +1414,21 @@ def _validate_legacy_visual_closure_peer(
         raise ValueError("legacy visual closure input is not authenticated") from exc
     if (verified_digest != source_digest
             or source_manifest.get("route_id") != manifest.get("route_id")
-            or source_manifest.get("parent_attempt_id") != manifest.get("parent_attempt_id")
             or (source_manifest.get("parallel_group") or source_manifest.get("replica_group")) != group
             or source_manifest.get("declared_size") != manifest.get("declared_size")
             or source_manifest.get("independence") != manifest.get("independence")):
         raise ValueError("legacy visual closure batch identity differs")
+    source_parent = source_manifest.get("parent_attempt_id")
+    current_parent = manifest.get("parent_attempt_id")
+    if source_parent != current_parent:
+        from dispatch_contract import review_self_disposition_lineage
+        try:
+            lineage = review_self_disposition_lineage(
+                route, jobs, {"parent_attempt_id": source_parent})
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError("legacy visual closure owner lineage invalid") from exc
+        if not lineage or lineage[-1] != current_parent:
+            raise ValueError("legacy visual closure owner lineage differs")
 
     source_members = {str(member["route_node"]): member
                       for member in source_manifest.get("members", [])}
