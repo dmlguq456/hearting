@@ -329,10 +329,14 @@ class ForegroundActivityTests(unittest.TestCase):
             jobs = root / "jobs.log"
             jobs.touch()
             process = subprocess.Popen(
-                [sys.executable, "-c", "import time; time.sleep(30)"],
+                [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(30)"],
                 start_new_session=True,
+                stdout=subprocess.PIPE, text=True,
             )
             try:
+                # /proc/cmdline can be empty during exec; wait for this fixture's
+                # interpreter before hashing its command identity.
+                self.assertEqual(process.stdout.readline(), "ready\n")
                 proc = Path("/proc") / str(process.pid)
                 stat = A._stat(proc / "stat")
                 argv = (proc / "cmdline").read_bytes().rstrip(b"\0").split(b"\0")
@@ -362,6 +366,7 @@ class ForegroundActivityTests(unittest.TestCase):
             finally:
                 process.terminate()
                 process.wait(timeout=5)
+                process.stdout.close()
 
     def test_owner_turn_factory_resolves_the_real_launch_binding_without_a_route_node(self):
         with tempfile.TemporaryDirectory() as td:
