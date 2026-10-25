@@ -1482,6 +1482,11 @@ An ended predecessor's terminal status, recorded exit code and matching sentinel
 remain exit evidence across PID namespaces. A namespace mismatch alone does not
 invalidate that recorded exit; missing or contradictory exit evidence still
 refuses replacement, and an observed live or reaping identity remains protected.
+A cancelled predecessor is ended when its failed row has a cancellation
+request and end time, its launch and parent-close intents are settled, and its
+exact process group is positively quiescent (local or compute-hosts). Sentinel,
+exit and successful-output evidence are unnecessary for retry admission;
+scientific success and prior-path protection remain separate judgments.
 All prior bindings protect their log, sentinel and progress paths across registries
 and path aliases. Existing active workflow progress is preserved. The final payload
 release checks parent close under the same ledger lock before publishing identity
