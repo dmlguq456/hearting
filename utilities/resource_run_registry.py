@@ -448,7 +448,10 @@ def compute_execution_observation(run: dict) -> dict:
         config = compute.load_config()
         if str(Path(config["run_root"]).resolve(strict=True)) != str(Path(execution["run_root"]).resolve(strict=True)):
             return {"state": "unknown", "reason": "compute-run-root-changed"}
-        return compute.observe_run_quiescence(config, execution["run_id"], expected=execution)
+        # A cancelled execution needs its bound identity and empty remote group,
+        # not the successful outputs/exit receipt required for adoption.
+        options = {"cancelled": True} if run.get("cancel_requested") is True else {}
+        return compute.observe_run_quiescence(config, execution["run_id"], expected=execution, **options)
     except (OSError, ValueError, KeyError, TypeError, ImportError, AttributeError) as exc:
         return {"state": "unknown", "reason": "compute-run-observation-unavailable:" + type(exc).__name__}
 

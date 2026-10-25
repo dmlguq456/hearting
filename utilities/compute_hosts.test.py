@@ -741,6 +741,41 @@ class ComputeRunQuiescenceTest(unittest.TestCase):
         self.assertEqual(self.observe({"state": "populated"})["state"], "not-quiescent")
         self.assertEqual(self.observe({"state": "unknown"})["state"], "unknown")
 
+    def test_cancelled_execution_needs_no_exit_or_outputs_but_still_observes_group(self):
+        (self.run_dir / "exit_code").unlink()
+        (self.run_dir / "outputs.json").unlink()
+        self.module._record_stop(self.run_dir)
+        for remote_state, expected in (("empty", "quiescent"), ("populated", "not-quiescent"),
+                                       ("unknown", "unknown")):
+            with self.subTest(remote_state=remote_state):
+                call = mock.Mock(return_value=subprocess.CompletedProcess(
+                    [], 0, json.dumps({"state": remote_state, "reason": "fixture-group"}), ""))
+                result = self.module.observe_run_quiescence(
+                    self.config, self.run_id, expected=self.expected,
+                    cancelled=True, remote_call=call)
+                self.assertEqual(result["state"], expected)
+                call.assert_called_once()
+                self.assertIn(self.identity["pid_namespace"], call.call_args.args[1])
+        self.assertNotEqual(self.observe({"state": "empty"})["state"], "quiescent")
+
+    def test_cancelled_observation_keeps_identity_and_running_receipts_protected(self):
+        path = self.run_dir / "launch-receipt.json"
+        original = path.read_bytes()
+        for change in ({"state": "running"}, {"identity": {}}, {"run_id": "other"}):
+            with self.subTest(change=change):
+                path.write_text(json.dumps({**json.loads(original), **change}))
+                expected = {**self.expected, "receipt_sha256":
+                            self.module.hashlib.sha256(path.read_bytes()).hexdigest()}
+                call = mock.Mock()
+                result = self.module.observe_run_quiescence(
+                    self.config, self.run_id, expected=expected, cancelled=True, remote_call=call)
+                self.assertEqual(result["state"], "not-quiescent")
+                call.assert_not_called()
+        path.write_bytes(original + b" ")
+        self.assertEqual(self.module.observe_run_quiescence(
+            self.config, self.run_id, expected=self.expected, cancelled=True)["reason"],
+            "compute-run-evidence-changed")
+
     def test_changed_exit_bytes_invalidate_the_observation(self):
         (self.run_dir / "exit_code").write_text("1\n")
         result = self.observe({"state": "empty"})

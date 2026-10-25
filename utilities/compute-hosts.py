@@ -3211,14 +3211,19 @@ def _run_state(config, run_id):
             "state": state}
 
 
-def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None):
-    """Freshly validate a compute run's immutable files and remote process group."""
+def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None, cancelled=False):
+    """Validate bound execution identity and a fresh remote process-group observation.
+
+    Cancellation needs no successful result files; adoption keeps its full
+    exit/output checks. Both require a finished receipt and an empty group.
+    """
     if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", run_id):
         return {"state": "unknown", "reason": "compute-run-id-invalid"}
     run_dir = Path(config["run_root"]) / run_id
     try:
-        paths = {name: run_dir / name for name in
-                 ("meta.json", "exit_code", "launch-receipt.json", "outputs.json")}
+        names = ("meta.json", "launch-receipt.json") if cancelled else (
+            "meta.json", "exit_code", "launch-receipt.json", "outputs.json")
+        paths = {name: run_dir / name for name in names}
         for path in paths.values():
             info = path.lstat()
             if not stat.S_ISREG(info.st_mode) or path.is_symlink():
@@ -3226,15 +3231,16 @@ def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None):
         raw = {name: path.read_bytes() for name, path in paths.items()}
         meta = json.loads(raw["meta.json"])
         receipt = json.loads(raw["launch-receipt.json"])
-        output_receipt = json.loads(raw["outputs.json"])
-        exit_text = raw["exit_code"].decode("ascii").strip()
-        exit_code = int(exit_text)
+        exit_code = None
+        if not cancelled:
+            output_receipt = json.loads(raw["outputs.json"])
+            exit_code = int(raw["exit_code"].decode("ascii").strip())
     except (OSError, UnicodeError, ValueError, TypeError):
         return {"state": "unknown", "reason": "compute-run-evidence-unavailable"}
-    hashes = {"meta_sha256": hashlib.sha256(raw["meta.json"]).hexdigest(),
-              "exit_sha256": hashlib.sha256(raw["exit_code"]).hexdigest(),
-              "receipt_sha256": hashlib.sha256(raw["launch-receipt.json"]).hexdigest(),
-              "outputs_sha256": hashlib.sha256(raw["outputs.json"]).hexdigest()}
+    hash_files = {"meta_sha256": "meta.json", "receipt_sha256": "launch-receipt.json"}
+    if not cancelled:
+        hash_files.update(exit_sha256="exit_code", outputs_sha256="outputs.json")
+    hashes = {key: hashlib.sha256(raw[name]).hexdigest() for key, name in hash_files.items()}
     if expected and any(expected.get(key) != value for key, value in hashes.items()):
         return {"state": "unknown", "reason": "compute-run-evidence-changed", **hashes}
     if not isinstance(meta, dict) or not isinstance(receipt, dict):
@@ -3255,34 +3261,35 @@ def observe_run_quiescence(config, run_id, expected=None, *, remote_call=None):
             or resource_parent != (expected or {}).get("provenance")
             or receipt.get("schema_version") != 1
             or receipt.get("run_id") != run_id or receipt.get("state") != "finished"
-            or receipt.get("exit_code") != exit_code or exit_code != 0
+            or (not cancelled and (receipt.get("exit_code") != exit_code or exit_code != 0))
             or not isinstance(identity, dict)
             or not all(identity.get(key) not in (None, "") for key in
                        ("pid", "starttime", "process_group", "pid_namespace", "boot_id"))):
         return {"state": "not-quiescent", "reason": "compute-run-terminal-evidence-incomplete", **hashes}
-    if _read_stop_reason(run_dir):
-        return {"state": "not-quiescent", "reason": "compute-run-stopped", **hashes}
-    parent_contract = ((meta.get("execution_contract") or {}).get("resource_parent") or {})
-    expected_outputs = parent_contract.get("declared_outputs")
-    output_rows = output_receipt.get("outputs") if isinstance(output_receipt, dict) else None
-    if (not isinstance(output_receipt, dict) or output_receipt.get("schema_version") != 1
-            or output_receipt.get("run_id") != run_id):
-        return {"state": "not-quiescent", "reason": "compute-run-output-receipt-invalid",
-                "differences": [{"field": "outputs.receipt", "expected": {
-                    "schema_version": 1, "run_id": run_id}, "actual": {
-                    "schema_version": output_receipt.get("schema_version")
-                    if isinstance(output_receipt, dict) else None,
-                    "run_id": output_receipt.get("run_id")
-                    if isinstance(output_receipt, dict) else None}}],
-                "retryable": False,
-                "next_action": "preserve and verify the original compute output receipt", **hashes}
-    output_check = validate_compute_outputs(
-        parent_contract.get("artifact_base"), expected_outputs, output_rows)
-    if not output_check.get("ok"):
-        return {"state": "not-quiescent", "reason": output_check.get("reason"),
-                "differences": output_check.get("differences"),
-                "retryable": output_check.get("retryable", False),
-                "next_action": output_check.get("next_action"), **hashes}
+    if not cancelled:
+        if _read_stop_reason(run_dir):
+            return {"state": "not-quiescent", "reason": "compute-run-stopped", **hashes}
+        parent_contract = ((meta.get("execution_contract") or {}).get("resource_parent") or {})
+        expected_outputs = parent_contract.get("declared_outputs")
+        output_rows = output_receipt.get("outputs") if isinstance(output_receipt, dict) else None
+        if (not isinstance(output_receipt, dict) or output_receipt.get("schema_version") != 1
+                or output_receipt.get("run_id") != run_id):
+            return {"state": "not-quiescent", "reason": "compute-run-output-receipt-invalid",
+                    "differences": [{"field": "outputs.receipt", "expected": {
+                        "schema_version": 1, "run_id": run_id}, "actual": {
+                        "schema_version": output_receipt.get("schema_version")
+                        if isinstance(output_receipt, dict) else None,
+                        "run_id": output_receipt.get("run_id")
+                        if isinstance(output_receipt, dict) else None}}],
+                    "retryable": False,
+                    "next_action": "preserve and verify the original compute output receipt", **hashes}
+        output_check = validate_compute_outputs(
+            parent_contract.get("artifact_base"), expected_outputs, output_rows)
+        if not output_check.get("ok"):
+            return {"state": "not-quiescent", "reason": output_check.get("reason"),
+                    "differences": output_check.get("differences"),
+                    "retryable": output_check.get("retryable", False),
+                    "next_action": output_check.get("next_action"), **hashes}
     host = next((record for name, record in config["hosts"].items()
                  if name == meta.get("host")), None)
     if not isinstance(host, dict):

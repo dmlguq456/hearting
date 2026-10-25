@@ -1683,6 +1683,97 @@ class ResourcePredecessorPidReuseTest(unittest.TestCase):
                     pass
 
 
+class SettledResourceCancellationTest(unittest.TestCase):
+    def setUp(self):
+        import resource_run_registry as RR
+        self.registry = RR
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.row = {
+            "run_id": "cancelled", "status": "failed", "workflow_state": "CANCELLED",
+            "cancel_requested": True, "failure_class": "cancelled", "ended_at": 123,
+            "exit_code": None, "sentinel": str(self.root / "old.exit"),
+            "log": str(self.root / "old.log"), "pid": 999999999, "starttime": "1",
+            "command_hash": "old-command", "process_group": 999999999,
+            "pid_namespace": os.readlink("/proc/self/ns/pid"), "launch_state": "started",
+            "resource_policy": "supervised-owner",
+        }
+        self.candidate = {"log": str(self.root / "next.log"),
+                          "sentinel": str(self.root / "next.exit")}
+
+    def test_settled_cancellation_without_exit_evidence_admits_a_new_attempt(self):
+        before = dict(self.row)
+        self.assertTrue(RA.resource_predecessor_finished(self.row))
+        RA.require_resource_predecessors([self.row], self.candidate)
+        self.assertEqual(self.row, before)
+        self.assertFalse(Path(self.row["sentinel"]).exists())
+
+    def test_unsettled_cancelled_resources_remain_protected(self):
+        cases = {
+            "no-end": {"ended_at": None}, "running": {"status": "running"},
+            "launching": {"status": "launching"}, "queued": {"launch_state": "queued"},
+            "claimed": {"launch_state": "claimed"}, "parent-close": {"parent_close_requested": True},
+            "no-identity": {"pid": None}, "no-group": {"process_group": None},
+            "no-namespace": {"pid_namespace": None}, "foreign-namespace": {"pid_namespace": "pid:[foreign]"},
+            "live": {**self.registry.proc_identity(os.getpid()), "process_group": os.getpgrp()},
+        }
+        for name, change in cases.items():
+            with self.subTest(case=name):
+                row = {**self.row, **change}
+                with self.assertRaisesRegex(ValueError, "resource-route-body-conflict"):
+                    RA.require_resource_predecessors([row], self.candidate)
+        for state in ("working", "reaping", "stale"):
+            with self.subTest(identity=state), mock.patch.object(
+                    self.registry, "classify_identity", return_value=(state, None, "fixture")):
+                self.assertFalse(RA.resource_predecessor_finished(self.row))
+        with mock.patch.object(self.registry, "resource_process_group_quiescent", return_value=False):
+            self.assertFalse(RA.resource_predecessor_finished(self.row))
+
+    def test_cancelled_resource_never_counts_as_scientific_success(self):
+        import dispatch_resource_wait as WAIT
+        Path(self.row["sentinel"]).write_text("0\n")
+        self.assertTrue(RA.resource_predecessor_finished(self.row))
+        self.assertFalse(WAIT.resource_execution_succeeded(self.row))
+
+    def test_settled_cancellation_keeps_all_prior_evidence_paths_protected(self):
+        for field in ("log", "sentinel", "progress_file"):
+            with self.subTest(field=field):
+                candidate = {**self.candidate, field: self.row["log"]}
+                with self.assertRaisesRegex(ValueError, "resource-route-body-conflict"):
+                    RA.require_resource_predecessors([self.row], candidate)
+
+    def test_compute_cancellation_uses_fresh_quiescence_and_rechecks_captured_row(self):
+        row = {**self.row, "execution": {"kind": "compute-hosts", "run_id": "remote"}}
+        with mock.patch.object(self.registry, "compute_execution_observation",
+                               return_value={"state": "quiescent"}) as observe:
+            self.assertTrue(RA.resource_predecessor_finished(row))
+        observe.assert_called_once_with(row)
+        captured = {"row": dict(row), "state": "quiescent"}
+        with mock.patch.object(self.registry, "compute_execution_observation",
+                               side_effect=AssertionError("remote probe under reservation lock")):
+            RA.require_resource_predecessors([row], self.candidate,
+                                             observations={row["run_id"]: captured})
+            for observation in (None, {**captured, "state": "unknown"},
+                                {**captured, "state": "not-quiescent"},
+                                {**captured, "row": {**row, "ended_at": 124}}):
+                with self.subTest(observation=observation):
+                    with self.assertRaisesRegex(ValueError, "resource-route-body-conflict"):
+                        RA.require_resource_predecessors([row], self.candidate,
+                            observations={row["run_id"]: observation})
+            for change in ({"ended_at": None}, {"status": "running"}, {"status": "launching"},
+                           {"launch_state": "claimed"}, {"launch_state": "queued"},
+                           {"parent_close_requested": True}):
+                changed = {**row, **change}
+                with self.subTest(change=change):
+                    with self.assertRaisesRegex(ValueError, "resource-route-body-conflict"):
+                        RA.require_resource_predecessors([changed], self.candidate,
+                            observations={row["run_id"]: {"row": changed, "state": "quiescent"}})
+            with self.assertRaisesRegex(ValueError, "resource-route-body-conflict"):
+                RA.require_resource_predecessors([row], {"log": row["log"]},
+                    observations={row["run_id"]: captured})
+
+
 class NestedHostSandboxEqualityTest(unittest.TestCase):
     """Only a matching, known workspace-write parent bounds nested Codex access."""
 

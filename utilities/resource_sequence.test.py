@@ -791,6 +791,49 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                 self.assertEqual(json.loads(registry.read_text())['runs']['fixture-run'], old)
                 self.assertEqual(Path(old['sentinel']).read_text(), '3')
 
+    def test_settled_cancellation_rearms_normal_start_without_rewriting_history(self):
+        for compute in (False, True):
+            with self.subTest(compute=compute), self.subfixture():
+                route, path, jobs, registry, output, ledger = self.fixture()
+                data = json.loads(registry.read_text())
+                old = data['runs']['fixture-run']
+                Path(old['sentinel']).unlink()
+                old.update(status='failed', workflow_state='CANCELLED', exit_code=None,
+                           failure_class='cancelled', cancel_requested=True, ended_at=time.time(),
+                           pid_namespace=os.readlink('/proc/self/ns/pid'))
+                if compute:
+                    compute_root = self.base / 'compute'
+                    old.update(compute_run_id='remote-cancelled',
+                               log=str(compute_root / 'remote-cancelled/log'),
+                               sentinel=str(compute_root / 'remote-cancelled/exit_code'))
+                    old['execution'] = {
+                        'kind': 'compute-hosts', 'run_id': 'remote-cancelled',
+                        'run_root': str(compute_root), 'meta_sha256': 'm' * 64,
+                        'exit_sha256': 'e' * 64, 'receipt_sha256': 'r' * 64,
+                        'outputs_sha256': 'o' * 64, 'contract_sha256': 'c' * 64,
+                        'provenance': {'route_id': route['route_id'], 'route_hash': route['route_hash']},
+                    }
+                registry.write_text(json.dumps(data))
+                armed = SUP.read_armed(ledger)['full-run']
+                armed['resource_binding'] = WAIT.resource_body_digest(old)
+                (ledger.root / 'armed/full-run.json').write_text(json.dumps(armed))
+                body = self.next_body(registry, 'next', output, final=True)
+                body['owner_wait'] = {'parent_attempt_id': 'att-parent', 'session_id': 'same-native'}
+                def observe_outside_locks(_row):
+                    for lock_path in (ledger.lock_path, Path(str(registry) + '.lock')):
+                        with lock_path.open('a+') as stream:
+                            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                    return {'state': 'quiescent'}
+                with mock.patch.object(SUP.RR, 'compute_execution_observation',
+                                       side_effect=observe_outside_locks):
+                    payloads, receipt = self.launch(route, path, jobs, registry, output, body)
+                self.assertTrue(receipt['payload_spawned'], receipt)
+                self.assertEqual(len(payloads), 1)
+                self.assertEqual(SUP.read_armed(ledger)['full-run']['predecessor_id'], 'next')
+                self.assertEqual(json.loads(registry.read_text())['runs']['fixture-run'], old)
+                self.assertFalse(Path(old['sentinel']).exists())
+
     def test_verified_resume_failed_predecessor_rearms_and_claims_verification_once(self):
         route, path, jobs, registry, output = self._resume_fixture()
         ledger = SUP.ledger_for(route, jobs)

@@ -98,7 +98,7 @@ def resource_execution_finished(row):
 
 def resource_execution_succeeded(row):
     """A past status word cannot substitute for the exact exit and sentinel."""
-    return (resource_execution_finished(row)
+    return (not row.get("cancel_requested") and resource_execution_finished(row)
             and supervisor().runner().read_sentinel(row.get("sentinel")) == 0)
 
 
