@@ -252,11 +252,19 @@ def _non_git_runtime_candidate(root: Path, values, source_root) -> str:
             return ""
 
         source = Path(source_root).expanduser().resolve(strict=False) if source_root else root.parent
+        configured_home = Path(values.get("HOME") or Path.home()).expanduser().resolve(strict=False)
+        home_source = source == configured_home and source != Path("/")
+        managed_home_state = state_root_real.is_relative_to(configured_home)
 
         def overlaps(left: Path, right: Path) -> bool:
             return (left == right or left.is_relative_to(right) or right.is_relative_to(left))
 
-        if overlaps(candidate, source) or overlaps(candidate, root):
+        source_overlap = overlaps(candidate, source)
+        home_default_exception = (home_source and managed_home_state
+                                  and candidate.is_relative_to(runtimes_root_real)
+                                  and candidate != runtimes_root_real)
+        if ((source_overlap and not home_default_exception)
+                or overlaps(candidate, root)):
             return ""
         if "releases" in candidate.parts or ".harness" in candidate.parts:
             return ""

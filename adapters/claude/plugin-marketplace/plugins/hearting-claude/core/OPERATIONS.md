@@ -147,6 +147,10 @@ folder or initialize Git. Source-mutating worker scopes are refused before route
 registration or worktree preparation. Existing artifact-scope and parallel-overlap
 checks continue to bound cycle output writes. The route's sealed `source_commit=unversioned`
 is the runtime signal; a Git probe error is not equivalent to a non-Git folder.
+When the non-Git source is exactly the canonical `HOME`, the generated default
+runtime may use only its exact project-hash child under the existing managed
+state `project-runtimes` namespace. Artifact overlap, namespace-parent aliases,
+foreign project state, and arbitrary runtime overrides remain fenced.
 
 #### Git index-lock failure diagnosis
 

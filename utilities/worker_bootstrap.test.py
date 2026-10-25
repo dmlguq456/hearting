@@ -183,9 +183,11 @@ class WorkerBootstrapTest(unittest.TestCase):
             self.assertEqual(W.runtime_dir_candidate(
                 artifact_root, {"HARNESS_STATE_ROOT": str(base / ".harness/releases/v1/state")},
                 repository_kind="non-git", source_root=source), "")
+            home_state = base / ".local/state/hearting/dispatch/project-runtimes"
+            home_digest = hashlib.sha256(str(artifact_root.resolve()).encode("utf-8")).hexdigest()
             self.assertEqual(W.runtime_dir_candidate(
                 artifact_root, {"HOME": str(base)}, repository_kind="non-git",
-                source_root=source.parent), "")
+                source_root=base), str(home_state / home_digest))
 
             state = base / "state"
             stable = state / "dispatch"
@@ -335,6 +337,59 @@ class WorkerBootstrapTest(unittest.TestCase):
             self.assertEqual(legacy["AGENT_RUNTIME_DIR"], str(artifact_root.parent / ".agent_runtime"))
             self.assertEqual(route_free["AGENT_RUNTIME_DIR"], str(artifact_root.parent / ".agent_runtime"))
             self.assertFalse(Path(expected).exists(), "producer environment issuance must not prepare runtime")
+
+    def test_home_source_uses_only_exact_managed_default_and_preserves_boundaries(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            home = base / "home"
+            home.mkdir()
+            artifact_root = base / "artifacts"
+            artifact_root.mkdir()
+            source = home.resolve()
+            cases = (
+                ({"HOME": str(home)}, home / ".local/state/hearting/dispatch"),
+                ({"HOME": str(home), "XDG_STATE_HOME": str(home / ".state")},
+                 home / ".state/hearting/dispatch"),
+            )
+            for values, stable in cases:
+                digest = hashlib.sha256(str(artifact_root.resolve()).encode("utf-8")).hexdigest()
+                expected = stable / "project-runtimes" / digest
+                candidate = W.runtime_dir_candidate(
+                    artifact_root, values, repository_kind="non-git", source_root=source)
+                self.assertEqual(candidate, str(expected))
+                self.assertFalse(expected.exists())
+                self.assertEqual(W.runtime_dir_candidate(
+                    artifact_root, {**values, "AGENT_RUNTIME_DIR": candidate},
+                    repository_kind="non-git", source_root=source), str(expected))
+                record = {"campaign_id": "camp_test", "cycle_id": "cyc_test", "producer_id": "prod_test"}
+                route = {"source_commit": "unversioned", "cwd": str(source)}
+                with mock.patch.dict(os.environ, values, clear=True), \
+                        mock.patch.object(AP, "cycle_dir", return_value=artifact_root / "cycle"), \
+                        mock.patch("artifact_workflow_groups.group_for_cycle", return_value=None):
+                    produced = AP._env_for(artifact_root, record, route)
+                self.assertEqual(produced.get("AGENT_RUNTIME_DIR"), str(expected))
+                self.assertEqual(C.prepare_runtime_root(
+                    str(artifact_root), values, repository_kind="non-git", source_root=str(source)),
+                    str(expected))
+                self.assertEqual((expected / ".gitignore").read_bytes(), b"*\n")
+
+            stable = home / ".local/state/hearting/dispatch"
+            namespace = stable / "project-runtimes"
+            outside = base / "outside-runtime"
+            outside.mkdir()
+            namespace.mkdir(parents=True, exist_ok=True)
+            (namespace / "other-project").mkdir()
+            self.assertEqual(W.runtime_dir_candidate(
+                artifact_root, {"HOME": str(home), "AGENT_RUNTIME_DIR": str(namespace / "other-project")},
+                repository_kind="non-git", source_root=source), "")
+            alias = namespace / "alias"
+            alias.symlink_to(outside, target_is_directory=True)
+            self.assertEqual(W.runtime_dir_candidate(
+                artifact_root, {"HOME": str(home), "AGENT_RUNTIME_DIR": str(alias)},
+                repository_kind="non-git", source_root=source), "")
+            self.assertEqual(W.runtime_dir_candidate(
+                namespace, {"HOME": str(home)}, repository_kind="non-git",
+                source_root=source), "")
 
     def test_nested_producer_environment_and_child_prompt_keep_default_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
