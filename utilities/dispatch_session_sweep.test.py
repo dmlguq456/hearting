@@ -306,6 +306,10 @@ class IsolatedRootMixin:
             "AGENT_DISPATCH_CHILD": "",
             "AGENT_DISPATCH_DEPTH": "",
         }
+        if self._testMethodName == "test_real_clear_handover_delivers_late_and_aggregate_records_from_the_original_store":
+            self._env_patch.update({"CODEX_THREAD_ID": "", "CODEX_SESSION_ID": "",
+                                    "AGENT_DISPATCH_CURRENT_HARNESS": "",
+                                    "AGENT_DISPATCH_CALLER_HARNESS": ""})
         self._saved_env = {k: os.environ.get(k) for k in self._env_patch}
         os.environ.update(self._env_patch)
         _log_fixture_env(
@@ -1680,6 +1684,47 @@ console.log(JSON.stringify({carrierEnv: globalThis.carrierEnv}));
         self.assertIn(("claim", "claimed"), [(item["stage"], item["reason"]) for item in carrier])
         self.assertIn(("prompt", "accepted"), [(item["stage"], item["reason"]) for item in carrier])
         self.assertTrue(all("text" not in item for item in carrier))
+
+    def test_retained_run_notice_uses_busy_to_idle_prompt_async_and_exact_native_receipt(self):
+        import importlib.util
+        import session_notice
+        from peer_obligations import ObligationStore
+        jobs = self.root / "jobs.log"
+        with mock.patch("peer_obligations.ensure_normal_runner", return_value=False), \
+                mock.patch("peer_obligations.request_dispatch_reconciliation", return_value=False):
+            notice = session_notice.notify("opencode", self.SID, key="checkpoint:run-1:slot-1",
+                subject="experiment checkpoint", text="run=run-1; ETA total 2h",
+                route_id="route-fixture", jobs=jobs)
+        duty, = ObligationStore(self.root).list(kinds={"run-notice"})
+        body = r'''
+const out = {env: {}};
+await hooks["shell.env"]({sessionID: "ses-oc-parent"}, out);
+await hooks.event({event: {type: "session.status", properties: {
+  sessionID: "ses-oc-parent", status: {type: "busy"}}}});
+await new Promise(r => setTimeout(r, 100));
+if (prompts.length) throw new Error("busy OpenCode session was prompted");
+await hooks.event({event: {type: "session.idle", properties: {sessionID: "ses-oc-parent"}}});
+for (let i = 0; i < 200 && !prompts.length; i++) await new Promise(r => setTimeout(r, 50));
+hooks.dispose();
+console.log(JSON.stringify({prompts, logs}));
+'''
+        result = self.run_plugin(body)
+        self.assertEqual(len(result["prompts"]), 1)
+        sent_text = result["prompts"][0]["body"]["parts"][0]["text"]
+        self.assertIn(SWEEP.NOTICE_DELIVERY_HEADER, sent_text)
+        self.assertIn("run=run-1", sent_text)
+        stored = PD.read(self.root, self.SID, notice["delivery_id"])
+        self.assertEqual(stored["state"], "acked")
+        self.assertEqual(stored["attempt_ids"], [])
+
+        spec = importlib.util.spec_from_file_location(
+            "run_notice_steward", ROOT / "utilities" / "peer-steward.py")
+        steward = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(steward)
+        store = ObligationStore(self.root)
+        steward._reconcile_obligations(store,
+            duties=steward._runner_duties(store, [duty]))
+        self.assertEqual(store.get(duty["id"])["state"], "complete")
 
     def test_native_receipt_from_another_carrier_suppresses_prompt_async(self):
         import dispatch_recipient_receipt as recipient_receipt

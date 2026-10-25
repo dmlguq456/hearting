@@ -37,6 +37,17 @@ source of truth for snapshot bytes, and the harness-owned resource-run row
 requires these fields when `--config-manifest` is supplied. The harness does not
 write `run.json` or rewrite existing registry rows.
 
+Hearting's separate public run record is one atomically replaced file at
+`<artifact-root>/resource-runs/<run_id>.json`; `resource-runner observation
+--registry <resource-runs.json> --run-id <run_id> --json` reads the same record.
+It lists only detected `epochs-jsonl`, `epoch-json-files`, or `tfevents` paths and
+metric keys, plus known run/route/host/output/progress/time fields; unknown values
+stay empty. Cairn reads those listed files incrementally from NAS and does not
+discover runs by scanning folders. The record does not rewrite experiment `run.json`
+or replace the root `metrics.jsonl` contract. Existing run/config metadata may
+optionally declare an observation path/key filter and known decision metric, proxy,
+rules, time budget, baselines, or comparable group; none is required to start a run.
+
 An in-flight process kept alive across a policy change records an optional
 `existing_run_exception` object with a fixed shape:
 

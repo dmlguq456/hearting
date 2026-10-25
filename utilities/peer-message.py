@@ -66,6 +66,7 @@ _PEER_TRAILER_RE = re.compile(
     r"(?P<sid>[^\s)]+)(?:\s+(?P<name>[^)]*?))?\s*\)")
 _EXACT_RECEIVER_PROVENANCE = "validated-peer-ref-receiver-v1"
 _RUNTIME_PRODUCER_SCHEMA = "registered-runtime-completion-v1"
+_RUNTIME_NOTICE_SCHEMA = "retained-runtime-notice-v1"
 
 
 def _session_handle():
@@ -191,14 +192,43 @@ def _unknown_sender(endpoint):
 
 
 def _valid_runtime_producer_binding(binding, sender, recipient=None, refs=None):
-    """Validate the existing registered completion lineage carried by a runtime sender."""
-    keys = {"schema", "duty_id", "jobs", "attempt_id", "carrier", "delivery_id",
-            "receipt_digest", "recipient", "route_id", "route_node"}
-    if (not isinstance(binding, dict) or set(binding) not in (keys, keys | {"dispatch_notices"})
-            or binding.get("schema") != _RUNTIME_PRODUCER_SCHEMA
-            or not isinstance(sender, dict) or sender.get("harness") != "runtime"
+    """Validate a retained runtime completion or ordinary-notice sender."""
+    if (not isinstance(binding, dict) or not isinstance(sender, dict)
+            or sender.get("harness") != "runtime"
             or sender.get("session_id") not in (None, "")
             or sender.get("name") != "Hearting runtime"):
+        return False
+    if binding.get("schema") == _RUNTIME_NOTICE_SCHEMA:
+        keys = {"schema", "duty_id", "jobs", "carrier", "delivery_id",
+                "receipt_digest", "recipient", "route_id", "route_node"}
+        duty_id = binding.get("duty_id")
+        target = binding.get("recipient")
+        if (set(binding) != keys
+                or not isinstance(duty_id, str)
+                or not re.fullmatch(r"run-notice-[0-9a-f]{32}", duty_id)
+                or not isinstance(binding.get("jobs"), str)
+                or not Path(binding["jobs"]).is_absolute()
+                or binding.get("carrier") not in {"claude-parent-runtime", "codex-native-queue", "opencode-turn"}
+                or not isinstance(binding.get("delivery_id"), str)
+                or not re.fullmatch(r"delivery-[0-9a-f]{64}", binding["delivery_id"])
+                or not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}",
+                                    str(binding.get("receipt_digest") or ""))
+                or not isinstance(target, dict) or not _valid_transfer_endpoint(target)
+                or not isinstance(binding.get("route_id"), str)
+                or len(binding["route_id"]) > 256 or binding.get("route_node") != "notice"):
+            return False
+        if recipient is not None and any(target.get(key) != recipient.get(key)
+                                         for key in ("harness", "session_id")):
+            return False
+        if refs is not None and (not isinstance(refs, (list, tuple))
+                                 or duty_id not in refs or binding["delivery_id"] not in refs):
+            return False
+        return True
+    keys = {"schema", "duty_id", "jobs", "attempt_id", "carrier", "delivery_id",
+            "receipt_digest", "recipient", "route_id", "route_node"}
+    if (set(binding) not in (keys, keys | {"dispatch_notices"})
+            or binding.get("schema") != _RUNTIME_PRODUCER_SCHEMA
+            ):
         return False
     duty_id, jobs = binding.get("duty_id"), binding.get("jobs")
     attempt, delivery, carrier = (binding.get("attempt_id"), binding.get("delivery_id"),
@@ -1209,6 +1239,10 @@ def _received_on_disk(path):
 def _registered_delivery_settled(row, *, read_context=None):
     try:
         from peer_obligations import registered_delivery_settled
+        if ((row.get("producer_binding") or {}).get("schema") == _RUNTIME_NOTICE_SCHEMA):
+            from peer_obligations import ordinary_notice_transfer_is_current
+            return (registered_delivery_settled(row)
+                    or not ordinary_notice_transfer_is_current(row))
         return (registered_delivery_settled(row) if read_context is None else
                 registered_delivery_settled(row, read_context=read_context))
     except (OSError, ValueError, KeyError, RuntimeError):

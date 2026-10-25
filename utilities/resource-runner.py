@@ -1215,6 +1215,9 @@ def _main(argv=None, *, controller=None):
     a.add_argument("command",nargs=argparse.REMAINDER)
     for name in ("status","stop","tail","reap"):
         x=s.add_parser(name); x.add_argument("--run-id",required=True)
+    observation_cmd=s.add_parser("observation", help="read a run's stable public observation record")
+    observation_cmd.add_argument("--run-id",required=True)
+    observation_cmd.add_argument("--json",action="store_true",required=True)
     s.add_parser("list")
     index_cmd=s.add_parser("index"); index_cmd.add_argument("--registry",required=True)
     args=p.parse_args(raw_argv)
@@ -1299,8 +1302,22 @@ def _main(argv=None, *, controller=None):
                           "config_layout": manifest.get("config_layout", "unknown")}
         log=Path(args.log).resolve()
         sentinel=Path(str(log)+".exit")
+        launcher_session = None
+        try:
+            import session_identity
+            identity = session_identity.identity(os.environ)
+            if identity.known and identity.session_id:
+                launcher_session = {"harness": identity.harness, "id": identity.session_id}
+        except Exception:
+            pass
+        jobs_path = args.jobs or os.environ.get("AGENT_DISPATCH_JOBS") or None
         placeholder={"run_id":args.run_id,"cwd":str(cwd),"log":str(log),"command":command,
                      **provenance,"route":args.route,"node":args.node,"status":"launching",
+                     "route_id":route.get("route_id"), "artifact_root":str(artifact_root),
+                     "campaign_id":os.environ.get("AGENT_ARTIFACT_CAMPAIGN_ID") or None,
+                     "cycle_id":os.environ.get("AGENT_ARTIFACT_CYCLE_ID") or None,
+                     "session":launcher_session,
+                     "jobs":jobs_path,
                      "sentinel":str(sentinel),"progress_file":str(log)+".progress.json",
                      "parent_attempt_id":args.parent_attempt_id,
                      "workflow_state":"READY","started_at":time.time()}
@@ -1371,7 +1388,12 @@ def _main(argv=None, *, controller=None):
         run={**ident,"pid_namespace":os.readlink("/proc/self/ns/pid"),"run_id":args.run_id,"process_group":os.getpgid(proc.pid),"cwd":str(cwd),"log":str(log),"command":command,
              "launch_argv":launch_argv,"sentinel":str(sentinel),"progress_file":placeholder["progress_file"],
              "parent_attempt_id":args.parent_attempt_id,**provenance,
-             "route":args.route,"node":args.node,"status":"running","workflow_state":"RUNNING",
+             "route":args.route,"node":args.node,"route_id":route.get("route_id"),
+             "artifact_root":str(artifact_root),
+             "campaign_id":placeholder.get("campaign_id"), "cycle_id":placeholder.get("cycle_id"),
+             "session":launcher_session,
+             "jobs":jobs_path,
+             "status":"running","workflow_state":"RUNNING",
              "started_at":placeholder["started_at"]}
         def add(data):
             data["runs"][args.run_id]=run
@@ -1405,6 +1427,16 @@ def _main(argv=None, *, controller=None):
         print(json.dumps(rows,sort_keys=True)); return
     run=data["runs"].get(args.run_id)
     if not run: fail("unknown run id")
+    if args.cmd=="observation":
+        root=run.get("artifact_root") or os.environ.get("AGENT_ARTIFACT_ROOT")
+        if root:
+            import resource_progress
+            record=resource_progress.read_public_run_record(root,args.run_id)
+            if record is not None:
+                print(json.dumps(record,ensure_ascii=False,sort_keys=True))
+                return
+        print(json.dumps({"run_id":args.run_id,"available":False},sort_keys=True))
+        return
     if args.cmd=="tail": print(Path(run["log"]).read_text(errors="replace"),end=""); return
     if args.cmd in ("status","reap"):
         run,settled=settle(registry,args.run_id,run)

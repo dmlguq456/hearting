@@ -58,6 +58,12 @@ python eval.py --config config.yaml --ckpt runs/run-001/ckpt/best.pt [--data <ne
 
 The user runs heavy evaluation. For an explicit lightweight request such as `가볍게 평가 돌려줘`, a small test set may be executed by dispatching the `qa/test` unit in functional eval mode with `eval.py` and the checkpoint. It returns final metrics summarized into `run.json best` and the per-step stream path `experiments/<slug>/metrics.jsonl`.
 
+For a matrix, the default plan queues each completed row's decision-metric
+evaluation on the existing approved queue while the next row trains, then updates
+the leaderboard artifact. Successive halving is a default option for many rows.
+Known metric/proxy/rules/time budget/baselines remain optional; long CPU scoring or
+inference may publish `write_progress(done, "item", total=n)` for an earlier ETA.
+
 ### E3 — Analysis, report, and completion
 
 **E3-1. Draft the result** when the user asks to organize results or the main agent observes eval completion. Use a localized one-screen preview with experiment, attempted change, best/final/delta metrics, sibling ablation table, parent delta, two or three observations, inline figure paths, and one next candidate. Ask whether to save, revise, or stop.

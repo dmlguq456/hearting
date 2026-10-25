@@ -240,6 +240,7 @@ utility-deferred	registered_parent_park.test.py
 utility-deferred	replica_batch_contract.py
 utility-deferred	resource-runner.py
 utility-deferred	resource_failure_resolution.py
+utility-deferred	resource_metric_sources.py
 utility-deferred	resource_placement.py
 utility-deferred	resource_progress.py
 utility-deferred	resource_run_registry.py

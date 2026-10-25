@@ -185,10 +185,23 @@ For `eval`, `eval-run` is likewise a supervised detached run whose termination
 advances `metrics`, and `sync` is the terminal node.
 
 Workload progress is optional. The resource runner supplies
-`AGENT_RESOURCE_PROGRESS_FILE`, `AGENT_RESOURCE_RUN_ID`, and `AGENT_RESOURCE_NODE`.
-Lab scripts may call `resource_progress.write_progress(completed, "epoch", total=50)`
-from the shared `utilities/` helper to atomically publish a short counter; a missing
-or invalid observation never interrupts the workload or changes exit/sentinel completion.
+`AGENT_RESOURCE_PROGRESS_FILE`, `AGENT_RESOURCE_RUN_ID`, and `AGENT_RESOURCE_NODE`;
+`resource_progress.write_progress(done, "item", total=n)` atomically publishes an
+optional counter. Detached training, CPU scoring, and inference get default checks
+from fixed `logs/epochs.jsonl`, root `valid/train-epoch-NNNN.json` plus
+`progress.json`, and `tensorboard/` event files. The first checkpoint is the
+earlier of 10% of planned time or two hours, then 25/50/75% or a 12-hour interval;
+without a plan it is two hours, then every 12 hours. Known metrics, rules, baselines,
+and time budgets are optional. Missing sources or ETA stay explicit and do not
+interrupt a run or change exit, sentinel, verification, or approval state. Notices
+carry the run id and stable public run-record path when available.
+For matrix plans, the default is to queue each completed row's decision-metric
+evaluation on the existing approved queue while the next row trains, then update
+the leaderboard artifact; successive halving is a default option for many rows.
+Known metric/proxy/rules/time budget/baselines remain optional. A long CPU scoring
+or inference stage may publish `write_progress(done, "item", total=n)`; new
+per-epoch JSON output folders belong beneath a directory with `CACHEDIR.TAG`, while
+running output folders stay in place.
 
 The same separation applies to GPU monitoring. Generated execution bridges
 read the payload's terminal evidence before sampling again and retain partial

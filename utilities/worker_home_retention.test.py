@@ -813,6 +813,20 @@ class Routes(Fixture):
 
 
 class Deliveries(Fixture):
+    def legacy_notice(self, session_id, key):
+        # Persist the old producer's exact notice shape. New ordinary notices
+        # have no synthetic attempt; retained legacy records remain readable.
+        import hashlib
+        receipt = NOTICE.validate({"schema_version": 1, "kind": "notice", "subject": "Status",
+                                   "text": "Read this", "required_action": "read-notice", "key": key})
+        digest = hashlib.sha256(f"notice\0{key}".encode()).hexdigest()
+        tag = "notice-" + digest[:32]
+        return P.create(self.root, recipient_kind="claude-parent-runtime", recipient_key=session_id,
+                        delivery_id="delivery-" + digest, session_generation="",
+                        session_generation_supported="0", attempt_ids=[tag], parent_attempt_id=tag,
+                        route_id="route-free", route_node="notice", receipt=receipt,
+                        receipt_digest=NOTICE.receipt_digest(receipt), row_revisions={tag: "notice"})
+
     def producer_delivery(self, attempt="att-producer", worker_type="review"):
         route = {}
         if worker_type in ("owner", "frame"):
@@ -868,8 +882,7 @@ class Deliveries(Fixture):
 
     def test_real_depth_one_delivery_and_notice_retire_after_retention_window(self):
         home, record = self.producer_delivery()
-        notice = NOTICE.notify("claude", "sess-notice", key="retention-fixture",
-                               subject="Status", text="Read this", jobs=self.jobs)
+        notice = self.legacy_notice("sess-notice", "retention-fixture")
         self.assertEqual(len(notice["delivery_id"]), len("delivery-") + 64)
         self.assertTrue(notice["parent_attempt_id"].startswith("notice-"))
         self.assertEqual(self.sweep(0)["kept"].get("delivery-open"), 1)
@@ -884,8 +897,7 @@ class Deliveries(Fixture):
 
     def test_mixed_notice_and_attempt_members_protect_actual_worker(self):
         home = self.add("att-mixed")
-        notice = NOTICE.notify("claude", "sess-mixed", key="mixed-fixture",
-                               subject="Status", text="Read this", jobs=self.jobs)
+        notice = self.legacy_notice("sess-mixed", "mixed-fixture")
         self.assertIsNotNone(notice)
         P.create(
             self.root, recipient_kind=notice["recipient_kind"], recipient_key="sess-other",

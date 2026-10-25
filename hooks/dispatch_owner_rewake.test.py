@@ -1610,28 +1610,38 @@ class CarrierOneClaimGateTest(unittest.TestCase):
 
         self.addCleanup(reap_fixture_processes)
         self.jobs = self.root / "jobs.log"
-        # This suite's env was previously ambient (only exercised correctly
-        # because the invoking shell already had a real AGENT_HOME); under
-        # tools/run-tests.py isolation AGENT_HOME/HOME are unset. main()
-        # checks `(agent_home() / "utilities" / "dispatch-attempt-ready.py"
-        # ).is_file()` before the (here mocked) wait_for_attempt, so
-        # AGENT_HOME must resolve to a real checkout carrying that file --
-        # this repo checkout is that checkout.
         self.agent_home = MODULE_PATH.parents[1]
-        self.environment = mock.patch.dict(
-            os.environ, {
-                "AGENT_HOME": str(self.agent_home),
-                "AGENT_DISPATCH_JOBS": str(self.jobs),
-                "HOME": str(self.root / "home"),
-                "XDG_STATE_HOME": str(self.root / "xdg-state"),
-                "XDG_CONFIG_HOME": str(self.root / "xdg-config"),
-                "HARNESS_STATE_ROOT": str(self.root / "harness-state"),
-                "AGENT_PEER_LEDGER_ROOT": str(self.root / "peer-ledger"),
-                "CODEX_HOME": str(self.root / "home" / ".codex"),
-                "CLAUDE_CONFIG_DIR": str(self.root / "home" / ".claude"),
-            },
-            clear=False
-        )
+        home = self.root / "home"
+        artifacts = self.root / "artifacts"
+        runtime = self.root / "runtime"
+        for path in (home, artifacts / "cycle" / "artifacts", runtime,
+                     self.root / "xdg-state", self.root / "xdg-config",
+                     self.root / "xdg-data", self.root / "xdg-cache",
+                     self.root / "peer-ledger", self.root / "harness-state"):
+            path.mkdir(parents=True, exist_ok=True)
+        fixture_env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TERM")
+                       if key in os.environ}
+        fixture_env.update({
+            "AGENT_HOME": str(self.agent_home),
+            "AGENT_DISPATCH_JOBS": str(self.jobs),
+            "AGENT_PEER_LEDGER_ROOT": str(self.root / "peer-ledger"),
+            "AGENT_RUNTIME_DIR": str(runtime),
+            "AGENT_ARTIFACT_ROOT": str(artifacts),
+            "AGENT_ARTIFACT_CYCLE_DIR": str(artifacts / "cycle"),
+            "AGENT_ARTIFACT_OUTPUT_DIR": str(artifacts / "cycle" / "artifacts"),
+            "AGENT_ARTIFACT_CAMPAIGN_ID": "campaign-fixture",
+            "AGENT_ARTIFACT_CYCLE_ID": "cycle-fixture",
+            "AGENT_ARTIFACT_PRODUCER_ID": "producer-fixture",
+            "HOME": str(home),
+            "XDG_STATE_HOME": str(self.root / "xdg-state"),
+            "XDG_CONFIG_HOME": str(self.root / "xdg-config"),
+            "XDG_DATA_HOME": str(self.root / "xdg-data"),
+            "XDG_CACHE_HOME": str(self.root / "xdg-cache"),
+            "HARNESS_STATE_ROOT": str(self.root / "harness-state"),
+            "CODEX_HOME": str(home / ".codex"),
+            "CLAUDE_CONFIG_DIR": str(home / ".claude"),
+        })
+        self.environment = mock.patch.dict(os.environ, fixture_env, clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
 
@@ -2960,12 +2970,12 @@ class GateCarrierTest(unittest.TestCase):
         self.assertIn(notice, text)
 
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        CarrierOneClaimGateTest.setUp(self)
         self.state = self.root / "dispatch"
         self.state.mkdir()
         self.jobs = self.state / "jobs.log"
+        os.environ["AGENT_DISPATCH_JOBS"] = str(self.jobs)
+        os.environ["AGENT_PEER_LEDGER_ROOT"] = str(self.state)
         # `_gate_notices` finds the recipient through the owner row's `parent_sid`,
         # so an empty registry means it returns [] and exercises nothing.
         meta = ",".join([
@@ -2982,9 +2992,6 @@ class GateCarrierTest(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        trusted = mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.jobs)}, clear=False)
-        trusted.start()
-        self.addCleanup(trusted.stop)
 
     def _gate_record(self, *, delivery_id="delivery-gate-0001", state=None):
         rewake._PROBE_DIRECTORY_MTIME.clear()
