@@ -952,7 +952,7 @@ class BackgroundShellJobsTests(unittest.TestCase):
             ('/usr/bin/bash -lc "python3 -m tools.fleet.report --mode final --strict"',
              "python3 -m tools.fleet.report --mode final --strict"),
             ("/usr/bin/zsh -lc \"python3 utilities/verification-background-lease.py "
-             "--timeout 40 -- python3 -c 'print(1)'\"", "python3 -c 'print(1)'"),
+             "--timeout 40 --memory-budget 140GB -- python3 -c 'print(1)'\"", "python3 -c 'print(1)'"),
         ]
         rows = []
         for index, (command, _display) in enumerate(commands):
@@ -993,6 +993,27 @@ class BackgroundShellJobsTests(unittest.TestCase):
                 self.assertNotIn(display, joined)
         self.assertTrue(all(job["command_display_source"] ==
                             "codex.native-shell-command.argv" for job in jobs))
+
+    def test_verification_lease_display_walks_its_own_options(self):
+        cases = (
+            ("python3 utilities/verification-background-lease.py --memory-budget=8GiB --timeout=40 -- ls -la", "ls -la"),
+            ("python3 utilities/verification-background-lease.py --memory-budget 140GB --timeout 40 -- ls", "ls"),
+            ("python3 utilities/verification-background-lease.py --timeout 40 -- ls", "ls"),
+        )
+        for inner, expected in cases:
+            wrapped = "/usr/bin/zsh -lc " + __import__("shlex").quote(inner)
+            self.assertEqual(shell_jobs._codex_shell_command_display(wrapped),
+                             shell_jobs.command_summary(expected))
+        unchanged = (
+            "--foo 1 --timeout 40 -- ls", "--timeout 1 --timeout 2 -- ls",
+            "--memory-budget 1G -- ls", "--timeout 40 --",
+            "--timeout x -- ls", "--timeout 40 --memory-budget -- ls",
+        )
+        for options in unchanged:
+            inner = "python3 utilities/verification-background-lease.py " + options
+            wrapped = "/usr/bin/zsh -lc " + __import__("shlex").quote(inner)
+            self.assertEqual(shell_jobs._codex_shell_command_display(wrapped),
+                             shell_jobs.command_summary(inner))
 
     def test_codex_direct_result_without_exact_handle_stays_unobserved(self):
         path = self.root / "missing-native-continuation.jsonl"
