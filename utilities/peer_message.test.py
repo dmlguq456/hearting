@@ -2393,6 +2393,24 @@ class SealedHandoffCommandTest(_TmpRootMixin, unittest.TestCase):
         self.assertIsNone(peer_message.bind_unresolved_pending_recipient(ref, recipient))
 
 
+    def test_unresolved_retry_binds_and_reuses_the_original_ref_even_after_submission(self):
+        sender = {"harness": "claude", "session_id": "old"}
+        original = {"harness": "unknown", "session_id": None, "name": "recovering peer"}
+        text, ref = peer_message.prepare_peer_message("original correction", sender, original, defer=True)
+        recipient = {"harness": "codex", "session_id": "native-current", "pane_id": "w1:p1", "name": "peer"}
+        retry = peer_message.prepare_peer_message("original correction", sender, recipient, defer=True,
+                                                 original_target="recovering peer")
+        self.assertEqual(retry, (text, ref))
+        row = peer_message._read_pending(ref)
+        self.assertEqual(row["to"], original)
+        self.assertEqual(peer_message.pending_delivery_recipient(row)["session_id"], "native-current")
+        row["state"] = "queued"
+        peer_message._save_pending(row)
+        self.assertEqual(peer_message.prepare_peer_message("original correction", sender, recipient, defer=True,
+                            original_target="recovering peer"), (text, ref))
+        self.assertEqual(len(list(peer_message._pending_dir().glob("*.json"))), 1)
+
+
 class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()

@@ -53,6 +53,27 @@ class ManagedDispatchParentTest(unittest.TestCase):
             sessions, [job], "both", False, 0, layout="wide", term_width=180,
         ))
 
+    def test_current_parent_and_harness_share_one_coherent_read_pass(self):
+        from fleet.collectors import _effective_job_parent
+        utilities = TOOLS.parent / "utilities"
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import dispatch_seat_handover as handover
+        job = self.job()
+        meta = {"parent_sid": job.parent_sid, "parent_harness": "codex", "attempt_id": "att-coherent",
+                "dispatch_depth": "1", "worker_type": "owner", "route_id": "rt-coherent", "route_hash": "sha256:coherent"}
+        job._registry_metadata, job._registry_path = meta, "/fixture/jobs.log"
+        binding = handover.binding_of(job._registry_path, meta)
+        snapshot = {"seat": {"kind": "pane", "key": "coherent", "pane": "w1:pC"},
+                    "from": {"sid": job.parent_sid}, "bindings": [binding]}
+        rows = [[{"event": "handover", "source": "retire", "from": job.parent_sid,
+                  "sid": sid, "harness": harness, "bindings": [binding], "ts": n}]
+                for n, (sid, harness) in enumerate((("current-B", "claude"), ("current-C", "opencode")), 1)]
+        with mock.patch.object(handover, "_all_snapshots_uncached", return_value=[snapshot]) as snapshots, \
+             mock.patch.object(handover, "handover_rows", side_effect=rows) as ledgers:
+            self.assertEqual(_effective_job_parent(job), ("current-B", "claude"))
+        self.assertEqual((snapshots.call_count, ledgers.call_count), (1, 1))
+
     def test_unreadable_lineage_retains_only_the_previously_confirmed_edge_for_existing_grace(self):
         from fleet.collectors import _effective_job_parent
         utilities = TOOLS.parent / "utilities"
@@ -76,6 +97,13 @@ class ManagedDispatchParentTest(unittest.TestCase):
                 self.assertEqual(job._parent_edge_sid, parent.session_id)
             resolve_parent_edges([self.session(sid=original)], [job])
             self.assertIsNone(job._parent_edge_sid)
+            model.reset_parent_edge_tracker()
+            resolve_parent_edges([self.session(sid=original)], [job])
+            self.assertIsNone(job._parent_edge_sid)
+            self.assertFalse(job._parent_edge_promoted_orphan)
+            classified = render._classify_group_jobs("repo", [job], [self.session(sid=original)])
+            self.assertNotIn(job, classified["children"].get(original, []))
+            self.assertIn(job, classified["orphans"])
         self.assertEqual(job.parent_sid, original)
 
     def test_unique_exact_managed_dir_recovers_parent(self):

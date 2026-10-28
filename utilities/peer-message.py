@@ -877,9 +877,9 @@ def bind_unresolved_pending_recipient(ref, recipient):
                 or row.get("rpc_claim") or row.get("actual_message_id")):
             return None
         bound = row.get("bound_to")
-        if bound is not None and bound != recipient:
-            return None
-        row = dict(row, bound_to=dict(recipient), state="pending")
+        if bound is not None:
+            return row if _same_transfer_session(bound, recipient) else None
+        row = dict(row, schema_version=2, bound_to=dict(recipient), state="pending")
         _save_pending(row)
         return row
 
@@ -1032,12 +1032,13 @@ def _read_pending(ref, *, roots=None, state_root=None):
         raise ValueError("peer-pending-oversized")
     row = json.loads(raw)
     if (isinstance(row, dict) and type(row.get("schema_version")) is int
-            and row["schema_version"] > 1):
+            and (row["schema_version"] > 2
+                 or row["schema_version"] == 2 and not _unresolved_target(row.get("to")))):
         raise UnsupportedPendingSchema("peer-pending-schema-unsupported")
     transfer = (_read_transfer_record(ref, roots=roots) if state_root is None else
                 _read_transfer_record(ref, roots=roots, state_root=state_root))
     if (not isinstance(row, dict) or not isinstance(transfer, dict)
-            or type(row.get("schema_version")) is not int or row["schema_version"] != 1
+            or type(row.get("schema_version")) is not int or row["schema_version"] not in (1, 2)
             or row.get("ref") != ref or row.get("from") != transfer.get("from")
             or row.get("to") != transfer.get("to") or row.get("body_sha256") != transfer.get("body_sha256")
             or row.get("body_ref") != transfer.get("body_ref")
@@ -1336,7 +1337,7 @@ def pending_messages(recipient):
 
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
-                         producer_binding=None, handoff=None):
+                         producer_binding=None, handoff=None, original_target=None):
     """A retry reuses a pending intent; ordinary sends need no preparation lock."""
     endpoints_verified = (_valid_transfer_sender(sender, producer_binding, recipient, list(refs))
                           and (_valid_transfer_endpoint(recipient)
@@ -1345,6 +1346,15 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
 
     def matches_target(row):
         target = row.get("to") or {}
+        if _unresolved_target(target):
+            bound = row.get("bound_to")
+            if _valid_transfer_endpoint(bound):
+                return _same_transfer_session(bound, recipient)
+            return (original_target is not None and target["name"] == original_target
+                    and row.get("state") in {"pending", "unverified"}
+                    and not row.get("rpc_claim") and not row.get("actual_message_id")
+                    and row.get("receipt") != "target-identity-changed"
+                    and "ambiguous" not in row.get("receipt", ""))
         if _valid_pane_bound_endpoint(target):
             return (target.get("harness") == recipient.get("harness")
                     and target.get("pane_id") == recipient.get("pane_id"))
@@ -1360,6 +1370,10 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                     and row.get("refs", []) == list(refs)
                     and row.get("producer_binding") == producer_binding
                     and row.get("handoff") == handoff):
+                if _unresolved_target(row.get("to")) and not row.get("bound_to"):
+                    row = bind_unresolved_pending_recipient(row["ref"], recipient)
+                    if row is None:
+                        continue
                 return row["text"], row["ref"]
         return None
 
@@ -1392,7 +1406,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                                           producer_binding=producer_binding, handoff=handoff)
         if len(text.encode("utf-8")) > _PENDING_BYTES:
             raise ValueError("peer-pending-body-oversized")
-        pending = {"schema_version": 1, "ref": ref, "from": dict(sender), "to": dict(recipient),
+        pending = {"schema_version": 2 if _unresolved_target(recipient) else 1,
+            "ref": ref, "from": dict(sender), "to": dict(recipient),
             "body_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "source_sha256": body_hash, "refs": list(refs), "created": time.time(),
             "state": "pending" if endpoints_verified else "unverified", "text": text,

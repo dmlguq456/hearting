@@ -4605,6 +4605,8 @@ class SeatHandoverTest(TidyCase):
             replay = self.handover.record_retire_handover("zero-A", "claude", row["sid"], "codex",
                 successor_seat=seats[winner], jobs=self.jobs)
             self.assertEqual(replay, row)
+            self.assertIsNone(self.handover.record_retire_handover(row["sid"], "codex", "zero-A", "claude",
+                successor_seat=self.seat("test:zero-A"), jobs=self.jobs))
             d_seat = self.seat("test:zero-D")
             self.assertIsNotNone(self.handover.record_retire_handover(row["sid"], "codex", "zero-D", "opencode",
                 successor_seat=d_seat, jobs=self.jobs))
@@ -4661,6 +4663,28 @@ class SeatHandoverTest(TidyCase):
             finally:
                 path.write_bytes(before)
             self.assertEqual(self.handover.effective_parent(meta, self.jobs), "sid-B")
+
+    def test_schema_damage_is_unreadable_instead_of_a_verified_empty_lineage(self):
+        meta = self.row("schema-damage")
+        self.snapshot()
+        self.start("sid-B")
+        with self.iso.patched_environ():
+            seat = self.seat()
+            path = st._ledger_path(seat)
+            original = path.read_bytes()
+            for replacement in ({"bindings": [{}]}, {"ts": float("nan")}, {"from": ""}):
+                entries = [json.loads(line) for line in original.splitlines()]
+                entry = next(row for row in entries if row.get("event") == "handover")
+                entry.update(replacement)
+                path.write_text("".join(json.dumps(row) + "\n" for row in entries))
+                result = self.handover.resolve_recipient("job-holder", metadata=meta, jobs=self.jobs)
+                self.assertEqual((result.state, result.session_id), ("unreadable", ""))
+            path.write_bytes(original)
+            snapshot = self.handover.read_snapshot(seat.key)
+            snapshot["bindings"] = [{}]
+            st.atomic_write_json(self.handover._snapshot_path(seat.key), snapshot)
+            self.assertEqual(self.handover.resolve_recipient("job-holder", metadata=meta, jobs=self.jobs).state,
+                             "unreadable")
 
     def test_the_twelve_job_cap_keeps_every_attempt_for_each_selected_job(self):
         self.row("att-active-1", node="active-one")

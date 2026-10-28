@@ -42,6 +42,7 @@ import contextlib
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -142,6 +143,16 @@ def _all_snapshots(read_context=None) -> list[dict]:
     return _all_snapshots_uncached()
 
 
+def _bindings_readable(bindings):
+    return isinstance(bindings, list) and all(
+        isinstance(binding, dict)
+        and all(isinstance(binding.get(key), str) and bool(binding[key])
+                for key in ("jobs", "route", "hash", "attempt"))
+        and isinstance(binding.get("node"), str)
+        and ("parent" not in binding or isinstance(binding["parent"], str) and bool(binding["parent"]))
+        for binding in bindings)
+
+
 def _all_snapshots_uncached() -> list[dict]:
     try:
         with os.scandir(_snapshot_dir()) as entries:
@@ -157,7 +168,8 @@ def _all_snapshots_uncached() -> list[dict]:
         seat = data.get("seat") if isinstance(data, dict) else None
         if (not isinstance(seat, dict) or not seat.get("key")
                 or seat.get("kind") not in {"pane", "native", "project"}
-                or not isinstance(data["from"].get("sid"), str)):
+                or not isinstance(data["from"].get("sid"), str) or not data["from"]["sid"]
+                or not _bindings_readable(data.get("bindings"))):
             raise ValueError("handover-snapshot-invalid")
         out.append(data)
     return out
@@ -169,7 +181,7 @@ def handover_rows(seat, *, read_context=None) -> list[dict]:
         st = _st()
         with st.seat_ledger_readonly_scope():
             return [e for e in st._read_ledger_lines(seat, strict=True)
-                    if e.get("event") == ROW_EVENT and e.get("from")]
+                    if e.get("event") == ROW_EVENT]
 
     rows = (read_context.handover_rows(seat, load) if read_context is not None else load())
     return sorted(rows, key=lambda r: float(r.get("ts", 0) or 0))
@@ -916,10 +928,11 @@ def _lineage_seats(extra=(), *, read_context=None) -> dict:
     result = {key: handover_rows(seat, read_context=read_context) for key, seat in seats.items()}
     for rows in result.values():
         for row in rows:
-            if (not isinstance(row.get("sid"), str) or not isinstance(row.get("from"), str)
-                    or not isinstance(row.get("bindings"), list)
+            if (not isinstance(row.get("sid"), str) or not row["sid"]
+                    or not isinstance(row.get("from"), str) or not row["from"]
+                    or not _bindings_readable(row.get("bindings"))
                     or row.get("harness") not in {"claude", "codex", "opencode"}
-                    or any(not isinstance(binding, dict) for binding in row["bindings"])):
+                    or not math.isfinite(float(row.get("ts", 0)))):
                 raise ValueError("handover-ledger-invalid")
     return result
 
@@ -1603,6 +1616,11 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
         if prior:
             return next((r for r in prior if (r["sid"], r["harness"]) ==
                          (successor_sid, successor_harness)), None)
+        target = resolve_recipient("seat-successor", session=successor_sid, harness=successor_harness)
+        if target.state == "unreadable":
+            raise RegistryUnreadable(target.reason)
+        if target.session_id == predecessor_sid:
+            return None  # A successor chain back to the source would create a backwards lineage.
         source = resolve_recipient("seat-successor", session=predecessor_sid, harness=predecessor_harness)
         if source.state == "unreadable":
             raise RegistryUnreadable(source.reason)

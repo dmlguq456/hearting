@@ -945,9 +945,11 @@ def queue_target(jobs: Path, attempts: set[str], registered: str) -> str:
         except FileNotFoundError:
             view = None
         rows = {a: row for a in attempts if view is not None and (row := view.handover_attempt(a)) is not None}
+        from peer_read_context import PeerReadContext
+        context = PeerReadContext()
         answers = [handover.resolve_recipient("job-holder", metadata=rows[a][1] if a in rows else
                     {"parent_sid": registered, "parent_harness": "codex"}, jobs=jobs,
-                    harness="codex") for a in attempts]
+                    harness="codex", read_context=context) for a in attempts]
         owners = {(answer.session_id, answer.harness) for answer in answers if answer.state != "unreadable"}
         if len(answers) != sum(answer.state != "unreadable" for answer in answers):
             return ""

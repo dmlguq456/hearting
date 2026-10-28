@@ -553,11 +553,6 @@ def _prompt_candidate_snapshot(target, *, wanted_tag=None):
             unknown_panes.add(pane)
             unknown_reason = unknown_reason or census_error
             continue
-        if (census_sid and row.get("session_id")
-                and census_sid != row["session_id"]):
-            unknown_panes.add(pane)
-            unknown_reason = unknown_reason or "target-identity-changed"
-            continue
         if row["harness"] != harness:
             unknown_panes.add(pane)
             unknown_reason = unknown_reason or "target-identity-changed"
@@ -7817,9 +7812,11 @@ def _resume_registered_obligation(duty, store, *, read_context=None):
     # a replacement process after that runtime died. Unknown identity stays protected.
     # The duty follows confirmed handover; the signed queue stays under the
     # registered parent, even when its current recipient is a successor.
-    recipient_sid = effective_parent(row.metadata, jobs, read_context=read_context)
+    from peer_read_context import PeerReadContext
+    parent_context = read_context if read_context is not None else PeerReadContext()
+    recipient_sid = effective_parent(row.metadata, jobs, read_context=parent_context)
     recipient_harness = (harness if recipient_sid == str(row.metadata.get("parent_sid") or "")
-                         else effective_parent_harness(row.metadata, jobs, read_context=read_context)
+                         else effective_parent_harness(row.metadata, jobs, read_context=parent_context)
                          or harness)
     storage_recipient = row.metadata.get("parent_sid", "")
     # Transfers are immutable. A transfer reserved for an earlier recipient
@@ -9382,7 +9379,8 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             body, {"harness": from_harness, "session_id": from_sid, "name": from_name},
             recipient, defer=True, refs=args.ref, receipt=input_reason or "native-pending",
             with_trailer=not args.no_trailer, reference_evidence=reference_evidence,
-            first_input_process=first_input_process, producer_binding=producer_binding, handoff=handoff)
+            first_input_process=first_input_process, producer_binding=producer_binding, handoff=handoff,
+            original_target=args.target)
         if on_prepared is not None:
             on_prepared(transfer_ref)
         pending = peer_message._read_pending(transfer_ref)

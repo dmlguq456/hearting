@@ -4623,6 +4623,24 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(send.call_args.args[:2], (pane, text))
         self.assertEqual(peer._read_pending(ref)["state"], "queued")
 
+    def test_name_resolution_uses_matching_native_proof_when_inventory_label_is_late(self):
+        row = self._inventory_row(sid="late-label", name="child")
+        self._set_inventory([row])
+        self._census_panes[0]["agent_session"]["value"] = "current-native"
+        self._native_sid_by_pid[40000] = "current-native"
+        stale = ("idle", {"harness": "claude", "session_id": "late-label",
+                          "name": "child", "pane": "w1:pX"}, 0, None)
+        with mock.patch.object(peer_steward, "_prompt_agent_inventory", return_value=([row], None)), \
+             mock.patch.object(peer_steward, "_retire_target", return_value=stale), \
+             mock.patch.object(peer_steward, "_retire_pane_info", side_effect=self._pane_info_for):
+            current, error, _panes = peer_steward._resolve_prompt_target("child")
+            self.assertIsNone(error)
+            self.assertEqual(current["session_id"], "current-native")
+            self._native_sid_by_pid[40000] = "actually-other"
+            current, error, _panes = peer_steward._resolve_prompt_target("child")
+            self.assertIsNone(current)
+            self.assertEqual(error, "target-identity-changed")
+
     def test_native_process_wins_over_stale_label_but_other_native_sid_is_protected(self):
         ident = {"harness": "claude", "session_id": "stale-label", "pane": "w1:pX", "name": "peer"}
         info = self._pane_info_for("w1:pX")

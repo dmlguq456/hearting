@@ -1014,9 +1014,11 @@ def _ordinary_notice_target(identity, carrier):
         if (row.metadata.get("parent_sid") != session
                 or row.metadata.get("parent_completion_delivery") != carrier):
             return None
-        current_session = effective_parent(row.metadata, jobs)
+        from peer_read_context import PeerReadContext
+        context = PeerReadContext()
+        current_session = effective_parent(row.metadata, jobs, read_context=context)
         current_harness = (harness if current_session == session else
-                           effective_parent_harness(row.metadata, jobs))
+                           effective_parent_harness(row.metadata, jobs, read_context=context))
         if (not current_session or current_harness not in {"claude", "codex", "opencode"}
                 or (current_session == session and current_harness == harness
                     and parent_completion(current_harness).get("carrier") != carrier)):
@@ -1252,12 +1254,11 @@ def _registered_delivery_bindings(message, roots=None, *, received_only=False,
         if intent.get("notice_delivery_id") and record.get("receipt_digest") != intent.get("notice_digest"):
             return
         from dispatch_seat_handover import effective_parent, effective_parent_harness
-        parent = (effective_parent(row.metadata, jobs) if read_context is None else
-                  effective_parent(row.metadata, jobs, read_context=read_context))
+        from peer_read_context import PeerReadContext
+        parent_context = read_context if read_context is not None else PeerReadContext()
+        parent = effective_parent(row.metadata, jobs, read_context=parent_context)
         if require_current_recipient:
-            parent_harness = (effective_parent_harness(row.metadata, jobs)
-                              if read_context is None else effective_parent_harness(
-                                  row.metadata, jobs, read_context=read_context))
+            parent_harness = effective_parent_harness(row.metadata, jobs, read_context=parent_context)
             expected_harness = (identity.get("harness", "") if parent == str(
                 row.metadata.get("parent_sid") or "") else parent_harness or identity.get("harness", ""))
             if (parent != binding["recipient_sid"]

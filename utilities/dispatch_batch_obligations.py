@@ -416,6 +416,8 @@ def parent_successor(jobs: str | Path, parent: str, attempts, *, current_session
     import dispatch_seat_handover as handover
     from dispatch_registry_cache import registry_view
     view = registry_view(Path(jobs))
+    from peer_read_context import PeerReadContext
+    context = PeerReadContext()
     answers = set()
     missing = False
     for attempt in attempts:
@@ -423,10 +425,10 @@ def parent_successor(jobs: str | Path, parent: str, attempts, *, current_session
         if row is None:
             missing = True
             continue
-        observed = handover.resolve_recipient("job-holder", metadata=row[1], jobs=jobs)
+        observed = handover.resolve_recipient("job-holder", metadata=row[1], jobs=jobs, read_context=context)
         if observed.state == "unreadable":
             raise handover.RegistryUnreadable(observed.reason)
-        successor = handover.effective_parent(row[1], jobs)
+        successor = handover.effective_parent(row[1], jobs, read_context=context)
         if not successor or successor == parent:
             missing = True
             continue

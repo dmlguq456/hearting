@@ -82,7 +82,18 @@ def _same_path(a, b):
     return a == b or os.path.realpath(a) == os.path.realpath(b)
 
 
-def _effective_job_parent(job):
+def _parent_read_context():
+    utilities = str(Path(__file__).resolve().parents[3] / "utilities")
+    if utilities not in sys.path:
+        sys.path.insert(0, utilities)
+    try:
+        from peer_read_context import PeerReadContext
+        return PeerReadContext()
+    except ImportError:
+        return None
+
+
+def _effective_job_parent(job, *, read_context=None):
     """Display parent from the shared handover interpreter; never rewrite the row."""
     registered = getattr(job, "parent_sid", None)
     metadata, registry = getattr(job, "_registry_metadata", None), getattr(job, "_registry_path", None)
@@ -95,10 +106,11 @@ def _effective_job_parent(job):
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         from dispatch_seat_handover import effective_parent, effective_parent_harness
-        return (effective_parent(metadata, jobs=registry),
-                effective_parent_harness(metadata, jobs=registry))
+        context = read_context if read_context is not None else _parent_read_context()
+        return (effective_parent(metadata, jobs=registry, read_context=context),
+                effective_parent_harness(metadata, jobs=registry, read_context=context))
     except ImportError:
-        return registered, ""
+        return "", ""
 
 
 def _mark_dispatch_child_sessions(sessions, jobs):
@@ -109,6 +121,7 @@ def _mark_dispatch_child_sessions(sessions, jobs):
     jobs by runtime+cold cwd, while explicitly protecting the parent session cwd/id.
     """
     child_jobs = []
+    parent_context = _parent_read_context()
     for j in jobs:
         if not getattr(j, 'cwd', None) or not getattr(j, 'harness', None):
             continue
@@ -153,7 +166,7 @@ def _mark_dispatch_child_sessions(sessions, jobs):
             # as "not the parent."
             if getattr(j, 'parent_sid', None) and not getattr(s, 'session_id', None):
                 continue
-            parent_sid, _parent_harness = _effective_job_parent(j)
+            parent_sid, _parent_harness = _effective_job_parent(j, read_context=parent_context)
             if parent_sid and s.session_id and parent_sid == s.session_id:
                 continue
             if getattr(j, 'parent_cwd', None) and _same_path(s.cwd, j.parent_cwd):
@@ -180,6 +193,7 @@ def resolve_parent_edges(sessions, jobs):
         if getattr(session, "session_id", None):
             sessions_by_sid.setdefault(session.session_id, []).append(session)
     managed_parents = model.unique_managed_parents(sessions)
+    parent_context = _parent_read_context()
     for j in jobs:
         parent_sid = getattr(j, "parent_sid", None)
         if not parent_sid and getattr(j, "caller_sid", None):
@@ -194,7 +208,7 @@ def resolve_parent_edges(sessions, jobs):
             continue
         if not (getattr(j, "is_child", False) and parent_sid):
             continue
-        parent_sid, parent_harness = _effective_job_parent(j)
+        parent_sid, parent_harness = _effective_job_parent(j, read_context=parent_context)
         if not parent_sid:
             j._parent_edge_sid, j._parent_edge_promoted_orphan = model.parent_edge_unknown(j.slug)
             continue  # Unreadable current lineage cannot establish a new managed-dir edge.

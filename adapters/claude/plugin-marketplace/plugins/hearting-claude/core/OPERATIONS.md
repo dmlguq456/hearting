@@ -1372,8 +1372,9 @@ answer stays kept and the current parent receives one `answer-awaiting-parent` s
 notice. The parent's carrier that delivers it (the shared prompt sweep or the
 Claude rewake) starts the route once under that session's identity
 (`dispatch_supervision.continue_for_parent`) and the notice says so. If handover
-state is unreadable, the registered parent remains the existing safe fallback; only when
-nothing could be started does it name the route's start command. Other ended owners still report
+state is unreadable, the retained controller observes again without restoring the
+registered parent's authority. A confirmed holder continues through the existing
+start path. Other ended owners still report
 `owner-input-unavailable-retain-correction`. An answer sent with an older attempt id
 follows the replacement lineage to the owner doing the work now.
 Corrections preserve route, completion and cleanup evidence; completed-prefix
@@ -2563,48 +2564,27 @@ Resumed retirement determines self-target from its recorded requester's session
 and pane identity. A cancelled request is terminal history:
 a new explicit request for the same lifetime accepts a fresh duty while retaining
 the cancelled record; repeated active or completed requests share that fresh duty.
-An explicitly accepted typed cross-seat handoff records the predecessor's
-open depth-1 routes to the exact successor through the common seat ledger,
-before reply delivery or physical retirement settles. The successor may then
+The current holder's explicit handoff records every eligible logical job and a
+seat-successor relation in the common ledger, independently of card delivery,
+receiver acceptance and physical retirement. A missing card or pane does not
+remove that relation. Explicit receiver acceptance records reading separately. The successor may then
 `start` and `correct` them, and their stored completion records reach it. The
 registered parent, worker, receipt, claim, and ACK identities stay anchored to
 their original storage; cards and notices are not moved. Physical retirement
 remains a separate retained duty and still observes the original process
 birth, executor work, busy state, drafts, and forms. A later retire replay
 reuses the same ledger row rather than creating another transfer.
-Deferred retirement uses the same early cutover when the original successor
-mark predates acceptance and its current native process proves the recorded
-requester. The mark stays available while exit waits. Past parent delivery
-uncertainty is separate from actual executor liveness. Proven loss of the booked predecessor
-lifetime can finish this same handover even when its pane has disappeared; it
-grants nothing to a later occupant. A completed retirement whose handover was
-missed is consumed by the ordinary lifecycle callback or the same
-`retire <predecessor>` call, without another exit action, pane closure, manual
-ledger edit or new recovery command. Cancelled and unverifiable requests grant
-no handover, and an existing transfer to another successor stays authoritative.
-If a completed successful retirement booked a stale headless session label,
-handover alone may read the original foreground identity from its exact native
-PID/start record. A label is stale only when it is the native session of a
-verified headless owner binding; any other label keeps the ordinary path, and a
-pending settlement leaves a stale one to that completed replay. The correction
-holds when the retained source is stable, owned by the current user and written
-before acceptance, and its native session is the registered parent of exactly
-one verified matching headless owner binding in canonical jobs. Unrelated
-missing historical sidecars leave that match intact; multiple verified matching
-attempts, including foreign or closed parents, are ambiguous.
-The original requester and pre-acceptance beside mark still govern succession,
-and the existing writer rechecks current open-route ownership. Unknown native
-identity or relation grants nothing, including through the stale booked label.
-Only a copy used for handover changes: duty identity, result and history remain
-intact, and completed replay performs no exit or pane action. This authority
-contract is shared by Claude, Codex and OpenCode; retained native source support
-depends on the harness. OpenCode's exact retained TUI selection can supply it;
-missing or disposed records and unsupported dead Claude/Codex identity remain
-unknown. Native source availability is not inferred from a label or saved SID.
+Retained settlement uses the same current-holder judgment and original native
+requester/lifetime evidence, preserving the signed duty identity, result and history. A completed retirement can replay
+the ledger write through the existing callback or normal call, with no further
+exit or pane action. Cancelled or unverifiable requests grant no handover, and
+an existing transfer to another successor stays authoritative. Native source
+availability depends on the harness; a label or saved SID does not establish it.
+Unreadable observations remain with the existing controller for reobservation.
 Replacement admission and lineage use that same parent judgment: a depth-1
 replacement may be launched only by the current `effective_parent`. If handover
-state is unreadable, the existing safe default temporarily resolves to the
-registered parent. This parent judgment (`route_authority.owns`) is separate from result
+state is unreadable, the existing controller waits without restoring historical
+parent authority. This parent judgment (`route_authority.owns`) is separate from result
 delivery, which follows the single `effective_parent`. Parent attempt bindings remain exact, as do route, node, depth,
 sub-session and input digests. A changed parent label on a depth-1 node replay
 is accepted only for that same parent; depth-2 parent bindings stay exact.
@@ -2993,9 +2973,12 @@ Prompt resolution distinguishes a complete no-match (`not-found`), multiple
 current matches or a name/tag collision (`ambiguous`), and observations that
 are missing, partial, malformed, or conflicting (`observation-unavailable` or
 `identity-unverified`). Failure diagnostics retain every known candidate pane.
-A duplicate session ID in two panes is two candidates. None of these failures
-creates a carrier submission or an
-unresolved-recipient delivery obligation. Successful resolution does not relax
+A duplicate session ID in two panes is two candidates. Unavailable resolution retains
+the original body, refs and address in one unsent pending message. The existing
+message runner resolves that address until it can fix one exact native endpoint;
+Ambiguous or conflicting identities keep the original intent unbound. A
+consistent complete census and native address can admit an exact native queue
+without permitting physical pane input. Successful resolution does not relax
 the existing exact SID/PID-birth, native state, registered-work, composer,
 form, or receive-evidence checks. A name or tag match does not expand the
 pane-only sidless first-input path, and a queued carrier result remains
@@ -3057,17 +3040,17 @@ actually recover a detached-watch receipt on its next turn, with no wake carrier
 receipts at `spec/stage-dispatch/_internal/research/peer-session-probe/P-<n>.md`; no
 adapter claims a working Codex-steward or OpenCode realization until its receipt exists.
 
-Only shared receiver guidance for a valid current typed cross-seat session-tidy
-handoff supplies the existing `session_tidy.py handoff accept <ref>` command.
-After reading the card and referenced documents, the receiver uses that exact
-command; it binds the current receiver and transfer ref. Ordinary messages and
-cards have no accept command or successor authority. A confirmed same-seat clear
-uses the existing seat handover automatically. Explicit acceptance records the
-current parent and completion recipient in the common seat ledger, then schedules
-the retained reply and normal predecessor retire reservation with the original
-exact identities. Reply delivery and physical retire remain separate retained
-duties; an unknown reply does not delay the accepted authority transfer. Delivery
-is receipt, not acceptance.
+The typed handoff producer seals its exact `session_tidy.py handoff accept <ref>`
+command in the transmitted body, including a long card's bounded envelope and
+complete-source path. Receiver guidance is advisory. The receiver reads the
+complete source and referenced documents before using that supplied command;
+ordinary messages and cards have no accept command or successor authority.
+Logical transfer records the current holder's explicit request independently
+of content delivery. Acceptance revalidates the exact native receiver, replays
+the same logical record and schedules the retained reply. Physical retirement
+has its own original lifetime and preserved-context checks; native acceptance
+may report `retire=deferred` without a reservation ID. Queueing, delivery and ACK
+remain receipt facts.
 For an actionable peer request that can be completed now, reply once with the
 result. For work that will wait or take sustained effort, send one short receipt and
 continue through the existing registered continuation. Informational/no-reply
