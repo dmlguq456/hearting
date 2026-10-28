@@ -826,23 +826,37 @@ def _native_ledger_path(seat: Seat) -> Path:
     return state_root() / "sessions" / f"{seat_state_key(seat)}.jsonl"
 
 
-def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True) -> list[dict]:
+def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True, strict: bool = False) -> list[dict]:
     path = _native_ledger_path(seat)
     physical = _physical_ledger_path(seat)
     scope = _LEDGER_READ_SCOPE.get()
     read_only = _LEDGER_READ_ONLY.get()
     cache_key = os.fspath(path) + ("#lineage" if include_physical_relations and path != physical else "")
+    if strict:
+        scope = None  # Fresh authority reads; PeerReadContext owns read-pass reuse.
     if scope is not None:
         cached = scope.get(cache_key)
         if cached is not None:
             return cached if read_only else copy.deepcopy(cached)
     def parse(source: Path) -> list[dict]:
         entries = []
-        for line in (read_bytes(source) or b"").decode("utf-8", "replace").splitlines():
+        if strict:
+            _reject_symlink(source)
+            try:
+                raw = source.read_bytes()
+            except FileNotFoundError:
+                raw = b""
+        else:
+            raw = read_bytes(source) or b""
+        for line in raw.decode("utf-8", "strict" if strict else "replace").splitlines():
             try:
                 item = json.loads(line)
             except ValueError:
+                if strict:
+                    raise
                 continue
+            if strict and (not isinstance(item, dict) or not item.get("sid")):
+                raise ValueError("seat-ledger-schema-invalid")
             if isinstance(item, dict) and item.get("sid"):
                 entries.append(item)
         return entries

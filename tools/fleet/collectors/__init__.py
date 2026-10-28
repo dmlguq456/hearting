@@ -95,7 +95,7 @@ def _effective_job_parent(job):
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         from dispatch_seat_handover import effective_parent, effective_parent_harness
-        return (effective_parent(metadata, jobs=registry) or registered,
+        return (effective_parent(metadata, jobs=registry),
                 effective_parent_harness(metadata, jobs=registry))
     except ImportError:
         return registered, ""

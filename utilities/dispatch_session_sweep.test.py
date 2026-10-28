@@ -2435,7 +2435,7 @@ for (let i = 0; i < 200 && !logs.some(row => row.extra?.stage === "settle"); i++
         self.seed_turn()
         record_path = PD.record_path(self.root, self.SID, "delivery-" + "a" * 32)
         snapshot = self.root.parent / "opencode-activation-complete.txt"
-        barrier = _SlowRecoveryBarrier(self.root.parent / "opencode-activation-recovery.sock")
+        barrier = _SlowRecoveryBarrier(self.root.parent / "oc-recovery.sock")
         requests = self.root.parent / "common-recovery-requests.jsonl"
         bodies = self.root.parent / "slow-recovery-bodies.jsonl"
         try:

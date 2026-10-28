@@ -6688,7 +6688,7 @@ def _message_terminal_evidence(duty, row, observed, reason):
 def _schedule_message_obligation(row, target, pane=None, *, delay_notice_for=None, handoff_acceptance=False):
     """Persist exact transport ownership without copying the sealed message body."""
     sender = row.get("from") or {}
-    recipient = row.get("to") or {}
+    recipient = peer_message.pending_delivery_recipient(row) or row.get("to") or {}
     sid = recipient.get("session_id")
     harness = recipient.get("harness")
     identity = {"server": _HERDR_SESSION or "default", "pane": pane or "",
@@ -6901,7 +6901,7 @@ def _resume_message_obligation(duty, store, *, read_context=None):
             # Even old settled=true rows are replayed through the existing
             # ledger writer; this repairs acceptance-before-ledger crashes
             # without asking the current pane to reassert the same identity.
-            runner.resume_handoff_acceptance(ref, steward=sys.modules[__name__])
+            settlement = runner.resume_handoff_acceptance(ref, steward=sys.modules[__name__])
         except (OSError, ValueError, KeyError, TypeError):
             if duty.get("state") == "complete":
                 return
@@ -6909,6 +6909,10 @@ def _resume_message_obligation(duty, store, *, read_context=None):
             return
         finally:
             _HERDR_SESSION = old_server
+        if not settlement.get("settled") or not settlement.get("retire_id"):
+            checkpoint(state="pending", cleanup="pending", observation={"ref": ref,
+                "reason": settlement.get("retire_reason", "handoff-retire-unsettled")})
+            return
         _HANDOFF_ACCEPTANCE_REPLAYED.add((str(store.root.resolve(strict=False)), duty_id))
         if len(_HANDOFF_ACCEPTANCE_REPLAYED) > 4096:
             _HANDOFF_ACCEPTANCE_REPLAYED.clear()
@@ -6928,6 +6932,14 @@ def _resume_message_obligation(duty, store, *, read_context=None):
             return
         checkpoint(state="unknown", observation={
             "ref": ref, "reason": "received-binding-unverified"})
+        return
+    native_recipient = peer_message.pending_delivery_recipient(row)
+    if (native_recipient and not native_recipient.get("pane_id")
+            and not ((duty.get("intent") or {}).get("identity") or {}).get("pane")):
+        if row.get("state") == "pending" and native_recipient.get("harness") == "codex":
+            peer_message.deliver_pending_codex(ref, timeout=0.25)
+        # Claude/OpenCode consume their exact native pending rows at their existing callback.
+        checkpoint(state="pending", observation={"ref": ref, "reason": "awaiting-native-receiver"})
         return
     identity = (duty.get("intent") or {}).get("identity") or {}
     # Identity is held outside mutable observations. The accepted target stays
@@ -8549,8 +8561,8 @@ def _runner_duties(store, duties=None):
                     or not isinstance(retire, dict)
                     or (retire.get("intent") or {}).get("kind") != "retire"
                     or retire.get("state") in {"cancelled", "failed"}
-                    or (retire_identity.get("server"), retire_identity.get("pane"),
-                        retire_identity.get("harness"), retire_identity.get("session_id"))
+                    or (retired_identity.get("server"), retired_identity.get("pane"),
+                        retired_identity.get("harness"), retired_identity.get("session_id"))
                        != (predecessor.get("server"), predecessor.get("pane"),
                            predecessor.get("harness"), predecessor.get("session_id"))
                     or (retire.get("intent") or {}).get("target") != target

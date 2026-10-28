@@ -2797,7 +2797,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         original_jobs = ("now\trunning\t0\tjob\tlog\t" +
             ",".join(f"{key}={value}" for key, value in meta.items()) + "\n").encode()
         self.jobs_path.write_bytes(original_jobs)
-        with mock.patch.object(handover, "record_retire_handover", return_value=None):
+        with mock.patch.object(handover, "record_retire_handover", return_value={"legacy": True}):
             self.runner.accept_handoff(self.ref, self.caller)
         accepted = peer_message._read_pending(self.ref)["acceptance"]
         self.assertTrue(accepted["settled"])
@@ -3151,10 +3151,45 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             peer_message.schedule_acceptance_reply(self.ref, dict(self.recipient, session_id="foreign"), self.sender)
         self.assertEqual(path.read_bytes(), before)
 
+    def test_native_acceptance_without_either_pane_retains_reply_and_retire_continuation(self):
+        import session_tidy as tidy
+        original = json.loads(json.dumps(peer_message._read_pending(self.ref)))
+        for missing in ("predecessor", "successor"):
+            with self.subTest(missing=missing):
+                _text, ref = peer_message.prepare_peer_message("card without " + missing, self.sender, self.recipient, defer=True)
+                row = peer_message._read_pending(ref)
+                row["handoff"] = json.loads(json.dumps(original["handoff"]))
+                context = row["handoff"]
+                context[missing]["pane"] = ""
+                context[missing]["foreground"] = None
+                context["target"] = context["predecessor"].get("pane")
+                context["requester"]["pane"] = context["successor"].get("pane")
+                peer_message._save_pending(row)
+                caller = self.caller if missing == "predecessor" else (
+                    tidy.Seat("native", "native-successor", harness="codex", sid="successor"), "codex", "successor")
+                with mock.patch.object(self.steward, "reserve_handoff_retire") as reserve:
+                    # Exercise the public CLI entry; it delegates to the actual accept/settle functions.
+                    args = tidy.build_parser().parse_args(["handoff", "accept", ref])
+                    output = io.StringIO()
+                    with mock.patch.object(tidy, "resolve_caller", return_value=caller), contextlib.redirect_stdout(output):
+                        code = tidy.cmd_handoff(args)
+                    self.assertEqual(code, 0, output.getvalue())
+                    self.assertIn("retire=deferred", output.getvalue())
+                    self.assertNotIn("request_id=", output.getvalue())
+                    saved = peer_message._read_pending(ref)["acceptance"]
+                    self.assertTrue(saved["read_and_accepted"])
+                    self.assertFalse(saved["settled"])
+                    self.assertNotIn("retire_id", saved)
+                    duty = next(d for d in self.store.list() if d["intent"].get("handoff_acceptance") and d["intent"]["ref"] == ref)
+                    self.steward._resume_message_obligation(duty, self.store)
+                    self.assertEqual(self.store.get(duty["id"])["state"], "pending")
+                    self.assertEqual(peer_message._read_pending(ref)["acceptance"]["reply_ref"], saved["reply_ref"])
+                    reserve.assert_not_called()
+
     def test_unverified_successor_lifetimes_cannot_accept(self):
         original = peer_message._read_pending(self.ref)
         known = self.successor["foreground"]
-        cases = [(None, None), (known, None), ({"pid": 22}, known),
+        cases = [(known, None), ({"pid": 22}, known),
                  ({"pid": True, "start": "202"}, known),
                  ({"pid": 22, "start": "invalid"}, known),
                  (known, {"pid": 22, "start": 0})]

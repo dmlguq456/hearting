@@ -1049,6 +1049,16 @@ def _read_pending(ref, *, roots=None, state_root=None):
             or row.get("state") not in ("pending", "queued", "unverified", "received")
             or type(row.get("created")) not in (int, float) or not math.isfinite(row["created"])):
         raise ValueError("peer-pending-binding-invalid")
+    if transfer.get("handoff") is not None:
+        expected_context = json.loads(json.dumps(transfer["handoff"]))
+        bound_context = row.get("bound_to")
+        if _valid_pane_bound_endpoint(row.get("to")) and _valid_transfer_endpoint(bound_context):
+            for key in ("successor", "requester"):
+                endpoint = expected_context.get(key)
+                if isinstance(endpoint, dict) and endpoint.get("session_id") is None:
+                    endpoint["session_id"] = bound_context["session_id"]
+        if row.get("handoff") != expected_context:
+            raise ValueError("peer-pending-handoff-invalid")
     bound = row.get("bound_to")
     original = row.get("to") or {}
     if bound is not None and (not _valid_transfer_endpoint(bound)
@@ -1098,7 +1108,7 @@ def _read_pending(ref, *, roots=None, state_root=None):
                 raise ValueError("peer-pending-source-invalid")
         if transfer.get("handoff") is not None:
             suffix = "\n\nRead the complete card and referenced documents, then accept with:\n" + handoff_accept_command(ref)
-            if row.get("handoff") != transfer["handoff"] or not source.endswith(suffix):
+            if not source.endswith(suffix):
                 raise ValueError("peer-pending-handoff-invalid")
             source = source[:-len(suffix)]
         if hashlib.sha256(source.encode("utf-8")).hexdigest() != row.get("source_sha256"):

@@ -4330,6 +4330,49 @@ print(json.dumps({'code': code, 'stdout': out.getvalue(), 'stderr': err.getvalue
                 process.terminate()
                 process.communicate(timeout=2)
 
+    def test_real_carrier_waits_through_unreadable_lineage_and_recovers(self):
+        self._unreadable_wait_case("session-B")
+
+    def test_real_carrier_waits_through_unreadable_lineage_then_hands_away(self):
+        self._unreadable_wait_case("session-C")
+
+    def _unreadable_wait_case(self, successor):
+        self._adopt_b()
+        self._create_gate()
+        seat = self.tidy.resolve_seat("claude", str(self.root), os.environ)
+        path = self.handover._snapshot_path(seat.key)
+        original = path.read_bytes()
+        for successor in (successor,):
+            with self.subTest(successor=successor):
+                claim = rewake.claim_arm(self.jobs, "att-gate-owner", "session-B", fresh=True)
+                self.assertIsInstance(claim, rewake.ArmClaim)
+                path.write_text('{broken')
+                waits = []
+                def recover(_seconds):
+                    waits.append(1)
+                    record = rewake.pending_delivery.read(self.state, "session-gate", self.delivery_id)
+                    self.assertEqual(record["state"], "pending")
+                    self.assertEqual(record.get("attempts"), 0)
+                    path.write_bytes(original)
+                    if successor == "session-C":
+                        self._adopt_c()
+                with mock.patch.object(rewake.time, "sleep", side_effect=recover):
+                    code, output, error, observation = self._carrier("session-B", claim)
+                self.assertEqual(len(waits), 1)
+                self.assertEqual(code, 2 if successor == "session-B" else 0)
+                if successor == "session-B":
+                    self.assertIn("human-gate", output + error)
+                    # Return only the fixture's own sent claim for the second scenario.
+                    record = rewake.pending_delivery.read(self.state, "session-gate", self.delivery_id)
+                    if record.get("claim_owner"):
+                        rewake.pending_delivery.release_claim(self.state, "session-gate", self.delivery_id,
+                            claim_owner=record["claim_owner"])
+                    self._create_gate()
+                else:
+                    self.assertEqual(output + error, "")
+                    record = rewake.pending_delivery.read(self.state, "session-gate", self.delivery_id)
+                    self.assertEqual(record["state"], "pending")
+
     def test_handed_away_gate_carrier_is_silent_and_c_can_wake(self):
         self._adopt_b()
         process, release, b_claim = self._start_live_b_carrier()

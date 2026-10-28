@@ -14933,113 +14933,57 @@ class RegisteredDeliverySettlementTest(_TmpRootMixin, unittest.TestCase):
 class RetireCandidatePromotionLockTest(_TmpRootMixin, unittest.TestCase):
     """A post-lock promotion must already belong to the retire transaction."""
 
-    def test_promoted_candidate_effect_mutex_serializes_real_retire(self):
+    def test_all_candidates_effect_mutex_and_source_decision_serialize_real_retire(self):
         import dispatch_seat_handover as handover
         import session_tidy
-
-        self.handover = handover
-        registered, predecessor = "registered-parent", "retire-parent"
-        candidates = []
-        for index in range(handover.MAX_BINDINGS + 1):
-            candidates.append({
-                "attempt_schema_version": "2", "dispatch_depth": "1", "worker_type": "owner",
-                "registered_worker": "1", "attempt_id": f"att-retire-{index:02d}",
-                "parent_sid": registered, "parent_harness": "claude",
-                "route_id": f"rt-retire-{index:02d}", "route_hash": f"sha256:retire-{index:02d}",
-                "route_node": "owner",
-            })
-        self.jobs_path.write_text("".join(
-            "now\trunning\t0\tjob\tlog\t" + ",".join(f"{key}={value}" for key, value in meta.items()) + "\n"
-            for meta in candidates))
+        candidates = [{"dispatch_depth": "1", "worker_type": "owner", "attempt_id": f"att-{i}",
+            "parent_sid": "registered", "parent_harness": "claude", "route_id": f"rt-{i}",
+            "route_hash": f"sha256:{i}", "route_node": "owner"} for i in range(13)]
+        self.jobs_path.write_text("".join("now\trunning\t0\tjob\tlog\t" +
+            ",".join(f"{k}={v}" for k,v in meta.items()) + "\n" for meta in candidates))
         retained = self.tmp_root / "retained-job-data.json"
         retained.write_text('{"state":"retained"}')
-        bindings = [handover.binding_of(self.jobs_path, meta) for meta in candidates]
-
-        # Two real snapshot publications make all thirteen exact route keys
-        # discoverable while each initial seat remains within the normal cap.
-        source_seats = [session_tidy._pane_seat_of("w1:pRetireSeedA"),
-                        session_tidy._pane_seat_of("w1:pRetireSeedB")]
-        groups = (bindings[:handover.MAX_BINDINGS], bindings[handover.MAX_BINDINGS:])
-        for seat, group in zip(source_seats, groups):
-            handover.publish_snapshot_locked(seat, "claude", registered, group,
-                                               jobs=self.jobs_path)
-            seeded = handover.record_retire_handover(
-                registered, "claude", predecessor, "codex", jobs=self.jobs_path,
-                successor_seat=seat)
-            self.assertTrue(seeded)
-
-        possible = handover._handover_candidates("codex", predecessor, self.jobs_path)
-        self.assertEqual(len({handover._logical_key(binding) for binding, _ in possible}),
-                         handover.MAX_BINDINGS + 1)
-        initial_selection = handover._select_binding_rows(possible)
-        selected_keys = {handover._logical_key(binding) for binding in initial_selection}
-        promoted = next(binding for binding, _status in possible
-                        if handover._logical_key(binding) not in selected_keys)
-        self.assertEqual(handover.effective_parent(candidates[-1], self.jobs_path), predecessor)
-
-        c_seat = session_tidy._pane_seat_of("w1:pRetireC")
-        d_seat = session_tidy._pane_seat_of("w1:pRetireD")
-        entered_acquire = threading.Event()
-        resume_c = threading.Event()
-        c_done = threading.Event()
-        results = []
-        original_mutexes = handover.binding_mutexes
-
+        seed = session_tidy._pane_seat_of("w1:pSeed")
+        handover.record_retire_handover("registered", "claude", "predecessor", "codex",
+            successor_seat=seed, jobs=self.jobs_path)
+        possible = handover._handover_candidates("codex", "predecessor", self.jobs_path)
+        self.assertEqual(len(possible), 13)
+        last = possible[-1][0]
+        acquiring = threading.Event()
+        c_done, d_done = threading.Event(), threading.Event()
+        results = {}
+        mutexes = handover.binding_mutexes
         @contextlib.contextmanager
-        def pause_c_acquisition(rows, *, wait=None):
-            if threading.current_thread().name == "retire-C":
-                entered_acquire.set()
-                if not resume_c.wait(3):
-                    raise TimeoutError("C did not receive the controlled lock schedule")
-            with original_mutexes(rows, wait=wait):
+        def observe(bindings, **kwargs):
+            bindings = list(bindings)
+            if any(handover._binding_identity(b) == handover._binding_identity(last) for b in bindings):
+                acquiring.set()
+            with mutexes(bindings, **kwargs):
                 yield
-
-        def retire_c():
+        def transfer(name, done):
             try:
-                results.append(handover.record_retire_handover(
-                    predecessor, "codex", "successor-C", "claude", jobs=self.jobs_path,
-                    successor_seat=c_seat))
-            except BaseException as exc:  # propagate worker errors through the main test assertion
-                results.append(exc)
+                results[name] = handover.record_retire_handover("predecessor", "codex", name, "claude",
+                    successor_seat=session_tidy._pane_seat_of("w1:p" + name), jobs=self.jobs_path)
+            except BaseException as exc:
+                results[name] = exc
             finally:
-                c_done.set()
-
-        worker = threading.Thread(target=retire_c, name="retire-C", daemon=True)
-        with mock.patch.object(handover, "binding_mutexes", side_effect=pause_c_acquisition):
-            worker.start()
-            try:
-                self.assertTrue(entered_acquire.wait(3), "C did not reach real binding acquisition")
-                d_row = handover.record_retire_handover(
-                    predecessor, "codex", "successor-D", "codex", jobs=self.jobs_path,
-                    successor_seat=d_seat)
-                self.assertTrue(d_row)
-                self.assertEqual({handover._logical_key(binding) for binding in d_row["bindings"]},
-                                 selected_keys)
-                hold_promoted = original_mutexes([promoted])
-                hold_promoted.__enter__()
-                resume_c.set()
-                self.assertFalse(c_done.wait(0.3),
-                                 "C committed a candidate while its real binding mutex was held")
-                self.assertFalse(any(row.get("sid") == "successor-C"
-                                     for row in handover.handover_rows(c_seat)))
-            finally:
-                resume_c.set()
-                if "hold_promoted" in locals():
-                    hold_promoted.__exit__(None, None, None)
-                worker.join(4)
-        self.assertFalse(worker.is_alive(), "bounded retire worker did not finish")
-        self.assertTrue(c_done.is_set())
-        self.assertEqual(len(results), 1)
-        self.assertNotIsInstance(results[0], BaseException)
-        c_row = results[0]
-        self.assertTrue(c_row)
-        self.assertEqual({handover._logical_key(binding) for binding in c_row["bindings"]},
-                         {handover._logical_key(promoted)})
-        promoted_meta = next(row for row in candidates if row["attempt_id"] == promoted["attempt"])
-        self.assertEqual(handover.effective_parent(promoted_meta, self.jobs_path), "successor-C")
-        for binding in initial_selection:
-            meta = next(row for row in candidates if row["attempt_id"] == binding["attempt"])
-            self.assertEqual(handover.effective_parent(meta, self.jobs_path), "successor-D")
+                done.set()
+        with mock.patch.object(handover, "binding_mutexes", side_effect=observe):
+            with mutexes([last]):
+                c = threading.Thread(target=transfer, args=("C", c_done))
+                c.start()
+                self.assertTrue(acquiring.wait(3))
+                self.assertFalse(c_done.wait(0.1))
+                d = threading.Thread(target=transfer, args=("D", d_done))
+                d.start()
+                self.assertFalse(d_done.wait(0.1))
+            c.join(4); d.join(4)
+        self.assertFalse(c.is_alive() or d.is_alive())
+        self.assertIsNone(results["D"])
+        self.assertIsInstance(results["C"], dict)
+        self.assertEqual(len(results["C"]["bindings"]), 13)
+        for meta in candidates:
+            self.assertEqual(handover.effective_parent(meta, self.jobs_path), "C")
         self.assertEqual(retained.read_text(), '{"state":"retained"}')
 
 

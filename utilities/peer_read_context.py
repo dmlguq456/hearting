@@ -16,6 +16,7 @@ class PeerReadContext:
         self.registry_append_only = registry_append_only
         self._registry_views = {}
         self._handover_snapshots = None
+        self._handover_index = None
         self._handover_ledgers = {}
         self._recipient_censuses = {}
         self._transfer_roots = None
@@ -88,3 +89,9 @@ class PeerReadContext:
         if key not in self._handover_ledgers:
             self._handover_ledgers[key] = tuple(loader())
         return self._handover_ledgers[key]
+
+    def handover_index(self, loader):
+        """One validated discovery/ledger answer, including unreadability, per pass."""
+        if self._handover_index is None:
+            self._handover_index = loader()
+        return self._handover_index

@@ -986,11 +986,11 @@ class DeliveryDutyLifetimeTest(unittest.TestCase):
                 self.jobs, self.PARENT, ["att-a"], current_session=current_session)
         return result, probe
 
-    def test_successor_must_be_a_codex_session_with_a_live_tui(self):
+    def test_successor_ownership_is_independent_of_carrier_and_live_tui(self):
         rows = {"att-a": ("done", {"parent_sid": self.PARENT})}
         self.assertEqual(self._successor(rows, tui=[{"pid": 1}])[0], "successor-thread")
-        self.assertEqual(self._successor(rows, harness="claude", tui=[{"pid": 1}])[0], "")
-        self.assertEqual(self._successor(rows, tui=[])[0], "")
+        self.assertEqual(self._successor(rows, harness="claude", tui=[{"pid": 1}])[0], "successor-thread")
+        self.assertEqual(self._successor(rows, tui=[])[0], "successor-thread")
         self.assertEqual(self._successor({})[0], "")
         self.assertEqual(self._successor(rows, successor=self.PARENT, tui=[{"pid": 1}])[0], "")
 

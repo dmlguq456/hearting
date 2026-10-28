@@ -409,29 +409,31 @@ def _proc_lifetime(pid):
 def parent_successor(jobs: str | Path, parent: str, attempts, *, current_session=None) -> str:
     """Return the same-seat successor that can actually receive these attempts, else "".
 
-    The successor must be sealed to an attempt by an exact seat handover and be
-    deliverable: ``current_session`` when the caller already knows the live
-    session, otherwise a Codex session that has a live TUI. Raises when the
-    evidence is unreadable so each caller keeps its own conservative rule.
+    Every attempt must have the same current job holder. Carrier availability is
+    observed by the existing delivery controller; it does not change ownership.
+    Unreadable lineage keeps that controller waiting.
     """
     import dispatch_seat_handover as handover
     from dispatch_registry_cache import registry_view
     view = registry_view(Path(jobs))
+    answers = set()
+    missing = False
     for attempt in attempts:
         row = view.handover_attempt(attempt)
         if row is None:
+            missing = True
             continue
+        observed = handover.resolve_recipient("job-holder", metadata=row[1], jobs=jobs)
+        if observed.state == "unreadable":
+            raise handover.RegistryUnreadable(observed.reason)
         successor = handover.effective_parent(row[1], jobs)
         if not successor or successor == parent:
+            missing = True
             continue
-        if current_session is not None:
-            if successor == current_session:
-                return successor
-            continue
-        if handover.effective_parent_harness(row[1], jobs) != "codex":
-            continue
-        from pane_ownership import codex_tui_processes_for_session
-        if codex_tui_processes_for_session(successor):
+        answers.add(successor)
+    if not missing and len(answers) == 1:
+        successor = next(iter(answers))
+        if current_session is None or successor == current_session:
             return successor
     return ""
 

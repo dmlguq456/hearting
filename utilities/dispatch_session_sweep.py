@@ -194,9 +194,9 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str) -> tuple
                 record = pending_delivery.read(root, storage_key, entry.stem)
             except (OSError, pending_delivery.PendingDeliveryError):
                 continue
-            if (record and record.get("recipient_kind") == recipient_kind
+            if (record and (record.get("recipient_kind") == recipient_kind or storage_key != session_id)
                     and record.get("state") in pending_delivery.OPEN_STATES
-                    and record_for_session(record, allowed)):
+                    and record_for_session(record, allowed, session=session_id, jobs=record_jobs(root, record))):
                 records.append({**record, STORAGE_KEY: storage_key})
     return records, count
 
@@ -463,6 +463,12 @@ def sweep_deliver(
             expected_identity = pending_delivery.received_ack_identity(
                 record, storage_key, member_id)
             try:
+                from dispatch_seat_handover import record_for_session, storage_recipients
+                allowances = dict(storage_recipients(session_id))
+                if storage_key not in allowances or not record_for_session(
+                        record, allowances[storage_key], session=session_id, jobs=jobs):
+                    group_ok = False
+                    break
                 if not keep_claim(root, storage_key, member_id, record, claim_owner, jobs=jobs):
                     group_ok = False
                     break
@@ -759,8 +765,8 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
                 try:
                     record = pending_delivery.read(root, storage, delivery_id)
                     if (record is None or record.get("state") != "acked"
-                            or record.get("recipient_kind") != recipient_kind
-                            or not record_for_session(record, allowed)):
+                            or (record.get("recipient_kind") != recipient_kind and storage == session_id)
+                            or not record_for_session(record, allowed, session=session_id, jobs=record_jobs(root, record))):
                         continue
                     by_id.setdefault(delivery_id, []).append(
                         (root, {**record, STORAGE_KEY: storage}))

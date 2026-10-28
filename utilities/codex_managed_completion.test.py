@@ -1793,25 +1793,19 @@ class NativeQueueDeliveryTest(unittest.TestCase):
         self.assertEqual(claim.call_args.args[1], SESSION)
         self.assertEqual(ack_received.call_args.args[1], SESSION)
 
-    def test_queue_target_follows_the_handover_and_defaults_to_the_registered_parent(self) -> None:
-        import tempfile
+    def test_queue_target_uses_shared_observation_without_restoring_old_thread(self):
         import dispatch_seat_handover as handover
-
         module = load_completion_module()
         with tempfile.TemporaryDirectory() as tmp:
             jobs = Path(tmp) / "jobs.log"
-            self.assertEqual(module.queue_target(jobs, {"att-one"}, SESSION), SESSION)      # no registry: registered
-            jobs.write_text("t\topen\t/w\t/w\tslug\tattempt_id=att-one,parent_sid=" + SESSION + "\n", encoding="utf-8")
             self.assertEqual(module.queue_target(jobs, {"att-one"}, SESSION), SESSION)
-            with mock.patch.object(handover, "effective_parent", return_value="successor-thread"), \
-                 mock.patch.object(handover, "effective_parent_harness", return_value="codex"):
-                self.assertEqual(module.queue_target(jobs, {"att-one"}, SESSION), "successor-thread")
-            # RA-2: a successor on another harness has no Codex queue; it reads the stored record.
-            with mock.patch.object(handover, "effective_parent", return_value="claude-successor"), \
-                 mock.patch.object(handover, "effective_parent_harness", return_value="claude"):
-                self.assertEqual(module.queue_target(jobs, {"att-one"}, SESSION), SESSION)
-            with mock.patch.object(handover, "effective_parent", side_effect=OSError("boom")):
-                self.assertEqual(module.queue_target(jobs, {"att-one"}, SESSION), SESSION)
+            jobs.write_text("t\topen\t/w\t/w\tslug\tattempt_id=att-one,parent_sid=" + SESSION + "\n")
+            self.assertEqual(module.queue_target(jobs, {"att-one"}, SESSION), SESSION)
+            for sid, harness, state, expected in (("successor", "codex", "confirmed", "successor"),
+                    ("claude-successor", "claude", "confirmed", ""), ("", "", "unreadable", "")):
+                result = handover.RecipientResolution(sid, harness, state, SESSION, "codex")
+                with mock.patch.object(handover, "resolve_recipient", return_value=result):
+                    self.assertEqual(module.queue_target(jobs, {"att-one"}, SESSION), expected)
 
     # The ledger is mocked here; the registry that keep_claim reads does not exist.
     @mock.patch("dispatch_notice_state.keep_claim", new=lambda *_a, **_k: True)

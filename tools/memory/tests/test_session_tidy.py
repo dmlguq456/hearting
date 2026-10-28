@@ -4545,6 +4545,82 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual([b["attempt"] for b in snap["bindings"]], [keep["attempt_id"]])
         self.assertEqual(snap["from"], {"harness": "claude", "sid": "sid-A"})
 
+    def test_zero_job_source_race_replay_chain_and_empty_publication(self):
+        import concurrent.futures, threading
+        from peer_read_context import PeerReadContext
+        with self.iso.patched_environ():
+            seats = [self.seat("test:zero-B"), self.seat("test:zero-C")]
+            barrier = threading.Barrier(2)
+            def transfer(index):
+                barrier.wait(timeout=3)
+                return self.handover.record_retire_handover("zero-A", "claude", "zero-" + str(index),
+                    "codex", successor_seat=seats[index], jobs=self.jobs)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(transfer, range(2)))
+            self.assertEqual(sum(row is not None for row in results), 1)
+            winner = next(index for index, row in enumerate(results) if row is not None)
+            row = results[winner]
+            self.assertEqual(row["bindings"], [])
+            replay = self.handover.record_retire_handover("zero-A", "claude", row["sid"], "codex",
+                successor_seat=seats[winner], jobs=self.jobs)
+            self.assertEqual(replay, row)
+            d_seat = self.seat("test:zero-D")
+            self.assertIsNotNone(self.handover.record_retire_handover(row["sid"], "codex", "zero-D", "opencode",
+                successor_seat=d_seat, jobs=self.jobs))
+            with st.seat_lock(seats[winner].key):
+                self.handover.publish_snapshot_locked(seats[winner], "codex", row["sid"], [], jobs=self.jobs)
+            result = self.handover.resolve_recipient("seat-successor", session="zero-A", read_context=PeerReadContext())
+            self.assertEqual((result.state, result.session_id, result.harness), ("confirmed", "zero-D", "opencode"))
+            self.assertEqual(len(self.handover.handover_rows(seats[winner])), 1)
+
+    def test_zero_job_automatic_and_explicit_successors_share_the_source_mutex(self):
+        import concurrent.futures, threading
+        with self.iso.patched_environ():
+            seat, other = self.seat("test:auto-zero"), self.seat("test:explicit-zero")
+            self.handover.record_retire_handover("auto-A", "claude", "auto-B", "codex",
+                successor_seat=seat, jobs=self.jobs)
+            st.record_event(seat, "codex", "auto-D", "start", cwd=str(self.cwd))
+            barrier = threading.Barrier(2)
+            def automatic():
+                barrier.wait(timeout=3)
+                with st.seat_lock(seat.key):
+                    return self.handover.record_locked(seat, "codex", "auto-D", "start", "clear", st.now_epoch())
+            def explicit():
+                barrier.wait(timeout=3)
+                return self.handover.record_retire_handover("auto-B", "codex", "auto-E", "claude",
+                    successor_seat=other, jobs=self.jobs)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                a, b = pool.submit(automatic), pool.submit(explicit)
+                rows = [a.result(timeout=5), b.result(timeout=5)]
+            self.assertEqual(sum(row is not None for row in rows), 1)
+            self.assertIn(self.handover.session_successor("auto-B")[0], {"auto-D", "auto-E"})
+
+    def test_strict_ledger_read_and_effect_boundary_do_not_reuse_pass_authority(self):
+        from peer_read_context import PeerReadContext
+        meta = self.row("strict-attempt")
+        self.snapshot()
+        self.start("sid-B")
+        with self.iso.patched_environ():
+            context = PeerReadContext()
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs, read_context=context), "sid-B")
+            seat = self.seat()
+            path = st._ledger_path(seat)
+            before = path.read_bytes()
+            try:
+                path.write_text('{broken json\n')
+                result = self.handover.resolve_recipient("job-holder", metadata=meta, jobs=self.jobs)
+                self.assertEqual(result.state, "unreadable")
+                self.assertEqual(result.registered_session, "sid-A")
+                self.assertEqual(self.handover.effective_parent(meta, self.jobs), "")
+                self.assertFalse(self.handover.owns(meta, "sid-A", self.jobs))
+                self.assertEqual(self.handover.storage_recipients("sid-B"), [])
+                self.assertEqual(self.handover.effective_parent(meta, self.jobs, read_context=context), "sid-B")
+                with self.handover.lineage_effect_lock(meta, self.jobs, "sid-B") as allowed:
+                    self.assertFalse(allowed)
+            finally:
+                path.write_bytes(before)
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "sid-B")
+
     def test_the_twelve_job_cap_keeps_every_attempt_for_each_selected_job(self):
         self.row("att-active-1", node="active-one")
         self.row("att-active-2", node="active-two", worker="frame")
@@ -4574,22 +4650,22 @@ class SeatHandoverTest(TidyCase):
         for index in range(12):
             self.row(f"att-finished-{index}", status="done", route="rt-finished", node=f"done-{index}",
                      digest="sha256:finished", route_file=route_file)
-        self.assertEqual(self.snapshot(), 12)
+        self.assertEqual(self.snapshot(), 13)
         with self.iso.patched_environ():
             snap = self.handover.read_snapshot(self.seat().key)
         nodes = {b["node"] for b in snap["bindings"]}
         self.assertIn("running", nodes)
         self.assertEqual(nodes & {f"done-{index}" for index in range(12)},
-                         {f"done-{index}" for index in range(1, 12)})
+                         {f"done-{index}" for index in range(12)})
 
         self.rows.clear()
         for index in range(13):
             self.row(f"att-open-{index}", node=f"open-{index}")
-        self.assertEqual(self.snapshot(), 12)
+        self.assertEqual(self.snapshot(), 13)
         with self.iso.patched_environ():
             snap = self.handover.read_snapshot(self.seat().key)
         self.assertEqual({b["node"] for b in snap["bindings"]},
-                         {f"open-{index}" for index in range(1, 13)})
+                         {f"open-{index}" for index in range(13)})
 
         self.rows.clear()
         route_file = self.open_route("rt-latest", "sha256:latest")
@@ -4600,12 +4676,12 @@ class SeatHandoverTest(TidyCase):
         for index in range(12):
             self.row(f"att-final-{index}", status="done", route="rt-latest", node=f"final-{index}",
                      digest="sha256:latest", route_file=route_file)
-        self.assertEqual(self.snapshot(), 12)
+        self.assertEqual(self.snapshot(), 13)
         with self.iso.patched_environ():
             snap = self.handover.read_snapshot(self.seat().key)
-        self.assertNotIn("latest", {b["node"] for b in snap["bindings"]})
+        self.assertIn("latest", {b["node"] for b in snap["bindings"]})
         self.assertEqual({b["node"] for b in snap["bindings"]},
-                         {f"final-{index}" for index in range(12)})
+                         {f"final-{index}" for index in range(12)} | {"latest"})
 
     def test_a_confirmed_clear_refreshes_only_the_selected_jobs_after_snapshot(self):
         original = self.row("att-before-clear", node="selected")
@@ -4686,14 +4762,14 @@ class SeatHandoverTest(TidyCase):
         self.assertIsNotNone(row)
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE_BESIDE}):
             snapshot = self.handover.read_snapshot(seat.key)
-        self.assertEqual(len(snapshot["bindings"]), 15)
+        self.assertEqual(len(snapshot["bindings"]), 16)
         self.assertEqual(len({(b["jobs"], b["route"], b["hash"], b["node"])
-                              for b in snapshot["bindings"]}), 12)
+                              for b in snapshot["bindings"]}), 13)
         self.assertEqual({(b["attempt"], b["parent"]) for b in snapshot["bindings"] if b["node"] == "shared"}, {
             ("att-kept-1", "sid-B"), ("att-kept-2", "sid-B"),
             ("att-new-1", "sid-A"), ("att-new-2", "sid-A"),
         })
-        self.assertNotIn("att-done-0", {b["attempt"] for b in snapshot["bindings"]})
+        self.assertIn("att-done-0", {b["attempt"] for b in snapshot["bindings"]})
         self.assertEqual({b["attempt"] for b in row["bindings"]},
                          {b["attempt"] for b in snapshot["bindings"] if b["parent"] == "sid-A"})
 
@@ -4931,7 +5007,7 @@ class SeatHandoverTest(TidyCase):
 
     def test_a_retire_with_nothing_live_hands_nothing(self):
         self.row("att-done", parent="sid-A", status="done")
-        self.assertIsNone(self.retire("sid-A", "codex", "sid-B", "claude"))
+        self.assertEqual(self.retire("sid-A", "codex", "sid-B", "claude")["bindings"], [])
         self.assertIsNone(self.retire("sid-A", "codex", "sid-A", "codex"))
 
     def test_retire_hands_open_route_after_terminal_receipt_is_acked(self):
@@ -4968,11 +5044,11 @@ class SeatHandoverTest(TidyCase):
             with self.subTest(raw=raw):
                 if raw is not None:
                     path.write_text(raw)
-                self.assertIsNone(self.retire("sid-A", "claude", "sid-B", "codex"))
+                self.assertEqual(self.retire("sid-A", "claude", "sid-B", "codex")["bindings"], [])
                 self.assertEqual(self.effective(meta), "sid-A")
         path.write_text(json.dumps({"route_id": "rt-1", "route_hash": "sha256:aa"}))
         path.with_suffix(".outcome.json").write_text(json.dumps({"terminal_gate_proven": False}))
-        self.assertIsNone(self.retire("sid-A", "claude", "sid-B", "codex"))
+        self.assertEqual(self.retire("sid-A", "claude", "sid-B", "codex")["bindings"], [])
 
     def test_finished_node_less_owner_keeps_its_verified_route_until_close(self):
         import owner_route_binding as owner
@@ -5000,7 +5076,7 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual(self.effective(meta), "sid-B")
         self.assertEqual(self.jobs.read_bytes(), before)
         path.with_suffix(".outcome.json").write_text("{}")
-        self.assertIsNone(self.retire("sid-B", "codex", "sid-C", "opencode", pane="test:pane-c"))
+        self.assertEqual(self.retire("sid-B", "codex", "sid-C", "opencode", pane="test:pane-c")["bindings"], [])
 
     # -- seat lineage: a node-less owner and the one answer for delivery and authority ------------------
 
@@ -5194,12 +5270,12 @@ class SeatHandoverTest(TidyCase):
                     for sid in ("sid-B", "sid-C", "sid-X"):
                         self.handover.owns(meta, sid, self.jobs)
             self.assertTrue(self.handover.owns(owner, "sid-C", self.jobs))
-        self.assertEqual([call.args[2] for call in resolved.call_args_list], ["sid-C"])
+        self.assertEqual([call.args[2] for call in resolved.call_args_list], [])
 
-    def test_a_broken_state_answers_the_registered_parent(self):
+    def test_a_broken_state_never_restores_the_registered_parent(self):
         meta = self.row("att-1")
         with mock.patch.object(self.handover, "_all_snapshots", side_effect=OSError("boom")):
-            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "sid-A")
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "")
 
     def test_markerless_role_only_clear_handoff_reaches_c_through_all_three_harnesses(self):
         pm = self.handover._peer_message()
@@ -5266,7 +5342,7 @@ class SeatHandoverTest(TidyCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(pm.cmd_release(SimpleNamespace(harness="claude", session_id="sid-A")), 0)
         _out, rows = self.start("sid-B")
-        self.assertEqual(rows, [])
+        self.assertTrue(all(not row.get("steward") for row in rows))
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
             self.assertEqual(self.handover.resolved_steward_relations(
                 "claude", "sid-B", seat_key=self.seat().key), [])

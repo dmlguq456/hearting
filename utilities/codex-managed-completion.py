@@ -303,6 +303,8 @@ class NoticeWatcher:
                 expected_sealed_batch_id=self.args.sealed_batch_id,
             )
             target = queue_target(self.args.jobs, self.attempts, self.recipient) if queue_socket else ""
+            if queue_socket and not target:
+                raise pending_delivery.PendingDeliveryError("pending-delivery-claim-refused", "recipient-unavailable")
             retry_context = f"{self.recipient}:{self.epoch}:{target}"
             # Reclaim only after checking the live monotonic deadline.  The
             # old carrier's lease may still be valid, so a fresh watcher must
@@ -938,32 +940,40 @@ def queue_target(jobs: Path, attempts: set[str], registered: str) -> str:
     try:
         import dispatch_seat_handover as handover
         from dispatch_registry_cache import registry_view
-        view = registry_view(Path(jobs))
-        rows = {a: row for a in attempts if (row := view.handover_attempt(a)) is not None}
-        owners = {(handover.effective_parent(rows[a][1], jobs),
-                   handover.effective_parent_harness(rows[a][1], jobs))
-                  for a in attempts if a in rows}
+        try:
+            view = registry_view(Path(jobs))
+        except FileNotFoundError:
+            view = None
+        rows = {a: row for a in attempts if view is not None and (row := view.handover_attempt(a)) is not None}
+        answers = [handover.resolve_recipient("job-holder", metadata=rows[a][1] if a in rows else
+                    {"parent_sid": registered, "parent_harness": "codex"}, jobs=jobs,
+                    harness="codex") for a in attempts]
+        owners = {(answer.session_id, answer.harness) for answer in answers if answer.state != "unreadable"}
+        if len(answers) != sum(answer.state != "unreadable" for answer in answers):
+            return ""
         if len(owners) == 1:
             owner, harness = owners.pop()
-            return (owner or registered) if harness == "codex" else registered
-    except Exception:  # noqa: BLE001 - the registered parent remains a valid target
+            return owner if harness == "codex" else ""
+    except Exception:  # noqa: BLE001 - retain the original storage record on unknown
         pass
-    return registered
+    return ""
 
 
 def _queue_target_from_rows(jobs: Path, rows, registered: str, *, read_context=None) -> str:
     """Resolve the recipient from the already-read exact batch rows."""
     try:
         import dispatch_seat_handover as handover
-        owners = {(handover.effective_parent(row.metadata, jobs, read_context=read_context),
-                   handover.effective_parent_harness(row.metadata, jobs, read_context=read_context))
-                  for row in rows}
+        answers = [handover.resolve_recipient("job-holder", metadata={"parent_sid": registered, "parent_harness": "codex", **row.metadata}, jobs=jobs,
+                    harness="codex", read_context=read_context) for row in rows]
+        owners = {(answer.session_id, answer.harness) for answer in answers if answer.state != "unreadable"}
+        if any(answer.state == "unreadable" for answer in answers):
+            return ""
         if len(owners) == 1:
             owner, harness = owners.pop()
-            return (owner or registered) if harness == "codex" else registered
-    except Exception:  # noqa: BLE001 - the registered parent remains a safe target
+            return owner if harness == "codex" else ""
+    except Exception:  # noqa: BLE001 - retain the original storage record on unknown
         pass
-    return registered
+    return ""
 
 
 _PRIOR_SUCCESS_FOLLOWUP = codex_queue_delivery._PRIOR_SUCCESS_FOLLOWUP
@@ -1041,6 +1051,8 @@ def _native_queue_delivery_once(
     target = (delivery_target if initial_rows is not None and delivery_target is not None else
               _queue_target_from_rows(args.jobs, rows, args.thread_id,
                                       read_context=PeerReadContext()))
+    if not target:
+        raise CompletionError("native-queue-recipient-unavailable")
     if delivery_target is not None and target != delivery_target:
         raise CompletionError("native-queue-target-changed")
     transport = {"session": session} if session is not None else {}
@@ -1478,6 +1490,12 @@ def deliver_to_native_queue(args, receipt, attempts, *, stop_check=None):
                                             CODEX_QUEUE_PARENT_DELIVERY)
             target = _queue_target_from_rows(args.jobs, rows, args.thread_id,
                                              read_context=PeerReadContext())
+            if not target:
+                from peer_obligations import retain_registered_completion
+                for row in rows:
+                    retain_registered_completion(args.jobs, row.attempt_id, args.thread_id,
+                                                 CODEX_QUEUE_PARENT_DELIVERY)
+                return {"schema_version": 1, "status": "retryable", "reason": "native-queue-recipient-unavailable"}
             session = codex_queue_delivery.DeliverySession(path, timeout=5.0)
             result = _native_queue_delivery_once(
                 args, receipt, attempts, allow_enqueue=not submitted,

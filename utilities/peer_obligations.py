@@ -985,14 +985,11 @@ def _ordinary_notice_target(identity, carrier):
     if lineage.get("kind") == "provenance":
         # The run named a session, not one of its jobs; after a seat handover the
         # session that took the seat over receives it.
-        try:
-            from dispatch_seat_handover import session_successor
-            successor, successor_harness = session_successor(session)
-        except Exception:  # noqa: BLE001 - the recorded session is always a safe answer
-            successor, successor_harness = "", ""
-        if successor and successor_harness in {"claude", "codex", "opencode"}:
-            return successor_harness, successor, identity.get("storage_recipient", session)
-        return harness, session, identity.get("storage_recipient", session)
+        from dispatch_seat_handover import resolve_recipient
+        result = resolve_recipient("seat-successor", session=session, harness=harness)
+        if result.state == "unreadable":
+            return None
+        return result.harness, result.session_id, identity.get("storage_recipient", session)
     if lineage.get("kind") not in {"attempt-parent", "owner-session"}:
         return None
     jobs = Path(identity.get("jobs", ""))
