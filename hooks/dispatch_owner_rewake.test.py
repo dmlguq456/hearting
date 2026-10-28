@@ -143,6 +143,135 @@ class ReplacementCarrierTest(unittest.TestCase):
             self.assertEqual(held.predecessors, (claim,))
 
 
+    def test_replacement_unknown_boundaries_keep_active_pair_deadline_and_predecessors(self):
+        for hops in (1, 2):
+            for boundary in ("gate", "terminal", "claim", "output"):
+                for outcome in ("recover", "moved", "timeout"):
+                    with self.subTest(hops=hops, boundary=boundary, outcome=outcome):
+                        self._replacement_unknown_case(hops, boundary, outcome)
+
+    def _replacement_unknown_case(self, hops, boundary, outcome):
+        import dispatch_replacement as replacement
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory(prefix="replacement-unknown-") as directory, contextlib.ExitStack() as stack:
+            root = Path(directory)
+            jobs = root / "jobs.log"
+            jobs.write_text("")
+            identity = ("7", "8", "ns")
+            names = ["att-old"] + ["att-new-" + str(i) for i in range(hops)]
+            claims = {}
+            for name in names:
+                claim = rewake.ArmClaim(root / (name + ".json"), name, "sid", 1, identity)
+                claims[name] = claim
+                claim.path.write_text(json.dumps({"schema": 1, "state": "waiting", "holder": list(identity),
+                    "session_id": "sid", "attempt_id": name}))
+            seen, armed, deadlines, emissions = [], [], [], []
+            clock = [0.0]
+            phase = {"injected": False, "unknown": False, "moved": False}
+            pd = rewake.pending_delivery
+            ids = ["delivery-" + str(i) * 32 for i in (1, 2, 3)]
+            for delivery_id in ids:
+                receipt = {"state": "attention", "children": [{"attempt_id": names[-1], "status": "done"}]}
+                pd.create(root, recipient_kind="claude-parent-runtime", recipient_key="sid", delivery_id=delivery_id,
+                    session_generation="", session_generation_supported="0", attempt_ids=[names[-1]],
+                    parent_attempt_id="parent", route_id="rt", route_node="execute", receipt=receipt,
+                    receipt_digest=pd._canonical_receipt_digest(receipt), row_revisions={names[-1]: "rev"})
+            pd.claim(root, "sid", ids[2], claim_owner="foreign-carrier", lease_seconds=100, require_generation_proof=False)
+            def inject():
+                phase.update(injected=True, unknown=True)
+                raise rewake.LineageUnavailable("fixture-lineage-unreadable")
+            def decision(launch):
+                if phase["unknown"]:
+                    raise rewake.LineageUnavailable("fixture-lineage-unreadable")
+                return SimpleNamespace(allowed=not phase["moved"])
+            def advance(_jobs, attempts, **kwargs):
+                name, = attempts
+                seen.append(name)
+                index = names.index(name)
+                if index < hops:
+                    target = names[index + 1]
+                    return {target}, [{"original_attempt_id": name, "replacement_attempt_id": target}], []
+                return attempts, [], []
+            def arm(_jobs, name, _sid, **kwargs):
+                if name in armed:
+                    return rewake.ArmRefusal("held-live")
+                armed.append(name)
+                return claims[name]
+            def wait(launch, _readiness, *, deadline, **kwargs):
+                deadlines.append(deadline)
+                return ("gate", "human-gate-open") if (launch.attempt_id == names[-1]
+                    and boundary == "gate" and not phase["injected"]) else ("ready", "terminal-quiescent")
+            def handed(launch):
+                if (launch.attempt_id == names[-1] and boundary in {"gate", "terminal"}
+                        and not phase["injected"]):
+                    return inject()
+                return not decision(launch).allowed
+            def completion(launch, _owing, **kwargs):
+                if boundary == "claim" and not phase["injected"]:
+                    return inject()
+                members = tuple((delivery_id, pd.claim(root, "sid", delivery_id, claim_owner="owned",
+                    lease_seconds=100, require_generation_proof=False)) for delivery_id in ids[:2])
+                return rewake.ClaimWin("owned", "sid", ids[0], root, members)
+            def emit(launch, claim, *args, **kwargs):
+                self.assertEqual((launch.attempt_id, claim.attempt_id), (names[-1], names[-1]))
+                if boundary == "output" and not phase["injected"]:
+                    return inject()
+                self.assertFalse(phase["unknown"])
+                emissions.append(launch.attempt_id)
+                return 2
+            def recover(_seconds):
+                clock[0] += 1.0
+                self.assertEqual(emissions, [])
+                self.assertEqual(rewake._read_arm(claims[names[-1]].path)["state"], "waiting")
+                for delivery_id in ids[:2]:
+                    record = pd.read(root, "sid", delivery_id)
+                    self.assertEqual((record["state"], record["claim_owner"]), ("pending", None))
+                foreign = pd.read(root, "sid", ids[2])
+                self.assertEqual((foreign["state"], foreign["claim_owner"]), ("claimed", "foreign-carrier"))
+                if outcome == "timeout":
+                    clock[0] = 9.0
+                else:
+                    phase.update(unknown=False, moved=outcome == "moved")
+            wall_clock = time.time_ns()
+            patches = [mock.patch.object(replacement, "advance_batch", side_effect=advance),
+                mock.patch.object(rewake, "claim_arm", side_effect=arm),
+                mock.patch.object(rewake, "current_attempt_row", return_value=SimpleNamespace(status="done", metadata={})),
+                mock.patch.object(rewake, "agent_home", return_value=ROOT),
+                mock.patch.object(rewake, "_recipient_decision", side_effect=decision),
+                mock.patch.object(rewake, "_handed_away", side_effect=handed),
+                mock.patch.object(rewake, "wait_for_attempt", side_effect=wait),
+                mock.patch.object(rewake, "_owner_status", return_value="done"),
+                mock.patch.object(rewake, "_retain_completion"),
+                mock.patch.object(rewake, "classified_receipt", return_value=("attention", "fixture complete")),
+                mock.patch.object(rewake, "_delivery_owing_row", return_value={"attempt_id": names[-1]}),
+                mock.patch.object(rewake, "_carrier_one_claim", side_effect=completion),
+                mock.patch.object(rewake, "_batch_message", return_value="batch"),
+                mock.patch.object(rewake, "_emit_with_gates", side_effect=emit),
+                mock.patch.object(rewake.time, "sleep", side_effect=recover),
+                mock.patch.object(rewake.time, "monotonic", side_effect=lambda: clock[0]),
+                mock.patch.object(rewake.time, "time_ns", side_effect=lambda: wall_clock + int(clock[0] * 1e9)),
+                mock.patch.dict(os.environ, {"AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS": "1", "AGENT_CLAUDE_REWAKE_MAX_SECONDS": "8"})]
+            for patch in patches:
+                stack.enter_context(patch)
+            released = stack.enter_context(mock.patch.object(pd, "release_claim", wraps=pd.release_claim))
+            ack = stack.enter_context(mock.patch.object(pd, "ack"))
+            code = rewake._observe_carrier(rewake.Launch(names[0], jobs, "sid"), claims[names[0]], {})
+            self.assertEqual(code, 2 if outcome == "recover" else 0)
+            self.assertEqual(armed, names[1:])  # No second claim of our live replacement arm.
+            expected_seen = names[:-1] if boundary == "gate" and outcome == "timeout" else names
+            self.assertEqual(seen[:len(expected_seen)], expected_seen)
+            self.assertTrue(all(name == names[-1] for name in seen[hops + 1:]))
+            self.assertEqual(set(deadlines), {8.0})
+            self.assertEqual(emissions, [names[-1]] if outcome == "recover" else [])
+            ack.assert_not_called()
+            self.assertEqual({call.args[2] for call in released.call_args_list}, set(ids[:2]) if boundary == "output" else set())
+            self.assertTrue(all(call.kwargs["claim_owner"] == "owned" for call in released.call_args_list))
+            if outcome == "timeout":
+                self.assertEqual(rewake._read_arm(claims[names[-1]].path)["state"], "lapsed")
+            for name in names:
+                exit_row, = [json.loads(line) for line in claims[name].path.with_suffix(".exits.jsonl").read_text().splitlines()]
+                self.assertEqual((exit_row["attempt_id"], exit_row["exit_code"]), (name, code))
+
     def test_lost_reply_register_only_retains_original_authority_until_spawn(self):
         from types import SimpleNamespace
         import dispatch_replacement as replacement

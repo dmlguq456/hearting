@@ -4586,6 +4586,160 @@ class SeatHandoverTest(TidyCase):
                 self.assertEqual(self.handover.session_successor(old), (new, "codex"))
             self.assertEqual(len(list(self.handover._snapshot_dir().glob("*.json"))), 2)
 
+    def test_missing_registry_rows_keep_exact_ledger_ownership_for_all_consumers(self):
+        import importlib.util
+        from dispatch_registry_cache import registry_snapshot
+        self.row("att-lost")
+        with self.iso.patched_environ():
+            self.handover.record_retire_handover("sid-A", "claude", "sid-B", "codex",
+                successor_seat=self.seat(PANE_BESIDE), jobs=self.jobs)
+            spec = importlib.util.spec_from_file_location("fix_queue_target", ROOT / "utilities/codex-managed-completion.py")
+            completion = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = completion
+            spec.loader.exec_module(completion)
+            original = self.jobs.read_bytes()
+            record = {"attempt_ids": ["att-lost"]}
+            inherited = dict(self.handover.storage_recipients("sid-B"))["sid-A"]
+            for data, complete in ((b"", True), (b"malformed\n", False),
+                                   (original.rstrip(b"\n"), False), (b"\xff\n", False)):
+                with self.subTest(data=data):
+                    self.jobs.write_bytes(data)
+                    self.assertEqual(registry_snapshot(self.jobs).complete, complete)
+                    self.assertFalse(self.handover.record_for_session(record, None, session="sid-A", jobs=self.jobs))
+                    self.assertEqual(self.handover.record_for_session(record, inherited, session="sid-B", jobs=self.jobs), complete)
+                    self.assertEqual(completion.queue_target(self.jobs, {"att-lost"}, "sid-A"), "sid-B" if complete else "")
+            self.jobs.unlink()
+            self.assertFalse(self.handover.record_for_session(record, None, session="sid-A", jobs=self.jobs))
+            self.assertTrue(self.handover.record_for_session(record, inherited, session="sid-B", jobs=self.jobs))
+            self.assertEqual(completion.queue_target(self.jobs, {"att-lost"}, "sid-A"), "sid-B")
+            self.jobs.write_bytes(original)
+            self.assertFalse(self.handover.record_for_session(record, None, session="sid-A", jobs=self.jobs))
+            self.assertTrue(self.handover.record_for_session(record, inherited, session="sid-B", jobs=self.jobs))
+            # A verified empty registry with no relevant handover keeps the original address.
+            self.jobs.write_bytes(b"")
+            self.assertTrue(self.handover.record_for_session({"attempt_ids": ["unbound"]}, None,
+                session="untouched", jobs=self.jobs))
+            self.assertEqual(completion.queue_target(self.jobs, {"unbound"}, "untouched"), "untouched")
+
+    def test_sweep_retains_damaged_registry_records_and_never_splits_mixed_holders(self):
+        import dispatch_pending_delivery as pending
+        import dispatch_session_sweep as sweep
+        self.row("att-one", node="one")
+        self.row("att-two", node="two")
+        with self.iso.patched_environ(), mock.patch("peer_obligations.ensure_normal_runner"):
+            self.handover.record_retire_handover("sid-A", "claude", "sid-B", "codex",
+                successor_seat=self.seat(PANE_BESIDE), jobs=self.jobs)
+            original = self.jobs.read_bytes()
+            root = self.jobs.parent
+            receipt = {"state": "attention", "job_registry": str(self.jobs), "children": [
+                {"attempt_id": "att-one", "status": "done", "required_action": "inspect-done-failure"}]}
+            def create(digit, attempts):
+                return pending.create(root, recipient_kind="claude-parent-runtime", recipient_key="sid-A",
+                    delivery_id="delivery-" + digit * 32, session_generation="", session_generation_supported="0",
+                    attempt_ids=attempts, parent_attempt_id="parent", route_id="rt-1", route_node="one",
+                    receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt),
+                    row_revisions={a: "revision" for a in attempts})
+            single = create("1", ["att-one"])
+            for data in (b"malformed\n", original.rstrip(b"\n"), b"\xff\n"):
+                self.jobs.write_bytes(data)
+                for sid, kind in (("sid-A", "claude-parent-runtime"), ("sid-B", "codex-native-queue")):
+                    self.assertEqual(sweep.sweep_deliver(root, kind, sid)[0], [])
+                current = pending.read(root, "sid-A", single["delivery_id"])
+                self.assertEqual((current["state"], current["attempts"], current["claim_owner"]), ("pending", 0, None))
+                self.assertEqual(current["receipt_digest"], single["receipt_digest"])
+            # The completely readable empty generation still preserves B's exact ledger binding.
+            self.jobs.write_bytes(b"")
+            self.assertEqual(sweep.sweep_deliver(root, "claude-parent-runtime", "sid-A")[0], [])
+            delivered, _ = sweep.sweep_deliver(root, "codex-native-queue", "sid-B")
+            self.assertEqual([r["delivery_id"] for r in delivered], [single["delivery_id"]])
+            self.assertEqual(delivered[0][sweep.STORAGE_KEY], "sid-A")
+            self.assertEqual(delivered[0]["receipt_digest"], single["receipt_digest"])
+            self.assertTrue(delivered[0]["claim_owner"])
+            self.assertEqual(sweep.ack_delivered(root, "sid-B", delivered, acked_by="fixture:sid-B"), 1)
+            acked = pending.read(root, "sid-A", single["delivery_id"])
+            self.assertEqual((acked["state"], acked["acked_by"]), ("acked", "fixture:sid-B"))
+            self.jobs.write_bytes(original)
+            # Move only att-two to another exact holder using the existing ledger representation.
+            seat = self.seat(PANE_BESIDE)
+            path = st._ledger_path(seat)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            transition = next(r for r in rows if r.get("event") == "handover")
+            extra = dict(transition, **{"from": "sid-B", "sid": "sid-C", "ts": transition["ts"] + 1,
+                "bindings": [b for b in transition["bindings"] if b["attempt"] == "att-two"]})
+            path.write_text(path.read_text() + json.dumps(extra) + "\n")
+            mixed = create("2", ["att-one", "att-two"])
+            self.jobs.write_bytes(b"")
+            for sid in ("sid-A", "sid-B", "sid-C"):
+                self.assertEqual(sweep.sweep_deliver(root, "codex-native-queue", sid)[0], [])
+            unchanged = pending.read(root, "sid-A", mixed["delivery_id"])
+            self.assertEqual((unchanged["state"], unchanged["attempts"], unchanged["claim_owner"]), ("pending", 0, None))
+            self.assertEqual(unchanged["receipt_digest"], mixed["receipt_digest"])
+
+    def test_sweep_releases_the_whole_claimed_batch_when_a_member_moves_or_becomes_unknown(self):
+        import dispatch_pending_delivery as pending
+        import dispatch_session_sweep as sweep
+        self.row("att-one", node="one")
+        self.row("att-two", node="two")
+        with self.iso.patched_environ(), mock.patch("peer_obligations.ensure_normal_runner"):
+            self.handover.record_retire_handover("sid-A", "claude", "sid-B", "codex",
+                successor_seat=self.seat(PANE_BESIDE), jobs=self.jobs)
+            root, seat = self.jobs.parent, self.seat(PANE_BESIDE)
+            ledger_path = st._ledger_path(seat)
+            original_ledger = ledger_path.read_bytes()
+            transition = next(json.loads(line) for line in original_ledger.splitlines()
+                              if json.loads(line).get("event") == "handover")
+            self.jobs.write_bytes(b"")
+            claim_batch = pending._claim_ready_batch_snapshot
+            for index, mode in enumerate(("moved", "malformed", "partial", "utf8")):
+                with self.subTest(mode=mode):
+                    records = []
+                    for number, attempt in enumerate(("att-one", "att-two")):
+                        receipt = {"state": "attention", "job_registry": str(self.jobs), "children": [
+                            {"attempt_id": attempt, "status": "done", "required_action": "inspect-done-failure"}]}
+                        records.append(pending.create(root, recipient_kind="claude-parent-runtime", recipient_key="sid-A",
+                            delivery_id="delivery-" + f"{index * 2 + number + 10:032x}",
+                            session_generation="", session_generation_supported="0", attempt_ids=[attempt],
+                            parent_attempt_id="parent", route_id="rt-1", route_node="one",
+                            receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt),
+                            row_revisions={attempt: "revision"}))
+                    ids = tuple(r["delivery_id"] for r in records)
+                    def grouping(_jobs, record, **_kwargs):
+                        info = self.jobs.stat()
+                        return {"delivery_ids": ids, "held": False, "registry_path": str(self.jobs),
+                            "registry_signature": (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns),
+                            "seed_identity": (record["delivery_id"], record["receipt_digest"],
+                                              tuple(record["attempt_ids"]), record["recipient_digest"])}
+                    def change_after_claim(*args, **kwargs):
+                        members = claim_batch(*args, **kwargs)
+                        if mode == "moved":
+                            extra = dict(transition, **{"from": "sid-B", "sid": "sid-C", "ts": transition["ts"] + 1,
+                                "bindings": [b for b in transition["bindings"] if b["attempt"] == "att-two"]})
+                            ledger_path.write_bytes(original_ledger + (json.dumps(extra) + "\n").encode())
+                        else:
+                            self.jobs.write_bytes({"malformed": b"malformed\n", "partial": b"partial", "utf8": b"\xff\n"}[mode])
+                        return members
+                    with mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=grouping), \
+                         mock.patch.object(pending, "_claim_ready_batch_snapshot", side_effect=change_after_claim), \
+                         mock.patch.object(pending, "ack", wraps=pending.ack) as ack:
+                        self.assertEqual(sweep.sweep_deliver(root, "codex-native-queue", "sid-B")[0], [])
+                        ack.assert_not_called()
+                    for record in records:
+                        current = pending.read(root, "sid-A", record["delivery_id"])
+                        self.assertEqual((current["state"], current["claim_owner"], current["attempts"]), ("pending", None, 1))
+                        for key in ("delivery_id", "receipt_digest", "recipient_digest", "attempt_ids", "row_revisions"):
+                            self.assertEqual(current[key], record[key])
+                    self.jobs.write_bytes(b"")
+                    ledger_path.write_bytes(original_ledger)
+                    # Existing retry backoff elapses; recovery receives the same complete batch.
+                    later = pending.time.time_ns() + 1_000_000_000
+                    with mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=grouping), \
+                         mock.patch.object(pending.time, "time_ns", return_value=later):
+                        self.assertEqual(sweep.sweep_deliver(root, "claude-parent-runtime", "sid-A")[0], [])
+                        delivered, _ = sweep.sweep_deliver(root, "codex-native-queue", "sid-B")
+                    self.assertEqual({r["delivery_id"] for r in delivered}, set(ids))
+                    self.assertEqual(sweep.ack_delivered(root, "sid-B", delivered, acked_by="batch-fixture:sid-B"), 2)
+                    self.assertTrue(all(pending.read(root, "sid-A", did)["state"] == "acked" for did in ids))
+
     def test_zero_job_source_race_replay_chain_and_empty_publication(self):
         import concurrent.futures, threading
         from peer_read_context import PeerReadContext

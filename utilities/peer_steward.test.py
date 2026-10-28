@@ -4657,6 +4657,143 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         self.assertIsNone(candidate)
         self.assertEqual(error, "target-identity-changed")
 
+    def _native_address_retry_observations(self, stack):
+        self._readiness_patch.stop()
+        peer_steward._HERDR_SESSION = "selected"
+        row = self._inventory_row(harness="codex", sid="exact-native-thread")
+        self._set_inventory([row])
+        stack.enter_context(mock.patch.object(peer_steward, "_prompt_agent_inventory", side_effect=lambda: (self._listed_rows, None)))
+        stack.enter_context(mock.patch.object(peer_steward, "_retire_target", side_effect=self._target_for))
+        stack.enter_context(mock.patch.object(peer_steward, "_retire_pane_info", side_effect=self._pane_info_for))
+        process = stack.enter_context(mock.patch.object(peer_steward, "_prompt_process_session", return_value=(None, None)))
+        stack.enter_context(mock.patch.object(peer_steward, "_prompt_foreground", return_value=None))
+        stack.enter_context(mock.patch.object(peer_steward.peer_obligations, "bound_work_for_pane", return_value=((), "observed")))
+        stack.enter_context(mock.patch.object(peer_steward, "_current_session_identity", return_value=("original-sender", "claude")))
+        stack.enter_context(mock.patch.object(peer_steward, "_from_name", return_value="sender"))
+        stack.enter_context(mock.patch("codex_queue_dispatch.resolve_queue_socket", return_value="fixture-socket"))
+        stack.enter_context(mock.patch("builtins.print"))
+        return process
+
+    def test_native_queue_failure_duty_recovers_without_process_sid_and_preserves_wire(self):
+        import codex_queue_delivery as queue
+        peer = peer_steward.peer_message
+        for failure in ("retryable", "unverified", "raises", "rpc-error"):
+            with self.subTest(failure=failure), contextlib.ExitStack() as stack:
+                process = self._native_address_retry_observations(stack)
+                submissions = []
+                def submit(_socket, **kwargs):
+                    submissions.append(kwargs)
+                    kwargs["before_add"]()
+                    return {"status": "queued"}
+                send = stack.enter_context(mock.patch.object(queue, "send_at_least_once", side_effect=submit))
+                args = peer_steward.build_parser().parse_args([
+                    "prompt", "child", "original correction " + failure, "--ref", "original-ref"])
+                if failure == "rpc-error":
+                    with mock.patch.object(queue, "send_at_least_once", side_effect=queue.QueueDeliveryError("queue-outage")):
+                        code = peer_steward.cmd_prompt(args)
+                else:
+                    with mock.patch.object(peer, "deliver_pending_codex",
+                            side_effect=OSError("queue-outage") if failure == "raises" else None,
+                            return_value={"status": failure, "reason": "queue-outage"}):
+                        code = peer_steward.cmd_prompt(args)
+                self.assertEqual(code, 5)
+                store = peer_steward.peer_obligations.ObligationStore()
+                duties = [d for d in store.list() if d["intent"].get("ref") == self._all_records()[-1]["transfer_ref"]]
+                self.assertEqual(len(duties), 1)
+                duty, = duties
+                ref = duty["intent"]["ref"]
+                original = peer._read_pending(ref)
+                self.assertEqual(original["state"], "pending")
+                self.assertEqual(duty["intent"]["identity"]["pane"], "w1:pX")
+                self.assertEqual(duty["intent"]["identity"]["server"], "selected")
+                peer_steward._resume_message_obligation(duty, store)
+                self.assertEqual(send.call_count, 1)
+                self.assertEqual(submissions[0]["thread_id"], "exact-native-thread")
+                self.assertEqual(submissions[0]["client_message_id"], "delivery-peer-" + ref)
+                self.assertEqual(submissions[0]["message"], original["text"])
+                self.assertEqual(process.return_value, (None, None))
+                latest = peer._read_pending(ref)
+                for key in ("ref", "text", "refs", "body_sha256", "source_sha256", "from", "to"):
+                    self.assertEqual(latest[key], original[key])
+                self.assertEqual(latest["state"], "queued")
+                peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                self.assertEqual(send.call_count, 1)  # Submitted rows are observed only.
+                self.assertEqual(store.get(duty["id"])["state"], "unknown")
+
+    def test_unresolved_native_address_becomes_exact_in_the_existing_duty(self):
+        import codex_queue_delivery as queue
+        peer = peer_steward.peer_message
+        with contextlib.ExitStack() as stack:
+            self._native_address_retry_observations(stack)
+            saved_rows = self._listed_rows
+            self._set_inventory([])
+            args = peer_steward.build_parser().parse_args(["prompt", "child", "preserved unresolved correction"])
+            send = stack.enter_context(mock.patch.object(queue, "send_at_least_once", return_value={"status": "queued"}))
+            self.assertEqual(peer_steward.cmd_prompt(args), 5)
+            store = peer_steward.peer_obligations.ObligationStore()
+            duty, = [d for d in store.list() if d["intent"]["kind"] == "message"]
+            original = peer._read_pending(duty["intent"]["ref"])
+            send.assert_not_called()
+            self._set_inventory(saved_rows)
+            peer_steward._resume_message_obligation(duty, store)
+            self.assertEqual(send.call_count, 1)
+            row = peer._read_pending(duty["intent"]["ref"])
+            self.assertEqual(row["to"], original["to"])
+            self.assertEqual(row["text"], original["text"])
+            self.assertEqual(row["body_sha256"], original["body_sha256"])
+            self.assertEqual(peer.pending_delivery_recipient(row)["session_id"], "exact-native-thread")
+
+    def test_native_retry_rechecks_actual_other_sid_at_both_effect_boundaries(self):
+        peer = peer_steward.peer_message
+        for boundary in (1, 2):
+            with self.subTest(boundary=boundary), contextlib.ExitStack() as stack:
+                process = self._native_address_retry_observations(stack)
+                body = "pinned native correction " + str(boundary)
+                args = peer_steward.build_parser().parse_args(["prompt", "child", body])
+                with mock.patch.object(peer, "deliver_pending_codex", return_value={"status": "retryable"}):
+                    self.assertEqual(peer_steward.cmd_prompt(args), 5)
+                store = peer_steward.peer_obligations.ObligationStore()
+                duties = [d for d in store.list() if d["intent"].get("ref") == self._all_records()[-1]["transfer_ref"]]
+                self.assertEqual(len(duties), 1)
+                duty, = duties
+                original = peer._read_pending(duty["intent"]["ref"])
+                exact = peer_steward._prompt_exact_candidate
+                checks = []
+                def observe(*args, **kwargs):
+                    checks.append(1)
+                    if len(checks) == boundary:
+                        process.return_value = ("actual-other-thread", None)
+                    return exact(*args, **kwargs)
+                with mock.patch.object(peer_steward, "_prompt_exact_candidate", side_effect=observe), \
+                     mock.patch.object(peer, "deliver_pending_codex") as send, \
+                     mock.patch.object(peer_steward, "_herdr_prompt") as physical:
+                    peer_steward._resume_message_obligation(duty, store)
+                send.assert_not_called()
+                physical.assert_not_called()
+                self.assertEqual(len(checks), boundary)
+                self.assertEqual(store.get(duty["id"])["observation"]["reason"], "target-identity-changed")
+                self.assertEqual(peer._read_pending(duty["intent"]["ref"])["text"], original["text"])
+
+    def test_ambiguous_native_submission_duty_is_receive_only_without_process_sid(self):
+        import codex_queue_delivery as queue
+        peer = peer_steward.peer_message
+        with contextlib.ExitStack() as stack:
+            self._native_address_retry_observations(stack)
+            def ambiguous(_socket, **kwargs):
+                kwargs["before_add"]()
+                raise queue.QueueDeliveryError("submitted-but-unverified", ambiguous=True)
+            send = stack.enter_context(mock.patch.object(queue, "send_at_least_once", side_effect=ambiguous))
+            args = peer_steward.build_parser().parse_args(["prompt", "child", "ambiguous original"])
+            self.assertEqual(peer_steward.cmd_prompt(args), 5)
+            store = peer_steward.peer_obligations.ObligationStore()
+            duty, = [d for d in store.list() if d["intent"]["kind"] == "message"]
+            original = peer._read_pending(duty["intent"]["ref"])
+            self.assertEqual(original["state"], "unverified")
+            peer_steward._resume_message_obligation(duty, store)
+            peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(peer._read_pending(duty["intent"]["ref"])["body_sha256"], original["body_sha256"])
+
     def test_native_endpoint_without_process_sid_is_distinct_from_input_proof(self):
         ident = {"harness": "codex", "session_id": "native-thread", "pane": "w1:pX", "name": "peer"}
         candidate, error = peer_steward._prompt_current_candidate(

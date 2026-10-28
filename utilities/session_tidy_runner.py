@@ -1289,6 +1289,45 @@ def _handoff_context(row, *, peer):
     return context, predecessor, successor, requester, target
 
 
+def _handoff_context_deferral(row, context):
+    """Compare current source context with the content explicitly accepted.
+
+    Absence is compatible with preserved content; unreadable observations are
+    not a zero prompt frontier or an absent card. Legacy contexts keep their
+    existing acceptance path when no source seat was recorded.
+    """
+    if not isinstance(context.get("source_seat"), dict) or "prompt_seq" not in context:
+        return ""
+    try:
+        seat = st.seat_from_dict(context["source_seat"])
+        if st._native_address_status(seat) == "conflict":
+            raise ValueError("source-card-conflict")
+        try:
+            frontier = json.loads(st._prompt_seq_path(seat).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            frontier = {"seq": 0}
+        if (not isinstance(frontier, dict) or type(frontier.get("seq")) is not int
+                or frontier["seq"] < 0):
+            raise ValueError("source-frontier-invalid")
+        if frontier["seq"] != context["prompt_seq"]:
+            return "handoff-context-new-input"
+        try:
+            card = json.loads(st.card_json_path(seat).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return ""  # The sealed, accepted payload already preserves the context.
+        author = card.get("author") if isinstance(card, dict) else None
+        if (not isinstance(card, dict) or card.get("schema") != st.SCHEMA
+                or not isinstance(card.get("body"), str) or not isinstance(author, dict)
+                or (author.get("harness"), author.get("sid")) != st.session_identity(seat)):
+            raise ValueError("source-card-invalid")
+        digest = hashlib.sha256(card["body"].rstrip("\n").encode("utf-8")).hexdigest()
+        if digest != row.get("source_sha256"):
+            return "handoff-context-new-card"
+        return ""
+    except (OSError, ValueError, TypeError, KeyError):
+        return "handoff-context-unreadable"
+
+
 def _settle_accepted_handoff(ref, row, context, successor, *, steward):
     """Replay the existing accepted row through its writer, reply, and retire duties."""
     peer = steward.peer_message
@@ -1333,13 +1372,7 @@ def _settle_accepted_handoff(ref, row, context, successor, *, steward):
     elif (not steward._handoff_lifetime_valid(context["predecessor"].get("foreground"))
           or not steward._handoff_lifetime_valid(successor.get("foreground"))):
         deferred = "handoff-original-lifetime-unavailable"
-    source_seat = context.get("source_seat")
-    if isinstance(source_seat, dict) and "prompt_seq" in context:
-        try:
-            if st.read_prompt_seq(st.seat_from_dict(source_seat)) != context["prompt_seq"]:
-                deferred = "handoff-context-new-input"
-        except (OSError, ValueError, TypeError):
-            deferred = "handoff-context-unreadable"
+    deferred = _handoff_context_deferral(row, context) or deferred
     if deferred:
         acceptance["settled"] = False
         acceptance["retire_reason"] = deferred
@@ -1444,7 +1477,9 @@ def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
             successor_foreground = steward._retire_foreground(
                 successor["pane"], successor["harness"], strict=False,
                 info=successor_candidate["_pane_info"])
-            context = {"card_id": card.get("id"), "target": seat.pane,
+            context = {"card_generation": card.get("generation"),
+                "card_body_sha256": hashlib.sha256(card["body"].rstrip("\n").encode("utf-8")).hexdigest(),
+                "target": seat.pane,
                 "source_seat": dict(seat.as_dict(), session={"harness": sender_harness, "sid": sender_sid}), "prompt_seq": card.get("prompt_seq", st.read_prompt_seq(seat)),
                 "predecessor": steward._retire_request_identity(predecessor,
                     source_foreground),

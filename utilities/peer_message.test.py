@@ -2460,6 +2460,76 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         for p in patches:
             p.start(); self.addCleanup(p.stop)
 
+    def test_current_source_context_controls_only_retirement_on_acceptance_and_duty_replay(self):
+        import session_tidy as tidy
+        source = tidy.session_seat(tidy.Seat("pane", "context-source", "w1:p1"), "claude", "predecessor")
+        cases = {"replacement": "handoff-context-new-card", "prompt": "handoff-context-new-input",
+                 "frontier-unreadable": "handoff-context-unreadable", "card-unreadable": "handoff-context-unreadable",
+                 "equivalent": None, "missing": None}
+        for name, reason in cases.items():
+            with self.subTest(name=name):
+                card = tidy.write_card(source, "claude", "predecessor", "preserved original " + name, prompt_seq=0)
+                frontier = tidy._prompt_seq_path(source)
+                tidy.atomic_write_json(frontier, {"schema": tidy.SCHEMA, "seq": 0})
+                context = dict(peer_message._read_pending(self.ref)["handoff"],
+                    source_seat=dict(source.as_dict(), session={"harness": "claude", "sid": "predecessor"}),
+                    prompt_seq=0, card_generation=card["generation"],
+                    card_body_sha256=hashlib.sha256(card["body"].encode()).hexdigest())
+                text, ref = peer_message.prepare_peer_message(card["body"], self.sender, self.recipient,
+                    defer=True, handoff=context, refs=["context-case:" + name])
+                card_path = tidy.card_json_path(source)
+                original = card_path.read_bytes()
+                if name == "replacement":
+                    newer = tidy.write_card(source, "claude", "predecessor", "new undelivered constraints", prompt_seq=0)
+                    self.assertGreater(newer["generation"], card["generation"])
+                    self.assertNotIn(newer["body"], text)
+                elif name == "prompt":
+                    tidy.bump_prompt_seq(source, "claude", "predecessor", tidy.now_epoch())
+                elif name == "frontier-unreadable":
+                    frontier.write_text('{broken')
+                    self.assertEqual(tidy.read_prompt_seq(source), 0)  # Compatibility API masks this damage.
+                elif name == "card-unreadable":
+                    card_path.write_bytes(b"\xff")
+                elif name == "equivalent":
+                    newer = tidy.write_card(source, "claude", "predecessor", card["body"], prompt_seq=0)
+                    self.assertGreater(newer["generation"], card["generation"])
+                elif name == "missing":
+                    card_path.unlink()
+                before_retire = len([d for d in self.store.list() if d["intent"]["kind"] == "retire"])
+                line, code = self.runner.accept_handoff(ref, self.caller)
+                self.assertEqual(code, 0, line)
+                row = peer_message._read_pending(ref)
+                self.assertTrue(row["acceptance"]["read_and_accepted"])
+                reply = row["acceptance"]["reply_ref"]
+                duty = next(d for d in self.store.list() if d["intent"].get("handoff_acceptance") and d["intent"]["ref"] == ref)
+                if reason:
+                    self.assertIn("retire=deferred", line)
+                    self.assertIn(reason, line)
+                    self.assertNotIn("request_id=", line)
+                    self.assertNotIn("retire_id", row["acceptance"])
+                    self.runner.resume_handoff_acceptance(ref, steward=self.steward)
+                    self.steward._resume_message_obligation(duty, self.store)
+                    pending = self.store.get(duty["id"])
+                    self.assertEqual(pending["state"], "pending")
+                    self.assertEqual(pending["observation"]["reason"], reason)
+                    self.assertEqual(len([d for d in self.store.list() if d["intent"]["kind"] == "retire"]), before_retire)
+                    card_path.write_bytes(original)
+                    tidy.atomic_write_json(frontier, {"schema": tidy.SCHEMA, "seq": 0})
+                    duty = pending
+                else:
+                    self.assertIn("retire=reserved", line)
+                self.steward._resume_message_obligation(duty, self.store)
+                self.assertEqual(self.store.get(duty["id"])["state"], "complete")
+                accepted = peer_message._read_pending(ref)["acceptance"]
+                self.assertEqual(accepted["reply_ref"], reply)
+                self.assertTrue(accepted["retire_id"])
+                self.assertEqual(peer_message._read_pending(ref)["text"], row["text"])
+                self.assertEqual(peer_message._read_pending(ref)["body_sha256"], row["body_sha256"])
+                self.assertEqual(self.runner.resume_handoff_acceptance(ref, steward=self.steward)["reply_ref"], reply)
+        import dispatch_seat_handover as handover
+        self.assertEqual(len([r for rows in handover._lineage_seats().values() for r in rows]), 1)
+        self.assertEqual(len([d for d in self.store.list() if d["intent"]["kind"] == "retire"]), 1)
+
     def legacy_reference(self, body, sender, recipient):
         evidence = {"schema": "legacy-reference-fixture", "recipient": dict(recipient)}
         with mock.patch.object(peer_message, "_reference_access_evidence_valid", return_value=True):
@@ -2969,13 +3039,14 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             on_prepared(ref)
             refs.append(ref)
             row = peer_message._read_pending(ref)
-            self.assertEqual(row["handoff"]["card_id"], "card-exact")
+            self.assertEqual(row["handoff"]["card_generation"], 7)
+            self.assertEqual(row["handoff"]["card_body_sha256"], hashlib.sha256(body.rstrip("\n").encode()).hexdigest())
             self.assertEqual(row["handoff"]["predecessor"], self.predecessor)
             self.assertEqual(row["handoff"]["successor"], self.successor)
             self.assertNotIn("acceptance", row)
             print(f"prompted={outcome} reason=native-queue")
             return exit_code
-        with mock.patch.object(tidy, "read_latest_card", return_value={"id": "card-exact", "body": "read this card"}), \
+        with mock.patch.object(tidy, "read_latest_card", return_value={"generation": 7, "body": "read this card"}), \
              mock.patch.object(tidy, "state_root", return_value=self.tmp_root), \
              mock.patch.object(tidy, "mark_card_handed_off") as marked, \
              mock.patch.object(self.runner, "injected_executable", return_value=None), \

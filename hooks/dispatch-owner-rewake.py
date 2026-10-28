@@ -1625,7 +1625,7 @@ def _observe_carrier(launch: Launch, claim: ArmClaim, payload: Any) -> int:
     _retain_completion(launch, claim)
     observation: dict[str, Any] = {"wait_state": "starting", "reason": "carrier-return",
                                    "exit_code": 1, "exit_kind": "exception", "exit_text": ""}
-    holder = {"claim": claim}
+    holder = {"launch": launch, "claim": claim}
     handlers = {}
 
     def terminated(signum, _frame):
@@ -1746,7 +1746,9 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
     interval = _bounded_number("AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 1, 300)
     maximum = _bounded_number("AGENT_CLAUDE_REWAKE_MAX_SECONDS", DEFAULT_MAX_SECONDS, interval, 86_400)
     deadline = time.monotonic() + maximum
+    holder.update(launch=launch, claim=claim)
     while True:
+        launch, claim = holder["launch"], holder["claim"]
         try:
             _recipient_decision(launch)
             return _run_carrier_once(launch, claim, payload, observation, holder, deadline)
@@ -1754,6 +1756,7 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
             observation.update(reason="arm-not-held-or-handed-away")
             return 0
         except LineageUnavailable as exc:
+            launch, claim = holder["launch"], holder["claim"]
             observation.update(wait_state="unknown", reason=str(exc))
             if not _holds_arm(claim):
                 return 0
@@ -1806,7 +1809,7 @@ def _run_carrier_once(launch, claim, payload, observation, holder, deadline) -> 
                     return 0 if successor.watched else no_arm_notice(payload, reason=successor.reason)
                 if successor is not None:
                     launch, claim = successor
-                    holder["claim"] = claim
+                    holder.update(launch=launch, claim=claim)
                     _retain_completion(launch, claim)
                     continue  # Same deadline; one registry-bound successor only.
                 if _owner_status(launch) in {"open", "running"}:

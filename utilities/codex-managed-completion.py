@@ -939,17 +939,10 @@ def queue_target(jobs: Path, attempts: set[str], registered: str) -> str:
     again on every pass, so a handover that happens while waiting is seen before the send."""
     try:
         import dispatch_seat_handover as handover
-        from dispatch_registry_cache import registry_view
-        try:
-            view = registry_view(Path(jobs))
-        except FileNotFoundError:
-            view = None
-        rows = {a: row for a in attempts if view is not None and (row := view.handover_attempt(a)) is not None}
         from peer_read_context import PeerReadContext
         context = PeerReadContext()
-        answers = [handover.resolve_recipient("job-holder", metadata=rows[a][1] if a in rows else
-                    {"parent_sid": registered, "parent_harness": "codex"}, jobs=jobs,
-                    harness="codex", read_context=context) for a in attempts]
+        answers = [handover.resolve_attempt_recipient(jobs, attempt, registered, "codex",
+                    read_context=context) for attempt in attempts]
         owners = {(answer.session_id, answer.harness) for answer in answers if answer.state != "unreadable"}
         if len(answers) != sum(answer.state != "unreadable" for answer in answers):
             return ""

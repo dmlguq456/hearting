@@ -682,6 +682,19 @@ def _resolve_prompt_target(target):
     return candidate, None, candidate_panes
 
 
+def _prompt_exact_candidate(pane, *, expected_harness, expected_sid, target_observation=None):
+    """Revalidate a pinned address for prompt and its existing continuation."""
+    current, error = _prompt_current_candidate(
+        pane, expected_harness=expected_harness, expected_sid=expected_sid,
+        require_process_session=True, target_observation=target_observation)
+    if current is None and error == "target-identity-unverified" and expected_harness == "codex":
+        current, error, _panes = _resolve_prompt_target(pane)
+        if current is not None and (current["harness"], current["session_id"], current["pane"]) != (
+                expected_harness, expected_sid, pane):
+            return None, "target-identity-changed"
+    return current, error
+
+
 def _prompt_failure_ledger(target, reason, candidate_panes, *, kind="steer", ref=(),
                            from_identity=None, from_name=_UNSET_NAME):
     """Record a bounded resolution failure without persisting or publishing its body."""
@@ -7041,11 +7054,14 @@ def _resume_message_obligation(duty, store, *, read_context=None):
                        "observed_pane": ident.get("pane", "")})
             return
         pinned_pane = expected_pane or ident.get("pane") or ""
-        current, current_error = _prompt_current_candidate(
-            pinned_pane, expected_harness=recipient.get("harness"),
-            expected_sid=None if pane_bound else recipient.get("session_id"),
-            require_process_session=not pane_bound,
-            target_observation=(state, ident))
+        if pane_bound:
+            current, current_error = _prompt_current_candidate(
+                pinned_pane, expected_harness=recipient.get("harness"),
+                target_observation=(state, ident))
+        else:
+            current, current_error = _prompt_exact_candidate(
+                pinned_pane, expected_harness=recipient.get("harness"),
+                expected_sid=recipient.get("session_id"), target_observation=(state, ident))
         if current is None:
             _ensure_sender_delay_notice_if_due(row)
             checkpoint(state="unknown", observation={"ref": ref,
@@ -7095,7 +7111,8 @@ def _resume_message_obligation(duty, store, *, read_context=None):
                                     target_observation=(state, ident),
                                     native_session_id=current.get("_native_session_id") or "",
                                     read_context=read_context)
-        if readiness.state == "unknown" or readiness.reason.startswith("bound-registered-work"):
+        if (recipient.get("harness") != "codex" or pane_bound) and (
+                readiness.state == "unknown" or readiness.reason.startswith("bound-registered-work")):
             if readiness.state != "ready":
                 checkpoint(state="unknown" if readiness.state == "unknown" else "pending",
                            observation={"ref": ref, "reason": readiness.reason,
@@ -7115,9 +7132,9 @@ def _resume_message_obligation(duty, store, *, read_context=None):
                            else "target-process-proof-unknown", "observed_pane": expected_pane})
                 return
         else:
-            latest, latest_error = _prompt_current_candidate(
+            latest, latest_error = _prompt_exact_candidate(
                 pinned_pane, expected_harness=recipient.get("harness"),
-                expected_sid=recipient.get("session_id"), require_process_session=True)
+                expected_sid=recipient.get("session_id"))
             if latest is None:
                 _ensure_sender_delay_notice_if_due(row)
                 checkpoint(state="unknown", observation={"ref": ref,
@@ -9410,9 +9427,8 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
                 resolved_target, expected_harness=t_harness, expected_sid=t_sid,
                 require_process_session=True)
         else:
-            current, current_error, _panes = _resolve_prompt_target(resolved_target)
-            if current and (current["harness"], current["session_id"]) != (t_harness, t_sid):
-                current, current_error = None, "target-identity-changed"
+            current, current_error = _prompt_exact_candidate(
+                resolved_target, expected_harness=t_harness, expected_sid=t_sid)
         if current is None:
             outcome, reason = "unverified", current_error or "target-identity-unverified"
             _schedule_message_obligation(pending, resolved_target, target_pane)
@@ -9424,6 +9440,9 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
                 verify, reason = "native-queue-" + result["status"], result.get("reason")
             except (OSError, ValueError) as exc:
                 outcome, reason = "unverified", "peer-pending-unavailable:" + str(exc)
+            if outcome != "true" and producer_binding is None:
+                # Runtime producers already have their bound retained controller.
+                _schedule_message_obligation(pending, resolved_target, target_pane)
     elif (t_harness in {"claude", "codex", "opencode"}
           and not peer_message.usable_session_id(t_sid)):
         direct_reason = None

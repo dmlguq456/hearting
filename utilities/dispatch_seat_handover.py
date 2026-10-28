@@ -1004,6 +1004,41 @@ def recipient_continuation(result, actor=None):
     return ContinuationDecision(True, "continue")
 
 
+def resolve_attempt_recipient(jobs, attempt, registered, harness="", *, read_context=None):
+    """Resolve a durable attempt even after its registry row has been retired.
+
+    Missing metadata does not erase an exact ledger binding. A damaged registry
+    cannot prove absence and leaves the existing delivery controller waiting.
+    """
+    from dispatch_registry_cache import registry_snapshot
+    try:
+        try:
+            snapshot = registry_snapshot(Path(jobs))
+        except FileNotFoundError:
+            snapshot = None  # Verified absence still consults exact ledger bindings.
+        if snapshot is not None and not snapshot.complete:
+            raise ValueError(snapshot.reason)
+        row = snapshot.view.handover_attempt(attempt) if snapshot is not None else None
+        if row is not None:
+            return resolve_recipient("job-holder", metadata=row[1], jobs=jobs,
+                                     session=registered, harness=harness, read_context=read_context)
+        seats, error = _lineage_index(read_context)
+        if error:
+            raise ValueError(error)
+        bindings = {(_logical_key(binding), str(binding.get("parent") or row["from"]))
+                    for rows in seats.values() for row in rows for binding in row["bindings"]
+                    if binding["jobs"] == _jobs_key(jobs) and binding["attempt"] == attempt}
+        owners = {_lineage_holder(seats, key, parent, harness) for key, parent in bindings}
+        if len(owners) > 1:
+            raise ValueError("handover-conflicting-attempt")
+        current, current_harness = next(iter(owners)) if owners else (registered, harness)
+        return RecipientResolution(current, current_harness,
+            "confirmed" if owners else "no-handover", registered, harness)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        return RecipientResolution("", "", "unreadable", registered, harness,
+                                   "handover-unreadable:" + str(exc))
+
+
 def _row_binds_key(row: dict, key: tuple) -> bool:
     return any(isinstance(b, dict) and (b.get("jobs"), b.get("route"), b.get("hash"), b.get("node")) == key
                for b in row.get("bindings") or ())
@@ -1182,13 +1217,12 @@ def record_for_session(record: dict, allowed: Optional[frozenset], *, session=No
         ids = record.get("attempt_ids")
         if jobs is not None and isinstance(ids, list) and ids:
             try:
-                from dispatch_registry_cache import registry_view
-                view = registry_view(Path(jobs))
-                rows = [view.handover_attempt(attempt) for attempt in ids]
-                if any(row is not None and effective_parent(row[1], jobs) != session for row in rows):
+                from peer_read_context import PeerReadContext
+                context = PeerReadContext()
+                answers = [resolve_attempt_recipient(jobs, attempt, session,
+                    read_context=context) for attempt in ids]
+                if any(not recipient_continuation(answer, session).allowed for answer in answers):
                     return False
-                # Verified absent rows retain the durable record's historical storage binding.
-                # Inherited records still need every attempt in the current shared allowance.
             except (OSError, ValueError, TypeError):
                 return False
     if allowed is None:
