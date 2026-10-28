@@ -2305,6 +2305,106 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         different = dict(unknown, name="different-name")
         self.assertNotEqual(peer_message.prepare_peer_message("unknown peer", self.sender, different, defer=True)[1], ref)
 
+    def test_exact_retained_request_distinguishes_every_intent_input_during_outage(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        def prepare(body="exact correction", sender=None, recipient=None, **kw):
+            return peer_message.prepare_peer_message(body, sender or self.sender, recipient or exact,
+                defer=True, original_target=kw.pop("original_target", "child"),
+                server=kw.pop("server", "selected"), refs=kw.pop("refs", ["request"]), **kw)
+        original = prepare()
+        before = peer_message._read_pending(original[1])
+        for recipient in (unknown, exact, dict(exact, session_id="current-namesake")):
+            self.assertEqual(prepare(recipient=recipient), original)
+        self.assertEqual(prepare(recipient=dict(unknown, name="w1:pX"), original_target="w1:pX"), original)
+        self.assertEqual(peer_message._read_pending(original[1]), before)
+        variants = ({"body": "different"}, {"refs": ["different"]}, {"server": "ambient"},
+                    {"sender": dict(self.sender, session_id="other")}, {"with_trailer": False},
+                    {"producer_binding": {"different": "producer"}},
+                    {"handoff": {"card_id": "other-card"}})
+        # A different producer is a different intent. Producer admission itself
+        # is tested separately; this test isolates retained preparation matching.
+        with mock.patch.object(peer_message, "_valid_runtime_producer_binding", return_value=True):
+            for kwargs in variants:
+                with self.subTest(kwargs=kwargs):
+                    self.assertNotEqual(prepare(recipient=unknown, **kwargs)[1], original[1])
+        other_address = {"harness": "unknown", "session_id": None, "name": "unrelated"}
+        self.assertNotEqual(prepare(recipient=other_address, original_target="unrelated")[1], original[1])
+        self.assertEqual(peer_message._read_pending(original[1]), before)
+
+    def test_legacy_exact_reuse_requires_recorded_endpoint_and_reliable_address_evidence(self):
+        import peer_obligations
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        store = peer_obligations.ObligationStore()
+        for evidence in ("duty", "row-and-duty", "pane", "tag", "none", "name-only", "wrong-server",
+                         "wrong-digest", "wrong-recipient", "wrong-identity", "wrong-sender", "wrong-refs"):
+            with self.subTest(evidence=evidence):
+                body = "legacy exact " + evidence
+                text, ref = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                    **({"server": "selected"} if evidence in ("row-and-duty", "pane", "name-only") else {}))
+                original = peer_message._read_pending(ref)
+                if evidence not in ("none", "name-only", "pane"):
+                    identity = {"server": "selected", "pane": "w1:pX", **{k: exact[k] for k in ("harness", "session_id")}}
+                    intent = {"ref": ref, "body_digest": original["body_sha256"], "from": self.sender,
+                              "to": exact, "target": "w1:pX", "refs": []}
+                    if evidence == "tag": intent["target"] = "[3e]"
+                    if evidence == "wrong-server": identity["server"] = "ambient"
+                    if evidence == "wrong-digest": intent["body_digest"] = "0" * 64
+                    if evidence == "wrong-recipient": intent["to"] = dict(exact, session_id="namesake")
+                    if evidence == "wrong-identity": identity["session_id"] = "namesake"
+                    if evidence == "wrong-sender": intent["from"] = dict(self.sender, session_id="other")
+                    if evidence == "wrong-refs": intent["refs"] = ["other"]
+                    store.create("message-" + ref, "message", identity, intent)
+                address = "[3e]" if evidence == "tag" else "w1:pX" if evidence == "pane" else "child"
+                result = peer_message.prepare_peer_message(body, self.sender, dict(unknown, name=address),
+                    defer=True, original_target=address, server="selected")
+                if evidence in ("duty", "row-and-duty", "pane", "tag"):
+                    self.assertEqual(result, (text, ref))
+                    self.assertEqual(peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                        original_target=address, server="selected"), result)
+                else:
+                    self.assertNotEqual(result[1], ref)
+                self.assertEqual(peer_message._read_pending(ref), original)
+
+    def test_exact_outage_retry_preserves_native_rpc_submission_and_ambiguity(self):
+        import codex_queue_delivery as queue
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        for ambiguous in (False, True):
+            with self.subTest(ambiguous=ambiguous):
+                body = "native exact outage " + str(ambiguous)
+                text, ref = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                    original_target="child", server="selected")
+                calls, adds = [], []
+                def rpc(_path, method, params, **kw):
+                    calls.append(method)
+                    self.assertEqual(params["threadId"], exact["session_id"])
+                    if method == "thread/queue/list": return {"data": [], "nextCursor": None}
+                    if method == "thread/queue/add":
+                        adds.append(params)
+                        if ambiguous: raise queue.QueueDeliveryError("queue-websocket-timeout", ambiguous=True)
+                        return {"queuedSubmission": {"id": "exact-native-item"}}
+                    self.fail(method)
+                with mock.patch("codex_queue_dispatch.resolve_queue_socket", return_value="fixture-socket"), \
+                     mock.patch.object(queue, "_known_consumed", return_value=None), \
+                     mock.patch.object(queue, "_rpc", side_effect=rpc):
+                    peer_message.deliver_pending_codex(ref)
+                    submitted = peer_message._read_pending(ref)
+                    for _ in range(3):
+                        for recipient in (unknown, exact):
+                            self.assertEqual(peer_message.prepare_peer_message(body, self.sender, recipient,
+                                defer=True, original_target="child", server="selected"), (text, ref))
+                            self.assertEqual(peer_message._read_pending(ref), submitted)
+                        peer_message.deliver_pending_codex(ref)
+                        submitted = peer_message._read_pending(ref)
+                self.assertEqual(len(adds), 1)
+                self.assertEqual(adds[0]["clientUserMessageId"], "delivery-peer-" + ref)
+                self.assertEqual(adds[0]["input"], [{"type": "text", "text": text}])
+                self.assertEqual(len([r for r in peer_message._pending_rows() if r["ref"] == ref]), 1)
+                sys.stdout.write("peer-retained-rpc=" + json.dumps({"ambiguous": ambiguous, "ref": ref,
+                    "methods": calls, "adds": adds, "submission_state": submitted["state"]}) + "\n")
+
     def test_unresolved_preparation_reuses_only_the_same_original_endpoint_and_intent(self):
         import peer_obligations
         unknown = {"harness": "unknown", "session_id": None, "name": "child"}
@@ -2346,8 +2446,14 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(peer_message._read_pending(ref)["receipt"], receipt)
 
     def test_concurrent_unresolved_and_exact_preparations_share_the_original_address_lock(self):
+        self._concurrent_address_preparations(start_exact=False)
+        self._concurrent_address_preparations(start_exact=True)
+
+    def _concurrent_address_preparations(self, *, start_exact):
         unknown = {"harness": "unknown", "session_id": None, "name": "child"}
         exact = {"harness": "codex", "session_id": "native", "name": "child"}
+        body = "concurrent original " + str(start_exact)
+        initial_count = len(list(peer_message._pending_rows()))
         entered, release = threading.Event(), threading.Event()
         original_prepare = peer_message._prepare_peer_message
         results, errors = [], []
@@ -2357,10 +2463,10 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
                 raise AssertionError("preparation not released")
             return original_prepare(*args, **kwargs)
         def prepare(recipient):
-            return peer_message.prepare_peer_message("concurrent original", self.sender, recipient,
+            return peer_message.prepare_peer_message(body, self.sender, recipient,
                 defer=True, original_target="child", server="selected", refs=["request"])
         def first():
-            try: results.append(prepare(unknown))
+            try: results.append(prepare(exact if start_exact else unknown))
             except BaseException as exc: errors.append(exc)
         with mock.patch.object(peer_message, "_prepare_peer_message", side_effect=delayed):
             thread = threading.Thread(target=first)
@@ -2377,7 +2483,7 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         self.assertFalse(errors)
         self.assertEqual(prepare(unknown), results[0])
         self.assertEqual(prepare(exact), results[0])
-        self.assertEqual(len(list(peer_message._pending_rows())), 1)
+        self.assertEqual(len(list(peer_message._pending_rows())), initial_count + 1)
 
     def test_concurrent_exact_aliases_still_share_the_native_preparation_lock(self):
         exact = dict(self.recipient, pane_id="w1:pX", name="child")

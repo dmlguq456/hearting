@@ -1344,46 +1344,59 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                                or _valid_pane_bound_endpoint(recipient)))
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
 
-    def same_server(row):
-        if server is None:
-            return True  # Native-only callers do not select a terminal endpoint.
+    def matches_target(row):
+        target = row.get("to") or {}
+        bound = row.get("bound_to") or target
+        # A retained request keeps its address even when resolution disappears
+        # or now names a different session. Only its original unsent unresolved
+        # target may bind below; matching never replaces a pinned recipient.
+        addresses = [row.get("original_target"), target.get("pane_id")]
+        if (_unresolved_target(target)
+                or isinstance(row.get("original_target"), str) and row["original_target"]):
+            addresses.append(target.get("name"))
+        same_native = (_valid_transfer_endpoint(bound)
+                       and _same_transfer_session(bound, recipient))
         recorded = row.get("server")
-        if recorded is None:
-            # Earlier retained rows already record their endpoint in the duty.
-            # Do not borrow the retrying caller's ambient endpoint for them.
+        if ((server is not None and recorded is None)
+                or (original_target is not None and original_target not in addresses
+                    and not same_native)):
             from peer_obligations import ObligationStore
             duty = ObligationStore().get("message-" + row["ref"])
-            if duty is None and _unresolved_target(row.get("to")):
-                return False  # An unrecorded endpoint is not the default endpoint.
-            recorded = (((duty or {}).get("intent") or {}).get("identity") or {}).get("server")
-        return (recorded or "default") == server
-
-    def matches_target(row):
-        if not same_server(row):
-            return False
-        target = row.get("to") or {}
-        if _unresolved_target(target):
-            bound = row.get("bound_to")
-            if _valid_transfer_endpoint(bound):
-                return (_same_transfer_session(bound, recipient)
-                        or _unresolved_target(recipient) and target["name"] == original_target)
-            return original_target is not None and target["name"] == original_target
+            intent = (duty or {}).get("intent") or {}
+            if (intent.get("ref") == row["ref"]
+                    and intent.get("body_digest") == row.get("body_sha256")
+                    and intent.get("from") == row.get("from")
+                    and intent.get("to") in (target, bound)
+                    and intent.get("refs", []) == row.get("refs", [])):
+                identity = intent.get("identity") or {}
+                if (not _valid_transfer_endpoint(target)
+                        or _same_transfer_session(identity, intent["to"])):
+                    if recorded is None:
+                        recorded = identity.get("server")
+                    if recorded == identity.get("server"):
+                        addresses.extend((intent.get("target"), target.get("name")))
+        if server is not None and recorded != server:
+            return False  # Missing endpoint evidence is not the default endpoint.
+        if original_target is not None and original_target in addresses:
+            return True
         if _valid_pane_bound_endpoint(target):
             return (target.get("harness") == recipient.get("harness")
                     and target.get("pane_id") == recipient.get("pane_id"))
-        return all(target.get(key) == recipient.get(key) for key in ("harness", "session_id"))
+        return (same_native or not _unresolved_target(target)
+                and not _unresolved_target(recipient) and _same_transfer_session(bound, recipient))
 
     def existing():
         for row in _pending_rows():
-            if (matches_target(row)
-                    and all(row["from"].get(k) == sender.get(k) for k in ("harness", "session_id"))
-                    and (recipient.get("session_id") is not None or row["to"].get("name") == recipient.get("name"))
+            if (all(row["from"].get(k) == sender.get(k) for k in ("harness", "session_id"))
+                    and (_unresolved_target(recipient) or recipient.get("session_id") is not None
+                         or row["to"].get("name") == recipient.get("name"))
                     and (sender.get("session_id") is not None or row["from"].get("name") == sender.get("name"))
                     and row.get("source_sha256") == body_hash
                     and row.get("refs", []) == list(refs)
                     and bool(row.get("no_trailer", False)) == (not with_trailer)
                     and row.get("producer_binding") == producer_binding
-                    and row.get("handoff") == handoff):
+                    and row.get("handoff") == handoff
+                    and matches_target(row)):
                 if _unresolved_target(row.get("to")) and not row.get("bound_to"):
                     # Reuse still-unresolved or submitted intents without acquiring
                     # a send/binding claim. Only a known unsent exact recovery binds.
@@ -1448,6 +1461,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             "receipt": receipt if endpoints_verified or _unresolved_target(recipient) else "peer-endpoint-unverified"}
         if server is not None:
             pending["server"] = server
+        if original_target is not None:
+            pending["original_target"] = original_target
         if handoff is not None:
             pending["handoff"] = handoff
         if producer_binding is not None:

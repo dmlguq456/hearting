@@ -9402,9 +9402,13 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
                 body, {"harness": from_harness, "session_id": from_sid, "name": from_name},
                 {"harness": "unknown", "session_id": None, "name": args.target},
                 defer=True, refs=args.ref, receipt=reason, with_trailer=not args.no_trailer,
+                producer_binding=producer_binding, handoff=handoff,
                 original_target=args.target, server=_HERDR_SESSION or "default")
+            if on_prepared is not None:
+                on_prepared(ref)
             row = peer_message._read_pending(ref)
-            _schedule_message_obligation(row, args.target)
+            if producer_binding is None:
+                _schedule_message_obligation(row, args.target)
             print(f"prompted=unverified reason={reason} ref={ref}")
         except (OSError, ValueError):
             print("prompted=unverified reason=peer-pending-unavailable")
@@ -9453,6 +9457,17 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         pending = peer_message._read_pending(transfer_ref)
     except (OSError, ValueError):
         print("prompted=unverified reason=peer-pending-or-transfer-unavailable")
+        return 5
+
+    pinned = peer_message.pending_delivery_recipient(pending)
+    if pinned is not None and not peer_message._same_transfer_session(pinned, recipient):
+        # The same retained request may outlive its original name association.
+        # Keep its exact recipient and controller; a current namesake is no send
+        # authority for that message, including when it was already submitted.
+        if producer_binding is None:
+            _schedule_message_obligation(pending, pending.get("original_target") or args.target,
+                                         pinned.get("pane_id"))
+        print(f"prompted=unverified reason=target-identity-changed ref={transfer_ref}")
         return 5
 
     kind = _prompt_message_kind(body)

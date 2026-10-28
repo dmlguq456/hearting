@@ -4309,7 +4309,8 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         def census(session=None):
             return SimpleNamespace(
                 endpoint=peer_steward.herdr_observation.endpoint_name(session),
-                complete=True, panes=tuple(dict(row) for row in self._census_panes))
+                complete=True, observed_at=time.monotonic(),
+                panes=tuple(dict(row) for row in self._census_panes))
 
         self._census_patch = mock.patch.object(
             peer_steward.herdr_observation, "pane_census", side_effect=census)
@@ -4801,6 +4802,224 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                     "native_adds": len(submissions), "allow_add": observations,
                     "thread_id": submissions[0]["thread_id"], "server": original["server"],
                     "body_sha256": original["body_sha256"], "original_wire_preserved": True}) + "\n")
+
+    def test_exact_request_survives_outages_namesakes_and_caller_or_runner_recovery(self):
+        import codex_queue_delivery as queue
+        peer = peer_steward.peer_message
+        for initial in ("pending", "queued", "ambiguous"):
+            for recovery in ("caller", "runner"):
+                for address in ("child", "w1:pX", "[3e]"):
+                    with self.subTest(initial=initial, recovery=recovery, address=address), contextlib.ExitStack() as stack:
+                        self._native_address_retry_observations(stack)
+                        stack.enter_context(mock.patch.object(peer_steward, "_prompt_fleet_tag", return_value=("3e", None)))
+                        inventory = self._listed_rows
+                        args = peer_steward.build_parser().parse_args([
+                            "prompt", address, "exact outage " + initial + recovery + address,
+                            "--ref", "stable-exact-request"])
+                        adds, observations = [], []
+                        def submit(_socket, **kw):
+                            observations.append(kw["allow_add"])
+                            if kw["allow_add"]:
+                                kw["before_add"]()
+                                adds.append(kw)
+                                if initial == "ambiguous":
+                                    raise queue.QueueDeliveryError("submitted-but-unverified", ambiguous=True)
+                            return {"status": "queued"}
+                        stack.enter_context(mock.patch.object(queue, "send_at_least_once", side_effect=submit))
+                        binder = stack.enter_context(mock.patch.object(peer, "bind_unresolved_pending_recipient",
+                                                                      wraps=peer.bind_unresolved_pending_recipient))
+                        if initial == "pending":
+                            with mock.patch.object(peer, "deliver_pending_codex", side_effect=OSError("queue-outage")):
+                                codes = [peer_steward.cmd_prompt(args)]
+                        else:
+                            codes = [peer_steward.cmd_prompt(args)]
+                        store = peer_steward.peer_obligations.ObligationStore()
+                        duty, = [d for d in store.list() if d["intent"].get("refs") == args.ref
+                                 and peer._read_pending(d["intent"]["ref"])["source_sha256"]
+                                 == hashlib.sha256(args.text.encode()).hexdigest()]
+                        original = peer._read_pending(duty["intent"]["ref"])
+                        transfer = peer._transfer_path(original["ref"]).read_bytes()
+                        def retained():
+                            rows = [r for r in peer._pending_rows() if r["source_sha256"] == original["source_sha256"]]
+                            self.assertEqual(len(rows), 1)
+                            for key in ("ref", "text", "refs", "from", "to", "body_sha256", "source_sha256"):
+                                self.assertEqual(rows[0][key], original[key])
+                            self.assertEqual(peer._transfer_path(original["ref"]).read_bytes(), transfer)
+                            self.assertEqual(store.get(duty["id"])["intent"], duty["intent"])
+                            return rows[0]
+                        for _ in range(3):
+                            self._set_inventory([])
+                            codes.append(peer_steward.cmd_prompt(args))
+                            self.assertEqual(retained(), original)  # Submission evidence is unchanged.
+                        # A current namesake, even if exactly resolved, cannot replace the pin.
+                        for rows in ([self._inventory_row(harness="codex", sid="other-native")],
+                                     [self._inventory_row(harness="codex", sid="other-native"),
+                                      self._inventory_row(harness="codex", sid="another-native", pane="w1:pY")]):
+                            # The pin still exists elsewhere: these observations
+                            # prove a different occupant, not terminal pin loss.
+                            self._set_inventory(rows + [self._inventory_row(harness="codex",
+                                sid="exact-native-thread", name="original moved", pane="w1:pOriginal")])
+                            codes.append(peer_steward.cmd_prompt(args))
+                            self.assertEqual(codes[-1], 5)
+                            peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                            self.assertEqual(len(adds), 0 if initial == "pending" else 1)
+                            retained()
+                        self._set_inventory(inventory)
+                        if recovery == "caller":
+                            codes.append(peer_steward.cmd_prompt(args))
+                        else:
+                            peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                        self.assertEqual(len(adds), 1)
+                        # Another outage after submission and both retry routes stay receive-only.
+                        self._set_inventory([])
+                        codes.append(peer_steward.cmd_prompt(args))
+                        self._set_inventory(inventory)
+                        peer_steward.cmd_prompt(args)
+                        peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                        retained()
+                        binder.assert_not_called()
+                        self.assertEqual(len(adds), 1)
+                        self.assertEqual(adds[0]["thread_id"], "exact-native-thread")
+                        self.assertEqual(adds[0]["client_message_id"], "delivery-peer-" + original["ref"])
+                        self.assertEqual(adds[0]["message"], original["text"])
+                        self.assertEqual(len([d for d in store.list() if d["intent"].get("ref") == original["ref"]]), 1)
+                        sys.stdout.write("peer-retained-probe=" + json.dumps({
+                            "initial": initial, "recovery": recovery, "address": address,
+                            "codes": codes, "ref": original["ref"], "rows": 1, "duties": 1,
+                            "native_adds": len(adds), "allow_add": observations,
+                            "recipient": original["to"], "server": original["server"],
+                            "body_sha256": original["body_sha256"], "immutable_preserved": True}) + "\n")
+
+    def test_retained_typed_handoff_keeps_context_through_unresolved_caller(self):
+        peer = peer_steward.peer_message
+        with contextlib.ExitStack() as stack:
+            self._native_address_retry_observations(stack)
+            inventory = self._listed_rows
+            adds, prepared = [], []
+            def submit(_socket, **kw):
+                if kw['allow_add']:
+                    kw['before_add']()
+                    adds.append(kw['client_message_id'])
+                return {'status': 'queued'}
+            stack.enter_context(mock.patch('codex_queue_delivery.send_at_least_once', side_effect=submit))
+            args = peer_steward.build_parser().parse_args(['prompt', 'child', '[handoff] retained context', '--ref', 'context-ref'])
+            context = {'card_id': 'original-card', 'predecessor': {'harness': 'claude', 'session_id': 'original-sender'},
+                       'successor': {'harness': 'codex', 'session_id': 'exact-native-thread'}}
+            self.assertEqual(peer_steward.cmd_prompt(args, handoff=context, on_prepared=prepared.append), 3)
+            ref, = prepared
+            original = peer._read_pending(ref)
+            self._set_inventory([])
+            for _ in range(3):
+                self.assertEqual(peer_steward.cmd_prompt(args, handoff=context, on_prepared=prepared.append), 5)
+                self.assertEqual(prepared[-1], ref)
+                self.assertEqual(peer._read_pending(ref), original)
+            self.assertEqual(prepared, [ref] * 4)
+            self.assertEqual(len(list(peer._pending_rows())), 1)
+            self.assertEqual(len(peer_steward.peer_obligations.ObligationStore().list()), 1)
+            # A genuinely different context is a different request, even during outage.
+            peer_steward.cmd_prompt(args, handoff=dict(context, card_id='other-card'), on_prepared=prepared.append)
+            self.assertNotEqual(prepared[-1], ref)
+            self._set_inventory(inventory)
+            peer_steward.cmd_prompt(args, handoff=context, on_prepared=prepared.append)
+            self.assertEqual(prepared[-1], ref)
+            self.assertEqual(adds, ['delivery-peer-' + ref])
+
+    def test_retained_runtime_producer_keeps_its_original_controller_through_outage(self):
+        peer = peer_steward.peer_message
+        with contextlib.ExitStack() as stack:
+            self._native_address_retry_observations(stack)
+            inventory = self._listed_rows
+            producer = {'schema': peer._RUNTIME_PRODUCER_SCHEMA, 'duty_id': 'registered-batch-' + 'a' * 32,
+                'jobs': str(Path(self._tmp.name) / 'jobs.log'), 'attempt_id': 'att-original',
+                'carrier': 'codex-native-queue', 'delivery_id': 'delivery-original', 'receipt_digest': 'b' * 64,
+                'recipient': {'harness': 'codex', 'session_id': 'exact-native-thread'},
+                'route_id': 'rt-original', 'route_node': 'execute'}
+            Path(producer['jobs']).touch()
+            store = peer_steward.peer_obligations.ObligationStore()
+            duty = store.create(producer['duty_id'], 'registered-batch', {'jobs': producer['jobs']}, {'carrier': producer['carrier']})
+            args = peer_steward.build_parser().parse_args(['prompt', 'child', 'runtime retained context'])
+            args.ref = [producer[k] for k in ('duty_id', 'attempt_id', 'delivery_id')]
+            adds, prepared = [], []
+            def submit(_socket, **kw):
+                if kw['allow_add']:
+                    kw['before_add']()
+                    adds.append(kw['client_message_id'])
+                return {'status': 'queued'}
+            stack.enter_context(mock.patch('codex_queue_delivery.send_at_least_once', side_effect=submit))
+            self.assertEqual(peer_steward.cmd_prompt(args, producer_binding=producer, on_prepared=prepared.append), 3)
+            ref, = prepared
+            original = peer._read_pending(ref)
+            self._set_inventory([])
+            for _ in range(3):
+                self.assertEqual(peer_steward.cmd_prompt(args, producer_binding=producer, on_prepared=prepared.append), 5)
+                self.assertEqual(prepared[-1], ref)
+                self.assertEqual(peer._read_pending(ref), original)
+            self.assertEqual(prepared, [ref] * 4)
+            self.assertEqual(store.list(), [duty])
+            self._set_inventory([self._inventory_row(harness='codex', sid='other-native'),
+                self._inventory_row(harness='codex', sid='exact-native-thread', name='original moved', pane='w1:pOriginal')])
+            self.assertEqual(peer_steward.cmd_prompt(args, producer_binding=producer, on_prepared=prepared.append), 5)
+            self.assertEqual(prepared[-1], ref)
+            self.assertEqual(store.list(), [duty])
+            self.assertEqual(adds, ['delivery-peer-' + ref])
+            self._set_inventory(inventory)
+            peer_steward.cmd_prompt(args, producer_binding=producer, on_prepared=prepared.append)
+            self.assertEqual(prepared[-1], ref)
+            self.assertEqual(adds, ['delivery-peer-' + ref])
+            # Different producer evidence cannot consume this retained intent.
+            peer_steward.cmd_prompt(args, producer_binding=dict(producer, receipt_digest='c' * 64), on_prepared=prepared.append)
+            self.assertNotEqual(prepared[-1], ref)
+            self.assertEqual(store.list(), [duty])
+
+
+    def test_concurrent_exact_outage_retries_reuse_the_original_duty(self):
+        import codex_queue_delivery as queue
+        peer = peer_steward.peer_message
+        with contextlib.ExitStack() as stack:
+            self._native_address_retry_observations(stack)
+            inventory = self._listed_rows
+            args = peer_steward.build_parser().parse_args(["prompt", "child", "concurrent exact outage"])
+            with mock.patch.object(peer, "deliver_pending_codex", side_effect=OSError("queue-outage")):
+                self.assertEqual(peer_steward.cmd_prompt(args), 5)
+            store = peer_steward.peer_obligations.ObligationStore()
+            duty, = store.list()
+            original = peer._read_pending(duty["intent"]["ref"])
+            self._set_inventory([])
+            entered, release = threading.Event(), threading.Event()
+            read = peer._pending_rows
+            def paused_read(**kw):
+                entered.set()
+                self.assertTrue(release.wait(5))
+                yield from read(**kw)
+            codes, errors = [], []
+            def retry():
+                try: codes.append(peer_steward.cmd_prompt(args))
+                except BaseException as exc: errors.append(exc)
+            with mock.patch.object(peer, "_pending_rows", side_effect=paused_read):
+                thread = threading.Thread(target=retry)
+                thread.start()
+                try:
+                    self.assertTrue(entered.wait(5))
+                    self.assertEqual(peer_steward.cmd_prompt(args), 5)
+                finally:
+                    release.set()
+                    thread.join(5)
+            self.assertFalse(thread.is_alive())
+            self.assertFalse(errors)
+            self.assertEqual(codes, [5])
+            self.assertEqual(list(peer._pending_rows()), [original])
+            self.assertEqual(store.list(), [duty])
+            self._set_inventory(inventory)
+            adds = []
+            def submit(_socket, **kw):
+                if kw["allow_add"]:
+                    kw["before_add"]()
+                    adds.append(kw["client_message_id"])
+                return {"status": "queued"}
+            with mock.patch.object(queue, "send_at_least_once", side_effect=submit):
+                peer_steward.cmd_prompt(args)
+                peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+            self.assertEqual(adds, ["delivery-peer-" + original["ref"]])
 
     def test_concurrent_unresolved_prompt_retries_retain_one_duty_and_submit_once(self):
         import codex_queue_delivery as queue
@@ -6059,7 +6278,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                     for patcher in patches:
                         stack.enter_context(patcher)
                     rc = peer_steward.main([
-                        "prompt", "child", "[steer] respect existing pane protections"])
+                        "prompt", "child", "[steer] respect existing pane protections " + sid])
                 self.assertEqual(rc, 3)
                 self.assertEqual(sends, [])
                 record = self._all_records()[-1]
