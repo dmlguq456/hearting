@@ -1068,6 +1068,16 @@ def _read_pending(ref, *, roots=None, state_root=None):
                 and bound.get("harness") == original.get("harness")
                 and bound.get("pane_id") == original.get("pane_id")))):
         raise ValueError("peer-pending-recipient-binding-invalid")
+    associations = row.get("verified_addresses", [])
+    pin = bound or original
+    if (not isinstance(associations, list) or any(
+            not isinstance(item, dict)
+            or set(item) != {"target", "server", "harness", "session_id"}
+            or not all(isinstance(item[key], str) and item[key] for key in item)
+            or not _valid_transfer_endpoint(pin) or not _same_transfer_session(item, pin)
+            or row.get("server") is not None and item["server"] != row["server"]
+            for item in associations)):
+        raise ValueError("peer-pending-address-binding-invalid")
     if (_valid_pane_bound_endpoint(original) and row.get("state") in ("queued", "received")
             and bound is None):
         submitted_sidless = (
@@ -1243,7 +1253,7 @@ def _quarantine_pending(path, expected):
         return False
 
 
-def _pending_rows(*, recipient=None, sender=None, read_context=None):
+def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=False):
     # Every row of one scan reads the same ledger roots; resolving them per row
     # cost seconds on each prompt once a few thousand rows had accumulated.
     try:
@@ -1266,6 +1276,10 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None):
             continue
         except (OSError, ValueError) as exc:
             if isinstance(exc, OSError) and exc.errno != errno.ELOOP:
+                if strict:
+                    # Preparation cannot turn unavailable retained state into
+                    # a fresh send. Keep established corruption quarantine below.
+                    raise
                 # A lock or temporary I/O failure proves no damage; the next
                 # ordinary callback can read this entry in its original place.
                 continue
@@ -1344,7 +1358,7 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                                or _valid_pane_bound_endpoint(recipient)))
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
 
-    def matches_target(row):
+    def address_evidence(row):
         target = row.get("to") or {}
         bound = row.get("bound_to") or target
         # A retained request keeps its address even when resolution disappears
@@ -1354,12 +1368,16 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         if (_unresolved_target(target)
                 or isinstance(row.get("original_target"), str) and row["original_target"]):
             addresses.append(target.get("name"))
-        same_native = (_valid_transfer_endpoint(bound)
-                       and _same_transfer_session(bound, recipient))
         recorded = row.get("server")
+        for association in row.get("verified_addresses", []):
+            if (association.get("server") == server
+                    and _valid_transfer_endpoint(bound)
+                    and _same_transfer_session(association, bound)):
+                addresses.append(association["target"])
+                if recorded is None:
+                    recorded = association["server"]
         if ((server is not None and recorded is None)
-                or (original_target is not None and original_target not in addresses
-                    and not same_native)):
+                or (original_target is not None and original_target not in addresses)):
             from peer_obligations import ObligationStore
             duty = ObligationStore().get("message-" + row["ref"])
             intent = (duty or {}).get("intent") or {}
@@ -1375,6 +1393,12 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                         recorded = identity.get("server")
                     if recorded == identity.get("server"):
                         addresses.extend((intent.get("target"), target.get("name")))
+        return addresses, recorded
+
+    def matches_target(row):
+        target = row.get("to") or {}
+        bound = row.get("bound_to") or target
+        addresses, recorded = address_evidence(row)
         if server is not None and recorded != server:
             return False  # Missing endpoint evidence is not the default endpoint.
         if original_target is not None and original_target in addresses:
@@ -1382,12 +1406,12 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
         if _valid_pane_bound_endpoint(target):
             return (target.get("harness") == recipient.get("harness")
                     and target.get("pane_id") == recipient.get("pane_id"))
-        return (same_native or not _unresolved_target(target)
+        return (_valid_transfer_endpoint(bound) and _same_transfer_session(bound, recipient)
+                or not _unresolved_target(target)
                 and not _unresolved_target(recipient) and _same_transfer_session(bound, recipient))
 
-    def existing():
-        for row in _pending_rows():
-            if (all(row["from"].get(k) == sender.get(k) for k in ("harness", "session_id"))
+    def same_intent(row):
+        return (all(row["from"].get(k) == sender.get(k) for k in ("harness", "session_id"))
                     and (_unresolved_target(recipient) or recipient.get("session_id") is not None
                          or row["to"].get("name") == recipient.get("name"))
                     and (sender.get("session_id") is not None or row["from"].get("name") == sender.get("name"))
@@ -1396,7 +1420,11 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                     and bool(row.get("no_trailer", False)) == (not with_trailer)
                     and row.get("producer_binding") == producer_binding
                     and row.get("handoff") == handoff
-                    and matches_target(row)):
+                    and matches_target(row))
+
+    def existing():
+        for row in _pending_rows(strict=True):
+            if same_intent(row):
                 if _unresolved_target(row.get("to")) and not row.get("bound_to"):
                     # Reuse still-unresolved or submitted intents without acquiring
                     # a send/binding claim. Only a known unsent exact recovery binds.
@@ -1408,15 +1436,32 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                         row = bind_unresolved_pending_recipient(row["ref"], recipient)
                         if row is None:
                             raise ValueError("peer-pending-binding-changed")
+                bound = row.get("bound_to") or row["to"]
+                if (original_target and server is not None
+                        and _valid_transfer_endpoint(bound)
+                        and _same_transfer_session(bound, recipient)
+                        and original_target not in address_evidence(row)[0]):
+                    # The resolver just verified this address against the retained
+                    # native pin on the selected endpoint. Merge into a fresh row:
+                    # a concurrent submit/bind/ACK must never be overwritten.
+                    with pending_lock(row["ref"]):
+                        current = _read_pending(row["ref"])
+                        if (current is None or not same_intent(current)
+                                or not _same_transfer_session(
+                                    current.get("bound_to") or current["to"], bound)):
+                            raise ValueError("peer-pending-binding-changed")
+                        association = {"target": original_target, "server": server,
+                                       "harness": bound["harness"],
+                                       "session_id": bound["session_id"]}
+                        associations = current.get("verified_addresses", [])
+                        if association not in associations:
+                            _save_pending(dict(current, verified_addresses=[*associations, association]))
                 return row["text"], row["ref"]
         return None
 
     if not defer:
         # An ordinary send is not gated by an unrelated pending writer.
-        try:
-            found = existing()
-        except (OSError, ValueError):
-            found = None
+        found = existing()
         return found or _prepare_peer_message(body, sender, recipient, include_trailer=with_trailer,
                                               reference_evidence=reference_evidence, refs=refs,
                                               producer_binding=producer_binding, handoff=handoff)

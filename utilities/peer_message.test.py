@@ -2318,6 +2318,10 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
             self.assertEqual(prepare(recipient=recipient), original)
         self.assertEqual(prepare(recipient=dict(unknown, name="w1:pX"), original_target="w1:pX"), original)
         self.assertEqual(peer_message._read_pending(original[1]), before)
+        self.assertEqual(prepare(original_target="[3e]"), original)
+        unknown = dict(unknown, name="[3e]")
+        self.assertEqual(prepare(recipient=unknown, original_target="[3e]"), original)
+        before = peer_message._read_pending(original[1])
         variants = ({"body": "different"}, {"refs": ["different"]}, {"server": "ambient"},
                     {"sender": dict(self.sender, session_id="other")}, {"with_trailer": False},
                     {"producer_binding": {"different": "producer"}},
@@ -2327,7 +2331,7 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         with mock.patch.object(peer_message, "_valid_runtime_producer_binding", return_value=True):
             for kwargs in variants:
                 with self.subTest(kwargs=kwargs):
-                    self.assertNotEqual(prepare(recipient=unknown, **kwargs)[1], original[1])
+                    self.assertNotEqual(prepare(recipient=unknown, original_target="[3e]", **kwargs)[1], original[1])
         other_address = {"harness": "unknown", "session_id": None, "name": "unrelated"}
         self.assertNotEqual(prepare(recipient=other_address, original_target="unrelated")[1], original[1])
         self.assertEqual(peer_message._read_pending(original[1]), before)
@@ -2366,6 +2370,233 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
                 else:
                     self.assertNotEqual(result[1], ref)
                 self.assertEqual(peer_message._read_pending(ref), original)
+
+    def test_verified_aliases_survive_sequences_without_guessing_unseen_addresses(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        for unresolved in (False, True):
+            body = "alias history " + str(unresolved)
+            def prepare(target, recipient=exact, **kw):
+                return peer_message.prepare_peer_message(body, self.sender, recipient,
+                    defer=True, original_target=target, server=kw.pop("server", "selected"), **kw)
+            original = prepare("child", unknown if unresolved else exact)
+            self.assertEqual(prepare("child"), original)
+            before = peer_message._read_pending(original[1])
+            wire = peer_message._transfer_path(original[1]).read_bytes()
+            aliases = ["[3e]", "renamed", "w1:pMoved", "[4f]"]
+            for alias in aliases:
+                self.assertEqual(prepare(alias, dict(exact, name="renamed", pane_id="w1:pMoved")), original)
+                for seen in aliases[:aliases.index(alias) + 1]:
+                    for _ in range(2):
+                        self.assertEqual(prepare(seen, dict(unknown, name=seen)), original)
+            after = peer_message._read_pending(original[1])
+            self.assertEqual({a["target"] for a in after["verified_addresses"]}, set(aliases))
+            self.assertEqual({k: v for k, v in after.items() if k != "verified_addresses"}, before)
+            self.assertEqual(peer_message._transfer_path(original[1]).read_bytes(), wire)
+            # Resolution to another pin is never remembered on the old request.
+            self.assertEqual(prepare("renamed", dict(exact, session_id="namesake")), original)
+            self.assertEqual(peer_message._read_pending(original[1]), after)
+            self.assertNotEqual(prepare("never-observed", dict(unknown, name="never-observed"))[1], original[1])
+            self.assertNotEqual(prepare("[3e]", dict(unknown, name="[3e]"), server="ambient")[1], original[1])
+
+    def test_legacy_aliases_need_recorded_endpoint_and_new_exact_observation(self):
+        import peer_obligations
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "[3e]"}
+        for evidence in ("row", "duty", "none"):
+            body = "legacy alias " + evidence
+            original = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                **({"server": "selected"} if evidence == "row" else {}))
+            before = peer_message._read_pending(original[1])
+            if evidence == "duty":
+                peer_obligations.ObligationStore().create("message-" + original[1], "message",
+                    {"server": "selected", **exact}, {"ref": original[1], "body_digest": before["body_sha256"],
+                    "from": self.sender, "to": exact, "target": "w1:pX", "refs": []})
+            # Nothing records this tag until a real exact retry uses it.
+            unseen = peer_message.prepare_peer_message(body, self.sender, unknown, defer=True,
+                original_target="[3e]", server="selected")
+            self.assertNotEqual(unseen[1], original[1])
+            self.assertEqual(peer_message._read_pending(original[1]), before)
+            # Retire only this fixture's independent negative-control request.
+            peer_message._pending_path(unseen[1]).unlink()
+            peer_message._transfer_path(unseen[1]).unlink()
+            observed = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                original_target="[3e]", server="selected")
+            if evidence == "none":
+                self.assertNotEqual(observed[1], original[1])
+                self.assertEqual(peer_message._read_pending(original[1]), before)
+            else:
+                self.assertEqual(observed, original)
+                # The association itself retains its checked endpoint/pin;
+                # later duty observations need not invent either fact.
+                with mock.patch.object(peer_obligations.ObligationStore, "get", return_value=None):
+                    self.assertEqual(peer_message.prepare_peer_message(body, self.sender, unknown,
+                        defer=True, original_target="[3e]", server="selected"), original)
+
+    def test_alias_updates_merge_fresh_submission_and_reject_changed_binding(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        for mutation in ("submitted", "received", "bound", "missing", "unreadable"):
+            with self.subTest(mutation=mutation):
+                body = "alias CAS " + mutation
+                unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+                text, ref = peer_message.prepare_peer_message(body, self.sender,
+                    unknown if mutation == "bound" else exact, defer=True,
+                    original_target="child", server="selected")
+                if mutation == "bound":
+                    peer_message.bind_unresolved_pending_recipient(ref, exact)
+                snapshot = peer_message._read_pending(ref)
+                # The scan has already observed this snapshot; another existing
+                # writer changes the row before the alias writer acquires its CAS.
+                if mutation == "submitted":
+                    current = dict(snapshot, state="queued", rpc_claim={"token": "concurrent"},
+                                   actual_message_id="native-item", receipt="native-queue-accepted")
+                elif mutation == "received":
+                    self.assertEqual(peer_message.receive_peer_message(text, exact), 0)
+                    current = peer_message._read_pending(ref)
+                    self.assertIsNone(current["text"])
+                elif mutation == "bound":
+                    current = dict(snapshot, bound_to=dict(exact, session_id="other"))
+                else:
+                    current = snapshot
+                peer_message._save_pending(current)
+                with mock.patch.object(peer_message, "_pending_rows", return_value=iter([snapshot])):
+                    if mutation in ("missing", "unreadable"):
+                        read = mock.patch.object(peer_message, "_read_pending", return_value=None,
+                            side_effect=OSError("unavailable") if mutation == "unreadable" else None)
+                    else:
+                        read = contextlib.nullcontext()
+                    with read, mock.patch.object(peer_message, "_prepare_peer_message") as publish:
+                        if mutation in ("bound", "missing", "unreadable"):
+                            with self.assertRaises((OSError, ValueError)):
+                                peer_message.prepare_peer_message(body, self.sender, exact,
+                                    defer=True, original_target="[3e]", server="selected")
+                        else:
+                            self.assertEqual(peer_message.prepare_peer_message(body, self.sender, exact,
+                                defer=True, original_target="[3e]", server="selected"), (text, ref))
+                        publish.assert_not_called()
+                latest = peer_message._read_pending(ref)
+                self.assertEqual({k: v for k, v in latest.items() if k != "verified_addresses"}, current)
+
+    def test_concurrent_alias_recording_and_outage_preparation_keep_every_association(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        body = "alias concurrency"
+        text, ref = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+            original_target="child", server="selected")
+        entered, release = threading.Event(), threading.Event()
+        save = peer_message._save_pending
+        errors = []
+        def paused(row):
+            if row.get("verified_addresses", [{}])[-1].get("target") == "[3e]":
+                entered.set()
+                if not release.wait(5): raise AssertionError("alias writer not released")
+            return save(row)
+        def prepare(alias, recipient=exact):
+            return peer_message.prepare_peer_message(body, self.sender, recipient, defer=True,
+                original_target=alias, server="selected")
+        def first():
+            try: self.assertEqual(prepare("[3e]"), (text, ref))
+            except BaseException as exc: errors.append(exc)
+        with mock.patch.object(peer_message, "_save_pending", side_effect=paused):
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                # Different pane/native preparation key, same retained row CAS.
+                with self.assertRaises(BlockingIOError):
+                    prepare("renamed", dict(exact, pane_id="w1:pMoved"))
+                with self.assertRaises(BlockingIOError):
+                    prepare("[3e]", {"harness": "unknown", "session_id": None, "name": "[3e]"})
+            finally:
+                release.set(); thread.join(5)
+                self.assertFalse(thread.is_alive())
+        self.assertFalse(errors, errors)
+        self.assertEqual(prepare("renamed", dict(exact, pane_id="w1:pMoved")), (text, ref))
+        for alias in ("[3e]", "renamed"):
+            self.assertEqual(prepare(alias, {"harness": "unknown", "session_id": None, "name": alias}), (text, ref))
+        self.assertEqual({a["target"] for a in peer_message._read_pending(ref)["verified_addresses"]}, {"[3e]", "renamed"})
+        self.assertEqual(len(list(peer_message._pending_rows())), 1)
+
+    def test_alias_recording_during_native_rpc_preserves_inflight_claim_and_single_add(self):
+        import codex_queue_delivery as queue
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        body = "alias while native submission is inflight"
+        text, ref = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+            original_target="child", server="selected")
+        entered, release = threading.Event(), threading.Event()
+        adds, results, errors = [], [], []
+        def rpc(_path, method, params, **_kw):
+            if method == "thread/queue/list": return {"data": [], "nextCursor": None}
+            self.assertEqual(method, "thread/queue/add")
+            adds.append(params)
+            entered.set()
+            if not release.wait(5): raise AssertionError("native add not released")
+            return {"queuedSubmission": {"id": "native-item"}}
+        def deliver():
+            try: results.append(peer_message.deliver_pending_codex(ref))
+            except BaseException as exc: errors.append(exc)
+        with mock.patch("codex_queue_dispatch.resolve_queue_socket", return_value="fixture-socket"), \
+             mock.patch.object(queue, "_known_consumed", return_value=None), \
+             mock.patch.object(queue, "_rpc", side_effect=rpc):
+            thread = threading.Thread(target=deliver)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                inflight = peer_message._read_pending(ref)
+                self.assertTrue(inflight["rpc_claim"]["token"])
+                self.assertEqual((inflight["state"], inflight["receipt"]), ("unverified", "native-queue-inflight"))
+                for alias in ("[3e]", "renamed", "w1:pMoved"):
+                    self.assertEqual(peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                        original_target=alias, server="selected"), (text, ref))
+                    self.assertEqual(peer_message.prepare_peer_message(body, self.sender,
+                        {"harness": "unknown", "session_id": None, "name": alias}, defer=True,
+                        original_target=alias, server="selected"), (text, ref))
+                latest = peer_message._read_pending(ref)
+                self.assertEqual({k: v for k, v in latest.items() if k != "verified_addresses"}, inflight)
+                self.assertEqual(peer_message.deliver_pending_codex(ref)["reason"], "peer-native-inflight")
+            finally:
+                release.set(); thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.assertFalse(errors, errors)
+            peer_message.deliver_pending_codex(ref)
+        latest = peer_message._read_pending(ref)
+        self.assertEqual(len(latest["verified_addresses"]), 3)
+        self.assertEqual(len(adds), 1)
+        self.assertEqual(adds[0]["clientUserMessageId"], "delivery-peer-" + ref)
+        self.assertEqual(adds[0]["threadId"], exact["session_id"])
+        self.assertEqual(adds[0]["input"], [{"type": "text", "text": text}])
+        sys.stdout.write("peer-alias-inflight=" + json.dumps({"ref": ref, "adds": adds,
+            "aliases": latest["verified_addresses"], "results": results}) + "\n")
+
+    def test_alias_write_failure_and_interruption_never_fall_through_to_publication(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        for defer, fault in ((True, "before-replace"), (False, "before-replace"),
+                             (True, "after-replace"), (True, "read-unavailable")):
+            with self.subTest(defer=defer, fault=fault):
+                body = "alias interruption " + str(defer) + fault
+                original = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                    original_target="child", server="selected")
+                wire = peer_message._transfer_path(original[1]).read_bytes()
+                fsync = peer_message.os.fsync
+                def fail_directory(fd):
+                    if stat.S_ISDIR(os.fstat(fd).st_mode): raise OSError("directory fsync interruption")
+                    return fsync(fd)
+                patch = (mock.patch.object(peer_message.os, "replace", side_effect=OSError("replace failed"))
+                         if fault == "before-replace" else
+                         mock.patch.object(peer_message.os, "fsync", side_effect=fail_directory)
+                         if fault == "after-replace" else
+                         mock.patch.object(peer_message, "_read_pending", side_effect=OSError("state unavailable")))
+                with patch, mock.patch.object(peer_message, "_prepare_peer_message") as publish:
+                    with self.assertRaises(OSError):
+                        peer_message.prepare_peer_message(body, self.sender, exact, defer=defer,
+                            original_target="[3e]", server="selected")
+                    publish.assert_not_called()
+                self.assertEqual(peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                    original_target="[3e]", server="selected"), original)
+                self.assertEqual(peer_message.prepare_peer_message(body, self.sender,
+                    {"harness": "unknown", "session_id": None, "name": "[3e]"}, defer=True,
+                    original_target="[3e]", server="selected"), original)
+                self.assertEqual(peer_message._transfer_path(original[1]).read_bytes(), wire)
+                self.assertFalse(list(peer_message._pending_dir().glob(".pending-*")))
 
     def test_exact_outage_retry_preserves_native_rpc_submission_and_ambiguity(self):
         import codex_queue_delivery as queue
