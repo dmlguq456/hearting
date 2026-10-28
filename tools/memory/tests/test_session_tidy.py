@@ -2471,6 +2471,18 @@ class CodexCompactBridgeTest(TidyCase):
             valid, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
             self.assertIsNotNone(valid, reason)
 
+            accepted.pop("acceptance")
+            clear._write_reservation(accepted)
+            recovered, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
+            self.assertIsNotNone(recovered, reason)
+            queue_path = runner._item_path(booking["queue_id"])
+            queue_bytes = queue_path.read_bytes()
+            queue_path.write_text('{unreadable')
+            unreadable, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
+            self.assertIsNone(unreadable)
+            self.assertEqual(reason, "idle-card-observation-unavailable")
+            self.assertEqual(clear.read_reservation(self.seat.key)["status"], "reserved")
+            queue_path.write_bytes(queue_bytes)
             accepted["acceptance"] = {"schema": 1, "nonce": booking["nonce"], "queue_id": booking["queue_id"]}
             clear._write_reservation(accepted)
             invalid, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
@@ -4044,6 +4056,22 @@ class ClearHelperTest(TidyCase):
     def status(self, seat):
         return st.read_json(self.state / "clear" / f"{seat.key}.json")["status"]
 
+    def test_snapshot_preparation_wait_keeps_the_same_helper_and_clear_identity(self):
+        seat, req = self.booked()
+        calls = []
+        def steward(path, nonce, pane):
+            calls.append(nonce)
+            if len(calls) == 1:
+                return {"cleared": "queued", "reason": "snapshot-pending"}
+            return {"cleared": "true", "new_session": "sid-B"}
+        with self.iso.patched_environ(self.extra):
+            result = clear.run_helper(seat.key, req["nonce"], wait=lambda *_: "idle",
+                steward=steward, sleep=lambda _: None)
+            saved = clear.read_reservation(seat.key)
+        self.assertEqual(result, "cleared")
+        self.assertEqual(calls, [req["nonce"], req["nonce"]])
+        self.assertEqual((saved["nonce"], saved["status"]), (req["nonce"], "cleared"))
+
     def test_an_idle_window_is_cleared_once_and_silently(self):
         seat, req = self.booked()
         self.assertEqual(self.run_helper(seat, req), "cleared")
@@ -4545,6 +4573,19 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual([b["attempt"] for b in snap["bindings"]], [keep["attempt_id"]])
         self.assertEqual(snap["from"], {"harness": "claude", "sid": "sid-A"})
 
+    def test_project_handover_requires_an_existing_exact_session_binding(self):
+        with self.iso.patched_environ():
+            shared = st.seat_for_project("codex", "same-project")
+            self.assertIsNone(self.handover.record_retire_handover("project-A", "claude", "project-B", "codex",
+                successor_seat=shared, jobs=self.jobs))
+            for old, new in (("project-A", "project-B"), ("project-X", "project-Y")):
+                exact = st.session_seat(shared, "codex", new)
+                row = self.handover.record_retire_handover(old, "claude", new, "codex",
+                    successor_seat=exact, jobs=self.jobs)
+                self.assertEqual(row["bindings"], [])
+                self.assertEqual(self.handover.session_successor(old), (new, "codex"))
+            self.assertEqual(len(list(self.handover._snapshot_dir().glob("*.json"))), 2)
+
     def test_zero_job_source_race_replay_chain_and_empty_publication(self):
         import concurrent.futures, threading
         from peer_read_context import PeerReadContext
@@ -4932,6 +4973,28 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual([(r["from"], r["sid"]) for r in rows], [("ses_A", "ses_B")])
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
             self.assertEqual(self.handover.effective_parent(meta, self.jobs), "ses_B")
+
+    def test_opencode_chat_message_wire_reaches_the_same_hook_writer_once(self):
+        meta = self.row("opencode-cli", parent="ses_A", harness="opencode")
+        self.snapshot(sid="ses_A", harness="opencode", now=st.now_epoch() - 5)
+        args = ("hook", "--harness", "opencode", "--event", "prompt", "--session-id", "ses_cli",
+                "--cwd", str(self.cwd), "--format", "json")
+        for _ in range(2):
+            event = self.cli(*args, input=json.dumps({"prompt": "continue the accepted work"}))
+            self.assertEqual(event.returncode, 0, event.stderr)
+            self.assertIn("additionalContext", json.loads(event.stdout))
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "ses_cli")
+            rows = self.handover.handover_rows(self.seat())
+            self.assertEqual([(row["from"], row["sid"]) for row in rows], [("ses_A", "ses_cli")])
+
+    def test_opencode_callback_cannot_promote_a_fork_or_an_older_native_session(self):
+        meta = self.row("opencode-protected", parent="ses_A", harness="opencode")
+        self.snapshot(sid="ses_A", harness="opencode", now=st.now_epoch() - 5)
+        self.start("ses_fork", harness="opencode", event="start", source="fork")
+        self.assertEqual(self.start("ses_fork", harness="opencode", event="prompt", source="")[1], [])
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "ses_A")
 
     def test_storage_stays_with_the_registered_parent_and_only_bound_attempts_reach_the_taker(self):
         self.row("att-1")

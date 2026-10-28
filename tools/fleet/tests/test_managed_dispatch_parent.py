@@ -53,6 +53,31 @@ class ManagedDispatchParentTest(unittest.TestCase):
             sessions, [job], "both", False, 0, layout="wide", term_width=180,
         ))
 
+    def test_unreadable_lineage_retains_only_the_previously_confirmed_edge_for_existing_grace(self):
+        from fleet.collectors import _effective_job_parent
+        utilities = TOOLS.parent / "utilities"
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import dispatch_seat_handover as handover
+        job = self.job()
+        job._registry_metadata = {"parent_sid": job.parent_sid}
+        job._registry_path = "/fixture/jobs.log"
+        parent = self.session(sid="confirmed-successor")
+        with mock.patch.object(handover, "effective_parent", return_value=parent.session_id), \
+             mock.patch.object(handover, "effective_parent_harness", return_value="codex"):
+            resolve_parent_edges([parent], [job])
+        self.assertEqual(job._parent_edge_sid, parent.session_id)
+        original = job.parent_sid
+        with mock.patch.object(handover, "effective_parent", return_value=""), \
+             mock.patch.object(handover, "effective_parent_harness", return_value=""):
+            self.assertEqual(_effective_job_parent(job), ("", ""))
+            for _ in range(3):
+                resolve_parent_edges([self.session(sid=original)], [job])
+                self.assertEqual(job._parent_edge_sid, parent.session_id)
+            resolve_parent_edges([self.session(sid=original)], [job])
+            self.assertIsNone(job._parent_edge_sid)
+        self.assertEqual(job.parent_sid, original)
+
     def test_unique_exact_managed_dir_recovers_parent(self):
         text = self.rendered([self.session()], self.job())
         self.assertIn("managed parent", text)

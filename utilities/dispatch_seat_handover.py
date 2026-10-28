@@ -1584,11 +1584,11 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
         return None
     st = _st()
     seat = successor_seat or pane_seat(env, successor_harness, successor_sid)
-    if seat is None:
-        seat = st.resolve_seat(successor_harness, env=env, sid=successor_sid)
     if seat is None or seat.kind not in {"pane", "native", "project"}:
         return None
     if seat.kind == "project":
+        if st.session_identity(seat) != (successor_harness, successor_sid):
+            return None  # A shared project/inherited pane is not an exact native receiver.
         import dataclasses
         seat = dataclasses.replace(st.session_seat(seat, successor_harness, successor_sid),
                                    key=st._native_session_key(successor_harness, successor_sid))
@@ -1652,17 +1652,24 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
 
 
 def _confirmed_clear(seat, harness: str, old: str, sid: str, event: str, source: str) -> bool:
-    if harness == "opencode":
-        return True                # no start hook: the first message of a new session after the snapshot
+    origins = {str(row.get("source") if row.get("event") == "start" else row.get("start_source") or "")
+               for row in _st()._read_ledger_lines(seat, strict=True)
+               if (row.get("harness"), row.get("sid")) == (harness, sid)}
+    if source == "fork" or "fork" in origins:
+        return False
     if event == "start" and source == "clear":
         return True
     try:
         import session_tidy_clear as clear
         booking = clear.read_reservation(seat.key)
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(booking) and booking.get("sid") == old and booking.get("harness") == harness and (
-        (booking.get("observed") or {}).get("sid") == sid or booking.get("new_session") == sid)
+    except (OSError, ValueError, TypeError):
+        booking = None
+    if bool(booking) and booking.get("sid") == old and booking.get("harness") == harness and (
+            (booking.get("observed") or {}).get("sid") == sid or booking.get("new_session") == sid):
+        return True
+    if harness == "opencode" and event == "prompt":
+        return not (origins | {source}) & {"startup", "resume", "select", "new"}
+    return False
 
 
 # ---------------------------------------------------------------------------

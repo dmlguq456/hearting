@@ -2832,17 +2832,14 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         proof = {"schema": "peer-first-input-process-v1", "harness": "codex",
                  "pane_id": "w1:p2", "pid": 22, "start": "202",
                  "pid_namespace": "pid:[4026531836]"}
+        successor = dict(self.successor, session_id=None)
+        requester = {"harness": "codex", "session_id": None, "pane": "w1:p2", "server": "default"}
+        context = {"card_id": "sidless-card", "target": "w1:p1", "predecessor": self.predecessor,
+                   "successor": successor, "requester": requester}
         text, ref = peer_message.prepare_peer_message(
             "[handoff] first turn card", self.sender, recipient, defer=True,
-            first_input_process=proof)
-        row = peer_message._read_pending(ref)
-        successor = dict(self.successor, session_id=None)
-        requester = {"harness": "codex", "session_id": None,
-                     "pane": "w1:p2", "server": "default"}
-        row["handoff"] = {"card_id": "sidless-card", "target": "w1:p1",
-            "predecessor": self.predecessor, "successor": successor,
-            "requester": requester}
-        peer_message._save_pending(row)
+            first_input_process=proof, handoff=context)
+        self.assertIn(peer_message.handoff_accept_command(ref), text)
         before_transfer = peer_message._transfer_path(ref).read_bytes()
         with self.assertRaisesRegex(ValueError, "handoff-context-invalid"):
             self.runner.accept_handoff(ref, self.caller)

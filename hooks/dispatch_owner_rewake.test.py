@@ -25,6 +25,7 @@ from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("dispatch-owner-rewake.py")
 ROOT = MODULE_PATH.parents[1]
+sys.path.insert(0, str(ROOT / "tools"))
 # A holder that is provably dead *from this process's own PID namespace*:
 # pid 4194304 is above Linux's pid_max, so `/proc/<pid>` never exists, and
 # the namespace is ours so the hook may judge it (a holder recorded from
@@ -178,7 +179,8 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
         # inherited (CI 2026-09-10; the peer classes already do this).
         environment = mock.patch.dict(
             os.environ,
-            {"AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_HOME": str(MODULE_PATH.parents[1])},
+            {"AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_HOME": str(MODULE_PATH.parents[1]),
+             "AGENT_CLAUDE_REWAKE_MAX_SECONDS": "1", "AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS": "1"},
             clear=False,
         )
         environment.start()
@@ -187,7 +189,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
     @staticmethod
     def row(*, attempt_id="att-owner-1", status="open", parent_sid="session-1", age_seconds=0.0, **overrides):
         stamp = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat().replace("+00:00", "Z")
-        metadata = {"capability": "autopilot-code", "dispatch_depth": "1", "worker_type": "owner",
+        metadata = {"attempt_schema_version": "2", "capability": "autopilot-code", "dispatch_depth": "1", "worker_type": "owner",
                     "parent_sid": parent_sid, "parent_completion_delivery": "claude-parent-runtime",
                     "launch_claimed": "1", "launch_started": "1", "attempt_id": attempt_id}
         metadata.update(overrides)
@@ -988,6 +990,7 @@ class DispatchOwnerRewakeTest(unittest.TestCase):
             self.assertEqual(rewake.main(), 0)
 
     def test_intact_stdout_never_consults_the_registry(self) -> None:
+        self.jobs.write_text(self.row(status="done"), encoding="utf-8")
         launch = rewake.parse_launch(self.payload())
         assert launch is not None
         self.assertEqual(launch.armed, "stdout")
@@ -1021,11 +1024,22 @@ class RegistryConfirmArmTest(unittest.TestCase):
         self.agent_home = MODULE_PATH.parents[1]
         self.environment = mock.patch.dict(
             os.environ,
-            {"AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_HOME": str(self.agent_home)},
+            {"AGENT_DISPATCH_JOBS": str(self.jobs), "AGENT_HOME": str(self.agent_home),
+             "AGENT_CLAUDE_REWAKE_MAX_SECONDS": "1", "AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS": "1"},
             clear=False,
         )
         self.environment.start()
         self.addCleanup(self.environment.stop)
+
+    def _ready_after_terminal(self, launch, *_args, **_kwargs):
+        for line in reversed(self.jobs.read_text().splitlines()):
+            fields = line.split("\t")
+            if f"attempt_id={launch.attempt_id}" in fields[5].split(","):
+                fields[1] = "done"
+                with self.jobs.open("a") as registry:
+                    registry.write("\t".join(fields) + "\n")
+                break
+        return "ready", "terminal-quiescent"
 
     def stamp(self, age_seconds: float = 0.0) -> str:
         moment = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
@@ -1043,6 +1057,7 @@ class RegistryConfirmArmTest(unittest.TestCase):
         **overrides: str,
     ) -> str:
         metadata = {
+            "attempt_schema_version": "2",
             "capability": "autopilot-code",
             "dispatch_depth": "1",
             "worker_type": "owner",
@@ -1319,7 +1334,7 @@ class RegistryConfirmArmTest(unittest.TestCase):
         # Review R2 B2: a crash between classification and emission must leave
         # the claim re-armable, or the wake is lost forever.
         with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(self.payload()))), \
-             mock.patch.object(rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")), \
+             mock.patch.object(rewake, "wait_for_attempt", side_effect=self._ready_after_terminal), \
              mock.patch.object(rewake, "classified_receipt", side_effect=RuntimeError("crash")), \
              mock.patch.object(rewake.sys, "stdout", io.StringIO()), \
              mock.patch.object(rewake.sys, "stderr", io.StringIO()):
@@ -1418,7 +1433,7 @@ class RegistryConfirmArmTest(unittest.TestCase):
         )
         stdout = "check=ok\nstatus=start\nregistered=1\nstarted=1\nattempt_id=att-owner-b"
         with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(self.payload(stdout=stdout)))), \
-             mock.patch.object(rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")) as wait, \
+             mock.patch.object(rewake, "wait_for_attempt", side_effect=self._ready_after_terminal) as wait, \
              mock.patch.object(rewake.sys, "stdout", io.StringIO()), \
              mock.patch.object(rewake.sys, "stderr", io.StringIO()) as err:
             self.assertEqual(rewake.main(), 2)
@@ -1467,7 +1482,7 @@ class RegistryConfirmArmTest(unittest.TestCase):
     def test_registry_armed_run_reaches_the_unchanged_wait_path(self) -> None:
         with mock.patch.object(rewake.sys, "stdin", io.StringIO(json.dumps(self.payload()))), (
             mock.patch.object(
-                rewake, "wait_for_attempt", return_value=("ready", "terminal-quiescent")
+                rewake, "wait_for_attempt", side_effect=self._ready_after_terminal
             )
         ) as wait, mock.patch.object(rewake.sys, "stdout", io.StringIO()) as stdout, \
              mock.patch.object(rewake.sys, "stderr", io.StringIO()):
@@ -2104,7 +2119,9 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 # The real courier must refuse before sealing any payload if
                 # its own target read no longer matches the retained identity.
                 with mock.patch.object(steward, "_herdr_missing", return_value=False), \
-                        mock.patch.object(steward, "_resolve_target", return_value=("claude", "stranger", None)), \
+                        mock.patch.object(steward, "_resolve_prompt_target", return_value=({
+                            "harness": "claude", "session_id": "stranger", "pane": "w1:p9",
+                            "name": "stranger", "state": "idle"}, None, ["w1:p9"])), \
                         mock.patch.object(steward.peer_message, "prepare_peer_message") as sealed:
                     code = real_prompt(args, expected_recipient=expected_recipient,
                                        on_prepared=on_prepared, producer_binding=producer_binding)
@@ -3055,7 +3072,7 @@ class GateCarrierTest(unittest.TestCase):
         with mock.patch.object(rewake, "_gate_notices", return_value=[notice]), \
                 mock.patch.object(rewake, "emit_receipt", return_value=2) as emit, \
                 mock.patch.object(rewake, "_ended", return_value=2):
-            rewake._emit_with_gates(self._launch(), None, "success", "Finished.", block=False)
+            rewake._emit_with_gates_locked(self._launch(), None, "success", "Finished.", block=False)
         message = emit.call_args.args[1]
         self.assertIn(notice, message)
         self.assertNotIn("human gate", message)
@@ -3983,10 +4000,18 @@ class SeatHandoverRewakeTest(unittest.TestCase):
 
     def handed_to(self, successor):
         resolver = lambda meta, jobs=None: successor if meta.get("parent_sid") == "session-1" else meta.get("parent_sid")
-        return (mock.patch.object(rewake.seat_handover, "effective_parent", side_effect=resolver),
-                mock.patch.object(rewake.seat_handover, "owns",
-                                  side_effect=lambda meta, session, jobs=None, **kw: meta.get("parent_sid") == session
-                                  or resolver(meta, jobs) == session))
+        @contextlib.contextmanager
+        def answers():
+            def result(question, **kwargs):
+                meta = kwargs.get("metadata") or {}
+                current = resolver(meta)
+                return rewake.seat_handover.RecipientResolution(current, "claude", "confirmed",
+                    meta.get("parent_sid", ""), "claude")
+            with mock.patch.object(rewake.seat_handover, "effective_parent", side_effect=resolver), \
+                 mock.patch.object(rewake.seat_handover, "resolve_recipient", side_effect=result):
+                yield
+        return (answers(), mock.patch.object(rewake.seat_handover, "owns",
+            side_effect=lambda meta, session, jobs=None, **kw: meta.get("parent_sid") == session or resolver(meta, jobs) == session))
 
     def test_one_scan_reads_the_handover_snapshots_once_however_many_rows(self) -> None:
         # 2026-10-28: `owns` without a shared read context re-read every
@@ -4081,6 +4106,9 @@ class BatchWakeCarrierTest(unittest.TestCase):
                           "delivery_classification": "success" if success else "attention"}],
             "delivery_classification": "success" if success else "attention",
         }
+        with self.jobs.open("a") as registry:
+            registry.write("now\tdone\t/repo\t/wt\tbatch\tattempt_schema_version=2,"
+                + f"attempt_id={attempt_id},parent_sid={self.RECIPIENT},parent_harness=claude\n")
         self.pd.create(
             self.root, recipient_kind="claude-parent-runtime", recipient_key=self.RECIPIENT,
             delivery_id=delivery_id, session_generation="", session_generation_supported="0",
@@ -4330,6 +4358,27 @@ print(json.dumps({'code': code, 'stdout': out.getvalue(), 'stderr': err.getvalue
                 process.terminate()
                 process.communicate(timeout=2)
 
+    def test_unreadable_effect_boundaries_never_claim_ack_or_emit(self):
+        self._adopt_b()
+        self._create_gate()
+        claim = rewake.claim_arm(self.jobs, "att-gate-owner", "session-B", fresh=True)
+        launch = rewake.Launch("att-gate-owner", self.jobs, "session-B", armed="registry")
+        metadata = rewake._row_metadata(self.jobs, launch.attempt_id)
+        seat = self.tidy.resolve_seat("claude", str(self.root), os.environ)
+        path = self.handover._snapshot_path(seat.key)
+        path.write_text('{unreadable')
+        with mock.patch.object(rewake.pending_delivery, "claim_ready_batch") as take, \
+             mock.patch.object(rewake, "_gate_notices") as gates, \
+             mock.patch.object(rewake, "emit_receipt") as emit:
+            for action in (lambda: rewake._carrier_one_claim(launch, metadata, arm=claim),
+                           lambda: rewake._announce_gate(launch, claim, {}),
+                           lambda: rewake._emit_with_gates(launch, claim, "success", "body", block=False)):
+                with self.assertRaises(rewake.LineageUnavailable):
+                    action()
+            take.assert_not_called(); gates.assert_not_called(); emit.assert_not_called()
+        record = rewake.pending_delivery.read(self.state, "session-gate", self.delivery_id)
+        self.assertEqual((record["state"], record["attempts"]), ("pending", 0))
+
     def test_real_carrier_waits_through_unreadable_lineage_and_recovers(self):
         self._unreadable_wait_case("session-B")
 
@@ -4516,18 +4565,18 @@ jobs = Path(os.environ['AGENT_DISPATCH_JOBS'])
 claim = module.claim_arm(jobs, 'att-gate-owner', 'session-B', fresh=True)
 if not isinstance(claim, module.ArmClaim): raise SystemExit(10)
 signal_path, release_path = Path(sys.argv[2]), Path(sys.argv[3])
-real_parent = module.seat_handover.effective_parent
+real_parent = module.seat_handover.resolve_recipient
 def gate_wait(*args, **kwargs): return ('gate', 'human-gate-open')
-def paused_parent(meta, registry, **kwargs):
-    current = real_parent(meta, registry, **kwargs)
-    if current == 'session-B' and not signal_path.exists():
+def paused_parent(question, **kwargs):
+    current = real_parent(question, **kwargs)
+    if current.session_id == 'session-B' and not signal_path.exists():
         signal_path.touch()
         deadline = time.monotonic() + 5
         while not release_path.exists() and time.monotonic() < deadline: time.sleep(0.01)
         if not release_path.exists(): raise SystemExit(11)
     return current
 module.wait_for_attempt = gate_wait
-module.seat_handover.effective_parent = paused_parent
+module.seat_handover.resolve_recipient = paused_parent
 launch = module.Launch('att-gate-owner', jobs, 'session-B', armed='registry')
 payload = {'hook_event_name':'PostToolUse','tool_name':'Bash','session_id':'session-B',
  'tool_input':{'command':'python3 utilities/workflow-supervisor.py'},'tool_response':{'stdout':'','stderr':''}}
@@ -4589,7 +4638,7 @@ print(json.dumps({'code':code,'stdout':out.getvalue(),'stderr':err.getvalue()}),
         local = threading.local()
         effect_thread = threading.get_ident()
         real_lock = f.tidy.seat_lock
-        real_parent = f.handover.effective_parent
+        real_parent = f.handover.resolve_recipient
         reads = {"count": 0}
 
         def retire():
@@ -4613,23 +4662,15 @@ print(json.dumps({'code':code,'stdout':out.getvalue(),'stderr':err.getvalue()}),
                 finally:
                     local.binding = previous
 
-        def synchronized_real_read(meta, registry, **kwargs):
-            current = real_parent(meta, registry, **kwargs)
-            if meta.get("attempt_id") == "att-gate-owner" and current == "session-gate":
+        def synchronized_real_read(question, **kwargs):
+            current = real_parent(question, **kwargs)
+            meta = kwargs.get("metadata") or {}
+            if (meta.get("attempt_id") == "att-gate-owner" and current.session_id == "session-gate"
+                    and getattr(local, "binding", False) and not reads["count"]):
                 reads["count"] += 1
-                if reads["count"] == 2:
-                    # The first read is the pre-wait ownership check. The
-                    # second is immediately before gate claim/output. A stable
-                    # binding transaction makes the real retire writer wait;
-                    # the old snapshot-selected lock has no key yet.
-                    if getattr(local, "binding", False):
-                        def writer():
-                            retire()
-                        threading.Thread(target=writer, daemon=True).start()
-                        self.assertTrue(writer_lock_attempt.wait(2),
-                                        "retire writer did not reach the real binding lock")
-                    else:
-                        retire()
+                threading.Thread(target=retire, daemon=True).start()
+                self.assertTrue(writer_lock_attempt.wait(2),
+                                "retire writer did not reach the real binding lock")
             return current
 
         real_settle = rewake.settle_arm
@@ -4641,7 +4682,7 @@ print(json.dumps({'code':code,'stdout':out.getvalue(),'stderr':err.getvalue()}),
             return result
 
         with mock.patch.object(f.tidy, "seat_lock", side_effect=observed_lock), \
-             mock.patch.object(f.handover, "effective_parent",
+             mock.patch.object(f.handover, "resolve_recipient",
                                side_effect=synchronized_real_read), \
              mock.patch.object(rewake, "wait_for_attempt",
                                return_value=("gate", "human-gate-open")), \

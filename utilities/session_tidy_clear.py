@@ -1245,7 +1245,8 @@ def _accepted_queue_relation(req: dict, seat: "st.Seat") -> bool:
                 "harness", "sid", "arrival_seq", "card_generation", "source_generation"}
     request = req.get("idle_request") if isinstance(req.get("idle_request"), dict) else {}
     arrival = request.get("arrival") if isinstance(request.get("arrival"), dict) else {}
-    if not isinstance(acceptance, dict) or not required.issubset(acceptance) or acceptance.get("schema") != 1:
+    if acceptance is not None and (not isinstance(acceptance, dict)
+            or not required.issubset(acceptance) or acceptance.get("schema") != 1):
         return False
     try:
         import session_tidy_runner as runner
@@ -1253,6 +1254,9 @@ def _accepted_queue_relation(req: dict, seat: "st.Seat") -> bool:
         operation_id = str(req.get("operation_id") or "")
         item = runner.read_item(queue_id)
         card = st.read_latest_card(seat)
+        if ((item is None and runner._item_path(queue_id).exists())
+                or (card is None and st.card_json_path(seat).exists())):
+            return None  # Existing source unreadable; absence is a different observation.
         expected = {
             "nonce": req.get("nonce"), "claim_id": request.get("token"),
             "operation_id": operation_id, "queue_id": queue_id, "seat_key": seat.key,
@@ -1261,6 +1265,14 @@ def _accepted_queue_relation(req: dict, seat: "st.Seat") -> bool:
             "card_generation": (card or {}).get("generation"),
             "source_generation": int((item or {}).get("card_generation", 0) or 0),
         }
+        if acceptance is None:
+            # The accepted native request, durable operation/queue and exact card
+            # are the source facts; a missing derived receipt is not lost context.
+            if (expected["source_generation"] not in {
+                    int(req.get("source_card_generation", 0) or 0), int((card or {}).get("generation", 0) or 0)}
+                    or st.read_prompt_seq(seat) != int(arrival.get("prompt_seq", -1))):
+                return False
+            acceptance = {"schema": 1, **expected}
         if any(acceptance.get(key) != value for key, value in expected.items()):
             return False
         return bool(item and card and request.get("state") == "accepted"
@@ -1271,7 +1283,9 @@ def _accepted_queue_relation(req: dict, seat: "st.Seat") -> bool:
                     and (card.get("author") or {}).get("harness") == req.get("harness")
                     and (card.get("author") or {}).get("sid") == req.get("sid")
                     and int(card.get("prompt_seq", -1)) == int(arrival.get("prompt_seq", -2)))
-    except (OSError, TypeError, ValueError, KeyError):
+    except OSError:
+        return None
+    except (TypeError, ValueError, KeyError):
         return False
 
 
@@ -1303,9 +1317,12 @@ def validate_request(path, nonce: Optional[str] = None, *, now: Optional[float] 
     compact = req.get("compact") if isinstance(req.get("compact"), dict) else {}
     if ((req.get("origin") == "idle"
          or (req.get("origin") == "compact" and compact.get("card_request_required") is True))
-            and (req.get("origin") == "idle" or require_ready)
-            and not _accepted_queue_relation(req, seat)):
-        return None, "idle-card-not-accepted"
+            and (req.get("origin") == "idle" or require_ready)):
+        relation = _accepted_queue_relation(req, seat)
+        if relation is None:
+            return None, "idle-card-observation-unavailable"
+        if not relation:
+            return None, "idle-card-not-accepted"
     if req.get("origin") == "compact" and require_ready:
         compact = req.get("compact") if isinstance(req.get("compact"), dict) else {}
         observation = ({"state": "ready"} if compact.get("card_request_required") is True
@@ -1950,7 +1967,11 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
         if req.get("helper") != helper:
             req["helper"] = helper
             _write_reservation(req)
-    if req.get("snapshot_state") == "pending":
+    import dispatch_seat_handover as handover
+    booked_seat = st.seat_from_dict(req["seat"])
+    snapshot_missing = (booked_seat.kind in {"pane", "native"}
+                        and handover.read_snapshot(booked_seat.key) is None)
+    if req.get("snapshot_state") == "pending" or (req.get("snapshot_state") == "ready" and snapshot_missing):
         while True:
             if _prepare_handover_snapshot(req):
                 break
@@ -2043,12 +2064,37 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
             reason = "timeout" if state.startswith(("timeout", "state-")) else state
             return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
     req, reason = validate_request(path, nonce)
+    while req is None and reason == "idle-card-observation-unavailable":
+        held = read_reservation(seat_key)
+        if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
+            return "superseded"
+        remaining = float(held.get("deadline", 0)) - st.now_epoch()
+        if remaining <= 0:
+            return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
+        sleep(min(1.0, remaining))
+        req, reason = validate_request(path, nonce)
     if req is None:
         if reason == "superseded":
             return "superseded"
         return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
-    verdict = steward(path, nonce, pane)
-    outcome, reason = verdict.get("cleared", "failed"), verdict.get("reason", "")
+    while True:
+        verdict = steward(path, nonce, pane)
+        outcome, reason = verdict.get("cleared", "failed"), verdict.get("reason", "")
+        if outcome != "queued" or reason != "snapshot-pending":
+            break
+        held = read_reservation(seat_key)
+        if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
+            return "superseded"
+        remaining = float(held.get("deadline", 0)) - st.now_epoch()
+        if remaining <= 0:
+            return "skipped" if _finish(seat_key, nonce, "skipped", "snapshot-unavailable") else "superseded"
+        if not _prepare_handover_snapshot(held):
+            sleep(min(1.0, remaining))
+        checked, why = validate_request(path, nonce)
+        if checked is None:
+            if why == "superseded":
+                return "superseded"
+            return "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
     if outcome == "true":
         _finish(seat_key, nonce, "cleared", observed=verdict.get("new_session", ""))
         return _continue(seat_key, nonce, continuer)

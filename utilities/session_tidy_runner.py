@@ -1305,7 +1305,8 @@ def _settle_accepted_handoff(ref, row, context, successor, *, steward):
         successor_seat = st._pane_seat_of(successor_pane, endpoint=st._endpoint_scope(seat_env),
                                          socket_path=seat_env.get("HERDR_SOCKET_PATH", ""))
     else:
-        successor_seat = None
+        successor_seat = st.session_seat(st.seat_for_project(successor["harness"], ""),
+                                         successor["harness"], successor["session_id"])
     try:
         relation = handover.record_retire_handover(
             predecessor_sid=context["predecessor"]["session_id"],
@@ -1408,7 +1409,9 @@ def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
                 sender_sid, sender_harness, successor_candidate["session_id"],
                 successor_candidate["harness"], env=os.environ,
                 successor_seat=st._pane_seat_of(successor_candidate["pane"],
-                    endpoint=st._endpoint_scope(os.environ)) if successor_candidate.get("pane") else None)
+                    endpoint=st._endpoint_scope(os.environ)) if successor_candidate.get("pane") else
+                    st.session_seat(st.seat_for_project(successor_candidate["harness"], ""),
+                        successor_candidate["harness"], successor_candidate["session_id"]))
         except handover.RegistryUnreadable:
             return "prompted=unverified reason=handoff-registry-unreadable", 5
         if relation is None and successor_candidate.get("session_id"):
@@ -1425,23 +1428,26 @@ def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
                                   capture_output=True, text=True, timeout=120)
         else:
             import io
+            source_foreground = None
+            predecessor = {"harness": sender_harness, "session_id": sender_sid,
+                           "pane": seat.pane or "", "name": None}
             if seat.pane:
-                _, predecessor, _, _ = steward._retire_target(seat.pane)
-            else:
-                predecessor = {"harness": sender_harness, "session_id": sender_sid, "pane": "", "name": None}
-            if successor_candidate is None:
-                return f"prompted=false reason={identity_error or 'target-identity-unverified'}", 5
+                source_current, _source_error = steward._prompt_current_candidate(
+                    seat.pane, expected_harness=sender_harness, expected_sid=sender_sid,
+                    require_process_session=True)
+                if source_current and source_current.get("_native_session_id") == sender_sid:
+                    predecessor = dict(source_current["_identity"], session_id=sender_sid)
+                    source_foreground = steward._retire_foreground(seat.pane, sender_harness, strict=False,
+                                                                  info=source_current["_pane_info"])
             successor = dict(successor_candidate["_identity"],
                              session_id=successor_candidate["session_id"])
-            if (predecessor.get("session_id"), predecessor.get("harness")) != (sender_sid, sender_harness):
-                raise ValueError("handoff-predecessor-mismatch")
             successor_foreground = steward._retire_foreground(
                 successor["pane"], successor["harness"], strict=False,
                 info=successor_candidate["_pane_info"])
             context = {"card_id": card.get("id"), "target": seat.pane,
                 "source_seat": dict(seat.as_dict(), session={"harness": sender_harness, "sid": sender_sid}), "prompt_seq": card.get("prompt_seq", st.read_prompt_seq(seat)),
                 "predecessor": steward._retire_request_identity(predecessor,
-                    steward._retire_foreground(seat.pane, sender_harness, strict=False) if seat.pane else None),
+                    source_foreground),
                 "successor": steward._retire_request_identity(successor, successor_foreground),
                 "requester": {"harness": successor["harness"], "session_id": successor["session_id"],
                     "pane": successor["pane"], "server": (steward._HERDR_SESSION or "default")}}

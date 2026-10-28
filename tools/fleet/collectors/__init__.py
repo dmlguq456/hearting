@@ -195,6 +195,10 @@ def resolve_parent_edges(sessions, jobs):
         if not (getattr(j, "is_child", False) and parent_sid):
             continue
         parent_sid, parent_harness = _effective_job_parent(j)
+        if not parent_sid:
+            j._parent_edge_sid, j._parent_edge_promoted_orphan = model.parent_edge_unknown(j.slug)
+            continue  # Unreadable current lineage cannot establish a new managed-dir edge.
+
         candidates = sessions_by_sid.get(parent_sid, [])
         if parent_harness:
             candidates = [s for s in candidates if s.harness == parent_harness]

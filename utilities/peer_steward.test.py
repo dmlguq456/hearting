@@ -300,6 +300,8 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
         row = {"state": "pending", "to": sender, "created": time.time()}
         with mock.patch.object(peer_steward.peer_message, "prepare_peer_message", side_effect=prepare), \
              mock.patch.object(peer_steward.peer_message, "_read_pending", side_effect=lambda ref: row), \
+             mock.patch.object(peer_steward.peer_message, "deliver_pending_codex",
+                               side_effect=lambda *_a, **_kw: row.update(state="queued")) as transport, \
              mock.patch.object(peer_steward, "_retire_target",
                                return_value=("idle", {"pane": "-"}, 0, None)):
             for _ in range(3):
@@ -307,7 +309,8 @@ class CompletionConsumerCorrectionTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(len(minted), 1)
         observation = store.get(duty["id"])["observation"]
         self.assertEqual((observation["ref"], observation["reason"]),
-                         (minted[0], "target-identity-changed"))
+                         (minted[0], "awaiting-native-receiver"))
+        transport.assert_called_once()
 
     def test_watch_completion_consumes_real_bound_readiness_but_working_remains_native(self):
         from dispatch_contract import (ObservedAttemptLiveness, claim_attempt_row,
@@ -9008,6 +9011,53 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
                                   side_effect=lambda cwd: Path(cwd))
         self.primary_mock = patch.start()
         self.addCleanup(patch.stop)
+
+    def test_layout_failure_returns_once_to_the_exact_native_controller_then_same_start_continues(self):
+        peer = peer_steward.peer_message
+        opened = [terminal_surface.PaneResult("herdr", None, "none", ["layout-unavailable"]),
+                  terminal_surface.PaneResult("herdr", None, "none", ["layout-unavailable"]),
+                  terminal_surface.PaneResult("herdr", "w1:pNew", "split")]
+        native_starts = []
+        def run(argv, **kwargs):
+            self.assertEqual(argv[:3], ["herdr", "agent", "start"])
+            native_starts.append(argv)
+            return _herdr_json({"result": {"agent": {"agent": "codex", "name": "new",
+                "agent_session": {"kind": "id", "value": "new-native"}}}})
+        def queued(ref, **kwargs):
+            row = peer._read_pending(ref)
+            self.assertEqual(row["to"]["session_id"], "original-controller")
+            row["state"] = "queued"
+            peer._save_pending(row)
+            return {"status": "queued"}
+        with mock.patch.object(peer_steward, "_current_session_identity", return_value=("original-controller", "codex")), \
+             mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner"), \
+             mock.patch.object(terminal_surface, "open_pane", side_effect=opened) as opener, \
+             mock.patch.object(peer_steward.shutil, "which", return_value="herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run", side_effect=run), \
+             mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")), \
+             mock.patch.object(peer_steward, "_wait_for_created_shell", return_value=(None, (101, "700"))), \
+             mock.patch.object(peer_steward, "_start_shell_snapshot", return_value="ready"), \
+             mock.patch.object(peer_steward, "_ensure_pane_ingress", return_value=None), \
+             mock.patch.object(peer_steward, "_read_screen", return_value=None), \
+             mock.patch.object(peer_steward, "_pane_is_managed", return_value=False), \
+             mock.patch.object(peer, "deliver_pending_codex", side_effect=queued) as queue, \
+             contextlib.redirect_stdout(io.StringIO()):
+            argv = ["start", "new", "--kind", "codex", "--beside", "w1:pOld", "--cwd", str(self.tmp_root)]
+            self.assertEqual(peer_steward.main(argv), 1)
+            self.assertEqual(peer_steward.main(argv), 1)
+            rows = list(peer._pending_rows())
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["from"], rows[0]["to"])
+            self.assertIn("w1:pOld", rows[0]["text"])
+            store = peer_steward.peer_obligations.ObligationStore()
+            duty = store.get("message-" + rows[0]["ref"])
+            peer_steward._resume_message_obligation(duty, store)
+            peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+            self.assertEqual(queue.call_count, 1)
+            self.assertEqual(peer_steward.main(argv), 0)
+        self.assertEqual(len(native_starts), 1)
+        self.assertTrue(all(call.kwargs["near"].pane == "w1:pOld" and call.kwargs["near"].same_tab
+                            for call in opener.call_args_list))
 
     def test_default_cwd_resolves_a_real_linked_worktree_subfolder_to_primary(self):
         primary, linked = self.tmp_root / "primary", self.tmp_root / "linked"

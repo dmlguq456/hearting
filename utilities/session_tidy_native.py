@@ -261,7 +261,7 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                 current, why = validator(request_path, nonce)
                 if current is None: return result("skipped", why)
                 if current.get("snapshot_state") in ("pending", "deferred"):
-                    return result("skipped", "snapshot-pending")
+                    return result("queued", "snapshot-pending")
                 why = idle_reason(target, sid)
                 if not why and continuing:
                     seat = st.seat_from_dict(req["seat"])

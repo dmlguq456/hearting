@@ -237,6 +237,24 @@ class NativeCommandTest(NativeCase):
         return native.command(req, path, req["nonce"], continuing=continuing,
                               screen_ready=ready or (lambda *_: None))
 
+    def test_snapshot_pending_is_unsent_and_the_same_booking_can_clear_after_recovery(self):
+        req, path = self.book(); self.prepare_transport()
+        held = clear.read_reservation(self.seat.key)
+        held["snapshot_state"] = "pending"
+        clear._write_reservation(held)
+        result = self.run_command(held, path)
+        self.assertEqual((result["cleared"], result["reason"]), ("queued", "snapshot-pending"))
+        self.write.assert_not_called()
+        self.assertNotIn("clear_claim", clear.read_reservation(self.seat.key))
+        held["snapshot_state"] = "ready"
+        clear._write_reservation(held)
+        def sent(fd, text):
+            self.publish(sessionId="session-B")
+            return len(text)
+        self.write.side_effect = sent
+        self.assertEqual(self.run_command(held, path)["cleared"], "true")
+        self.write.assert_called_once()
+
     def test_clear_once_and_observe_exact_new_session(self):
         req, path = self.book(); self.prepare_transport()
         def sent(fd, text):
@@ -417,9 +435,12 @@ class NativeCommandTest(NativeCase):
                 if continuing:
                     self.assertEqual(clear.read_reservation(self.seat.key)["continued"]["state"], "pending")
 
-    def test_native_retire_does_not_acquire_cross_pane_authority(self):
+    def test_native_logical_handoff_does_not_acquire_physical_authority(self):
         import dispatch_seat_handover as handover
-        self.assertIsNone(handover.record_retire_handover("before", "claude", "session-A", "claude"))
+        with mock.patch.object(native, "attachment") as physical:
+            row = handover.record_retire_handover("before", "claude", "session-A", "claude")
+        self.assertEqual((row["from"], row["sid"], row["bindings"]), ("before", "session-A", []))
+        physical.assert_not_called()
 
 
 if __name__ == "__main__":

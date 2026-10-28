@@ -1851,7 +1851,70 @@ def _herdr_surface():
         _HERDR_SESSION)
 
 
+def _retain_start_failure(requester, requested, actual, result):
+    """One message to the original native controller; the normal start remains the retry."""
+    sid, harness = requester
+    if not peer_message.usable_session_id(sid) or harness not in _PROMPT_HARNESSES:
+        return
+    sender = {"harness": harness, "session_id": sid}
+    request_key = hashlib.sha256(json.dumps([sender, requested], sort_keys=True).encode()).hexdigest()
+    ref_key = "peer-start:" + request_key
+    # Include received rows: this failed request never wakes its controller twice.
+    for path in peer_message._pending_dir().glob("*.json"):
+        try:
+            row = peer_message._read_pending(path.stem)
+        except (OSError, ValueError):
+            continue
+        if row and row.get("refs") == [ref_key] and row.get("from") == sender and row.get("to") == sender:
+            _schedule_message_obligation(row, "")
+            return
+    command = ["hearting", "run", "peer-steward", "start", requested["name"], "--kind", requested["kind"]]
+    pane = actual.get("pane") or requested.get("pane")
+    if pane:
+        command += ["--pane", pane]
+    elif requested.get("beside"):
+        command += ["--beside", requested["beside"]]
+    if requested.get("cwd"):
+        command += ["--cwd", requested["cwd"]]
+    if requested.get("permission_mode"):
+        command += ["--permission-mode", requested["permission_mode"]]
+    if requested.get("agent_args"):
+        command += ["--", *requested["agent_args"]]
+    body = ("[notice] Your requested peer start did not complete. "
+        "Reobserve the same endpoint and original request on this native turn. "
+        "If the requested agent already started, adopt that exact observation; otherwise continue the same start. "
+        "Keep the requested workspace/tab/pane and do not select another window.\n"
+        + "Request: " + json.dumps(requested, sort_keys=True, ensure_ascii=False)
+        + "\nObserved result: " + result.strip() + "\nSame start: " + shlex.join(command))
+    _text, ref = peer_message.prepare_peer_message(body, sender, sender, defer=True,
+                                                  refs=[ref_key], receipt="peer-start-failed")
+    _schedule_message_obligation(peer_message._read_pending(ref), "")
+
+
 def cmd_start(args):
+    import io
+    requester = _current_session_identity()
+    requested = {key: getattr(args, key, None) for key in
+                 ("name", "kind", "pane", "beside", "cwd", "permission_mode", "agent_args")}
+    if not requested["pane"] and not requested["beside"]:
+        requested["beside"] = _caller_pane() or None
+    if not requested["cwd"]:
+        requested["cwd"] = os.getcwd()
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        code = _start_request(args)
+    result = output.getvalue()
+    if result:
+        print(result, end="")
+    if code != 0:
+        try:
+            _retain_start_failure(requester, requested, vars(args), result)
+        except (OSError, ValueError, KeyError, TypeError):
+            pass  # Preserve the actual start failure when no native carrier is available.
+    return code
+
+
+def _start_request(args):
     if len(args.name) > 32:
         print(f"started=false reason=agent-name-too-long agent={args.kind} name={args.name} "
               "max_length=32 detail=이름은 최대 32자까지 사용할 수 있습니다")
