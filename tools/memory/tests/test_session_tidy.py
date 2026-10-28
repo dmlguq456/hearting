@@ -1517,7 +1517,7 @@ class LedgerTest(TidyCase):
     def test_hook_records_the_session_transcript_and_cwd(self):
         self.hook("codex", "start", "thr-1", "--transcript", "/x/rollout.jsonl", "--source", "startup")
         with self.library():
-            seat = st.resolve_seat("codex", str(self.cwd))
+            seat = st.session_seat(st.resolve_seat("codex", str(self.cwd)), "codex", "thr-1")
             row = st.session_summary(seat)[("codex", "thr-1")]
         self.assertEqual((row["transcript"], row["cwd"], row["epoch"]), ("/x/rollout.jsonl", str(self.cwd), 0))
         self.assertGreater(row["first_seen"], 0)
@@ -3720,7 +3720,7 @@ class TidyOneCallTest(TidyCase):
         self.hook("claude", "prompt", "sid-A")
         calls = []
 
-        def handoff(seat, target):
+        def handoff(seat, target, *, caller=None):
             calls.append((len(self.queued()), self.reservation(seat)["status"], target))
             return "prompted=failed target=peer-x", 1
 

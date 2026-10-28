@@ -3477,7 +3477,7 @@ def cmd_tidy(args) -> int:
     code = 0
     if handoff:
         import session_tidy_runner as runner
-        handoff_line, code = runner.handoff(caller[0], args.handoff)
+        handoff_line, code = runner.handoff(caller[0], args.handoff, caller=caller)
         print(handoff_line)
     origin = str((idle_context or {}).get("origin") or "")
     print("say=" + tidy_report_line(line, handoff=handoff, origin=origin, harness=caller[1]))
@@ -3551,7 +3551,7 @@ def cmd_handoff(args) -> int:
         except ValueError as exc:
             raise StateError(str(exc)) from exc
     else:
-        line, code = runner.handoff(caller[0], args.target)
+        line, code = runner.handoff(caller[0], args.target, caller=caller)
     print(line)
     return code
 

@@ -1372,8 +1372,9 @@ answer stays kept and the current parent receives one `answer-awaiting-parent` s
 notice. The parent's carrier that delivers it (the shared prompt sweep or the
 Claude rewake) starts the route once under that session's identity
 (`dispatch_supervision.continue_for_parent`) and the notice says so. If handover
-state is unreadable, the registered parent remains the existing safe fallback; only when
-nothing could be started does it name the route's start command. Other ended owners still report
+state is unreadable, the retained controller observes again without restoring the
+registered parent's authority. A confirmed holder continues through the existing
+start path. Other ended owners still report
 `owner-input-unavailable-retain-correction`. An answer sent with an older attempt id
 follows the replacement lineage to the owner doing the work now.
 Corrections preserve route, completion and cleanup evidence; completed-prefix
@@ -2563,9 +2564,10 @@ Resumed retirement determines self-target from its recorded requester's session
 and pane identity. A cancelled request is terminal history:
 a new explicit request for the same lifetime accepts a fresh duty while retaining
 the cancelled record; repeated active or completed requests share that fresh duty.
-An explicitly accepted typed cross-seat handoff records the predecessor's
-open depth-1 routes to the exact successor through the common seat ledger,
-before reply delivery or physical retirement settles. The successor may then
+The current holder's explicit handoff records every eligible logical job and a
+seat-successor relation in the common ledger, independently of card delivery,
+receiver acceptance and physical retirement. A missing card or pane does not
+remove that relation. Explicit receiver acceptance records reading separately. The successor may then
 `start` and `correct` them, and their stored completion records reach it. The
 registered parent, worker, receipt, claim, and ACK identities stay anchored to
 their original storage; cards and notices are not moved. Physical retirement
@@ -2993,9 +2995,12 @@ Prompt resolution distinguishes a complete no-match (`not-found`), multiple
 current matches or a name/tag collision (`ambiguous`), and observations that
 are missing, partial, malformed, or conflicting (`observation-unavailable` or
 `identity-unverified`). Failure diagnostics retain every known candidate pane.
-A duplicate session ID in two panes is two candidates. None of these failures
-creates a carrier submission or an
-unresolved-recipient delivery obligation. Successful resolution does not relax
+A duplicate session ID in two panes is two candidates. Unavailable resolution retains
+the original body, refs and address in one unsent pending message. The existing
+message runner resolves that address until it can fix one exact native endpoint;
+ambiguity and an observed different SID never permit input or retargeting. A
+consistent complete census and native address can admit an exact native queue
+without permitting physical pane input. Successful resolution does not relax
 the existing exact SID/PID-birth, native state, registered-work, composer,
 form, or receive-evidence checks. A name or tag match does not expand the
 pane-only sidless first-input path, and a queued carrier result remains
@@ -3057,7 +3062,7 @@ actually recover a detached-watch receipt on its next turn, with no wake carrier
 receipts at `spec/stage-dispatch/_internal/research/peer-session-probe/P-<n>.md`; no
 adapter claims a working Codex-steward or OpenCode realization until its receipt exists.
 
-Only shared receiver guidance for a valid current typed cross-seat session-tidy
+Only the sealed typed handoff body (with advisory receiver guidance) for a valid current typed cross-seat session-tidy
 handoff supplies the existing `session_tidy.py handoff accept <ref>` command.
 After reading the card and referenced documents, the receiver uses that exact
 command; it binds the current receiver and transfer ref. Ordinary messages and

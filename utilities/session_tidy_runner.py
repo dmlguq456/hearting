@@ -1397,7 +1397,7 @@ def accept_handoff(ref, caller, *, steward=None):
     return "accepted=true reply=scheduled retire=reserved request_id=" + acceptance["retire_id"], 0
 
 
-def handoff(seat: "st.Seat", target: str) -> tuple[str, int]:
+def handoff(seat: "st.Seat", target: str, *, caller=None) -> tuple[str, int]:
     """(one report line, exit code); the verdict is peer-steward's own typed answer."""
     card = st.read_latest_card(seat)
     if not card or not st.sanitize_body(card.get("body", "")):
@@ -1414,13 +1414,7 @@ def handoff(seat: "st.Seat", target: str) -> tuple[str, int]:
             import io
             steward = _handoff_steward()
             _, predecessor, _, _ = steward._retire_target(seat.pane)
-            successor_state, successor_observed, successor_code, successor_reason = steward._retire_target(target)
-            successor_candidate, identity_error = steward._prompt_current_candidate(
-                target, expected_harness=successor_observed.get("harness"),
-                expected_sid=steward.peer_message.usable_session_id(
-                    successor_observed.get("session_id")),
-                target_observation=(successor_state, successor_observed,
-                                    successor_code, successor_reason))
+            successor_candidate, identity_error, _panes = steward._resolve_prompt_target(target)
             if successor_candidate is None:
                 return f"prompted=false reason={identity_error or 'target-identity-unverified'}", 5
             successor = dict(successor_candidate["_identity"],
@@ -1454,7 +1448,8 @@ def handoff(seat: "st.Seat", target: str) -> tuple[str, int]:
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 code = steward.cmd_prompt(args, expected_recipient=(successor["harness"], successor["session_id"]),
-                                          on_prepared=prepared)
+                                          on_prepared=prepared, handoff=context,
+                                          resolved_recipient=successor_candidate)
             done = subprocess.CompletedProcess([], code, output.getvalue(), "")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
         return f"prompted=failed reason=peer-steward-unavailable detail={type(exc).__name__}", 1

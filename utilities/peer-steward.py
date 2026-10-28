@@ -301,6 +301,18 @@ def _prompt_process_session(pane, harness, info):
                 if (found.confidence == PROVEN
                         and peer_message.usable_session_id(found.session_id)):
                     claims.add(found.session_id)
+                elif harness == "claude":
+                    # A resume selector is native process evidence. Read actual argv
+                    # with its birth fence, never the terminal label's command string.
+                    start = _proc_start_ticks(pid)
+                    actual = _retire_process_record(pid)
+                    argv = (actual or {}).get("argv") or []
+                    selectors = [argv[i + 1] for i, token in enumerate(argv[:-1])
+                                 if token in {"--resume", "-r"}]
+                    if (len(selectors) == 1 and peer_message.usable_session_id(selectors[0])
+                            and argv and os.path.basename(argv[0]) == "claude"
+                            and start and _proc_start_ticks(pid) == start):
+                        claims.add(selectors[0])
     except Exception:
         return None, "target-observation-unavailable"
     if len(claims) > 1:
@@ -310,7 +322,7 @@ def _prompt_process_session(pane, harness, info):
 
 def _prompt_current_candidate(pane, *, expected_harness=None, expected_sid=None,
                               expected_name=None, require_process_session=False,
-                              target_observation=None, pane_info=None):
+                              target_observation=None, pane_info=None, native_address=None):
     """Bind one pane to a single current native identity before prompt admission."""
     if target_observation is None:
         state, ident, _code, unavailable = _retire_target(pane)
@@ -336,23 +348,25 @@ def _prompt_current_candidate(pane, *, expected_harness=None, expected_sid=None,
         return None, "target-identity-changed"
     herdr_sid = peer_message.usable_session_id(ident.get("session_id"))
     info = pane_info if pane_info is not None else _retire_pane_info(pane)
-    if info is None:
+    if info is None and native_address != (harness, expected_sid, pane):
         return None, "target-observation-unavailable"
-    process_sid, process_error = _prompt_process_session(pane, harness, info)
+    process_sid, process_error = (_prompt_process_session(pane, harness, info)
+                                  if info is not None else (None, None))
     if process_error:
         return None, process_error
     expected_sid = peer_message.usable_session_id(expected_sid)
     if (expected_sid and process_sid and expected_sid != process_sid
-            or herdr_sid and process_sid and herdr_sid != process_sid):
+            or not expected_sid and herdr_sid and process_sid and herdr_sid != process_sid):
         return None, "target-identity-changed"
-    if expected_sid and not process_sid or herdr_sid and not process_sid:
+    verified_address = (native_address == (harness, expected_sid, pane) and expected_sid is not None)
+    if (expected_sid or herdr_sid or require_process_session) and not process_sid and not verified_address:
         return None, "target-identity-unverified"
-    if require_process_session and not process_sid:
+    session_id = process_sid or (expected_sid if verified_address else None)
+    if require_process_session and not session_id:
         return None, "target-identity-unverified"
-    session_id = process_sid
     return {"state": state, "harness": harness, "session_id": session_id,
             "name": name if isinstance(name, str) and name and name != "-" else None,
-            "pane": pane, "_identity": dict(ident), "_pane_info": info,
+            "pane": pane, "_identity": dict(ident, session_id=session_id or "-"), "_pane_info": info,
             "_native_session_id": process_sid}, None
 
 
@@ -515,6 +529,8 @@ def _prompt_candidate_snapshot(target, *, wanted_tag=None):
             if isinstance(registry_name, str) and registry_name and registry_name != "-":
                 names.add(registry_name)
 
+        if target == pane:
+            names.add(pane)
         name_match = target in names
         name_unresolved = not names and not sid_hints
         tag_match, tag_unresolved = False, False
@@ -548,14 +564,15 @@ def _prompt_candidate_snapshot(target, *, wanted_tag=None):
             continue
         expected_sid = census_sid or row.get("session_id") or observed_sid
         if (observed_ident.get("harness") not in (None, harness)
-                or observed_ident.get("pane") not in (None, pane)
-                or (expected_sid and observed_sid and expected_sid != observed_sid)):
+                or observed_ident.get("pane") not in (None, pane)):
             unknown_panes.add(pane)
             unknown_reason = unknown_reason or "target-identity-changed"
             continue
         candidate, reason = _prompt_current_candidate(
             pane, expected_harness=harness, expected_sid=expected_sid,
-            require_process_session=True, target_observation=observed)
+            require_process_session=True, target_observation=observed,
+            native_address=(harness, expected_sid, pane)
+            if census_sid and census_sid == row.get("session_id") else None)
         if candidate is None:
             unknown_panes.add(pane)
             unknown_reason = unknown_reason or reason or "target-identity-unverified"
@@ -618,7 +635,10 @@ def _resolve_prompt_target(target):
 
     if is_pane:
         candidate, reason = _prompt_current_candidate(target)
-        return (candidate, None, [target]) if candidate else (None, reason, [target])
+        if candidate:
+            return candidate, None, [target]
+        if reason != "target-identity-unverified":
+            return None, reason, [target]
 
     wanted_tag = tag_match.group(1).lower() if is_tag else None
     rows, snapshot_error, unknown_panes = _prompt_candidate_snapshot(
@@ -654,7 +674,9 @@ def _resolve_prompt_target(target):
     # tags select a pane but never stand in for its current native identity.
     candidate, reason = _prompt_current_candidate(
         row["pane"], expected_harness=row["harness"], expected_sid=row["session_id"],
-        require_process_session=True)
+        require_process_session=True,
+        native_address=(row["harness"], row["session_id"], row["pane"])
+        if not row.get("_native_session_id") else None)
     if not candidate:
         return None, reason, candidate_panes
     if wanted_tag is not None:
@@ -5773,56 +5795,47 @@ def _herdr_prompt(target, text, *, wait, timeout_ms):
     return proc.returncode, payload
 
 
+def _prompt_foreground(pane, harness, *, info=None):
+    """Prompt-only foreground lifetime, including a native child of a group wrapper."""
+    info = info if info is not None else _retire_pane_info(pane)
+    if not isinstance(info, dict):
+        return None
+    found = []
+    for process in info.get("foreground_processes", ()):
+        pid = process.get("pid") if isinstance(process, dict) else None
+        actual = _retire_process_record(pid) if type(pid) is int and pid > 0 else None
+        argv = (actual or {}).get("argv") or []
+        if (actual and argv and os.path.basename(argv[0]) == harness
+                and actual.get("group") == info.get("foreground_process_group_id")
+                and pid != info.get("shell_pid")):
+            found.append({"pid": pid, **actual, "shell_pid": info.get("shell_pid"),
+                          "shell_start": _proc_start_ticks(info.get("shell_pid"))})
+    return found[0] if len(found) == 1 else None
+
+
 def _claude_prompt_foreground_proof(pane, expected_sid):
-    """Bind the pane leader to Claude's exact registered SID, PID birth and namespace."""
     info = _retire_pane_info(pane)
-    if not isinstance(info, dict) or info.get("pane_id") != pane:
+    foreground = _prompt_foreground(pane, "claude", info=info)
+    if not foreground or _prompt_process_session(pane, "claude", info) != (expected_sid, None):
         return None
-    group = info.get("foreground_process_group_id")
-    leaders = [item for item in info.get("foreground_processes", ())
-               if isinstance(item, dict) and item.get("pid") == group]
-    if len(leaders) != 1:
-        return None
-    item = leaders[0]
-    pid, argv = item.get("pid"), item.get("argv")
-    if (type(pid) is not int or pid <= 0 or pid == info.get("shell_pid")
-            or not isinstance(argv, list) or not argv
-            or any(not isinstance(arg, str) for arg in argv)
-            or os.path.basename(argv[0]) != "claude"):
+    pid, start = foreground["pid"], foreground["start"]
+    if _proc_start_ticks(pid) != start:
         return None
     try:
-        proc = Path(f"/proc/{pid}")
-        stat_fields = (proc / "stat").read_text().rsplit(") ", 1)[1].split()
-        start = stat_fields[19]
-        process_group = int(stat_fields[2])
-        comm = (proc / "comm").read_text().strip()
-        namespace = os.readlink(proc / "ns/pid")
-        current_namespace = os.readlink("/proc/self/ns/pid")
-    except (OSError, ValueError, IndexError):
-        return None
-    if (comm != "claude" or process_group != group or not start.isdigit()
-            or namespace != current_namespace or _proc_start_ticks(pid) != start):
-        return None
-    session_id = _proven_session([{"pid": pid}], "claude")
-    if session_id != expected_sid:
-        return None
-    proof = {"pid": pid, "start": start, "pid_namespace": namespace,
-             "session_id": session_id}
-    try:
-        if (_proc_start_ticks(pid) != start
-                or os.readlink(proc / "ns/pid") != namespace
-                or _proven_session([{"pid": pid}], "claude") != expected_sid):
+        namespace = os.readlink(f"/proc/{pid}/ns/pid")
+        if (namespace != os.readlink("/proc/self/ns/pid")
+                or _proc_start_ticks(pid) != start
+                or _prompt_process_session(pane, "claude", info) != (expected_sid, None)):
             return None
     except OSError:
         return None
-    return proof
+    return {"pid": pid, "start": start, "pid_namespace": namespace, "session_id": expected_sid}
 
 
 def _claude_idle_prompt_guard(target, expected_sid, expected_pane, expected_foreground=None):
     """Prove the exact idle Claude TUI and empty composer before one prompt send."""
     state, ident, _code, reason = _retire_target(target)
     if (reason or ident.get("harness") != "claude"
-            or ident.get("session_id") != expected_sid
             or ident.get("pane") != expected_pane):
         return reason or "target-identity-changed", None
     current, identity_error = _prompt_current_candidate(
@@ -6069,7 +6082,7 @@ def _pane_readiness(target, state, *, expected_harness=None, expected_sid=None, 
                 sid, expected_sid = proven, None
         if isinstance(native_session_id, str) and peer_message.usable_session_id(native_session_id):
             sid = native_session_id
-        foreground = (_retire_foreground(pane, harness, strict=False, info=info)
+        foreground = (_prompt_foreground(pane, harness, info=info)
                       if native_session_id is not None and isinstance(info, dict) else None)
         native_source = "herdr-corroboration"
         native_turn = observed_state
@@ -6652,6 +6665,13 @@ def _message_terminal_evidence(duty, row, observed, reason):
             and observed.get("session_id") == recipient.get("session_id")
             and (not expected_pane or observed.get("pane") == expected_pane)):
         return None
+    if expected_pane and observed.get("pane") == expected_pane and reason is None:
+        current, _error = _prompt_current_candidate(
+            expected_pane, expected_harness=recipient.get("harness"),
+            expected_sid=recipient.get("session_id"), require_process_session=True,
+            target_observation=("observed", observed))
+        if current is not None:
+            return None  # Native process proof outranks an outdated census/terminal label.
     census = herdr_observation.pane_census(session=server)
     presence = _census_session_presence(census, recipient.get("session_id"), server)
     if presence is not False:
@@ -6852,6 +6872,20 @@ def _resume_message_obligation(duty, store, *, read_context=None):
                     return
         checkpoint(state="unknown", observation={"ref": ref, "reason": "pending-row-missing"})
         return
+    if peer_message._unresolved_target(row.get("to")) and not row.get("bound_to"):
+        if row.get("receipt") == "target-identity-changed" or "ambiguous" in row.get("receipt", ""):
+            checkpoint(state="unknown", observation={"ref": ref, "reason": row["receipt"]})
+            return
+        current, error, _panes = _resolve_prompt_target((row.get("to") or {}).get("name"))
+        if not current or not peer_message.usable_session_id(current.get("session_id")):
+            checkpoint(state="unknown", observation={"ref": ref, "reason": error or "target-identity-unverified"})
+            return
+        row = peer_message.bind_unresolved_pending_recipient(ref, {
+            "harness": current["harness"], "session_id": current["session_id"],
+            "pane_id": current.get("pane")})
+        if row is None:
+            checkpoint(state="unknown", observation={"ref": ref, "reason": "target-binding-changed"})
+            return
     if intent.get("handoff_acceptance"):
         accepted = row.get("acceptance") or {}
         if not accepted.get("read_and_accepted"):
@@ -6898,12 +6932,13 @@ def _resume_message_obligation(duty, store, *, read_context=None):
     identity = (duty.get("intent") or {}).get("identity") or {}
     # Identity is held outside mutable observations. The accepted target stays
     # nameable only while its exact harness/session/pane still resolves.
-    recipient = row.get("to") or {}
+    recipient = peer_message.pending_delivery_recipient(row) or row.get("to") or {}
     server = identity.get("server") or "default"
     old_server = _HERDR_SESSION
     _HERDR_SESSION = None if server == "default" else server
     try:
-        state, ident, _code, reason = _retire_target(target or recipient.get("name") or "")
+        state, ident, _code, reason = _retire_target(
+            recipient.get("pane_id") or target or recipient.get("name") or "")
         expected_pane = identity.get("pane") or ""
         pane_bound = peer_message._valid_pane_bound_endpoint(recipient)
         terminal_evidence = _message_terminal_evidence(duty, row, ident, reason)
@@ -6930,8 +6965,7 @@ def _resume_message_obligation(duty, store, *, read_context=None):
                        "reason": row.get("receipt", "delivery-unconfirmed")})
             return
         if (reason or ident.get("harness") != recipient.get("harness")
-                or (expected_pane and ident.get("pane") != expected_pane)
-                or (not pane_bound and ident.get("session_id") != recipient.get("session_id"))):
+                or (expected_pane and ident.get("pane") != expected_pane)):
             checkpoint(state="unknown", observation={"ref": ref,
                        "reason": reason or "target-identity-changed",
                        "observed_pane": ident.get("pane", "")})
@@ -7052,6 +7086,9 @@ def _resume_message_obligation(duty, store, *, read_context=None):
                     "reason": "runtime-notice-native-retry",
                     "transport_state": (current or row).get("state")})
                 return
+        if recipient.get("harness") == "claude" and row.get("state") == "pending":
+            _submit_pending_claude(row, pinned_pane, recipient.get("session_id"),
+                                   pinned_pane, state, no_trailer=row.get("no_trailer", False))
         if recipient.get("harness") == "codex":
             peer_message.deliver_pending_codex(ref, timeout=0.25)
         # Claude hook context and OpenCode's idle plugin own native delivery.
@@ -9113,17 +9150,82 @@ def receiver_idle(recipient, pane, *, peer=True):
             clear._continue(seat.key, req["nonce"], clear._run_continue)
 
 
-def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None):
+def _submit_pending_claude(pending, target, sid, pane, state, *, no_trailer=False):
+    transfer_ref = pending.get("ref")
+    if not transfer_ref:
+        return "peer-ref-unavailable", "unverified", "private-pending", "peer-ref-unavailable"
+    resolved_target, t_sid, target_pane, state_before = target, sid, pane, state
+    outcome, verify, reason = "queued", "native-callback", None
+    direct_reason = None
+    if no_trailer:
+        direct_reason = "no-trailer-callback-only"
+    elif pending["state"] != "pending":
+        direct_reason = "peer-delivery-already-submitted"
+    elif state_before not in ("idle", "done"):
+        direct_reason = "native-state-" + str(state_before)
+    elif not target_pane or not peer_message.usable_session_id(t_sid):
+        direct_reason = "target-identity-unverified"
+    else:
+        direct_reason, proof = _claude_idle_prompt_guard(
+            resolved_target, t_sid, target_pane)
+        if direct_reason is None:
+            try:
+                claimed = peer_message.reserve_pending_herdr(
+                    transfer_ref, {"harness": "claude", "session_id": t_sid,
+                                   "pane_id": target_pane},
+                    receipt="claude-pty-prompt-inflight")
+            except (OSError, ValueError):
+                claimed = None
+            if claimed is None:
+                direct_reason = "peer-delivery-already-claimed"
+            else:
+                direct_reason, _proof = _claude_idle_prompt_guard(
+                    target_pane, t_sid, target_pane, expected_foreground=proof)
+                if direct_reason:
+                    peer_message.release_unsent_herdr_claim(
+                        claimed, receipt=direct_reason)
+                    claimed = None
+                else:
+                    reserved = claimed
+                    claimed = peer_message.begin_pending_write(
+                        claimed, recipient={"harness": "claude", "session_id": t_sid,
+                                            "pane_id": target_pane},
+                        receipt="claude-pty-prompt-inflight")
+                    if claimed is None:
+                        peer_message.release_pending_herdr_claim(reserved)
+                        direct_reason = "peer-delivery-already-claimed"
+                    else:
+                        rc, payload = _herdr_prompt(
+                            target_pane, pending["text"], wait=False,
+                            timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
+                        if rc != 0:
+                            outcome = "unverified"
+                            verify = "native-prompt-unverified"
+                            reason = (_herdr_error_reason(payload, rc)
+                                      if rc is not None else "herdr-invocation-failed")
+                        else:
+                            peer_message.mark_pending_prompt_queued(
+                                transfer_ref, claimed["rpc_claim"])
+                            current = peer_message._read_pending(transfer_ref)
+                            if current and current.get("state") == "received":
+                                outcome, verify = "true", "exact-peer-ref"
+                            elif current and current.get("state") == "queued":
+                                outcome, verify = "queued", "native-prompt-submitted"
+                                reason = "awaiting-exact-receiver-ref"
+                            else:
+                                outcome, verify = "unverified", "native-prompt-unverified"
+                                reason = "peer-state-unavailable-after-submit"
+    return direct_reason, outcome, verify, reason
+
+
+def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_binding=None,
+               handoff=None, resolved_recipient=None):
     """Seal a peer message and route it through the recipient's native carrier.
 
     Codex uses its exact thread queue. Claude's hook context and OpenCode's
     native idle callback consume their own pending rows. Queue acceptance or
     context emission remains queued; only an exact native receive is true.
     """
-    if _herdr_missing():
-        _prompt_failure_ledger(args.target, "herdr-not-found", [],
-                               ref=getattr(args, "ref", ()))
-        return _unavailable("herdr-not-found")
     if args.body_file:
         with open(args.body_file, encoding="utf-8", errors="replace", newline="") as handle:
             body = handle.read()
@@ -9146,16 +9248,28 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         from_sid, from_harness = _current_session_identity()
         from_identity = (from_sid, from_harness, _project_of(os.getcwd()))
         from_name = _from_name(from_harness, from_sid)
-    resolved, resolve_error, candidate_panes = _resolve_prompt_target(args.target)
+    if _herdr_missing():
+        resolved, resolve_error, candidate_panes = None, "herdr-not-found", []
+    elif resolved_recipient is None:
+        resolved, resolve_error, candidate_panes = _resolve_prompt_target(args.target)
+    else:
+        resolved, resolve_error, candidate_panes = resolved_recipient, None, [resolved_recipient.get("pane")]
     if resolved is None:
         reason = resolve_error or "target-observation-unavailable"
         _prompt_failure_ledger(args.target, reason, candidate_panes,
                                kind=_prompt_message_kind(body), ref=args.ref,
                                from_identity=from_identity, from_name=from_name)
-        print("prompted=false reason=%s target=%s candidate_panes=%s" % (
-            reason, json.dumps(args.target, ensure_ascii=False),
-            json.dumps(candidate_panes, ensure_ascii=False, separators=(",", ":"))))
-        return 1 if reason.endswith("-not-found") else 5
+        try:
+            _text, ref = peer_message.prepare_peer_message(
+                body, {"harness": from_harness, "session_id": from_sid, "name": from_name},
+                {"harness": "unknown", "session_id": None, "name": args.target},
+                defer=True, refs=args.ref, receipt=reason, with_trailer=not args.no_trailer)
+            row = peer_message._read_pending(ref)
+            _schedule_message_obligation(row, args.target)
+            print(f"prompted=unverified reason={reason} ref={ref}")
+        except (OSError, ValueError):
+            print("prompted=unverified reason=peer-pending-unavailable")
+        return 5
     resolved_target = resolved["pane"]
     t_harness, t_sid, t_name = (resolved["harness"], resolved["session_id"],
                                 resolved["name"] or args.target)
@@ -9193,7 +9307,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             body, {"harness": from_harness, "session_id": from_sid, "name": from_name},
             recipient, defer=True, refs=args.ref, receipt=input_reason or "native-pending",
             with_trailer=not args.no_trailer, reference_evidence=reference_evidence,
-            first_input_process=first_input_process, producer_binding=producer_binding)
+            first_input_process=first_input_process, producer_binding=producer_binding, handoff=handoff)
         if on_prepared is not None:
             on_prepared(transfer_ref)
         pending = peer_message._read_pending(transfer_ref)
@@ -9210,7 +9324,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
 
     if pending["state"] == "received":
         outcome, verify = "true", pending.get("receipt") or "exact-native-history"
-    elif input_reason:
+    elif input_reason and not (t_harness == "codex" and peer_message.usable_session_id(t_sid)):
         if pending["state"] == "pending":
             _schedule_message_obligation(pending, resolved_target, target_pane)
         outcome = "queued" if pending["state"] in {"pending", "queued"} else "unverified"
@@ -9218,9 +9332,14 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             verify = "native-callback"
         reason = input_reason
     elif t_harness == "codex" and peer_message.usable_session_id(t_sid):
-        current, current_error = _prompt_current_candidate(
-            resolved_target, expected_harness=t_harness, expected_sid=t_sid,
-            require_process_session=True)
+        if resolved.get("_native_session_id"):
+            current, current_error = _prompt_current_candidate(
+                resolved_target, expected_harness=t_harness, expected_sid=t_sid,
+                require_process_session=True)
+        else:
+            current, current_error, _panes = _resolve_prompt_target(resolved_target)
+            if current and (current["harness"], current["session_id"]) != (t_harness, t_sid):
+                current, current_error = None, "target-identity-changed"
         if current is None:
             outcome, reason = "unverified", current_error or "target-identity-unverified"
             _schedule_message_obligation(pending, resolved_target, target_pane)
@@ -9301,65 +9420,8 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         elif outcome == "unverified":
             _schedule_message_obligation(pending, resolved_target, target_pane)
     elif t_harness == "claude":
-        direct_reason = None
-        if args.no_trailer:
-            direct_reason = "no-trailer-callback-only"
-        elif pending["state"] != "pending":
-            direct_reason = "peer-delivery-already-submitted"
-        elif state_before not in ("idle", "done"):
-            direct_reason = "native-state-" + str(state_before)
-        elif not target_pane or not peer_message.usable_session_id(t_sid):
-            direct_reason = "target-identity-unverified"
-        else:
-            direct_reason, proof = _claude_idle_prompt_guard(
-                resolved_target, t_sid, target_pane)
-            if direct_reason is None:
-                try:
-                    claimed = peer_message.reserve_pending_herdr(
-                        transfer_ref, {"harness": "claude", "session_id": t_sid,
-                                       "pane_id": target_pane},
-                        receipt="claude-pty-prompt-inflight")
-                except (OSError, ValueError):
-                    claimed = None
-                if claimed is None:
-                    direct_reason = "peer-delivery-already-claimed"
-                else:
-                    direct_reason, _proof = _claude_idle_prompt_guard(
-                        target_pane, t_sid, target_pane, expected_foreground=proof)
-                    if direct_reason:
-                        peer_message.release_unsent_herdr_claim(
-                            claimed, receipt=direct_reason)
-                        claimed = None
-                    else:
-                        reserved = claimed
-                        claimed = peer_message.begin_pending_write(
-                            claimed, recipient={"harness": "claude", "session_id": t_sid,
-                                                "pane_id": target_pane},
-                            receipt="claude-pty-prompt-inflight")
-                        if claimed is None:
-                            peer_message.release_pending_herdr_claim(reserved)
-                            direct_reason = "peer-delivery-already-claimed"
-                        else:
-                            rc, payload = _herdr_prompt(
-                                target_pane, pending["text"], wait=False,
-                                timeout_ms=_PROMPT_VERIFY_TIMEOUT_MS)
-                            if rc != 0:
-                                outcome = "unverified"
-                                verify = "native-prompt-unverified"
-                                reason = (_herdr_error_reason(payload, rc)
-                                          if rc is not None else "herdr-invocation-failed")
-                            else:
-                                peer_message.mark_pending_prompt_queued(
-                                    transfer_ref, claimed["rpc_claim"])
-                                current = peer_message._read_pending(transfer_ref)
-                                if current and current.get("state") == "received":
-                                    outcome, verify = "true", "exact-peer-ref"
-                                elif current and current.get("state") == "queued":
-                                    outcome, verify = "queued", "native-prompt-submitted"
-                                    reason = "awaiting-exact-receiver-ref"
-                                else:
-                                    outcome, verify = "unverified", "native-prompt-unverified"
-                                    reason = "peer-state-unavailable-after-submit"
+        direct_reason, outcome, verify, reason = _submit_pending_claude(
+            pending, resolved_target, t_sid, target_pane, state_before, no_trailer=args.no_trailer)
         if direct_reason is not None:
             if pending["state"] == "pending":
                 _schedule_message_obligation(pending, resolved_target, target_pane)
