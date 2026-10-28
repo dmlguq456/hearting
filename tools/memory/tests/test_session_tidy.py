@@ -2427,15 +2427,15 @@ class CodexCompactBridgeTest(TidyCase):
             self.assertEqual((retained["id"], retained["operation_id"]), (queue_id, operation_id))
             self.assertGreaterEqual(len(starts), 2, "normal prompt reconciliation did not restart the same queue")
 
-    def test_old_booking_and_queue_can_be_accepted_but_partial_relation_cannot_clear(self):
+    def _accepted_compact_booking(self, tag="legacy"):
         path = self.rollout()
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
                 mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
                 mock.patch.object(clear, "_start_helper", return_value=4321), \
                 mock.patch.object(runner, "start_detached", return_value=9876):
             result = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                 compact_context={"trigger": "auto", "turn_id": "turn-legacy",
-                                                  "event_id": "compact-legacy"},
+                                 compact_context={"trigger": "auto", "turn_id": "turn-" + tag,
+                                                  "event_id": "compact-" + tag},
                                  transcript=str(path), cwd=str(self.cwd), env=self.env)
             self.assertEqual(result, "booking=scheduled")
             booking = clear.read_reservation(self.seat.key)
@@ -2471,6 +2471,11 @@ class CodexCompactBridgeTest(TidyCase):
             valid, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
             self.assertIsNotNone(valid, reason)
 
+            return accepted
+
+    def test_old_booking_and_queue_can_be_accepted_but_partial_relation_cannot_clear(self):
+        accepted = booking = self._accepted_compact_booking()
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
             accepted.pop("acceptance")
             clear._write_reservation(accepted)
             recovered, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
@@ -2491,6 +2496,162 @@ class CodexCompactBridgeTest(TidyCase):
             retained = runner.read_item(booking["queue_id"])
             self.assertEqual((retained["id"], retained["operation_id"]),
                              (booking["queue_id"], accepted["operation_id"]))
+
+    def test_public_validation_and_helper_reobserve_unavailable_sources_at_each_boundary(self):
+        import dispatch_seat_handover as handover
+        sources = ("card", "queue", "frontier", "frontier-schema", "frontier-utf8")
+        for phase in ("snapshot", "compact-wait", "final-validation", "writer"):
+            for source in sources:
+                tag = phase + "-" + source
+                with self.subTest(phase=phase, source=source):
+                    booking = self._accepted_compact_booking(tag)
+                    path = clear.reservation_path(self.seat.key)
+                    if phase != "snapshot":
+                        self.assertTrue(clear._prepare_handover_snapshot(booking))
+                    source_path = (st.card_json_path(self.seat) if source == "card" else
+                                   runner._item_path(booking["queue_id"]) if source == "queue" else
+                                   st._prompt_seq_path(self.seat))
+                    original = source_path.read_bytes()
+                    damaged = [False]
+                    calls, pauses = [], []
+                    identity = {key: booking[key] for key in ("nonce", "operation_id", "queue_id")}
+                    token = booking["idle_request"]["token"]
+                    def damage():
+                        if damaged[0]:
+                            return
+                        damaged[0] = True
+                        source_path.write_bytes(b'{"schema":1,"seq":"unknown"}' if source == "frontier-schema"
+                                                else b'\xff' if source in {"card", "frontier-utf8"} else b'{damaged')
+                        checked, why = clear.validate_request(path, booking["nonce"])
+                        self.assertIsNone(checked)
+                        self.assertEqual(why, "idle-card-observation-unavailable")
+                    def restore(delay):
+                        pauses.append(delay)
+                        held = clear.read_reservation(self.seat.key)
+                        self.assertEqual({key: held[key] for key in identity}, identity)
+                        self.assertEqual(held["idle_request"]["token"], token)
+                        self.assertEqual(held["status"], "reserved")
+                        self.assertEqual(calls, [])
+                        source_path.write_bytes(original)
+                    def wait(*_args):
+                        if phase == "final-validation":
+                            damage()
+                        return "idle"
+                    def steward(pathname, nonce, _pane):
+                        if phase == "writer":
+                            damage()
+                        claimed, why = clear.claim_clear(pathname, nonce)
+                        if claimed is None:
+                            return {"cleared": "skipped", "reason": why}
+                        calls.append(("clear", claimed["clear_claim"]["token"]))
+                        return {"cleared": "true", "new_session": "successor-" + tag}
+                    def continuer(pathname, nonce, _pane):
+                        claimed, why = clear.claim_continue(pathname, nonce)
+                        self.assertIsNotNone(claimed, why)
+                        calls.append(("continue", claimed["continued"]["claim_id"]))
+                        return {"continued": "true", "claim_id": claimed["continued"]["claim_id"]}
+                    if phase in {"snapshot", "compact-wait"}:
+                        damage()
+                    try:
+                        result = clear.run_helper(self.seat.key, booking["nonce"], wait=wait,
+                                                  steward=steward, continuer=continuer, sleep=restore)
+                    finally:
+                        source_path.write_bytes(original)
+                    self.assertEqual(result, "continued")
+                    self.assertEqual([call[0] for call in calls], ["clear", "continue"])
+                    self.assertIn(len(pauses), (1, 2) if phase == "snapshot" else (1,))
+                    held = clear.read_reservation(self.seat.key)
+                    self.assertEqual({key: held[key] for key in identity}, identity)
+                    self.assertEqual(held["idle_request"]["token"], token)
+                    self.assertEqual(held["clear_claim"]["token"], calls[0][1])
+                    self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=restore), "superseded")
+
+    def test_relation_reread_keeps_unavailable_frontier_and_continue_recovers_after_clear(self):
+        booking = self._accepted_compact_booking("relation-reread")
+        path = clear.reservation_path(self.seat.key)
+        frontier = st._prompt_seq_path(self.seat)
+        original = frontier.read_bytes()
+        read_json = st.read_json
+        reads = []
+        def read(pathname):
+            data = read_json(pathname)
+            if pathname == frontier:
+                reads.append(1)
+                if len(reads) == 1:
+                    frontier.write_bytes(b'\xff')
+            return data
+        try:
+            with mock.patch.object(st, "read_json", side_effect=read):
+                self.assertEqual(clear.validate_request(path, booking["nonce"])[1],
+                                 "idle-card-observation-unavailable")
+        finally:
+            frontier.write_bytes(original)
+        card_path = st.card_json_path(self.seat)
+        card_bytes = card_path.read_bytes()
+        effects, pauses = [], []
+        def steward(pathname, nonce, _pane):
+            claim, why = clear.claim_clear(pathname, nonce)
+            self.assertIsNotNone(claim, why)
+            effects.append("clear")
+            card_path.write_bytes(b'\xff')
+            return {"cleared": "true", "new_session": "recovered-continue"}
+        def restore(delay):
+            pauses.append(delay)
+            held = clear.read_reservation(self.seat.key)
+            self.assertEqual(held["status"], "cleared")
+            self.assertEqual(held["continued"]["state"], "pending")
+            self.assertEqual(effects, ["clear"])
+            card_path.write_bytes(card_bytes)
+        def continuer(pathname, nonce, _pane):
+            claim, why = clear.claim_continue(pathname, nonce)
+            self.assertIsNotNone(claim, why)
+            effects.append("continue")
+            return {"continued": "true", "claim_id": claim["continued"]["claim_id"]}
+        self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], wait=lambda *_: "idle",
+                                         steward=steward, continuer=continuer, sleep=restore), "continued")
+        self.assertEqual(effects, ["clear", "continue"])
+        self.assertEqual(len(pauses), 1)
+        held = clear.read_reservation(self.seat.key)
+        self.assertEqual((held["nonce"], held["queue_id"], held["operation_id"]),
+                         (booking["nonce"], booking["queue_id"], booking["operation_id"]))
+
+    def test_unavailable_observation_expires_without_extending_booking_or_accepting_native_request(self):
+        booking = self._accepted_compact_booking("expired-read")
+        path = clear.reservation_path(self.seat.key)
+        clock = [st.now_epoch()]
+        booking["deadline"] = clock[0] + 2
+        clear._write_reservation(booking)
+        st.card_json_path(self.seat).write_bytes(b'\xff')
+        def sleep(delay):
+            clock[0] += delay
+        with mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]), \
+             mock.patch.object(clear, "_run_steward") as effect:
+            result = clear.run_helper(self.seat.key, booking["nonce"], sleep=sleep)
+        self.assertEqual(result, "skipped")
+        effect.assert_not_called()
+        self.assertEqual(clear.read_reservation(self.seat.key)["deadline"], booking["deadline"])
+        booking = self._accepted_compact_booking("unaccepted-read")
+        booking["idle_request"]["state"] = "unverified"
+        clear._write_reservation(booking)
+        self.assertEqual(clear.validate_request(path, booking["nonce"])[1], "idle-card-not-accepted")
+        with mock.patch.object(clear, "_run_steward") as effect:
+            self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=sleep), "unverified")
+        effect.assert_not_called()
+
+    def test_real_card_replacement_and_new_input_still_stop_clear(self):
+        for change in ("card", "prompt"):
+            with self.subTest(change=change):
+                booking = self._accepted_compact_booking("replaced-" + change)
+                if change == "card":
+                    st.write_card(self.seat, "codex", self.SID, "new unsaved work", cwd=str(self.cwd),
+                                  prompt_seq=st.read_prompt_seq(self.seat))
+                else:
+                    st.bump_prompt_seq(self.seat, "codex", self.SID, st.now_epoch())
+                self.assertEqual(clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])[1],
+                                 "card-changed" if change == "card" else "new-input")
+                with mock.patch.object(clear, "_run_steward") as effect:
+                    self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=lambda _: None), "skipped")
+                effect.assert_not_called()
 
     def test_manual_unknown_or_unidentified_codex_compaction_stays_queue_only(self):
         path = self.rollout()
@@ -4739,6 +4900,84 @@ class SeatHandoverTest(TidyCase):
                     self.assertEqual({r["delivery_id"] for r in delivered}, set(ids))
                     self.assertEqual(sweep.ack_delivered(root, "sid-B", delivered, acked_by="batch-fixture:sid-B"), 2)
                     self.assertTrue(all(pending.read(root, "sid-A", did)["state"] == "acked" for did in ids))
+
+    def test_concurrent_edges_cannot_close_short_or_long_cycles(self):
+        import concurrent.futures
+        import threading
+        h = self.handover
+        for count in (0, 1):
+            for shape in ("reverse", "long", "auto-first", "auto-second"):
+                with self.subTest(jobs=count, shape=shape), self.iso.patched_environ():
+                    prefix = f"cycle-{count}-{shape}-"
+                    a, b, c, d = [prefix + x for x in "ABCD"]
+                    seats = {x: self.seat("test:" + x) for x in (a, b, c, d)}
+                    if count:
+                        route = prefix + "route"
+                        route_file = self.open_route(route, "sha256:aa")
+                        self.row(prefix + "job-a", parent=a, route=route, route_file=route_file)
+                        self.row(prefix + "job-c", parent=c, node="second", route=route, route_file=route_file)
+                    def explicit(old, new):
+                        return h.record_retire_handover(old, "claude", new, "claude",
+                                                       successor_seat=seats[new], jobs=self.jobs)
+                    if shape == "reverse":
+                        first, second = (a, b), (b, a)
+                    else:
+                        self.assertIsNotNone(explicit(a, b))
+                        self.assertIsNotNone(explicit(c, d))
+                        first, second = (b, c), (d, a)
+                    automatic = first if shape == "auto-first" else second if shape == "auto-second" else None
+                    if automatic:
+                        old, new = automatic
+                        # Use the actual snapshot/start ledger and confirmed-clear writer.
+                        st.record_event(seats[old], "claude", new, "start", cwd=str(self.cwd))
+                    publishing, contender = threading.Event(), threading.Event()
+                    append, seat_lock = h._append_transition_row, st.seat_lock
+                    observed = []
+                    @contextlib.contextmanager
+                    def lock(key, **kwargs):
+                        if publishing.is_set() and key == "lineage-write":
+                            contender.set()
+                        with seat_lock(key, **kwargs):
+                            observed.append((threading.current_thread().name, key))
+                            yield
+                    def publish(seat, row):
+                        if row["from"] == first[0]:
+                            publishing.set()
+                            self.assertTrue(contender.wait(5), "second writer never reached exclusion/publication")
+                        elif row["from"] == second[0]:
+                            # Also releases the negative-control baseline without the new mutex.
+                            contender.set()
+                        return append(seat, row)
+                    def transfer(edge):
+                        old, new = edge
+                        if edge == automatic:
+                            with st.seat_lock(seats[old].key):
+                                return h.record_locked(seats[old], "claude", new, "start", "clear", st.now_epoch())
+                        return explicit(old, new)
+                    with mock.patch.object(st, "seat_lock", side_effect=lock), \
+                         mock.patch.object(h, "_append_transition_row", side_effect=publish), \
+                         concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                        one = pool.submit(transfer, first)
+                        self.assertTrue(publishing.wait(5))
+                        two = pool.submit(transfer, second)
+                        results = [one.result(timeout=10), two.result(timeout=10)]
+                    self.assertIsNotNone(results[0])
+                    self.assertIsNone(results[1])
+                    for source in (a, b, c, d):
+                        self.assertNotEqual(h.resolve_recipient("seat-successor", session=source,
+                                                               harness="claude").state, "unreadable")
+                    for thread in {thread for thread, _key in observed}:
+                        keys = [key for owner, key in observed if owner == thread]
+                        self.assertEqual(keys[1], "lineage-write")
+                        self.assertTrue(keys[2].startswith("lineage-source-"))
+                        self.assertFalse(any(key in {seat.key for seat in seats.values()} for key in keys[2:]))
+                    # Retained binding identities remain complete and usable through the winner.
+                    if count:
+                        rows, error = h._lineage_index()
+                        self.assertFalse(error)
+                        self.assertTrue(any(binding["attempt"] == prefix + "job-a"
+                                            for values in rows.values() for row in values
+                                            for binding in row["bindings"]))
 
     def test_zero_job_source_race_replay_chain_and_empty_publication(self):
         import concurrent.futures, threading

@@ -1314,7 +1314,7 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
              mock.patch.object(peer_steward.subprocess, "run",
                                 return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="boom")):
-            self.assertEqual(self._start(name="peer-f", kind="claude"), 0)
+            self.assertEqual(self._start(name="peer-f", kind="claude"), 1)
         self.assertEqual(peer_steward.peer_message.read_steward_markers(), {})
 
     def test_start_with_an_error_body_or_no_agent_block_marks_nothing(self):
@@ -1327,7 +1327,7 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
                      mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
                      mock.patch.object(peer_steward.subprocess, "run",
                                        return_value=subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")):
-                    self.assertEqual(self._start(name="peer-g", kind="codex"), 0)
+                    self.assertEqual(self._start(name="peer-g", kind="codex"), 1 if expect == "started=false" else 0)
                 self.assertIn(expect, print_mock.call_args[0][0])
                 self.assertEqual(peer_steward.peer_message.read_steward_markers(), {})
 
@@ -1342,7 +1342,7 @@ class StartTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward.subprocess, "run",
                                 return_value=subprocess.CompletedProcess([], 1, stdout="", stderr="boom")):
             rc = self._start()
-        self.assertEqual(rc, 0)
+        self.assertEqual(rc, 1)
         line = print_mock.call_args[0][0]
         self.assertIn("started=false", line)
 
@@ -9214,6 +9214,174 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
         self.assertTrue(all(call.kwargs["near"].pane == "w1:pOld" and call.kwargs["near"].same_tab
                             for call in opener.call_args_list))
 
+    def test_failed_native_results_retain_one_original_request_and_retry_the_effective_target(self):
+        import shlex
+        peer = peer_steward.peer_message
+        cases = [(placement, cleanup) for placement in ("beside", "project")
+                 for cleanup in ("closed", "retained", "close-failed")]
+        cases += [("before-allocation", None), ("explicit", None), ("default-cwd", "closed")]
+        primary, launch = self.tmp_root / "primary", self.tmp_root / "linked" / "nested"
+        primary.mkdir(); launch.mkdir(parents=True)
+        for index, (placement, cleanup) in enumerate(cases):
+            name = "request-" + str(index)
+            state = {"failed": True, "agent": None}
+            starts, openings, wires = [], [], []
+            expected_cwd = str(primary if placement == "default-cwd" else launch)
+            def run(argv, **kwargs):
+                self.assertEqual(argv[:3], ["herdr", "--session", "selected"])
+                action = argv[3:5]
+                if action == ["agent", "get"]:
+                    return _herdr_json({"result": {"agent": state["agent"]}})
+                self.assertEqual(action, ["agent", "start"])
+                starts.append(argv)
+                if state["failed"]:
+                    raise OSError("transient native invocation failure")
+                return _herdr_json({"result": {"agent": {"agent": "codex", "name": name}}})
+            def open_pane(**kwargs):
+                openings.append(kwargs["near"])
+                if state["failed"] and placement == "before-allocation":
+                    return terminal_surface.PaneResult("herdr", None, "none", ["layout-unavailable"])
+                return terminal_surface.PaneResult("herdr", "w1:pNew", "split")
+            def placement_result(*argv):
+                self.assertEqual(argv, ("agent", "get", "w1:pHint"))
+                return {"agent": {"pane_id": "w1:pHint", "workspace_id": "w1",
+                                   "foreground_cwd": str(launch)}}
+            def queue(ref, **kwargs):
+                row = peer._read_pending(ref)
+                full = peer.read_peer_payload(ref)
+                wires.append(full["body"] if full else row["text"])
+                row["state"] = "queued"; peer._save_pending(row)
+                return {"status": "queued"}
+            with contextlib.ExitStack() as patches:
+                patches.enter_context(mock.patch.dict(os.environ, {"HERDR_PANE_ID": "w1:pHint"}))
+                patches.enter_context(mock.patch.object(peer_steward, "_HERDR_SESSION", None))
+                patches.enter_context(mock.patch.object(peer_steward, "_current_session_identity", return_value=("original-controller", "codex")))
+                patches.enter_context(mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner"))
+                patches.enter_context(mock.patch.object(peer_steward, "_caller_pane", return_value=""))
+                patches.enter_context(mock.patch.object(peer_steward, "_placement_result", side_effect=placement_result))
+                patches.enter_context(mock.patch.object(peer_steward.os, "getcwd", return_value=str(launch)))
+                patches.enter_context(mock.patch.object(peer_steward.INSTALL_PATHS, "primary_checkout", return_value=Path(expected_cwd)))
+                patches.enter_context(mock.patch.object(terminal_surface, "open_pane", side_effect=open_pane))
+                patches.enter_context(mock.patch.object(peer_steward.shutil, "which", return_value="herdr"))
+                patches.enter_context(mock.patch.object(peer_steward.subprocess, "run", side_effect=run))
+                patches.enter_context(mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")))
+                patches.enter_context(mock.patch.object(peer_steward, "_wait_for_created_shell", return_value=(None, (101, "700"))))
+                patches.enter_context(mock.patch.object(peer_steward, "_start_shell_snapshot", return_value="ready"))
+                patches.enter_context(mock.patch.object(peer_steward, "_failed_start_cleanup", return_value=cleanup))
+                ingress = patches.enter_context(mock.patch.object(peer_steward, "_ensure_pane_ingress", return_value=None))
+                patches.enter_context(mock.patch.object(peer_steward, "_process_session", return_value=None))
+                patches.enter_context(mock.patch.object(peer_steward, "_read_screen", return_value=None))
+                patches.enter_context(mock.patch.object(peer_steward, "_pane_is_managed", return_value=False))
+                patches.enter_context(mock.patch.object(peer, "deliver_pending_codex", side_effect=queue))
+                patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                patches.enter_context(self.subTest(placement=placement, cleanup=cleanup))
+                argv = ["--herdr-session", "selected", "start", name, "--kind", "codex"]
+                if placement == "explicit":
+                    argv += ["--pane", "w1:pExplicit"]
+                elif placement != "project":
+                    argv += ["--beside", "w1:pOld"]
+                if placement != "default-cwd":
+                    argv += ["--cwd", str(launch)]
+                argv += ["--permission-mode", "inherit", "--", "--model", "fixture-model"]
+                self.assertEqual(peer_steward.main(argv), 4 if placement == "explicit" else 1)
+                rows = [r for r in peer._pending_rows() if r.get("start_request", {}).get("name") == name]
+                self.assertEqual(len(rows), 1)
+                row = rows[0]
+                identity = {key: row[key] for key in ("ref", "refs", "text", "from", "to")}
+                store = peer_steward.peer_obligations.ObligationStore()
+                duty = store.get("message-" + row["ref"])
+                self.assertEqual(duty["intent"]["identity"]["server"], "selected")
+                peer_steward._resume_message_obligation(duty, store)
+                peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                self.assertEqual(len(wires), 1)
+                self.assertIn('"server": "selected"', wires[0])
+                command = shlex.split(wires[0].split("Same start: ", 1)[1].splitlines()[0])
+                self.assertEqual(command[command.index("--herdr-session") + 1], "selected")
+                self.assertEqual(command[command.index("--cwd") + 1], expected_cwd)
+                if cleanup in {"retained", "close-failed"}:
+                    self.assertEqual(command[command.index("--pane") + 1], "w1:pNew")
+                elif placement == "explicit":
+                    self.assertEqual(command[command.index("--pane") + 1], "w1:pExplicit")
+                else:
+                    self.assertNotIn("--pane", command)
+                retry_env = {}
+                if command[0] == "env":
+                    self.assertEqual(command[:3], ["env", "-C", str(launch)])
+                    retry_env["HERDR_PANE_ID"] = command[3].split("=", 1)[1]
+                    command = command[4:]
+                self.assertEqual(command[:3], ["hearting", "run", "peer-steward"])
+                # A second failed invocation of the transmitted command keeps the same
+                # original ref even if it now names the retained allocated pane.
+                with mock.patch.dict(os.environ, retry_env):
+                    self.assertEqual(peer_steward.main(command[3:]), 4 if "--pane" in command else 1)
+                    rows = [r for r in peer._pending_rows() if r.get("start_request", {}).get("name") == name]
+                    self.assertEqual(len(rows), 1)
+                    self.assertEqual({key: rows[0][key] for key in identity}, identity)
+                    state["failed"] = False
+                    before = len(starts)
+                    if "--pane" in command:
+                        pane = command[command.index("--pane") + 1]
+                        state["agent"] = {"pane_id": pane, "agent": "codex", "name": name,
+                                          "cwd": expected_cwd, "agent_session": {"value": "late-native"}}
+                    # Simulate another endpoint in the new turn; argv must still select the original.
+                    peer_steward._HERDR_SESSION = "other"
+                    self.assertEqual(peer_steward.main(command[3:]), 0)
+                    self.assertEqual(len(starts) - before, 0 if state["agent"] else 1)
+                self.assertEqual(len(wires), 1)
+                if placement == "project" and cleanup == "closed":
+                    self.assertTrue(all(near.workspace == "w1" and near.pane is None for near in openings))
+                if placement in {"beside", "before-allocation", "default-cwd"} and cleanup not in {"retained", "close-failed"}:
+                    self.assertTrue(all(near.pane == "w1:pOld" and near.same_tab for near in openings))
+
+    def test_closed_split_retry_command_keeps_endpoint_and_original_beside(self):
+        import shlex
+        with contextlib.ExitStack() as patches:
+            patches.enter_context(mock.patch.object(peer_steward, "_current_session_identity", return_value=("original-controller", "codex")))
+            patches.enter_context(mock.patch.object(peer_steward, "_herdr_missing", return_value=False))
+            patches.enter_context(mock.patch.object(terminal_surface, "open_pane", return_value=terminal_surface.PaneResult("herdr", "w1:pNew", "split")))
+            patches.enter_context(mock.patch.object(peer_steward.subprocess, "run", side_effect=OSError("start unavailable")))
+            patches.enter_context(mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")))
+            patches.enter_context(mock.patch.object(peer_steward, "_wait_for_created_shell", return_value=(None, (101, "700"))))
+            patches.enter_context(mock.patch.object(peer_steward, "_start_shell_snapshot", return_value="ready"))
+            patches.enter_context(mock.patch.object(peer_steward, "_failed_start_cleanup", return_value="closed"))
+            patches.enter_context(mock.patch.object(peer_steward, "_ensure_pane_ingress", return_value=None))
+            patches.enter_context(contextlib.redirect_stdout(io.StringIO()))
+            self.assertEqual(peer_steward.main(["--herdr-session", "selected", "start", "original",
+                                               "--kind", "codex", "--beside", "w1:pOld",
+                                               "--cwd", str(self.tmp_root)]), 1)
+        row, = peer_steward.peer_message._pending_rows()
+        full = peer_steward.peer_message.read_peer_payload(row["ref"])
+        body = full["body"] if full else row["text"]
+        command = shlex.split(body.split("Same start: ", 1)[1].splitlines()[0])
+        self.assertNotIn("--pane", command, "cleanup closed the allocated pane")
+        self.assertEqual(command[command.index("--beside") + 1], "w1:pOld")
+        self.assertEqual(command[command.index("--herdr-session") + 1], "selected")
+
+    def test_native_refusal_exit_codes_and_unavailable_requester_keep_real_outcome(self):
+        peer = peer_steward.peer_message
+        for index, (rc, stdout, stderr) in enumerate(((0, {"error": {"code": "agent_name_taken"}}, ""),
+                                                     (1, {"error": {"code": "agent_name_taken"}}, ""),
+                                                     (2, None, "native refused"))):
+            with self.subTest(rc=rc), \
+                 mock.patch.object(peer_steward, "_current_session_identity", return_value=("original-controller", "codex")), \
+                 mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+                 mock.patch.object(terminal_surface, "open_pane", return_value=terminal_surface.PaneResult("herdr", "w1:pNew", "split")), \
+                 mock.patch.object(peer_steward.subprocess, "run", return_value=subprocess.CompletedProcess([], rc, json.dumps(stdout) if stdout else "", stderr)), \
+                 mock.patch.object(peer_steward, "_start_shell_identity", return_value=(101, "700")), \
+                 mock.patch.object(peer_steward, "_wait_for_created_shell", return_value=(None, (101, "700"))), \
+                 mock.patch.object(peer_steward, "_start_shell_snapshot", return_value="ready"), \
+                 mock.patch.object(peer_steward, "_failed_start_cleanup", return_value="closed"), \
+                 mock.patch.object(peer_steward, "_ensure_pane_ingress", return_value=None), \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                argv = ["start", "refused-" + str(index), "--kind", "codex", "--beside", "w1:pOld"]
+                self.assertEqual(peer_steward.main(argv), 1)
+                self.assertIn("started=false", output.getvalue())
+                rows = list(peer._pending_rows())
+                self.assertEqual(len(rows), index + 1)
+                with mock.patch.object(peer_steward, "_current_session_identity", return_value=(None, None)):
+                    self.assertEqual(peer_steward.main(argv), 1)
+                self.assertEqual(len(list(peer._pending_rows())), index + 1)
+
     def test_default_cwd_resolves_a_real_linked_worktree_subfolder_to_primary(self):
         primary, linked = self.tmp_root / "primary", self.tmp_root / "linked"
         native_run = subprocess.run
@@ -9315,7 +9483,7 @@ class BesideStartTest(_TmpRootMixin, unittest.TestCase):
         self.assertIn("reason=beside-shell-readiness-timeout", line)
         self.assertIn("pane_cleanup=retained", line)
         reuse = next(v.split("=", 1)[1] for v in shlex.split(line) if v.startswith("reuse_command="))
-        self.assertEqual(shlex.split(reuse), ["hearting", "run", "peer-steward", "start", "new",
+        self.assertEqual(shlex.split(reuse), ["hearting", "run", "peer-steward", "--herdr-session", "default", "start", "new",
                          "--kind", "opencode", "--pane", "w1:pN", "--cwd", str(self.tmp_root),
                          "--permission-mode", "inherit", "--", "--model", "user/model"])
 

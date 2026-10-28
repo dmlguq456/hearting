@@ -266,6 +266,83 @@ class NativeCommandTest(NativeCase):
         self.assertEqual((result["cleared"], result["new_session"]), ("true", "session-B"))
         self.write.assert_called_once()
 
+    def test_unreadable_source_after_clear_claim_keeps_claim_and_rechecks_screen_before_one_write(self):
+        for source in ("card", "frontier"):
+            with self.subTest(source=source):
+                self.publish(sessionId="session-A")
+                req, path = self.book(); self.prepare_transport()
+                logical = st.session_seat(self.seat, "claude", "session-A")
+                source_path = st.card_json_path(logical) if source == "card" else st._prompt_seq_path(logical)
+                original = source_path.read_bytes() if source_path.exists() else None
+                source_path.parent.mkdir(parents=True, exist_ok=True)
+                reads, claims = [], []
+                lines = [[("❯", False)], [("─", False)]]
+                def read(*_args, **_kwargs):
+                    reads.append(1)
+                    if len(reads) == 2:
+                        claims.append(clear.read_reservation(self.seat.key)["clear_claim"])
+                        source_path.write_bytes(b'\xff')
+                    return lines
+                def restore(_delay):
+                    self.write.assert_not_called()
+                    held = clear.read_reservation(self.seat.key)
+                    self.assertEqual(held["clear_claim"], claims[0])
+                    self.assertEqual(held["nonce"], req["nonce"])
+                    if original is None:
+                        source_path.unlink()
+                    else:
+                        source_path.write_bytes(original)
+                self.view.side_effect = read
+                self.write.side_effect = lambda fd, text: (self.publish(sessionId="session-B"), len(text))[1]
+                with mock.patch.object(native.time, "sleep", side_effect=restore):
+                    result = self.run_command(req, path)
+                self.assertEqual(result["cleared"], "true")
+                self.write.assert_called_once_with(99, b"/clear\r")
+                self.assertEqual(len(reads), 3)
+                self.assertEqual(clear.read_reservation(self.seat.key)["clear_claim"], claims[0])
+
+    def test_unreadable_card_after_continue_claim_retains_it_until_one_native_write(self):
+        req, path = self.book(continuing=True); self.prepare_transport()
+        logical = st.session_seat(self.seat, "claude", "session-A")
+        card_path = st.card_json_path(logical)
+        original = card_path.read_bytes()
+        lines = [[("❯", False)], [("─", False)]]
+        reads, claims = [], []
+        def read(*_args, **_kwargs):
+            reads.append(1)
+            if len(reads) == 2:
+                claims.append(clear.read_reservation(self.seat.key)["continued"])
+                card_path.write_bytes(b'\xff')
+            return lines
+        def restore(_delay):
+            self.write.assert_not_called()
+            self.assertEqual(clear.read_reservation(self.seat.key)["continued"], claims[0])
+            card_path.write_bytes(original)
+        def sent(fd, text):
+            st.run_hook("claude", "prompt", "session-B", cwd=self.cwd)
+            return len(text)
+        self.view.side_effect = read
+        self.write.side_effect = sent
+        with mock.patch.object(native.time, "sleep", side_effect=restore):
+            result = self.run_command(req, path, continuing=True)
+        self.assertEqual(result["continued"], "true")
+        self.write.assert_called_once_with(99, (clear.CONTINUE_TEXT + "\r").encode())
+        self.assertEqual(len(reads), 3)
+        self.assertEqual(clear.read_reservation(self.seat.key)["continued"]["claim_id"], claims[0]["claim_id"])
+
+    def test_unavailable_zero_frontier_and_io_errors_never_authorize_clear(self):
+        req, path = self.book()
+        logical = st.session_seat(self.seat, "claude", "session-A")
+        frontier = st._prompt_seq_path(logical)
+        frontier.parent.mkdir(parents=True, exist_ok=True)
+        frontier.symlink_to(frontier.parent / "unavailable-target")
+        self.assertEqual(clear.validate_request(path, req["nonce"])[1], "idle-card-observation-unavailable")
+        frontier.unlink()
+        with mock.patch.object(st, "read_latest_card", side_effect=PermissionError("unreadable")):
+            self.assertEqual(clear.validate_request(path, req["nonce"])[1], "idle-card-observation-unavailable")
+        self.assertIsNotNone(clear.validate_request(path, req["nonce"])[0])
+        self.assertEqual(clear.read_reservation(self.seat.key)["status"], "reserved")
+
     def test_idle_card_request_uses_the_exact_attachment_and_claims_one_prompt(self):
         req, path = self.book()
         now = time.time()

@@ -63,6 +63,7 @@ WORKER_TYPES = frozenset({"owner", "frame", "review"})
 OPEN_ROW_STATUSES = frozenset({"open", "running"})
 LINE_MAX_BYTES = 520
 KEEP_ROWS = 40
+LINEAGE_WRITE_KEY = "lineage-write"
 
 
 class RegistryUnreadable(OSError):
@@ -1462,17 +1463,24 @@ def source_session_mutex(harness, sid):
 
 
 def record_locked(seat, harness: str, sid: str, event: str, source: str, now: float) -> Optional[dict]:
-    snap = read_snapshot(seat.key)
-    if not snap:
-        return None
-    with source_session_mutex(str(snap["from"].get("harness") or ""), str(snap["from"].get("sid") or "")):
-        if read_snapshot(seat.key) != snap:
+    # Caller holds the physical seat. All edge writers then take the same
+    # mutation lock before source/binding locks: reachability and publication
+    # must see one graph even when concurrent edges have disjoint endpoints.
+    with _st().seat_lock(LINEAGE_WRITE_KEY):
+        snap = read_snapshot(seat.key)
+        if not snap:
             return None
-        old = str(snap["from"].get("sid") or "")
-        result = resolve_recipient("seat-successor", session=old, harness=harness)
-        if result.state == "unreadable" or (result.state == "confirmed" and result.session_id != sid):
-            return None
-        return _record_locked(seat, harness, sid, event, source, now)
+        with source_session_mutex(str(snap["from"].get("harness") or ""), str(snap["from"].get("sid") or "")):
+            if read_snapshot(seat.key) != snap:
+                return None
+            old = str(snap["from"].get("sid") or "")
+            result = resolve_recipient("seat-successor", session=old, harness=harness)
+            if result.state == "unreadable" or (result.state == "confirmed" and result.session_id != sid):
+                return None
+            target = resolve_recipient("seat-successor", session=sid, harness=harness)
+            if target.state == "unreadable" or target.session_id == old:
+                return None
+            return _record_locked(seat, harness, sid, event, source, now)
 
 
 def _record_locked(seat, harness: str, sid: str, event: str, source: str, now: float) -> Optional[dict]:
@@ -1641,8 +1649,10 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
                                    key=st._native_session_key(successor_harness, successor_sid))
     jobs = jobs or _default_jobs()
     now = st.now_epoch() if now is None else now
-    # Lock order: actual destination seat -> source identity -> sorted bindings.
-    with st.seat_lock(seat.key), source_session_mutex(predecessor_harness, predecessor_sid):
+    # Never acquire another physical seat after the common mutation lock.
+    # Lock order: destination seat -> lineage write -> source -> sorted bindings.
+    with st.seat_lock(seat.key), st.seat_lock(LINEAGE_WRITE_KEY), \
+            source_session_mutex(predecessor_harness, predecessor_sid):
         seats, error = _lineage_index()
         if error:
             raise RegistryUnreadable(error)

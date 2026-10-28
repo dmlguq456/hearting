@@ -1859,13 +1859,22 @@ def _herdr_surface():
         _HERDR_SESSION)
 
 
+def _start_request_key(sender, requested):
+    fields = ("server", "name", "kind", "pane", "beside", "cwd", "permission_mode", "agent_args",
+              "project_workspace")
+    identity = {key: requested.get(key) for key in fields}
+    if identity["project_workspace"]:
+        identity.update(launch_cwd=requested.get("launch_cwd"), project_hint=requested.get("project_hint"))
+    return hashlib.sha256(json.dumps([sender, identity], sort_keys=True).encode()).hexdigest()
+
+
 def _retain_start_failure(requester, requested, actual, result):
     """One message to the original native controller; the normal start remains the retry."""
     sid, harness = requester
     if not peer_message.usable_session_id(sid) or harness not in _PROMPT_HARNESSES:
         return
     sender = {"harness": harness, "session_id": sid}
-    request_key = hashlib.sha256(json.dumps([sender, requested], sort_keys=True).encode()).hexdigest()
+    request_key = _start_request_key(sender, requested)
     ref_key = "peer-start:" + request_key
     # Include received rows: this failed request never wakes its controller twice.
     for path in peer_message._pending_dir().glob("*.json"):
@@ -1873,11 +1882,17 @@ def _retain_start_failure(requester, requested, actual, result):
             row = peer_message._read_pending(path.stem)
         except (OSError, ValueError):
             continue
-        if row and row.get("refs") == [ref_key] and row.get("from") == sender and row.get("to") == sender:
+        if (row and (row.get("refs") == [ref_key] or row.get("start_retry_key") == request_key)
+                and row.get("from") == sender and row.get("to") == sender):
             _schedule_message_obligation(row, "")
             return
-    command = ["hearting", "run", "peer-steward", "start", requested["name"], "--kind", requested["kind"]]
-    pane = actual.get("pane") or requested.get("pane")
+    command = ["hearting", "run", "peer-steward", "--herdr-session", requested["server"],
+               "start", requested["name"], "--kind", requested["kind"]]
+    # A split that cleanup closed is no longer a retry destination. A retained
+    # pane still enters the normal observe/adopt and occupied-pane checks.
+    pane = requested.get("pane")
+    if actual.get("pane_cleanup") in {"retained", "close-failed"}:
+        pane = actual.get("pane") or pane
     if pane:
         command += ["--pane", pane]
     elif requested.get("beside"):
@@ -1888,6 +1903,11 @@ def _retain_start_failure(requester, requested, actual, result):
         command += ["--permission-mode", requested["permission_mode"]]
     if requested.get("agent_args"):
         command += ["--", *requested["agent_args"]]
+    if requested.get("project_workspace") and not pane:
+        # Recreate the original project lookup using its existing cwd/pane hint,
+        # without turning that hint into physical caller ownership.
+        command = ["env", "-C", requested["launch_cwd"],
+                   "HERDR_PANE_ID=" + requested["project_hint"], *command]
     body = ("[notice] Your requested peer start did not complete. "
         "Reobserve the same endpoint and original request on this native turn. "
         "If the requested agent already started, adopt that exact observation; otherwise continue the same start. "
@@ -1896,7 +1916,16 @@ def _retain_start_failure(requester, requested, actual, result):
         + "\nObserved result: " + result.strip() + "\nSame start: " + shlex.join(command))
     _text, ref = peer_message.prepare_peer_message(body, sender, sender, defer=True,
                                                   refs=[ref_key], receipt="peer-start-failed")
-    _schedule_message_obligation(peer_message._read_pending(ref), "")
+    retry = dict(requested)
+    if pane:
+        retry.update(pane=pane, beside=None, project_workspace=None)
+    with peer_message.pending_lock(ref):
+        row = peer_message._read_pending(ref)
+        if row is None:
+            return
+        row.update(start_request=requested, start_retry_key=_start_request_key(sender, retry))
+        peer_message._save_pending(row)
+    _schedule_message_obligation(row, "")
 
 
 def cmd_start(args):
@@ -1904,10 +1933,12 @@ def cmd_start(args):
     requester = _current_session_identity()
     requested = {key: getattr(args, key, None) for key in
                  ("name", "kind", "pane", "beside", "cwd", "permission_mode", "agent_args")}
-    if not requested["pane"] and not requested["beside"]:
-        requested["beside"] = _caller_pane() or None
+    requested.update(server=_HERDR_SESSION or os.environ.get("HERDR_SESSION") or "default",
+                     launch_cwd=os.getcwd())
     if not requested["cwd"]:
         requested["cwd"] = os.getcwd()
+    requested["cwd"] = os.path.realpath(os.path.expanduser(str(requested["cwd"])))
+    args.start_request = requested
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         code = _start_request(args)
@@ -1931,8 +1962,18 @@ def _start_request(args):
         args.beside = _caller_pane() or None
         if not args.beside:
             args.project_workspace = _project_start_workspace()
+    args.start_request.update(beside=args.beside,
+                              project_workspace=getattr(args, "project_workspace", None),
+                              project_hint=os.environ.get("HERDR_PANE_ID", ""))
     workspace = (args.beside.split(":")[0] if args.beside else
                  getattr(args, "project_workspace", None))
+    if workspace and not args.cwd:
+        try:
+            args.cwd = str(INSTALL_PATHS.primary_checkout(os.getcwd()))
+        except OSError:
+            args.cwd = None
+    if args.cwd:
+        args.start_request["cwd"] = os.path.realpath(os.path.expanduser(str(args.cwd)))
     if not workspace:
         return _start_in_pane(args)
     # Hold the workspace claim until native start settles, including shell reuse.
@@ -1949,12 +1990,6 @@ def _start_in_pane(args):
         print(f"started=false reason=pane-unknown agent={args.kind} name={args.name} "
               "pane=- detail=호출자의 창 또는 같은 프로젝트 작업공간을 확인하지 못했습니다")
         return 1
-    if (args.beside or workspace) and not args.cwd:
-        try:
-            args.cwd = str(INSTALL_PATHS.primary_checkout(os.getcwd()))
-        except OSError:
-            args.cwd = None
-
     pane_cwd = None
     cwd_flag = []
     if args.cwd:
@@ -1994,8 +2029,10 @@ def _start_in_pane(args):
                   _failed_start_cleanup(args.pane, created_shell, created_screen,
                                         deadline=failure_deadline))
         note = f" pane_cleanup={result}"
+        args.pane_cleanup = result
         if result in {"retained", "close-failed"}:
-            retry = ["hearting", "run", "peer-steward", "start", args.name,
+            retry = ["hearting", "run", "peer-steward", "--herdr-session",
+                     args.start_request["server"], "start", args.name,
                      "--kind", args.kind, "--pane", args.pane]
             if pane_cwd:
                 retry += ["--cwd", pane_cwd]
@@ -2184,7 +2221,7 @@ def _start_in_pane(args):
         + (f" start_verify={start_verify}" if start_verify else "")
         + (f" placement=project-workspace workspace={workspace}" if workspace else "")
     )
-    return 0
+    return 0 if started else 1
 
 
 # One normal exit action, without retry or force: Claude's documented command

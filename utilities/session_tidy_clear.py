@@ -1228,17 +1228,50 @@ def _booking_at(path: Path):
     return req, seat, ""
 
 
+def _card_frontier(seat: "st.Seat"):
+    """Readable card/frontier facts, or None when an existing source is unavailable."""
+    try:
+        frontier_path = st._prompt_seq_path(seat)
+        frontier = st.read_json(frontier_path)
+        if frontier is None:
+            try:
+                frontier_path.lstat()
+            except FileNotFoundError:
+                frontier = {"schema": st.SCHEMA, "seq": 0}
+            else:
+                return None
+        if (not isinstance(frontier, dict) or frontier.get("schema") != st.SCHEMA
+                or type(frontier.get("seq")) is not int or frontier["seq"] < 0):
+            return None
+        card = st.read_latest_card(seat)
+        if card is None:
+            try:
+                st.card_json_path(seat).lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                return None
+        elif type(card.get("generation")) is not int or card["generation"] < 0:
+            return None
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return card, frontier["seq"]
+
+
 def _unchanged_since_card(req: dict, seat: "st.Seat") -> str:
     """"" while no prompt was submitted since the booking and the card is the booked one, else the reason."""
-    if st.read_prompt_seq(seat) != int(req.get("prompt_seq", -1)):
+    observation = _card_frontier(seat)
+    if observation is None:
+        return "idle-card-observation-unavailable"
+    card, sequence = observation
+    if sequence != int(req.get("prompt_seq", -1)):
         return "new-input"
-    card = st.read_latest_card(seat)
     if (int(card["generation"]) if card else 0) != int(req.get("card_generation", -1)):
         return "card-changed"
     return ""
 
 
-def _accepted_queue_relation(req: dict, seat: "st.Seat") -> bool:
+def _accepted_queue_relation(req: dict, seat: "st.Seat") -> Optional[bool]:
     """Validate the full card/claim/operation/queue relation before an automatic clear."""
     acceptance = req.get("acceptance")
     required = {"schema", "nonce", "claim_id", "operation_id", "queue_id", "seat_key",
@@ -1253,10 +1286,17 @@ def _accepted_queue_relation(req: dict, seat: "st.Seat") -> bool:
         queue_id = str(req.get("queue_id") or "")
         operation_id = str(req.get("operation_id") or "")
         item = runner.read_item(queue_id)
-        card = st.read_latest_card(seat)
-        if ((item is None and runner._item_path(queue_id).exists())
-                or (card is None and st.card_json_path(seat).exists())):
-            return None  # Existing source unreadable; absence is a different observation.
+        observation = _card_frontier(seat)
+        if observation is None:
+            return None
+        card, sequence = observation
+        if item is None:
+            try:
+                runner._item_path(queue_id).lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                return None  # Existing source unreadable; absence is a different observation.
         expected = {
             "nonce": req.get("nonce"), "claim_id": request.get("token"),
             "operation_id": operation_id, "queue_id": queue_id, "seat_key": seat.key,
@@ -1270,7 +1310,7 @@ def _accepted_queue_relation(req: dict, seat: "st.Seat") -> bool:
             # are the source facts; a missing derived receipt is not lost context.
             if (expected["source_generation"] not in {
                     int(req.get("source_card_generation", 0) or 0), int((card or {}).get("generation", 0) or 0)}
-                    or st.read_prompt_seq(seat) != int(arrival.get("prompt_seq", -1))):
+                    or sequence != int(arrival.get("prompt_seq", -1))):
                 return False
             acceptance = {"schema": 1, **expected}
         if any(acceptance.get(key) != value for key, value in expected.items()):
@@ -1330,6 +1370,33 @@ def validate_request(path, nonce: Optional[str] = None, *, now: Optional[float] 
         if observation.get("state") != "ready":
             return None, "compact-unknown" if observation.get("state") == "unknown" else "compact-pending"
     return req, ""
+
+
+def reobserve_request(path, nonce: str, *, sleep: Callable[[float], None] = time.sleep,
+                      require_ready: bool = True, _sending_claim: Optional[dict] = None,
+                      continuing: bool = False):
+    """Wait only for unavailable source reads within this booking's original deadline.
+
+    No claim is acquired or changed here. Native writers can retain their exact
+    unsent claim while reobserving; every effect still rechecks physical readiness.
+    """
+    while True:
+        if continuing:
+            req, reason = (validate_continue(path, nonce) if _sending_claim is None else
+                           validate_continue(path, nonce, _sending_claim=_sending_claim))
+        else:
+            req, reason = validate_request(path, nonce, require_ready=require_ready,
+                                           _sending_claim=_sending_claim)
+        if req is not None or reason != "idle-card-observation-unavailable":
+            return req, reason
+        held, _seat, why = _booking_at(Path(path))
+        if not held or held.get("nonce") != nonce or held.get("status") != ("cleared" if continuing else "reserved"):
+            return None, why or "superseded"
+        window = (held.get("continued") or {}) if continuing else held
+        remaining = float(window.get("deadline", 0) or 0) - st.now_epoch()
+        if remaining <= 0:
+            return None, "expired"
+        sleep(min(1.0, remaining))
 
 
 def claim_clear(path, nonce: Optional[str] = None):
@@ -1744,19 +1811,24 @@ def _finish_continue(seat_key: str, nonce: str, outcome: str, reason: str = "", 
                             author_harness=str(req.get("harness") or ""), author_sid=str(req.get("sid") or ""))
     return True
 
-def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], dict]) -> str:
+def _continue(seat_key: str, nonce: str, continuer: Callable[[Path, str, str], dict], *,
+              sleep: Callable[[float], None] = time.sleep) -> str:
     """After a confirmed clear, ask ``peer-steward.py continue`` once and record its result.
     ``continued`` means the exact native continuation was confirmed; the clear remains valid
     when continuation is queued, skipped or unverified.
     """
     path = reservation_path(seat_key)
-    req, reason = validate_continue(path, nonce)
-    if req is None and reason in ("superseded", "off"):
-        return "cleared"                # nothing pending: --no-continue, a newer tidy, --no-clear
-    if req is None:
-        verdict = {"continued": "skipped", "reason": reason}
-    else:
+    while True:
+        req, reason = reobserve_request(path, nonce, continuing=True, sleep=sleep)
+        if req is None and reason in ("superseded", "off"):
+            return "cleared"            # no pending continuation
+        if req is None:
+            verdict = {"continued": "skipped", "reason": reason}
+            break
         verdict = continuer(path, nonce, str((req.get("seat") or {}).get("pane") or ""))
+        if (verdict.get("continued") not in {"queued", "skipped"}
+                or verdict.get("reason") != "idle-card-observation-unavailable"):
+            break
     outcome = verdict.get("continued", "failed")
     _finish_continue(seat_key, nonce, outcome, verdict.get("reason", ""),
                        claim_id=verdict.get("claim_id", ""), transfer_ref=verdict.get("transfer_ref", ""))
@@ -1886,7 +1958,7 @@ def _compact_turn_end_and_request(seat_key: str, nonce: str, sleep: Callable[[fl
         remaining = float(req.get("deadline", 0) or 0) - now
         if remaining <= 0:
             return "skipped" if _finish(seat_key, nonce, "skipped", "compact-timeout") else "superseded"
-        checked, reason = validate_request(path, nonce, require_ready=False)
+        checked, reason = reobserve_request(path, nonce, require_ready=False, sleep=sleep)
         if checked is None:
             if reason == "superseded":
                 return "superseded"
@@ -1975,7 +2047,7 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
         while True:
             if _prepare_handover_snapshot(req):
                 break
-            checked, reason = validate_request(path, nonce, require_ready=False)
+            checked, reason = reobserve_request(path, nonce, require_ready=False, sleep=sleep)
             if checked is None:
                 if reason == "superseded":
                     return "superseded"
@@ -1998,7 +2070,7 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
         req = read_reservation(seat_key) or req
     if req.get("origin") == "compact":
         while True:
-            req, reason = validate_request(path, nonce, require_ready=False)
+            req, reason = reobserve_request(path, nonce, require_ready=False, sleep=sleep)
             if req is None:
                 if reason == "superseded":
                     return "superseded"
@@ -2039,7 +2111,7 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
                                     seat_key, nonce, "skipped", "snapshot-unavailable") else "superseded"
                             sleep(min(COMPACT_POLL_SEC, remaining))
                             continue
-                    req, reason = validate_request(path, nonce)
+                    req, reason = reobserve_request(path, nonce, sleep=sleep)
                     if req is not None:
                         break
                     if reason == "superseded":
@@ -2063,16 +2135,7 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
         if state not in ("idle", "done"):
             reason = "timeout" if state.startswith(("timeout", "state-")) else state
             return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
-    req, reason = validate_request(path, nonce)
-    while req is None and reason == "idle-card-observation-unavailable":
-        held = read_reservation(seat_key)
-        if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
-            return "superseded"
-        remaining = float(held.get("deadline", 0)) - st.now_epoch()
-        if remaining <= 0:
-            return "skipped" if _finish(seat_key, nonce, "skipped", reason) else "superseded"
-        sleep(min(1.0, remaining))
-        req, reason = validate_request(path, nonce)
+    req, reason = reobserve_request(path, nonce, sleep=sleep)
     if req is None:
         if reason == "superseded":
             return "superseded"
@@ -2080,7 +2143,14 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
     while True:
         verdict = steward(path, nonce, pane)
         outcome, reason = verdict.get("cleared", "failed"), verdict.get("reason", "")
-        if outcome != "queued" or reason != "snapshot-pending":
+        if reason == "idle-card-observation-unavailable" and outcome in {"queued", "skipped"}:
+            checked, why = reobserve_request(path, nonce, sleep=sleep)
+            if checked is not None:
+                continue  # No send occurred; the same command rechecks readiness and claim.
+            if why == "superseded":
+                return "superseded"
+            return "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
+        if outcome not in {"queued", "skipped"} or reason != "snapshot-pending":
             break
         held = read_reservation(seat_key)
         if not held or held.get("nonce") != nonce or held.get("status") != "reserved":
@@ -2090,14 +2160,14 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
             return "skipped" if _finish(seat_key, nonce, "skipped", "snapshot-unavailable") else "superseded"
         if not _prepare_handover_snapshot(held):
             sleep(min(1.0, remaining))
-        checked, why = validate_request(path, nonce)
+        checked, why = reobserve_request(path, nonce, sleep=sleep)
         if checked is None:
             if why == "superseded":
                 return "superseded"
             return "skipped" if _finish(seat_key, nonce, "skipped", why) else "superseded"
     if outcome == "true":
         _finish(seat_key, nonce, "cleared", observed=verdict.get("new_session", ""))
-        return _continue(seat_key, nonce, continuer)
+        return _continue(seat_key, nonce, continuer, sleep=sleep)
     if outcome == "unverified":
         # The clear was written once and never repeated; allow the new conversation's
         # start hook a short bounded window to show up before calling it unconfirmed.
@@ -2107,7 +2177,7 @@ def run_helper(seat_key: str, nonce: str, *, wait: Optional[Callable[[str, int],
             seen = (held or {}).get("observed") or {}
             if seen.get("sid"):
                 _finish(seat_key, nonce, "cleared", observed=str(seen["sid"]))
-                return _continue(seat_key, nonce, continuer)
+                return _continue(seat_key, nonce, continuer, sleep=sleep)
             sleep(1.0)
         return "unverified" if _finish(seat_key, nonce, "unverified", reason) else "superseded"
     final = "skipped" if outcome == "skipped" else "failed"
