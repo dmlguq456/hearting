@@ -243,8 +243,12 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
     target = (req.get("seat") or {}).get("native")
     sid = req.get("new_session") if continuing else req.get("sid")
     word = "continued" if continuing else "cleared"
+    claim = None
     def result(outcome, reason="", new_session=""):
-        return {word: outcome, "reason": reason, "new_session": new_session}
+        fields = {word: outcome, "reason": reason, "new_session": new_session}
+        if continuing and claim is not None:
+            fields["claim_id"] = (claim.get("continued") or {}).get("claim_id", "")
+        return fields
     if req.get("harness") != "claude" or not target:
         return result("skipped", "unsupported-harness")
     why = idle_reason(target, sid)
@@ -316,7 +320,11 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
             text = clear.followup_text(req) if continuing else "/clear"
             # A single write includes Enter; partial/failed writes are never retried.
             data = (text + "\r").encode()
-            if os.write(fd, data) != len(data): return result("unverified", "partial-send")
+            try:
+                written = os.write(fd, data)
+            except OSError:
+                return result("unverified", "partial-send")
+            if written != len(data): return result("unverified", "partial-send")
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 record = live(target)

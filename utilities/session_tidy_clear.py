@@ -1264,6 +1264,10 @@ def _unchanged_since_card(req: dict, seat: "st.Seat") -> str:
     if observation is None:
         return "idle-card-observation-unavailable"
     card, sequence = observation
+    return _card_unchanged_reason(req, card, sequence)
+
+
+def _card_unchanged_reason(req: dict, card, sequence: int) -> str:
     if sequence != int(req.get("prompt_seq", -1)):
         return "new-input"
     if (int(card["generation"]) if card else 0) != int(req.get("card_generation", -1)):
@@ -1441,10 +1445,13 @@ def validate_continue(path, nonce: Optional[str] = None, *, now: Optional[float]
         return None, "superseded"
     if now > float(held.get("deadline", 0) or 0):
         return None, "expired"
-    reason = _unchanged_since_card(req, seat)
+    observation = _card_frontier(seat)
+    if observation is None:
+        return None, "idle-card-observation-unavailable"
+    card, sequence = observation
+    reason = _card_unchanged_reason(req, card, sequence)
     if reason:
         return None, reason
-    card = st.read_latest_card(seat)
     if not card:
         return None, "no-card"
     if card.get("handed_off"):
@@ -1641,9 +1648,18 @@ def _ask_steward(command: str, word: str, path: Path, nonce: str, pane: str) -> 
     """``peer-steward.py <command>`` -- its ``<word>=...`` line as a dict (``failed`` on a crash)."""
     injected = _injected("HEARTING_TIDY_PEER_STEWARD")
     base = [str(injected)] if injected else [sys.executable, str(HERE / "peer-steward.py")]
+    timeout = STEWARD_TIMEOUT_SEC
+    if command in {"clear", "continue"}:
+        req, _seat, _reason = _booking_at(path)
+        if req is not None and req.get("nonce") == nonce:
+            window = (req.get("continued") or {}) if command == "continue" else req
+            # Native writers may wait on unavailable reads until this existing
+            # deadline. Leave the usual command budget for final checks, its one
+            # write, arrival observation and attachment teardown after that wait.
+            timeout += max(0.0, float(window.get("deadline", 0) or 0) - st.now_epoch())
     try:
         done = subprocess.run([*base, command, pane, "--request", str(path), "--nonce", nonce],
-                              capture_output=True, text=True, timeout=STEWARD_TIMEOUT_SEC, env=_helper_env())
+                              capture_output=True, text=True, timeout=timeout, env=_helper_env())
     except (OSError, subprocess.SubprocessError) as exc:
         return {word: "failed", "reason": f"peer-steward-unavailable-{type(exc).__name__}"}
     for line in done.stdout.splitlines():

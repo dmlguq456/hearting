@@ -4,8 +4,10 @@ import contextlib
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import sys
+import textwrap
 import time
 from types import SimpleNamespace
 import unittest
@@ -56,6 +58,11 @@ class NativeCase(unittest.TestCase):
     def publish(self, **fields):
         self.record.update(fields)
         self.registry.write_text(json.dumps(self.record))
+
+    def reset_tidy(self):
+        root = st.state_root()
+        self.assertIn(self.iso.root, root.parents)
+        shutil.rmtree(root, ignore_errors=True)
 
     def book(self, *, continuing=False):
         st.record_event(self.seat, "claude", "session-A", "start", source="startup", cwd=self.cwd)
@@ -330,6 +337,95 @@ class NativeCommandTest(NativeCase):
         self.assertEqual(len(reads), 3)
         self.assertEqual(clear.read_reservation(self.seat.key)["continued"]["claim_id"], claims[0]["claim_id"])
 
+    def test_continue_uses_one_strict_card_observation_and_recovers_before_or_after_claim(self):
+        for boundary in ("before-claim", "after-claim"):
+            with self.subTest(boundary=boundary):
+                self.reset_tidy()
+                self.publish(sessionId="session-A")
+                req, path = self.book(continuing=True)
+                self.prepare_transport()
+                card_path = st.card_json_path(st.session_seat(self.seat, "claude", "session-A"))
+                original = card_path.read_bytes()
+                real_read = st.read_latest_card
+                lost, waits, claims = [], [], []
+                def read(seat):
+                    card = real_read(seat)
+                    held = clear.read_reservation(self.seat.key)
+                    sending = (held.get("continued") or {}).get("state") == "sending"
+                    if card and not lost and sending == (boundary == "after-claim"):
+                        lost.append(1)
+                        claims.append(held.get("continued"))
+                        card_path.write_bytes(b'\xff')
+                    return card
+                def restore(_delay):
+                    waits.append(1)
+                    self.write.assert_not_called()
+                    self.assertEqual(clear.read_reservation(self.seat.key)["nonce"], req["nonce"])
+                    if boundary == "after-claim":
+                        self.assertEqual(clear.read_reservation(self.seat.key)["continued"], claims[0])
+                    card_path.write_bytes(original)
+                def sent(_fd, data):
+                    st.run_hook("claude", "prompt", "session-B", cwd=self.cwd)
+                    return len(data)
+                self.write.side_effect = sent
+                def continuer(path, nonce, _pane):
+                    held, reason = clear.validate_continue(path, nonce)
+                    if not held:
+                        return {"continued": "skipped", "reason": reason}
+                    return native.command(held, path, nonce, continuing=True, screen_ready=lambda *_: None)
+                with mock.patch.object(st, "read_latest_card", side_effect=read), \
+                     mock.patch.object(native.time, "sleep", side_effect=restore):
+                    self.assertEqual(clear._continue(self.seat.key, req["nonce"], continuer, sleep=restore), "continued")
+                self.assertEqual(len(waits), 1)
+                self.write.assert_called_once()
+                held = clear.read_reservation(self.seat.key)
+                self.assertEqual(held["continued"]["state"], "sent")
+                if boundary == "after-claim":
+                    self.assertEqual(held["continued"]["claim_id"], claims[0]["claim_id"])
+                self.assertEqual(held["nonce"], req["nonce"])
+
+    def test_continue_strict_observation_preserves_absence_replacement_handoff_and_input_protections(self):
+        for change in ("absent", "replaced", "handed-off", "new-input", "unreadable-expiry"):
+            with self.subTest(change=change):
+                self.reset_tidy()
+                self.publish(sessionId="session-A")
+                req, path = self.book(continuing=True)
+                self.prepare_transport()
+                booked = clear._booked_seat(req, self.seat.key)
+                card_path = st.card_json_path(booked)
+                if change == "absent":
+                    card_path.unlink()
+                    reason = "card-changed"
+                elif change in {"replaced", "handed-off"}:
+                    card = st.read_latest_card(booked)
+                    if change == "replaced": card["generation"] += 1
+                    else: card["handed_off"] = True
+                    st.atomic_write_json(card_path, card)
+                    reason = "card-changed" if change == "replaced" else "handed-off"
+                elif change == "new-input":
+                    st.bump_prompt_seq(booked, "claude", "session-B", st.now_epoch())
+                    reason = "new-input"
+                else:
+                    card_path.write_bytes(b'\xff')
+                    reason = "expired"
+                now = st.now_epoch()
+                clock = [now]
+                def advance(delay): clock[0] += delay
+                with mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]):
+                    self.assertEqual(clear._continue(self.seat.key, req["nonce"], mock.Mock(), sleep=advance), "cleared")
+                held = clear.read_reservation(self.seat.key)
+                self.assertEqual((held["continued"]["state"], held["continued"]["reason"]), ("skipped", reason))
+                self.assertEqual(held["continued"]["deadline"], req["continued"]["deadline"])
+                self.write.assert_not_called()
+
+    def test_continue_verified_absence_is_no_card_when_no_generation_was_booked(self):
+        req, path = self.book(continuing=True)
+        card_path = st.card_json_path(clear._booked_seat(req, self.seat.key))
+        card_path.unlink()
+        req["card_generation"] = 0
+        clear._write_reservation(req)
+        self.assertEqual(clear.validate_continue(path, req["nonce"])[1], "no-card")
+
     def test_unavailable_zero_frontier_and_io_errors_never_authorize_clear(self):
         req, path = self.book()
         logical = st.session_seat(self.seat, "claude", "session-A")
@@ -518,6 +614,233 @@ class NativeCommandTest(NativeCase):
             row = handover.record_retire_handover("before", "claude", "session-A", "claude")
         self.assertEqual((row["from"], row["sid"], row["bindings"]), ("before", "session-A", []))
         physical.assert_not_called()
+
+
+class NativeRPCWaitTest(NativeCase):
+    """Actual helper -> subprocess -> steward -> native command, with private I/O."""
+
+    CHILD = r'''
+import contextlib, importlib.util, json, os, signal, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
+import session_tidy as st
+import session_tidy_clear as clear
+import session_tidy_native as native
+config = json.loads(Path(__file__).with_suffix('.json').read_text())
+spec = importlib.util.spec_from_file_location('rpc_steward', config['steward'])
+peer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(peer)
+args = peer.build_parser().parse_args(sys.argv[1:])
+req, seat, reason = clear._booking_at(Path(args.request))
+assert req is not None, reason
+continuing = sys.argv[1] == 'continue'
+source = st.card_json_path(seat)
+original = source.read_bytes()
+events = Path(config['events'])
+def emit(kind, **data):
+    with events.open('a') as stream:
+        stream.write(json.dumps({'event': kind, 'pid': os.getpid(), **data}) + '\n')
+claim = None
+reads = 0
+started = None
+restored = False
+real_sleep = time.sleep
+def held_claim():
+    held = clear.read_reservation(req['seat']['key'])
+    return held.get('continued' if continuing else 'clear_claim')
+@contextlib.contextmanager
+def attached(_target):
+    try: yield 99, SimpleNamespace(poll=lambda: None)
+    finally: emit('attachment-closed')
+def read(*_args, **_kwargs):
+    global reads, claim, started
+    reads += 1
+    if reads == 2:
+        claim = held_claim()
+        assert claim['state'] == 'sending'
+        emit('claim', claim=claim, nonce=req['nonce'])
+        source.write_bytes(b'\xff')
+        started = time.monotonic()
+    emit('screen', count=reads)
+    if reads > 2 and config['scenario'] == 'draft':
+        return [[('❯', False), ('x', False)], [('─', False)] * 16]
+    if reads > 2 and config['scenario'] == 'form':
+        return [[(c, False) for c in 'Enter to confirm'], [('❯', False)], [('─', False)] * 16]
+    return [[('❯', False)], [('─', False)] * 16]
+def sleep(delay):
+    global restored
+    assert held_claim() == claim
+    real_sleep(min(delay, .04))
+    if not restored and time.monotonic() - started >= config['outage_sec']:
+        restored = True
+        scenario = config['scenario']
+        emit('wait-passed-fixed-timeout', seconds=time.monotonic()-started)
+        if scenario == 'expiry': return
+        source.write_bytes(original)
+        if scenario == 'new-input':
+            st.bump_prompt_seq(seat, 'claude', req.get('new_session') or req['sid'], st.now_epoch())
+        elif scenario == 'supersede':
+            held = clear.read_reservation(req['seat']['key'])
+            held['nonce'] = 'replacement-nonce'
+            clear._write_reservation(held)
+        elif scenario == 'death-unsent':
+            os.kill(os.getpid(), signal.SIGTERM)
+        elif scenario in {'target-changed', 'process-changed'}:
+            registry = Path(config['registry'])
+            record = json.loads(registry.read_text())
+            record['sessionId' if scenario == 'target-changed' else 'procStart'] = 'actual-other'
+            registry.write_text(json.dumps(record))
+        emit('restored', claim=held_claim())
+def write(fd, data):
+    assert held_claim() == claim
+    emit('write', text=data.decode(), claim=claim)
+    scenario = config['scenario']
+    if scenario == 'death-after-write': os.kill(os.getpid(), signal.SIGTERM)
+    if scenario == 'timeout-after-write': real_sleep(10)
+    if scenario == 'partial': return len(data)-1
+    if scenario == 'write-error': raise OSError('ambiguous-write')
+    if continuing:
+        st.bump_prompt_seq(st.seat_from_dict(req['seat']), 'claude', req['new_session'], st.now_epoch())
+    else:
+        registry = Path(config['registry'])
+        record = json.loads(registry.read_text())
+        record['sessionId'] = 'session-B'
+        registry.write_text(json.dumps(record))
+    return len(data)
+proxy = SimpleNamespace(**vars(os)); proxy.write = write
+with mock.patch.object(native, 'attachment', side_effect=attached), \
+     mock.patch.object(native.View, 'read', side_effect=read), \
+     mock.patch.object(native.time, 'sleep', side_effect=sleep), \
+     mock.patch.object(native, 'os', proxy), \
+     mock.patch.object(peer, '_record'), mock.patch.object(peer, '_project_of', return_value='fixture'):
+    code = peer.cmd_continue(args) if continuing else peer.cmd_clear(args)
+emit('finished', claim=held_claim())
+raise SystemExit(code)
+'''
+
+    def probe(self, *, mode="ordinary", scenario="recovery"):
+        continuing = mode == "continue"
+        self.reset_tidy()
+        self.publish(sessionId="session-A")
+        req, path = self.book(continuing=continuing)
+        if mode == "compact":
+            req, path, transcript = self.book_compact()
+            with transcript.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"type": "assistant", "uuid": "a-final",
+                    "message": {"stop_reason": "end_turn", "content": [
+                        {"type": "text", "text": "complete"}]}}) + "\n")
+        # Use the actual original reservation/window, scaled to keep the probe short.
+        deadline = st.now_epoch() + 3.0
+        if continuing:
+            req["deadline"] = st.now_epoch() - 10  # Only continuation's own window applies.
+            req["continued"]["deadline"] = deadline
+        else:
+            req["deadline"] = deadline
+            req["continue_off"] = True
+        clear._write_reservation(req)
+        import dispatch_seat_handover as handover
+        with st.seat_lock(self.seat.key):
+            handover.write_snapshot_locked(self.seat, "claude", "session-A")
+        tag = mode + "-" + scenario
+        script = self.iso.root / (tag + ".py")
+        events_path = self.iso.root / (tag + ".jsonl")
+        script.write_text(f"#!{sys.executable}\nimport sys\nsys.path.insert(0, {str(ROOT / 'utilities')!r})\n"
+                          + textwrap.dedent(self.CHILD))
+        compile(script.read_text(), str(script), "exec")
+        script.chmod(0o700)
+        script.with_suffix(".json").write_text(json.dumps({"scenario": scenario,
+            "steward": str(ROOT / "utilities/peer-steward.py"), "events": str(events_path),
+            "registry": str(self.registry), "outage_sec": 1.0}))
+        runs = []
+        real_run = clear.subprocess.run
+        def capture(*args, **kwargs):
+            try:
+                done = real_run(*args, **kwargs)
+            except clear.subprocess.TimeoutExpired:
+                runs.append({"timeout": kwargs.get("timeout"), "timed_out": True})
+                raise
+            runs.append({"code": done.returncode, "stdout": done.stdout, "stderr": done.stderr,
+                         "timeout": kwargs.get("timeout")})
+            return done
+        with mock.patch.dict(os.environ, {"HEARTING_TIDY_TEST_ROOT": str(self.iso.root),
+                                         "HEARTING_TIDY_PEER_STEWARD": str(script),
+                                         "HEARTING_TIDY_CLEAR_OBSERVE": "0.01"}), \
+             mock.patch.object(clear, "STEWARD_TIMEOUT_SEC", .75), \
+             mock.patch.object(clear.subprocess, "run", side_effect=capture), \
+             mock.patch.object(native, "wait_idle", return_value="idle"):
+            if continuing:
+                outcome = clear._continue(self.seat.key, req["nonce"], clear._run_continue)
+            else:
+                outcome = clear.run_helper(self.seat.key, req["nonce"])
+        events = [json.loads(line) for line in events_path.read_text().splitlines()] if events_path.exists() else []
+        self.assertEqual(len([e for e in events if e["event"] == "claim"]), 1, (events, runs, outcome, clear.read_reservation(self.seat.key)))
+        self.assertEqual(len([e for e in events if e["event"] == "wait-passed-fixed-timeout"]), 1, events)
+        for pid in {e["pid"] for e in events}:
+            self.assertFalse(Path(f"/proc/{pid}").exists(), "RPC child must be reaped before fixture cleanup")
+        held = clear.read_reservation(self.seat.key)
+        window = held["continued"] if continuing else held
+        self.assertEqual(window["deadline"], deadline)
+        writes = [e for e in events if e["event"] == "write"]
+        print("native-rpc-probe=" + json.dumps({"mode": mode, "scenario": scenario,
+            "outcome": outcome, "nonce": req["nonce"], "deadline": deadline,
+            "claim": next(e["claim"] for e in events if e["event"] == "claim"),
+            "writes": writes, "events": [e["event"] for e in events], "rpc": runs,
+            "owned_children_reaped": True}, ensure_ascii=False))
+        return outcome, held, events, writes, req
+
+    def test_rpc_outage_longer_than_fixed_timeout_recovers_on_original_clear_compact_and_continue_window(self):
+        for mode in ("ordinary", "compact", "continue"):
+            with self.subTest(mode=mode):
+                outcome, held, events, writes, req = self.probe(mode=mode)
+                self.assertEqual(outcome, "continued" if mode == "continue" else "cleared", events)
+                self.assertEqual(len(writes), 1)
+                self.assertEqual(held["nonce"], req["nonce"])
+                claim = next(e["claim"] for e in events if e["event"] == "claim")
+                final = held["continued"] if mode == "continue" else held["clear_claim"]
+                self.assertEqual(final["token"], claim["token"])
+                self.assertEqual(final["state"], "sent")
+                self.assertGreaterEqual(len([e for e in events if e["event"] == "screen"]), 3)
+                self.assertEqual(events[-2]["event"], "attachment-closed")
+
+    def test_rpc_original_deadline_expiry_supersession_input_and_recovered_draft_never_send(self):
+        for mode in ("ordinary", "compact", "continue"):
+            for scenario in ("expiry", "supersede", "new-input", "draft"):
+                with self.subTest(mode=mode, scenario=scenario):
+                    outcome, held, events, writes, req = self.probe(mode=mode, scenario=scenario)
+                    self.assertFalse(writes)
+                    if scenario == "supersede":
+                        self.assertEqual(held["nonce"], "replacement-nonce")
+                    else:
+                        final = held["continued"] if mode == "continue" else held
+                        self.assertEqual(final["reason"], {"expiry": "expired", "new-input": "new-input", "draft": "draft"}[scenario])
+
+    def test_rpc_process_death_and_ambiguous_writes_never_authorize_a_second_send(self):
+        for mode in ("ordinary", "continue"):
+            for scenario in ("death-unsent", "death-after-write", "timeout-after-write", "partial", "write-error"):
+                with self.subTest(mode=mode, scenario=scenario):
+                    outcome, held, events, writes, req = self.probe(mode=mode, scenario=scenario)
+                    self.assertEqual(len(writes), 0 if scenario == "death-unsent" else 1)
+                    final = held["continued"] if mode == "continue" else held
+                    if scenario in ("partial", "write-error"):
+                        self.assertEqual((final["state"] if mode == "continue" else final["status"], final["reason"]),
+                                         ("unverified", "partial-send"))
+                    with mock.patch.object(clear, "_ask_steward") as again:
+                        if mode == "continue": clear._continue(self.seat.key, req["nonce"], clear._run_continue)
+                        else: clear.run_helper(self.seat.key, req["nonce"])
+                    again.assert_not_called()
+
+    def test_rpc_recovery_rechecks_native_session_process_and_form_before_write(self):
+        for mode in ("ordinary", "continue"):
+            for scenario in ("target-changed", "process-changed", "form"):
+                with self.subTest(mode=mode, scenario=scenario):
+                    # Each case starts with the same exact private PID/start record.
+                    self.publish(procStart=self.own[5])
+                    outcome, held, events, writes, req = self.probe(mode=mode, scenario=scenario)
+                    self.assertFalse(writes)
+                    final = held["continued"] if mode == "continue" else held
+                    self.assertEqual(final["reason"], "form-open" if scenario == "form" else "target-changed")
+                    self.assertGreaterEqual(len([e for e in events if e["event"] == "screen"]), 3)
 
 
 if __name__ == "__main__":

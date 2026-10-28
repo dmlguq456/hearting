@@ -2305,6 +2305,109 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         different = dict(unknown, name="different-name")
         self.assertNotEqual(peer_message.prepare_peer_message("unknown peer", self.sender, different, defer=True)[1], ref)
 
+    def test_unresolved_preparation_reuses_only_the_same_original_endpoint_and_intent(self):
+        import peer_obligations
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        exact = {"harness": "codex", "session_id": "native", "name": "child", "pane_id": "w1:pX"}
+        def prepare(body="correction", sender=None, recipient=None, **kwargs):
+            return peer_message.prepare_peer_message(body, sender or self.sender, recipient or unknown,
+                defer=True, original_target="child", server=kwargs.pop("server", "selected"),
+                refs=kwargs.pop("refs", ["request"]), **kwargs)
+        original = prepare()
+        self.assertEqual(prepare(), original)
+        self.assertEqual(prepare(recipient=exact), original)
+        self.assertEqual(prepare(), original)
+        for kwargs in ({"body": "different"}, {"refs": ["other"]}, {"server": "ambient"},
+                       {"sender": dict(self.sender, session_id="other")}, {"with_trailer": False}):
+            with self.subTest(kwargs=kwargs):
+                self.assertNotEqual(prepare(**kwargs)[1], original[1])
+        # Legacy rows use the endpoint already recorded by their message duty.
+        _, legacy = peer_message.prepare_peer_message("legacy", self.sender, unknown, defer=True)
+        self.assertNotEqual(prepare("legacy", refs=[], server="default")[1], legacy)
+        self.assertIsNone(peer_message._read_pending(legacy).get("bound_to"))
+        peer_obligations.ObligationStore().create("message-" + legacy, "message", {"server": "selected"},
+            {"ref": legacy, "body_digest": peer_message._read_pending(legacy)["body_sha256"],
+             "target": "child", "from": self.sender, "to": unknown})
+        self.assertEqual(prepare("legacy", refs=[])[1], legacy)
+        self.assertNotEqual(prepare("legacy", refs=[], server="ambient")[1], legacy)
+
+    def test_unresolved_ambiguous_or_conflicting_intents_stay_unsent_on_exact_retry(self):
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        exact = {"harness": "codex", "session_id": "native", "name": "child"}
+        for receipt in ("target-name-ambiguous", "target-identity-changed", "submission-ambiguous"):
+            with self.subTest(receipt=receipt):
+                args = (receipt, self.sender)
+                text, ref = peer_message.prepare_peer_message(*args, unknown, defer=True,
+                    receipt=receipt, original_target="child", server="selected")
+                for recipient in (unknown, exact):
+                    self.assertEqual(peer_message.prepare_peer_message(*args, recipient, defer=True,
+                        original_target="child", server="selected"), (text, ref))
+                self.assertIsNone(peer_message._read_pending(ref).get("bound_to"))
+                self.assertEqual(peer_message._read_pending(ref)["receipt"], receipt)
+
+    def test_concurrent_unresolved_and_exact_preparations_share_the_original_address_lock(self):
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        exact = {"harness": "codex", "session_id": "native", "name": "child"}
+        entered, release = threading.Event(), threading.Event()
+        original_prepare = peer_message._prepare_peer_message
+        results, errors = [], []
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("preparation not released")
+            return original_prepare(*args, **kwargs)
+        def prepare(recipient):
+            return peer_message.prepare_peer_message("concurrent original", self.sender, recipient,
+                defer=True, original_target="child", server="selected", refs=["request"])
+        def first():
+            try: results.append(prepare(unknown))
+            except BaseException as exc: errors.append(exc)
+        with mock.patch.object(peer_message, "_prepare_peer_message", side_effect=delayed):
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                for recipient in (unknown, exact):
+                    with self.assertRaises(BlockingIOError):
+                        prepare(recipient)
+            finally:
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        self.assertEqual(prepare(unknown), results[0])
+        self.assertEqual(prepare(exact), results[0])
+        self.assertEqual(len(list(peer_message._pending_rows())), 1)
+
+    def test_concurrent_exact_aliases_still_share_the_native_preparation_lock(self):
+        exact = dict(self.recipient, pane_id="w1:pX", name="child")
+        entered, release = threading.Event(), threading.Event()
+        original_prepare = peer_message._prepare_peer_message
+        results, errors = [], []
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(5): raise AssertionError("preparation not released")
+            return original_prepare(*args, **kwargs)
+        def prepare(target):
+            return peer_message.prepare_peer_message("aliased original", self.sender, exact,
+                defer=True, original_target=target, server="selected")
+        def first():
+            try: results.append(prepare("child"))
+            except BaseException as exc: errors.append(exc)
+        with mock.patch.object(peer_message, "_prepare_peer_message", side_effect=delayed):
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaises(BlockingIOError): prepare("w1:pX")
+            finally:
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        self.assertEqual(prepare("w1:pX"), results[0])
+        self.assertEqual(len(list(peer_message._pending_rows())), 1)
+
     def test_two_recipient_rpc_and_receive_race_do_not_block_or_resurrect_payload(self):
         import codex_queue_delivery as queue
         text, ref = self.pending()

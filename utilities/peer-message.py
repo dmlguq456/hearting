@@ -1337,24 +1337,37 @@ def pending_messages(recipient):
 
 def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), receipt="target-form-open",
                          with_trailer=True, reference_evidence=None, first_input_process=None,
-                         producer_binding=None, handoff=None, original_target=None):
+                         producer_binding=None, handoff=None, original_target=None, server=None):
     """A retry reuses a pending intent; ordinary sends need no preparation lock."""
     endpoints_verified = (_valid_transfer_sender(sender, producer_binding, recipient, list(refs))
                           and (_valid_transfer_endpoint(recipient)
                                or _valid_pane_bound_endpoint(recipient)))
     body_hash = hashlib.sha256(body.rstrip("\n").encode("utf-8")).hexdigest()
 
+    def same_server(row):
+        if server is None:
+            return True  # Native-only callers do not select a terminal endpoint.
+        recorded = row.get("server")
+        if recorded is None:
+            # Earlier retained rows already record their endpoint in the duty.
+            # Do not borrow the retrying caller's ambient endpoint for them.
+            from peer_obligations import ObligationStore
+            duty = ObligationStore().get("message-" + row["ref"])
+            if duty is None and _unresolved_target(row.get("to")):
+                return False  # An unrecorded endpoint is not the default endpoint.
+            recorded = (((duty or {}).get("intent") or {}).get("identity") or {}).get("server")
+        return (recorded or "default") == server
+
     def matches_target(row):
+        if not same_server(row):
+            return False
         target = row.get("to") or {}
         if _unresolved_target(target):
             bound = row.get("bound_to")
             if _valid_transfer_endpoint(bound):
-                return _same_transfer_session(bound, recipient)
-            return (original_target is not None and target["name"] == original_target
-                    and row.get("state") in {"pending", "unverified"}
-                    and not row.get("rpc_claim") and not row.get("actual_message_id")
-                    and row.get("receipt") != "target-identity-changed"
-                    and "ambiguous" not in row.get("receipt", ""))
+                return (_same_transfer_session(bound, recipient)
+                        or _unresolved_target(recipient) and target["name"] == original_target)
+            return original_target is not None and target["name"] == original_target
         if _valid_pane_bound_endpoint(target):
             return (target.get("harness") == recipient.get("harness")
                     and target.get("pane_id") == recipient.get("pane_id"))
@@ -1368,12 +1381,20 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                     and (sender.get("session_id") is not None or row["from"].get("name") == sender.get("name"))
                     and row.get("source_sha256") == body_hash
                     and row.get("refs", []) == list(refs)
+                    and bool(row.get("no_trailer", False)) == (not with_trailer)
                     and row.get("producer_binding") == producer_binding
                     and row.get("handoff") == handoff):
                 if _unresolved_target(row.get("to")) and not row.get("bound_to"):
-                    row = bind_unresolved_pending_recipient(row["ref"], recipient)
-                    if row is None:
-                        continue
+                    # Reuse still-unresolved or submitted intents without acquiring
+                    # a send/binding claim. Only a known unsent exact recovery binds.
+                    if (_valid_transfer_endpoint(recipient)
+                            and row.get("state") in {"pending", "unverified"}
+                            and not row.get("rpc_claim") and not row.get("actual_message_id")
+                            and row.get("receipt") != "target-identity-changed"
+                            and "ambiguous" not in row.get("receipt", "")):
+                        row = bind_unresolved_pending_recipient(row["ref"], recipient)
+                        if row is None:
+                            raise ValueError("peer-pending-binding-changed")
                 return row["text"], row["ref"]
         return None
 
@@ -1391,13 +1412,25 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
                  for e in (sender, recipient)]
     if producer_binding is None:
         key_parts.append(body_hash)
-        key = json.dumps(key_parts, ensure_ascii=False)
     else:
         key_parts.extend((body_hash, producer_binding))
-        key = json.dumps(key_parts, ensure_ascii=False, sort_keys=True)
-    if handoff is not None:
-        key += json.dumps(handoff, sort_keys=True)
-    with pending_lock("prepare-" + hashlib.sha256(key.encode()).hexdigest()):
+
+    def preparation_key(parts):
+        key = json.dumps(parts, ensure_ascii=False, sort_keys=producer_binding is not None)
+        if handoff is not None:
+            key += json.dumps(handoff, sort_keys=True)
+        return "prepare-" + hashlib.sha256(key.encode()).hexdigest()
+
+    keys = {preparation_key(key_parts)}
+    if original_target is not None:
+        # Retain native alias exclusion as well as the original unresolved
+        # address exclusion across recovery. Both use the existing lock backend.
+        address_parts = list(key_parts)
+        address_parts[1] = ["original-target", original_target, server or "default"]
+        keys.add(preparation_key(address_parts))
+    with contextlib.ExitStack() as preparation:
+        for key in sorted(keys):
+            preparation.enter_context(pending_lock(key))
         found = existing()
         if found:
             return found
@@ -1413,6 +1446,8 @@ def prepare_peer_message(body, sender, recipient, *, defer=False, refs=(), recei
             "state": "pending" if endpoints_verified else "unverified", "text": text,
             "no_trailer": not with_trailer,
             "receipt": receipt if endpoints_verified or _unresolved_target(recipient) else "peer-endpoint-unverified"}
+        if server is not None:
+            pending["server"] = server
         if handoff is not None:
             pending["handoff"] = handoff
         if producer_binding is not None:

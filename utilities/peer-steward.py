@@ -6917,6 +6917,18 @@ def _flush_pending_for_target(target, t_harness, t_sid, entry_state, skip=None,
     return flushed, stuck
 
 def _resume_message_obligation(duty, store, *, read_context=None):
+    """Observe and deliver on the duty's endpoint, including unresolved addresses."""
+    global _HERDR_SESSION
+    old_server = _HERDR_SESSION
+    server = ((duty.get("intent") or {}).get("identity") or {}).get("server") or "default"
+    _HERDR_SESSION = None if server == "default" else server
+    try:
+        return _resume_message_obligation_scoped(duty, store, read_context=read_context)
+    finally:
+        _HERDR_SESSION = old_server
+
+
+def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     intent = duty.get("intent") or {}
     observation = duty.get("observation") or {}
     duty_id = duty["id"]
@@ -9389,7 +9401,8 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             _text, ref = peer_message.prepare_peer_message(
                 body, {"harness": from_harness, "session_id": from_sid, "name": from_name},
                 {"harness": "unknown", "session_id": None, "name": args.target},
-                defer=True, refs=args.ref, receipt=reason, with_trailer=not args.no_trailer)
+                defer=True, refs=args.ref, receipt=reason, with_trailer=not args.no_trailer,
+                original_target=args.target, server=_HERDR_SESSION or "default")
             row = peer_message._read_pending(ref)
             _schedule_message_obligation(row, args.target)
             print(f"prompted=unverified reason={reason} ref={ref}")
@@ -9434,7 +9447,7 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             recipient, defer=True, refs=args.ref, receipt=input_reason or "native-pending",
             with_trailer=not args.no_trailer, reference_evidence=reference_evidence,
             first_input_process=first_input_process, producer_binding=producer_binding, handoff=handoff,
-            original_target=args.target)
+            original_target=args.target, server=_HERDR_SESSION or "default")
         if on_prepared is not None:
             on_prepared(transfer_ref)
         pending = peer_message._read_pending(transfer_ref)
