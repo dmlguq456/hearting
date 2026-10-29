@@ -16846,5 +16846,107 @@ class RetireCandidatePromotionLockTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(retained.read_text(), '{"state":"retained"}')
 
 
+class SessionNoticePriorityTest(_TmpRootMixin, unittest.TestCase):
+    """Accepted delivery work must reach its consumer before unrelated recovery."""
+    notice = SessionNoticeTerminalIdentityTest.notice
+    terminal = SessionNoticeTerminalIdentityTest.terminal
+    transport = SessionNoticeIntegrationCorrectionTest.transport
+
+    def setUp(self):
+        import dispatch_contract
+        for module, name, value in (
+                (peer_steward.peer_obligations, "_proc_start_for_store", "100001"),
+                (peer_steward.peer_obligations, "request_dispatch_reconciliation", False),
+                (dispatch_contract, "process_start_ticks", "100001"),
+                (dispatch_contract, "process_identity_disposition", "live")):
+            patch = mock.patch.object(module, name, return_value=value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        super().setUp()
+        self.store = peer_steward.peer_obligations.ObligationStore(self.tmp_root)
+
+    class PausePass(BaseException):
+        pass
+
+    def notices(self, *, acknowledged=False):
+        duties = []
+        for subject in ("steward-check", "compute-exit", "experiment-checkpoint"):
+            record, duty = self.notice("run-notice", f"{subject}:{acknowledged}")
+            if acknowledged:
+                self.terminal(record, "acked")
+            duties.append(duty)
+        return duties
+
+    def progress(self, duties, native):
+        return (native.call_count,
+                [self.store.get(duty["id"])["state"] for duty in duties])
+
+    def test_delivery_and_ack_settlement_precede_unrelated_duty(self):
+        for acknowledged in (False, True):
+            with self.subTest(acknowledged=acknowledged):
+                duties = self.notices(acknowledged=acknowledged)
+                unrelated = self.store.create("message-unrelated", "message",
+                                              {"session_id": "other"}, {})
+                reached = []
+                def pause(*_args, **_kwargs):
+                    reached.append(self.progress(duties, native))
+                    raise self.PausePass()
+                with self.transport("terminal-A") as native, \
+                     mock.patch.object(peer_steward, "_resume_message_obligation", side_effect=pause):
+                    with self.assertRaises(self.PausePass):
+                        peer_steward._reconcile_obligations(self.store, [unrelated, *duties])
+                self.assertEqual(reached, [(0, ["complete"] * 3)] if acknowledged
+                                 else [(1, ["pending"] * 3)])
+
+    def check_full_pass(self, recover_legacy):
+        created = [] if recover_legacy else self.notices()
+        def discover(*_args, **_kwargs):
+            if recover_legacy:
+                _record, duty = self.notice("session-notice", "discovered-after-fast-pass")
+                created.append(duty)
+            return True
+        def pause(*_args, **_kwargs):
+            raise self.PausePass()
+        lock_path = self.store.root / peer_steward.peer_obligations.RUNNER_LOCK_NAME
+        resume = peer_steward._resume_session_notice_obligations
+        with lock_path.open("w") as lock, self.transport("terminal-A") as native, \
+             mock.patch.object(peer_steward, "_runner_readiness_loop"), \
+             mock.patch.object(peer_steward, "_discover_session_notice_duties", side_effect=discover), \
+             mock.patch.object(peer_steward, "_resume_session_notice_obligations", wraps=resume) as progress, \
+             mock.patch.object(peer_steward, "_reconcile_external_obligations", side_effect=pause):
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with self.assertRaises(self.PausePass):
+                peer_steward.cmd_obligation_runner(SimpleNamespace(
+                    state_root=self.tmp_root, lock_fd=lock.fileno()))
+        self.assertTrue(created)
+        self.assertEqual(progress.call_count, 1)
+        self.assertEqual(native.call_count, 1)
+
+    def test_fast_pass_preserves_later_legacy_recovery(self):
+        self.check_full_pass(True)
+
+    def test_an_accepted_notice_advances_only_once_per_pass(self):
+        self.check_full_pass(False)
+
+    def test_accepted_delivery_and_ack_settlement_precede_legacy_discovery(self):
+        for acknowledged in (False, True):
+            with self.subTest(acknowledged=acknowledged):
+                duties = self.notices(acknowledged=acknowledged)
+                lock_path = self.store.root / peer_steward.peer_obligations.RUNNER_LOCK_NAME
+                reached = []
+                def pause(*_args, **_kwargs):
+                    reached.append(self.progress(duties, native))
+                    raise self.PausePass()
+                with lock_path.open("w") as lock, self.transport("terminal-A") as native, \
+                     mock.patch.object(peer_steward, "_runner_readiness_loop"), \
+                     mock.patch.object(peer_steward, "_discover_session_notice_duties", side_effect=pause):
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    with self.assertRaises(self.PausePass):
+                        peer_steward.cmd_obligation_runner(SimpleNamespace(
+                            state_root=self.tmp_root, lock_fd=lock.fileno()))
+                self.assertEqual(reached, [(0, ["complete"] * 3)] if acknowledged
+                                 else [(1, ["pending"] * 3)])
+
+
 if __name__ == "__main__":
     unittest.main()
