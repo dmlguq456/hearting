@@ -884,18 +884,10 @@ try {
     model: { providerID: "fixture", id: "model", limit: { context: 900000, output: 8192 } },
     response: new Response("", { status: 200 }) })
   const directory = `${process.env.XDG_STATE_HOME}/agent-fleet/context-policy/opencode`
-  let record = JSON.parse(fs.readFileSync(`${directory}/${fs.readdirSync(directory)[0]}`))
-  assert.equal(record.session_id, "ses_exact")
-  assert.equal(record.model, "fixture/model")
-  assert.equal(record.policy.effective_window_tokens, 900000)
-  assert.equal(record.policy.state, "unknown")
-  assert.equal(record.policy.applied_trigger_tokens, null)
+  assert.equal(fs.existsSync(directory), false, "HTTP observations must not write primary policy")
   await hooks.get("http.response")({ sessionID: "ses_other",
     model: { providerID: "fixture", id: "no-limits" }, response: new Response("", { status: 200 }) })
-  record = JSON.parse(fs.readFileSync(`${directory}/${fs.readdirSync(directory)[0]}`))
-  assert.equal(record.session_id, "ses_other")
-  assert.equal(record.policy.effective_window_tokens, null)
-  assert.equal(record.policy.reason, "native-model-window-not-observed")
+  assert.equal(fs.existsSync(directory), false)
 } finally { cleanup() }
 '''
             env = {**BASE_ENV, "HOME": tmp, "XDG_STATE_HOME": str(Path(tmp) / "state"),
@@ -907,6 +899,421 @@ try {
             result = subprocess.run([node, "--input-type=module", "-e", script],
                                     cwd=ROOT, env=env, text=True, capture_output=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_v2_primary_context_is_bound_to_selected_tui(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+        with ExitStack() as stack:
+            tmp = stack.enter_context(tempfile.TemporaryDirectory())
+            os.mkfifo(Path(tmp) / "invalid.fifo")
+            # Private live lifetimes stand in for three TUI hosts. The service
+            # must use their selection records, never its own PID or attempt.
+            tuis = []
+            for _ in range(3):
+                child = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                         stdin=subprocess.PIPE)
+                def settle(child=child):
+                    child.stdin.close()
+                    child.wait(timeout=5)
+                stack.callback(settle)
+                raw = Path(f"/proc/{child.pid}/stat").read_text()
+                tuis.append({"pid": child.pid, "start": raw[raw.rindex(") ") + 2:].split()[19]})
+            script = r'''
+import assert from "node:assert/strict"
+import fs from "node:fs"
+import childProcess from "node:child_process"
+import { syncBuiltinESMExports } from "node:module"
+import { pathToFileURL } from "node:url"
+childProcess.spawnSync = () => ({ status: 0, stdout: "", stderr: "" })
+childProcess.spawn = () => ({ on() {}, unref() {}, stdin: { on() {}, end() {} } })
+const fstat = fs.fstatSync, read = fs.readSync, readFile = fs.readFileSync
+let wrongOwner = false, changeDuringRead = null, procMode = null
+fs.fstatSync = (...args) => {
+  const stat = fstat(...args)
+  return wrongOwner ? { ...stat, uid: stat.uid + 1n, isFile: () => stat.isFile() } : stat
+}
+fs.readSync = (...args) => {
+  const length = read(...args)
+  if (changeDuringRead) {
+    const file = changeDuringRead
+    changeDuringRead = null
+    fs.appendFileSync(file, " ")
+  }
+  return length
+}
+fs.readFileSync = (...args) => {
+  const raw = readFile(...args)
+  if (!procMode || args[0] !== `/proc/${JSON.parse(process.env.TUI_FIXTURES)[0].pid}/stat`) return raw
+  const close = raw.lastIndexOf(") "), fields = raw.slice(close + 2).trim().split(/\s+/)
+  if (procMode === "dead") fields[0] = "Z"
+  else fields[19] = String(Number(fields[19]) + 1)
+  return raw.slice(0, close + 2) + fields.join(" ")
+}
+syncBuiltinESMExports()
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
+const hooks = new Map(), tuis = JSON.parse(process.env.TUI_FIXTURES)
+const location = { directory: process.env.TEMP_ROOT }
+const otherLocation = { directory: `${process.env.TEMP_ROOT}/other` }
+fs.mkdirSync(otherLocation.directory)
+const identityDir = `${process.env.XDG_STATE_HOME}/hearting/tui-identity`
+const policyDir = `${process.env.XDG_STATE_HOME}/agent-fleet/context-policy/opencode`
+fs.mkdirSync(identityDir, { recursive: true })
+fs.mkdirSync(policyDir, { recursive: true })
+const file = tui => `${identityDir}/${tui.pid}-${tui.start}.json`
+const target = tui => `${policyDir}/${tui.pid}-${tui.start}.json`
+const select = (tui, sessionID) => fs.writeFileSync(file(tui), JSON.stringify({
+  schema: "hearting-tui-selection-v1", ...tui, sessionID,
+}))
+const record = tui => JSON.parse(fs.readFileSync(target(tui)))
+const clear = () => { for (const tui of tuis) fs.rmSync(target(tui), { force: true }) }
+const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(setImmediate) }
+const queue = []
+let wake, stopStream = false
+const sequences = new Map()
+const emitEvent = (type, data, created) => {
+  const seq = (sequences.get(data.sessionID) ?? -1) + 1
+  sequences.set(data.sessionID, seq)
+  queue.push({ type, data, created, durable: { aggregateID: data.sessionID, seq, version: 2 } })
+  wake?.()
+}
+const emit = data => emitEvent("session.step.started", data, data.started + 1)
+let clock = Date.now(), requestNumber = 0
+Date.now = () => clock
+const cases = []
+const capture = (name, native, window, extra = {}) => cases.push({
+  name, native, window, native_event_seq: sequences.get(native.sessionID),
+  record: record(tuis[0]), ...extra })
+const model = (id = "m", context = 900000) => ({ providerID: "p", id, modelID: id,
+  enabled: true, status: "active", limit: { context, output: 8192 } })
+let lookup = () => ({ location, data: [model(), model("other", 1000000)] })
+let lookups = 0
+const ctx = { location,
+  model: { list: async args => {
+    assert.equal(args.location, location)
+    lookups++
+    return lookup()
+  } },
+  session: { hook: async (name, fn) => hooks.set(name, fn),
+    get: async ({ sessionID }) => ({ id: sessionID,
+      title: sessionID === "ses_worker" ? "hearting-worker-att-actual" : "Main" }) },
+  tool: { hook: async () => {} }, shell: { hook: async () => {} },
+  permission: { hook: async () => {} },
+  event: { subscribe: async function* ({ signal }) {
+    signal.addEventListener("abort", () => wake?.(), { once: true })
+    while (!signal.aborted) {
+      if (queue.length) { yield queue.shift(); continue }
+      if (stopStream) return
+      await new Promise(resolve => { wake = resolve })
+    }
+  } },
+}
+const cleanup = await plugin.setup(ctx)
+const primary = async (sessionID = "ses_a", ref = { providerID: "p", id: "m" }, start = true) => {
+  clock += 1000
+  if (!sequences.has(sessionID)) {
+    emitEvent("session.execution.started", { sessionID }, clock - 1)
+    await flush()
+  }
+  await hooks.get("context")({ sessionID, model: ref, system: [], messages: [], options: {}, tools: {} })
+  const native = { sessionID, model: ref, assistantMessageID: `msg-${++requestNumber}`, started: clock + 1 }
+  if (start) emit(native)
+  await flush()
+  return native
+}
+try {
+  select(tuis[0], "ses_a"); select(tuis[1], "ses_a"); select(tuis[2], "ses_b")
+  const inherited = `${policyDir}/attempt-att-inherited.json`
+  fs.writeFileSync(inherited, "inherited sentinel")
+  await primary(); await primary("ses_b", { providerID: "p", id: "other" })
+  await flush()
+  const initial = tuis.map(record)
+  assert.deepEqual(initial.map(row => row.policy.effective_window_tokens), [900000, 900000, 1000000])
+  for (const [i, row] of initial.entries()) {
+    assert.equal(row.pid, tuis[i].pid)
+    assert.equal(row.proc_start, tuis[i].start)
+    assert.equal(row.attempt_id, null)
+    assert.equal(row.policy.attempt_id, null)
+    assert.equal(row.policy.session_id, row.session_id)
+    assert.equal(row.policy.state, "unknown")
+    assert.equal(row.policy.applied_trigger_tokens, null)
+    assert.equal(row.policy.source, "opencode-native-v2-context")
+  }
+  assert.equal(fs.readFileSync(inherited, "utf8"), "inherited sentinel")
+  assert.equal(fs.readdirSync(policyDir).length, 4, "service PID policy was created")
+  const saved = fs.readFileSync(target(tuis[0]), "utf8")
+  for (const sessionID of ["ses_a", "ses_title", "ses_b"]) await hooks.get("http.response")({
+    sessionID, model: { providerID: "p", id: "m" }, response: new Response("", { status: 200 }) })
+  assert.equal(fs.readFileSync(target(tuis[0]), "utf8"), saved, "HTTP ref overwrote primary limits")
+
+  // Invalid joins never borrow inline limits, a default, another location or
+  // provider, or an ambiguous row. They write an explicit unknown observation.
+  for (const response of [null, { location, data: [] },
+      { location: otherLocation, data: [model()] },
+      { location, data: [model(), model()] },
+      { location, data: [{ ...model(), providerID: "other" }] },
+      ...[{}, { context: -1, output: 1 }, { context: true, output: 1 },
+          { context: "900000", output: 1 }, { context: 900000, output: -1 },
+          { context: 900000, output: 8192, input: false }].map(limit =>
+            ({ location, data: [{ ...model(), limit }] })),
+      { location, data: [{ ...model(), enabled: false }] }]) {
+    lookup = () => response
+    await primary("ses_a", { providerID: "p", id: "m", limit: { context: 800000 } })
+    await flush()
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  }
+  lookup = () => { throw new Error("unavailable") }
+  await primary(); await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  lookup = () => ({ location, data: [model("m", 0)] })
+  await primary(); await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, 0)
+  assert.equal(record(tuis[0]).policy.state, "unknown", "v1 trigger formula leaked into v2")
+
+  // Snapshot/recheck covers home, SID switches (including A→B→A), same-byte
+  // atomic replacement, changed process start, and a missing/dead lifecycle.
+  for (const mutate of [
+    () => fs.rmSync(file(tuis[0])),
+    () => select(tuis[0], "ses_b"),
+    () => { select(tuis[0], "ses_b"); select(tuis[0], "ses_a") },
+    () => { fs.copyFileSync(file(tuis[0]), file(tuis[0]) + ".new");
+      fs.renameSync(file(tuis[0]) + ".new", file(tuis[0])) },
+    () => fs.writeFileSync(file(tuis[0]), JSON.stringify({ schema: "hearting-tui-selection-v1",
+      ...tuis[0], start: "1", sessionID: "ses_a" })),
+    () => { procMode = "dead" },
+    () => { procMode = "reused" },
+  ]) {
+    select(tuis[0], "ses_a")
+    lookup = () => ({ location, data: [model()] })
+    await primary()
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, 900000)
+    let release
+    lookup = () => new Promise(resolve => { release = resolve })
+    const native = await primary()
+    assert.equal(typeof release, "function", "context hook waited for model lookup")
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+    capture(`pending replacement ${cases.length}`, native, null)
+    mutate()
+    release({ location, data: [model("m", 600000)] }); await flush()
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+    assert.equal(record(tuis[1]).policy.effective_window_tokens, 600000)
+    capture(`rejected replacement ${cases.length}`, native, null)
+    procMode = null
+  }
+  // No selection at observation time cannot acquire one during an SDK await.
+  select(tuis[0], "ses_a")
+  lookup = () => ({ location, data: [model()] })
+  await primary()
+  const prior = fs.readFileSync(target(tuis[0]), "utf8")
+  fs.rmSync(file(tuis[0]), { force: true }); fs.rmSync(file(tuis[1]))
+  const before = lookups
+  const missing = await primary(); select(tuis[0], "ses_a"); await flush()
+  assert.equal(lookups, before)
+  assert.equal(fs.readFileSync(target(tuis[0]), "utf8"), prior)
+  capture("missing selection then reselection keeps prior file but rejects prior request", missing, null)
+  for (const invalidate of [
+    () => fs.writeFileSync(file(tuis[0]), "x".repeat(1025)),
+    () => fs.writeFileSync(file(tuis[0]), "{}"),
+    () => fs.writeFileSync(file(tuis[0]), JSON.stringify({ schema: "hearting-tui-selection-v1",
+      ...tuis[0], start: [tuis[0].start], sessionID: "ses_a" })),
+    () => { fs.rmSync(file(tuis[0])); fs.symlinkSync(file(tuis[2]), file(tuis[0])) },
+    () => fs.renameSync(`${process.env.TEMP_ROOT}/invalid.fifo`, file(tuis[0])),
+    () => { wrongOwner = true },
+    () => { changeDuringRead = file(tuis[0]) },
+  ]) {
+    fs.rmSync(file(tuis[0]), { force: true }); select(tuis[0], "ses_a")
+    invalidate()
+    await primary(); await flush()
+    wrongOwner = false
+    assert.equal(fs.readFileSync(target(tuis[0]), "utf8"), prior)
+  }
+  select(tuis[0], "ses_a")
+  lookup = () => ({ location, data: [model()] })
+  const known = await primary()
+  capture("normal completed 900000", known, 900000)
+  capture("pending native assistant cannot combine old tokens and policy", known, null, { pending: true })
+  let releaseOld
+  lookup = () => new Promise(resolve => { releaseOld = resolve })
+  await primary()
+  lookup = () => ({ location, data: [model("m", 600000)] })
+  const newer = await primary(); await flush()
+  releaseOld({ location, data: [model()] }); await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, 600000, "late same-model lookup replaced the new window")
+  capture("same-model different-window late callback", newer, 600000)
+  capture("completed known0 active tokens", newer, 600000, { active: 0 })
+  const skipped = { ...newer, assistantMessageID: "skipped-hook", started: newer.started + 120000 }
+  emit(skipped); await flush()
+  capture("skipped context hook cannot reuse a consumed binding", skipped, null)
+  const retry = { ...newer, started: newer.started + 121000 }
+  emit(retry); await flush()
+  capture("same native assistant id with a different retry start", retry, null)
+  const absentStart = await primary("ses_a", { providerID: "p", id: "m" }, false)
+  capture("missing native start stays unknown", absentStart, null)
+  emitEvent("session.step.ended", { sessionID: "ses_a", assistantMessageID: newer.assistantMessageID }, newer.started)
+  await flush()
+  emit(newer); await flush()
+  capture("late old native start cannot bind the current hook", absentStart, null)
+  emit(absentStart); await flush()
+  capture("late matching start recovers", absentStart, 600000)
+  const sameMs = await primary("ses_a", { providerID: "p", id: "m" }, false)
+  emit({ ...sameMs, started: clock }); await flush()
+  capture("ambiguous same-ms native start stays unknown", { ...sameMs, started: clock }, null)
+  const lost = await primary("ses_a", { providerID: "p", id: "m" }, false)
+  emitEvent("session.step.ended", { sessionID: "ses_a", assistantMessageID: lost.assistantMessageID }, clock + 2)
+  await flush()
+  const afterLost = { ...lost, assistantMessageID: "after-lost-start", started: lost.started + 120000 }
+  emit(afterLost); await flush()
+  capture("unmatched start retired at native step end", afterLost, null)
+  const stranded = await primary("ses_a", { providerID: "p", id: "m" }, false)
+  // Native start/end occurred but both observations were lost, then the next
+  // context callback was skipped. The later start cannot borrow this lookup.
+  sequences.set("ses_a", sequences.get("ses_a") + 2)
+  const afterGap = { ...stranded, assistantMessageID: "after-stream-gap", started: stranded.started + 120000 }
+  emit(afterGap); await flush()
+  capture("skipped start and end plus skipped next hook reject a stream gap", afterGap, null)
+  capture("fresh hook recovers after the gap", await primary(), 600000)
+  // Distinct durable incarnations may alias in BOTH assistant id and clock.
+  // Preserve known producer snapshots: the real native reader must also reject
+  // a retained old file when missing selection prevents invalidation writes.
+  lookup = () => ({ location, data: [model()] })
+  const sameID = await primary()
+  const oldKnown = record(tuis[0])
+  assert.equal(oldKnown.policy.effective_window_tokens, 900000)
+  emitEvent("session.step.failed", { sessionID: "ses_a", assistantMessageID: sameID.assistantMessageID }, sameID.started)
+  await flush()
+  emit(sameID); await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  capture("same-ID same-ms retry without hook retires consumed policy", sameID, null)
+  capture("retained old known file against same-ID same-ms retry", sameID, null, { record: oldKnown })
+  lookup = () => ({ location, data: [model("m", 600000)] })
+  await hooks.get("context")({ sessionID: "ses_a", model: { providerID: "p", id: "m" },
+    system: [], messages: [], options: {}, tools: {} })
+  capture("late hook cannot bind the start already observed", sameID, null)
+  // A new native retry in the same millisecond CAN use its own new hook.
+  emit(sameID); await flush()
+  capture("same-ID same-ms retry with fresh hook keeps new 600000 window", sameID, 600000)
+  queue.push({ type: "session.step.started", data: sameID, created: sameID.started + 1,
+    durable: { aggregateID: "ses_a", seq: sequences.get("ses_a"), version: 1 } })
+  wake?.(); await flush()
+  capture("replayed same durable start is not a distinct incarnation", sameID, 600000)
+
+  // A matching completion remains known, including zero tokens. Later native
+  // events extend that SAME step interval without borrowing another step.
+  lookup = () => ({ location, data: [model("m", 600000)] })
+  const completed = await primary()
+  emitEvent("session.step.ended", { sessionID: "ses_a", assistantMessageID: completed.assistantMessageID }, completed.started + 1)
+  await flush()
+  capture("completed same-step interval known0", completed, 600000, { active: 0 })
+  emitEvent("session.execution.succeeded", { sessionID: "ses_a" }, completed.started + 2)
+  await flush()
+  capture("completed same-step interval after execution success", completed, 600000)
+  const completedKnown = record(tuis[0])
+  // Observe a gap after a consumed binding, without a step.started branch.
+  sequences.set("ses_a", sequences.get("ses_a") + 2)
+  emitEvent("session.step.streamed", { sessionID: "ses_a", assistantMessageID: completed.assistantMessageID }, completed.started + 3)
+  await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  capture("consumed binding then gap and later streamed observation", completed, null)
+  capture("retained completed policy after missed end/start", completed, null, { record: completedKnown })
+
+  // Late callbacks cannot revive an object retired by a later same-ms step,
+  // a gap, or stream loss. New hooks still recover at the observed cursor.
+  for (const boundary of ["same-step-alias", "gap", "execution-start"]) {
+    lookup = () => ({ location, data: [model()] })
+    await primary()
+    let release
+    lookup = () => new Promise(resolve => { release = resolve })
+    const pending = await primary()
+    if (boundary === "same-step-alias") emit(pending)
+    else {
+      if (boundary === "gap") sequences.set("ses_a", sequences.get("ses_a") + 2)
+      emitEvent(boundary === "gap" ? "session.step.streamed" : "session.execution.started",
+        { sessionID: "ses_a", assistantMessageID: pending.assistantMessageID }, pending.started + 1)
+    }
+    await flush()
+    release({ location, data: [model("m", 600000)] }); await flush()
+    capture(`late model callback after ${boundary}`, pending, null)
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  }
+  lookup = () => ({ location, data: [model()] })
+  const invisible = await primary()
+  const retained = record(tuis[0])
+  fs.rmSync(file(tuis[0])); fs.rmSync(file(tuis[1]), { force: true })
+  // Retry's new hook and start cannot write while no TUI is selected. The
+  // database sees a new durable step even when ID/start are byte-identical.
+  clock += 1000
+  await hooks.get("context")({ sessionID: "ses_a", model: { providerID: "p", id: "m" },
+    system: [], messages: [], options: {}, tools: {} })
+  emit(invisible); await flush()
+  select(tuis[0], "ses_a")
+  assert.deepEqual(record(tuis[0]), retained)
+  capture("missing selection then reselect aliases ID/start against retained known", invisible, null)
+  // Even with all new hook/start/end observations missing, an exact native
+  // cursor change rejects the old file. No producer-written currentness flag.
+  sequences.set("ses_a", sequences.get("ses_a") + 3)
+  capture("all later observations missing but native projection advanced", invisible, null)
+  capture("missing native aggregate cursor cannot verify retained known", invisible, null,
+    { record: retained, native_event_seq: null })
+  lookup = () => ({ location, data: [model("m", 600000)] })
+  const afterInvisible = await primary()
+  capture("fresh hook after unseen gap first reanchors", afterInvisible, null)
+  capture("next new hook after reanchor recovers 50 percent", await primary(), 600000)
+  select(tuis[0], "ses_unanchored")
+  clock += 1000
+  await hooks.get("context")({ sessionID: "ses_unanchored", model: { providerID: "p", id: "m" },
+    system: [], messages: [], options: {}, tools: {} })
+  const unanchored = { sessionID: "ses_unanchored", model: { providerID: "p", id: "m" },
+    assistantMessageID: "unanchored-start", started: clock + 1 }
+  emit(unanchored); await flush()
+  capture("first observed start with no pre-hook sequence anchor stays unknown", unanchored, null)
+  capture("next hook recovers with an observed sequence anchor", await primary("ses_unanchored"), 600000)
+  select(tuis[0], "ses_a")
+  lookup = () => new Promise(() => {})
+  await primary()
+  await new Promise(resolve => setTimeout(resolve, 1100))
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, null, "unbounded lookup retained stale limits")
+  lookup = () => ({ location, data: [model()] })
+  await primary("ses_worker"); await flush()
+  const worker = JSON.parse(fs.readFileSync(inherited))
+  assert.equal(worker.attempt_id, "att-inherited")
+  assert.equal(worker.policy.attempt_id, "att-inherited")
+  assert.equal(worker.session_id, "ses_worker")
+  select(tuis[0], "ses_a")
+  lookup = () => ({ location, data: [model()] })
+  await primary()
+  let releaseStopped
+  lookup = () => new Promise(resolve => { releaseStopped = resolve })
+  const stopped = await primary()
+  stopStream = true; wake?.(); await flush()
+  releaseStopped({ location, data: [model("m", 600000)] }); await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  capture("closed stream retires pending callback", stopped, null)
+  // Restore the exact initial producer files for Python's real Fleet reader.
+  clear()
+  for (const [i, row] of initial.entries()) {
+    select(tuis[i], row.session_id)
+    fs.writeFileSync(target(tuis[i]), JSON.stringify(row))
+  }
+  console.log(JSON.stringify({ initial, cases }))
+} finally { cleanup() }
+'''
+            env = {**BASE_ENV, "HOME": tmp, "XDG_STATE_HOME": str(Path(tmp) / "state"),
+                   "XDG_CONFIG_HOME": str(Path(tmp) / "config"),
+                   "FLEET_SESSION_REGISTRY_DIR": str(Path(tmp) / "state/agent-fleet/sessions"),
+                   "AGENT_DISPATCH_ATTEMPT_ID": "att-inherited", "AGENT_DISPATCH_CHILD": "1",
+                   "OPENCODE_VERSION": "1.19.0",  # inherited v1 version cannot prove a v2 trigger
+                   "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "TUI_FIXTURES": json.dumps(tuis), "TEMP_ROOT": tmp,
+                   "AGENT_HOME": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
+            result = subprocess.run([node, "--input-type=module", "-e", script],
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            with mock.patch.object(sys, "path", [str(ROOT), *sys.path]):
+                from tools.fleet.tests.test_opencode_display_fields import (
+                    assert_primary_context_pipeline, assert_primary_request_cases)
+                produced = json.loads(result.stdout)
+                assert_primary_context_pipeline(self, env, produced["initial"])
+                assert_primary_request_cases(self, env, produced["cases"])
 
     def test_v2_shell_env_carries_the_executing_session(self):
         node = shutil.which("node")

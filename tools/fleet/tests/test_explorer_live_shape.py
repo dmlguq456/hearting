@@ -26,7 +26,7 @@ OMITTED = ("seats", "generations", "cards", "dialogue", "attempts", "models")
 
 
 def route_extension(key, value):
-    """Validate only the three public route additions, including known zero."""
+    """Validate the optional route display fields, including known zero."""
     optional_number = lambda item: item is None or type(item) in (int, float)
     optional_pct = lambda item: item is None or type(item) is int
     pair = lambda item: isinstance(item, (list, tuple)) and len(item) == 2
@@ -34,6 +34,8 @@ def route_extension(key, value):
         return pair(value) and optional_pct(value[0]) and optional_number(value[1])
     if key == "current":
         return type(value) is bool
+    if key == "worker_context_index":
+        return type(value) is int and value >= 0
     if key == "worker_contexts":
         return isinstance(value, (list, tuple)) and all(
             isinstance(row, dict) and set(row) == {"stage", "harness", "model", "context", "window"}
@@ -82,7 +84,7 @@ def conform(live, samples, path, problems):
     if kind == "map":
         keys = set().union(*(set(sample) for sample in samples if bucket(sample) == "map"))
         for key in live:
-            if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current"):
+            if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current", "worker_context_index"):
                 if not route_extension(key, live[key]):
                     problems.append(f"{path}.{key}: invalid optional route field shape")
                 continue
@@ -223,7 +225,7 @@ class SectionShapes(unittest.TestCase):
     def test_route_extensions_accept_known_zero_unknown_and_legacy_records(self):
         samples = self.fixture["routes"]
         for fields in ({}, {"owner_gauge": [None, None], "worker_contexts": [], "current": False},
-                       {"owner_gauge": (0, 1.0), "current": True, "worker_contexts": [
+                       {"owner_gauge": (0, 1.0), "current": True, "worker_context_index": 0, "worker_contexts": [
                            {"stage": "execute", "harness": "codex", "model": ["model", "fam_other"],
                             "context": 0, "window": 1.0},
                            {"stage": "test", "harness": None, "model": None,
@@ -240,6 +242,7 @@ class SectionShapes(unittest.TestCase):
             {"owner_gauge": [0]}, {"owner_gauge": [0, 1, 2]}, {"owner_gauge": [False, 1]},
             {"owner_gauge": ["0", 1]}, {"owner_gauge": [0, "1M"]},
             {"current": 0}, {"current": "true"}, {"worker_contexts": {}},
+            {"worker_context_index": -1}, {"worker_context_index": True}, {"worker_context_index": "0"},
             {"worker_contexts": [dict(worker, context=False)]},
             {"worker_contexts": [dict(worker, window="1M")]},
             {"worker_contexts": [dict(worker, harness=7)]},

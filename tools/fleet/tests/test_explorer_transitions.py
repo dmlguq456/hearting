@@ -7,7 +7,7 @@ from tools.fleet.explorer.frame import draw
 from tools.fleet.explorer.input import ExplorerInput
 from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.explorer.view_model import load_fixture
-from tools.fleet.tests.test_explorer_peers import _card_boxes
+from tools.fleet.tests.test_explorer_peers import SEPARATOR, _arrow_glyph_delta, _card_boxes
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "explorer"
 
@@ -73,6 +73,8 @@ class ViewerByteTrace(unittest.TestCase):
                         # Current accepted renderer: compare every cell and ordered hit.
                         # Historical input chunks and expected navigation states are unchanged.
                         expected_cells = _expand([row_pool[index] for index in expected_frame["cells"]])
+                        if state.view == "PEERS" and state.scope == "-":
+                            _arrow_glyph_delta([row[SEPARATOR:] for row in expected_cells[5:]])
                         # The approved side-lane head now sits on the card edge; keep the
                         # reference capture's lane gutter normalized like the PEERS pane test.
                         expected_cells = _lane_gutter_delta_full(actual, vm, expected_cells)

@@ -21,6 +21,310 @@ import fixture_env  # noqa: E402
 import codex_hook_trust  # noqa: E402
 
 
+class OpenCodeGuardDiscoveryTest(unittest.TestCase):
+    """Private runtime homes exercise the public activation transaction."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="opencode-guard-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.source = self.root / "source"
+        files = {
+            "core/CORE.md": "# core\n", "capabilities/README.md": "# capabilities\n",
+            "roles/README.md": "# roles\n", "adapters/opencode/AGENTS.md": "# bootstrap\n",
+            "adapters/opencode/skills/demo/SKILL.md": "# demo\n",
+            "adapters/opencode/agents/memory-scout/memory-scout.md": "# scout\n",
+            "adapters/opencode/commands/demo.md": "# command\n",
+            "adapters/opencode/plugins/hearting-guards.js": 'export default { id: "hearting-guards" }\n',
+            "adapters/opencode/tui/hearting-tui-identity.ts": 'export default {}\n',
+        }
+        repo = Path(__file__).resolve().parents[2]
+        for rel in ("adapters/opencode/plugins/hearting-guards/index.ts",
+                    "adapters/opencode/config/models.conf"):
+            files[rel] = (repo / rel).read_text()
+        for rel, content in files.items():
+            path = self.source / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        environment = fixture_env.patched_environment(self.root / "fixture", self.source)
+        environment.__enter__()
+        self.addCleanup(environment.__exit__, None, None, None)
+        versions = mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "2.0.32",
+                                               "OPENCODE_BIN": str(self.root / "no-opencode")})
+        versions.start()
+        self.addCleanup(versions.stop)
+        self.home = activation.paths.runtime_home("opencode")
+        self.js = self.home / "plugins/hearting-guards.js"
+        self.package = self.home / "plugins/hearting-guards/index.ts"
+        self.module = self.source / "adapters/opencode/plugins/hearting-guards.js"
+
+    def run_activation(self, mode="linked"):
+        return activation.activate("opencode", mode, str(self.source))
+
+    def state(self):
+        return activation._load_json(activation._state_path("opencode"))
+
+    @staticmethod
+    def remove(path):
+        # destructive-ok: reason=exercise absent guard leaves; boundary=exact leaf created inside this test's TemporaryDirectory
+        path.unlink()
+
+    @staticmethod
+    def snapshot(path):
+        stat = path.lstat()
+        return (stat.st_mode, stat.st_mtime_ns, os.readlink(path) if path.is_symlink() else path.read_bytes())
+
+    def old_dual_receipt(self):
+        report = self.run_activation()
+        self.js.symlink_to(self.module)
+        state = self.state()
+        state["owned_paths"].append(activation._entry(self.module, self.js, "hook_config"))
+        activation._atomic_json(activation._state_path("opencode"), state)
+        return report
+
+    def test_v2_linked_packaged_update_and_repeat_keep_one_direct_bundle_import(self):
+        for mode in ("linked", "packaged"):
+            with self.subTest(mode=mode):
+                report = self.run_activation(mode)
+                self.assertEqual(report["freshness"], "fresh", report)
+                self.assertFalse(self.js.exists() or self.js.is_symlink())
+                self.assertFalse(self.package.is_symlink())
+                active_module = Path(report["active_root"]) / "adapters/opencode/plugins/hearting-guards.js"
+                self.assertIn(f'from {json.dumps(str(active_module))}', self.package.read_text())
+                self.module.write_text(self.module.read_text() + "// next release\n")
+                updated = activation.refresh("opencode")
+                self.assertEqual(updated["freshness"], "fresh", updated)
+                self.assertFalse(self.js.exists())
+                self.assertIn(str(Path(updated["active_root"]) / "adapters/opencode/plugins/hearting-guards.js"),
+                              self.package.read_text())
+                self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+
+    def test_v1_compatibility_and_exact_owned_generation_changes(self):
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "1.4.0"
+        self.assertEqual(self.run_activation()["freshness"], "fresh")
+        self.assertTrue(self.js.is_symlink())
+        self.assertFalse(self.package.exists())
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "2.0.32"
+        self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+        self.assertFalse(self.js.exists())
+        self.assertTrue(self.package.is_file())
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "1.4.0"
+        self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+        self.assertTrue(self.js.is_symlink())
+        self.assertFalse(self.package.exists())
+
+    def test_disabled_dated_and_dangling_siblings_never_revive_or_change(self):
+        self.js.parent.mkdir(parents=True)
+        disabled = [self.js.with_name(self.js.name + suffix) for suffix in
+                    (".v1-disabled-20261026", ".dup-disabled-20261029", ".disabled")]
+        disabled[0].symlink_to(self.root / "old-missing-bundle.js")
+        disabled[1].symlink_to(self.module)
+        disabled[2].write_bytes(b"disabled user bytes\n")
+        before = [self.snapshot(path) for path in disabled]
+        for version in ("1.4.0", "invalid", "2.0.32"):
+            os.environ["OPENCODE_RUNTIME_VERSION"] = version
+            report = self.run_activation()
+            self.assertEqual(report["freshness"], "fresh", report)
+            self.assertFalse(self.js.exists() or self.js.is_symlink())
+            self.assertEqual([self.snapshot(path) for path in disabled], before)
+        self.assertTrue(self.package.is_file())  # a disabled JS does not disable V2
+        inert = self.package.with_name("index.ts.disabled-20261029")
+        self.package.rename(inert)
+        before_package = self.snapshot(inert)
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertFalse(self.package.exists())
+        self.assertFalse(self.js.exists())
+        self.assertEqual(self.snapshot(inert), before_package)
+
+    def test_unknown_preserves_single_existing_binding_and_missing_receipt_recovery(self):
+        for version, carrier in (("1.4.0", self.js), ("2.0.32", self.package)):
+            os.environ["OPENCODE_RUNTIME_VERSION"] = version
+            self.run_activation()
+            before = self.snapshot(carrier)
+            os.environ["OPENCODE_RUNTIME_VERSION"] = "invalid"
+            report = activation.refresh("opencode")
+            self.assertEqual(report["freshness"], "fresh", report)
+            self.assertEqual(self.snapshot(carrier), before)
+            self.assertIn("unknown", " ".join(report["report_lines"]))
+            self.remove(carrier)
+            self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+            self.assertTrue(carrier.is_file())
+
+    def test_fresh_unknown_fallback_is_explicit_and_uses_the_bounded_resolver(self):
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "invalid"
+        report = self.run_activation()
+        self.assertTrue(self.js.is_symlink())
+        self.assertFalse(self.package.exists())
+        self.assertIn("unknown; legacy JS compatibility fallback", " ".join(report["report_lines"]))
+        import opencode_runtime
+        os.environ.pop("OPENCODE_RUNTIME_VERSION")
+        with mock.patch.object(opencode_runtime, "runtime_version", return_value=None):
+            self.assertEqual(activation.projector.opencode_generation(), "unknown")
+
+    def test_failed_absent_and_malformed_version_probes_remain_unknown(self):
+        import opencode_runtime
+        os.environ.pop("OPENCODE_RUNTIME_VERSION")
+        binary = self.root / "bin/opencode"
+        binary.parent.mkdir()
+        for content in ("#!/bin/sh\nexit 1\n", "#!/bin/sh\nprintf 'not-a-version'\n"):
+            binary.write_text(content)
+            binary.chmod(0o755)
+            os.environ["OPENCODE_BIN"] = str(binary)
+            opencode_runtime.runtime_version.cache_clear()
+            self.assertEqual(activation.projector.opencode_generation(), "unknown")
+        os.environ["OPENCODE_BIN"] = str(self.root / "absent/opencode")
+        opencode_runtime.runtime_version.cache_clear()
+        self.assertEqual(activation.projector.opencode_generation(), "unknown")
+
+    def test_package_directory_disable_and_unrelated_backup_names(self):
+        self.js.parent.mkdir(parents=True)
+        self.js.with_name("hearting-guards.js.bak").write_text("backup\n")
+        self.js.with_name("other-guards.js.disabled").write_text("unrelated\n")
+        inert = self.package.parent.with_name("hearting-guards.disabled")
+        inert.symlink_to(self.root / "missing-package")
+        before = self.snapshot(inert)
+        report = self.run_activation()
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertFalse(self.package.exists())
+        self.assertEqual(self.snapshot(inert), before)
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "1.4.0"
+        self.run_activation()
+        self.assertTrue(self.js.is_symlink())  # neither .bak nor another ID disables this leaf
+
+    def test_unknown_unowned_valid_package_is_preserved_without_adoption(self):
+        self.package.parent.mkdir(parents=True)
+        content = activation.projector.render_opencode_plugin(
+            self.source / "adapters/opencode/plugins/hearting-guards/index.ts", self.module)
+        self.package.write_text(content)
+        before = self.snapshot(self.package)
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "invalid"
+        report = self.run_activation()
+        self.assertEqual(report["freshness"], "fresh", report)
+        self.assertEqual(self.snapshot(self.package), before)
+        self.assertNotIn(str(self.package), [entry["dest"] for entry in self.state()["owned_paths"]])
+        self.assertTrue(activation._native_present("opencode"))
+
+    def test_unknown_dual_layout_is_preserved_and_diagnosed(self):
+        self.old_dual_receipt()
+        before = (self.snapshot(self.js), self.snapshot(self.package))
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "invalid"
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "duplicate", report)
+        self.assertIn("observed-local-file+package:generation-unknown", report["duplicate_sources"])
+        self.assertEqual((self.snapshot(self.js), self.snapshot(self.package)), before)
+        self.assertEqual(len([e for e in self.state()["owned_paths"] if e.get("guard") or
+                             activation.projector.opencode_guard_leaf(Path(e["dest"]), self.home)]), 2)
+        self.js.rename(self.js.with_name("hearting-guards.js.disabled"))
+        self.remove(self.package)
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "missing", report)
+        self.assertFalse(self.js.exists())
+        self.assertFalse(self.package.exists())
+
+    def test_exact_dual_receipt_retires_only_js_and_rollback_restores_both(self):
+        self.old_dual_receipt()
+        before = (self.snapshot(self.js), self.package.read_bytes(), activation._state_path("opencode").read_bytes())
+        with mock.patch.dict(os.environ, {"HARNESS_RUNTIME_FAIL_AFTER": "1"}):
+            with self.assertRaisesRegex(activation.ActivationError, "injected failure"):
+                activation.refresh("opencode")
+        self.assertEqual(os.readlink(self.js), before[0][2])
+        self.assertEqual(self.package.read_bytes(), before[1])
+        self.assertEqual(activation._state_path("opencode").read_bytes(), before[2])
+        self.assertEqual(activation.refresh("opencode")["freshness"], "fresh")
+        self.assertFalse(self.js.exists())
+        self.assertNotIn(str(self.js), self.state()["discovery_paths"])
+
+    def test_state_publication_failure_restores_retirement_and_render_with_canaries(self):
+        self.old_dual_receipt()
+        template = self.source / "adapters/opencode/plugins/hearting-guards/index.ts"
+        template.write_text(template.read_text() + "// new render\n")
+        inert = self.js.with_name("hearting-guards.js.disabled-rollback")
+        inert.symlink_to(self.module)
+        foreign = self.home / "plugins/user-plugin.js"
+        foreign.write_bytes(b"// user plugin canary\n")
+        before = (os.readlink(self.js), self.package.read_bytes(), activation._state_path("opencode").read_bytes(),
+                  self.snapshot(inert), self.snapshot(foreign))
+        original = activation._atomic_json
+
+        def fail_state(path, data):
+            if path == activation._state_path("opencode"):
+                raise OSError("guard-state-publication-failure")
+            return original(path, data)
+
+        with mock.patch.object(activation, "_atomic_json", side_effect=fail_state):
+            with self.assertRaisesRegex(OSError, "guard-state-publication-failure"):
+                activation.refresh("opencode")
+        self.assertEqual((os.readlink(self.js), self.package.read_bytes(), activation._state_path("opencode").read_bytes(),
+                          self.snapshot(inert), self.snapshot(foreign)), before)
+
+    def test_same_root_repoint_and_foreign_unowned_js_are_preserved(self):
+        self.old_dual_receipt()
+        other = self.source / "adapters/opencode/plugins/other.js"
+        other.write_text("// user repoint\n")
+        self.remove(self.js)
+        self.js.symlink_to(other)
+        before = self.snapshot(self.js)
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "duplicate", report)
+        self.assertIn(str(self.js), report["user_changed"])
+        self.assertEqual(self.snapshot(self.js), before)
+        self.assertIn(str(self.js), activation.deactivate("opencode")["preserved"])
+        self.assertEqual(self.snapshot(self.js), before)
+
+    def test_foreign_files_and_edited_package_are_never_overwritten(self):
+        self.run_activation()
+        self.package.write_text(self.package.read_text() + "// user edit\n")
+        before = self.snapshot(self.package)
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "duplicate", report)
+        self.assertEqual(self.snapshot(self.package), before)
+        self.js.write_text("// foreign plugin\n")
+        before_js = self.snapshot(self.js)
+        report = activation.refresh("opencode")
+        self.assertEqual(report["freshness"], "duplicate", report)
+        self.assertEqual(self.snapshot(self.js), before_js)
+        self.package.write_bytes(b"\xff\xfe foreign bytes")
+        report = activation.status("opencode")
+        self.assertEqual(report["freshness"], "duplicate", report)
+        self.assertEqual(self.package.read_bytes(), b"\xff\xfe foreign bytes")
+
+    def test_missing_template_or_module_and_stale_binding_fail_health(self):
+        self.run_activation()
+        original = self.module.read_bytes()
+        self.remove(self.module)
+        self.assertEqual(activation.status("opencode")["freshness"], "missing")
+        with self.assertRaisesRegex(activation.ActivationError, "module missing"):
+            activation.refresh("opencode")
+        self.module.write_bytes(original)
+        self.package.write_text(self.package.read_text().replace(str(self.module), "/missing/guard.js"))
+        self.assertFalse(activation.projector.opencode_guard_health(
+            activation.projector.opencode_guard_layout(self.source, self.home)) == [])
+        self.remove(self.source / "adapters/opencode/plugins/hearting-guards/index.ts")
+        with self.assertRaises(activation.ActivationError):
+            activation.refresh("opencode")
+
+    def test_js_module_content_affects_linked_digest_without_flat_discovery(self):
+        first = self.run_activation()["projection_digest"]
+        self.module.write_text(self.module.read_text() + "// changed module\n")
+        report = activation.status("opencode")
+        self.assertNotEqual(first, report["projection_digest"])
+        self.assertEqual(report["freshness"], "session-reload-needed")
+        self.assertNotIn(str(self.js), report["discovery_paths"])
+
+    def test_duplicate_file_package_npm_and_v1_loader_boundaries(self):
+        self.run_activation()
+        self.assertEqual(activation.duplicate_sources("opencode"), [])
+        (self.home / "opencode.json").write_text('{"plugin":["hearting-opencode@1.0.0"]}')
+        self.assertEqual(activation.duplicate_sources("opencode"), ["local+npm"])
+        self.js.symlink_to(self.module)
+        self.assertIn("local-file+package", activation.duplicate_sources("opencode"))
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "1.4.0"
+        self.assertEqual(activation.duplicate_sources("opencode"), ["local+npm"])
+        self.remove(self.js)
+        self.assertEqual(activation.duplicate_sources("opencode"), [])
+
+
 class ManagedCopyProjectionHealthTest(unittest.TestCase):
     def test_copy_health_requires_matching_regular_file_bytes_and_mode(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -2616,6 +2920,9 @@ class NativeAgentRenderTest(unittest.TestCase):
         patched = fixture_env.patched_environment(self.root / "fixture", REPO_ROOT)
         patched.__enter__()
         self.addCleanup(patched.__exit__, None, None, None)
+        version = mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "2.0.32"})
+        version.start()
+        self.addCleanup(version.stop)
 
     # -- helpers -------------------------------------------------------------
     def home(self, runtime):

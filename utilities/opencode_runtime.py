@@ -1784,15 +1784,16 @@ def _read_v2_messages(connection, session_id, after_seq=None):
         parameters.append(after_seq)
     parameters.append(MAX_SESSION_MESSAGES)
     order = "ASC" if incremental else "DESC"
+    message_id = "id" if "id" in columns else "NULL"
     rows = connection.execute(
-        "SELECT type, seq, data, time_created, time_updated FROM session_message WHERE "
+        "SELECT " + message_id + ", type, seq, data, time_created, time_updated FROM session_message WHERE "
         + condition + " ORDER BY seq " + order + " LIMIT ?", parameters,
     ).fetchall()
     if not incremental:
         rows = list(reversed(rows))
     messages = []
     max_seq = None
-    for message_type, seq, raw, created, updated in rows:
+    for native_id, message_type, seq, raw, created, updated in rows:
         data = _decode_json(raw)
         if data is None:
             continue
@@ -1806,8 +1807,13 @@ def _read_v2_messages(connection, session_id, after_seq=None):
                 state = part.get("state") if isinstance(part.get("state"), dict) else {}
                 if state.get("status") in ("streaming", "running"):
                     tools.append({"name": part.get("name"), "status": state.get("status")})
-        messages.append({"type": message_type, "seq": seq, "text": text,
+        messages.append({"id": native_id, "type": message_type, "seq": seq, "text": text,
                          "created": created, "updated": updated,
+                         # A retried step can reuse the row/id. Native projection
+                         # updates time.created to session.step.started.started;
+                         # the row's original insertion time cannot bind a retry.
+                         "started": (data.get("time") or {}).get("created")
+                         if isinstance(data.get("time"), dict) else None,
                          "completed": (data.get("time") or {}).get("completed")
                          if isinstance(data.get("time"), dict) else None,
                          "agent": data.get("agent"), "model": data.get("model"),
@@ -1816,6 +1822,21 @@ def _read_v2_messages(connection, session_id, after_seq=None):
                          "finish": data.get("finish"),
                          "has_error": bool(data.get("error"))})
     return messages, max_seq
+
+
+def _read_v2_event_seq(connection, session_id):
+    """The native durable aggregate cursor, independent of message insertion seq.
+
+    Bus writes event_sequence even when optional event-log persistence is off.
+    A retry updates the assistant row without changing its insertion seq; only
+    the aggregate cursor can verify the producer's observed step interval.
+    """
+    try:
+        row = connection.execute(
+            "SELECT seq FROM event_sequence WHERE aggregate_id=?", (session_id,)).fetchone()
+        return row[0] if row and type(row[0]) is int and row[0] >= 0 else None
+    except sqlite3.Error:
+        return None
 
 
 def _read_v2_shell_tasks(connection, session_id, after_seq=0, refresh_seqs=()):
@@ -2085,6 +2106,9 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA busy_timeout=500")
+        # Pair message projection and durable cursor in one read snapshot. A
+        # concurrent retry must not mix an older message with its newer cursor.
+        connection.execute("BEGIN")
         candidates = _session_generation_rows(connection, session_id)
         if generation:
             candidates = [item for item in candidates if item[0] == generation]
@@ -2098,6 +2122,7 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
             raw_model = {"id": row["model"]}
         if selected_generation == "v2":
             messages, cursor = _read_v2_messages(connection, session_id, after_seq)
+            event_seq = _read_v2_event_seq(connection, session_id)
             cursor_kind = "session-message-seq-v2"
             if cursor is None and isinstance(after_seq, int) and after_seq >= 0:
                 cursor = after_seq
@@ -2110,6 +2135,7 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
                     connection, session_id, shell_after_seq, shell_refresh_seqs)
         else:
             messages, cursor = _read_v1_messages(connection, session_id)
+            event_seq = None
             cursor_kind = "message-updated-v1"
             shell_tasks = []
             shell_cursor = {"state": "unobserved",
@@ -2129,7 +2155,7 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
                             "tokens_input": row.get("tokens_input"),
                             "tokens_output": row.get("tokens_output"),
                             "tokens_reasoning": row.get("tokens_reasoning")},
-                "messages": messages, "cursor": cursor,
+                "messages": messages, "cursor": cursor, "event_seq": event_seq,
                 "cursor_kind": cursor_kind, "shell_tasks": shell_tasks,
                 "shell_cursor": shell_cursor, "database_identity": db_identity}
     except (OSError, sqlite3.Error):

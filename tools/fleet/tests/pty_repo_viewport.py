@@ -55,6 +55,12 @@ def _child_main(evidence_dir, explorer=False, refresh_interval=20.0):
     from fleet.refresh import LiveSnapshot, set_required_details
 
     evidence_dir = Path(evidence_dir)
+    publication = os.environ.get("FLEET_PTY_PUBLICATION") == "1"
+    def publication_control():
+        try:
+            return json.loads((evidence_dir / "publication.json").read_text())
+        except (OSError, ValueError):
+            return {}
     render.set_explorer_mode(explorer)
     if explorer:
         # The synthetic explorer reads the frozen redacted view model, so a route
@@ -94,6 +100,94 @@ def _child_main(evidence_dir, explorer=False, refresh_interval=20.0):
                             title="synthetic session %02d" % i, session_id=str(item["tag"]),
                             liveness="working", elapsed_min=i + 1)
                     for i, item in enumerate(fixture_vm.sessions)]
+        if publication:
+            from dataclasses import replace
+            from fleet.explorer import focus
+            from fleet.collectors import peer_messages
+            from fleet.explorer.types import Health
+            for session, row in zip(sessions, fixture_vm.sessions):
+                session.session_tag = str(row["tag"])
+                session.session_id = "pty-full-native-" + str(row["tag"])
+                session.cwd = "/tmp/fleet-pty-fixture/" + str(row.get("repo_id") or row.get("repo"))
+            fixture_vm = replace(fixture_vm, seats=(), generations={}, cards={}, dialogue={})
+            def selected_vm(snapshot, accepted_detail=None, **_kwargs):
+                command = (snapshot.observations or {}).get("pty-publication", {})
+                bindings = explorer_live.detail_bindings(snapshot)
+                tags = {f"{session.harness}:{session.session_id}": session.session_tag
+                        for session in snapshot.sessions}
+                rows = [dict(row, now="base-revision-" + str(command.get("revision", 1)))
+                        for row in fixture_vm.sessions if row["tag"] in tags.values()]
+                peer_source = explorer_live._peer_snapshot(snapshot, accepted_detail, bindings)
+                peer_index = {s.session_tag: {"sid": s.session_id, "ids": (s.session_id,), "session": s}
+                              for s in peer_source.sessions}
+                # Keep this publication fixture's graph small enough that its new
+                # link is visible at 140x45; graph layout has separate tests.
+                endpoints = {sid for s in peer_source.sessions if s.peer_last_sent
+                             for sid in (s.session_id, s.peer_last_sent.get("to_session_id"))}
+                peer_rows = [row for row in rows if peer_index[row["tag"]]["sid"] in endpoints]
+                peer_nodes, peer_edges = explorer_live._peer_records(peer_rows, peer_index, time.time(), peer_source)
+                peer_nodes, peer_edges = explorer_live._finish_peers(
+                    peer_nodes, peer_edges, rows, peer_index, fixture_vm.routes, [])
+                peer_observation = (peer_source.observations or {}).get("optional:peers", {})
+                base = replace(fixture_vm, sessions=tuple(rows), source_records={
+                    "_detail_bindings": bindings, "_detail_tags": tags,
+                    "_peer_observed_at": peer_observation.get("observed_at")}, readiness=None,
+                    peer_nodes=peer_nodes, peer_edges=peer_edges, system={**fixture_vm.system,
+                    "peer_observation": {"state": peer_observation.get("state", "unknown")}})
+                return explorer_live.selected_detail(base, accepted_detail)
+            explorer_live.build_view_model = selected_vm
+            peer_reads = [0]
+            def peers(**_kwargs):
+                peer_reads[0] += 1
+                owned = {route.get("session_tag") for route in fixture_vm.routes}
+                source, target = [s for s in sessions if s.session_tag not in owned][-2:]
+                return ({"records": [], "by_session": {(source.harness, source.session_id): {
+                    "last_sent": {"to_session_id": target.session_id, "to_harness": target.harness,
+                                  "kind": "pready" + str(peer_reads[0]), "age_min": 0}}}},
+                        {"state": "success"})
+            peer_messages.collect = peers
+            card_reads = [0]
+            def seat(_session, harness, sid, *, cards=False, **_kwargs):
+                if cards:
+                    card_reads[0] += 1
+                return (({"harness": harness, "sid": sid, "current": True,
+                          "cards": [{"generation": 1, "status": "available", "title": "seat-summary",
+                                     **({"lines": ["history-detail-ready-" + str(card_reads[0])]} if cards else {})}]},),
+                        "", Health("success", time.time()))
+            focus.read_seat_history = seat
+            focus.read_dialogue = lambda _entry: ["user: synthetic dialogue"]
+            focus.read_pane_map = lambda: {}
+            focus.read_pane_visible = lambda *_args, **_kwargs: None
+            focus.session_entries = lambda *_args, **_kwargs: []
+            focus.read_obligations = lambda *_args, **_kwargs: ()
+            focus.read_model_config = lambda: dict(fixture_vm.models or {}, fixture_revision=2)
+            original_feed_update = render._ExplorerFeed.update
+            def observe_feed(feed, *args, **kwargs):
+                detail, changed = original_feed_update(feed, *args, **kwargs)
+                if changed and detail is not None and detail.focus is not None:
+                    seats = detail.focus.source_records.get("seat") or ()
+                    marker = next((card["lines"][0] for entry in seats for card in entry.get("cards", ())
+                                   if card.get("lines")), "")
+                    event("selection-accepted", key=detail.focus.key.sid, epoch=detail.focus.epoch,
+                          wants=list(detail.focus.request.wants),
+                          ready=list(detail.focus.source_records), detail_marker=marker)
+                peer_result = detail.results.get("seats") if detail is not None else None
+                observed_peers = (peer_result.source_records.get("peers") if peer_result else None)
+                if changed and observed_peers is not None:
+                    marker = next((s.peer_last_sent["kind"] for s in observed_peers.snapshot.sessions
+                                   if s.peer_last_sent), "")
+                    event("peer-selection-accepted", epoch=peer_result.epoch, detail_marker=marker)
+                return detail, changed
+            render._ExplorerFeed.update = observe_feed
+            original_attach = render._explorer_attach_remote_observation
+            def attach_remote(snapshot, observation):
+                result = original_attach(snapshot, observation)
+                if ((result.observations or {}).get("pty-publication") or {}).get("pending"):
+                    import copy
+                    result = copy.copy(result)
+                    result.observations = dict(result.observations or {}, **{"remote-host": {"state": "pending"}})
+                return result
+            render._explorer_attach_remote_observation = attach_remote
 
     collects = [0]
 
@@ -101,7 +195,9 @@ def _child_main(evidence_dir, explorer=False, refresh_interval=20.0):
         # Every call publishes a new snapshot object, so each refresh ages the painted hit map.
         collects[0] += 1
         observed_at = time.time()
-        snapshot = LiveSnapshot(sessions=list(sessions), observations={
+        command = publication_control() if publication else {}
+        observed_sessions = [s for s in sessions if s.session_tag != command.get("missing")] if publication else list(sessions)
+        snapshot = LiveSnapshot(sessions=observed_sessions, observations={
             "basic": {"state": "ok", "generation_identity": "pty-fixture-generation",
                       "observed_at": observed_at, "all_new": True},
             "usage:claude": {"state": "absent", "attempted": True,
@@ -115,6 +211,11 @@ def _child_main(evidence_dir, explorer=False, refresh_interval=20.0):
             "remote-host": {"state": "absent", "attempted": True,
                             "observed_at": observed_at},
         })
+        if publication:
+            snapshot.project_of = lambda cwd: str(cwd).rsplit("/", 1)[-1]
+            snapshot.observations["pty-publication"] = dict(command, state="success")
+            if command.get("pending"):
+                snapshot.observations["remote-host"] = {"state": "pending"}
         return set_required_details(snapshot, "ok", all_new=True, observed_at=observed_at)
 
     def forbidden(name):
@@ -193,6 +294,9 @@ def _child_main(evidence_dir, explorer=False, refresh_interval=20.0):
                  "select_mode": bool(render._SELECT_MODE),
                  "prompt_stage": (render._PROMPT or {}).get("stage"),
                  "mouse_config": dict(cfg)}
+        if publication:
+            source = kwargs.get("snapshot")
+            state["publication"] = dict((getattr(source, "observations", None) or {}).get("pty-publication", {}))
         if explorer:
             frame = render._EXPLORER_FRAME
             explorer_state = render._EXPLORER_STATE
@@ -222,6 +326,11 @@ def _child_main(evidence_dir, explorer=False, refresh_interval=20.0):
                           if explorer_state is not None else None),
                 "tree_drag": (list(explorer_state.drag) if explorer_state is not None and
                               explorer_state.drag and explorer_state.drag[0] == "tree" else []),
+                "pending": list((render._EXPLORER_READINESS or {}).get("pending", ())),
+                "detail_text": repr(getattr(render._EXPLORER_MODEL, "cards", None)),
+                "peer_text": repr(getattr(render._EXPLORER_MODEL, "peer_edges", None)),
+                "base_text": repr(getattr(render._EXPLORER_PUBLISHED_MODEL, "sessions", None)),
+                "models_revision": (getattr(render._EXPLORER_MODEL, "models", None) or {}).get("fixture_revision"),
                 "hits": ([[hit.y, hit.x0, hit.x1, list(hit.action)]
                           for hit in getattr(frame, "hits", ())] if frame is not None else []),
                 "order": {
@@ -481,6 +590,15 @@ class PtyRun:
         child_env["TERM"] = os.environ.get("TERM") or "xterm-256color"
         child_env["PYTHONDONTWRITEBYTECODE"] = "1"
         child_env["XDG_CONFIG_HOME"] = str(self.evidence_dir / "xdg-config")
+        if not self.live_capture:
+            for key in tuple(child_env):
+                if key.startswith(("AGENT_", "HERDR_", "CODEX_", "CLAUDE_", "OPENCODE_")):
+                    child_env.pop(key)
+            child_env["HOME"] = str(self.evidence_dir / "home")
+            child_env["XDG_CACHE_HOME"] = str(self.evidence_dir / "xdg-cache")
+            child_env["XDG_DATA_HOME"] = str(self.evidence_dir / "xdg-data")
+            child_env["TMPDIR"] = str(self.evidence_dir / "tmp")
+            Path(child_env["TMPDIR"]).mkdir(exist_ok=True)
         # An explicit fixture state root is shared across process restarts.
         # A standalone invocation still gets its own isolated default.
         if not child_env.get("XDG_STATE_HOME"):
@@ -822,6 +940,8 @@ class PtyRun:
         try:
             if self.live_capture:
                 self.run_live_capture()
+            elif self.explorer and os.environ.get("FLEET_PTY_PUBLICATION") == "1":
+                self.run_publication()
             elif self.explorer and self.click_measure:
                 self.run_click_measure()
             elif self.explorer:
@@ -848,6 +968,161 @@ class PtyRun:
         (self.evidence_dir / "capture.ansi").write_bytes(raw)
         self.send(b"q", "quit-owned-live-capture")
         self.drain(0.25)
+
+    def run_publication(self):
+        state = self.wait_for("initial complete publication", lambda s: s.get("hit_valid") and
+                              s.get("explorer", {}).get("hits") and s.get("frame", 0) >= 5, timeout=60)
+        self.check("publication fixture is 140x45", state["size"] == [45, 140], state["size"])
+        self.drag_previews.append({"initial_order": state["explorer"]["order"]})
+        if os.environ.get("FLEET_PTY_PUBLICATION_REPLAY") == "1":
+            return
+        def hits(kind):
+            values = self.state()["explorer"]["hits"]
+            return [h for h in values if h[3][:1] == ["scope"] and h[1] < 32 and
+                    (str(h[3][1]).startswith("repo:") if kind == "repo" else ":" not in str(h[3][1]))]
+        def point(hit):
+            return hit[1] + 2, hit[0]
+        def click(hit, label):
+            before = self.state()["frame"]
+            self.mouse(0, *point(hit))
+            self.mouse(0, *point(hit), release=True)
+            return self.wait_for(label, lambda s: s["frame"] > before)
+        def command(**values):
+            before = self.state()["collects"]
+            _write_json(self.evidence_dir / "publication.json", values)
+            return self.wait_for("candidate painted: " + repr(values), lambda s:
+                                 s["collects"] >= before + 2 and
+                                 s.get("publication") == dict(values, state="success"))
+        def releases():
+            return sum(row.get("event", {}).get("phase") == "release"
+                       for row in self.read_jsonl("effects.jsonl"))
+        source = hits("session")[0]
+        tag = source[3][1]
+        self.mouse(0, *point(source))
+        self.wait_for("main press", lambda s: bool(s["explorer"]["tree_drag"]))
+        held = command(pending=True, missing=tag)
+        self.check("rejected missing-main candidate preserves pending press",
+                   bool(held["explorer"]["tree_drag"]) and "remote-host" in held["explorer"]["pending"],
+                   {"drag": held["explorer"]["tree_drag"], "pending": held["explorer"]["pending"]})
+        x, y = point(source)
+        self.mouse(32, x + 3, y)
+        self.mouse(0, x + 3, y, release=True)
+        opened = self.wait_for("small motion release opens the painted main", lambda s:
+                               s["explorer"]["state"]["scope"] == "session:" + tag)
+        self.check("small motion keeps click semantics", not opened["explorer"]["tree_drag"])
+        self.mouse(32, *point(hits("repo")[0]))
+        self.drain(0.15)
+        self.check("orphan motion is inert", not self.state()["explorer"]["tree_drag"])
+        command()
+        repos = hits("repo")
+        click(repos[0], "repo click painted")
+        self.wait_for("repo page", lambda s: s["explorer"]["state"]["scope"] == repos[0][3][1])
+        group = {}
+        for hit in hits("session"):
+            group.setdefault(self.state()["explorer"]["order"]["repo_by_tag"][hit[3][1]], []).append(hit)
+        pair = next(rows for rows in group.values() if len(rows) > 1)
+        source, target = pair[1], pair[0]
+        before = self.state()["explorer"]["order"]["sessions"]
+        self.mouse(0, *point(source))
+        self.wait_for("drag press", lambda s: bool(s["explorer"]["tree_drag"]))
+        command(pending=True, missing=source[3][1])
+        self.mouse(32, *point(target))
+        self.wait_for("drag valid across rejected candidate", lambda s: bool(s["explorer"]["tree_drag"]) and
+                      s["explorer"]["tree_drag"][7])
+        self.mouse(0, *point(target), release=True)
+        changed = self.wait_for("same-repo reorder", lambda s: s["explorer"]["order"]["sessions"] != before)
+        self.check("painted main reorder survives rejected candidate", not changed["explorer"]["tree_drag"])
+        command()
+        source, target = hits("repo")[1], hits("repo")[0]
+        before = self.state()["explorer"]["order"]["repos"]
+        self.mouse(0, *point(source))
+        self.mouse(32, *point(target))
+        self.mouse(0, *point(target), release=True)
+        self.wait_for("repo reorder", lambda s: s["explorer"]["order"]["repos"] != before)
+        self.check("repo reorder saved", True)
+        session_hits = hits("session")
+        source = session_hits[0]
+        target = next(h for h in session_hits if self.state()["explorer"]["order"]["repo_by_tag"][h[3][1]] !=
+                      self.state()["explorer"]["order"]["repo_by_tag"][source[3][1]])
+        before = self.state()["explorer"]["order"]["sessions"]
+        before_release = releases()
+        self.mouse(0, *point(source))
+        self.mouse(32, *point(target))
+        self.mouse(0, *point(target), release=True)
+        self.wait_for("cross-repo release settled", lambda s: releases() > before_release and
+                      not s["explorer"]["tree_drag"])
+        self.check("cross-repo reorder is refused", self.state()["explorer"]["order"]["sessions"] == before)
+        before_scope = self.state()["explorer"]["state"]["scope"]
+        before_release = releases()
+        self.mouse(0, *point(source))
+        self.wait_for("press for different target release", lambda s: bool(s["explorer"]["tree_drag"]))
+        self.mouse(0, *point(target), release=True)
+        other = self.wait_for("different target release settled", lambda s: releases() > before_release and
+                              not s["explorer"]["tree_drag"])
+        self.check("different target release is refused", other["explorer"]["state"]["scope"] == before_scope)
+        source = hits("session")[0]
+        self.mouse(0, *point(source))
+        self.wait_for("press before real removal", lambda s: bool(s["explorer"]["tree_drag"]))
+        removed = command(missing=source[3][1])
+        self.check("actually published removal cancels drag", not removed["explorer"]["tree_drag"])
+        command()
+        self.mouse(0, *point(hits("session")[0]))
+        self.wait_for("press before resize", lambda s: bool(s["explorer"]["tree_drag"]))
+        self.resize(44, 139)
+        resized = self.wait_for("resize cancels press", lambda s: s["size"] == [44, 139] and
+                                not s["explorer"]["tree_drag"])
+        self.check("resize cancels gesture", not resized["explorer"]["tree_drag"])
+        self.resize(45, 140)
+        self.wait_for("restore geometry", lambda s: s["size"] == [45, 140])
+        command(pending=True)
+        history = next(h for h in self.state()["explorer"]["hits"] if h[3] == ["tab", "HISTORY"])
+        click(history, "history view click")
+        self.wait_for("seat rows in history", lambda s: any(h[3][:2] == ["fold", "hopen:HISTORY"]
+                      for h in s["explorer"]["hits"]))
+        history_seat = next(h for h in self.state()["explorer"]["hits"] if h[3][:2] == ["fold", "hopen:HISTORY"])
+        event_start = len(self.read_events())
+        started = time.monotonic()
+        click(history_seat, "history seat click")
+        def accepted():
+            return next((e for e in reversed(self.read_events()[event_start:])
+                         if e["kind"] == "selection-accepted" and e.get("detail_marker")), None)
+        painted = self.wait_for("first selected history paint", lambda s:
+                               accepted() is not None and accepted()["detail_marker"] in
+                               "\n".join(s["explorer"]["pane_lines"]))
+        observed = accepted()
+        self.check("history detail paints while remote remains pending",
+                   "remote-host" in painted["explorer"]["pending"] and
+                   observed is not None,
+                   {"input_to_paint_seconds": time.monotonic() - started,
+                    "request_to_poll_seconds": observed["monotonic"] - started,
+                    "poll_to_paint_seconds": painted["monotonic"] - observed["monotonic"],
+                    "pending": painted["explorer"]["pending"], "frame": painted["frame"]})
+        peers = next(h for h in self.state()["explorer"]["hits"] if h[3] == ["tab", "PEERS"])
+        event_start = len(self.read_events())
+        started = time.monotonic()
+        click(peers, "peers view click")
+        def peer_accepted():
+            return next((e for e in reversed(self.read_events()[event_start:])
+                         if e["kind"] == "peer-selection-accepted" and e.get("detail_marker")), None)
+        painted = self.wait_for("first selected peer paint", lambda s:
+                               peer_accepted() is not None and peer_accepted()["detail_marker"] in
+                               "\n".join(s["explorer"]["pane_lines"]))
+        observed = peer_accepted()
+        self.check("peer detail paints while remote remains pending",
+                   "remote-host" in painted["explorer"]["pending"],
+                   {"input_to_paint_seconds": time.monotonic() - started,
+                    "request_to_poll_seconds": observed["monotonic"] - started,
+                    "poll_to_paint_seconds": painted["monotonic"] - observed["monotonic"],
+                    "pending": painted["explorer"]["pending"], "frame": painted["frame"]})
+        models = next(h for h in self.state()["explorer"]["hits"] if h[3] == ["tab", "MODELS"])
+        click(models, "models view click")
+        self.wait_for("model config overlay", lambda s: s["explorer"]["models_revision"] == 2)
+        completed = command(revision=2)
+        self.check("models result does not starve next complete base", "base-revision-2" in completed["explorer"]["base_text"])
+        route = next(h for h in completed["explorer"]["hits"] if h[3][:1] == ["route"])
+        click(route, "route click")
+        self.wait_for("route page", lambda s: s["explorer"]["state"]["scope"] == "route:" + route[3][1])
+        self.check("main repo and route clicks use painted hits", True)
 
     def run_explorer(self):
         state = self.wait_for("initial explorer frame",

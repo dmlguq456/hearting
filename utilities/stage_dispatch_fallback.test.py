@@ -4312,6 +4312,36 @@ class LaunchTupleReportOnlyTest(unittest.TestCase):
 
 
 class D5FallbackSelectionTest(unittest.TestCase):
+ def test_real_credits_cache_respects_disabled_soft_gate_and_admitted_pin(self):
+  if str(ROOT/"tools") not in sys.path:sys.path.insert(0,str(ROOT/"tools"))
+  from fleet.collectors import usage_cache
+  parent={"parent_harness":"claude","parent_transport":"headless","parent_sandbox":"adapter-default","launch_authority":"conductor"}
+  node={"id":"execute","dispatch_depth":2,"model_profile":"deep",
+        "harness_policy":{"primary":["codex","claude"],"relief":[],"last_resort":[],"promote_relief_below":0},
+        "fallback_hops":[{"ordinal":1,"fallback_hop":"cross-harness-headless",
+                          "candidates":[{**parent,"child_harness":h,"status":"supported"} for h in ("codex","claude")]}]}
+  allocation={"strategy":"balanced","window":30,"harness_order":["codex","claude"],"usage_gate_used_percent":85}
+  with tempfile.TemporaryDirectory() as td:
+   home=Path(td);config=home/"defaults.yaml";jobs=home/"jobs.log";jobs.touch()
+   baseline=(ROOT/"profiles/dispatch-defaults.yaml").read_text()
+   with mock.patch.dict(os.environ,{"DISPATCH_DEFAULTS_CONFIG":str(config),"FLEET_USAGE_STATE_DIR":str(home/"usage"),
+        "HARNESS_CAPACITY_SCORES":"claude:80,opencode:70","CODEX_HOME":str(home/"codex")}), \
+        mock.patch.object(F.CAPACITY,"_codex_api_score",return_value=None), \
+        mock.patch.object(F,"attempt_counts",return_value={"codex":0,"claude":20,"opencode":0}):
+    self.assertTrue(usage_cache.record("codex",{"windows":[["7d",100,time.time()+86400]],"credits":{"has_credits":True}}))
+    self.assertEqual(F._usage_states(jobs)["codex"],"ok")
+    for disabled,pinned in ((True,False),(False,False),(True,True)):
+     config.write_text(baseline.replace("  enabled: [claude, codex, opencode]","  enabled: [claude, opencode]") if disabled else baseline)
+     route={"dispatch_allocation":allocation}
+     if pinned:route["selection_pins"]={"worker":{"harness":"codex"}}
+     hops,context=F.ordered_fallback_hops(route,node,jobs,parent_identity=parent)
+     rows=[r for hop in hops for r in hop.get("candidates",[])]
+     codex=next(r for r in rows if r["child_harness"]=="codex")
+     if disabled and not pinned:self.assertEqual(codex.get("_allocation_skip"),"disabled-by-user-policy")
+     else:self.assertFalse(codex.get("_allocation_skip"))
+     self.assertEqual(next(r["child_harness"] for r in rows if not r.get("_allocation_skip")),"codex" if pinned else "claude")
+     if context and not disabled:self.assertEqual(context["capacity"]["codex"],0.0)
+
  def test_disabled_admitted_pin_survives_ordering_and_wrapper_recheck(self):
   parent={"parent_harness":"claude","parent_transport":"headless","parent_sandbox":"adapter-default","launch_authority":"conductor"}
   node={"id":"execute","harness_policy":{"primary":["codex"],"relief":[],"last_resort":[]},

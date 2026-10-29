@@ -14,6 +14,7 @@ import re
 import time
 
 from .view_model import ExplorerViewModel
+from ..display import codex_credits
 
 HARNESSES = ("claude", "codex", "opencode")
 _SEG_DIM = "dim"
@@ -518,22 +519,82 @@ def _chain_position(nodes, rid):
 
 
 def _chain_title(nodes, rid):
-    """The route's name: its own recorded outcome name, else that of the frame that opened it
-    (the nearest earlier ``route-frame`` node), else the nearest earlier named node."""
+    """Only this route's recorded name proves its subject, not a previous task's name."""
     index = _chain_position(nodes, rid)
     if index is None:
         return None
-    own = _text(_get(nodes[index].get("result"), "name"))
-    if own:
-        return own
-    before = nodes[:index]
-    for node in reversed(before):
-        if node.get("capability") == "route-frame" and _text(_get(node.get("result"), "name")):
-            return node["result"]["name"]
-    for node in reversed(before):
-        if _text(_get(node.get("result"), "name")):
-            return node["result"]["name"]
+    result = nodes[index].get("result")
+    return _text(_get(result, "name")) if _get(result, "route_id") in (None, rid) else None
+
+
+def _route_subject(rid, record, view, owner, result, chain_nodes):
+    """Consume existing route-bound subject sources; never generate or prettify a slug."""
+    from ..work_titles import readable
+    locators = {_text(_get(item, "slug")) for item in (record, view, owner)} - {None}
+    locators |= {readable(value) for value in locators}
+
+    def subject(value):
+        value = _text(value)
+        return value if value and value.strip() and value not in locators else None
+
+    recorded = subject(_get(result, "name")) if _get(result, "route_id") in (None, rid) else None
+    recorded = recorded or subject(_chain_title(chain_nodes, rid))
+    if recorded:
+        return recorded
+    # The record arrived through the existing verified projection. Do not use
+    # a session's evolving title to name its unrelated historical routes.
+    if record.get("route_id") != rid:
+        return None
+    named = subject(record.get("display_title")) or subject(record.get("title"))
+    if named:
+        return named
+    work = _work(owner)
+    attempt = _text(_get(owner, "attempt_id"))
+    expected = _text(record.get("owner_attempt_id"))
+    exact_owner = (
+        attempt and expected in (None, "-", attempt)
+        and _get(work, "source") == "route-exact" and _get(work, "route_id") == rid
+        and record.get("route_hash") and _get(work, "route_hash") == record["route_hash"]
+        and _get(owner, "_summary_sid") == "dispatch-" + attempt
+        and not _get(owner, "association_ambiguity")
+        and (not _get(owner, "_child_session_associated") or _get(owner, "_runtime_session_id"))
+    )
+    if exact_owner and subject(_get(owner, "title")):
+        return subject(_get(owner, "title"))
+    request = _get(record.get("work_request"), "text")
+    if isinstance(request, str):
+        # A sealed request's own first line is a literal fallback, not a model
+        # summary or an extraction from accumulated session conversation.
+        first = next((line.strip() for line in request.splitlines() if line.strip()), "")
+        return subject(re.sub(r"^#{1,6}\s+", "", first))
     return None
+
+
+def _selected_worker_job(node, jobs):
+    """Resolve the body row to one job in this observation, never by native SID alone."""
+    if not node or node.get("unit") == "_kernel/resource":
+        return None
+    anchor = node.get("job")
+    attempt = _text(_get(anchor, "attempt_id")) or _text(node.get("attempt_id"))
+    if not attempt:
+        return None
+    matches = [job for job in jobs if _get(job, "attempt_id") == attempt
+               and _get(job, "route_node") == node.get("id")]
+    if len(matches) != 1:
+        return None
+    job = matches[0]
+    if node.get("harness") and node["harness"] != _get(job, "harness"):
+        return None
+    if node.get("unit") and _get(job, "worker_mode") and node["unit"] != _get(job, "worker_mode"):
+        return None
+    if anchor is not None:
+        # Even a copied anchor must describe the same attempt, native session,
+        # role and process generation. Conflicting/unknown observations stay separate.
+        for field in ("route_id", "route_hash", "harness", "_runtime_session_id", "session_id",
+                      "worker_type", "worker_mode", "depth", "pid", "proc_start"):
+            if _get(anchor, field) != _get(job, field):
+                return None
+    return job
 
 
 def _chain_leg_name(node):
@@ -792,17 +853,15 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             match = next((node for node in chain_nodes if _get(node, "route_id") == rid), None)
             if match is not None and _get(match, "result") is not None:
                 result = _get(match, "result")
-        title = _text(_get(result, "name")) or _chain_title(chain_nodes, rid) or \
-            _text(view.get("slug")) or _text(record.get("slug")) or \
-            (_text(_get(owner, "slug")) if owner is not None else None)
-        if (owner is None or not jobs) and (session_row or {}).get("title"):
-            title = title or session_row["title"]
+        title = _route_subject(rid, record, view, owner, result, chain_nodes)
         worker_stage = _text(worker_node.get("id")) if worker_node else None
         worker_unit = _text(worker_node.get("unit")) if worker_node else None
         # Navigation ancestry never authorizes metrics from the parent session.
         # Each attempt uses the same applied-policy/native gauge as a session.
         owner_gauge = _context_gauge(owner) if owner is not None else (None, None)
         worker_contexts = []
+        selected_worker = _selected_worker_job(worker_node, jobs)
+        worker_context_index = None
         for job in jobs:
             node_id = _text(_get(job, "route_node"))
             if not node_id or _get(job, "liveness") not in ("working", "idle", "blocked"):
@@ -834,6 +893,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             # Multiple registered sub-sessions are individual rows, never one
             # latest/aggregate context value for the whole stage.
             pct, window = _context_gauge(job) if attempt else (None, None)
+            if job is selected_worker:
+                worker_context_index = len(worker_contexts)
             worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
                                     "model": _model_pair(_get(job, "resolved_model", "model")),
                                     "context": pct, "window": window})
@@ -865,6 +926,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "worker_contexts": worker_contexts, "subworker": None,
             "current": current,
         }
+        if worker_context_index is not None:
+            route["worker_context_index"] = worker_context_index
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status)
     return routes, nodes
@@ -1469,11 +1532,89 @@ def _session_gpu_lines(snapshot, session_index):
 _UNIT = {"5h": "5h", "7d": "week", "wk": "week", "mo": "month"}
 
 
+def _claude_usage_payload(snapshot, now):
+    """Consume the public admitted payload only, with its original quota age."""
+    payload = _get(snapshot, "payload")
+    freshness = _get(snapshot, "freshness")
+    observed = _num(_get(snapshot, "observed_at"))
+    now = _num(now)
+    if (not isinstance(payload, Mapping) or freshness not in ("fresh", "stale")
+            or observed is None or now is None or not 0 <= observed <= now
+            or now - observed > 900):
+        return None, "unknown", None
+
+    def percent(value):
+        return value if type(value) is int and 0 <= value <= 100 else None
+
+    clean = {key: percent(payload.get(key)) for key in ("rl_5h", "rl_7d")}
+    clean.update({key: value if (value := _num(payload.get(key))) is not None and value >= 0 else None
+                  for key in ("rs_5h", "rs_7d")})
+    models = payload.get("rl_ms")
+    clean["rl_ms"] = [(item[0], item[1]) for item in models
+                      if isinstance(item, (list, tuple)) and len(item) == 2
+                      and isinstance(item[0], str) and 0 < len(item[0]) <= 80
+                      and item[0].isprintable() and percent(item[1]) is not None
+                     ] if isinstance(models, (list, tuple)) else []
+    if not any(clean[key] is not None for key in ("rl_5h", "rl_7d")) and not clean["rl_ms"]:
+        return None, "unknown", None
+    return clean, "stale" if freshness == "stale" or now - observed > 180 else "fresh", observed
+
+
+def _claude_usage_unavailable(snapshot, now, *, quota_observed=None, quota_freshness="stale"):
+    """Display only the backend's safe observation; never resolve credentials or an account here."""
+    observation = _get(snapshot, "error_observation")
+    observation = observation if isinstance(observation, Mapping) else {}
+    error = _text(observation.get("error"))
+    errors = {"rate-limit": "rate limit", "auth": "auth", "missing-credential": "no credential",
+              "timeout": "timeout", "network": "network", "response-invalid": "response invalid",
+              "unknown": None}
+    reasons = {"credential-not-found": "no credential", "credential-invalid": None,
+               "credential-store-read-failed": None, "credential-changed": None,
+               "authentication-rejected": "auth", "usage-rate-limited": "rate limit",
+               "usage-timeout": "timeout", "usage-unreachable": "network",
+               "usage-response-invalid": "response invalid", "usage-http-error": None,
+               "usage-unreadable": None}
+    reason = (errors.get(error) or reasons.get(_text(observation.get("reason")))) if error in errors else None
+    observed = _num(observation.get("observed_at"))
+    now = _num(now)
+    observed = observed if observed is not None and now is not None and 0 <= observed <= now else None
+    retry = _num(observation.get("retry_at"))
+    until = (_clock(retry) if error in errors and observed is not None
+             and retry is not None and retry > now else None)
+    status = "unavailable"
+    if until:
+        # A long backend cooldown outlives quota freshness; keep its absolute deadline.
+        remaining = _dur((retry - now) / 60)
+        status = f"wait {remaining} ({until})" if retry - now >= 86400 else f"wait {until}"
+    if reason:
+        status += " · " + reason
+    if quota_observed is not None:
+        # Quota age belongs to the admitted payload, independently of fetch/retry time.
+        age = quota_freshness + " · " + _since(quota_observed, now) + " ago"
+        status = age + " · API " + status if until else age + (" · " + status if reason else "")
+    elif observed is not None:
+        status += " · " + _since(observed, now) + " ago"
+    return {"text": "claude " + status, "key": "hb_claude",
+            "windows": [None, None, None]}
+
+
+def _claude_usage_annotation(snapshot, now, freshness, quota_observed):
+    """Display status alongside admitted windows; it cannot admit quota itself."""
+    status = _claude_usage_unavailable(snapshot, now)
+    error_at = _num(_get(_get(snapshot, "error_observation"), "observed_at"))
+    if quota_observed is not None and (freshness == "stale" or (
+            error_at is not None and error_at >= quota_observed
+            and status["text"].startswith("claude wait "))):
+        return _claude_usage_unavailable(snapshot, now, quota_observed=quota_observed,
+                                        quota_freshness=freshness)["text"].removeprefix("claude ")
+    return ""
+
+
 def _usage_records(snapshot, session_rows, now):
     best = {}
     for session in _records(_get(snapshot, "sessions", default=())):
         harness = _text(_get(session, "harness"))
-        if harness not in HARNESSES:
+        if harness not in HARNESSES or harness == "claude":
             continue
         windows = _get(session, "rl_windows")
         r5, r7, rms = _get(session, "rl_5h"), _get(session, "rl_7d"), _get(session, "rl_ms")
@@ -1482,7 +1623,19 @@ def _usage_records(snapshot, session_rows, now):
             if harness not in best or mtime > best[harness][0]:
                 resets = _get(session, "rl_rs") or (None, None)
                 best[harness] = (mtime, r5, r7, rms, resets, windows)
-    for harness, snap in (_get(snapshot, "usage_snapshots", default={}) or {}).items():
+    snapshots = _get(snapshot, "usage_snapshots", default={})
+    snapshots = snapshots if isinstance(snapshots, Mapping) else {}
+    claude_snapshot = snapshots.get("claude")
+    payload, freshness, observed = _claude_usage_payload(claude_snapshot, now)
+    annotation = _claude_usage_annotation(claude_snapshot, now, freshness, observed)
+    if payload is not None:
+        best["claude"] = (observed, payload["rl_5h"], payload["rl_7d"], payload["rl_ms"],
+                          (payload["rs_5h"], payload["rs_7d"]), None)
+    claude_present = "claude" in snapshots or any(
+        _get(session, "harness") == "claude" for session in _records(_get(snapshot, "sessions", default=())))
+    for harness, snap in snapshots.items():
+        if harness == "claude":
+            continue
         payload = snap.get("payload") if isinstance(snap, Mapping) else None
         if isinstance(payload, Mapping) and harness in HARNESSES and (
                 payload.get("rl_windows") or payload.get("windows") or payload.get("rl_5h") is not None
@@ -1493,6 +1646,9 @@ def _usage_records(snapshot, session_rows, now):
     usage = []
     for harness in HARNESSES:
         if harness not in best:
+            if harness == "claude" and claude_present:
+                usage.append(_claude_usage_unavailable(claude_snapshot, now,
+                             quota_observed=observed if freshness == "stale" else None))
             continue
         _mt, r5, r7, rms, resets, windows = best[harness]
         raw = list(windows) if windows else [("5h", r5, resets[0]), ("week", r7, resets[1])]
@@ -1510,8 +1666,46 @@ def _usage_records(snapshot, session_rows, now):
             if shown[slot] is None:
                 shown[slot] = [unit, int(pct), reset_text]
         if any(shown):
-            usage.append({"text": harness, "key": "hb_" + harness, "windows": shown})
+            text = harness + (" " + annotation if harness == "claude" and annotation else "")
+            item = {"text": text, "key": "hb_" + harness, "windows": shown}
+            if harness == "codex":
+                snap = (_get(snapshot, "usage_snapshots", default={}) or {}).get(harness)
+                credit = codex_credits(snap.get("payload") if isinstance(snap, Mapping) else None)
+                if credit:
+                    item["credits"] = credit
+            usage.append(item)
+        elif harness == "claude" and claude_snapshot is not None:
+            usage.append(_claude_usage_unavailable(claude_snapshot, now))
     return usage
+
+
+def current_claude_usage(model, snapshot, now):
+    """Rebind only Claude usage at precomputed/replay and pending-draw boundaries."""
+    from dataclasses import replace
+
+    def claude(row):
+        return (row.get("harness") == "claude" or row.get("key") == "hb_claude"
+                or str(row.get("text", "")).split(" ", 1)[0] == "claude")
+
+    snapshots = _get(snapshot, "usage_snapshots")
+    current = _usage_records({
+        "usage_snapshots": {"claude": snapshots["claude"]}
+        if isinstance(snapshots, Mapping) and "claude" in snapshots else {},
+        "sessions": [session for session in _records(_get(snapshot, "sessions", default=()))
+                     if _get(session, "harness") == "claude"],
+    }, (), now)
+    row = next((item for item in current if claude(item)), None)
+    usage, replaced = [], False
+    for old in model.usage:
+        if claude(old):
+            if not replaced:
+                usage.append(row or _claude_usage_unavailable(None, now))
+                replaced = True
+        else:
+            usage.append(old)
+    if row is not None and not replaced:
+        usage.insert(0, row)
+    return replace(model, usage=usage) if replaced or row is not None else model
 
 
 def _parse_clock(ts):
@@ -1957,9 +2151,229 @@ def _detail_parts(detail):
     """``(focus result, seats by harness:sid, config, panes)`` of whatever the feed handed over."""
     if detail is None:
         return None, {}, None, {}
-    if hasattr(detail, "seats") and hasattr(detail, "focus"):
-        return detail.focus, dict(detail.seats or {}), detail.config, dict(getattr(detail, "panes", {}) or {})
+    if hasattr(detail, "config"):
+        return (_get(detail, "focus"), dict(_get(detail, "seats", default={}) or {}),
+                detail.config, dict(_get(detail, "panes", default={}) or {}))
     return detail, {}, None, {}
+
+
+def detail_bindings(snapshot):
+    """Live process and route incarnations, never short badges or cwd guesses."""
+    result = {}
+    jobs = _records(_get(snapshot, "jobs", default=()))
+    for session in _records(_get(snapshot, "sessions", default=())):
+        harness = _text(_get(session, "harness"))
+        sid = _text(_get(session, "session_id", "sid"))
+        pid, start = _get(session, "pid"), _get(session, "proc_start")
+        if not _is_main(session) or not harness or not sid or pid is None or start is None:
+            continue
+        routes = tuple(sorted((str(_get(job, "owner_route_id", "route_id") or ""),
+                               str(_get(job, "attempt_id") or ""))
+                              for job in jobs if _get(job, "parent_sid") == sid))
+        result[f"{harness}:{sid}"] = (harness, sid, str(pid), str(start), routes,
+            str(_get(session, "route_id") or ""), str(_get(session, "attempt_id") or ""))
+    return result
+
+
+def detail_for_bindings(detail, bindings, *, strict=False):
+    """Keep accepted reads only for the process incarnation they observed."""
+    from dataclasses import replace
+    from .types import ExplorerDetail
+    focus, seats, config, panes = _detail_parts(detail)
+    results = _get(detail, "results", default={}) or {}
+
+    def matches(result, ref):
+        request = _get(result, "request")
+        if request is None or not request.bindings:
+            return not strict
+        observed = dict(request.bindings)
+        return ref in bindings and observed.get(ref) == bindings[ref]
+
+    key = _get(focus, "key")
+    ref = f"{_get(key, 'harness')}:{_get(key, 'sid')}"
+    if focus is not None and not matches(focus, ref):
+        focus = None
+    seats = {ref: value for ref, value in seats.items() if matches(results.get("seats"), ref)}
+    panes = {sid: pane for sid, pane in panes.items()
+             if any(value[1] == sid and matches(results.get("panes"), ref)
+                    for ref, value in bindings.items())} if strict or results else panes
+    auxiliary = _get(results.get("panes"), "source_records", default={}) or {}
+    aux = auxiliary.get("aux")
+    key = _get(aux, "key")
+    if aux is not None and matches(aux, f"{_get(key, 'harness')}:{_get(key, 'sid')}"):
+        if focus is None:
+            focus = aux
+        elif aux.key == focus.key:
+            records = dict(aux.source_records)
+            records.update({name: value for name, value in focus.source_records.items()
+                            if name in ("seat", "dialogue", "lineage")})
+            focus = replace(focus, source_records=records, obligations=aux.obligations,
+                            events=aux.events, sources=focus.sources + aux.sources,
+                            health=aux.health if aux.health.state != "success" else focus.health)
+    return ExplorerDetail(focus=focus, seats=seats, config=config, panes=panes, results=results)
+
+
+def _peer_snapshot(snapshot, detail, bindings):
+    """Join the list worker's peer-only observation to the exact captured roster."""
+    import copy
+    from ..details import _PEER_FIELDS
+    result = (_get(detail, "results", default={}) or {}).get("seats")
+    observed = (_get(result, "source_records", default={}) or {}).get("peers")
+    request = _get(result, "request")
+    if (observed is None or request is None or not bindings or dict(request.bindings) != bindings
+            or detail_bindings(observed.snapshot) != bindings):
+        return snapshot
+    fresh = (observed.snapshot.observations or {}).get("optional:peers", {})
+    current = (_get(snapshot, "observations", default={}) or {}).get("optional:peers", {})
+    if (fresh.get("observed_at") or 0) < (current.get("observed_at") or 0):
+        return snapshot
+    def process_key(session):
+        return (_get(session, "harness"), _get(session, "session_id", "sid"),
+                str(_get(session, "pid")), str(_get(session, "proc_start")))
+    old = {process_key(s): s for s in observed.snapshot.sessions}
+    value = copy.copy(snapshot)
+    sessions = []
+    for session in _get(snapshot, "sessions", default=()):
+        row = copy.copy(session)
+        prior = old.get(process_key(row))
+        if prior is not None:
+            for field in _PEER_FIELDS:
+                field_value = copy.deepcopy(getattr(prior, field, None))
+                if isinstance(row, dict):
+                    row[field] = field_value
+                else:
+                    setattr(row, field, field_value)
+        sessions.append(row)
+    observations = dict(_get(snapshot, "observations", default={}) or {})
+    observations["optional:peers"] = dict(fresh)
+    if isinstance(value, Mapping):
+        value = dict(value, sessions=sessions, observations=observations)
+    else:
+        value.sessions, value.observations = sessions, observations
+    return value
+
+
+def selected_detail(model, detail, *, peer_model=None):
+    """Apply local selected reads to a complete base, preserving its rows and ordering."""
+    if model is None:
+        return model
+    from dataclasses import replace
+    from .view_model import freeze
+    provenance = model.source_records or {}
+    bindings = dict(provenance.get("_detail_bindings", {}))
+    candidate_sources = _get(peer_model, "source_records", default={}) or {}
+    # Snapshot peers are independent of HISTORY's selected body. Only the observed
+    # graph may advance over a pending base; no rows, targets or readiness travel.
+    if (bindings and bindings == candidate_sources.get("_detail_bindings")
+            and provenance.get("_detail_tags") == candidate_sources.get("_detail_tags")
+            and {row["tag"]: row.get("repo_id", row.get("repo")) for row in model.sessions} ==
+                {row["tag"]: row.get("repo_id", row.get("repo")) for row in peer_model.sessions}
+            and (candidate_sources.get("_peer_observed_at") or 0) >=
+                (provenance.get("_peer_observed_at") or 0)):
+        observation = (_get(peer_model, "system", default={}) or {}).get("peer_observation", {})
+        if candidate_sources.get("_peer_observed_at") is not None:
+            changes = {}
+            if observation.get("state") == "success":
+                changes.update(peer_nodes=peer_model.peer_nodes, peer_edges=peer_model.peer_edges)
+            else:
+                prior = (model.system or {}).get("peer_observation", {})
+                observation = dict(observation, last_good=bool(observation.get("last_good") or
+                    prior.get("state") == "success" or prior.get("last_good")))
+            provenance = {**provenance, "_peer_observed_at": candidate_sources.get("_peer_observed_at")}
+            model = replace(model, **changes, system=freeze({**(model.system or {}),
+                            "peer_observation": observation}), source_records=provenance)
+    if detail is None:
+        return model
+    detail = detail_for_bindings(detail, bindings, strict=True)
+    focus, seats, config, panes = _detail_parts(detail)
+    sources = _get(focus, "source_records", default={}) or {}
+    tag_of = provenance.get("_detail_tags", {})
+    rows = [dict(row) for row in model.sessions]
+    index = {row["tag"]: {"sid": ref.partition(":")[2]}
+             for ref, tag in tag_of.items() for row in rows if row["tag"] == tag}
+    bound_rows = [row for row in rows if row["tag"] in index]
+    seat_rows, generations, cards, dialogue, pane_read, raw = _detail_sections(
+        bound_rows, index, detail, time.time())
+    touched = {tag_of[ref] for ref in seats if ref in tag_of}
+    key = _get(focus, "key")
+    ref = f"{_get(key, 'harness')}:{_get(key, 'sid')}"
+    tag = tag_of.get(ref)
+    if tag and "seat" in sources:
+        touched.add(tag)
+    old_seats = [seat for seat in model.seats if seat[0] not in touched]
+    new_generations = {key: value for key, value in (model.generations or {}).items() if key not in touched}
+    new_cards = {key: value for key, value in (model.cards or {}).items() if key not in touched}
+    new_generations.update(generations)
+    new_cards.update(cards)
+    old_dialogue = dict(model.dialogue or {})
+    logs = dict(old_dialogue.get("logs", {}))
+    if tag and "seat" in sources and not sources["seat"]:
+        logs = {key: value for key, value in logs.items() if not key.startswith(tag + ":")}
+    logs.update((dialogue or {}).get("logs", {}))
+    old_dialogue["logs"] = logs
+    by_tag = {row["tag"]: row for row in rows}
+    for current_tag in touched:
+        by_tag[current_tag]["generation"] = by_tag[current_tag]["last_clear"] = None
+    for ref, current_tag in tag_of.items():
+        if current_tag in by_tag and ref.partition(":")[2] in panes:
+            by_tag[current_tag]["pane"] = panes[ref.partition(":")[2]]
+    for seat in seat_rows:
+        by_tag[seat[0]]["generation"] = seat[2]
+        by_tag[seat[0]]["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
+    panes_result = detail.results.get("panes")
+    pane_request = _get(panes_result, "request")
+    if tag in by_tag and pane_request is not None and "pane" in pane_request.wants:
+        # Last-good belongs to the feed's exact request, not to an older
+        # selection embedded in the complete base. A failed new request has no
+        # observed body; a failed refresh carries its retained body below.
+        by_tag[tag]["pane_lines"] = []
+    if pane_read:
+        current_tag, read = pane_read
+        by_tag[current_tag]["pane_lines"] = [[str(line), "soft"] for line in read.get("lines") or ()]
+        by_tag[current_tag]["pane_meta"] = "visible screen"
+    health_results = dict(detail.results)
+    if panes_result is not None:
+        health_results["panes:aux"] = panes_result.source_records.get("aux")
+    system = dict(model.system or {})
+    events = model.events
+    if focus is not None:
+        session_index = {tag_of[ref]: {"session": {"harness": binding[0]}, "ids": (binding[1],)}
+                         for ref, binding in bindings.items() if ref in tag_of}
+        system["task_summary"] = _current_task_summary(detail, rows, session_index, model.routes)
+        other_events = provenance.get("_detail_other_events")
+        if other_events is not None:
+            feed = list(other_events) + _registry_events(focus, tag)
+            feed.sort(key=lambda item: -item[0])
+            events = tuple(freeze(event) for _epoch, event in feed[:5])
+    return replace(model, sessions=tuple(freeze(row) for row in rows),
+                   seats=tuple(freeze(row) for row in old_seats + seat_rows),
+                   generations=freeze(new_generations), cards=freeze(new_cards),
+                   dialogue=freeze(old_dialogue), attempts=freeze(raw) if raw is not None else model.attempts,
+                   models=freeze(config) if config is not None else model.models,
+                   system=freeze(system), events=events,
+                   source_records={**provenance, "_detail_health": {
+                       kind: {"state": result.health.state, "error": result.health.error}
+                       for kind, result in health_results.items() if result is not None}})
+
+
+def reorder_view_model(model, effects):
+    """Reorder the displayed identities after their ordering effect succeeded."""
+    if model is None or not isinstance(model.ordering, Mapping):
+        return model
+    from dataclasses import replace
+    from . import order
+    ordering = dict(model.ordering)
+    saved = {"repos": list(ordering.get("repo_keys", ())),
+             "sessions": {repo: list(keys) for repo, keys in ordering.get("session_keys", {}).items()}}
+    for _name, kind, repo, source, target in effects:
+        saved = (order.move_repo(saved, source, target) if kind == "repo" else
+                 order.move_session(saved, repo, source, target))
+    rows = [dict(row, order_key=ordering.get("tag_keys", {}).get(row["tag"], ""))
+            for row in model.sessions]
+    ordered = order.reconcile_order(saved, model.repos, rows)
+    ordering.update(saved=saved, repo_keys=ordered["repo_order"], session_keys=ordered["session_order"],
+                    tag_cycle=["session:" + row["tag"] for row in ordered["sessions"]])
+    return replace(model, repos=tuple(ordered["repos"]), sessions=tuple(ordered["sessions"]), ordering=ordering)
 
 
 def _stamp(epoch, now):
@@ -2045,6 +2459,9 @@ def _detail_sections(rows, session_index, accepted_detail, now):
         entries = merged.get(ref)
         if entries is None:
             continue
+        if not entries:
+            generations[row["tag"]] = []
+            continue
         seat, gens, card_block = _seat_view(row["tag"], row["repo"], row["harness"],
                                             session_index[row["tag"]]["sid"], entries, now, row.get("now"))
         seat_rows.append(seat)
@@ -2129,12 +2546,17 @@ def _header_identity(snapshot):
 
 def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=None):
     """Project facts only; identity and liveness decisions stay with their source builders."""
+    clock = time.time() if now is None else now
     fixture_values = _get(snapshot, "values")
     if isinstance(fixture_values, Mapping):
-        return ExplorerViewModel.from_mapping(fixture_values)
+        return current_claude_usage(ExplorerViewModel.from_mapping(fixture_values), snapshot, clock)
     if isinstance(snapshot, Mapping) and "schema" in snapshot and "sessions" in snapshot:
-        return ExplorerViewModel.from_mapping(snapshot)
-    clock = time.time() if now is None else now
+        return current_claude_usage(ExplorerViewModel.from_mapping(snapshot), snapshot, clock)
+    bindings = detail_bindings(snapshot)
+    # Global view-only memory is independent of the selected session's incarnation.
+    memory = _memory_records(snapshot, accepted_detail)
+    accepted_detail = detail_for_bindings(accepted_detail, bindings)
+    snapshot = _peer_snapshot(snapshot, accepted_detail, bindings)
     resolver = _resolver(snapshot)
     session_rows, session_index = _session_records(snapshot, clock, resolver)
     order = _get(snapshot, "session_order")
@@ -2239,12 +2661,19 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         "peer_nodes": peer_nodes, "peer_edges": peer_edges,
         "events": [event for _epoch, event in feed],
         "compute": compute,
-        "memory": _memory_records(snapshot, accepted_detail),
+        "memory": memory,
         "models": detail_config if detail_config is not None else _get(cached_config, "models", "model_config"),
         "config": cached_config,
         "system": system,
         "pane_graph": _records(_get(snapshot, "pane_graph", "pane_edges", default=())),
-        "source_records": explicit if isinstance(explicit, Mapping) else None,
+        "source_records": {**(explicit if isinstance(explicit, Mapping) else {}),
+                           "_detail_bindings": bindings,
+                           "_detail_other_events": tuple((epoch, event) for epoch, event in feed
+                                                         if event[2] != "registry"),
+                           "_peer_observed_at": _get(peer_observation, "observed_at"),
+                           "_detail_tags": {f"{row['harness']}:{session_index[row['tag']]['sid']}": row["tag"]
+                                            for row in session_rows
+                                            if f"{row['harness']}:{session_index[row['tag']]['sid']}" in bindings}},
     }
     return ExplorerViewModel.from_mapping(data)
 

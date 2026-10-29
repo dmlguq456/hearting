@@ -4,7 +4,8 @@ Two on-disk sources per session:
   1. ~/.claude/sessions/<pid>.json  — native claude file: sessionId, status(idle/shell/busy),
      name, cwd. No model/tokens/rate-limit here.
   2. ~/.claude/.statusline/<sid>.json — per-session statusline tap (§5, written by
-     statusline.sh). Full telemetry: model, effort, context%, 5h/7d rate limits, cost.
+     statusline.sh). Session telemetry: model, effort, context%, cost. Account
+     quota comes only from the current-credential usage cache.
      Absent until §5 has run for that session → those cells stay '—' (graceful).
 
 Current identity joins the native registry/tap, exact foreground pane and recorded
@@ -445,34 +446,10 @@ def _apply_statusline(sess, d):
     sess.context_display_window_tokens = (
         policy["applied_trigger_tokens"] if policy["state"] == "applied" else None)
     sess.ctx_pct = context_policy_used_pct(sess.active_context_tokens, policy)
-    rl = d.get("rate_limits") or {}
-
-    def pct(k):
-        v = (rl.get(k) or {}).get("used_percentage")
-        return round(v) if isinstance(v, (int, float)) else None
-
-    p5, p7 = pct("five_hour"), pct("seven_day")
-    if p5 is not None:
-        sess.rl_5h = p5
-    if p7 is not None:
-        sess.rl_7d = p7
-    # per-model buckets → rl_ms [["fable", 57], ...]. Two schema shapes (2.1.198 bundle):
-    #  1. named siblings: seven_day_opus / seven_day_sonnet / seven_day_overage_included
-    #     ("Fable 5 limit" label) / seven_day_oauth_apps — same {used_percentage} shape as 5h/7d
-    #  2. model_scoped array: [{display_name:"Fable", utilization:0..1, resets_at:str}]
-    ms = []
-    for k, lbl in (("seven_day_opus", "opus"), ("seven_day_sonnet", "sonnet"),
-                   ("seven_day_overage_included", "fable"), ("seven_day_oauth_apps", "apps")):
-        v = pct(k)
-        if v is not None:
-            ms.append([lbl, v])
-    for e in (rl.get("model_scoped") or []):
-        if isinstance(e, dict) and isinstance(e.get("utilization"), (int, float)):
-            lbl = (e.get("display_name") or "model").split()[0].lower()
-            if not any(x[0] == lbl for x in ms):     # named bucket wins over a duplicate scoped row
-                ms.append([lbl, round(e["utilization"] * 100)])
-    if ms:
-        sess.rl_ms = ms
+    # Native taps identify a session, not the currently selected credential.
+    # Reusing their quota after account switching can resurrect another account.
+    # Only the credential-bound usage cache supplies account quota.
+    sess.rl_5h = sess.rl_7d = sess.rl_ms = sess.rl_rs = sess.rl_windows = None
     cost = d.get("cost") or {}
     cv = cost.get("total_cost_usd") if isinstance(cost, dict) else None
     if isinstance(cv, (int, float)):

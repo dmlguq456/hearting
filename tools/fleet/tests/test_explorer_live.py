@@ -8,7 +8,91 @@ from unittest import mock
 from tools.fleet.explorer.live import build_view_model
 from tools.fleet.explorer.chrome import count_word
 from tools.fleet.explorer.view_model import load_fixture
-from tools.fleet.model import Session
+from tools.fleet.model import DispatchJob, Session, WorkProjection
+
+
+class RouteSubjects(unittest.TestCase):
+    def snapshot(self, **record_values):
+        record = {"route_id": "rt-subject", "route_hash": "subject-hash", "slug": "opaque-task-1029",
+                  "owner_attempt_id": "att-owner", "work_request": {"text": "# 사용자 목적\n\n상세 요청"},
+                  **record_values}
+        work = WorkProjection(source="route-exact", route_id="rt-subject", route_hash="subject-hash",
+                              _route_view={"view": {"slug": record["slug"], "nodes": []}, "record": record})
+        owner = DispatchJob(key="owner", slug=record["slug"], harness="codex", depth=1,
+                            route_id="rt-subject", route_hash="subject-hash", attempt_id="att-owner",
+                            work_projection=work, title="정확한 작업 주제", liveness="working")
+        owner._summary_sid = "dispatch-att-owner"
+        return {"jobs": [owner], "sessions": [], "resources": []}
+
+    def test_exact_attempt_title_precedes_the_locator_and_preserves_last_success(self):
+        snapshot = self.snapshot()
+        snapshot["jobs"][0].title_ts = 1       # old success is still the exact source; no regeneration
+        self.assertEqual(build_view_model(snapshot).routes[0]["title"], "정확한 작업 주제")
+
+    def test_recorded_subject_and_display_title_keep_precedence(self):
+        for values, expected in (({"result": {"name": "Recorded outcome"}}, "Recorded outcome"),
+                                 ({"display_title": "Named route"}, "Named route"),
+                                 ({"title": "User supplied name"}, "User supplied name")):
+            with self.subTest(values=values):
+                self.assertEqual(build_view_model(self.snapshot(**values)).routes[0]["title"], expected)
+
+    def test_sealed_request_heading_or_literal_first_line_is_used_without_a_title(self):
+        for text, expected in (("\n## 현재 작업 목적\n\n후속", "현재 작업 목적"),
+                               ("Restore session selection.\nKeep existing behavior.", "Restore session selection.")):
+            snapshot = self.snapshot(work_request={"text": text})
+            snapshot["jobs"][0].title = None
+            self.assertEqual(build_view_model(snapshot).routes[0]["title"], expected)
+
+    def test_foreign_or_ambiguous_title_sources_do_not_override_the_sealed_request(self):
+        for case in ("hash", "owner-attempt", "sidecar-attempt", "ambiguity", "cwd-child", "record-id"):
+            with self.subTest(case=case):
+                snapshot = self.snapshot()
+                owner = snapshot["jobs"][0]
+                backing = owner.work_projection._route_view
+                if case == "hash":
+                    backing["record"]["route_hash"] = "other-hash"
+                elif case == "owner-attempt":
+                    backing["record"]["owner_attempt_id"] = "att-other"
+                elif case == "sidecar-attempt":
+                    owner._summary_sid = "dispatch-att-other"
+                elif case == "ambiguity":
+                    owner.association_ambiguity = "multiple-child-session-id-candidates"
+                elif case == "cwd-child":
+                    owner._child_session_associated = True
+                else:
+                    backing["record"]["route_id"] = "rt-foreign"
+                self.assertEqual(build_view_model(snapshot).routes[0]["title"],
+                                 None if case == "record-id" else "사용자 목적")
+
+    def test_slug_and_readable_slug_are_not_user_purpose_sources(self):
+        snapshot = self.snapshot(result={"name": "opaque task"})
+        self.assertEqual(build_view_model(snapshot).routes[0]["title"], "정확한 작업 주제")
+        snapshot["jobs"][0].title = "opaque-task-1029"
+        self.assertEqual(build_view_model(snapshot).routes[0]["title"], "사용자 목적")
+
+    def test_absent_subject_never_borrows_parent_or_previous_route_purpose(self):
+        from tools.fleet.explorer import live
+        snapshot = self.snapshot(work_request={})
+        owner = snapshot["jobs"][0]
+        owner.title = None
+        parent = Session(harness="codex", pid=10, session_tag="p1", session_id="sid-parent",
+                         title="Unrelated current session topic", liveness="working")
+        parent.route_chain = {"nodes": [
+            {"route_id": "rt-before", "capability": "route-frame", "result": {"name": "Old frame topic"}},
+            {"route_id": "rt-subject", "capability": "autopilot-code"}]}
+        snapshot["sessions"] = [parent]
+        self.assertIsNone(build_view_model(snapshot).routes[0]["title"])
+        self.assertIsNone(live._chain_title(parent.route_chain["nodes"], "rt-subject"))
+        owner.work_projection._route_view["record"]["work_request"] = {"text": "   "}
+        self.assertIsNone(build_view_model(snapshot).routes[0]["title"])
+
+    def test_exact_chain_result_keeps_its_own_name(self):
+        from tools.fleet.explorer import live
+        nodes = [{"route_id": "rt-old", "result": {"name": "Previous topic"}},
+                 {"route_id": "rt-subject", "result": {"name": "Own topic"}}]
+        self.assertEqual(live._chain_title(nodes, "rt-subject"), "Own topic")
+        nodes[1]["result"]["route_id"] = "rt-foreign"
+        self.assertIsNone(live._chain_title(nodes, "rt-subject"))
 
 
 class CoreFields(unittest.TestCase):

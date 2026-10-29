@@ -127,6 +127,55 @@ class ExplorerRuntimeReuseTests(unittest.TestCase):
             recovered.join(2)
             self.assertEqual(write.call_count, 2)
 
+    def test_candidate_composition_does_not_adopt_input_state(self):
+        from tools.fleet import render
+        from tools.fleet.explorer.state import NavState
+        state = NavState(drag=("tree", "session", "painted", "painted", 2, 15, None, False, False),
+                         scroll=(("pane", 100),))
+        with patch.object(render, "_explorer_runtime", return_value=ExplorerRuntime()), \
+                patch.object(render, "_EXPLORER_COMPOSE_MODEL", None), \
+                patch.object(render, "_EXPLORER_STATE", state), \
+                patch.object(render, "_EXPLORER_ORDER", ["painted-order"]):
+            render._explorer_compose({"sessions": [], "jobs": []}, 140, 45, state)
+            self.assertEqual(render._EXPLORER_STATE, state)
+            self.assertEqual(render._EXPLORER_ORDER, ["painted-order"])
+
+    def test_orphan_motion_and_release_on_unpreviewed_target_are_inert(self):
+        from tools.fleet.explorer.frame import CellFrame, Hit
+        from tools.fleet.explorer.state import NavState, reduce
+        frame = CellFrame((), (Hit(4, 0, 32, ("scope", "repo:a")),
+                               Hit(5, 0, 32, ("scope", "repo:b")),
+                               Hit(6, 0, 32, ("scope", "repo:c"))), 40, 20)
+        orphan, effects = reduce(NavState(), {"type": "mouse", "phase": "press", "motion": True,
+                                              "x": 2, "y": 4}, frame)
+        self.assertEqual((orphan.drag, effects), ((), ()))
+        held, _ = reduce(NavState(), {"type": "mouse", "phase": "press", "x": 2, "y": 4}, frame)
+        moved, _ = reduce(held, {"type": "mouse", "phase": "press", "motion": True, "x": 2, "y": 5}, frame)
+        ended, effects = reduce(moved, {"type": "mouse", "phase": "release", "x": 2, "y": 6}, frame)
+        self.assertEqual((ended.drag, effects), ((), ()))
+
+    def test_painted_process_replacement_cancels_a_pending_gesture_on_the_same_tag(self):
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from tools.fleet import render
+        from tools.fleet.explorer.state import NavState
+        old = ExplorerViewModel(source_records={"_detail_tags": {"claude:full-sid": "tag"},
+            "_detail_bindings": {"claude:full-sid": ("claude", "full-sid", "17", "old-start")}},
+            ordering={"repo_by_tag": {"tag": "repo"}, "tag_keys": {"tag": "sid:claude:full-sid"}})
+        state = NavState(drag=("tree", "session", "tag", "tag", 2, 15, None, False, False,
+                               render._explorer_gesture_binding(old, "tag")))
+        current = replace(old, source_records={"_detail_tags": {"claude:full-sid": "tag"},
+            "_detail_bindings": {"claude:full-sid": ("claude", "full-sid", "17", "new-start")}})
+        frame = ExplorerRuntime().loading_frame(140, 45)
+        with patch.object(render, "_EXPLORER_MODEL", current), \
+                patch.object(render, "_EXPLORER_STATE", state), \
+                patch.object(render, "_EXPLORER_SIZE", None), \
+                patch.object(render, "_EXPLORER_ORDER", []), \
+                patch.object(render, "_explorer_frame_from_model", return_value=frame), \
+                patch.object(render, "_draw_explorer_frame"):
+            render._draw_explorer(SimpleNamespace(getmaxyx=lambda: (45, 140)), {}, frame=frame)
+            self.assertEqual(render._EXPLORER_STATE.drag, ())
+
 
 if __name__ == "__main__":
     unittest.main()

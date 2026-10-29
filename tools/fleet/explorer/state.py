@@ -1013,11 +1013,19 @@ def _reduce(state, event, frame=None):
             phase = event.get("phase")
             x, y = int(event.get("x", -1)), int(event.get("y", -1))
             button = int(event.get("button", 0))
+            if event.get("motion") and not state.drag:
+                return state, ()
             offsets = dict(state.scroll)
             if phase == "release":
                 if state.drag and state.drag[0] == "tree":
                     drag = state.drag
-                    if not drag[8]:
+                    if drag[8]:
+                        # Validate the actual release target against the painted frame, not
+                        # just the previous motion packet's insertion preview.
+                        moved, _ = _reduce(state, {**event, "phase": "press", "motion": True}, frame)
+                        if moved.drag[6:8] != drag[6:8]:
+                            return replace(state, drag=()), ()
+                    if not drag[8] or (not drag[7] and _tree_release_on_press(drag, x, y, frame)):
                         # An unmoved press is a click on the identity it grabbed, wherever that
                         # row is drawn: the tree or a ("scope", …) row of the right pane. It is
                         # confirmed before the tree-only bounds below. Only motion packets set
@@ -1085,7 +1093,7 @@ def _reduce(state, event, frame=None):
                             source_repo = repo_by_tag.get(drag[2])
                             valid = target != drag[2] and repo_by_tag.get(target) == source_repo
                     return replace(state, drag=("tree", drag[1], drag[2], drag[3], drag[4],
-                                                 drag[5], target if valid else None, valid, moved)), ()
+                                                 drag[5], target if valid else None, valid, moved, *drag[9:])), ()
                 slot, maximum, origin_y, origin_offset, sign = state.drag
                 offsets[slot] = max(0, min(int(maximum), int(origin_offset) +
                                            (y - int(origin_y)) * int(sign)))

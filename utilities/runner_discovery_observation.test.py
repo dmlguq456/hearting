@@ -233,6 +233,9 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
                 with self.assertRaises(BlockingIOError):
                     fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assertEqual(store.get(message["id"])["state"], "complete")
+            if inventory and no_resend == "pending" and len(delays) == 1:
+                self.assertTrue(prepared_messages,
+                                "notice preparation now reaches its message duty in the first pass")
             if len(delays) <= 2:
                 if inventory and legacy:
                     self.assertEqual(observed_path_before,
@@ -305,14 +308,22 @@ class RunnerDiscoveryObservationTest(peer._TmpRootMixin, unittest.TestCase):
         self.assertEqual(messages, [message["id"]])
         self.assertEqual(discoveries[:1 if replace_lock else 2], [False] * (1 if replace_lock else 2))
         message_progress = inventory and no_resend == "pending"
-        expected_delays = [1.0] if replace_lock else [1.0, 1.0 if historical or message_progress else 1.7]
+        # Preparation and its message checkpoint now happen in the first pass;
+        # only a newly received historical ACK changes the second signature.
+        expected_delays = [1.0] if replace_lock else [1.0, 1.0 if historical else 1.7]
         self.assertEqual(delays[:len(expected_delays)], expected_delays)
         if message_progress:
             self.assertTrue(prepared_messages)
             self.assertEqual(steward.peer_message._read_pending(ref)["state"], "pending")
-        self.assertEqual(len(ordinary_passes), len(discoveries))
-        self.assertEqual(len({id(context) for context in ordinary_passes}), len(discoveries))
-        self.assertEqual(len({id(context) for context in read_contexts}), len(discoveries))
+        # Each iteration now reads accepted active notices before discovery,
+        # then starts a separate full-recovery pass. Neither phase may reuse a
+        # store snapshot or authority context from an earlier phase/iteration.
+        read_phases = 2 * len(discoveries)
+        self.assertEqual(len(ordinary_passes), read_phases)
+        self.assertEqual(len({id(context) for context in ordinary_passes}), read_phases)
+        self.assertGreaterEqual(len(read_contexts), len(discoveries))
+        self.assertLessEqual(len(read_contexts), read_phases)
+        self.assertEqual(len({id(context) for context in read_contexts}), len(read_contexts))
         self.assertEqual(len(batch_calls), len(discoveries))
         self.assertEqual(len(watch_calls), min(3, len(discoveries)) if not legacy else 0)
         self.assertEqual(len(workers), len(discoveries) + 1 if service else 1)
