@@ -76,6 +76,26 @@ class F51UsageCacheTest(unittest.TestCase):
         self.assertEqual(after["observed_at"], 1000.0)
         self.assertEqual(after["payload"]["windows"][0][1], 40)
 
+    def test_credit_metadata_roundtrip_failure_preservation_and_success_replacement(self):
+        windows = {"windows": [["7d", 100, 9000.0]]}
+        good = {**windows, "credits": {"has_credits": True, "unlimited": False,
+                                     "balance": "56446.1701575000"},
+                "spend_control_reached": None}
+        for metadata in ({"credits": {"has_credits": False, "unlimited": False}},
+                         {"credits": {"has_credits": True}, "spend_control_reached": True}, {}):
+            with self.subTest(metadata=metadata):
+                self.assertTrue(usage_cache.record("codex", good, now=1000.0))
+                self.assertEqual(usage_cache.read("codex", now=1001.0)["payload"], good)
+                self.assertTrue(usage_cache.record_attempt("codex", now=1100.0))
+                failed = usage_cache.read("codex", now=1101.0)
+                self.assertEqual(failed["payload"], good)
+                self.assertEqual((failed["observed_at"], failed["attempted_at"]), (1000.0, 1100.0))
+                replacement = {**windows, **metadata}
+                self.assertTrue(usage_cache.record("codex", replacement, now=1200.0))
+                refreshed = usage_cache.read("codex", now=1201.0)
+                self.assertEqual(refreshed["payload"], replacement)
+                self.assertEqual((refreshed["observed_at"], refreshed["attempted_at"]), (1200.0, 1200.0))
+
     def test_provider_rejection_does_not_refresh_quota_and_is_account_scoped(self):
         self.assertTrue(usage_cache.record("opencode", {
             "rl_5h": 5, "rl_windows": [["5h", 5, 9000.0]]}, now=1000.0))

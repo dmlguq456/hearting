@@ -167,6 +167,65 @@ class SharedCacheFallbackTests(unittest.TestCase):
         self.assertIsNone(score)
         self.assertEqual(source, "unknown:timeout")
 
+    def test_codex_credit_matrix_lifts_only_hard_hold(self):
+        cases = [({"has_credits": True}, None, True),
+                 ({"has_credits": True, "balance": "0"}, False, True),
+                 ({"has_credits": False, "unlimited": True}, None, True),
+                 ({"has_credits": False, "unlimited": False}, None, False),
+                 (None, None, False), ([], None, False),
+                 ({"has_credits": "true", "unlimited": 1}, None, False),
+                 ({"balance": "56446.1701575000"}, None, False),
+                 ({"has_credits": True}, True, False),
+                 ({"unlimited": True}, "false", False),
+                 ({"has_credits": True}, 0, False)]
+        cache = self._cache()
+        for credits, spend, usable in cases:
+            with self.subTest(credits=credits, spend=spend):
+                cache.record("codex", {"windows": [["5h", 100, 2000], ["7d", 100, 9000]],
+                                       "credits": credits, "spend_control_reached": spend}, now=900)
+                self.assertEqual(C.gauge_limit_epoch("codex", now=1000), None if usable else 9000)
+                score, source = C._cached_score("codex", 1000, 3600)
+                self.assertEqual(score, 0.0)
+                self.assertTrue(C.is_gated({"codex": score}, "codex", usage_gate_used_percent=85))
+                self.assertEqual(C.gate_release_epoch("codex", source, now=1000,
+                                                       usage_gate_used_percent=85), 9000)
+                self.assertEqual(C.rank_band(["codex"], {"codex": "ok"}, {}, ["codex"],
+                                             {"codex": score}, strategy="capacity-aware"), [])
+
+    def test_credit_judgment_reads_one_fresh_snapshot(self):
+        cache = self._cache()
+        # A concurrent later refresh must not supply credits for older windows.
+        first = {"payload": {"windows": [["7d", 100, 9000]]}}
+        later = {"payload": {"credits": {"has_credits": True}}}
+        with mock.patch.object(cache, "read", side_effect=[first, later]) as read:
+            self.assertEqual(C.gauge_limit_epoch("codex", now=1000, stale_after=123), 9000)
+        read.assert_called_once_with("codex", now=1000, stale_max=123)
+
+    def test_credit_metadata_does_not_change_other_gauges_or_unknown_windows(self):
+        cache = self._cache()
+        metadata = {"credits": {"has_credits": True}}
+        cache.record("opencode", {"rl_windows": [["wk", 100, 9000]], **metadata}, now=900)
+        cache.record("claude", {"windows": [["7d", 100, 9000]], **metadata}, now=900)
+        self.assertEqual(C.gauge_limit_epoch("opencode", now=1000), 9000)
+        self.assertIsNone(C.gauge_limit_epoch("claude", now=1000))
+        for rows in ([["7d", 99, 9000]], [["7d", 100, 999]],
+                     [["7d", 100, None]], [["5h", 100, 9000], ["7d", 100, None]]):
+            for credit in ({}, metadata):
+                with self.subTest(rows=rows, credit=credit):
+                    cache.record("codex", {"windows": rows, **credit}, now=900)
+                    self.assertIsNone(C.gauge_limit_epoch("codex", now=1000))
+        cache.record("codex", {"windows": [["7d", 100, 9000]], **metadata}, now=900)
+        self.assertIsNone(C.gauge_limit_epoch("codex", now=5000))
+
+    def test_manual_zero_and_positive_scores_skip_credit_and_window_reads(self):
+        for score in (0, 42):
+            with self.subTest(score=score), mock.patch.dict(os.environ, {
+                    "HARNESS_CAPACITY_SCORES": f"codex:{score},claude:80,opencode:70",
+                    "AGENT_DISPATCH_JOBS": ""}), \
+                    mock.patch.object(C, "_usage_cache", side_effect=AssertionError("manual is offline")):
+                self.assertIsNone(C.gauge_limit_epoch("codex", now=1000))
+                self.assertEqual(C.capacity_report(now=1000)["scores"]["codex"], score)
+
     def test_capacity_report_names_manual_and_unknown_sources(self):
         with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": "codex:12",
                                          "AGENT_DISPATCH_JOBS": ""}), \
