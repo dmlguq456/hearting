@@ -42,6 +42,7 @@ import safe_fs
 import user_model_config
 import codex_tui_config
 import herdr_integration
+import manifest
 
 
 RUNTIMES = ("claude", "codex", "opencode")
@@ -2616,6 +2617,7 @@ def _activation_protected_paths(runtime: str, scope: str = "global") -> List[Pat
         paths_owned.append(_config_path(runtime, scope, CODEX_IDENTITY_BACKUP))
     elif runtime == "opencode":
         home = paths.runtime_home(runtime, scope)
+        paths_owned.append(manifest._manifest_path(runtime, scope))
         paths_owned.extend(home / name for name in (
             "tui.json", "tui.jsonc", "cli.json", "cli.jsonc",
         ))
@@ -3179,6 +3181,29 @@ def _trusted_owned(
     return trusted, user_changed
 
 
+def _opencode_legacy_guard_transfer(desired: List[dict], owned: set, scope: str):
+    """Retire only exact legacy hashes for guards this activation adopts."""
+    home = paths.runtime_home("opencode", scope)
+    path = manifest._manifest_path("opencode", scope)
+    try:
+        data, state = manifest.load_ownership_manifest(path, "opencode", scope)
+    except ValueError:
+        return None
+    if data is None:
+        return None
+    guards = {}
+    for item in desired:
+        if not item.get("guard") or item.get("preserve") or item["dest"] not in owned:
+            continue
+        dest = Path(item["dest"])
+        relative = dest.relative_to(home).as_posix()
+        current = safe_fs.capture_state(dest)
+        if current.kind == "file" and current.digest == data["files"].get(relative):
+            guards[item["dest"]] = current
+            del data["files"][relative]
+    return (path, data, state, guards) if guards else None
+
+
 # destructive-ok: reason=discard the active runtime transaction after commit or exact rollback; boundary=one UUID transaction root created below runtime harness state
 def _apply_transaction(
     runtime: str,
@@ -3194,6 +3219,8 @@ def _apply_transaction(
     tx_root = state_dir / "transactions" / uuid.uuid4().hex
     backup_root = tx_root / "backup"
     owned, user_changed = _trusted_owned(runtime, previous, desired, scope)
+    legacy_transfer = (_opencode_legacy_guard_transfer(desired, owned, scope)
+                       if runtime == "opencode" else None)
     desired_by_dest = {entry["dest"]: entry for entry in desired}
     removal = [Path(item) for item in owned if item not in desired_by_dest]
     removal.extend(Path(item) for item in user_changed if item not in desired_by_dest)
@@ -3221,6 +3248,11 @@ def _apply_transaction(
             record["postimage"] = record["preimage"]
             snapshots.append(record)
             _write_journal(journal_path, runtime, "preparing", snapshots)
+        if legacy_transfer:
+            manifest_path, _, expected_manifest, _ = legacy_transfer
+            record = next(item for item in snapshots if item["dest"] == str(manifest_path))
+            if safe_fs.PathState.from_public(record["preimage"]) != expected_manifest:
+                raise ActivationError(f"concurrent-successor: legacy manifest changed: {manifest_path}")
 
         for dest in removal + [Path(item["dest"]) for item in desired]:
             key = str(dest)
@@ -3247,6 +3279,9 @@ def _apply_transaction(
             _safe_existing_dest(dest, kind, owned, allowed_link_roots,
                                 Path(source) if source else None)
             record = _snapshot_record(dest, backup_root, len(snapshots))
+            if legacy_transfer and key in legacy_transfer[3]:
+                if safe_fs.PathState.from_public(record["preimage"]) != legacy_transfer[3][key]:
+                    raise ActivationError(f"concurrent-successor: legacy guard changed: {dest}")
             record["postimage"] = (
                 safe_fs.PathState("missing").public()
                 if record["state"] == "moved"
@@ -3355,11 +3390,29 @@ def _apply_transaction(
                 raise ActivationError(f"injected failure after operation {operation_count}")
 
         owned_entries = changed + preserved
+        if legacy_transfer:
+            manifest_path, transferred, expected_manifest, _ = legacy_transfer
+            auth = safe_fs.authority(
+                manifest_path, owner="runtime-activation:legacy-guard-handover",
+                allowed_paths=(manifest_path,), allow_leaf_symlink=False,
+                expected=expected_manifest,
+            )
+            postimage = safe_fs.atomic_write_bytes(
+                auth, json.dumps(transferred, sort_keys=True, ensure_ascii=False,
+                                 indent=2).encode("utf-8"), 0o600,
+            )
+            record = next(item for item in snapshots if item["dest"] == str(manifest_path))
+            record["postimage"] = postimage.public()
+            _write_journal(journal_path, runtime, "applying", snapshots)
         if commit_callback is not None:
             try:
                 commit_callback(owned_entries)
             finally:
                 protected = {str(path) for path in protected_paths}
+                if runtime == "opencode":
+                    # This receipt has its own mutation postimage. A current
+                    # successor is never the handover's rollback authority.
+                    protected.discard(str(manifest._manifest_path(runtime, scope)))
                 for record in snapshots:
                     if record["dest"] in protected:
                         record["postimage"] = safe_fs.capture_state(
@@ -3431,6 +3484,8 @@ def _activation_owned_paths(
         destinations.append(_config_path(runtime, scope, "settings.json"))
     elif runtime == "codex":
         destinations.extend(_activation_protected_paths(runtime, scope)[1:])
+    elif runtime == "opencode":
+        destinations.append(manifest._manifest_path(runtime, scope))
 
     discovery: set[Path] = set()
     for root in roots:

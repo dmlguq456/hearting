@@ -91,6 +91,38 @@ class SafeFsTest(unittest.TestCase):
             )
         self.assertEqual(observations, [True, True])
 
+    def test_atomic_write_returns_its_own_postimage_when_a_successor_arrives(self) -> None:
+        target = self.root / "entry"
+        before = safe_fs.capture_state(target, include_payload=True)
+        original = os.replace
+
+        def replace_then_edit(source, destination):
+            original(source, destination)
+            if Path(destination) == target:
+                target.write_bytes(b"user successor")
+
+        with mock.patch.object(safe_fs.os, "replace", side_effect=replace_then_edit):
+            postimage = safe_fs.atomic_write_bytes(self.auth(target, before), b"installer", 0o600)
+        self.assertNotEqual(postimage, safe_fs.capture_state(target))
+        with self.assertRaisesRegex(safe_fs.SafetyError, "concurrent-successor"):
+            safe_fs.cas_restore(self.auth(target), before, postimage)
+        self.assertEqual(target.read_bytes(), b"user successor")
+
+    def test_tracked_transaction_does_not_seal_successors_after_partial_failure(self) -> None:
+        first, second = self.root / "render", self.root / "receipt"
+        first.write_bytes(b"old")
+        authorities = {"render": self.auth(first), "receipt": self.auth(second)}
+        with safe_fs.transaction(authorities) as transaction:
+            transaction.seal(postimages=transaction.preimages)
+            transaction.write_bytes("render", b"ours", 0o600)
+            second.write_bytes(b"user receipt")
+            with self.assertRaisesRegex(safe_fs.SafetyError, "expected-state-mismatch"):
+                transaction.write_bytes("receipt", b"ours", 0o600)
+            with self.assertRaisesRegex(safe_fs.SafetyError, "concurrent-successor"):
+                transaction.restore()
+        self.assertEqual(first.read_bytes(), b"ours")
+        self.assertEqual(second.read_bytes(), b"user receipt")
+
     # destructive-ok: reason=construct a same-byte successor inode; boundary=one target below self.root in this TemporaryDirectory
     def test_cas_restore_preserves_unrelated_and_same_byte_successors(self) -> None:
         target = self.root / "profile"

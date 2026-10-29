@@ -61,17 +61,24 @@ def _install_guard(entry, home, dry_run, scope="global"):
             for name, path in (("manifest", manifest._manifest_path(RUNTIME, scope)),
                                ("pristine", manifest._pristine_path(RUNTIME, scope, relative))):
                 receipt_paths[name] = safe_fs.authority(path, owner="opencode-driver:guard-receipt",
-                                                       allowed_paths=(path,), allow_leaf_symlink=False)
+                                                       allowed_paths=(path,), allow_leaf_symlink=False,
+                                                       expected=safe_fs.capture_state(path))
             with safe_fs.transaction(receipt_paths) as transaction:
+                transaction.seal(postimages=transaction.preimages)
                 try:
+                    # The ownership decision predates lock acquisition.
+                    for receipt_auth in receipt_paths.values():
+                        safe_fs.assert_expected(receipt_auth)
                     if not unchanged:
-                        safe_fs.atomic_write_bytes(auth, content, 0o644, expected=current, create_parents=True)
+                        transaction.write_bytes("entry", content, 0o644)
                     # Persist authority even when an unrelated install action
                     # fails later. Never register user-modified bytes.
                     manifest.record(RUNTIME, [{"relpath": relative, "source_abs": str(dest),
-                                               "dest_abs": str(dest)}], scope=scope)
+                                               "dest_abs": str(dest),
+                                               "expected_state": transaction.postimages["entry"],
+                                               "content_sha256": entry["content_sha256"]}],
+                                    scope=scope, transaction=transaction)
                 except Exception:
-                    transaction.seal()
                     transaction.restore()
                     raise
         else:

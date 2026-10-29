@@ -50,6 +50,9 @@ for changed_file in \
   tools/install/runtime_activation.py \
   tools/install/projector.py \
   tools/install/drivers/opencode.py \
+  tools/install/manifest.py \
+  tools/install/safe_fs.py \
+  tools/install/test_safe_fs.py \
   tools/install/opencode_driver.test.py \
   tools/install/runtime-activation.test.sh \
   adapters/opencode/bin/preflight.sh \
