@@ -14,6 +14,131 @@ from fleet.model import ContextProjection, Session
 FULL, EMPTY = render._BAR_FULL, render._BAR_EMPTY
 
 
+class CodexCreditsUsageTest(unittest.TestCase):
+    NOW = 1_000_000
+    CASES = (
+        ({"credits": {"has_credits": True, "balance": "40928.299999"}}, "credits 40,928"),
+        ({"credits": {"has_credits": False, "balance": "0"}}, "credits none"),
+        ({"credits": {"has_credits": True, "balance": "40928.29"},
+          "spend_control_reached": True}, "credits spend limit"),
+        ({}, None),
+    )
+
+    @classmethod
+    def snapshots(cls, metadata=None, two_windows=False):
+        windows = [["7d", 100, cls.NOW + 86400]]
+        if two_windows:
+            windows.insert(0, ["5h", 20, cls.NOW + 3600])
+        return {
+            "claude": {"payload": {"windows": [["5h", 12, cls.NOW + 3600],
+                                                ["7d", 59, cls.NOW + 86400]]}},
+            "codex": {"payload": {"windows": windows, **(metadata or {})}},
+            "opencode": {"payload": {"windows": [["5h", 10, cls.NOW + 3600],
+                                                  ["7d", 30, cls.NOW + 86400]]}},
+        }
+
+    @classmethod
+    def classic(cls, snapshots, width, sessions=()):
+        return render._usage_header_rows(sessions, usage_snapshots=snapshots,
+                                         term_width=width, now=cls.NOW)
+
+    @classmethod
+    def explorer(cls, snapshots, width, expanded=True, sessions=()):
+        from fleet.explorer.live import build_view_model
+        from fleet.explorer.frame import draw
+        from fleet.explorer.state import NavState
+        vm = build_view_model({"sessions": sessions, "usage_snapshots": snapshots}, now=cls.NOW)
+        with mock.patch("fleet.explorer.chrome._clock_freshness", return_value="12:00"):
+            return draw(vm, NavState(usage_open=expanded), width, 45, beat=1)
+
+    def test_actual_expanded_rows_and_other_harnesses_at_all_widths(self):
+        for width in (80, 100, 140):
+            baseline = self.classic(self.snapshots(), width)
+            frame_before = self.explorer(self.snapshots(), width)
+            for metadata, expected in self.CASES:
+                with self.subTest(width=width, metadata=metadata):
+                    rows = self.classic(self.snapshots(metadata), width)
+                    self.assertEqual(rows[0], baseline[0])
+                    self.assertEqual(rows[2], baseline[2])
+                    visible = render._snapshot_line(rows[1])
+                    self.assertEqual(visible.split("week ", 1)[1],
+                                     render._snapshot_line(baseline[1]).split("week ", 1)[1])
+                    self.assertIn("100%", visible)
+                    self.assertTrue(all(render._dw(render._snapshot_line(row)) <= width for row in rows))
+                    frame = self.explorer(self.snapshots(metadata), width)
+                    self.assertEqual(frame.cells[1], frame_before.cells[1])
+                    self.assertEqual(frame.cells[3], frame_before.cells[3])
+                    codex_row = frame.text_rows()[2]
+                    if expected:
+                        self.assertIn(expected, visible)
+                        self.assertIn(expected, codex_row)
+                    else:
+                        self.assertEqual(rows, baseline)
+                        self.assertEqual(frame.cells, frame_before.cells)
+                        self.assertNotIn("credits", visible + codex_row)
+
+    def test_compact_cells_and_hits_are_identical(self):
+        for width in (80, 100, 140):
+            before = self.explorer(self.snapshots(), width, expanded=False)
+            for metadata, _ in self.CASES:
+                with self.subTest(width=width, metadata=metadata):
+                    after = self.explorer(self.snapshots(metadata), width, expanded=False)
+                    self.assertEqual(after.cells, before.cells)
+                    self.assertEqual(after.hits, before.hits)
+
+    def test_two_windows_and_first_usage_row_reserve_complete_credit_text(self):
+        for width in (80, 100, 140):
+            for metadata, expected in self.CASES[:3]:
+                snapshots = {"codex": self.snapshots(metadata, two_windows=True)["codex"]}
+                with self.subTest(width=width, expected=expected):
+                    row = render._snapshot_line(self.classic(snapshots, width)[0])
+                    self.assertIn(expected, row)
+                    self.assertIn("5h 20%", row)
+                    self.assertLessEqual(render._dw(row), width)
+                    frame = self.explorer(snapshots, width)
+                    self.assertIn(expected, frame.text_rows()[1])
+                    self.assertIn("5h 20%", frame.text_rows()[1])
+                    self.assertTrue(frame.text_rows()[1].endswith("u less ▾ "))
+                    baseline = {"codex": self.snapshots(two_windows=True)["codex"]}
+                    quota_before = render._snapshot_line(self.classic(baseline, width)[0])
+                    self.assertEqual(row.split("week ", 1)[1], quota_before.split("week ", 1)[1])
+                    self.assertEqual(frame.cells[1][54:], self.explorer(baseline, width).cells[1][54:])
+
+    def test_session_only_and_non_codex_metadata_keep_their_existing_rows(self):
+        session = Session(harness="codex", pid=1, cwd="/x", liveness="idle", rl_7d=100)
+        for width in (80, 100, 140):
+            baseline = self.classic({}, width, [session])
+            self.assertEqual(baseline, self.classic({"codex": None}, width, [session]))
+            self.assertNotIn("credits", "".join(render._snapshot_line(row) for row in baseline))
+            self.assertNotIn("credits", "\n".join(self.explorer({}, width, sessions=[session]).text_rows()))
+            snapshots = self.snapshots()
+            before = self.classic(snapshots, width)
+            frame_before = self.explorer(snapshots, width)
+            for harness in ("claude", "opencode"):
+                snapshots[harness]["payload"].update(self.CASES[0][0])
+            self.assertEqual(self.classic(snapshots, width), before)
+            self.assertEqual(self.explorer(snapshots, width).cells, frame_before.cells)
+
+    def test_optional_and_malformed_credit_metadata(self):
+        from fleet.display import codex_credits
+        cases = (
+            (None, None), ({}, None),
+            ({"spend_control_reached": True}, None),
+            ({"credits": None}, "credits ?"),
+            ({"credits": {"has_credits": "true", "balance": "99"}}, "credits ?"),
+            ({"credits": {"unlimited": True, "has_credits": False}}, "credits unlimited"),
+            ({"credits": {"has_credits": True, "balance": "0"}}, "credits 0"),
+            ({"credits": {"has_credits": True}, "spend_control_reached": "false"}, "credits ?"),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                self.assertEqual(codex_credits(payload), expected)
+        for balance in (None, True, "bad", "NaN", "Infinity", "-1", "1e99999", {}, []):
+            with self.subTest(balance=balance):
+                self.assertEqual(codex_credits({"credits": {"has_credits": True, "balance": balance}}),
+                                 "credits available")
+
+
 class F51GaugeTest(unittest.TestCase):
     def test_fixed_width_and_half_up(self):
         """The legacy `width` argument never sizes the meter — `_GAUGE_W` cells regardless
