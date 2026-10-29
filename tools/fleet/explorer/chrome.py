@@ -439,6 +439,13 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             usage_limit = width - 9 if y == 1 else width - 1
             grid.put(1, y, str(item.get("text", "")), item.get("key", "dim"), limit=usage_limit)
             windows = list(item.get("windows", ()))
+            credit = item.get("credits") if item.get("text") == "codex" else None
+            if credit:
+                if windows and windows[0]:
+                    name, percent, _reset = windows[0]
+                    credit = f"{name} {int(percent)}% " + credit
+                    windows[0] = None
+                grid.put(14, y, credit, "dim", limit=min(54, usage_limit))
 
             def window_end(slot, window):
                 return 14 + slot * 40 + 5 + 1 + 1 + 12 + 5 + 1 + (
