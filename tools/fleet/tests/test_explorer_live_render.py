@@ -200,6 +200,137 @@ class UsageRule(unittest.TestCase):
         self.assertEqual(usage_text(SimpleNamespace(usage_snapshots={}, sessions=())), "·")
 
 
+class ClaudeUsageStatus(unittest.TestCase):
+    NOW = 2_000_000_000.0
+
+    def vm(self, snapshot, sessions=()):
+        from tools.fleet.explorer.live import build_view_model
+        return build_view_model({"sessions": sessions, "usage_snapshots": {"claude": snapshot}},
+                                cached_config={}, now=self.NOW)
+
+    def observation(self, error="rate-limit", **changes):
+        return {"payload": None, "freshness": "unknown", "observed_at": None,
+                "error_observation": {"error": error, "reason": error,
+                                      "observed_at": self.NOW - 60, **changes}}
+
+    def test_no_quota_and_sanitized_errors_remain_visible_in_both_modes(self):
+        cases = [({"payload": None, "freshness": "unknown"}, "unavailable")]
+        cases += [(self.observation(error), label) for error, label in (
+            ("rate-limit", "rate limit"), ("auth", "auth"),
+            ("missing-credential", "no credential"), ("unknown", "unavailable"))]
+        cases.append((self.observation("unknown", reason="rate-limit"), "rate limit"))
+        cases.append(({"payload": {"rl_7d": float("nan")}}, "unavailable"))
+        for snapshot, label in cases:
+            vm = self.vm(snapshot)
+            self.assertEqual(len(vm.usage), 1)
+            self.assertFalse(any(vm.usage[0]["windows"]))
+            for expanded in (False, True):
+                with self.subTest(label=label, expanded=expanded):
+                    frame = draw(vm, NavState(usage_open=expanded), 140, 45, beat=1)
+                    row = frame.text_rows()[1]
+                    self.assertIn("claude", row)
+                    self.assertIn(label, row)
+                    self.assertNotIn("%", row)
+                    self.assertNotIn("━", row)
+                    self.assertNotIn("─", row)
+
+    def test_authoritative_unknown_or_error_never_borrows_session_quota(self):
+        sessions = [{"harness": "claude", "rl_5h": 97, "rl_7d": 98, "mtime": self.NOW}]
+        for snapshot in ({}, None, {"freshness": "unknown", "payload": {"rl_7d": 98}},
+                         self.observation("auth"), self.observation()):
+            with self.subTest(snapshot=snapshot):
+                vm = self.vm(snapshot, sessions)
+                self.assertFalse(any(vm.usage[0]["windows"]))
+                self.assertNotIn("98", vm.usage[0]["text"])
+
+    def test_absent_backend_entry_preserves_passive_fallback_and_other_harnesses(self):
+        from tools.fleet.explorer.live import build_view_model
+        sessions = [{"harness": harness, "rl_5h": 0, "rl_7d": 33}
+                    for harness in ("claude", "codex", "opencode")]
+        for snapshots in ({}, {"claude": self.observation("auth")}):
+            vm = build_view_model({"sessions": sessions, "usage_snapshots": snapshots},
+                                  cached_config={}, now=self.NOW)
+            self.assertEqual(len(vm.usage), 3)
+            for row in vm.usage:
+                if row.get("harness") == "claude":
+                    continue
+                self.assertEqual(row["windows"][0], ("5h", 0, None))
+                self.assertEqual(row["windows"][1], ("week", 33, None))
+
+    def test_long_retry_survives_expired_quota_and_keeps_original_observation_age(self):
+        from tools.fleet.explorer.live import build_view_model
+        from tools.fleet.explorer.live import _clock
+        for delay in (7200, 90000):
+            snapshot = self.observation(observed_at=self.NOW - 1800, retry_at=self.NOW + delay)
+            for elapsed, age in ((0, "30m ago"), (900, "45m ago")):
+                vm = build_view_model({"sessions": [], "usage_snapshots": {"claude": snapshot}},
+                                      cached_config={}, now=self.NOW + elapsed)
+                self.assertIn("wait", vm.usage[0]["text"])
+                self.assertIn(_clock(self.NOW + delay), vm.usage[0]["text"])
+                self.assertIn(age, vm.usage[0]["text"])
+                if delay > 86400:
+                    self.assertIn("1d", vm.usage[0]["text"])
+                self.assertFalse(any(vm.usage[0]["windows"]))
+
+    def test_expired_missing_invalid_retry_or_observation_never_becomes_a_live_wait(self):
+        for retry in (None, self.NOW, self.NOW - 1, True, "tomorrow", float("nan"), float("inf"), 1e20):
+            with self.subTest(retry=retry):
+                text = self.vm(self.observation(retry_at=retry)).usage[0]["text"]
+                self.assertNotIn("wait", text)
+                self.assertNotIn("00:00", text)
+        for observed in (None, True, self.NOW + 1, "now", -1, float("nan")):
+            with self.subTest(observed=observed):
+                text = self.vm(self.observation(observed_at=observed, retry_at=self.NOW + 7200)).usage[0]["text"]
+                self.assertNotIn("wait", text)
+
+    def test_numeric_success_ignores_old_error_and_preserves_known_zero(self):
+        snapshot = self.observation(retry_at=self.NOW + 7200)
+        snapshot.update(payload={"rl_5h": 0, "rl_7d": 63, "rs_7d": self.NOW + 3600},
+                        freshness="fresh", observed_at=self.NOW)
+        for freshness in ("fresh", "stale"):
+            snapshot["freshness"] = freshness
+            vm = self.vm(snapshot, [{"harness": "claude", "rl_7d": 99}])
+            self.assertEqual(vm.usage[0]["text"], "claude")
+            self.assertEqual(vm.usage[0]["windows"], (("5h", 0, None), ("week", 63, "1h 0m"), None))
+            self.assertNotIn("wait", str(vm.usage))
+            self.assertNotIn("error_observation", str(vm.usage))
+
+    def test_error_details_and_account_scope_do_not_enter_display_or_persistence(self):
+        marker = "private-fixture-value"
+        snapshot = self.observation(error=marker, reason=marker, account_scope=marker,
+                                    body=marker, retry_at=self.NOW + 3600)
+        vm = self.vm(snapshot)
+        self.assertNotIn(marker, str(vm.to_mapping()["usage"]))
+        self.assertIn("unavailable", vm.usage[0]["text"])
+        self.assertNotIn("wait", vm.usage[0]["text"])
+        from tools.fleet.explorer.view_model import persistable_view_model
+        persisted = persistable_view_model(vm)
+        self.assertNotIn(marker, str(persisted))
+
+    def test_status_and_retry_fit_narrow_headers_and_keep_usage_toggle_hits(self):
+        from tools.fleet.explorer.grid import cell_width
+        from tools.fleet.explorer.state import reduce
+        vm = self.vm(self.observation(observed_at=self.NOW - 1800, retry_at=self.NOW + 7200))
+        for width in (40, 60, 80, 100, 140, 180, 240, 320):
+            with self.subTest(width=width):
+                state = NavState()
+                for expanded in (False, True):
+                    frame = draw(vm, state, width, 45, beat=1)
+                    self.assertEqual(state.usage_open, expanded)
+                    self.assertEqual(cell_width(frame.text_rows()[1]), width)
+                    self.assertIn("claude wait", frame.text_rows()[1])
+                    self.assertIn("less" if expanded else "more", frame.text_rows()[1])
+                    hit = next(hit for hit in frame.hits if hit.action == ("usage",))
+                    self.assertTrue(0 <= hit.x0 < hit.x1 <= width)
+                    self.assertEqual(hit.y, 1)
+                    state, effects = reduce(state, {"type": "click", "action": hit.action}, frame)
+                    self.assertFalse(effects)
+                self.assertFalse(state.usage_open)
+                state, effects = reduce(state, {"type": "key", "key": "u"})
+                self.assertTrue(state.usage_open)
+                self.assertFalse(effects)
+
+
 class HeaderCallerFallback(unittest.TestCase):
     @staticmethod
     def snapshot():

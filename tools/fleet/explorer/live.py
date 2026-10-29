@@ -1531,6 +1531,33 @@ def _session_gpu_lines(snapshot, session_index):
 _UNIT = {"5h": "5h", "7d": "week", "wk": "week", "mo": "month"}
 
 
+def _claude_usage_unavailable(snapshot, now):
+    """Display only the backend's safe observation; never resolve credentials or an account here."""
+    observation = _get(snapshot, "error_observation")
+    observation = observation if isinstance(observation, Mapping) else {}
+    error = _text(observation.get("error"))
+    reasons = {"rate-limit": "rate limit", "auth": "auth", "missing-credential": "no credential",
+               "unknown": None}
+    reason = reasons.get(error) or reasons.get(_text(observation.get("reason")))
+    observed = _num(observation.get("observed_at"))
+    now = _num(now)
+    observed = observed if observed is not None and now is not None and 0 <= observed <= now else None
+    retry = _num(observation.get("retry_at"))
+    until = (_clock(retry) if error in reasons and observed is not None
+             and retry is not None and retry > now else None)
+    status = "unavailable"
+    if until:
+        # A long backend cooldown outlives quota freshness; keep its absolute deadline.
+        remaining = _dur((retry - now) / 60)
+        status = f"wait {remaining} ({until})" if retry - now >= 86400 else f"wait {until}"
+    if reason:
+        status += " · " + reason
+    if observed is not None:
+        status += " · " + _since(observed, now) + " ago"
+    return {"harness": "claude", "text": "claude " + status, "key": "hb_claude",
+            "windows": [None, None, None]}
+
+
 def _usage_records(snapshot, session_rows, now):
     best = {}
     for session in _records(_get(snapshot, "sessions", default=())):
@@ -1544,7 +1571,15 @@ def _usage_records(snapshot, session_rows, now):
             if harness not in best or mtime > best[harness][0]:
                 resets = _get(session, "rl_rs") or (None, None)
                 best[harness] = (mtime, r5, r7, rms, resets, windows)
+    claude_snapshot = None
     for harness, snap in (_get(snapshot, "usage_snapshots", default={}) or {}).items():
+        if harness == "claude":
+            # The credential-bound backend entry owns unknown/error too. A passive
+            # session reading may still belong to a previous credential generation.
+            best.pop(harness, None)
+            claude_snapshot = snap if isinstance(snap, Mapping) else {}
+            if claude_snapshot.get("freshness") == "unknown":
+                continue
         payload = snap.get("payload") if isinstance(snap, Mapping) else None
         if isinstance(payload, Mapping) and harness in HARNESSES and (
                 payload.get("rl_windows") or payload.get("windows") or payload.get("rl_5h") is not None
@@ -1555,6 +1590,8 @@ def _usage_records(snapshot, session_rows, now):
     usage = []
     for harness in HARNESSES:
         if harness not in best:
+            if harness == "claude" and claude_snapshot is not None:
+                usage.append(_claude_usage_unavailable(claude_snapshot, now))
             continue
         _mt, r5, r7, rms, resets, windows = best[harness]
         raw = list(windows) if windows else [("5h", r5, resets[0]), ("week", r7, resets[1])]
@@ -1573,6 +1610,8 @@ def _usage_records(snapshot, session_rows, now):
                 shown[slot] = [unit, int(pct), reset_text]
         if any(shown):
             usage.append({"text": harness, "key": "hb_" + harness, "windows": shown})
+        elif harness == "claude" and claude_snapshot is not None:
+            usage.append(_claude_usage_unavailable(claude_snapshot, now))
     return usage
 
 

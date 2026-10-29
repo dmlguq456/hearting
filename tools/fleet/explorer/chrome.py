@@ -408,6 +408,9 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             week = next((window for window in item.get("windows", ())
                          if window and window[0] == "week"), None)
             if week is None:
+                if item.get("harness") == "claude":
+                    status = _clip(str(text), width - 12 - x)
+                    x = grid.put(x, 1, status, key, limit=width - 12) + 4
                 continue
             label, percent, reset = week
             reset = "·" if reset is None else reset
