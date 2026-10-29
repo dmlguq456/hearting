@@ -4,6 +4,7 @@ Portable capabilities, roles, and core remain the source of truth. This module
 only computes links, copies, and delegated actions; runtime drivers apply them.
 """
 
+import os
 from pathlib import Path
 
 import paths
@@ -29,6 +30,69 @@ def claude_installer_owned_names():
     ``$HOME/.claude`` symlinks converge on one set instead of drifting apart.
     """
     return set(_CLAUDE_SYMLINK_NAMES)
+
+
+def native_harness_target(runtime: str, candidate: Path) -> bool:
+    """Recognize only a canonical harness projection, never a path substring."""
+    try:
+        target = candidate.resolve(strict=False)
+    except RuntimeError:
+        return False
+    for root in (target, *target.parents):
+        if not (root / "harness-manifest.json").is_file():
+            continue
+        try:
+            relative = target.relative_to(root).parts
+        except ValueError:
+            continue
+        allowed = {
+            "codex": (
+                ("adapters", "codex", "skills"),
+                ("adapters", "codex", "agents"),
+                ("adapters", "codex", "modes"),
+                ("codex_setting", "codex-skills"),
+                ("codex_setting", "codex-agents"),
+                ("codex_setting", "codex-modes"),
+            ),
+            "claude": (
+                ("adapters", "claude", "skills"),
+                ("adapters", "claude", "agents"),
+                ("adapters", "claude", "agent-modes"),
+                ("claude_setting", "skills"),
+                ("claude_setting", "agents"),
+            ),
+            "opencode": (
+                ("adapters", "opencode", "skills"),
+                ("adapters", "opencode", "agents"),
+                ("adapters", "opencode", "commands"),
+                ("adapters", "opencode", "plugins"),
+            ),
+        }[runtime]
+        if any(relative[: len(prefix)] == prefix for prefix in allowed):
+            return True
+    return False
+
+
+def native_leaf_preservation(runtime: str, source: Path, dest: Path) -> str | None:
+    """Return why a per-leaf native projection must leave ``dest`` alone.
+
+    Only absent destinations, links already pointing at ``source``, links into
+    the harness's own generated tree, and dangling links may be (re)written.
+    A real file/directory or a resolving link elsewhere belongs to the user.
+    """
+    if not dest.is_symlink():
+        if dest.exists():
+            return f"user-owned {'directory' if dest.is_dir() else 'file'} preserved: {dest}"
+        return None
+    try:
+        if os.readlink(dest) == str(source):
+            return None
+    except OSError:
+        return None
+    if not dest.exists() or native_harness_target(runtime, dest):
+        return None
+    return f"user-owned symlink to {dest.resolve()} preserved: {dest}"
+
 
 _CLAUDE_TABLE = (
     [
@@ -108,12 +172,14 @@ _CODEX_TABLE = (
             "source_dir": "codex_setting/codex-skills",
             "dest_subdir": "skills",
             "pattern": "*",
+            "native_leaf": True,
         },
         {
             "action": "symlink_glob",
             "source_dir": "codex_setting/codex-agents",
             "dest_subdir": "agents",
             "pattern": "*.toml",
+            "native_leaf": True,
             # Project scope redirects agents into the project's local .codex/agents/.
             "project_scope_override": True,
         },
@@ -166,12 +232,14 @@ _OPENCODE_TABLE = (
             "source_dir": "opencode_setting/opencode-agents",
             "dest_subdir": "agent",
             "pattern": "*/*.md",
+            "native_leaf": True,
         },
         {
             "action": "symlink_glob",
             "source_dir": "opencode_setting/opencode-commands",
             "dest_subdir": "command",
             "pattern": "*.md",
+            "native_leaf": True,
         },
         {
             "action": "merge",
@@ -274,6 +342,7 @@ def _expand(table, runtime, scope):
                             "source": str(match),
                             "dest": str(dest_path),
                             "source_present": True,
+                            **({"native_leaf": True} if item.get("native_leaf") else {}),
                         }
                     )
                 else:
