@@ -94,6 +94,82 @@ class ArtifactContextTest(unittest.TestCase):
         with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-outside-node-scope"):
             outside.resolve_output("run-record")
 
+    def _borrowed_smoke_context(self):
+        base = self._context()
+        part_root = "_internal/parts/autopilot-lab/smoke"
+        mapped = f"{part_root}/reviews/smoke-attestation.json"
+        node = {"id": "autopilot-lab-smoke", "part": "autopilot-lab:smoke",
+                "outputs": [mapped],
+                "write_scope": [f"{part_root}/reviews/smoke/**", mapped],
+                "part_io": {"reviews/smoke-attestation.json": mapped}}
+        return replace(base, node=node, node_id=node["id"]), part_root
+
+    def test_config_seal_resolves_borrowed_smoke_part_support(self):
+        context, part_root = self._borrowed_smoke_context()
+        self.assertNotIn("reviews/smoke/**", context.node["part_io"])
+        selected = context.resolve_output("config-seal", leaf="experiments/demo/_internal/configs")
+        self.assertEqual(selected.path,
+                         context.output_dir / part_root / "reviews/smoke/experiments/demo/_internal/configs")
+
+        base = self._context()
+        native = replace(base, node={"id": "smoke", "outputs": ["reviews/smoke/**"],
+                                     "write_scope": ["reviews/smoke/**"]}, node_id="smoke")
+        self.assertEqual(native.resolve_output("config-seal", leaf="experiments/demo/_internal/configs").path,
+                         base.output_dir / "reviews/smoke/experiments/demo/_internal/configs")
+
+    def test_config_seal_borrowed_role_keeps_mapping_scope_and_identity_refusals(self):
+        context, part_root = self._borrowed_smoke_context()
+        missing = replace(context, node={**context.node, "part_io": {}}, node_id="missing-map")
+        with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-role-missing"):
+            missing.resolve_output("config-seal", leaf="experiments/demo/_internal/configs")
+
+        invalid_mapping = replace(context, node={**context.node,
+            "part_io": {"reviews/smoke-attestation.json": "../outside/reviews/smoke-attestation.json"}},
+            node_id="invalid-map")
+        with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-role-missing"):
+            invalid_mapping.resolve_output("config-seal", leaf="experiments/demo/_internal/configs")
+
+        wrong_identity = replace(context, node={**context.node, "part": "autopilot-lab:full-run"},
+                                 node_id="wrong-part")
+        with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-role-missing"):
+            wrong_identity.resolve_output("config-seal", leaf="experiments/demo/_internal/configs")
+
+        unsupported = replace(context, node={**context.node,
+            "outputs": [*context.node["outputs"], f"{part_root}/reviews/smoke/**"],
+            "write_scope": [context.node["outputs"][0]]}, node_id="scope-missing")
+        with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-outside-node-scope"):
+            unsupported.resolve_output("config-seal", leaf="experiments/demo/_internal/configs")
+
+        ambiguous = replace(context, node={**context.node,
+            "outputs": [context.node["outputs"][0], f"{part_root}/reviews/smoke/left/**",
+                        f"{part_root}/reviews/smoke/right/**"],
+            "write_scope": [f"{part_root}/reviews/smoke/left/**",
+                            f"{part_root}/reviews/smoke/right/**"]},
+            node_id="ambiguous")
+        with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-role-ambiguous"):
+            ambiguous.resolve_output("config-seal", leaf="experiments/demo/_internal/configs")
+
+        mapped = context.node["outputs"][0]
+        top_level = replace(context, node={**context.node,
+            "outputs": [mapped, "reviews/smoke/**"],
+            "write_scope": [mapped, "reviews/smoke/**"]}, node_id="top-level")
+        with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-role-missing"):
+            top_level.resolve_output("config-seal", leaf="experiments/demo/_internal/configs")
+
+        with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-path-invalid"):
+            context.resolve_output("config-seal", leaf="experiments/../escape/_internal/configs")
+
+    def test_config_seal_borrowed_role_rejects_resolved_sibling_part_symlink(self):
+        context, part_root = self._borrowed_smoke_context()
+        relative = f"{part_root}/reviews/smoke/experiments/demo/_internal/configs"
+        candidate = context.output_dir / relative
+        sibling = context.output_dir / "_internal/parts/autopilot-lab/full-run/reviews/smoke/experiments/demo/_internal/configs"
+        sibling.mkdir(parents=True)
+        candidate.parent.mkdir(parents=True)
+        candidate.symlink_to(sibling, target_is_directory=True)
+        with self.assertRaisesRegex(C.ArtifactContextError, "artifact-output-outside-node-scope"):
+            context.resolve_output("config-seal", leaf="experiments/demo/_internal/configs")
+
     def test_logical_outputs_are_not_reconstructed_as_paths(self):
         self.assertEqual(C.render_outputs(self.root / "cycle/artifacts", ["source-diff"]), ["source-diff"])
         self.assertEqual(C.render_outputs(self.root / "cycle/artifacts", ["test_logs/**"]),
