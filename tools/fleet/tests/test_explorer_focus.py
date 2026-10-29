@@ -277,6 +277,42 @@ class SeatHistory(unittest.TestCase):
 
 
 class AuxReads(unittest.TestCase):
+    def test_split_metadata_health_and_observed_empty_are_explicit(self):
+        from unittest.mock import patch
+        from tools.fleet.explorer import focus
+        from tools.fleet.explorer.types import FocusRequest
+        request = FocusRequest(FocusKey("claude", "sid-1"), 1, 0, wants=("metadata", "pane"))
+        snapshot = {"sessions": [{"harness": "claude", "session_id": "sid-1"}]}
+        with patch.object(focus, "session_entries", return_value=[]), \
+                patch.object(focus, "read_pane_map", return_value={"sid-1": "fixture-pane"}), \
+                patch.object(focus, "read_pane_visible", return_value=None) as pane, \
+                patch.object(focus, "read_obligations", side_effect=OSError("fixture unavailable")) as duties, \
+                patch.object(focus, "read_events", side_effect=OSError("fixture unavailable")) as events:
+            failed = focus.collect_focus(request, snapshot=snapshot, state_roots=[])
+            self.assertEqual(failed.health.state, "partial")
+            self.assertEqual({name: health.state for name, health in failed.sources},
+                             {"pane_read": "unknown", "obligations": "failed", "events": "failed"})
+            for name in ("pane_read", "obligations", "events"):
+                self.assertIsNone(failed.source_records[name])
+            pane.return_value = []
+            duties.side_effect, duties.return_value = None, ()
+            events.side_effect, events.return_value = None, ()
+            empty = focus.collect_focus(request, snapshot=snapshot, state_roots=[])
+            self.assertEqual(empty.health.state, "success")
+            self.assertEqual(empty.source_records["pane_read"]["lines"], [])
+            self.assertEqual(empty.source_records["obligations"], ())
+            self.assertEqual(empty.source_records["events"], ())
+
+    def test_successful_empty_native_pane_read_clears_but_failure_is_missing(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from tools.fleet.explorer import focus
+        for code, stdout, expected in ((0, "", []), (0, "  \n", []), (1, "", None)):
+            with self.subTest(code=code, stdout=stdout), \
+                    patch("subprocess.run", return_value=SimpleNamespace(returncode=code, stdout=stdout)), \
+                    patch.object(focus, "_herdr_argv", return_value=["fixture-herdr"]):
+                self.assertEqual(focus.read_pane_visible("fixture-pane"), expected)
+
     def test_aux_kinds_read_panes_seats_and_models_and_nothing_else(self):
         from tools.fleet.explorer import focus
         from tools.fleet.explorer.types import FocusRequest

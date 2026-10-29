@@ -968,6 +968,21 @@ const select = (tui, sessionID) => fs.writeFileSync(file(tui), JSON.stringify({
 const record = tui => JSON.parse(fs.readFileSync(target(tui)))
 const clear = () => { for (const tui of tuis) fs.rmSync(target(tui), { force: true }) }
 const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(setImmediate) }
+const queue = []
+let wake
+const sequences = new Map()
+const emitEvent = (type, data, created) => {
+  const seq = (sequences.get(data.sessionID) ?? -1) + 1
+  sequences.set(data.sessionID, seq)
+  queue.push({ type, data, created, durable: { aggregateID: data.sessionID, seq, version: 2 } })
+  wake?.()
+}
+const emit = data => emitEvent("session.step.started", data, data.started + 1)
+let clock = Date.now(), requestNumber = 0
+Date.now = () => clock
+const cases = []
+const capture = (name, native, window, extra = {}) => cases.push({
+  name, native, window, record: record(tuis[0]), ...extra })
 const model = (id = "m", context = 900000) => ({ providerID: "p", id, modelID: id,
   enabled: true, status: "active", limit: { context, output: 8192 } })
 let lookup = () => ({ location, data: [model(), model("other", 1000000)] })
@@ -984,17 +999,31 @@ const ctx = { location,
   tool: { hook: async () => {} }, shell: { hook: async () => {} },
   permission: { hook: async () => {} },
   event: { subscribe: async function* ({ signal }) {
-    await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }))
+    signal.addEventListener("abort", () => wake?.(), { once: true })
+    while (!signal.aborted) {
+      if (queue.length) { yield queue.shift(); continue }
+      await new Promise(resolve => { wake = resolve })
+    }
   } },
 }
 const cleanup = await plugin.setup(ctx)
-const primary = (sessionID = "ses_a", ref = { providerID: "p", id: "m" }) =>
-  hooks.get("context")({ sessionID, model: ref, system: [], messages: [], options: {}, tools: {} })
+const primary = async (sessionID = "ses_a", ref = { providerID: "p", id: "m" }, start = true) => {
+  clock += 1000
+  if (!sequences.has(sessionID)) {
+    emitEvent("session.execution.started", { sessionID }, clock - 1)
+    await flush()
+  }
+  await hooks.get("context")({ sessionID, model: ref, system: [], messages: [], options: {}, tools: {} })
+  const native = { sessionID, model: ref, assistantMessageID: `msg-${++requestNumber}`, started: clock + 1 }
+  if (start) emit(native)
+  await flush()
+  return native
+}
 try {
   select(tuis[0], "ses_a"); select(tuis[1], "ses_a"); select(tuis[2], "ses_b")
   const inherited = `${policyDir}/attempt-att-inherited.json`
   fs.writeFileSync(inherited, "inherited sentinel")
-  await Promise.all([primary(), primary("ses_b", { providerID: "p", id: "other" })])
+  await primary(); await primary("ses_b", { providerID: "p", id: "other" })
   await flush()
   const initial = tuis.map(record)
   assert.deepEqual(initial.map(row => row.policy.effective_window_tokens), [900000, 900000, 1000000])
@@ -1052,23 +1081,34 @@ try {
     () => { procMode = "dead" },
     () => { procMode = "reused" },
   ]) {
-    select(tuis[0], "ses_a"); clear()
+    select(tuis[0], "ses_a")
+    lookup = () => ({ location, data: [model()] })
+    await primary()
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, 900000)
     let release
     lookup = () => new Promise(resolve => { release = resolve })
-    await primary()
+    const native = await primary()
     assert.equal(typeof release, "function", "context hook waited for model lookup")
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+    capture(`pending replacement ${cases.length}`, native, null)
     mutate()
-    release({ location, data: [model()] }); await flush()
-    assert.equal(fs.existsSync(target(tuis[0])), false)
-    assert.equal(record(tuis[1]).policy.effective_window_tokens, 900000)
+    release({ location, data: [model("m", 600000)] }); await flush()
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+    assert.equal(record(tuis[1]).policy.effective_window_tokens, 600000)
+    capture(`rejected replacement ${cases.length}`, native, null)
     procMode = null
   }
   // No selection at observation time cannot acquire one during an SDK await.
-  clear(); fs.rmSync(file(tuis[0]), { force: true }); fs.rmSync(file(tuis[1]))
+  select(tuis[0], "ses_a")
+  lookup = () => ({ location, data: [model()] })
+  await primary()
+  const prior = fs.readFileSync(target(tuis[0]), "utf8")
+  fs.rmSync(file(tuis[0]), { force: true }); fs.rmSync(file(tuis[1]))
   const before = lookups
-  await primary(); select(tuis[0], "ses_a"); await flush()
+  const missing = await primary(); select(tuis[0], "ses_a"); await flush()
   assert.equal(lookups, before)
-  assert.equal(fs.existsSync(target(tuis[0])), false)
+  assert.equal(fs.readFileSync(target(tuis[0]), "utf8"), prior)
+  capture("missing selection then reselection keeps prior file but rejects prior request", missing, null)
   for (const invalidate of [
     () => fs.writeFileSync(file(tuis[0]), "x".repeat(1025)),
     () => fs.writeFileSync(file(tuis[0]), "{}"),
@@ -1083,16 +1123,63 @@ try {
     invalidate()
     await primary(); await flush()
     wrongOwner = false
-    assert.equal(fs.existsSync(target(tuis[0])), false)
+    assert.equal(fs.readFileSync(target(tuis[0]), "utf8"), prior)
   }
   select(tuis[0], "ses_a")
+  lookup = () => ({ location, data: [model()] })
+  const known = await primary()
+  capture("normal completed 900000", known, 900000)
+  capture("pending native assistant cannot combine old tokens and policy", known, null, { pending: true })
   let releaseOld
   lookup = () => new Promise(resolve => { releaseOld = resolve })
   await primary()
-  lookup = () => ({ location, data: [model("other", 600000)] })
-  await primary("ses_a", { providerID: "p", id: "other" }); await flush()
+  lookup = () => ({ location, data: [model("m", 600000)] })
+  const newer = await primary(); await flush()
   releaseOld({ location, data: [model()] }); await flush()
-  assert.equal(record(tuis[0]).model, "p/other", "late older request replaced the newer model")
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, 600000, "late same-model lookup replaced the new window")
+  capture("same-model different-window late callback", newer, 600000)
+  capture("completed known0 active tokens", newer, 600000, { active: 0 })
+  const skipped = { ...newer, assistantMessageID: "skipped-hook", started: newer.started + 120000 }
+  emit(skipped); await flush()
+  capture("skipped context hook cannot reuse a consumed binding", skipped, null)
+  const retry = { ...newer, started: newer.started + 121000 }
+  emit(retry); await flush()
+  capture("same native assistant id with a different retry start", retry, null)
+  const absentStart = await primary("ses_a", { providerID: "p", id: "m" }, false)
+  capture("missing native start stays unknown", absentStart, null)
+  emitEvent("session.step.ended", { sessionID: "ses_a", assistantMessageID: newer.assistantMessageID }, newer.started)
+  await flush()
+  emit(newer); await flush()
+  capture("late old native start cannot bind the current hook", absentStart, null)
+  emit(absentStart); await flush()
+  capture("late matching start recovers", absentStart, 600000)
+  const sameMs = await primary("ses_a", { providerID: "p", id: "m" }, false)
+  emit({ ...sameMs, started: clock }); await flush()
+  capture("ambiguous same-ms native start stays unknown", { ...sameMs, started: clock }, null)
+  const lost = await primary("ses_a", { providerID: "p", id: "m" }, false)
+  emitEvent("session.step.ended", { sessionID: "ses_a", assistantMessageID: lost.assistantMessageID }, clock + 2)
+  await flush()
+  const afterLost = { ...lost, assistantMessageID: "after-lost-start", started: lost.started + 120000 }
+  emit(afterLost); await flush()
+  capture("unmatched start retired at native step end", afterLost, null)
+  const stranded = await primary("ses_a", { providerID: "p", id: "m" }, false)
+  // Native start/end occurred but both observations were lost, then the next
+  // context callback was skipped. The later start cannot borrow this lookup.
+  sequences.set("ses_a", sequences.get("ses_a") + 2)
+  const afterGap = { ...stranded, assistantMessageID: "after-stream-gap", started: stranded.started + 120000 }
+  emit(afterGap); await flush()
+  capture("skipped start and end plus skipped next hook reject a stream gap", afterGap, null)
+  capture("fresh hook recovers after the gap", await primary(), 600000)
+  select(tuis[0], "ses_unanchored")
+  clock += 1000
+  await hooks.get("context")({ sessionID: "ses_unanchored", model: { providerID: "p", id: "m" },
+    system: [], messages: [], options: {}, tools: {} })
+  const unanchored = { sessionID: "ses_unanchored", model: { providerID: "p", id: "m" },
+    assistantMessageID: "unanchored-start", started: clock + 1 }
+  emit(unanchored); await flush()
+  capture("first observed start with no pre-hook sequence anchor stays unknown", unanchored, null)
+  capture("next hook recovers with an observed sequence anchor", await primary("ses_unanchored"), 600000)
+  select(tuis[0], "ses_a")
   lookup = () => new Promise(() => {})
   await primary()
   await new Promise(resolve => setTimeout(resolve, 1100))
@@ -1109,7 +1196,7 @@ try {
     select(tuis[i], row.session_id)
     fs.writeFileSync(target(tuis[i]), JSON.stringify(row))
   }
-  console.log(JSON.stringify(initial))
+  console.log(JSON.stringify({ initial, cases }))
 } finally { cleanup() }
 '''
             env = {**BASE_ENV, "HOME": tmp, "XDG_STATE_HOME": str(Path(tmp) / "state"),
@@ -1124,8 +1211,11 @@ try {
                                     cwd=ROOT, env=env, text=True, capture_output=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             with mock.patch.object(sys, "path", [str(ROOT), *sys.path]):
-                from tools.fleet.tests.test_opencode_display_fields import assert_primary_context_pipeline
-                assert_primary_context_pipeline(self, env, json.loads(result.stdout))
+                from tools.fleet.tests.test_opencode_display_fields import (
+                    assert_primary_context_pipeline, assert_primary_request_cases)
+                produced = json.loads(result.stdout)
+                assert_primary_context_pipeline(self, env, produced["initial"])
+                assert_primary_request_cases(self, env, produced["cases"])
 
     def test_v2_shell_env_carries_the_executing_session(self):
         node = shutil.which("node")

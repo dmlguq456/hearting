@@ -1008,6 +1008,15 @@ async function v2ContextModel(ctx, ref) {
 async function setupOpenCodeV2(ctx) {
   const controller = new AbortController()
   const contextObservations = new Map()
+  const publishContext = observation => {
+    if (controller.signal.aborted || contextObservations.get(observation.sessionID) !== observation
+        || !observation.contextRequest || !observation.resolved) return
+    for (const selected of observation.selections) {
+      const current = v2ContextSelection(selected.file, observation.sessionID)
+      if (current?.generation !== selected.generation) continue
+      writeContextPolicy(observation, {}, { pid: selected.pid, start: selected.start })
+    }
+  }
   const sessionInfo = async (sessionID) => {
     if (!sessionID || typeof ctx.session?.get !== "function") return null
     try {
@@ -1194,25 +1203,29 @@ async function setupOpenCodeV2(ctx) {
     const selections = v2ContextSelections(sid)
     const observation = { sessionID: sid,
       model: { providerID: event.model?.providerID, id: event.model?.id },
-      contextObservation: "v2-context" }
+      contextObservation: "v2-context", selections, contextAt: Date.now(),
+      eventSeq: contextObservations.get(sid)?.eventSeq }
     contextObservations.set(sid, observation)
-    return withSession(sid, async () => {
+    // Invalidate before any await, including a missing/late SDK result. The
+    // reader must never borrow the last request's window for this one.
+    for (const selected of selections) {
+      writeContextPolicy(observation, {}, { pid: selected.pid, start: selected.start })
+    }
+    try { return await withSession(sid, async () => {
       const worker = v2WorkerSessions.has(sid)
+      observation.worker = worker
       void (async () => {
         if (!worker && !selections.length) return
         if (typeof observation.model.providerID !== "string" || !observation.model.providerID
             || typeof observation.model.id !== "string" || !observation.model.id) return
         observation.model = await v2ContextModel(ctx, observation.model)
         if (controller.signal.aborted || contextObservations.get(sid) !== observation) return
+        observation.resolved = true
         if (worker) {
           writeContextPolicy(observation, {})
           return
         }
-        for (const selected of selections) {
-          const current = v2ContextSelection(selected.file, sid)
-          if (current?.generation !== selected.generation) continue
-          writeContextPolicy(observation, {}, { pid: selected.pid, start: selected.start })
-        }
+        publishContext(observation)
       })().catch(() => {})
       if (v2WorkerSessions.has(event.sessionID)) {
         const contract = await sessionWorkerContract(ctx, event.sessionID)
@@ -1230,7 +1243,7 @@ async function setupOpenCodeV2(ctx) {
           if (typeof text === "string" && text) event.system.push({ type: "text", text })
         }
       }
-    })
+    }) } finally { observation.contextReturnedAt = Date.now() }
   })
   await ctx.session.hook("compaction", async (event) => withSession(event.sessionID, async () => {
     if (v2WorkerSessions.has(event.sessionID)) {
@@ -1278,6 +1291,51 @@ async function setupOpenCodeV2(ctx) {
         const info = data.info || data.session || null
         const sessionID = data.sessionID || data.form?.sessionID || info?.id || native?.sessionID || ""
         if (!sessionID) continue
+        const observation = contextObservations.get(sessionID)
+        const seq = native.durable?.aggregateID === sessionID
+          && Number.isSafeInteger(native.durable?.seq) && native.durable.seq >= 0
+          ? native.durable.seq : null
+        const contiguous = seq !== null && Number.isSafeInteger(observation?.eventSeq)
+          && seq === observation.eventSeq + 1
+        if (seq !== null) {
+          if (!observation) contextObservations.set(sessionID, { eventSeq: seq })
+          else if (!Number.isSafeInteger(observation.eventSeq) || seq > observation.eventSeq) {
+            // The public durable session sequence detects skipped start/end
+            // events. An unconsumed old hook cannot bind the next request after
+            // a stream gap. With no prior cursor, require a pre-hook anchor.
+            if (!contiguous && (Number.isSafeInteger(observation.eventSeq)
+                || !(Number.isFinite(native.created) && native.created <= observation.contextAt))) {
+              observation.eventGap = true
+            }
+            observation.eventSeq = seq
+          }
+        }
+        if (native.type === "session.step.started") {
+          // Native primary preparation precedes SessionStep.attempt. Its
+          // started timestamp becomes assistant.time.created (also on retry).
+          // Consume one event only; delayed older events and ambiguous same-ms
+          // ordering cannot bind a newer hook. No event means unknown.
+          if (observation && contiguous && !observation.eventGap
+              && !observation.worker && !observation.contextRequest
+              && Number.isSafeInteger(data.started) && data.started > observation.contextReturnedAt
+              && typeof data.assistantMessageID === "string" && data.assistantMessageID
+              && data.model?.providerID === observation.model.providerID
+              && data.model?.id === observation.model.id) {
+            observation.contextRequest = { kind: "opencode-v2-primary",
+              assistant_message_id: data.assistantMessageID, started_at_ms: data.started,
+              event_seq: seq,
+              context_at_ms: observation.contextAt, context_returned_at_ms: observation.contextReturnedAt }
+            publishContext(observation)
+          }
+        }
+        if (["session.step.ended", "session.step.failed", "session.execution.succeeded",
+             "session.execution.failed", "session.execution.interrupted"].includes(native.type)) {
+          // An unmatched start must not acquire the following request's event.
+          if (observation && !observation.contextRequest && Number.isSafeInteger(native.created)
+              && native.created >= observation.contextReturnedAt) {
+            contextObservations.set(sessionID, { eventSeq: observation.eventSeq })
+          }
+        }
         if (native.type === "session.deleted") contextObservations.delete(sessionID)
         if (native.type === "session.deleted" && v2WorkerSessions.has(sessionID)) {
           v2WorkerSessions.delete(sessionID)
@@ -1306,6 +1364,7 @@ async function setupOpenCodeV2(ctx) {
       }
     } catch {
       // Event-stream loss is an observation gap; it does not settle a session.
+      contextObservations.clear()
     }
   })()
 
@@ -2626,6 +2685,7 @@ function writeContextPolicy(input, output, observationIdentity = null) {
     const payload = { schema: "hearting-context-policy-v1", harness: "opencode",
       session_id: sid, pid: own.pid, proc_start: own.start, attempt_id: attemptID,
       model: `${input?.model?.providerID || input?.provider?.info?.id || ""}/${input?.model?.id || ""}`,
+      ...(input?.contextObservation === "v2-context" ? { request: input.contextRequest || null } : {}),
       observed_at: Date.now() / 1000, policy }
     writeFileSync(temporary, JSON.stringify(payload), { encoding: "utf8", mode: 0o600 })
     renameSync(temporary, target)

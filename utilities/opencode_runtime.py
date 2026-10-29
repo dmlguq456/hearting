@@ -1784,15 +1784,16 @@ def _read_v2_messages(connection, session_id, after_seq=None):
         parameters.append(after_seq)
     parameters.append(MAX_SESSION_MESSAGES)
     order = "ASC" if incremental else "DESC"
+    message_id = "id" if "id" in columns else "NULL"
     rows = connection.execute(
-        "SELECT type, seq, data, time_created, time_updated FROM session_message WHERE "
+        "SELECT " + message_id + ", type, seq, data, time_created, time_updated FROM session_message WHERE "
         + condition + " ORDER BY seq " + order + " LIMIT ?", parameters,
     ).fetchall()
     if not incremental:
         rows = list(reversed(rows))
     messages = []
     max_seq = None
-    for message_type, seq, raw, created, updated in rows:
+    for native_id, message_type, seq, raw, created, updated in rows:
         data = _decode_json(raw)
         if data is None:
             continue
@@ -1806,8 +1807,13 @@ def _read_v2_messages(connection, session_id, after_seq=None):
                 state = part.get("state") if isinstance(part.get("state"), dict) else {}
                 if state.get("status") in ("streaming", "running"):
                     tools.append({"name": part.get("name"), "status": state.get("status")})
-        messages.append({"type": message_type, "seq": seq, "text": text,
+        messages.append({"id": native_id, "type": message_type, "seq": seq, "text": text,
                          "created": created, "updated": updated,
+                         # A retried step can reuse the row/id. Native projection
+                         # updates time.created to session.step.started.started;
+                         # the row's original insertion time cannot bind a retry.
+                         "started": (data.get("time") or {}).get("created")
+                         if isinstance(data.get("time"), dict) else None,
                          "completed": (data.get("time") or {}).get("completed")
                          if isinstance(data.get("time"), dict) else None,
                          "agent": data.get("agent"), "model": data.get("model"),

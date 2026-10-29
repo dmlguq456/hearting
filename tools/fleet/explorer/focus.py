@@ -542,7 +542,7 @@ def read_pane_visible(pane, *, rows=PANE_ROWS, timeout=2.5):
     except (OSError, subprocess.SubprocessError):
         return None
     text = proc.stdout if isinstance(proc.stdout, str) else ""
-    if proc.returncode or not text or len(text.encode("utf-8")) > 262144:
+    if proc.returncode or len(text.encode("utf-8")) > 262144:
         return None
     if text.lstrip().startswith("{"):
         try:
@@ -694,7 +694,14 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
         obligations = None
         errors.append(f"obligations: {type(exc).__name__}")
         sources.append(("obligations", Health("failed", None, type(exc).__name__)))
-    events = read_events(entries, nav_tag(session))
+    try:
+        events = None if history_only else read_events(entries, nav_tag(session))
+        if not history_only:
+            sources.append(("events", Health("success", wall)))
+    except Exception as exc:
+        events = None
+        errors.append(f"events: {type(exc).__name__}")
+        sources.append(("events", Health("failed", None, type(exc).__name__)))
 
     pane = None
     if session is not None:
@@ -706,6 +713,11 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
         lines = read_pane_visible(pane_id) if pane_id else None
         if lines is not None:
             extra["pane_read"] = {"pane": pane_id, "at": wall, "lines": lines}
+            sources.append(("pane_read", Health("success", wall)))
+        else:
+            extra["pane_read"] = None
+            errors.append("pane_read: not observed")
+            sources.append(("pane_read", Health("unknown", None, "pane not observed")))
     raw_want = next((w[4:] for w in wants if w.startswith("raw:")), "")
     if raw_want and output_reader is not None:
         raw_route, _, raw_attempt = raw_want.partition(":")
@@ -727,12 +739,13 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
         "lineage": lineage.get("lineage"),
         "pane": pane,
         "obligations": obligations,
+        "events": events,
         "output_events": tuple(output.get("output_events", ())),
         "warnings": tuple(errors),
     }
     result = FocusResult(
         key=key, epoch=request.epoch, snapshot_generation=request.snapshot_generation,
-        obligations=obligations, events=events, sources=tuple(sources),
+        obligations=obligations, events=events or (), sources=tuple(sources),
         health=Health("partial" if errors else "success", wall, "; ".join(errors) or None),
         **output, **lineage, source_records=source_records, request=request)
     return result
@@ -970,7 +983,7 @@ def collect_aux(request, *, snapshot=None, now=None, aux_reader=None):
     from . import nav
     kind = request.key.sid
     wall = time.time() if now is None else float(now)
-    records, errors = {}, []
+    records, errors, sources = {}, [], []
     if kind == "panes":
         records["panes"] = read_pane_map()
         selected = next((w[4:] for w in request.wants if w.startswith("aux:")), "")
@@ -982,6 +995,10 @@ def collect_aux(request, *, snapshot=None, now=None, aux_reader=None):
                                   wants=tuple(w for w in request.wants if not w.startswith("aux:")))
             records["aux"] = (aux_reader(aux_request) if aux_reader is not None else
                               collect_focus(aux_request, snapshot=snapshot, now=now))
+            health = records["aux"].health if records["aux"] is not None else Health("unknown")
+            sources.append(("aux", health))
+            if health.state != "success":
+                errors.append("aux: " + (health.error or health.state))
     elif kind == "peers":
         from .. import details
         if snapshot is not None:
@@ -1014,7 +1031,50 @@ def collect_aux(request, *, snapshot=None, now=None, aux_reader=None):
         records["models"] = config
     return FocusResult(request.key, request.epoch, request.snapshot_generation,
                        health=Health("partial" if errors else "success", wall, "; ".join(errors) or None),
-                       source_records=records, request=request)
+                       sources=tuple(sources), source_records=records, request=request)
+
+
+def retain_focus_last_good(previous, current):
+    """Retain missing scopes only within one exact selected request.
+
+    Nested auxiliary metadata has the same contract as the outer envelope.
+    Empty observed collections clear; None/missing retain data, never health.
+    """
+    from dataclasses import replace
+    if (previous is None or current.request is None or previous.request != current.request
+            or (previous.key, previous.epoch, previous.snapshot_generation) !=
+               (current.key, current.epoch, current.snapshot_generation)):
+        return current
+    fresh = dict(current.source_records)
+    # Older providers carry these scopes in typed fields. Canonical readers
+    # also name events explicitly, so partial success-empty remains observable.
+    fresh.setdefault("obligations", current.obligations)
+    fresh.setdefault("events", current.events if current.events or current.health.state == "success" else None)
+    for name, health in current.sources:
+        if name != "aux" and name in fresh and health.state != "success":
+            fresh[name] = None
+    pane = fresh.get("pane_read")
+    if isinstance(pane, dict) and pane.get("lines") is None:
+        fresh["pane_read"] = None
+    records = dict(previous.source_records)
+    records.update({name: value for name, value in fresh.items() if value is not None})
+    for name in ("seats",):
+        if previous.source_records.get(name) is not None and fresh.get(name) is not None:
+            records[name] = dict(previous.source_records[name], **fresh[name])
+    if records.get("peers") is not None and previous.source_records.get("peers") is not None:
+        from ..details import retain_optional_last_good
+        records["peers"] = retain_optional_last_good(previous.source_records["peers"], records["peers"])
+    old_aux, aux = previous.source_records.get("aux"), fresh.get("aux")
+    if old_aux is not None and aux is None:
+        aux = replace(old_aux, health=Health("unknown", None, "aux: not observed"), sources=())
+    if aux is not None:
+        records["aux"] = retain_focus_last_good(old_aux, aux)
+    health = current.health
+    if records.get("aux") is not None and records["aux"].health.state != "success" and health.state == "success":
+        health = Health("partial", health.last_success_at, "aux: " + records["aux"].health.state)
+    return replace(current, source_records=records, health=health,
+                   obligations=records.get("obligations", previous.obligations),
+                   events=records.get("events", previous.events))
 
 
 class FocusReader:

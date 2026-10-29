@@ -7102,7 +7102,6 @@ class _ExplorerFeed:
         return self.pumps[kind]
 
     def update(self, state, generation, now_mono, snapshot=None):
-        from dataclasses import replace
         from .explorer import live
         from .explorer.types import ExplorerDetail
         requests = _explorer_requests(snapshot, state, _EXPLORER_MODEL) if snapshot is not None else {}
@@ -7136,18 +7135,8 @@ class _ExplorerFeed:
                     # Fill physical-seat history once the independent pane lookup finishes.
                     self._pump("session").request(force=True)
                 if previous is not None and previous.request == result.request:
-                    # Missing/failed scopes retain their last good values for this binding.
-                    records = dict(previous.source_records)
-                    records.update({name: value for name, value in result.source_records.items()
-                                    if value is not None})
-                    for name in ("seats",):
-                        if name in previous.source_records and name in result.source_records:
-                            records[name] = dict(previous.source_records[name], **result.source_records[name])
-                    if "peers" in records and "peers" in previous.source_records:
-                        from .details import retain_optional_last_good
-                        records["peers"] = retain_optional_last_good(
-                            previous.source_records["peers"], records["peers"])
-                    result = replace(result, source_records=records)
+                    from .explorer.focus import retain_focus_last_good
+                    result = retain_focus_last_good(previous, result)
                 self.results[kind] = result
         token = tuple(self._mark(kind) for kind in _EXPLORER_INTERVALS)
         changed = token != self.token

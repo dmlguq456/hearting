@@ -423,6 +423,178 @@ class SelectedDetailPublication(unittest.TestCase):
         self.assertNotIn("private unbound dialogue", repr(shown.dialogue))
         self.assertTrue(self.render._EXPLORER_REPLAY_ACTIVE)
 
+    def aux_feed(self):
+        """Actual split collector and selection pumps; only the leaf sources vary."""
+        from dataclasses import replace
+        from unittest.mock import patch
+        from tools.fleet.explorer import focus
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.explorer.types import FocusKey, FocusResult, Health
+        from tools.fleet.tests.test_explorer_focus import wait_for
+        import time
+
+        state = NavState(scope="session:a7")
+        self.render._EXPLORER_STATE = state
+        self.snapshot.observations = {"remote-host": {"state": "pending"}}
+        chosen = {"revision": 0}
+        calls = []
+
+        def reader(request):
+            calls.append(request)
+            if request.key.sid != "panes":
+                return FocusResult(request.key, request.epoch, request.snapshot_generation,
+                                   health=Health("success"), request=request)
+
+            def auxiliary(aux_request):
+                if chosen.get("missing_aux"):
+                    return None
+                if chosen.get("request_change"):
+                    aux_request = replace(aux_request, epoch=aux_request.epoch + 100)
+                return FocusResult(aux_request.key, aux_request.epoch, aux_request.snapshot_generation,
+                    health=Health(chosen.get("health", "success"), error=chosen.get("error")),
+                    source_records=chosen.get("records", {}), obligations=chosen.get("obligations"),
+                    events=chosen.get("events", ()), sources=chosen.get("sources", ()), request=aux_request)
+            outer = focus.collect_aux(request, snapshot=self.snapshot, aux_reader=auxiliary)
+            return replace(outer, source_records={**outer.source_records, "revision": chosen["revision"]})
+
+        patcher = patch.object(focus, "read_pane_map", return_value={self.session.session_id: "fixture-pane"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        feed = self.render._ExplorerFeed(reader, 60)
+        self.addCleanup(feed.stop)
+
+        def step(**values):
+            revision = chosen["revision"] + 1
+            chosen.clear()
+            chosen.update(revision=revision, **values)
+            if "panes" in feed.pumps:
+                feed.pumps["panes"].request(force=True)
+
+            def accepted():
+                detail, _changed = feed.update(self.render._EXPLORER_STATE, 1, time.monotonic(), self.snapshot)
+                result = detail.results.get("panes") if detail is not None else None
+                return detail if result and result.source_records.get("revision") == revision else None
+            detail = wait_for(accepted)
+            self.assertIsNotNone(detail)
+            self.render._EXPLORER_RESULT = detail
+            shown = self.draw()
+            self.assertIs(self.render._EXPLORER_PUBLISHED_MODEL, self.base)
+            self.assertIsNot(shown, self.base)
+            # Every pending draw starts from the SAME complete base, never from
+            # the previous overlay that happened to contain last-good data.
+            return shown, detail
+
+        return feed, step, calls
+
+    def test_split_aux_last_good_missing_partial_failed_recovery_and_success_empty(self):
+        from tools.fleet.tests.test_explorer_focus import wait_for
+        from tools.fleet.explorer.types import Health
+        feed, step, calls = self.aux_feed()
+        obligation = ({"state": "running", "attempt_id": "aux-duty-marker"},)
+        event = ({"time": "12:00", "tag": "a7", "source": "registry", "kind": "aux-event-marker"},)
+
+        def success(lines):
+            return {"records": {"pane_read": {"pane": "fixture-pane", "lines": lines},
+                                "obligations": obligation, "events": event},
+                    "obligations": obligation, "events": event}
+
+        shown, detail = step(**success(["aux-pane-marker"]))
+        self.assertIn("aux-pane-marker", repr(shown.sessions))
+        self.assertIn("aux-event-marker", repr(shown.events))
+        self.assertIn("aux-duty", repr(shown.system["task_summary"]))
+        from tools.fleet.explorer.view_model import persistable_view_model
+        self.assertNotIn("aux-pane-marker", repr(persistable_view_model(shown)))
+        self.assertTrue(wait_for(lambda: len([r for r in calls if r.key.sid == self.session.session_id]) == 2))
+        history_calls = len([r for r in calls if r.key.sid == self.session.session_id])
+        request = detail.results["panes"].request
+        for values, health in (({"missing_aux": True}, "unknown"),
+                               ({"health": "unknown", "records": {}}, "unknown"),
+                               ({"health": "partial", "records": {"pane_read": {"pane": "fixture-pane"},
+                                                                    "obligations": None, "events": None}}, "partial"),
+                               ({"health": "failed", "error": "fixture failure", "records": {}}, "failed")):
+            with self.subTest(refresh=health, values=values):
+                shown, detail = step(**values)
+                self.assertEqual(detail.results["panes"].request, request)
+                self.assertIn("aux-pane-marker", repr(shown.sessions))
+                self.assertIn("aux-event-marker", repr(shown.events))
+                self.assertIn("aux-duty", repr(shown.system["task_summary"]))
+                self.assertEqual(shown.source_records["_detail_health"]["panes:aux"]["state"], health)
+                self.assertNotEqual(shown.source_records["_detail_health"]["panes"]["state"], "success")
+                self.assertEqual(shown.system["task_summary"]["state"], health)
+                accepted = self.live.detail_for_bindings(detail, self.live.detail_bindings(self.snapshot), strict=True)
+                self.assertEqual(accepted.focus.obligations, obligation)
+                self.assertEqual(accepted.focus.events, event)
+        # Empty-looking values from explicitly failed scopes are not an
+        # observation of emptiness. Each scope's own health takes precedence.
+        shown, _detail = step(health="partial", records={"pane_read": {"lines": []},
+                                                         "obligations": (), "events": ()},
+                              sources=tuple((name, Health("failed"))
+                                            for name in ("pane_read", "obligations", "events")))
+        self.assertIn("aux-pane-marker", repr(shown.sessions))
+        self.assertIn("aux-event-marker", repr(shown.events))
+        self.assertIn("aux-duty", repr(shown.system["task_summary"]))
+        recovered, _detail = step(**success(["recovered-pane"]))
+        self.assertIn("recovered-pane", repr(recovered.sessions))
+        self.assertNotIn("aux-pane-marker", repr(recovered.sessions))
+        self.assertEqual(recovered.source_records["_detail_health"]["panes:aux"]["state"], "success")
+        cleared, detail = step(records={"pane_read": {"pane": "fixture-pane", "lines": []},
+                                        "obligations": (), "events": ()}, obligations=(), events=())
+        self.assertEqual(next(row for row in cleared.sessions if row["tag"] == "a7")["pane_lines"], ())
+        self.assertNotIn("aux-event-marker", repr(cleared.events))
+        self.assertNotIn("aux-duty", repr(cleared.system["task_summary"]))
+        self.assertEqual(len([r for r in calls if r.key.sid == self.session.session_id]), history_calls)
+
+    def test_split_aux_never_bridges_selection_process_or_nested_request_replacement(self):
+        from tools.fleet.explorer.state import NavState
+        feed, step, _calls = self.aux_feed()
+        good = {"records": {"pane_read": {"pane": "fixture-pane", "lines": ["aux-pane-marker"]}}}
+        original_pid, original_start = self.session.pid, self.session.proc_start
+        other_tag = next(row["tag"] for row in self.base.sessions if row["tag"] != "a7")
+        for change in ("A-B-A", "pid", "start", "aux-request"):
+            with self.subTest(change=change):
+                self.session.pid, self.session.proc_start = original_pid, original_start
+                self.render._EXPLORER_STATE = NavState(scope="session:a7")
+                shown, old_detail = step(**good)
+                if change in ("A-B-A", "aux-request"):
+                    self.assertIn("aux-pane-marker", repr(shown.sessions))
+                if change == "A-B-A":
+                    self.render._EXPLORER_STATE = NavState(scope="session:" + other_tag)
+                    step(health="failed")
+                    self.render._EXPLORER_STATE = NavState(scope="session:a7")
+                elif change == "pid":
+                    self.session.pid += 1
+                elif change == "start":
+                    self.session.proc_start = "replacement-start"
+                shown, detail = step(health="failed", request_change=change == "aux-request")
+                self.assertNotIn("aux-pane-marker", repr(shown.sessions))
+                if change in ("pid", "start"):
+                    replacement = self.live.build_view_model(self.snapshot)
+                    self.assertNotIn("aux-pane-marker", repr(self.live.selected_detail(replacement, old_detail).sessions))
+                # Return to the original nested request after replacement: the
+                # failed intermediate result cannot reconnect an older body.
+                if change == "aux-request":
+                    shown, _detail = step(health="failed")
+                    self.assertNotIn("aux-pane-marker", repr(shown.sessions))
+
+    def test_new_aux_request_does_not_borrow_a_pane_embedded_in_the_complete_base(self):
+        from tools.fleet.explorer.state import NavState
+        _feed, step, _calls = self.aux_feed()
+        step(records={"pane_read": {"pane": "fixture-pane", "lines": ["aux-pane-marker"]}})
+        # Publish a genuinely complete collection containing the old selection.
+        # The later pending draws keep this complete base fixed throughout.
+        self.snapshot.observations = {}
+        self.draw()
+        self.base = self.render._EXPLORER_PUBLISHED_MODEL
+        self.assertIn("aux-pane-marker", repr(self.base.sessions))
+        self.snapshot.observations = {"remote-host": {"state": "pending"}}
+        other = next(row["tag"] for row in self.base.sessions if row["tag"] != "a7")
+        self.render._EXPLORER_STATE = NavState(scope="session:" + other)
+        step(health="failed")
+        self.render._EXPLORER_STATE = NavState(scope="session:a7")
+        shown, _detail = step(health="failed")
+        self.assertNotIn("aux-pane-marker", repr(shown.sessions))
+        self.assertIn("aux-pane-marker", repr(self.base.sessions))
+
 
 class RemoteHostObservation(unittest.TestCase):
     def test_compute_host_pump_result_records_success_failure_or_confirmed_absence(self):

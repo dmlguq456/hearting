@@ -58,12 +58,14 @@ def assert_primary_context_pipeline(case, env, records):
     def observation(sid, **_kwargs):
         row = by_sid[sid]
         provider, model = row["model"].split("/", 1)
-        updated = int((row["observed_at"] + 2) * 1000)
+        started = row["request"]["started_at_ms"]
+        updated = started + 2000
         return {"state": "observed", "generation": "v2", "cursor": 1,
                 "session": {"directory": env["HOME"],
                             "model": {"providerID": provider, "id": model},
                             "time_updated": updated + 10000, "tokens_input": 9999999},
-                "messages": [{"type": "assistant", "model": {"providerID": provider, "id": model},
+                "messages": [{"type": "assistant", "id": row["request"]["assistant_message_id"],
+                              "started": started, "model": {"providerID": provider, "id": model},
                               "tokens": {"total": 450000 if sid == "ses_a" else 200000},
                               "updated": updated, "completed": updated}]}
 
@@ -95,8 +97,11 @@ def assert_primary_context_pipeline(case, env, records):
                 (0, False, True, (None, None))):
             observed = observation(first["session_id"])
             if late:
-                observed["messages"][0]["updated"] = int((first["observed_at"] - 3) * 1000)
+                observed["messages"][0]["started"] -= 3000
             observed["messages"].append({"type": "assistant",
+                "id": first["request"]["assistant_message_id"],
+                "started": first["request"]["started_at_ms"],
+                "model": {"providerID": "p", "id": "m"},
                 "tokens": {"total": active}, "updated": int((first["observed_at"] + 2) * 1000),
                 "completed": True if completed else None})
             runtime.read_session_observation.side_effect = None
@@ -107,6 +112,78 @@ def assert_primary_context_pipeline(case, env, records):
                 case.assertIsNone(sess.context_window_tokens,
                                   "new session metadata cannot freshen an older assistant's policy")
             assert_opencode_context_surface(case, [sess], [expected])
+
+
+def assert_primary_request_cases(case, env, cases):
+    """Reconsume actual producer snapshots through selection -> reader -> cache/VM.
+
+    Replaying files is confined to the command's private fixture directory. No
+    production reader, identity checker, policy reader or display path is mocked.
+    """
+    from tools.fleet.tests.test_fleet_user_task_surface import assert_opencode_context_surface
+    db = Path(env["HOME"]) / "request-cases.db"
+    with sqlite3.connect(db) as con:
+        con.execute("CREATE TABLE credential (id TEXT, integration_id TEXT, value TEXT)")
+        con.execute("CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT, model TEXT, "
+                    "time_created INT, time_updated INT)")
+        con.execute("CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, "
+                    "seq INT, time_created INT, time_updated INT, data TEXT)")
+    results = []
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(opencode, "_db", return_value=str(db)), \
+            mock.patch.object(opencode.session_registry, "read", return_value=None), \
+            mock.patch.object(opencode, "_attach_v2_shell_tasks"), \
+            mock.patch.object(opencode.titles, "last_title", return_value=None), \
+            mock.patch.object(opencode.titles, "fresh_summary_with_ts", return_value=(None, None)):
+        for item in cases:
+            with case.subTest(request_case=item["name"]):
+                row, request = item["record"], item["native"]
+                # Keep the known prior policy exactly as produced, including
+                # skipped-hook cases. Reselection must not freshen its numbers.
+                target = policy_path("opencode", pid=row["pid"], proc_start=row["proc_start"])
+                target.write_text(json.dumps(row))
+                selection = Path(env["XDG_STATE_HOME"]) / "hearting/tui-identity" / target.name
+                selection.write_text(json.dumps({"schema": "hearting-tui-selection-v1",
+                    "pid": row["pid"], "start": row["proc_start"], "sessionID": row["session_id"]}))
+                message = {"id": request["assistantMessageID"], "type": "assistant",
+                           "model": request["model"], "started": request["started"],
+                           "created": request["started"], "updated": request["started"] + 120000,
+                           "completed": request["started"] + 120000,
+                           "tokens": {"total": item.get("active", 300000)}}
+                messages = [message]
+                if item.get("pending"):
+                    messages.append({**message, "id": "next-pending", "started": message["started"] + 121000,
+                                     "completed": None, "tokens": {"total": 0}})
+                with sqlite3.connect(db) as con:
+                    con.execute("DELETE FROM session_v2")
+                    con.execute("DELETE FROM session_message")
+                    con.execute("INSERT INTO session_v2 VALUES (?,?,?,?,?)", (
+                        row["session_id"], env["HOME"], json.dumps(request["model"]),
+                        message["started"], message["updated"]))
+                    for seq, native in enumerate(messages, 1):
+                        con.execute("INSERT INTO session_message VALUES (?,?,?,?,?,?,?)", (
+                            native["id"], row["session_id"], "assistant", seq,
+                            native["created"], native["updated"], json.dumps({
+                                "model": native["model"], "tokens": native["tokens"],
+                                "time": {"created": native["started"], "completed": native["completed"]}})))
+                before = db.read_bytes()
+                sess = Session(harness="opencode", pid=row["pid"], proc_start=row["proc_start"],
+                               cwd=env["HOME"], session_tag="o0", liveness="idle")
+                opencode.enrich(sess)
+                case.assertEqual(db.read_bytes(), before, "native reader modified its fixture DB")
+                case.assertEqual(sess.session_id, row["session_id"])
+                case.assertEqual(sess.context_window_tokens, item["window"])
+                case.assertIsNone(sess.context_display_window_tokens)
+                case.assertIsNone(sess.ctx_pct)
+                window = item["window"]
+                expected = (round(message["tokens"]["total"] * 100 / window), window / 1000000) if window else (None, None)
+                assert_opencode_context_surface(case, [sess], [expected])
+                results.append({"case": item["name"], "saved_window": row["policy"]["effective_window_tokens"],
+                                "native_request": request, "policy_request": row.get("request"),
+                                "reader_active": sess.active_context_tokens,
+                                "reader_window": sess.context_window_tokens,
+                                "asserted_vm_pct": expected[0], "asserted_vm_window": expected[1]})
+    return results
 
 
 _TEXT_LINE = _envelope("text", {
@@ -563,7 +640,8 @@ class CurrentSessionBindingTest(unittest.TestCase):
         observed = {"state": "observed", "generation": "v2", "cursor": 8,
                     "session": {"model": {"id": "m", "providerID": "p"},
                                 "time_updated": 2000000, "tokens_input": 999999},
-                    "messages": [{"type": "assistant", "model": {"id": "m", "providerID": "p"},
+                    "messages": [{"type": "assistant", "id": "msg-current", "started": 1999500,
+                                  "model": {"id": "m", "providerID": "p"},
                                   "tokens": {"total": 123456}, "updated": 2000000}]}
         with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state"),
                                           "FLEET_SESSION_REGISTRY_DIR": str(self.root / "sessions")}):
@@ -571,14 +649,28 @@ class CurrentSessionBindingTest(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             record = {"schema": SCHEMA, "harness": "opencode", "session_id": "ses_b",
                       "pid": 4242, "proc_start": "123", "attempt_id": None, "model": "p/m",
-                      "observed_at": 1999.0, "policy": {
+                      "observed_at": 1999.0, "request": {
+                          "kind": "opencode-v2-primary", "assistant_message_id": "msg-current",
+                          "event_seq": 10,
+                          "started_at_ms": 1999500, "context_at_ms": 1999000,
+                          "context_returned_at_ms": 1999001}, "policy": {
                           "state": "unknown", "runtime_version": "2.0.32",
                           "source": "opencode-v2-request", "effective_window_tokens": 950000,
                           "session_id": "ses_b", "reason": "native-v2-compaction-behavior-unverified"}}
-            for change, expected in (({}, 950000), ({"model": "p/other"}, None),
+            for change, expected in (({}, 950000), ({"observed_at": 2002.0}, 950000),
+                                     ({"model": "p/other"}, None),
                                      ({"session_id": "ses_other"}, None),
                                      ({"proc_start": "124"}, None),
-                                     ({"observed_at": 2002.0}, None)):
+                                     ({"request": None}, None),
+                                     ({"request": {**record["request"], "assistant_message_id": "msg-prior"}}, None),
+                                     ({"request": {**record["request"], "started_at_ms": 1999400}}, None),
+                                     *(({"request": {**record["request"], key: value}}, None)
+                                       for key, value in (("started_at_ms", True),
+                                                          ("event_seq", None), ("event_seq", True),
+                                                          ("started_at_ms", "1999500"),
+                                                          ("context_at_ms", False),
+                                                          ("context_returned_at_ms", 1999500),
+                                                          ("context_returned_at_ms", 1998999)))):
                 with self.subTest(change=change):
                     path.write_text(json.dumps({**record, **change}))
                     sess, _ = self._run_v2(self._session(),

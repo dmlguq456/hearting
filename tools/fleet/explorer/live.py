@@ -2076,7 +2076,8 @@ def detail_for_bindings(detail, bindings, *, strict=False):
             records.update({name: value for name, value in focus.source_records.items()
                             if name in ("seat", "dialogue", "lineage")})
             focus = replace(focus, source_records=records, obligations=aux.obligations,
-                            events=aux.events, sources=aux.sources)
+                            events=aux.events, sources=focus.sources + aux.sources,
+                            health=aux.health if aux.health.state != "success" else focus.health)
     return ExplorerDetail(focus=focus, seats=seats, config=config, panes=panes, results=results)
 
 
@@ -2187,18 +2188,40 @@ def selected_detail(model, detail, *, peer_model=None):
     for seat in seat_rows:
         by_tag[seat[0]]["generation"] = seat[2]
         by_tag[seat[0]]["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
+    panes_result = detail.results.get("panes")
+    pane_request = _get(panes_result, "request")
+    if tag in by_tag and pane_request is not None and "pane" in pane_request.wants:
+        # Last-good belongs to the feed's exact request, not to an older
+        # selection embedded in the complete base. A failed new request has no
+        # observed body; a failed refresh carries its retained body below.
+        by_tag[tag]["pane_lines"] = []
     if pane_read:
         current_tag, read = pane_read
         by_tag[current_tag]["pane_lines"] = [[str(line), "soft"] for line in read.get("lines") or ()]
         by_tag[current_tag]["pane_meta"] = "visible screen"
+    health_results = dict(detail.results)
+    if panes_result is not None:
+        health_results["panes:aux"] = panes_result.source_records.get("aux")
+    system = dict(model.system or {})
+    events = model.events
+    if focus is not None:
+        session_index = {tag_of[ref]: {"session": {"harness": binding[0]}, "ids": (binding[1],)}
+                         for ref, binding in bindings.items() if ref in tag_of}
+        system["task_summary"] = _current_task_summary(detail, rows, session_index, model.routes)
+        other_events = provenance.get("_detail_other_events")
+        if other_events is not None:
+            feed = list(other_events) + _registry_events(focus, tag)
+            feed.sort(key=lambda item: -item[0])
+            events = tuple(freeze(event) for _epoch, event in feed[:5])
     return replace(model, sessions=tuple(freeze(row) for row in rows),
                    seats=tuple(freeze(row) for row in old_seats + seat_rows),
                    generations=freeze(new_generations), cards=freeze(new_cards),
                    dialogue=freeze(old_dialogue), attempts=freeze(raw) if raw is not None else model.attempts,
                    models=freeze(config) if config is not None else model.models,
+                   system=freeze(system), events=events,
                    source_records={**provenance, "_detail_health": {
                        kind: {"state": result.health.state, "error": result.health.error}
-                       for kind, result in detail.results.items() if result is not None}})
+                       for kind, result in health_results.items() if result is not None}})
 
 
 def reorder_view_model(model, effects):
@@ -2511,6 +2534,8 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         "pane_graph": _records(_get(snapshot, "pane_graph", "pane_edges", default=())),
         "source_records": {**(explicit if isinstance(explicit, Mapping) else {}),
                            "_detail_bindings": bindings,
+                           "_detail_other_events": tuple((epoch, event) for epoch, event in feed
+                                                         if event[2] != "registry"),
                            "_peer_observed_at": _get(peer_observation, "observed_at"),
                            "_detail_tags": {f"{row['harness']}:{session_index[row['tag']]['sid']}": row["tag"]
                                             for row in session_rows

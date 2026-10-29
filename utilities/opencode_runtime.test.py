@@ -751,12 +751,23 @@ class OpenCodeSessionObservationTest(unittest.TestCase):
             self.assertEqual(observation["generation"], "v2")
             self.assertEqual(observation["session"]["directory"], "/work/tree")
             self.assertEqual(observation["messages"][-1]["text"], "OK")
+            self.assertEqual(observation["messages"][-1]["id"], "msg_assistant")
+            self.assertEqual(observation["messages"][-1]["started"], 1500)
             self.assertEqual(observation["cursor_kind"], "session-message-seq-v2")
             delta = runtime.read_session_observation(session_id, db_path=db,
                                                     generation="v2", after_seq=2)
             self.assertEqual(delta["messages"], [])
             self.assertEqual(delta["cursor"], 2)
             self.assertEqual(db.read_bytes(), before)
+            # Native retries reuse the row/id but update the projected start.
+            with sqlite3.connect(db) as con:
+                row = con.execute("SELECT data FROM session_message WHERE id='msg_assistant'").fetchone()
+                payload = json.loads(row[0])
+                payload["time"]["created"] = 1900
+                con.execute("UPDATE session_message SET data=? WHERE id='msg_assistant'", (json.dumps(payload),))
+            retried = runtime.read_session_observation(session_id, db_path=db)["messages"][-1]
+            self.assertEqual((retried["id"], retried["created"], retried["started"]),
+                             ("msg_assistant", 1500, 1900))
 
     def test_v2_shell_cursor_pages_all_row_types_and_refreshes_old_pending_seq(self):
         with tempfile.TemporaryDirectory() as tmp:
