@@ -106,6 +106,8 @@ def _process_session(payload: object, session_id: str) -> int:
                 return cached_evidence
 
             receipt_observer = observe_receipt
+    from dispatch_notice_state import NoticeReadContext
+    notice_context = NoticeReadContext()
     for root in roots:
         if root in seen:
             continue
@@ -116,10 +118,12 @@ def _process_session(payload: object, session_id: str) -> int:
             continue
         try:
             if _event_name(payload) == "SessionStart":
-                records = activate(root, RECIPIENT_KIND, session_id, request_recovery=False)
+                records = activate(root, RECIPIENT_KIND, session_id, request_recovery=False,
+                                   notice_context=notice_context)
             else:
                 records, _entries = sweep_deliver(
                     root, RECIPIENT_KIND, session_id,
+                    notice_context=notice_context,
                     **({"receipt_observer": receipt_observer} if receipt_observer else {}))
         except Exception:  # noqa: BLE001 -- fail-open (§13.33.1-(3))
             continue
