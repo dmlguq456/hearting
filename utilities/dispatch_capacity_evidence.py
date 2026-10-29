@@ -595,7 +595,8 @@ def gauge_limits(now):
 
     A window at 100% used with a future reset is a real usage limit, not the
     soft ordering gate; `harness-capacity.gauge_limit_epoch` is the one reader
-    (manual score, staleness and unknown-reset keep its existing rules). A
+    (Codex usable credits lift only the gauge hold; manual score, staleness
+    and unknown-reset keep their existing rules). A
     missing or broken capacity reader leaves today's answer in place.
     """
     limits = {}
