@@ -1824,6 +1824,21 @@ def _read_v2_messages(connection, session_id, after_seq=None):
     return messages, max_seq
 
 
+def _read_v2_event_seq(connection, session_id):
+    """The native durable aggregate cursor, independent of message insertion seq.
+
+    Bus writes event_sequence even when optional event-log persistence is off.
+    A retry updates the assistant row without changing its insertion seq; only
+    the aggregate cursor can verify the producer's observed step interval.
+    """
+    try:
+        row = connection.execute(
+            "SELECT seq FROM event_sequence WHERE aggregate_id=?", (session_id,)).fetchone()
+        return row[0] if row and type(row[0]) is int and row[0] >= 0 else None
+    except sqlite3.Error:
+        return None
+
+
 def _read_v2_shell_tasks(connection, session_id, after_seq=0, refresh_seqs=()):
     """Bounded exact V2 shell-task catch-up plus a mutable recent-row window.
 
@@ -2091,6 +2106,9 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")
         connection.execute("PRAGMA busy_timeout=500")
+        # Pair message projection and durable cursor in one read snapshot. A
+        # concurrent retry must not mix an older message with its newer cursor.
+        connection.execute("BEGIN")
         candidates = _session_generation_rows(connection, session_id)
         if generation:
             candidates = [item for item in candidates if item[0] == generation]
@@ -2104,6 +2122,7 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
             raw_model = {"id": row["model"]}
         if selected_generation == "v2":
             messages, cursor = _read_v2_messages(connection, session_id, after_seq)
+            event_seq = _read_v2_event_seq(connection, session_id)
             cursor_kind = "session-message-seq-v2"
             if cursor is None and isinstance(after_seq, int) and after_seq >= 0:
                 cursor = after_seq
@@ -2116,6 +2135,7 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
                     connection, session_id, shell_after_seq, shell_refresh_seqs)
         else:
             messages, cursor = _read_v1_messages(connection, session_id)
+            event_seq = None
             cursor_kind = "message-updated-v1"
             shell_tasks = []
             shell_cursor = {"state": "unobserved",
@@ -2135,7 +2155,7 @@ def read_session_observation(session_id: str, *, db_path: str | Path | None = No
                             "tokens_input": row.get("tokens_input"),
                             "tokens_output": row.get("tokens_output"),
                             "tokens_reasoning": row.get("tokens_reasoning")},
-                "messages": messages, "cursor": cursor,
+                "messages": messages, "cursor": cursor, "event_seq": event_seq,
                 "cursor_kind": cursor_kind, "shell_tasks": shell_tasks,
                 "shell_cursor": shell_cursor, "database_identity": db_identity}
     except (OSError, sqlite3.Error):

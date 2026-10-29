@@ -61,6 +61,7 @@ def assert_primary_context_pipeline(case, env, records):
         started = row["request"]["started_at_ms"]
         updated = started + 2000
         return {"state": "observed", "generation": "v2", "cursor": 1,
+                "event_seq": row["request"]["observed_event_seq"],
                 "session": {"directory": env["HOME"],
                             "model": {"providerID": provider, "id": model},
                             "time_updated": updated + 10000, "tokens_input": 9999999},
@@ -128,6 +129,8 @@ def assert_primary_request_cases(case, env, cases):
                     "time_created INT, time_updated INT)")
         con.execute("CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, "
                     "seq INT, time_created INT, time_updated INT, data TEXT)")
+        # Native Bus persists this cursor even with event-log persistence off.
+        con.execute("CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY, seq INT, owner_id TEXT)")
     results = []
     with mock.patch.dict(os.environ, env), \
             mock.patch.object(opencode, "_db", return_value=str(db)), \
@@ -157,6 +160,11 @@ def assert_primary_request_cases(case, env, cases):
                 with sqlite3.connect(db) as con:
                     con.execute("DELETE FROM session_v2")
                     con.execute("DELETE FROM session_message")
+                    con.execute("DELETE FROM event_sequence")
+                    native_seq = item.get("native_event_seq")
+                    if native_seq is not None:
+                        con.execute("INSERT INTO event_sequence VALUES (?,?,NULL)",
+                                    (row["session_id"], native_seq))
                     con.execute("INSERT INTO session_v2 VALUES (?,?,?,?,?)", (
                         row["session_id"], env["HOME"], json.dumps(request["model"]),
                         message["started"], message["updated"]))
@@ -179,6 +187,7 @@ def assert_primary_request_cases(case, env, cases):
                 expected = (round(message["tokens"]["total"] * 100 / window), window / 1000000) if window else (None, None)
                 assert_opencode_context_surface(case, [sess], [expected])
                 results.append({"case": item["name"], "saved_window": row["policy"]["effective_window_tokens"],
+                                "native_event_seq": native_seq,
                                 "native_request": request, "policy_request": row.get("request"),
                                 "reader_active": sess.active_context_tokens,
                                 "reader_window": sess.context_window_tokens,
@@ -637,7 +646,7 @@ class CurrentSessionBindingTest(unittest.TestCase):
                 self.assertEqual(sess.session_input_tokens, 999999)
 
     def test_v2_exact_request_policy_keeps_raw_window_when_trigger_is_unknown(self):
-        observed = {"state": "observed", "generation": "v2", "cursor": 8,
+        observed = {"state": "observed", "generation": "v2", "cursor": 8, "event_seq": 10,
                     "session": {"model": {"id": "m", "providerID": "p"},
                                 "time_updated": 2000000, "tokens_input": 999999},
                     "messages": [{"type": "assistant", "id": "msg-current", "started": 1999500,
@@ -651,7 +660,7 @@ class CurrentSessionBindingTest(unittest.TestCase):
                       "pid": 4242, "proc_start": "123", "attempt_id": None, "model": "p/m",
                       "observed_at": 1999.0, "request": {
                           "kind": "opencode-v2-primary", "assistant_message_id": "msg-current",
-                          "event_seq": 10,
+                          "event_seq": 10, "observed_event_seq": 10,
                           "started_at_ms": 1999500, "context_at_ms": 1999000,
                           "context_returned_at_ms": 1999001}, "policy": {
                           "state": "unknown", "runtime_version": "2.0.32",
@@ -667,6 +676,10 @@ class CurrentSessionBindingTest(unittest.TestCase):
                                      *(({"request": {**record["request"], key: value}}, None)
                                        for key, value in (("started_at_ms", True),
                                                           ("event_seq", None), ("event_seq", True),
+                                                          ("observed_event_seq", None),
+                                                          ("observed_event_seq", True),
+                                                          ("observed_event_seq", 9),
+                                                          ("observed_event_seq", 11),
                                                           ("started_at_ms", "1999500"),
                                                           ("context_at_ms", False),
                                                           ("context_returned_at_ms", 1999500),
@@ -681,6 +694,14 @@ class CurrentSessionBindingTest(unittest.TestCase):
                     self.assertEqual(sess.session_input_tokens, 999999)
                     self.assertIsNone(sess.ctx_pct)
                     self.assertIsNone(sess.context_display_window_tokens)
+            path.write_text(json.dumps(record))
+            for cursor in (None, True, 9, 11, "10"):
+                with self.subTest(native_cursor=cursor):
+                    sess, _ = self._run_v2(self._session(),
+                                           ("ses_b", "opencode-tui-selection"),
+                                           {**observed, "event_seq": cursor}, policy_reader=read_policy)
+                    self.assertIsNone(sess.context_window_tokens)
+                    self.assertEqual(sess.active_context_tokens, 123456)
 
     def test_v2_missing_or_malformed_latest_tokens_do_not_reuse_an_older_request(self):
         for tokens in (None, {"total": -1}, {"total": "invalid"}):

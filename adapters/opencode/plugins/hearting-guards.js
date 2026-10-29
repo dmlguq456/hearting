@@ -1017,6 +1017,21 @@ async function setupOpenCodeV2(ctx) {
       writeContextPolicy(observation, {}, { pid: selected.pid, start: selected.start })
     }
   }
+  const retireContext = observation => {
+    if (!observation?.sessionID || observation.worker) return
+    // Retire the object too: a pending model lookup must not publish after a
+    // later step/gap. If selection disappeared the old file stays untouched;
+    // the reader's independent native sequence check rejects that retained file.
+    contextObservations.set(observation.sessionID, { eventSeq: observation.eventSeq })
+    const unknown = { ...observation, contextRequest: null,
+      model: { providerID: observation.model?.providerID, id: observation.model?.id } }
+    for (const selected of observation.selections || []) {
+      const current = v2ContextSelection(selected.file, observation.sessionID)
+      if (current?.generation === selected.generation) {
+        writeContextPolicy(unknown, {}, { pid: selected.pid, start: selected.start })
+      }
+    }
+  }
   const sessionInfo = async (sessionID) => {
     if (!sessionID || typeof ctx.session?.get !== "function") return null
     try {
@@ -1291,12 +1306,23 @@ async function setupOpenCodeV2(ctx) {
         const info = data.info || data.session || null
         const sessionID = data.sessionID || data.form?.sessionID || info?.id || native?.sessionID || ""
         if (!sessionID) continue
-        const observation = contextObservations.get(sessionID)
+        let observation = contextObservations.get(sessionID)
         const seq = native.durable?.aggregateID === sessionID
           && Number.isSafeInteger(native.durable?.seq) && native.durable.seq >= 0
           ? native.durable.seq : null
         const contiguous = seq !== null && Number.isSafeInteger(observation?.eventSeq)
           && seq === observation.eventSeq + 1
+        const advancing = seq !== null && (!Number.isSafeInteger(observation?.eventSeq)
+          || seq > observation.eventSeq)
+        const stepStart = native.type === "session.step.started"
+        const executionStart = native.type === "session.execution.started"
+        if (observation?.sessionID && !observation.worker
+            && ((advancing && !contiguous)
+              || ((advancing || seq === null) && (stepStart || executionStart)
+                && observation.contextRequest))) {
+          retireContext(observation)
+          observation = contextObservations.get(sessionID)
+        }
         if (seq !== null) {
           if (!observation) contextObservations.set(sessionID, { eventSeq: seq })
           else if (!Number.isSafeInteger(observation.eventSeq) || seq > observation.eventSeq) {
@@ -1310,7 +1336,7 @@ async function setupOpenCodeV2(ctx) {
             observation.eventSeq = seq
           }
         }
-        if (native.type === "session.step.started") {
+        if (stepStart) {
           // Native primary preparation precedes SessionStep.attempt. Its
           // started timestamp becomes assistant.time.created (also on retry).
           // Consume one event only; delayed older events and ambiguous same-ms
@@ -1323,18 +1349,30 @@ async function setupOpenCodeV2(ctx) {
               && data.model?.id === observation.model.id) {
             observation.contextRequest = { kind: "opencode-v2-primary",
               assistant_message_id: data.assistantMessageID, started_at_ms: data.started,
-              event_seq: seq,
+              event_seq: seq, observed_event_seq: seq,
               context_at_ms: observation.contextAt, context_returned_at_ms: observation.contextReturnedAt }
-            publishContext(observation)
           }
         }
         if (["session.step.ended", "session.step.failed", "session.execution.succeeded",
              "session.execution.failed", "session.execution.interrupted"].includes(native.type)) {
           // An unmatched start must not acquire the following request's event.
-          if (observation && !observation.contextRequest && Number.isSafeInteger(native.created)
+          if (observation?.contextRequest && advancing) {
+            // Keep completed known values for this native step, but detach
+            // unresolved asynchronous callbacks at its end.
+            observation = { ...observation }
+            contextObservations.set(sessionID, observation)
+          } else if (observation && !observation.contextRequest && Number.isSafeInteger(native.created)
               && native.created >= observation.contextReturnedAt) {
-            contextObservations.set(sessionID, { eventSeq: observation.eventSeq })
+            retireContext(observation)
           }
+        }
+        if (advancing && observation?.contextRequest
+            && contextObservations.get(sessionID) === observation) {
+          // This is the upper bound of the contiguous native step interval,
+          // not a proof minted by the hook. Fleet compares it with the exact
+          // SID's event_sequence.seq from the native database.
+          observation.contextRequest = { ...observation.contextRequest, observed_event_seq: seq }
+          publishContext(observation)
         }
         if (native.type === "session.deleted") contextObservations.delete(sessionID)
         if (native.type === "session.deleted" && v2WorkerSessions.has(sessionID)) {
@@ -1364,6 +1402,8 @@ async function setupOpenCodeV2(ctx) {
       }
     } catch {
       // Event-stream loss is an observation gap; it does not settle a session.
+    } finally {
+      for (const observation of contextObservations.values()) retireContext(observation)
       contextObservations.clear()
     }
   })()

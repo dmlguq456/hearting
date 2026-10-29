@@ -969,7 +969,7 @@ const record = tui => JSON.parse(fs.readFileSync(target(tui)))
 const clear = () => { for (const tui of tuis) fs.rmSync(target(tui), { force: true }) }
 const flush = async () => { for (let i = 0; i < 12; i++) await new Promise(setImmediate) }
 const queue = []
-let wake
+let wake, stopStream = false
 const sequences = new Map()
 const emitEvent = (type, data, created) => {
   const seq = (sequences.get(data.sessionID) ?? -1) + 1
@@ -982,7 +982,8 @@ let clock = Date.now(), requestNumber = 0
 Date.now = () => clock
 const cases = []
 const capture = (name, native, window, extra = {}) => cases.push({
-  name, native, window, record: record(tuis[0]), ...extra })
+  name, native, window, native_event_seq: sequences.get(native.sessionID),
+  record: record(tuis[0]), ...extra })
 const model = (id = "m", context = 900000) => ({ providerID: "p", id, modelID: id,
   enabled: true, status: "active", limit: { context, output: 8192 } })
 let lookup = () => ({ location, data: [model(), model("other", 1000000)] })
@@ -1002,6 +1003,7 @@ const ctx = { location,
     signal.addEventListener("abort", () => wake?.(), { once: true })
     while (!signal.aborted) {
       if (queue.length) { yield queue.shift(); continue }
+      if (stopStream) return
       await new Promise(resolve => { wake = resolve })
     }
   } },
@@ -1170,6 +1172,92 @@ try {
   emit(afterGap); await flush()
   capture("skipped start and end plus skipped next hook reject a stream gap", afterGap, null)
   capture("fresh hook recovers after the gap", await primary(), 600000)
+  // Distinct durable incarnations may alias in BOTH assistant id and clock.
+  // Preserve known producer snapshots: the real native reader must also reject
+  // a retained old file when missing selection prevents invalidation writes.
+  lookup = () => ({ location, data: [model()] })
+  const sameID = await primary()
+  const oldKnown = record(tuis[0])
+  assert.equal(oldKnown.policy.effective_window_tokens, 900000)
+  emitEvent("session.step.failed", { sessionID: "ses_a", assistantMessageID: sameID.assistantMessageID }, sameID.started)
+  await flush()
+  emit(sameID); await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  capture("same-ID same-ms retry without hook retires consumed policy", sameID, null)
+  capture("retained old known file against same-ID same-ms retry", sameID, null, { record: oldKnown })
+  lookup = () => ({ location, data: [model("m", 600000)] })
+  await hooks.get("context")({ sessionID: "ses_a", model: { providerID: "p", id: "m" },
+    system: [], messages: [], options: {}, tools: {} })
+  capture("late hook cannot bind the start already observed", sameID, null)
+  // A new native retry in the same millisecond CAN use its own new hook.
+  emit(sameID); await flush()
+  capture("same-ID same-ms retry with fresh hook keeps new 600000 window", sameID, 600000)
+  queue.push({ type: "session.step.started", data: sameID, created: sameID.started + 1,
+    durable: { aggregateID: "ses_a", seq: sequences.get("ses_a"), version: 1 } })
+  wake?.(); await flush()
+  capture("replayed same durable start is not a distinct incarnation", sameID, 600000)
+
+  // A matching completion remains known, including zero tokens. Later native
+  // events extend that SAME step interval without borrowing another step.
+  lookup = () => ({ location, data: [model("m", 600000)] })
+  const completed = await primary()
+  emitEvent("session.step.ended", { sessionID: "ses_a", assistantMessageID: completed.assistantMessageID }, completed.started + 1)
+  await flush()
+  capture("completed same-step interval known0", completed, 600000, { active: 0 })
+  emitEvent("session.execution.succeeded", { sessionID: "ses_a" }, completed.started + 2)
+  await flush()
+  capture("completed same-step interval after execution success", completed, 600000)
+  const completedKnown = record(tuis[0])
+  // Observe a gap after a consumed binding, without a step.started branch.
+  sequences.set("ses_a", sequences.get("ses_a") + 2)
+  emitEvent("session.step.streamed", { sessionID: "ses_a", assistantMessageID: completed.assistantMessageID }, completed.started + 3)
+  await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  capture("consumed binding then gap and later streamed observation", completed, null)
+  capture("retained completed policy after missed end/start", completed, null, { record: completedKnown })
+
+  // Late callbacks cannot revive an object retired by a later same-ms step,
+  // a gap, or stream loss. New hooks still recover at the observed cursor.
+  for (const boundary of ["same-step-alias", "gap", "execution-start"]) {
+    lookup = () => ({ location, data: [model()] })
+    await primary()
+    let release
+    lookup = () => new Promise(resolve => { release = resolve })
+    const pending = await primary()
+    if (boundary === "same-step-alias") emit(pending)
+    else {
+      if (boundary === "gap") sequences.set("ses_a", sequences.get("ses_a") + 2)
+      emitEvent(boundary === "gap" ? "session.step.streamed" : "session.execution.started",
+        { sessionID: "ses_a", assistantMessageID: pending.assistantMessageID }, pending.started + 1)
+    }
+    await flush()
+    release({ location, data: [model("m", 600000)] }); await flush()
+    capture(`late model callback after ${boundary}`, pending, null)
+    assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  }
+  lookup = () => ({ location, data: [model()] })
+  const invisible = await primary()
+  const retained = record(tuis[0])
+  fs.rmSync(file(tuis[0])); fs.rmSync(file(tuis[1]), { force: true })
+  // Retry's new hook and start cannot write while no TUI is selected. The
+  // database sees a new durable step even when ID/start are byte-identical.
+  clock += 1000
+  await hooks.get("context")({ sessionID: "ses_a", model: { providerID: "p", id: "m" },
+    system: [], messages: [], options: {}, tools: {} })
+  emit(invisible); await flush()
+  select(tuis[0], "ses_a")
+  assert.deepEqual(record(tuis[0]), retained)
+  capture("missing selection then reselect aliases ID/start against retained known", invisible, null)
+  // Even with all new hook/start/end observations missing, an exact native
+  // cursor change rejects the old file. No producer-written currentness flag.
+  sequences.set("ses_a", sequences.get("ses_a") + 3)
+  capture("all later observations missing but native projection advanced", invisible, null)
+  capture("missing native aggregate cursor cannot verify retained known", invisible, null,
+    { record: retained, native_event_seq: null })
+  lookup = () => ({ location, data: [model("m", 600000)] })
+  const afterInvisible = await primary()
+  capture("fresh hook after unseen gap first reanchors", afterInvisible, null)
+  capture("next new hook after reanchor recovers 50 percent", await primary(), 600000)
   select(tuis[0], "ses_unanchored")
   clock += 1000
   await hooks.get("context")({ sessionID: "ses_unanchored", model: { providerID: "p", id: "m" },
@@ -1190,6 +1278,16 @@ try {
   assert.equal(worker.attempt_id, "att-inherited")
   assert.equal(worker.policy.attempt_id, "att-inherited")
   assert.equal(worker.session_id, "ses_worker")
+  select(tuis[0], "ses_a")
+  lookup = () => ({ location, data: [model()] })
+  await primary()
+  let releaseStopped
+  lookup = () => new Promise(resolve => { releaseStopped = resolve })
+  const stopped = await primary()
+  stopStream = true; wake?.(); await flush()
+  releaseStopped({ location, data: [model("m", 600000)] }); await flush()
+  assert.equal(record(tuis[0]).policy.effective_window_tokens, null)
+  capture("closed stream retires pending callback", stopped, null)
   // Restore the exact initial producer files for Python's real Fleet reader.
   clear()
   for (const [i, row] of initial.entries()) {

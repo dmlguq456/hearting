@@ -640,13 +640,18 @@ def _enrich_v2(sess, tick, db):
     started = latest.get("started") if latest else None
     context_at, returned_at = request.get("context_at_ms"), request.get("context_returned_at_ms")
     # PID/start/SID/model are necessary, but cannot identify a native request.
-    # V2 publishes the assistant id + step start through the existing event
-    # stream; a retry can reuse the id and change time.created. Never substitute
-    # session.updated or the row's initial creation time for that incarnation.
+    # Retries can reuse both assistant id and millisecond start. The producer's
+    # contiguous step interval must end at the independently read native cursor
+    # in the same DB snapshot as this message. Missing cursor means unknown;
+    # neither message insertion seq nor integer presence proves currentness.
+    observed_seq = request.get("observed_event_seq")
+    native_seq = observed.get("event_seq")
     policy_current = bool(
         policy_record and latest is newest_assistant and latest is not None
         and request.get("kind") == "opencode-v2-primary"
         and type(request.get("event_seq")) is int and request["event_seq"] >= 0
+        and type(observed_seq) is int and observed_seq >= request["event_seq"]
+        and type(native_seq) is int and observed_seq == native_seq
         and isinstance(latest.get("id"), str) and latest["id"]
         and request.get("assistant_message_id") == latest["id"]
         and type(started) is int and started > 0
