@@ -42,6 +42,7 @@ import unicodedata
 from collections import Counter, deque
 from collections.abc import Mapping
 from .display import label as _user_label, project as _user_project, gpu_owner as _gpu_owner_label
+from .display import codex_credits
 
 from .model import (fmt_min, dash, project_of, exec_child_is_wait,
                     current_background_shell_jobs, session_parent_visible,
@@ -8951,7 +8952,21 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
                 widths[slot] = max(widths[slot], sum(_dw(t) for t, _k in cell))
     out = []
     for row, cells in rows:
+        credit = None
+        if any(key == "hb_codex" for _text, key in row):
+            snapshot = (usage_snapshots or {}).get("codex")
+            credit = codex_credits(snapshot.get("payload") if isinstance(snapshot, Mapping) else None)
+        credit_tail = credit
         if cells is not None:
+            if credit and _dw(credit) <= widths[0]:
+                annotation = credit
+                if cells[0]:
+                    percent = next((text.strip() for text, _key in cells[0] if "%" in text), "—")
+                    summary = "5h " + percent + " " + credit
+                    if _dw(summary) <= widths[0]:
+                        annotation = summary
+                cells[0] = [(annotation, "dim")]
+                credit_tail = None
             last = max((slot for slot, cell in enumerate(cells) if cell), default=-1)
             for slot in range(last + 1):
                 cell = cells[slot]
@@ -8961,6 +8976,11 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
                     row.append((" " * (widths[slot] - used + 3), None))
             if claude_annotation and any(key == "hb_claude" for _text, key in row):
                 row.append(("   " + claude_annotation, "dim"))
+        if credit_tail:
+            suffix = "   " + credit_tail
+            if term_width is not None:
+                row = _clip_segs(row, max(0, term_width - 1 - _dw(suffix)))[0]
+            row.append((suffix, "dim"))
         # Only quota columns use the viewport fit; source-absence/error messages
         # keep their existing plain output (F-101 ledger-absent goldens).
         if cells is not None and term_width is not None:

@@ -15,6 +15,8 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 eval "$(python3 "$ROOT/tools/install/fixture_env.py" shell "$TMP" "$ROOT")"
+export OPENCODE_RUNTIME_VERSION=2.0.32
+export OPENCODE_BIN="$TMP/no-opencode-probe"
 
 # A hosted CI runner has no vendor Codex command. Seed one outside the
 # harness-owned ingress so activation exercises the real binding/protection
@@ -23,6 +25,8 @@ VENDOR_BIN="$TMP/vendor/bin"
 mkdir -p "$VENDOR_BIN"
 printf '%s\n' '#!/usr/bin/env sh' 'printf "%s\n" "codex-cli 0.151.0"' > "$VENDOR_BIN/codex"
 chmod 755 "$VENDOR_BIN/codex"
+printf '%s\n' '#!/usr/bin/env sh' '[ "$1" = --version ] || exit 70' 'printf "%s\n" "2.0.32"' > "$VENDOR_BIN/opencode"
+chmod 755 "$VENDOR_BIN/opencode"
 PATH="$VENDOR_BIN${PATH:+:$PATH}"
 export PATH
 
@@ -43,7 +47,19 @@ mkdir -p "$PACKAGED_SOURCE"
 git -C "$ROOT" archive --format=tar HEAD > "$TMP/packaged-source.tar"
 tar -xf "$TMP/packaged-source.tar" -C "$PACKAGED_SOURCE"
 for changed_file in \
+  tools/install/installer.py \
   tools/install/runtime_activation.py \
+  tools/install/projector.py \
+  tools/install/drivers/opencode.py \
+  tools/install/manifest.py \
+  tools/install/safe_fs.py \
+  tools/install/test_safe_fs.py \
+  tools/install/opencode_driver.test.py \
+  tools/install/runtime-activation.test.sh \
+  adapters/opencode/bin/preflight.sh \
+  core/ADAPTATION.md \
+  adapters/claude/plugin-marketplace/plugins/hearting-claude/core/ADAPTATION.md \
+  adapters/codex/plugins/hearting-codex/core/ADAPTATION.md \
   tools/install/runtime_activation.test.py \
   tools/install/projection-completeness.test.sh \
   tools/install/release-lifecycle.test.sh \
@@ -185,7 +201,7 @@ PY
   test -L "$HOME/.claude/hooks/spec-read-marker.sh" || fail "$mode lost Claude kernel hooks"
   test -L "$HOME/.claude/statusline.sh" || fail "$mode lost Claude statusline"
   test -x "$HOME/.claude/statusline.sh" || fail "$mode Claude statusline is not executable"
-  test -L "$HOME/.config/opencode/plugins/hearting-guards.js" || fail "$mode lost OpenCode kernel guard plugin"
+  test ! -e "$HOME/.config/opencode/plugins/hearting-guards.js" || fail "$mode duplicated OpenCode guard discovery"
   { test -f "$HOME/.config/opencode/plugins/hearting-guards/index.ts" \
     && test ! -L "$HOME/.config/opencode/plugins/hearting-guards/index.ts"; } \
     || fail "$mode lost OpenCode V2 guard package entrypoint (must be a regular file inside the package)"
@@ -201,6 +217,41 @@ assert settings["autoMemoryEnabled"] is False, settings
 PY
 
   harness runtime status --runtime all --json > "$TMP/$mode-status.json"
+  python3 - "$TMP/$mode-status.json" "$HOME/.config/opencode/plugins/hearting-guards/index.ts" <<'PY'
+import json, pathlib, sys
+row = next(r for r in json.load(open(sys.argv[1]))["runtimes"] if r["runtime"] == "opencode")
+module = pathlib.Path(row["active_root"]) / "adapters/opencode/plugins/hearting-guards.js"
+assert module.is_file(), module
+assert f'from {json.dumps(str(module))}' in pathlib.Path(sys.argv[2]).read_text()
+PY
+  AGENT_HOME="$ROOT" "$ROOT/adapters/opencode/bin/preflight.sh" headless --check "$ROOT" \
+    > "$TMP/$mode-opencode-preflight.log" \
+    || { cat "$TMP/$mode-opencode-preflight.log" >&2; fail "$mode OpenCode headless preflight"; }
+  guard_package="$HOME/.config/opencode/plugins/hearting-guards/index.ts"
+  # destructive-ok: reason=simulate a missing selected package; boundary=exact rendered package in this fixture's private runtime home
+  mv "$guard_package" "$guard_package.fixture-missing"
+  if AGENT_HOME="$ROOT" "$ROOT/adapters/opencode/bin/preflight.sh" headless --check "$ROOT" \
+    > "$TMP/$mode-opencode-missing-package.log" 2>&1; then
+    fail "$mode OpenCode preflight accepted a missing selected carrier"
+  fi
+  # destructive-ok: reason=restore the simulated missing package; boundary=exact rendered package in this fixture's private runtime home
+  mv "$guard_package.fixture-missing" "$guard_package"
+  if [ "$mode" = packaged ]; then
+    guard_module=$(python3 - "$TMP/$mode-status.json" <<'PY'
+import json, pathlib, sys
+row = next(r for r in json.load(open(sys.argv[1]))["runtimes"] if r["runtime"] == "opencode")
+print(pathlib.Path(row["active_root"]) / "adapters/opencode/plugins/hearting-guards.js")
+PY
+)
+    # destructive-ok: reason=simulate a missing bundle dependency; boundary=exact guard module in the fixture's private copied packaged source
+    mv "$guard_module" "$guard_module.fixture-missing"
+    if AGENT_HOME="$ROOT" "$ROOT/adapters/opencode/bin/preflight.sh" headless --check "$ROOT" \
+      > "$TMP/$mode-opencode-missing-module.log" 2>&1; then
+      fail "$mode OpenCode preflight accepted a missing bundle module"
+    fi
+    # destructive-ok: reason=restore the simulated missing dependency; boundary=exact guard module in the fixture's private copied packaged source
+    mv "$guard_module.fixture-missing" "$guard_module"
+  fi
   python3 - "$TMP/$mode-status.json" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))

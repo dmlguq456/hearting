@@ -1325,9 +1325,13 @@ def cmd_runtime(args):
                     args.mode,
                     args.source,
                     args.scope,
+                    transaction_snapshot=snapshots_by_runtime[runtime],
                 )
             elif args.runtime_command == "refresh":
-                report = runtime_activation.refresh(runtime, args.scope)
+                report = runtime_activation.refresh(
+                    runtime, args.scope,
+                    transaction_snapshot=snapshots_by_runtime[runtime],
+                )
             elif args.runtime_command == "doctor":
                 report = runtime_activation.doctor(runtime, args.strict, args.scope)
                 if not report["ok"]:
@@ -1462,7 +1466,7 @@ def cmd_runtime(args):
             lines.append("compute-hosts-config: " + inventory["status"] + " " + inventory["path"])
             for report in reports:
                 report["compute_hosts_config"] = inventory
-    except runtime_activation.ActivationError as exc:
+    except Exception as exc:
         rollback_errors = []
         for snapshot in reversed(snapshots):
             try:
@@ -1481,30 +1485,23 @@ def cmd_runtime(args):
         for report in reports:
             report["rolled_back"] = True
         if snapshots:
-            lines.append("runtime invocation rolled back across all selected runtimes")
+            lines.append("runtime invocation rollback encountered changed targets" if rollback_errors
+                         else "runtime invocation rolled back across all selected runtimes")
         if rollback_errors:
             lines.append("rollback errors: " + "; ".join(rollback_errors))
         lines.append(f"runtime {args.runtime_command}: blocked: {exc}")
         for snapshot in snapshots:
             runtime_activation.discard_runtime_state(snapshot)
+        if launcher_snapshot is not None:
+            codex_launcher.discard_snapshot(launcher_snapshot)
+        if not isinstance(exc, runtime_activation.ActivationError) and not rollback_errors:
+            raise
         return _runtime_emit_shape(
             args.runtime_command,
             reports + [{"error": str(exc)}],
             EXIT_BLOCKED,
             lines,
         )
-    except Exception:
-        for snapshot in reversed(snapshots):
-            if not snapshot.get("_sealed"):
-                runtime_activation.seal_runtime_state(snapshot)
-            runtime_activation.restore_runtime_state(snapshot)
-        if launcher_snapshot is not None:
-            if "postimages" not in launcher_snapshot:
-                codex_launcher.seal_snapshot(launcher_snapshot)
-            codex_launcher.restore_snapshot(launcher_snapshot)
-        for snapshot in snapshots:
-            runtime_activation.discard_runtime_state(snapshot)
-        raise
 
     for snapshot in snapshots:
         runtime_activation.discard_runtime_state(snapshot)

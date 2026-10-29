@@ -14,6 +14,7 @@ import re
 import time
 
 from .view_model import ExplorerViewModel
+from ..display import codex_credits
 
 HARNESSES = ("claude", "codex", "opencode")
 _SEG_DIM = "dim"
@@ -1666,7 +1667,13 @@ def _usage_records(snapshot, session_rows, now):
                 shown[slot] = [unit, int(pct), reset_text]
         if any(shown):
             text = harness + (" " + annotation if harness == "claude" and annotation else "")
-            usage.append({"text": text, "key": "hb_" + harness, "windows": shown})
+            item = {"text": text, "key": "hb_" + harness, "windows": shown}
+            if harness == "codex":
+                snap = (_get(snapshot, "usage_snapshots", default={}) or {}).get(harness)
+                credit = codex_credits(snap.get("payload") if isinstance(snap, Mapping) else None)
+                if credit:
+                    item["credits"] = credit
+            usage.append(item)
         elif harness == "claude" and claude_snapshot is not None:
             usage.append(_claude_usage_unavailable(claude_snapshot, now))
     return usage

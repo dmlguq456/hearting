@@ -558,6 +558,11 @@ def window_release_epoch(harness, *, usage_gate_used_percent=100, now=None, stal
         return None
     now = time.time() if now is None else now
     payload = cache.read(harness, now=now, stale_max=stale_after).get("payload")
+    return _payload_release_epoch(payload, harness, usage_gate_used_percent, now)
+
+
+def _payload_release_epoch(payload, harness, usage_gate_used_percent, now):
+    """Judge windows from one snapshot without reading the cache again."""
     rows = payload.get("rl_windows" if harness == "opencode" else "windows") if isinstance(payload, dict) else None
     if not isinstance(rows, list):
         return None
@@ -583,11 +588,21 @@ def gauge_limit_epoch(harness, *, now=None, stale_after=3600):
     manual `HARNESS_CAPACITY_SCORES` entry replaces the gauge exactly as it does
     in `capacity_report`, and Claude has no gauge windows here (its limits stay
     native). No window, a past reset, or a cache older than `stale_after`
-    stays unknown.
+    stays unknown. Codex usable credits in that same fresh snapshot lift only
+    this gauge hold; headroom and the soft gate still use the original windows.
     """
     if harness not in ("codex", "opencode") or harness in _manual_scores():
         return None
-    return window_release_epoch(harness, usage_gate_used_percent=100, now=now, stale_after=stale_after)
+    cache = _usage_cache()
+    if cache is None:
+        return None
+    now = time.time() if now is None else now
+    payload = cache.read(harness, now=now, stale_max=stale_after).get("payload")
+    if harness == "codex":
+        from fleet.collectors.codex import credits_usable
+        if credits_usable(payload):
+            return None
+    return _payload_release_epoch(payload, harness, 100, now)
 
 
 def gate_release_epoch(harness, source, *, usage_gate_used_percent=90, now=None, stale_after=3600):

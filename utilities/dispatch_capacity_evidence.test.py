@@ -154,6 +154,21 @@ class QuotaEvidenceTests(unittest.TestCase):
                 self.assertEqual(selected[:2], ("codex", "primary"))
         self.assertEqual(before, (self.jobs.read_bytes(), self.log.read_bytes(), self.config.read_bytes()))
 
+    def test_usable_codex_credits_do_not_lift_native_claude_rejection(self):
+        from fleet.collectors import usage_cache
+        with mock.patch.dict(os.environ, self.env):
+            usage_cache.record("codex", {"windows": [["7d", 100, self.now + 86400]],
+                                         "credits": {"has_credits": True}}, now=self.now)
+            # Exercise the credit exception rather than this class's manual score.
+            with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": ""}):
+                states = Q.usage_states(self.jobs, now=self.now)
+                self.assertEqual(states["codex"], "ok")
+                self.assertTrue(states["claude"].startswith("limited("))
+                self.assertEqual(Q.harness_hold(self.jobs, "claude", now=self.now)["until_epoch"],
+                                 self.now + 86400)
+                self.assertEqual(Q.active_limits(self.jobs, now=self.now)["claude"]["scope_authority"],
+                                 "launch-bound")
+
     def test_gauge_and_batch_selection_consume_the_same_scoped_feedback(self):
         capacity = load("quota_gauge", "harness-capacity.py")
         batch = load("quota_batch", "dispatch-batch.py")
@@ -1329,6 +1344,28 @@ class SharedGaugeHoldTests(unittest.TestCase):
         self.assertEqual(limits["codex"]["scope_authority"], "gauge")
         self.assertEqual(limits["codex"]["model_scope"], "all")
 
+    def test_credit_matrix_reaches_usage_hold_and_active_limit_readers(self):
+        reset = self.now + 86400
+        cases = [({"credits": {"has_credits": True}, "spend_control_reached": None}, True),
+                 ({"credits": {"has_credits": True}}, True),
+                 ({"credits": {"has_credits": False, "unlimited": True}, "spend_control_reached": False}, True),
+                 ({"credits": {"has_credits": False, "unlimited": False}}, False),
+                 ({"credits": {"has_credits": True}, "spend_control_reached": True}, False),
+                 ({"credits": {"has_credits": True}, "spend_control_reached": "false"}, False),
+                 ({"credits": {"has_credits": "true", "unlimited": 1}}, False),
+                 ({"credits": {"balance": "56446.1701575000"}}, False),
+                 ({"credits": None}, False), ({}, False)]
+        for metadata, usable in cases:
+            with self.subTest(metadata=metadata):
+                self.record("codex", {"windows": [["7d", 100, reset]], **metadata})
+                states, hold, limits = self.readers()
+                if usable:
+                    self.assertEqual((states["codex"], hold, limits.get("codex")), ("ok", None, None))
+                else:
+                    self.assertEqual(states["codex"], f"limited({Q._iso(reset)})")
+                    self.assertEqual(hold["until_epoch"], reset)
+                    self.assertEqual(limits["codex"]["scope_authority"], "gauge")
+
     def test_ninety_nine_past_reset_and_stale_cache_stay_ok(self):
         future = self.now + 86400
         self.record("codex", {"windows": [["7d", 99, future]]})
@@ -1342,6 +1379,19 @@ class SharedGaugeHoldTests(unittest.TestCase):
         self.record("codex", {"windows": [["7d", 100, future]]}, age=4000)
         states, hold, limits = self.readers()
         self.assertEqual((states["codex"], hold, limits.get("codex")), ("ok", None, None))
+
+    def test_credits_do_not_override_model_eligibility(self):
+        import model_profile
+        import opencode_runtime
+        self.record("codex", {"windows": [["7d", 100, self.now + 86400]],
+                              "credits": {"has_credits": True}})
+        with mock.patch.object(model_profile, "resolve_runtime_profile", return_value=(
+                {"model": "opencode-go/model", "budget": "high"}, object())), \
+                mock.patch.object(opencode_runtime, "automatic_candidates", return_value=[
+                    {"model": "opencode-go/model", "state": "unavailable"}]):
+            states = Q.usage_states(self.jobs, profile="deep", now=self.now)
+        self.assertEqual(states["codex"], "ok")
+        self.assertTrue(states["opencode"].startswith("limited(provider-model-unavailable:"), states)
 
     def test_opencode_full_rl_window_holds_all_three_readers(self):
         reset = self.now + 86400
@@ -1377,6 +1427,12 @@ class SharedGaugeHoldTests(unittest.TestCase):
                          "limited(2099-01-01T00:00:00Z)")
         self.assertEqual(Q.harness_hold(self.jobs, "codex", now=self.now)["until_epoch"],
                          Q._text_reset_epoch("2099-01-01T00:00:00Z", self.now, os.environ))
+        self.record("codex", {"windows": [["7d", 100, self.now + 86400]],
+                              "credits": {"has_credits": True}})
+        states, hold, limits = self.readers()
+        self.assertEqual(states["codex"], "limited(2099-01-01T00:00:00Z)")
+        self.assertEqual(hold["until_epoch"], Q._text_reset_epoch("2099-01-01T00:00:00Z", self.now, os.environ))
+        self.assertNotIn("codex", limits)  # legacy hold survives independently of active gauge items
 
     def test_later_gauge_reset_wins_over_the_legacy_marker(self):
         stamp = datetime.fromtimestamp(self.now, timezone.utc).isoformat().replace("+00:00", "Z")
