@@ -55,6 +55,20 @@ def resolve_delivery_batch(jobs: Path, record: dict, *, recipient_key: str = "",
     never writes registry, route, pending-delivery, or lease state.
     """
     try:
+        seed_ids = record.get("attempt_ids")
+        receipt = record.get("receipt") or {}
+        if (not isinstance(seed_ids, list) or len(seed_ids) != 1
+                or not isinstance(receipt, dict)
+                or receipt.get("kind") in {"notice", "supervision", "human-gate"}
+                or receipt.get("replacement_attention") or receipt.get("human_gate")
+                or receipt.get("state") != "ready"
+                or receipt.get("delivery_classification") != "success"
+                or not isinstance(receipt.get("children"), list)
+                or not receipt["children"]
+                or any(not isinstance(child, dict)
+                       or child.get("required_action") != "advance-completed"
+                       for child in receipt["children"])):
+            return None
         from dispatch_contract import parse_registry_metadata, attempt_process_quiescence
         from dispatch_attempt_policy import committed_outcome
         jobs = Path(jobs).resolve(strict=True)
@@ -79,20 +93,6 @@ def resolve_delivery_batch(jobs: Path, record: dict, *, recipient_key: str = "",
         after = jobs.stat()
         if (before.st_ino, before.st_size, before.st_mtime_ns) != (
                 after.st_ino, after.st_size, after.st_mtime_ns):
-            return None
-        seed_ids = record.get("attempt_ids")
-        receipt = record.get("receipt") or {}
-        if (not isinstance(seed_ids, list) or len(seed_ids) != 1
-                or not isinstance(receipt, dict)
-                or receipt.get("kind") in {"notice", "supervision", "human-gate"}
-                or receipt.get("replacement_attention") or receipt.get("human_gate")
-                or receipt.get("state") != "ready"
-                or receipt.get("delivery_classification") != "success"
-                or not isinstance(receipt.get("children"), list)
-                or not receipt["children"]
-                or any(not isinstance(child, dict)
-                       or child.get("required_action") != "advance-completed"
-                       for child in receipt["children"])):
             return None
         seed = seed_ids[0]
         matches = [(fields, meta) for fields, meta in parsed if meta.get("attempt_id") == seed]

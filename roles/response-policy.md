@@ -58,7 +58,9 @@ Each clause is one contract line plus the signal that it was violated.
   user has to ask what a term or a sentence in your own reply meant.
   In user-facing replies, identify other sessions by Fleet tag and pane (SID
   when needed), with their role in parentheses; use herdr name and pane when
-  no tag exists, rather than internal abbreviations.
+  no tag exists, rather than internal abbreviations. Durable card and peer trailer
+  references keep the full exact native SID and observed pane together with the
+  confirmed tag; unknown numbers stay absent, never replaced by a hash.
   For the first core subject in a message that must stand on its own, carry the
   source description and the comparison condition that distinguishes it, then
   add its original identifier as a reference: “the fixed two-speaker,

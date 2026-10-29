@@ -53,13 +53,18 @@ def _lineage(value, harness, session_id):
 
 
 def _retain(jobs: Path, carrier: str, harness: str, session_id: str,
-            record: dict, lineage: dict, *, ensure_runner=True):
+            record: dict, *, ensure_runner=True):
     import peer_obligations
     storage = record.get("_storage_key") or session_id
+    jobs, lineage = pending_lineage(record, harness, storage, jobs)
     identity = {"jobs": str(jobs), "storage_recipient": storage,
-                "recipient_harness": harness, "recipient_session_id": session_id,
+                "recipient_harness": harness, "recipient_session_id": lineage["session_id"],
                 "lineage": lineage}
-    duty = peer_obligations.ObligationStore(jobs.parent).create(
+    store = peer_obligations.ObligationStore(jobs.parent)
+    legacy_identity = {"state_root": str(jobs.parent), "storage_sid": storage,
+                       "harness": harness, "delivery_id": record["delivery_id"],
+                       "receipt_digest": record["receipt_digest"]}
+    duty = store.get(peer_obligations.stable_duty_id("session-notice", legacy_identity)) or store.create(
         peer_obligations.stable_duty_id("run-notice", identity, record["delivery_id"]),
         "run-notice", identity,
         {"carrier": carrier, "delivery_id": record["delivery_id"],
@@ -74,6 +79,39 @@ def _retain(jobs: Path, carrier: str, harness: str, session_id: str,
 def _stored_lineage(jobs: Path, lineage: dict) -> str:
     return LINEAGE_PREFIX + json.dumps({"jobs": str(jobs), "binding": lineage},
         sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def pending_lineage(record, harness, storage, jobs=None):
+    """Read the original notice authority; old notices keep their storage provenance."""
+    validate_pending_record(record)
+    from harness_capabilities import parent_completion
+    if (not storage or parent_completion(harness).get("carrier") != record.get("recipient_kind")
+            or record.get("recipient_digest") != pending_delivery.recipient_digest(storage)):
+        raise ValueError("notice-storage-lineage-conflict")
+    values = [value[len(LINEAGE_PREFIX):] for value in record.get("lineage", [])
+              if isinstance(value, str) and value.startswith(LINEAGE_PREFIX)]
+    if not values:
+        tag = "notice-" + hashlib.sha256(f"{KIND}\0{record['receipt']['key']}".encode()).hexdigest()[:32]
+        if (record.get("attempt_ids") != [tag] or record.get("parent_attempt_id") != tag
+                or record.get("row_revisions") != {tag: KIND}):
+            raise ValueError("notice-lineage-missing")
+    if len(values) > 1:
+        raise ValueError("notice-lineage-ambiguous")
+    stored = json.loads(values[0]) if values else None
+    if values and not isinstance(stored, dict):
+        raise ValueError("notice-lineage-invalid")
+    if isinstance(stored, dict) and set(stored) == {"jobs", "binding"}:
+        raw_jobs = stored["jobs"]
+        if not isinstance(raw_jobs, str) or not Path(raw_jobs).is_absolute() or Path(raw_jobs).is_symlink():
+            raise ValueError("notice-registry-invalid")
+        recorded_jobs = Path(raw_jobs).resolve(strict=False)
+        if jobs is not None and recorded_jobs.parent != Path(jobs).resolve(strict=False).parent:
+            raise ValueError("notice-registry-conflict")
+        jobs, stored = recorded_jobs, stored["binding"]
+        if not isinstance(stored, dict):
+            raise ValueError("notice-lineage-invalid")
+    lineage = _lineage(stored, harness, storage)
+    return (Path(jobs) if jobs is not None else None), lineage
 
 
 def notify(harness: str, session_id: str, *, key: str, subject: str, text: str,
@@ -107,7 +145,7 @@ def notify(harness: str, session_id: str, *, key: str, subject: str, text: str,
     elif (record.get("receipt_digest") != receipt_digest(receipt)
           or record.get("recipient_kind") != carrier):
         raise ValueError("notice-key-identity-conflict")
-    _retain(jobs_path, carrier, harness, session_id, record, binding)
+    _retain(jobs_path, carrier, harness, session_id, record)
     return record
 
 
@@ -125,22 +163,7 @@ def retain_pending(jobs, record) -> bool:
         storage = record.get("_storage_key")
         if not harness or not storage:
             return False
-        lineage_value = next((value[len(LINEAGE_PREFIX):] for value in record.get("lineage", [])
-                              if isinstance(value, str) and value.startswith(LINEAGE_PREFIX)), None)
-        stored = json.loads(lineage_value) if lineage_value else None
-        if isinstance(stored, dict) and set(stored) == {"jobs", "binding"}:
-            recorded_jobs = Path(stored["jobs"]).expanduser().resolve(strict=False)
-            if recorded_jobs.parent != jobs_path.parent:
-                return False
-            jobs_path = recorded_jobs
-            lineage = stored["binding"]
-        else:
-            lineage = (stored if stored else
-                       {"kind": "provenance", "harness": harness, "session_id": storage})
-        if not isinstance(lineage, dict):
-            return False
-        lineage = _lineage(lineage, harness, lineage.get("session_id", storage))
-        _retain(jobs_path, carrier, harness, lineage["session_id"], record, lineage,
+        _retain(jobs_path, carrier, harness, storage, record,
                 ensure_runner=False)
         return True
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):

@@ -48,6 +48,83 @@ _PARENT = (
 )
 
 
+class ReapDeadlineTest(unittest.TestCase):
+    """A deadline is an error only while a pinned fixture process survives."""
+
+    def setUp(self):
+        patches = {
+            "marked_processes": mock.patch.object(fixture_processes, "marked_processes"),
+            "start": mock.patch.object(fixture_processes, "_start_ticks", return_value="101"),
+            "state": mock.patch.object(fixture_processes, "_state", return_value="S"),
+            "clock": mock.patch.object(fixture_processes.time, "monotonic", side_effect=[0, 10, 10]),
+            "sleep": mock.patch.object(fixture_processes.time, "sleep"),
+            "own_group": mock.patch.object(fixture_processes.os, "getpgrp", return_value=1),
+            "group": mock.patch.object(fixture_processes.os, "getpgid", return_value=2),
+            "kill": mock.patch.object(fixture_processes.os, "kill"),
+            "killpg": mock.patch.object(fixture_processes.os, "killpg"),
+        }
+        for name, patch in patches.items():
+            setattr(self, name, patch.start())
+            self.addCleanup(patch.stop)
+
+    def test_empty_initial_batch_at_deadline_is_a_no_op(self):
+        self.marked_processes.return_value = {}
+        self.assertEqual(fixture_processes.reap("private-marker"), [])
+        self.kill.assert_not_called()
+        self.killpg.assert_not_called()
+        self.sleep.assert_not_called()
+
+    def test_process_gone_at_deadline_is_not_a_survivor(self):
+        self.marked_processes.side_effect = [{101: "101"}, {}]
+        self.start.side_effect = ["101", None, None]
+        self.assertEqual(fixture_processes.reap("private-marker"), [101])
+        self.killpg.assert_called_once_with(2, signal.SIGKILL)
+        self.sleep.assert_not_called()
+
+    def test_live_writer_at_deadline_still_raises(self):
+        self.marked_processes.return_value = {101: "101"}
+        with self.assertRaisesRegex(TimeoutError, r"survived SIGKILL: \[101\]"):
+            fixture_processes.reap("private-marker")
+        self.killpg.assert_called_once_with(2, signal.SIGKILL)
+
+    def test_pid_reused_before_signal_is_not_killed(self):
+        self.marked_processes.side_effect = [{101: "old"}, {}]
+        self.assertEqual(fixture_processes.reap("private-marker"), [])
+        self.group.assert_not_called()
+        self.kill.assert_not_called()
+        self.killpg.assert_not_called()
+
+    def test_pid_reused_after_signal_is_not_a_survivor(self):
+        self.marked_processes.side_effect = [{101: "101"}, {}]
+        self.start.side_effect = ["101", "new", "new"]
+        self.assertEqual(fixture_processes.reap("private-marker"), [101])
+        self.killpg.assert_called_once_with(2, signal.SIGKILL)
+
+    def test_zombie_at_deadline_cannot_keep_writing(self):
+        self.marked_processes.side_effect = [{101: "101"}, {}]
+        self.state.return_value = "Z"
+        self.assertEqual(fixture_processes.reap("private-marker"), [101])
+
+    def test_callers_group_uses_only_the_pinned_process_signal(self):
+        self.marked_processes.side_effect = [{101: "101"}, {}]
+        self.group.return_value = 1
+        self.start.side_effect = ["101", None, None]
+        self.assertEqual(fixture_processes.reap("private-marker"), [101])
+        self.kill.assert_called_once_with(101, signal.SIGKILL)
+        self.killpg.assert_not_called()
+
+    def test_second_scan_live_child_still_raises_after_first_process_exits(self):
+        self.marked_processes.side_effect = [{101: "101"}, {102: "102"}]
+        self.clock.side_effect = [0, 1, 10]
+        # Pin the first snapshot before its process disappears.
+        starts = iter(["101", None, "102", None, "102"])
+        self.start.side_effect = lambda pid: next(starts)
+        with self.assertRaisesRegex(TimeoutError, r"survived SIGKILL: \[102\]"):
+            fixture_processes.reap("private-marker")
+        self.assertEqual(self.marked_processes.call_count, 2)
+        self.assertEqual(self.killpg.call_count, 2)
+
+
 class ReapTest(unittest.TestCase):
     @staticmethod
     def _wait_for(path, timeout=10):

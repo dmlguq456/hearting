@@ -1576,6 +1576,33 @@ class DispatchBatchTest(unittest.TestCase):
         reserve.assert_not_called()
         popen.assert_not_called()
 
+
+    def test_d5_real_history_resolver_preserves_disabled_peer_and_tuple_guards(self):
+        parent={"parent_harness":"claude","parent_transport":"headless","parent_sandbox":"adapter-default","launch_authority":"conductor"}
+        nodes=[]; rows={}; tuples=[]
+        for name,h,hop,ordinal in (("peer","codex","cross-harness-headless",2),("gap","claude","same-harness-headless",1)):
+            row={**parent,"child_harness":h,"status":"supported","failure_class":"","failure_scope":"none"}
+            tuples.append(row)
+            nodes.append({"id":name,"fallback_hops":[{"ordinal":ordinal,"fallback_hop":hop,"candidates":[dict(row)]}]})
+            rows[name]=([], {"harness":h})
+        route={"dispatch_evidence":{"tuples":tuples}}
+        config=self.base/"d5-history.yaml"
+        config.write_text((ROOT/"profiles/dispatch-defaults.yaml").read_text().replace("  enabled: [claude, codex, opencode]","  enabled: [claude, opencode]"))
+        with mock.patch.dict(os.environ,{"DISPATCH_DEFAULTS_CONFIG":str(config)}), \
+             mock.patch.object(BATCH,"partial_source_rows",return_value=rows), mock.patch.object(BATCH,"validate_attempt_metadata"):
+            got=BATCH.partial_source_assignments(self.jobs,route,nodes,{},parent)
+            payload={"manifest":{"members":[{"route_node":n['id'],"harness":h,"fallback_hop":hop,"fallback_ordinal":ordinal} for n,h,hop,ordinal in got]}}
+            self.assertEqual(BATCH.prior_batch_assignments(payload,route,nodes,parent),got)
+            for mutation in ("parent","counterpart","ordinal"):
+                other=json.loads(json.dumps(route)); doc=json.loads(json.dumps(payload)); identity=parent
+                if mutation=="parent":identity={**parent,"parent_harness":"opencode"}
+                if mutation=="counterpart":other["dispatch_evidence"]["tuples"]=tuples[1:]
+                if mutation=="ordinal":doc["manifest"]["members"][0]["fallback_ordinal"]=99
+                with self.assertRaises((BATCH.BatchError,BATCH.DISPATCH_NODE.DispatchNodeError)):
+                    BATCH.prior_batch_assignments(doc,other,nodes,identity)
+            config.unlink()  # even unreadable defaults cannot cancel history
+            self.assertEqual(BATCH.prior_batch_assignments(payload,route,nodes,parent),got)
+
     def test_at5_partial_continuation_reuses_peers_and_claims_only_gap(self):
         self._partial_continuation_launch()
 
@@ -1823,6 +1850,13 @@ class DispatchBatchTest(unittest.TestCase):
 
     def _partial_continuation_launch(self, *, retry_prompt=None, sealed=False,
                                     parent_attempt="att-parent-fixture", original_prompt=None):
+        # D5/R-1: a successful Codex peer may be disabled today; only the
+        # pending Claude gap owes current launch policy. All fixtures stay private.
+        config = self.base / "d5-defaults.yaml"
+        baseline = (ROOT / "profiles/dispatch-defaults.yaml").read_text()
+        config.write_text(baseline.replace("  enabled: [claude, codex, opencode]", "  enabled: [claude, opencode]"))
+        policy_env = mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)})
+        policy_env.start(); self.addCleanup(policy_env.stop)
         source_legs = self.legs(prompt=original_prompt)
         _source_manifest, continuation, partial = self.partial_continuation(source_legs)
         peer, gap = source_legs
@@ -1913,6 +1947,16 @@ class DispatchBatchTest(unittest.TestCase):
                 "AGENT_DISPATCH_CURRENT_TRANSPORT": "headless",
                 "AGENT_DISPATCH_CURRENT_SANDBOX": "workspace-write",
             }))
+            before_rows = self.jobs.read_bytes()
+            config.write_text(baseline.replace("  enabled: [claude, codex, opencode]", "  enabled: [opencode]"))
+            with contextlib.redirect_stdout(output):
+                policy_rc = BATCH.main(argv)
+            self.assertEqual(policy_rc, 65, output.getvalue())
+            self.assertEqual(json.loads(output.getvalue())["reason"], "explicit-adapter-disabled-by-user-policy")
+            self.assertEqual(self.jobs.read_bytes(), before_rows)
+            reserve.assert_not_called(); popen.assert_not_called()
+            config.write_text(baseline.replace("  enabled: [claude, codex, opencode]", "  enabled: [claude, opencode]"))
+            gate.reset_mock(); output.seek(0); output.truncate(0)
             with mock.patch("dispatch_capacity_evidence.active_limits", return_value={
                     "claude": {"reset_epoch": 9999999999}}), contextlib.redirect_stdout(output):
                 blocked_rc = BATCH.main(argv)
@@ -2534,6 +2578,45 @@ class DispatchBatchTest(unittest.TestCase):
             "claude": 5.0, "codex": 60.0, "opencode": 80.0,
         }), mock.patch("dispatch_capacity_evidence.active_limits", return_value=limits or {}):
             return BATCH.assign_harnesses(route, route["nodes"], allow_degraded=False, jobs=self.jobs)
+
+
+    def test_d5_new_choices_and_explicit_target_do_not_widen_automatic_pool(self):
+        config=self.base/"d5-choices.yaml"
+        config.write_text((ROOT/"profiles/dispatch-defaults.yaml").read_text().replace(
+            "  enabled: [claude, codex, opencode]","  enabled: [claude, opencode]"))
+        with mock.patch.dict(os.environ,{"DISPATCH_DEFAULTS_CONFIG":str(config)}):
+            route=self._pinned_balanced_route()
+            rows,_,_=self._assign_gated(route)
+            self.assertNotIn("codex",{row[1] for row in rows})
+            route=self._pinned_balanced_route(pin="codex")
+            rows,_,_=self._assign_gated(route)
+            self.assertEqual({row[1] for row in rows},{"codex"})
+            # A checked enabled pin can select outside the original allocation
+            # and bands. Removing it must immediately restore the original pool.
+            route=self._pinned_balanced_route(pin="opencode")
+            route["dispatch_allocation"]["harness_order"]=["claude"]
+            for node in route["nodes"]:
+                node["harness_policy"].update(primary=["claude"],relief=[],last_resort=[])
+            rows,_,_=self._assign_gated(route)
+            self.assertEqual({row[1] for row in rows},{"opencode"})
+            del route["selection_pins"]
+            rows,_,_=self._assign_gated(route)
+            self.assertEqual({row[1] for row in rows},{"claude"})
+            route["selection_pins"]={"contract_version":1,"worker":{"harness":"codex"}}
+            with self.assertRaises(BATCH.BatchError) as denied:
+                self._assign_gated(route)
+            self.assertEqual(denied.exception.reason,"explicit-adapter-disabled-by-user-policy")
+
+
+    def test_d5_legacy_order_does_not_exclude_checked_batch_candidates(self):
+        config=self.base/"legacy.yaml"
+        route=self._pinned_balanced_route();route["dispatch_allocation"]["harness_order"]=["claude"]
+        for version in (1,2):
+            config.write_text(f"schema_version: {version}\ndepth1_owner: [claude]\nopencode:\n  relief_only: {str(version == 1).lower()}\n"+
+                ("allocation:\n  strategy: least-recent-attempts\n  window: 30\n" if version==2 else "")+"capabilities:\n")
+            with mock.patch.dict(os.environ,{"DISPATCH_DEFAULTS_CONFIG":str(config)}):
+                rows,_,_=self._assign_gated(route)
+            self.assertEqual({row[1] for row in rows},{"codex"})
 
     def test_a_sealed_worker_pin_is_placed_even_when_the_usage_gate_would_skip_it(self):
         # claude has 5% headroom (gated, not at a limit). With `--pin worker=claude` it still takes
@@ -3872,6 +3955,8 @@ class DispatchBatchTest(unittest.TestCase):
 
         original_rows = self.jobs.read_bytes()
         with stack:
+            stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE, "current_launch_harnesses", side_effect=AssertionError("historical reuse must not read live defaults")))
+            stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE, "current_launch_defaults", side_effect=AssertionError("historical reuse must not read live defaults")))
             stack.enter_context(mock.patch("dispatch_capacity_evidence.active_limits", side_effect=AssertionError("live replay spends no quota")))
             stack.enter_context(mock.patch.object(BATCH.DISPATCH_NODE, "resolve_checked_tuple", side_effect=resolve_side_effect))
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=self.route))
@@ -4273,6 +4358,7 @@ class DispatchBatchTest(unittest.TestCase):
             return [sys.executable, "-c", script]
         output, error = io.StringIO(), io.StringIO()
         with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(BATCH, "select_launch_lifecycle", return_value="detached"))
             stack.enter_context(mock.patch.object(BATCH, "load_route", return_value=route))
             stack.enter_context(mock.patch.object(BATCH, "assign_harnesses", return_value=(
                 assignments, "cross-harness", {"families_considered": [], "usable_families": [],

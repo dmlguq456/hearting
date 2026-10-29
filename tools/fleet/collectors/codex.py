@@ -1813,9 +1813,9 @@ def share_managed_tags(sessions):
 
     A managed Codex session is two `codex` processes on one `--state-dir`: the
     `--remote .../managed-tui.sock` client owns the rollout after
-    `_transfer_managed_rollouts` (so the thread id and the minted tag), while the
+    `_transfer_managed_rollouts` (so the thread id and its assigned tag), while the
     `app-server --listen` sibling holds no rollout of its own and leaves `enrich`
-    before `minted_tag` runs (2026-09-08 audit: 8 Codex rows with a blank badge).
+    before the shared tag reader runs (2026-09-08 audit: 8 Codex rows with a blank badge).
     The pairing key is the exact managed state dir carried in both argv lines --
     never the thread id, never a session-id reverse lookup. Exactly one server
     and exactly one tagged client per dir; anything else stays as it is. A row
@@ -2474,8 +2474,7 @@ def enrich(sess, tick=None):
                             "cursor_kind": "byte-offset-v1"}
     if sess.session_id:
         from fleet import titles
-        # F-100b — Codex exposes no derived `<basename>-<xx>` name, so the tag behind the
-        # `[xx]` badge is minted from the thread id. Deterministic, so nothing is stored.
+        # Read only a confirmed shared assignment; normal collection seeds new tags.
         from fleet.session_handle import resolve_tag
         sess.session_tag = resolve_tag("codex", sess.session_id)
         sidecar_title = _displayable_title(

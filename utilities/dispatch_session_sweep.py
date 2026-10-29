@@ -13,9 +13,9 @@ refusal -- not a successful claim -- is this package's observable output
 No blocking vocabulary anywhere in this module. A caller never receives an
 exception from :func:`sweep`; every failure mode (unreadable directory,
 corrupt record, lock contention) is swallowed and folded into ``"refused"``.
-Enumeration is bounded to the caller's own ``recipient_digest`` directory
-only (O(own records), §13.33.1-(3)) -- this module never walks any other
-session's records and never reads ``jobs.log``.
+Enumeration is bounded to the caller's own key and the confirmed predecessor
+keys returned by ``storage_recipients`` (O(addressed records), §13.33.1-(3));
+this module never scans unrelated session directories and never reads ``jobs.log``.
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import json
 import hashlib
 import os
 from pathlib import Path
+import re
 import sys
 import time
 
@@ -177,12 +178,21 @@ def _timestamp_note(record: dict) -> str:
             + "; receipt source=" + value("receive_source") + ". Missing legacy values stay unknown.")
 
 
-def addressed_records(root: Path, recipient_kind: str, session_id: str) -> tuple[list[dict], int]:
+def _recipient_harness(recipient_kind: str) -> str | None:
+    for harness in ("claude", "codex", "opencode"):
+        if recipient_kind.startswith(harness):
+            return harness
+    return None
+
+
+def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_context=None) -> tuple[list[dict], int]:
     """Read the current session's open notices without claiming or consuming them."""
     from dispatch_seat_handover import record_for_session, storage_recipients
+    from peer_read_context import PeerReadContext
+    read_context = read_context or PeerReadContext()
     records, count = [], 0
-    for storage_key, allowed in storage_recipients(
-            session_id, harness="codex" if recipient_kind.startswith("codex") else None):
+    harness = _recipient_harness(recipient_kind)
+    for storage_key, allowed in storage_recipients(session_id, harness=harness, read_context=read_context):
         try:
             directory = pending_delivery.record_directory(root, storage_key)
             entries = sorted(directory.glob("delivery-*.json"))
@@ -196,7 +206,10 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str) -> tuple
                 continue
             if (record and (record.get("recipient_kind") == recipient_kind or storage_key != session_id)
                     and record.get("state") in pending_delivery.OPEN_STATES
-                    and record_for_session(record, allowed, session=session_id, jobs=record_jobs(root, record))):
+                    and record_for_session(record, allowed, session=session_id,
+                                           harness=harness,
+                                           storage_key=storage_key, jobs=record_jobs(root, record),
+                                           read_context=read_context)):
                 records.append({**record, STORAGE_KEY: storage_key})
     return records, count
 
@@ -251,10 +264,11 @@ def _reconcile_canonical_dispatch_state(root: Path) -> None:
         pass
 
 
-def record_jobs(root: Path, record: dict) -> Path | None:
-    """Use the receipt's registry or the canonical selection, preserving its filename."""
+def record_jobs(root: Path, record: dict, *, observed_jobs=None) -> Path | None:
+    """Use the receipt, observed registry, then canonical selection, preserving its filename."""
     from dispatch_contract import resolve_agent_home, resolve_global_registry
-    raw = (record.get("receipt") or {}).get("job_registry")
+    receipt = record.get("receipt") or {}
+    raw = receipt.get("job_registry")
     try:
         if (record.get("receipt") or {}).get("kind") == "notice":
             state_root = Path(root).resolve(strict=True)
@@ -272,8 +286,11 @@ def record_jobs(root: Path, record: dict) -> Path | None:
                 except (OSError, ValueError, TypeError):
                     continue
             return state_root / "jobs.log"
-        jobs = (Path(raw).expanduser() if isinstance(raw, str) and raw else
-                resolve_global_registry(resolve_agent_home(), None, 0, "read").path)
+        if isinstance(raw, str) and raw:
+            jobs = Path(raw).expanduser()
+        else:
+            jobs = (Path(observed_jobs) if observed_jobs is not None else
+                    resolve_global_registry(resolve_agent_home(), None, 0, "read").path)
         if jobs.is_symlink():
             return None
         jobs = jobs.resolve(strict=True)
@@ -361,6 +378,17 @@ def sweep_deliver(
                "opencode" if recipient_kind.startswith("opencode") else "")
     legacy_bindings_by_evidence: dict[int, tuple[dict, dict]] = {}
     visited_batch_ids: set[str] = set()
+    observed_evidence: dict[int, dict] = {}
+
+    def currently_addressed(record, storage_key):
+        from dispatch_seat_handover import record_for_session, storage_recipients
+        from peer_read_context import PeerReadContext
+        # A new effect check must not consume the discovery pass's authority.
+        context = PeerReadContext()
+        scopes = dict(storage_recipients(session_id, harness=harness, read_context=context))
+        return storage_key in scopes and record_for_session(
+            record, scopes[storage_key], session=session_id, harness=harness,
+            storage_key=storage_key, jobs=record_jobs(root, record), read_context=context)
 
     def settle_observed(record):
         evidence = native_evidence
@@ -369,6 +397,11 @@ def sweep_deliver(
                 evidence = receipt_observer(root, record.get(STORAGE_KEY) or session_id, record)
             except Exception:
                 evidence = None
+        if isinstance(evidence, dict):
+            observed_evidence[id(evidence)] = evidence
+        return settle_evidence(record, evidence)
+
+    def settle_evidence(record, evidence):
         if harness == "claude" and isinstance(evidence, dict):
             key = id(evidence)
             cached = legacy_bindings_by_evidence.get(key)
@@ -395,6 +428,27 @@ def sweep_deliver(
             return {"received": False, "settled": False,
                     "reason": "native-receipt-unknown"}
 
+    def unsubmitted(record, storage_key):
+        fence = pending_delivery.read_submission_fence(
+            root, storage_key, record["delivery_id"], expected_identity=
+            pending_delivery.submission_fence_identity(record, session_id))
+        return fence is None or fence.get("state") == "not-accepted"
+
+    def release_group(records, storage_key, claim_owner, identities):
+        for member in records:
+            member_id = member["delivery_id"]
+            try:
+                fresh = pending_delivery.read(root, storage_key, member_id)
+                if (fresh is not None and fresh.get("state") == "claimed"
+                        and fresh.get("claim_owner") == claim_owner
+                        and pending_delivery.received_ack_identity(
+                            fresh, storage_key, member_id) == identities[member_id]
+                        and unsubmitted(fresh, storage_key)):
+                    pending_delivery.release_claim(root, storage_key, member_id,
+                        claim_owner=claim_owner, expected_identity=identities[member_id])
+            except (OSError, pending_delivery.PendingDeliveryError):
+                pass
+
     # The session's own records, then the records of a cleared predecessor at the same pane
     # that the seat handover bound to it. Those stay stored (and acked) under the registered
     # parent; only the receiving session differs.
@@ -405,7 +459,10 @@ def sweep_deliver(
             break
         storage_key = current[STORAGE_KEY]
         delivery_id = current["delivery_id"]
+        observed_evidence.clear()
         if settle_observed(current)["received"]:
+            continue
+        if not currently_addressed(current, storage_key):
             continue
         state = current.get("state")
         if state in {"claimed", "sent-ambiguous"}:
@@ -444,29 +501,29 @@ def sweep_deliver(
             continue
         group_ids = {member.get("delivery_id") for member in group_claims}
         visited_batch_ids.update(group_ids)
+        group_identities = {member["delivery_id"]: pending_delivery.received_ack_identity(
+            member, storage_key, member["delivery_id"]) for member in group_claims}
         # Check elapsed at the group boundary. A group that crossed the
         # six-second carrier budget while claiming is released as a whole.
         if (len(group_claims) > 1 and time.monotonic_ns() - start_ns
                 > DELIVER_BUDGET_SECONDS * 1_000_000_000):
-            for member in group_claims:
-                try:
-                    pending_delivery.release_claim(root, storage_key, member["delivery_id"],
-                                                   claim_owner=claim_owner)
-                except pending_delivery.PendingDeliveryError:
-                    pass
+            release_group(group_claims, storage_key, claim_owner, group_identities)
             continue
         group_output = []
         group_ok = True
+        authority_changed = False
         from dispatch_notice_state import keep_claim
         for record in group_claims:
             member_id = record["delivery_id"]
-            expected_identity = pending_delivery.received_ack_identity(
-                record, storage_key, member_id)
+            expected_identity = group_identities[member_id]
             try:
                 from dispatch_seat_handover import record_for_session, storage_recipients
-                allowances = dict(storage_recipients(session_id))
+                from peer_read_context import PeerReadContext
+                effect_context = PeerReadContext()
+                allowances = dict(storage_recipients(session_id, harness=harness, read_context=effect_context))
                 if storage_key not in allowances or not record_for_session(
-                        record, allowances[storage_key], session=session_id, jobs=jobs):
+                        record, allowances[storage_key], session=session_id, harness=harness,
+                        storage_key=storage_key, jobs=jobs, read_context=effect_context):
                     group_ok = False
                     break
                 if not keep_claim(root, storage_key, member_id, record, claim_owner, jobs=jobs):
@@ -488,20 +545,63 @@ def sweep_deliver(
                     or final.get("claim_owner") != claim_owner):
                 group_ok = False
                 break
+            if not currently_addressed(final, storage_key):
+                group_ok = False
+                authority_changed = True
+                break
             from dispatch_supervision import CONTINUED_KEY, continue_for_parent
             continued = continue_for_parent(record, session_id=session_id,
                                             recipient_kind=recipient_kind)
             group_output.append({**record, STORAGE_KEY: storage_key, IDENTITY_KEY: expected_identity,
                                  **({CONTINUED_KEY: continued} if continued else {})})
-        if not group_ok:
-            if len(group_claims) == 1:
-                continue  # Preserve the established singleton recovery lease.
+        # A later native snapshot can contain an earlier member's exact receipt,
+        # even when its claim/recipient changed or the ACK write must be retried.
+        # Reuse this group's observations without starting another native read
+        # mid-check. A later unavailable/empty snapshot cannot undo exact proof.
+        for member in group_claims:
+            member_id = member["delivery_id"]
+            try:
+                fresh = pending_delivery.read(root, storage_key, member_id)
+                if (fresh is None or pending_delivery.received_ack_identity(
+                        fresh, storage_key, member_id) != group_identities[member_id]):
+                    group_ok = False
+                    continue
+                if any(settle_evidence({**fresh, STORAGE_KEY: storage_key}, evidence)["received"]
+                       for evidence in observed_evidence.values()):
+                    group_ok = False
+            except (OSError, pending_delivery.PendingDeliveryError):
+                group_ok = False
+        # Every native observation and continuation above can change any member.
+        # Validate the whole group here; no native callback or continuation may
+        # intervene between these current checks and handing out the group.
+        if group_ok:
             for member in group_claims:
+                member_id = member["delivery_id"]
                 try:
-                    pending_delivery.release_claim(root, storage_key, member["delivery_id"],
-                                                   claim_owner=claim_owner)
-                except pending_delivery.PendingDeliveryError:
-                    pass
+                    final = pending_delivery.read(root, storage_key, member_id)
+                    deadline = final.get("claim_deadline_ns") if final is not None else None
+                    if (final is None or pending_delivery.received_ack_identity(
+                            final, storage_key, member_id) != group_identities[member_id]
+                            or final.get("state") != "claimed"
+                            or final.get("claim_owner") != claim_owner
+                            or type(deadline) is not int or deadline <= time.monotonic_ns()
+                            or not unsubmitted(final, storage_key)):
+                        group_ok = False
+                        break
+                    if not currently_addressed(final, storage_key):
+                        group_ok = False
+                        authority_changed = True
+                        break
+                except (OSError, pending_delivery.PendingDeliveryError):
+                    group_ok = False
+                    break
+        if (len(group_claims) > 1 and time.monotonic_ns() - start_ns
+                > DELIVER_BUDGET_SECONDS * 1_000_000_000):
+            group_ok = False
+        if not group_ok:
+            if len(group_claims) == 1 and not authority_changed:
+                continue  # Preserve the established singleton recovery lease.
+            release_group(group_claims, storage_key, claim_owner, group_identities)
             continue
         claimed.extend(group_output)
     elapsed_ns = time.monotonic_ns() - start_ns
@@ -513,7 +613,7 @@ NOTICE_DELIVERY_HEADER = (
     "Hearting notice about work you started (a paused route resumed, a remote run ended). "
     "Report observed metrics, trend, and elapsed or ETA against the criteria and plan; state when unavailable. "
     "Act only where a line's required_action asks for it. "
-    "Do not start Monitor, dispatch-wait, or a polling loop."
+    "Do not start a separate harness-scheduled re-invocation, Monitor, dispatch-wait, or a polling loop."
 )
 
 
@@ -525,9 +625,32 @@ GATE_DELIVERY_HEADER = (
     "release --route <route file> --gate <name> --decision proceed|revise|stop "
     "[--answers <file from frame_interview.py answers-template>]`. The owner is waiting on "
     "`await-release` or has paused at the gate; the release continues the work either way. "
-    "Do not start Monitor, dispatch-wait, or a polling loop."
+    "Do not start a separate harness-scheduled re-invocation, Monitor, dispatch-wait, or a polling loop."
 )
 COMPLETION_DELIVERY_HEADER = (
+    "Hearting runtime delivery. Follow required_action/next-action receipt; "
+    "inspect-recovery: diagnostic. runtime-v1 finalizes. Tracked-Workflow Continuation. "
+    "Keep new failures/conflicts, unfinished work, questions; no extra "
+    "harness-scheduled calls/Monitor/dispatch-wait/polling."
+)
+# Frozen headers from the previous short rendering; receipt recovery only.
+_PREVIOUS_NOTICE_DELIVERY_HEADER = (
+    "Hearting notice about work you started (a paused route resumed, a remote run ended). "
+    "Report observed metrics, trend, and elapsed or ETA against the criteria and plan; state when unavailable. "
+    "Act only where a line's required_action asks for it. "
+    "Do not start Monitor, dispatch-wait, or a polling loop."
+)
+_PREVIOUS_GATE_DELIVERY_HEADER = (
+    "Hearting human gate awaiting your decision (SD-123/129). Read the named artifact "
+    "(an interview file or a frame summary), put the [방향 확인] card and every interview "
+    "question to the user through AskUserQuestion -- one topic at a time, in plain words, "
+    "recommended answer first -- then record the answer with `workflow-supervisor.py "
+    "release --route <route file> --gate <name> --decision proceed|revise|stop "
+    "[--answers <file from frame_interview.py answers-template>]`. The owner is waiting on "
+    "`await-release` or has paused at the gate; the release continues the work either way. "
+    "Do not start Monitor, dispatch-wait, or a polling loop."
+)
+_PREVIOUS_COMPLETION_DELIVERY_HEADER = (
     "Hearting runtime delivery. Follow required_action; inspect-recovery is diagnostic. "
     "Follow route's next-action receipt; runtime-v1 owners close/finalize. "
     "Tracked-Workflow Continuation. Keep new failures/conflicts, unfinished work, questions; "
@@ -571,10 +694,31 @@ _LEGACY_RUNTIME_V1_FOLLOWUP = (
 )
 
 
+def _previous_opencode_delivery_body(text: str, *, legacy_completion: bool = False) -> str:
+    """Restore only renderer-owned block headers, keeping receipt content exact."""
+    from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE
+    headers = {
+        GATE_DELIVERY_HEADER: _PREVIOUS_GATE_DELIVERY_HEADER,
+        NOTICE_DELIVERY_HEADER: _PREVIOUS_NOTICE_DELIVERY_HEADER,
+        COMPLETION_DELIVERY_HEADER: (_LEGACY_COMPLETION_DELIVERY_HEADER if legacy_completion
+                                     else _PREVIOUS_COMPLETION_DELIVERY_HEADER),
+    }
+    blocks = []
+    previous = None
+    for block in text.split("\n\n"):
+        header, separator, body = block.partition("\n")
+        # Gate/notice blocks end at their last receipt marker. Blank lines inside
+        # a receipt or follow-up do not turn payload text into another header.
+        if previous is None or OPENCODE_MARKER_LINE_RE.fullmatch(previous.rsplit("\n", 1)[-1]):
+            header = headers.get(header, header)
+        blocks.append(header + separator + body)
+        previous = block
+    return "\n\n".join(blocks)
+
+
 def _legacy_opencode_completion_body(text: str, roots: list[Path], records: list[dict]) -> str:
     """Render the exact previous full body for receipt recovery only."""
-    legacy = text.replace(COMPLETION_DELIVERY_HEADER,
-                          _LEGACY_COMPLETION_DELIVERY_HEADER, 1)
+    legacy = _previous_opencode_delivery_body(text, legacy_completion=True)
     for root, record in zip(roots, records):
         follow = _followup(root, record)
         if follow.startswith(_CURRENT_RUNTIME_V1_FOLLOWUP_PREFIX):
@@ -601,6 +745,48 @@ def _followup(root: Path, record: dict) -> str:
         return ""
 
 
+_COMPUTE_RUN_NOTICE_RE = re.compile(
+    r"^run (?P<run_id>[A-Za-z0-9_-]+) on (?P<host>[A-Za-z0-9_.-]+) "
+    r"ended with exit (?P<exit>[0-9]+)(?: \([^()\n]*\))?"
+    r"(?:; started by attempt [^;\n]+ in route [^;\n]+)?"
+    r"(?:; 지표 없음; 계획 시간 미상; run 기록 경로 없음)?"
+    r"; read it with: compute-hosts tail (?P<tail>[A-Za-z0-9_-]+)$"
+)
+
+
+def _compute_run_notice(record: dict) -> dict | None:
+    """Classify only the canonical, fully self-identifying compute-run notice."""
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    receipt_key = receipt.get("key")
+    if (receipt.get("kind") != "notice" or not isinstance(receipt_key, str)
+            or receipt_key.split(":", 1)[0] != "compute-run"
+            or receipt.get("subject") != "compute run"):
+        return None
+    match = _COMPUTE_RUN_NOTICE_RE.fullmatch(receipt.get("text", ""))
+    if not match or match.group("tail") != match.group("run_id"):
+        return None
+    original_key = f"compute-run:{match.group('run_id')}"
+    if receipt_key != original_key:
+        from harness_capabilities import HARNESSES, parent_completion
+        harness = next((name for name in HARNESSES
+            if parent_completion(name).get("carrier") == record.get("recipient_kind")), None)
+        storage = record.get(STORAGE_KEY)
+        if not harness or not storage or receipt_key != f"{original_key}:{harness}:{storage}":
+            return None
+        try:
+            import session_notice
+            session_notice.pending_lineage(record, harness, storage)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            return None
+    run_id, host = match.group("run_id"), match.group("host")
+    identity = re.fullmatch(r"(?P<host>.+)-(?P<stamp>[0-9]{8}-[0-9]{6})(?:-(?P<label>.*))?", run_id)
+    if not identity or identity.group("host") != host:
+        return None
+    return {"host": host, "stamp": identity.group("stamp"),
+            "label": identity.group("label") or "", "exit": int(match.group("exit")),
+            "run_id": run_id}
+
+
 def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
     """The one text a parent receives for its delivered records, whichever runtime carries it.
 
@@ -608,9 +794,9 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
     answered, completions are consumed, so they get separate instructions.
     """
 
-    gate_lines: list[str] = []
-    notice_lines: list[str] = []
-    lines: list[str] = []
+    gate_lines: list[tuple[str, str]] = []
+    notice_records: list[tuple[Path, dict]] = []
+    lines: list[tuple[str, str]] = []
     followups: list[str] = []
     from dispatch_recipient_receipt import receipt_marker
 
@@ -628,22 +814,64 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
         for record in records:
             text = bound_text(root, record)
             if is_human_gate_record(record):
-                gate_lines.append(text)
+                gate_lines.append((str(record.get("delivery_id", "")), text))
                 continue
             if (record.get("receipt") or {}).get("kind") == "notice":
-                notice_lines.append(text)
+                notice_records.append((root, record))
                 continue
-            lines.append(text)
+            lines.append((str(record.get("delivery_id", "")), text))
             follow = _followup(root, record)
             if follow and follow not in followups:
                 followups.append(follow)
     blocks: list[str] = []
     if gate_lines:
-        blocks.append(GATE_DELIVERY_HEADER + "\n" + "\n".join(f"- {line}" for line in gate_lines))
-    if notice_lines:
-        blocks.append(NOTICE_DELIVERY_HEADER + "\n" + "\n".join(f"- {line}" for line in notice_lines))
+        blocks.append(GATE_DELIVERY_HEADER + "\n" + "\n".join(
+            f"- {line}" for _delivery_id, line in sorted(gate_lines)))
+    if notice_records:
+        individual: list[tuple[tuple, str]] = []
+        groups: dict[tuple, list[tuple[dict, dict]]] = {}
+        for root, record in notice_records:
+            run = _compute_run_notice(record)
+            if run and run["exit"] == 0:
+                receipt = record.get("receipt") or {}
+                key = (receipt.get("subject"), run["host"], run["label"],
+                       receipt.get("required_action"), 0)
+                groups.setdefault(key, []).append((run, {"root": root, "record": record}))
+            else:
+                receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+                text = bound_text(root, record)
+                individual.append(((0, str(receipt.get("text", "")),
+                                    str(record.get("delivery_id", ""))), text))
+        for key, members in groups.items():
+            members.sort(key=lambda item: (item[0]["stamp"], item[0]["run_id"],
+                                           str(item[1]["record"].get("delivery_id", ""))))
+            if len(members) < 3:
+                for run, pair in members:
+                    record = pair["record"]
+                    receipt = record.get("receipt") or {}
+                    individual.append(((0, str(receipt.get("text", "")),
+                                        str(record.get("delivery_id", ""))),
+                                       bound_text(pair["root"], record)))
+                continue
+            runs = [run for run, _pair in members]
+            latest = runs[-1]
+            label = key[2] or "(unlabeled)"
+            summary = (f"compute run summary: {len(runs)} runs on {key[1]} label={label}; "
+                       f"exit 0:{len(runs)}; time {runs[0]['stamp']}..{latest['stamp']}; "
+                       f"latest {latest['run_id']}; compute-hosts tail {latest['run_id']}")
+            markers = []
+            for _run, pair in members:
+                text = bound_text(pair["root"], pair["record"])
+                markers.extend(line for line in text.splitlines()
+                               if line.startswith("HEARTING_RECEIPT_V1 "))
+            individual.append(((1, key, latest["run_id"]), summary + "\n" + "\n".join(markers)))
+        ordered_notices = sorted(individual, key=lambda item: item[0])
+        if ordered_notices:
+            blocks.append(NOTICE_DELIVERY_HEADER + "\n" + "\n".join(
+                f"- {line}" for _sort_key, line in ordered_notices))
     if lines:
-        blocks.append(COMPLETION_DELIVERY_HEADER + "\n" + "\n".join(f"- {line}" for line in lines)
+        blocks.append(COMPLETION_DELIVERY_HEADER + "\n" + "\n".join(
+            f"- {line}" for _delivery_id, line in sorted(lines))
                       + "".join("\n" + follow for follow in followups))
     return "\n\n".join(blocks)
 
@@ -737,6 +965,8 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
     """
     from dispatch_recipient_receipt import OPENCODE_MARKER_LINE_RE, identity_binding
     from dispatch_seat_handover import record_for_session, storage_recipients
+    from peer_read_context import PeerReadContext
+    read_context = PeerReadContext()
 
     by_id: dict[str, list[tuple[Path, dict]]] = {}
     candidate_ids = set()
@@ -749,7 +979,7 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         candidate_ids.update(delivery_id for delivery_id, _digest in markers)
 
     for root in roots:
-        records, _count = addressed_records(root, recipient_kind, session_id)
+        records, _count = addressed_records(root, recipient_kind, session_id, read_context=read_context)
         for record in records:
             delivery_id = record.get("delivery_id")
             if delivery_id in candidate_ids:
@@ -757,8 +987,8 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
 
     # Open records are already enumerated above. Look up only marker-selected
     # terminal records so an ACKed member can validate the old complete batch.
-    harness = "codex" if recipient_kind.startswith("codex") else None
-    recipients = storage_recipients(session_id, harness=harness)
+    harness = _recipient_harness(recipient_kind)
+    recipients = storage_recipients(session_id, harness=harness, read_context=read_context)
     for delivery_id in candidate_ids - by_id.keys():
         for root in roots:
             for storage, allowed in recipients:
@@ -766,7 +996,9 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
                     record = pending_delivery.read(root, storage, delivery_id)
                     if (record is None or record.get("state") != "acked"
                             or (record.get("recipient_kind") != recipient_kind and storage == session_id)
-                            or not record_for_session(record, allowed, session=session_id, jobs=record_jobs(root, record))):
+                            or not record_for_session(record, allowed, session=session_id,
+                                                      harness=harness,
+                                                      storage_key=storage, jobs=record_jobs(root, record), read_context=read_context)):
                         continue
                     by_id.setdefault(delivery_id, []).append(
                         (root, {**record, STORAGE_KEY: storage}))
@@ -811,10 +1043,11 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         for root, record in selected:
             grouped_selected.setdefault(root, []).append(record)
         rendered = delivery_context(list(grouped_selected.items()))
+        previous_rendered = _previous_opencode_delivery_body(rendered)
         legacy_rendered = _legacy_opencode_completion_body(
             rendered, [root for root, _record in selected],
             [record for _root, record in selected]) if rendered else ""
-        if not rendered or native_text not in {rendered, legacy_rendered}:
+        if not rendered or native_text not in {rendered, previous_rendered, legacy_rendered}:
             continue
         candidate = _opencode_expected_message(native_text, identities)
         key = (candidate["text"], tuple(candidate["bindings"]))
@@ -953,7 +1186,7 @@ def main(argv: list[str] | None = None) -> int:
     """
     import argparse
     parser = argparse.ArgumentParser(description=main.__doc__)
-    parser.add_argument("action", choices=("roots", "activate", "deliver", "ack", "release", "settle"))
+    parser.add_argument("action", choices=("roots", "recipients", "activate", "deliver", "ack", "release", "settle"))
     parser.add_argument("--recipient-kind", default="")
     parser.add_argument("--session", default="")
     args = parser.parse_args(argv)
@@ -965,6 +1198,23 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--session is required")
     if args.recipient_kind not in pending_delivery.RECIPIENT_KINDS:
         parser.error(f"unknown recipient kind {args.recipient_kind}")
+    if args.action == "recipients":
+        if args.recipient_kind != "opencode-turn":
+            parser.error("recipients is an internal OpenCode carrier action")
+        from dispatch_seat_handover import lineage_graph, storage_recipients
+        from peer_read_context import PeerReadContext
+        read_context = PeerReadContext()
+        # Project the generation that was actually readable by the shared
+        # graph, so a warm observation failure cannot preserve old digests.
+        graph = lineage_graph(read_context=read_context)
+        generation = hashlib.sha256(json.dumps(graph.generation, separators=(",", ":")).encode()).hexdigest()
+        digests = sorted({hashlib.sha256(storage.encode()).hexdigest()
+                          for storage, _allowed in storage_recipients(
+                              args.session, harness="opencode", read_context=read_context)})
+        if lineage_graph() is not graph:
+            raise OSError("lineage-observation-changed")
+        print(json.dumps({"generation": generation, "digests": digests}))
+        return 0
     if args.action == "settle":
         try:
             handed = json.load(sys.stdin)
@@ -975,15 +1225,24 @@ def main(argv: list[str] | None = None) -> int:
         roots = _state_roots()
         allowed_roots = {Path(root).resolve() for root in roots}
         targets = []
+        requested_complete, unavailable_ids = True, set()
         if isinstance(requested, list):
             for item in requested:
                 if not isinstance(item, dict):
+                    requested_complete = False
                     continue
                 try:
                     root = Path(item["root"]).resolve()
-                    if root in allowed_roots:
-                        targets.append((root, item["storage_key"], item["delivery_id"], item))
-                except (KeyError, TypeError):
+                    storage, delivery_id = item["storage_key"], item["delivery_id"]
+                    if (root not in allowed_roots or not isinstance(storage, str) or not storage
+                            or not isinstance(delivery_id, str) or not delivery_id):
+                        requested_complete = False
+                        if isinstance(delivery_id, str):
+                            unavailable_ids.add(delivery_id)
+                        continue
+                    targets.append((root, storage, delivery_id, item))
+                except (KeyError, TypeError, OSError, RuntimeError):
+                    requested_complete = False
                     continue
         else:
             for root in roots:
@@ -995,9 +1254,16 @@ def main(argv: list[str] | None = None) -> int:
             text = handed.get("text")
             if isinstance(text, str):
                 identities = []
-                for _root, _storage, delivery_id, item in targets:
+                # The exact native body includes every original member, even
+                # when one root is no longer admitted. Only admitted targets
+                # may be read/ACKed; their historical proof is still usable.
+                for item in requested:
+                    if not isinstance(item, dict):
+                        continue
+                    delivery_id = item.get("delivery_id")
                     identity = item.get("immutable_identity")
-                    if (isinstance(identity, dict) and identity.get("delivery_id") == delivery_id):
+                    if (isinstance(delivery_id, str) and isinstance(identity, dict)
+                            and identity.get("delivery_id") == delivery_id):
                         identities.append((delivery_id, identity))
                 expected = _opencode_expected_message(text, identities)
                 if expected["bindings"]:
@@ -1039,7 +1305,7 @@ def main(argv: list[str] | None = None) -> int:
                         break
         evidence = opencode_messages_evidence(
             handed.get("messages"), args.session, expected_messages)
-        received_ids, unknown_ids, settled_count = set(), set(), 0
+        received_ids, unknown_ids, settled_count = set(), set(unavailable_ids), 0
         remaining_context, remaining_handoffs = [], []
         for root, storage, delivery_id, handed_record in targets:
             try:
@@ -1091,6 +1357,26 @@ def main(argv: list[str] | None = None) -> int:
                 if isinstance(requested, list) and isinstance(handed_record, dict):
                     unknown_ids.add(delivery_id)
                 continue
+        # Receipt settlement above precedes authority admission. Every original
+        # unreceived member must still be current after all views/observations.
+        if isinstance(requested, list):
+            from dispatch_recipient_receipt import claimed_send_current, release_unsubmitted_claim
+            for root, storage, delivery_id, item in targets:
+                if delivery_id in received_ids:
+                    continue
+                original = {"delivery_id": delivery_id,
+                            IDENTITY_KEY: (item or {}).get("immutable_identity")}
+                if not claimed_send_current(root, storage, original,
+                        (item or {}).get("claim_owner"), "opencode", args.session):
+                    unknown_ids.add(delivery_id)
+            if unknown_ids or not requested_complete:
+                for root, storage, delivery_id, item in targets:
+                    if delivery_id not in received_ids:
+                        release_unsubmitted_claim(root, storage,
+                            {"delivery_id": delivery_id,
+                             IDENTITY_KEY: (item or {}).get("immutable_identity")},
+                            (item or {}).get("claim_owner"), args.session)
+                remaining_context, remaining_handoffs = [], []
         print(json.dumps({"received_ids": sorted(received_ids), "settled_count": settled_count,
                           "unknown_ids": sorted(unknown_ids), "text": delivery_context(remaining_context),
                           "records": remaining_handoffs},
@@ -1143,7 +1429,10 @@ def main(argv: list[str] | None = None) -> int:
                 done += ack_delivered(root, args.session, [{"delivery_id": delivery_id, STORAGE_KEY: key}],
                                       acked_by=f"{args.recipient_kind}:{args.session}")
             else:
-                pending_delivery.release_claim(root, key, delivery_id, claim_owner=item["claim_owner"])
+                from dispatch_recipient_receipt import release_unsubmitted_claim
+                release_unsubmitted_claim(root, key,
+                    {"delivery_id": delivery_id, IDENTITY_KEY: item.get("immutable_identity")},
+                    item["claim_owner"], args.session)
                 done += 1
         except (KeyError, TypeError, OSError, pending_delivery.PendingDeliveryError):
             continue

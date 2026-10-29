@@ -172,6 +172,8 @@ def verified_terminal_caller(process_info, *, pid=None):
     Stdio may be redirected: /proc's controlling tty, not isatty(0), is the
     evidence. All ancestry records are read twice, including their start times.
     No controlling terminal or inaccessible process namespace means no proof.
+    A supplied backend tty must match; an absent/null tty leaves the same
+    controlling-terminal, foreground-job and shell-ancestry proof required.
     """
     if not isinstance(process_info, dict):
         return False
@@ -182,9 +184,10 @@ def verified_terminal_caller(process_info, *, pid=None):
         tty = process_info.get("tty")
         if (not caller or not shell or not caller[3] or caller[3] != shell[3]
                 or type(group) is not int or group <= 0
-                or caller[2] != group or caller[4] != group or shell[4] != group
-                or not isinstance(tty, str) or not tty.startswith("/dev/")
-                or os.stat(tty).st_rdev != caller[3]):
+                or caller[2] != group or caller[4] != group or shell[4] != group):
+            return False
+        if tty is not None and (not isinstance(tty, str) or not tty.startswith("/dev/")
+                                or os.stat(tty).st_rdev != caller[3]):
             return False
         chain, current = [], caller
         for _ in range(32):

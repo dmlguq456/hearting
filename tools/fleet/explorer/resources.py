@@ -311,6 +311,9 @@ def draw_system(grid: CellGrid, vm, state=None, x=34, y=3):
     section("peer delivery")
     y += 1
     pending = [(str(delivery.get("pending", "·")), "lvl_y"), (" awaiting recipient", "dim")]
+    no_recipient = delivery.get("no_recipient")
+    if isinstance(no_recipient, int) and not isinstance(no_recipient, bool):
+        pending.append((f" · 받을 세션 없음 {no_recipient}", "dim"))
     obligations = []
     for entry in data.get("obligations") or ():
         if obligations:

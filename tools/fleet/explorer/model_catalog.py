@@ -1,10 +1,10 @@
-"""Read model choices from already-authenticated runtime catalog caches only."""
+"""Read model choices from the installed runtime's bounded catalog observation."""
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-import time
+import sys
 
 from .types import ModelCatalog
 
@@ -89,6 +89,14 @@ def _candidates(harness):
 
 def read_catalog(harness):
     """Return one source-qualified catalog; absence and parse failure stay unknown."""
+    if harness == "opencode":
+        utilities = Path(__file__).resolve().parents[3] / "utilities"
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import opencode_runtime
+        native = opencode_runtime.read_model_catalog()
+        if native is not None:
+            return ModelCatalog(harness=harness, **native)
     for candidate in _candidates(harness):
         path = Path(candidate)
         document = _json(path)
@@ -222,5 +230,5 @@ def _opencode_ids(document):
 
 
 def read_catalogs():
-    """Read the three runtime cache files without invoking harnesses or the network."""
+    """Read existing runtime catalogs; never start a service or contact a provider."""
     return {harness: read_catalog(harness) for harness in ("claude", "codex", "opencode")}

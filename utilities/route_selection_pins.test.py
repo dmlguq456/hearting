@@ -382,19 +382,64 @@ class SelectionPinVerifyTest(unittest.TestCase):
 
 
 class DefaultChildrenTest(IsolatedCase):
-    def test_every_enabled_harness_plus_pinned_ones(self):
+    def test_pins_cannot_add_disabled_harnesses_to_compose_candidates(self):
         self.config(ALL_ENABLED)
         self.assertEqual(R._compose_default_children(), ("claude", "codex", "opencode"))
         self.config(OPENCODE_ONLY)
         self.assertEqual(R._compose_default_children(), ("opencode",))
         pins = R._parse_selection_pins(["worker=claude"])
-        self.assertEqual(R._compose_default_children(pins), ("opencode", "claude"))
+        with self.assertRaisesRegex(ValueError, "disabled-by-user-policy"):
+            R._compose_default_children(pins)
 
-    def test_no_or_unreadable_policy_falls_back_to_the_shipped_three(self):
+    def test_selected_unreadable_or_malformed_policy_is_not_an_all_enabled_fallback(self):
         with mock.patch.object(R.DEFAULTS, "default_config_path", return_value="/nonexistent-defaults"):
-            self.assertEqual(R._compose_default_children(), ("claude", "codex", "opencode"))
+            with self.assertRaises((R.DEFAULTS.DefaultsConfigError, OSError)):
+                R._compose_default_children()
         self.config("schema_version: 4\nmystery: 1\n")
-        self.assertEqual(R._compose_default_children(), ("claude", "codex", "opencode"))
+        with self.assertRaises((R.DEFAULTS.DefaultsConfigError, OSError)):
+            R._compose_default_children()
+
+
+    def test_disabled_pin_cannot_expand_bands_or_trigger_a_new_probe(self):
+        self.config(OPENCODE_ONLY)
+        pins=R._parse_selection_pins(["owner=codex", "worker=codex", "frame=codex"])
+        route={"nodes":[{"dispatch_depth":2,"harness_policy":{"primary":["opencode"],"relief":[],"last_resort":[]}}]}
+        before=json.dumps(route)
+        with self.assertRaisesRegex(ValueError,"disabled-by-user-policy"):
+            R._apply_selection_pins(route,pins)
+        self.assertEqual(json.dumps(route),before)
+        with mock.patch.object(R,"_compose_readiness") as probe:
+            for target in ("owner","worker","frame"):
+                with self.assertRaisesRegex(ValueError,"disabled-by-user-policy"):
+                    R._pin_change_probe(route,self.home/"state/jobs.log",target,"codex","claude")
+            probe.assert_not_called()
+
+    def test_formal_enabled_pin_change_adds_only_its_checked_target(self):
+        self.config(ALL_ENABLED)
+        import route_authority as RA
+        route={"route_id":"rt-d5-pin","route_hash":"sha256:original","artifact_root":str(self.home),"cwd":str(self.home),
+               "dispatch_allocation":{"harness_order":["claude"]},
+               "dispatch_evidence":{"tuples":[nested("claude","claude")]},
+               "nodes":[{"id":"execute","dispatch_depth":2,"fallback_hops":[{"ordinal":1,"fallback_hop":"same-harness-headless","candidates":[nested("claude","claude")]},{"ordinal":2,"fallback_hop":"cross-harness-headless","candidates":[]}]}]}
+        before=json.dumps(route,sort_keys=True)
+        with mock.patch.object(R,"_compose_readiness",return_value={"tuples":[nested("claude","opencode")]}) as probe:
+            tuples,candidates=R._pin_change_probe(route,self.home/"state/jobs.log","worker","opencode","claude")
+        self.assertEqual(probe.call_count,1)
+        RA.record_pin_change(route,target="worker",pin={"harness":"opencode","model":None,"effort":None},
+                             by={"harness":"claude","session_id":"parent"},source="unattributed",tuples=tuples,candidates=candidates)
+        view=RA.route_in_force(route)
+        self.assertEqual(view["selection_pins"]["worker"]["harness"],"opencode")
+        self.assertEqual(view["dispatch_allocation"],route["dispatch_allocation"])
+        self.assertIn("opencode",[r["child_harness"] for r in view["dispatch_evidence"]["tuples"]])
+        self.assertEqual(json.dumps(route,sort_keys=True),before)
+        spec=importlib.util.spec_from_file_location("d5_pin_node",R.ROOT/"utilities/dispatch-node.py")
+        node_module=importlib.util.module_from_spec(spec);spec.loader.exec_module(node_module)
+        parent={key:nested("claude","opencode")[key] for key in ("parent_harness","parent_transport","parent_sandbox","launch_authority")}
+        with mock.patch.object(node_module,"current_parent_identity",return_value=parent), mock.patch("dispatch_capacity_evidence.active_limits",return_value={}):
+            self.assertFalse(node_module.pin_harness_available(route,route["nodes"][0],"opencode",self.home/"state/jobs.log"))
+            self.assertTrue(node_module.pin_harness_available(view,view["nodes"][0],"opencode",self.home/"state/jobs.log"))
+            self.config(OPENCODE_ONLY.replace("enabled: [opencode]","enabled: [claude]"))
+            self.assertFalse(node_module.pin_harness_available(view,view["nodes"][0],"opencode",self.home/"state/jobs.log"))
 
 
 class RouteSelectionPinHelperTest(unittest.TestCase):

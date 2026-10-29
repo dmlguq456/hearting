@@ -3,7 +3,9 @@ import json
 import os
 import sys
 import tempfile
+import subprocess
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest import mock
 
@@ -11,6 +13,134 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from fleet import model, projection, process_identity
 from fleet.collectors import claude, codex, herdr, procscan
 from fleet.model import Session, DispatchJob
+from test_process_identity import FakeClaudeProc
+
+
+class NativeBackgroundChainTest(unittest.TestCase):
+    def test_unknown_native_is_not_a_new_row_but_legacy_claude_unknown_rows_remain(self):
+        identity = procscan.claude_process_identity
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            f = FakeClaudeProc(temporary)
+            executable = "/opt/claude/versions/8.7.6"
+            f.process(71, argv=["unrecognized-runtime-title"])
+            f.process(72, argv=["unrecognized-runtime-title"])
+            f.process(73)
+            (f.root / "73/cmdline").unlink()  # unreadable legacy comm=claude
+            f.process(74, argv=["8.7.6"], executable="/tmp/8.7.6")
+            f.process(75, argv=["claude", "daemon", "run"])
+            real_observe = identity.observe_process
+            stack.enter_context(mock.patch.object(identity, "observe_process",
+                side_effect=lambda pid: real_observe(pid, proc_root=f.root)))
+            lines = [f"71 8.7.6 01:00 {executable}", f"72 claude 01:00 {executable}",
+                     "73 claude 01:00 claude", "74 8.7.6 01:00 /tmp/8.7.6",
+                     "75 claude 01:00 claude daemon run"]
+            for name, value in (("_ps_lines", lines), ("_pid_ttys", {}),
+                    ("_detached_ttys", set()), ("proc_tree", {}), ("is_terminal_state", False),
+                    ("exec_child", None), ("_orca_dead_socks", set()), ("read_environ", {}),
+                    ("_read_argv", []), ("_read_cwd", (temporary, False))):
+                stack.enter_context(mock.patch.object(procscan, name, return_value=value))
+            stack.enter_context(mock.patch.object(procscan, "read_proc_start", return_value="101"))
+            rows = procscan.scan()
+            self.assertEqual([(r.pid, r.harness, r._invocation_mode) for r in rows],
+                             [(72, "claude", "unknown"), (73, "claude", "unknown")])
+
+    def test_old_daemon_tap_and_next_statusline_event_have_one_correct_native_row(self):
+        from fleet import session_cwd
+        from fleet.explorer.live import _session_records
+        identity = procscan.claude_process_identity
+        source = Path(__file__).resolve().parents[3]
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            f = FakeClaudeProc(temporary)
+            sid = "7a47c285-2f29-4d37-ab20-8411e48c9d70"
+            project = str(Path(temporary) / "SR_CorrNet_SD")
+            Path(project).mkdir()
+            (Path(project) / ".git").mkdir()
+            executable = "/opt/claude/versions/8.7.6"
+            argv = {71: ["claude", "daemon", "run"],
+                    72: ["claude bg-pty-host", "--bg-pty-host", "/tmp/fixture.sock"],
+                    73: [executable, "--session-id", sid, "--fork-session", "--resume", "/old.jsonl"],
+                    74: ["bash", "statusline.sh"],
+                    75: ["rg", executable],
+                    76: [executable, "--session-id", sid],
+                    77: ["node", "/tmp/unrelated.js", executable]}
+            for pid in argv:
+                f.process(pid, parent=pid - 1 if pid > 71 else 1, start=str(pid + 100),
+                          argv=argv[pid], executable={74: "/bin/bash", 76: "/usr/bin/python3",
+                                                      77: "/usr/bin/node"}.get(pid, executable))
+            f.registry(73, start="173", sid=sid, cwd=project, name="Automatic title", nameSource="auto")
+            f.tap(sid=sid, pid=71, start="171")
+            lines = [f"{pid} {'claude' if pid == 71 else '8.7.6'} 01:00 {' '.join(argv[pid])}"
+                     for pid in (71, 72, 73, 75, 76, 77)]
+            stack.enter_context(mock.patch.dict(os.environ, {
+                "CLAUDE_CONFIG_DIR": str(f.home), "FLEET_TITLE_STATE_DIR": temporary + "/titles",
+                "XDG_STATE_HOME": temporary + "/state", "HERDR_PANE_ID": "",
+            }))
+            real_observe = identity.observe_process
+            stack.enter_context(mock.patch.object(identity, "observe_process",
+                side_effect=lambda pid, **kw: real_observe(pid, proc_root=f.root)))
+            for name, value in (("_ps_lines", lines), ("_pid_ttys", {71: "?", 72: "?", 73: "pts/9"}),
+                    ("_detached_ttys", set()), ("proc_tree", {}), ("is_terminal_state", False),
+                    ("exec_child", None), ("_orca_dead_socks", set()), ("read_environ", {})):
+                stack.enter_context(mock.patch.object(procscan, name, return_value=value))
+            stack.enter_context(mock.patch.object(procscan, "read_proc_start", side_effect=lambda pid: str(pid + 100)))
+            stack.enter_context(mock.patch.object(procscan, "_read_cwd", return_value=(temporary, False)))
+            stack.enter_context(mock.patch.object(procscan, "_comm_of", return_value="8.7.6"))
+            stack.enter_context(mock.patch.object(herdr, "pane_session_aliases", return_value=[]))
+            stack.enter_context(mock.patch.object(identity, "claude_session_census", side_effect=AssertionError("no census")))
+
+            def collect():
+                rows = procscan.scan()
+                for row in rows:
+                    claude.enrich(row)
+                process_identity.finalize_process_roles(rows, [])
+                session_cwd.project(rows)
+                self.assertEqual(len(rows), 1)
+                row = rows[0]
+                self.assertEqual((row.pid, row.proc_start, row.session_id, row.process_role),
+                                 (73, "173", sid, "conversation"))
+                self.assertEqual(row.cwd, project)
+                self.assertIsNone(row.session_tag)
+                shown, keys = _session_records({"sessions": rows}, 0, model.project_of)
+                self.assertEqual([(r["tag"], r["repo"], r["repo_id"]) for r in shown],
+                                 [("?1", "SR_CorrNet_SD", "SR_CorrNet_SD")])
+                self.assertEqual(keys["?1"]["sid"], sid)
+                for selected in ({"claude"}, iter(["claude"])):
+                    filtered = procscan.scan(harness_filter=selected)
+                    self.assertEqual([(r.pid, r.harness) for r in filtered], [(73, "claude")])
+                    self.assertFalse(filtered.census_complete)
+                    self.assertIn("harness-filter-partial", filtered.census_reasons)
+                for selected in ({"codex"}, {"opencode"}):
+                    self.assertEqual(procscan.scan(harness_filter=selected), [])
+
+            # Both consumers reject even an old resolved daemon-bound tap.
+            self.assertEqual(process_identity.process_identity(71, "claude").confidence,
+                             process_identity.HARNESS_ONLY)
+            daemon = Session(harness="claude", pid=71, proc_start="171", session_id=sid)
+            daemon.session_identity_evidence = {"verdict": "resolved", "session_id": sid}
+            retained = [daemon]
+            process_identity.finalize_process_roles(retained, [])
+            self.assertEqual(retained, [])
+            collect()
+
+            # Drive the real statusline shell against the same private proc
+            # files. Only the proc root/starting parent are fixture adapters;
+            # every observation, SID check and tap write is production code.
+            agent = Path(temporary) / "agent"
+            (agent / "utilities").mkdir(parents=True)
+            (agent / "utilities/claude_process_identity.py").write_text(
+                "import importlib.util\n"
+                f"s=importlib.util.spec_from_file_location('native_helper', {str(source / 'utilities/claude_process_identity.py')!r})\n"
+                "m=importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
+                "def statusline_bindings(parent, sid, home):\n"
+                f"    return m.statusline_bindings(74, sid, home, proc_root={str(f.root)!r})\n")
+            result = subprocess.run(["bash", str(source / "adapters/claude/statusline.sh")],
+                input=json.dumps({"session_id": sid, "cwd": project}), capture_output=True,
+                text=True, timeout=30, env={**os.environ, "AGENT_HOME": str(agent),
+                    "FLEET_TITLE_DISABLE": "1", "HARNESS_CAPACITY_REFRESH_DISABLE": "1"})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            tap = json.loads((f.home / ".statusline" / (sid + ".json")).read_text())
+            self.assertEqual((tap["pid"], tap["proc_start"]), (73, "173"))
+            collect()
 
 
 class CurrentSessionTest(unittest.TestCase):

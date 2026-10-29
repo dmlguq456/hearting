@@ -35,7 +35,19 @@ For durable completion delivery, an exact native receipt remains valid after
 the transport claim expires or changes owner. All carriers reuse that receipt
 through the delivery's existing immutable identity and `ack_received` CAS; an
 ACK write failure leaves the verified receipt usable for suppressing another
-send while settlement is retried naturally. Output, process exit, queue
+send while settlement is retried naturally. The original body's receipt markers
+bind that identity for first writes and receipt retries, including retained
+notices. Native notice watchers use the same claim and recipient check at their
+add callback, and keep the original submission identity for historical receipt
+settlement; a replacement row remains a different identity even with the same
+receipt digest. Ordinary notices keep their stored provenance or exact parent
+or owner-session authority. The common recipient answer distinguishes seat
+succession, job ownership and the attempt's native consumer; that consumer
+does not follow a seat successor. It returns current identity, observation
+health and the original address together, without restoring old authority
+when a read fails.
+The existing notice courier carries both current and legacy duties through the
+same grouping, first-write and receipt checks. Output, process exit, queue
 acceptance, or an incomplete native-history read is not receipt evidence.
 Receiving a notice settles delivery only: it does not complete the work or its
 follow-up. When native receipt evidence is absent or unknown, emission remains
@@ -131,8 +143,9 @@ adding new refusal rules.
 Read-only work shared during one input may reuse that input's parsed snapshot.
 A shared registry view may live across scan passes while its file generation is
 unchanged; each pass still checks the current generation and re-observes any
-other input it depends on. The snapshot is not authority for a state-changing
-action: claims, acknowledgements, handovers, and sends recheck the current row
+other input it depends on. Notice discovery shares that pass's registry view
+and completeness judgment before reconciliation. The snapshot is not authority
+for a state-changing action: claims, acknowledgements, handovers, and sends recheck the current row
 and binding under their existing lock. Recovery callbacks reconnect the
 existing owner of work; they do not repeat work already owned by its live
 runner.
@@ -155,6 +168,11 @@ and observes again without replaying work already owned by its live runner.
 Session hooks request that existing recovery runner and return; they do not
 replay global settlement history before delivering and acknowledging the
 session's own notices. The runner retains observation state across requests.
+Recipient checks use the registry's existing attempt index for the addressed
+records; they do not expand unrelated historical rows on each authority check.
+Lineage reads include both logical-session and physical-seat ledgers, reusing
+each file's observed bytes and parsed rows within the pass. Replacing one copy
+does not erase valid evidence in the other.
 An idle foreground waiter observes its exact parent's current row without a
 writer lock, and checks process-group cleanup only after its leader exits.
 Registry mutation keeps its fresh authority check inside the existing short
@@ -285,6 +303,14 @@ defect. A slower or emptier view is a regression even when every check passes.
 Publish observed session identity, execution/wait reasons and resources first;
 campaign titles, route details and installation/git metadata fill asynchronously.
 Unknown observations stay unknown, and slow details must not stop basic refresh.
+Titles summarize the person's current goal in their language; NOW describes
+progress toward that goal. Internal stage, review and handoff instructions do
+not replace the goal. Failed generation preserves the last successful text and
+its original age. A folded session exposes its currently executing connected
+routes from the same observation; completed history alone is not activity.
+Model choices follow the installed runtime's current catalog through the existing
+bounded refresh. A saved model absent from that catalog remains visible as
+unavailable for selection, without silently rewriting the person's configuration.
 Project activity includes running resources nested under an idle owner. A file
 update is labelled as a file update, never as completion. Recent results show
 the recorded task, result and event time; an unproven gate is not a failed task.
@@ -345,6 +371,14 @@ notifications count current items only. Unknown seat attribution remains in the
 global current total. Reading does not claim, resume, settle, or mutate a job.
 S4 signals and derived caches are observational, private state; folding never
 changes source state and adds no hook, gate, or user setting.
+
+For a supported selected question or approval, Fleet sends the person's explicit
+response through the existing native transport to that exact live request once.
+Revalidate a changed or already answered request before submission. Submitted,
+received and applied remain distinct; transport acceptance alone proves neither
+native consumption nor resumed work. Current pending questions, answered or
+expired requests, unknown observations and older history remain distinct on
+every display. Unsupported response surfaces retain their native fallback.
 
 Fleet's interactive view keeps shared status, usage, compute/GPU observations,
 and its controls outside the scrolling work-list viewport. The list body owns

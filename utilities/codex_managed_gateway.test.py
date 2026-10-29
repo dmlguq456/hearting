@@ -152,6 +152,7 @@ class FakeAppServer:
         self.start_count = 0
         self.steer_count = 0
         self.approval_responses: list[dict[str, Any]] = []
+        self.interaction_consumers: dict[Any, dict[str, Any]] = {}
         self.hold_start = False
         self.reject_steer = False
         self.start_received = threading.Event()
@@ -323,6 +324,7 @@ class FakeAppServer:
             ):
                 with self.lock:
                     self.approval_responses.append(message)
+                self._consume_interaction_response(websocket, message)
             elif "id" in message:
                 websocket.write_json(
                     {
@@ -331,6 +333,43 @@ class FakeAppServer:
                         "result": {},
                     }
                 )
+
+    def expect_interaction_response(self, request, result, marker):
+        """Register original-task work that only the exact response can resume."""
+        params = request["params"]
+        consumer = {"request": request, "result": result, "marker": marker,
+                    "thread_id": params["threadId"], "turn_id": params["turnId"],
+                    "item_id": params["itemId"], "consumed": [], "rejected": [],
+                    "progress": threading.Event(), "allowed_work": []}
+        with self.lock:
+            self.interaction_consumers[GATEWAY.request_key(request["id"])] = consumer
+        return consumer
+
+    def _consume_interaction_response(self, websocket, message):
+        with self.lock:
+            consumer = self.interaction_consumers.get(GATEWAY.request_key(message.get("id")))
+            if consumer is None:
+                return
+            if (message.get("result") != consumer["result"] or "error" in message
+                    or consumer["consumed"]):
+                consumer["rejected"].append(message)
+                return
+            consumer["consumed"].append(message)
+        declined = message["result"].get("decision") in {"decline", "cancel"}
+        if not declined:
+            consumer["allowed_work"].append("original-task-work")
+        consumer["marker"].write_text(json.dumps({
+            "thread_id": consumer["thread_id"], "turn_id": consumer["turn_id"],
+            "request_id": message["id"], "next_step": "original-task-continued",
+            "work_performed": not declined}), encoding="utf-8")
+        websocket.write_json({"jsonrpc": "2.0", "method": "serverRequest/resolved",
+                              "params": {"threadId": consumer["thread_id"],
+                                         "requestId": message["id"]}})
+        websocket.write_json({"jsonrpc": "2.0", "method": "item/completed", "params": {
+            "threadId": consumer["thread_id"], "turnId": consumer["turn_id"],
+            "item": {"id": consumer["item_id"], "type": "commandExecution",
+                     "status": "declined" if declined else "completed"}}})
+        consumer["progress"].set()
 
     def emit_approval(self) -> None:
         deadline = time.monotonic() + 5
@@ -442,8 +481,14 @@ class FakeAppServer:
         self.stop.set()
         if self.current is not None:
             self.current.close()
+        try:
+            self.listener.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         self.listener.close()
         self.thread.join(timeout=2)
+        if self.thread.is_alive():
+            raise AssertionError("owned fake App Server did not stop")
 
 
 def control(path: Path, value: dict[str, Any]) -> dict[str, Any]:
@@ -2373,6 +2418,32 @@ class FleetResponseIngressTest(unittest.TestCase):
         self.assertEqual(received["request"]["state"], "received")
         self.assertEqual(self._reply(ref, {"answers": {"q1": ["Rust"]}}, "answer-1")["status"],
                          "received")
+
+    def test_other_thread_turn_or_item_completion_does_not_apply_receipt(self) -> None:
+        self._server_request({"jsonrpc": "2.0", "id": "bound-approval",
+            "method": "item/commandExecution/requestApproval", "params": {
+                "threadId": "thread-1", "turnId": "original-turn", "itemId": "original-item",
+                "command": "fixture command"}})
+        ref = self._ref("bound-approval")
+        self.assertEqual(self._reply(ref, {"decision": "approve"}, "bound-once")["status"], "submitted")
+        self._wait_native_response("bound-approval")
+        for thread, turn, item in (("other-thread", "original-turn", "original-item"),
+                                   ("thread-1", "other-turn", "original-item"),
+                                   ("thread-1", "original-turn", "other-item")):
+            self.server.current.write_json({"jsonrpc": "2.0", "method": "item/completed", "params": {
+                "threadId": thread, "turnId": turn,
+                "item": {"id": item, "type": "commandExecution", "status": "completed"}}})
+            self.client.wait_for(lambda message: message.get("method") == "item/completed"
+                and message.get("params", {}).get("threadId") == thread
+                and message.get("params", {}).get("turnId") == turn
+                and message.get("params", {}).get("item", {}).get("id") == item)
+            detail = control(self.control, {"schema_version": 1, "op": "interaction-detail", "ref": ref})
+            self.assertEqual(detail["request"]["state"], "submitted")
+        self.server.emit_resolved("thread-1", "bound-approval")
+        self.client.wait_for(lambda message: message.get("method") == "serverRequest/resolved")
+        detail = control(self.control, {"schema_version": 1, "op": "interaction-detail", "ref": ref})
+        self.assertEqual(detail["request"]["state"], "received")
+        self.assertEqual(len(self._wait_native_response("bound-approval")), 1)
 
     def test_native_tui_response_is_submitted_until_exact_resolution(self) -> None:
         request = {

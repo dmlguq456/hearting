@@ -2212,6 +2212,14 @@ class CarrierOneClaimGateTest(unittest.TestCase):
     def _check_lost_carrier_completion(self, crash_sid="session-1", recipient_sid="session-1",
                                        changed_pane=False, live_holder=False):
         self._open_row()
+        from route_identity import route_hash
+        route = {"route_id": "rt-owner", "nodes": [{"id": "report"}]}
+        route["route_hash"] = route_hash(route)
+        route_path = self.root / "rt-owner.json"
+        route_path.write_text(json.dumps(route))
+        row_text = self.jobs.read_text().rstrip()
+        self.jobs.write_text(row_text + ",route_file=" + str(route_path)
+                             + ",route_hash=" + route["route_hash"] + "\n")
         spec = importlib.util.spec_from_file_location("retained_steward_test", ROOT / "utilities/peer-steward.py")
         steward = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(steward)
@@ -2225,6 +2233,13 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                 rewake._observe_carrier(launch, claim, {})
         store = rewake.peer_obligations.ObligationStore(self.root)
         duty, = store.list()
+        if recipient_sid != "session-1":
+            import session_tidy
+            meta = rewake._row_metadata(self.jobs, launch.attempt_id)
+            session_tidy._append_ledger_entry(session_tidy.Seat("pane", "lost-carrier-holder"),
+                dict(event="handover", source="retire", harness="claude", sid=recipient_sid,
+                     **{"from": "session-1"}, ts=1,
+                     bindings=[rewake.seat_handover.binding_of(self.jobs, meta)]))
         sent = []
         real_prompt = steward.cmd_prompt
         def prompt(args, *, expected_recipient, on_prepared=None, producer_binding=None):
@@ -4149,10 +4164,19 @@ class SeatHandoverRewakeTest(unittest.TestCase):
             DispatchOwnerRewakeTest.row(attempt_id=f"att-owner-{n}", status="done" if n % 2 else "open",
                                         route_id=f"rt-{n}", route_hash="digest")
             for n in range(1, 21)), encoding="utf-8")
-        with mock.patch.object(rewake.seat_handover, "_all_snapshots_uncached", return_value=[]) as snapshots:
-            rows = rewake._session_owner_rows(self.jobs, "session-1", statuses=rewake.RECEIPT_ROW_STATUSES)
+        tidy = rewake.seat_handover._st()
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.jobs.parent / "state")}):
+            tidy._append_ledger_entry(tidy.Seat("pane", "scan-fixture"),
+                                     dict(event="start", harness="claude", sid="session-1"))
+            ledgers = sorted((tidy.state_root() / "sessions").glob("*.jsonl"))
+            with mock.patch.object(tidy, "read_bytes", wraps=tidy.read_bytes) as reads, \
+                    mock.patch.object(rewake.seat_handover, "_readable_lineage_signature",
+                                      wraps=rewake.seat_handover._readable_lineage_signature) as scans:
+                rows = rewake._session_owner_rows(self.jobs, "session-1", statuses=rewake.RECEIPT_ROW_STATUSES)
         self.assertEqual(len(rows), 20)
-        self.assertEqual(snapshots.call_count, 1)
+        self.assertEqual(scans.call_count, 1)
+        self.assertEqual([call.args[0] for call in reads.call_args_list], ledgers,
+                         "one scan reads each current logical/physical ledger once")
 
     def test_the_successor_arms_the_row_the_old_window_launched_and_a_stranger_does_not(self) -> None:
         self.assertEqual(rewake._session_owner_rows(self.jobs, "session-2"), [])
@@ -4353,6 +4377,7 @@ class SeatGateChainTest(unittest.TestCase):
             "AGENT_HOME": str(self.agent_home),
             "AGENT_DISPATCH_JOBS": str(self.jobs),
             "HARNESS_STATE_ROOT": str(self.state),
+            "XDG_STATE_HOME": str(self.root / "xdg-state"),
             "HERDR_PANE_ID": self.pane,
             "AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS": "1",
             "AGENT_CLAUDE_REWAKE_MAX_SECONDS": "8",
@@ -4826,6 +4851,132 @@ print(json.dumps({'code':code,'stdout':out.getvalue(),'stderr':err.getvalue()}),
         self.assertEqual(record["state"], "sent-ambiguous")
         self.assertEqual(rewake._read_arm(
             rewake.arm_path(f.jobs, "att-gate-owner"))["state"], "gate-wake-sent")
+
+
+
+
+class ExpandedBatchAuthorityTest(unittest.TestCase):
+
+    def case(self, mode, count=2):
+        import dispatch_pending_delivery as pending
+        import dispatch_seat_handover as handover
+        from dispatch_notice_state import resolve_delivery_batch
+        from route_identity import route_hash
+        mod = rewake
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            jobs = root / 'jobs.log'
+            sid = 'registered-parent'
+            ids = []
+            metas = []
+            receipts = []
+            for i in range(count):
+                aid = f'att-review-{i}'
+                did = f'delivery-{i:032x}'
+                rid = f'rt-review-{i}'
+                route = {'route_id': rid, 'parent_cycle_id': 'cycle-review-batch', 'nodes': [{'id': 'frame'}]}
+                route['route_hash'] = route_hash(route)
+                rp = root / (rid + '.json')
+                rp.write_text(json.dumps(route))
+                child = {'attempt_id': aid, 'status': 'done', 'readiness': 'ready', 'reason': 'terminal-complete', 'required_action': 'advance-completed', 'harness': 'claude', 'delivery_classification': 'success'}
+                receipt = {'schema_version': 2, 'state': 'ready', 'parent_attempt_id': 'att-review-parent', 'job_registry': str(jobs), 'children': [child], 'delivery_classification': 'success'}
+                record = pending.create(root, recipient_kind='claude-parent-runtime', recipient_key=sid, delivery_id=did, session_generation='', session_generation_supported='0', attempt_ids=[aid], parent_attempt_id='att-review-parent', route_id=rid, route_node='frame', receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt), row_revisions={aid: 'revision'})
+                meta = {'attempt_id': aid, 'attempt_schema_version': '2', 'execution_surface': 'registered-headless', 'launch_claimed': '1', 'launch_outcome': 'reaped-before-publish', 'dispatch_depth': '1', 'registered_worker': '1', 'worker_type': 'frame', 'parent_sid': sid, 'parent_harness': 'claude', 'harness': 'claude', 'parent_attempt_id': 'att-review-parent', 'route_file': str(rp), 'route_id': rid, 'route_hash': route['route_hash'], 'route_node': 'frame', 'delivery_intent': '1', 'delivery_intent_at_ns': str(time.monotonic_ns()), 'failure_class': 'pass', 'note': 'completed-marker', 'delivery_id': did, 'parent_completion_delivery': 'claude-parent-runtime', 'delivery_recipient_kind': 'claude-parent-runtime', 'delivery_row_revision': 'revision', 'delivery_receipt_digest': record['receipt_digest']}
+                ids.append(did)
+                metas.append(meta)
+                receipts.append(receipt)
+            jobs.write_text(''.join(('2026-10-25T00:00:00Z\tdone\t/fixture/repo\t/fixture/wt\tframe\t' + ','.join((k + '=' + v for k, v in meta.items())) + '\n' for meta in metas)))
+            with mock.patch.dict(os.environ, {'AGENT_DISPATCH_JOBS': str(jobs), 'XDG_STATE_HOME': str(root / 'state')}, clear=False):
+                getattr(handover, '_LINEAGE_GRAPH_CACHE', {}).clear()
+                seen = []
+                sent = []
+                protected = {}
+
+                def targets():
+                    return [handover.effective_parent(meta, jobs) for meta in metas]
+
+                def move(index):
+                    folder = root / 'state/hearting/session-tidy/sessions'
+                    folder.mkdir(parents=True, exist_ok=True)
+                    (folder / 'explicit-away.jsonl').write_text(json.dumps({'event': 'handover', 'source': 'retire', 'harness': 'claude', 'sid': 'new-holder', 'from': {'harness': 'claude', 'sid': sid}, 'ts': 1, 'bindings': [handover.binding_of(jobs, metas[index])]}) + '\n')
+                    snapshots = root / 'state/hearting/session-tidy/handover'
+                    snapshots.mkdir(parents=True, exist_ok=True)
+                    (snapshots / 'explicit-away.json').write_text(json.dumps({'schema': 1, 'seat': {'kind': 'pane', 'key': 'explicit-away'}, 'from': {'harness': 'claude', 'sid': sid}, 'bindings': [handover.binding_of(jobs, metas[index])]}))
+                batch = resolve_delivery_batch(jobs, pending.read(root, sid, ids[0]), recipient_key=sid, delivery_root=root)
+                self.assertFalse(batch['held'])
+                self.assertEqual(set(batch['delivery_ids']), set(ids))
+                self.assertEqual(targets(), [sid] * count)
+                if mode == 'already-away':
+                    move(1)
+                    self.assertEqual(targets(), [sid, 'new-holder'])
+
+                def mutate(index):
+                    if mode.startswith('native-away') or mode.startswith('emit-away'):
+                        move(index)
+                    elif mode.startswith(('owner-', 'lease-', 'identity-')):
+                        path = pending.record_path(root, sid, ids[index])
+                        raw = json.loads(path.read_text())
+                        if mode.startswith('owner-'):
+                            raw['claim_owner'] = 'other-carrier'
+                        elif mode.startswith('lease-'):
+                            raw['claim_deadline_ns'] = True
+                        else:
+                            raw['row_revisions'] = {metas[index]['attempt_id']: 'changed'}
+                        path.write_text(json.dumps(raw))
+                        protected[index] = path.read_bytes()
+
+                def keep(_r, _s, did, _record, _owner, **kw):
+                    seen.append(did)
+                    if mode == 'late-away' and did == ids[-1]:
+                        move(0)
+                    return True
+
+                launch = mod.Launch(attempt_id=metas[0]['attempt_id'], jobs=jobs, session_id=sid, armed='registry')
+
+                def emit(_state, message, **kwargs):
+                    sent.append(dict(thread_id=sid, message=message, actual_current_recipients=targets()))
+                    return 0
+
+                def gates(*a, **kw):
+                    if mode.startswith(('emit-away', 'owner-', 'lease-', 'identity-')):
+                        mutate(int(mode.rsplit('-', 1)[1]))
+                    return []
+                with mock.patch.object(mod, '_incarnation_binding_matches', return_value=True), mock.patch.object(mod, 'wait_for_attempt', return_value=('ready', 'terminal-complete')), mock.patch.object(mod, 'follow_replacement', return_value=None), mock.patch.object(mod, '_holds_arm', return_value=True), mock.patch.object(mod, 'classified_receipt', side_effect=lambda launch, *args: ('success', 'RECEIPT ' + launch.attempt_id)), mock.patch.object(mod, '_gate_notices', side_effect=gates), mock.patch.object(mod, 'settle_arm', return_value=True), mock.patch.object(mod, 'emit_receipt', side_effect=emit), mock.patch('dispatch_notice_state.keep_claim', side_effect=keep):
+                    self.assertFalse(mod._handed_away(launch))
+                    result = mod._run_carrier(launch, mock.sentinel.arm, {}, {}, {'claim': mock.sentinel.arm})
+                print(json.dumps({'mode': mode, 'real_batch_ids': list(batch['delivery_ids']), 'keep_order': seen, 'sends': sent, 'result': result, 'states': [pending.read(root, sid, d)['state'] for d in ids]}, sort_keys=True), flush=True)
+                if mode == 'current':
+                    self.assertEqual(len(sent), 1)
+                    self.assertTrue(all((d in sent[0]['message'] for d in ids)))
+                else:
+                    self.assertEqual(sent, [], 'an expanded sibling batch must not send any member whose current recipient differs')
+                    for index, did in enumerate(ids):
+                        current = pending.read(root, sid, did)
+                        self.assertIsNone(pending.read(root, 'new-holder', did))
+                        if index in protected:
+                            self.assertEqual(pending.record_path(root, sid, did).read_bytes(), protected[index])
+                        else:
+                            self.assertEqual(current['state'], 'pending')
+
+    def test_current_batch_positive(self):
+        self.case('current')
+
+    def test_already_reassigned_sibling_must_withhold_whole_batch(self):
+        self.case('already-away')
+
+    def test_later_member_check_cannot_leave_first_member_authority_stale(self):
+        self.case('late-away')
+
+    def test_singleton_and_four_member_positive(self):
+        for count in (1, 4):
+            with self.subTest(count=count):
+                self.case('current', count)
+
+    def test_every_member_at_native_boundary_and_mutable_claims(self):
+        for kind in ('emit-away', 'owner', 'lease', 'identity'):
+            for index in (0, 1):
+                with self.subTest(kind=kind, index=index):
+                    self.case(kind + '-' + str(index))
 
 
 if __name__ == "__main__":

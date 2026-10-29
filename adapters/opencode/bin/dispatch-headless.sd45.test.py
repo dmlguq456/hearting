@@ -859,8 +859,8 @@ class OpenCodeFrameCapacityDowngrade(unittest.TestCase):
     def test_deep_without_a_claim_is_refused_by_the_profile_binding_and_by_registration(self):
         self.flow(self).run_claimless()
 
-    def test_an_undeclared_top_profile_is_refused_without_a_claim_or_launch(self):
-        self.flow(self).run_undeclared_profile()
+    def test_undeclared_top_collapses_without_config_rewrite_and_keeps_launch_guards(self):
+        self.flow(self).run_opencode_undeclared_profile()
 
 
 class ForegroundActivityWiring(unittest.TestCase):

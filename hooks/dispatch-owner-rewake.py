@@ -1323,10 +1323,16 @@ def _carrier_one_claim_locked(launch, metadata):
         (record["delivery_id"], record) for record in records
         if keep_claim(root, recipient_key, record["delivery_id"], record, claim_owner, jobs=launch.jobs)
     ]
+    kept_ids = {delivery_id for delivery_id, _record in kept}
+    if any(record["delivery_id"] not in kept_ids and
+            (pending_delivery.read(root, recipient_key, record["delivery_id"]) or {}).get("state")
+                not in {"acked", "rejected", "expired"} for record in records):
+        from dispatch_recipient_receipt import release_unsubmitted_claim
+        for record in records:
+            release_unsubmitted_claim(root, recipient_key, record, claim_owner, launch.session_id)
+        return None
     if not kept:
         return None
-    if len(records) == 1:
-        return ClaimWin(claim_owner, recipient_key, delivery_id, root)
     return ClaimWin(claim_owner, recipient_key, kept[0][0], root, tuple(kept))
 
 
@@ -1941,13 +1947,31 @@ def _run_carrier_once(launch, claim, payload, observation, holder, deadline) -> 
                 binding = receipt_marker(record, win.recipient_key)
         except (OSError, ValueError, TypeError, pending_delivery.PendingDeliveryError):
             binding = None
+    emitted = False
+    def before_emit():
+        nonlocal emitted
+        from dispatch_recipient_receipt import claimed_send_current, release_unsubmitted_claim
+        members = win.members
+        if not members or not all(claimed_send_current(win.root, win.recipient_key, record,
+                win.claim_owner, "claude", launch.session_id, jobs=launch.jobs)
+                for _delivery_id, record in members):
+            for _delivery_id, record in members:
+                release_unsubmitted_claim(win.root, win.recipient_key, record,
+                                          win.claim_owner, launch.session_id)
+            return False
+        emitted = True
+        return True
     try:
         exit_code = _emit_with_gates(launch, claim, state, message, block=False,
-                                     owner_closed=True, receipt_binding=binding)
+                                     owner_closed=True, receipt_binding=binding, before_emit=before_emit)
     except (LineageUnavailable, LineageMoved):
-        for delivery_id in (member_id for member_id, _record in win.members) if win.members else (win.delivery_id,):
-            pending_delivery.release_claim(win.root, win.recipient_key, delivery_id, claim_owner=win.claim_owner)
+        from dispatch_recipient_receipt import release_unsubmitted_claim
+        for _delivery_id, record in win.members:
+            release_unsubmitted_claim(win.root, win.recipient_key, record,
+                                      win.claim_owner, launch.session_id)
         raise
+    if not emitted:
+        return exit_code
     for delivery_id in (member_id for member_id, _record in win.members) if win.members else (win.delivery_id,):
         try:
             pending_delivery.mark_sent_ambiguous(
@@ -1986,7 +2010,7 @@ def _batch_message(launch: Launch, win: ClaimWin, message: str) -> str:
 
 def _emit_with_gates(
     launch: Launch, claim: ArmClaim, state: str, message: str, *, block: bool,
-    owner_closed: bool = False, receipt_binding: str | None = None,
+    owner_closed: bool = False, receipt_binding: str | None = None, before_emit=None,
 ) -> int:
     """Fold the recipient's open gates into a bound receipt and emit it.
 
@@ -2004,10 +2028,12 @@ def _emit_with_gates(
         if not owner:
             raise LineageUnavailable("lineage-effect-unavailable")
         return _emit_with_gates_locked(launch, claim, state, message, block=block,
-                                      owner_closed=owner_closed, receipt_binding=receipt_binding)
+                                      owner_closed=owner_closed, receipt_binding=receipt_binding,
+                                      before_emit=before_emit)
 
 
-def _emit_with_gates_locked(launch, claim, state, message, *, block, owner_closed=False, receipt_binding=None):
+def _emit_with_gates_locked(launch, claim, state, message, *, block, owner_closed=False,
+                            receipt_binding=None, before_emit=None):
     # The owner's own outcome, read before any gate is folded in (top review
     # R2-M1): a gate belongs to whoever raised it and only changes what this
     # receipt *displays*. Letting it also decide this claim sealed a timed-out
@@ -2027,6 +2053,8 @@ def _emit_with_gates_locked(launch, claim, state, message, *, block, owner_close
         )
     if receipt_binding:
         message += "\n" + receipt_binding
+    if before_emit is not None and not before_emit():
+        return _ended(claim, 0, terminal=False)
     exit_code = emit_receipt(state, message, block=block)
     return _ended(claim, exit_code, terminal=terminal)
 

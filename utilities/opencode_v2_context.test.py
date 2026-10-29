@@ -167,6 +167,25 @@ class OpenCodeV2ContextTest(unittest.TestCase):
         with self.assertRaisesRegex(context.OpenCodeContextError, "differs from launch directory"):
             context._v2_model_info(wrong_location, cwd=str(self.cwd), model="fixture/catalog-name")
 
+    def test_current_v2_catalog_resolves_without_reading_a_retained_models_dev_cache(self):
+        row = model_info(model_id="current-name", transport_id="upstream/current", input_limit=...)
+        after = model_info(model_id="current-name", transport_id="upstream/current",
+                           context_limit=800000, input_limit=...)
+        config = {"providers": {"fixture": {"models": {"current-name": {
+            "modelID": "upstream/current", "limit": {"context": 900000, "output": 32000}}}}}}
+        with mock.patch.object(context, "_native_limits", side_effect=AssertionError("stale v1 cache read")), \
+                mock.patch.object(context, "_api_json", side_effect=[self.model_response(row),
+                                                                     self.model_response(after)]):
+            launch = context.prepare_launch_context(
+                model="fixture/current-name", context_window="800000",
+                config_content=json.dumps(config), cwd=str(self.cwd),
+                environ={"OPENCODE_RUNTIME_VERSION": "2.0.32"}, command="opencode-fixture")
+        self.assertEqual(launch["model"], "fixture/current-name")
+        self.assertEqual(launch["final_limits"]["context"], 800000)
+        with self.assertRaisesRegex(context.OpenCodeContextError, "missing or ambiguous"):
+            context._v2_model_info(self.model_response(row), cwd=str(self.cwd),
+                                   model="fixture/retired-name")
+
     def test_reused_shared_server_ignoring_client_environment_fails_closed(self):
         row = model_info(context_limit=900000)
         unchanged = model_info(context_limit=900000)

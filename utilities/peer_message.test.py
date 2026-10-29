@@ -162,7 +162,7 @@ class PeerMessageTest(_TmpRootMixin, unittest.TestCase):
             body, sender, recipient, defer=True, refs=refs,
             producer_binding=producer, receipt="native-pending")
         self.assertEqual(replay, (text, ref))
-        self.assertIn("(runtime-from: runtime [?] Hearting runtime ; ref=" + ref + ")", text)
+        self.assertIn("(runtime-from: runtime [?] Hearting runtime ; pane=- ; sid=- ; ref=" + ref + ")", text)
         transfer = peer_message._read_transfer_record(ref)
         pending = peer_message._read_pending(ref)
         self.assertEqual(transfer["from"], sender)
@@ -668,7 +668,7 @@ class F100cSenderAndStewardTest(unittest.TestCase):
 
     def test_trailer_round_trip_and_last_wins(self):
         t = peer_message.peer_trailer("claude", "sid-a", "hearting-46")
-        self.assertIn("(peer-from: claude [?] hearting-46)", t)
+        self.assertIn("(peer-from: claude [?] hearting-46 ; pane=- ; sid=sid-a)", t)
         self.assertEqual(peer_message.parse_peer_trailer("body\n\n" + t),
                          {"harness": "claude", "session_id": None, "name": "hearting-46"})
         self.assertEqual(peer_message.parse_peer_trailer("(peer-from: codex 01a0)")["name"], None)
@@ -1112,6 +1112,28 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         self.assertIsNone(received["text"])
         self.assertEqual(path.read_bytes(), raw)
         self.assertEqual(peer_message.read_peer_payload(ref)["body"], body)
+
+    def test_reference_and_wire_share_one_trailer_with_exact_sender_identity(self):
+        sender = dict(self.sender, pane_id="w:sender")
+        with mock.patch.object(peer_message, "peer_alias", side_effect=["[93]", "[92]"]) as alias:
+            text, ref = self.pending("한글 " * 1800, sender=sender)
+        self.assertEqual(alias.call_count, 1)
+        self.assertIn("[93]", text)
+        self.assertIn(" ; pane=w:sender ; sid=" + sender["session_id"], text)
+        self.assertLessEqual(len(text.encode("utf-8")), 1024)
+        self.assertEqual(peer_message.parse_peer_trailer(text, self.recipient)["session_id"],
+                         sender["session_id"])
+        self.assertIsNotNone(peer_message._read_transfer_record(ref).get("body_ref"))
+
+    def test_reference_with_identity_larger_than_cap_falls_back_to_complete_inline_body(self):
+        sender = dict(self.sender, session_id="native-" + "x" * 1200, pane_id="w:sender")
+        body = "한글 " * 1800
+        text, ref = self.pending(body, sender=sender)
+        self.assertIn(body, text)
+        self.assertIn("sid=" + sender["session_id"], text)
+        self.assertIsNone(peer_message._read_transfer_record(ref).get("body_ref"))
+        self.assertEqual(peer_message.parse_peer_trailer(text, self.recipient)["session_id"],
+                         sender["session_id"])
 
     def test_reference_threshold_is_utf8_bytes_and_no_trailer_stays_inline(self):
         bodies = ("한" * 682 + "a", "한" * 682 + "ab", "한" * 683)

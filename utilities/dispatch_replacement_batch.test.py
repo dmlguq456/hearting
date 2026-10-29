@@ -112,6 +112,11 @@ class ReplacementBatchTest(unittest.TestCase):
                 RB.command(self.jobs, self.record, self.source, self.replay)
 
     def test_batch_launches_only_gap_with_common_claim_identity(self):
+        config=self.base/'d5-defaults.yaml'
+        baseline=(FIXTURE.ROOT/'profiles/dispatch-defaults.yaml').read_text()
+        config.write_text(baseline.replace('  enabled: [claude, codex, opencode]','  enabled: [claude, opencode]'))
+        env=mock.patch.dict(os.environ,{'DISPATCH_DEFAULTS_CONFIG':str(config)})
+        env.start();self.addCleanup(env.stop)
         command, path, evidence = self.evidence()
         spawned = []
         class FakeProcess:
@@ -141,8 +146,11 @@ class ReplacementBatchTest(unittest.TestCase):
                 'AGENT_DISPATCH_CURRENT_HARNESS': 'codex', 'AGENT_DISPATCH_CURRENT_TRANSPORT': 'headless',
                 'AGENT_DISPATCH_CURRENT_SANDBOX': 'workspace-write'}))
             output = io.StringIO()
-            with contextlib.redirect_stdout(output):
+            config.write_text(baseline.replace('  enabled: [claude, codex, opencode]','  enabled: [opencode]'))
+            diagnostic=io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(diagnostic):
                 rc = BATCH.main(command[2:])
+            self.assertEqual(diagnostic.getvalue().count('policy_note=disabled-since-admission'),1)
         self.assertEqual(rc, 0, output.getvalue())
         self.assertEqual(len(spawned), 1)
         allocator.assert_not_called()

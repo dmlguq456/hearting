@@ -304,6 +304,24 @@ class ModelConfigTest(unittest.TestCase):
 
 
 class TopProfileOptionalityTest(unittest.TestCase):
+    def test_opencode_omitted_top_preserves_selected_file_bytes_and_permissions(self):
+        from model_profile import resolve_runtime_profile
+        with tempfile.TemporaryDirectory(prefix="opencode-top-legacy-") as root:
+            runtime = Path(root)
+            user = runtime / "agent-config/models.conf"
+            user.parent.mkdir()
+            shipped = config.shipped_path("opencode").read_bytes()
+            original = b"".join(line for line in shipped.splitlines(keepends=True)
+                                if not line.startswith((b"CFG_MODEL_PROFILE_TOP=",
+                                                        b"CFG_MODEL_PROFILE_GRANULARITY_TOP=")))
+            user.write_bytes(original)
+            user.chmod(0o640)
+            resolved, receipt = resolve_runtime_profile("opencode", "top", runtime=runtime)
+            self.assertEqual(receipt.source, "user")
+            self.assertTrue(resolved["granularity"].startswith("collapsed-top-to-"))
+            self.assertEqual(user.read_bytes(), original)
+            self.assertEqual(user.stat().st_mode & 0o777, 0o640)
+
     def make_root(self, adapter="claude", shipped=BASE):
         root = Path(tempfile.mkdtemp())
         shipped_path = root / "adapters" / adapter / "config" / "models.conf"

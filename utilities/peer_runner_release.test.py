@@ -727,10 +727,12 @@ print(json.dumps(result))
             sender = {"harness": "codex", "session_id": "sid-registered-sender",
                       "name": "sender"}
             recipient = {"harness": "claude", "session_id": sid, "name": "parent"}
+            from dispatch_recipient_receipt import receipt_marker
             gate_binding = seed_registered_delivery(gate_delivery, "human-gate")
             with mock.patch.dict(os.environ, env, clear=True):
                 gate_text, gate_ref = peer_message.prepare_peer_message(
-                    "[gate] registered human gate", sender, recipient,
+                    "[gate] registered human gate\n" + receipt_marker(
+                        pending_delivery.read(self.state, sid, gate_delivery), sid), sender, recipient,
                     defer=True, refs=[duty_id])
                 peer_message.bind_dispatch_notice(gate_ref, gate_binding)
                 gate_pending = peer_message._read_pending(gate_ref)
@@ -768,7 +770,8 @@ print(json.dumps(result))
             terminal_binding = seed_registered_delivery(terminal_delivery, "notice")
             with mock.patch.dict(os.environ, env, clear=True):
                 terminal_text, terminal_ref = peer_message.prepare_peer_message(
-                    "[notice] registered terminal delivery", sender, recipient,
+                    "[notice] registered terminal delivery\n" + receipt_marker(
+                        pending_delivery.read(self.state, sid, terminal_delivery), sid), sender, recipient,
                     defer=True, refs=[duty_id])
                 peer_message.bind_dispatch_notice(terminal_ref, terminal_binding)
                 self.assertEqual(peer_message.receive_peer_message(terminal_text, recipient), 0)

@@ -180,6 +180,11 @@ def finalize_process_roles(sessions, jobs):
                       and str(native.get("procStart") or "") == s.proc_start)
         evidence = s.session_identity_evidence or {}
         if s.harness == "claude":
+            observed = procscan.claude_process_identity.observe_process(s.pid)
+            if (observed and observed["proc_start"] == s.proc_start
+                    and observed["kind"] == "service"):
+                s.process_role = "service"
+                continue
             proven = evidence.get("verdict") == "resolved"
         elif s.harness == "codex":
             proven = proven or bool(s.session_id and getattr(s, "_fd_owner", False))
@@ -217,7 +222,10 @@ def process_identity(pid, harness, *, live_codex=None, codex_observation=None):
     session_id, source = None, ""
     try:
         if harness == "claude":
-            from .collectors import claude
+            from .collectors import claude, procscan
+            observed = procscan.claude_process_identity.observe_process(pid)
+            if observed and observed["kind"] == "service":
+                return record(harness, "", "", HARNESS_ONLY)
             session_id, source = claude.session_id_of_process(pid), "claude-session-registry"
         elif harness == "codex":
             from .collectors import codex

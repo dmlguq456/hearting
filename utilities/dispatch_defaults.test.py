@@ -815,5 +815,32 @@ class NoProgressDefaultsTests(DispatchDefaultsV3Tests):
         self.assertEqual(D.query_no_progress_minutes(normalized), 0)
         self.assertFalse(any("no_progress_minutes" in w for w in warnings))
 
+
+class D5CurrentEnabledTest(unittest.TestCase):
+    def test_current_ceiling_intersects_without_filling_bands_or_mutating_sealed_values(self):
+        import copy
+        for version in (3, 4):
+            config = DispatchDefaultsV3Tests().config()
+            config["schema_version"] = version
+            config["harnesses"]["enabled"] = ["claude", "opencode"]
+            sealed = {"primary": ["codex", "claude"], "relief": ["opencode"], "last_resort": [], "promote_relief_below": 25}
+            before = copy.deepcopy((config, sealed))
+            allowed = D.current_enabled_harnesses(config)
+            policy = D.restrict_harness_policy(sealed, allowed)
+            self.assertEqual(policy, {**sealed, "primary": ["claude"]})
+            self.assertEqual((config, sealed), before)
+            self.assertEqual(D.restrict_harness_policy(sealed, [])['primary'], [])
+        for version in (1, 2):
+            self.assertEqual(set(D.current_enabled_harnesses({"schema_version": version, "depth1_owner": ["claude"]})), D.DISPATCHABLE_HARNESSES)
+
+    def test_unreadable_or_invalid_current_defaults_cannot_become_all_enabled(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "policy.yaml"
+            for text in (None, "schema_version: 4\nmystery: 1\n"):
+                if text is not None:
+                    path.write_text(text)
+                with mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(path)}), self.assertRaises(D.DefaultsConfigError):
+                    D.current_enabled_harnesses()
+
 if __name__ == "__main__":
     unittest.main()

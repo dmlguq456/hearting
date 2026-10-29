@@ -761,7 +761,7 @@ def _profile_cell(values, profile):
         model = values.get(f"CFG_TIER_{tier}_MODEL")
     if not model:
         return None
-    return [model.replace("opencode-go/", "", 1), effort]
+    return [model, effort]
 
 
 def _allocation_fields(policy):
@@ -886,6 +886,14 @@ def read_model_config():
         except Exception:
             continue
         profile_map[adapter] = {profile: _profile_cell(values, profile) for profile in _PROFILES}
+        if adapter == "opencode":
+            try:
+                # Use the selected runtime config's normal resolver: an omitted
+                # TOP uses the installed collapse, without rewriting the file.
+                top = utility("model_profile").resolve_profile_values(adapter, values, "top")
+                profile_map[adapter]["top"] = [top["model"], top["budget"]]
+            except Exception:
+                pass
         picked = []
         for cell in profile_map[adapter].values():
             if cell and cell[0] not in picked:
@@ -904,7 +912,7 @@ def read_model_config():
         for adapter, catalog in catalogs.items():
             catalog_sources[adapter] = {"state": catalog.state, "source": catalog.source,
                                         "observed_at": catalog.observed_at}
-            if catalog.models:
+            if catalog.models or catalog.state in ("available", "empty"):
                 choices[adapter] = list(catalog.models)
     except Exception:
         catalogs = {}

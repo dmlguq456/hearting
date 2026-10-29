@@ -105,10 +105,10 @@ def _effective_job_parent(job, *, read_context=None):
         utilities = str(Path(__file__).resolve().parents[3] / "utilities")
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
-        from dispatch_seat_handover import effective_parent, effective_parent_harness
+        from dispatch_seat_handover import resolve_recipient
         context = read_context if read_context is not None else _parent_read_context()
-        return (effective_parent(metadata, jobs=registry, read_context=context),
-                effective_parent_harness(metadata, jobs=registry, read_context=context))
+        answer = resolve_recipient("job-holder", metadata=metadata, jobs=registry, read_context=context)
+        return answer.session_id, answer.harness
     except ImportError:
         return "", ""
 
@@ -304,6 +304,13 @@ def _adopt_child_titles(sessions, jobs):
                     job.summary = None
                     job.summary_ts = None
             continue
+        source_sid = getattr(source, "session_id", None)
+        source_attempt = getattr(source, "attempt_id", None)
+        job_attempt = getattr(job, "attempt_id", None)
+        if ((runtime_sid and source_sid and runtime_sid != source_sid)
+                or (job_attempt and source_attempt and job_attempt != source_attempt)):
+            job.association_ambiguity = "child-native-identity-conflict"
+            continue
         job._child_session_associated = True
         # Identity association alone is not enough to suppress the attempt-log
         # fallback.  `claude -p --no-session-persistence` exposes a session id and
@@ -323,9 +330,6 @@ def _adopt_child_titles(sessions, jobs):
             job.summary_ts = getattr(source, 'summary_ts', None)
         if getattr(job, 'subagents', None) is None:
             job.subagents = getattr(source, 'subagents', None)
-        source_attempt = getattr(source, "attempt_id", None)
-        job_attempt = getattr(job, "attempt_id", None)
-        source_sid = getattr(source, "session_id", None)
         runtime_sid = getattr(job, "_runtime_session_id", None)
         if (source_sid and (runtime_sid is None or runtime_sid == source_sid)
                 and source_attempt == job_attempt):
@@ -336,7 +340,24 @@ def _adopt_child_titles(sessions, jobs):
             if (not isinstance(current_observation, dict)
                     or current_observation.get("state") == "unavailable"):
                 job.shell_job_observation = getattr(source, "shell_job_observation", None)
-        if not getattr(job, '_dispatch_context_owned', False):
+        # The cwd join above remains useful for legacy TITLE/NOW, but cannot
+        # authorize telemetry. Reject conflicting facts even when another key
+        # (for example a PID before reuse) matched.
+        exact_process = (all(item is not None for item in identity)
+                         and identity == (source.harness, source.pid, source.proc_start))
+        exact_session = bool(runtime_sid and runtime_sid == source_sid)
+        conflicts = any(left is not None and right is not None and left != right
+                        for left, right in (
+                            (runtime_sid, source_sid), (job_attempt, source_attempt)))
+        # A native child can have a different PID from its registered wrapper.
+        # Equal PIDs with conflicting start times are reuse, not a wrapper join.
+        if (getattr(job, 'pid', None) == getattr(source, 'pid', None)
+                and getattr(job, 'proc_start', None) is not None
+                and getattr(source, 'proc_start', None) is not None
+                and job.proc_start != source.proc_start):
+            conflicts = True
+        if (not getattr(job, '_dispatch_context_owned', False)
+                and (exact_process or exact_session) and not conflicts):
             for field_name in (
                     'ctx_pct', 'active_context_tokens', 'context_window_tokens',
                     'context_display_window_tokens', 'context_policy',
@@ -409,6 +430,42 @@ def apply_peer_rows(sessions, by_key):
             s.peer_obligations = sorted(
                 duties, key=lambda item: (item.get("kind", ""), item.get("age_min", 0))
             )[:8]
+
+
+def _session_census_observation(sessions, herdr_observed):
+    """Join this process snapshot to herdr and native session identities.
+
+    ``herdr_observed.complete`` covers herdr's own observation only. It cannot
+    certify the separately collected process rows, so the downstream absence
+    count is complete only when both observations and every row identity are
+    complete in this same collection pass.
+    """
+    herdr_complete = (isinstance(herdr_observed, dict)
+                      and herdr_observed.get("complete") is True)
+    process_complete = getattr(sessions, "census_complete", False) is True
+    reasons = list(getattr(sessions, "census_reasons", ()))
+    live = set()
+    native_sid_complete = True
+    for session in sessions:
+        harness = getattr(session, "harness", None)
+        sid = getattr(session, "session_id", None)
+        if (not isinstance(harness, str) or harness.lower() not in procscan.HARNESSES
+                or not isinstance(sid, str) or not sid.strip()):
+            native_sid_complete = False
+            continue
+        live.add((harness.lower(), sid))
+    if not process_complete and not reasons:
+        reasons.append("process-census-unverified")
+    if not native_sid_complete:
+        reasons.append("native-session-id-unobserved")
+    return {
+        "complete": herdr_complete and process_complete and native_sid_complete,
+        "herdr_complete": herdr_complete,
+        "process_complete": process_complete,
+        "process_reasons": tuple(dict.fromkeys(reasons)),
+        "native_sid_complete": native_sid_complete,
+        "live": frozenset(live),
+    }
 
 
 def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_first=False, *,
@@ -489,10 +546,12 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
 
     # F-100b: herdr attachment — one `herdr agent list` per snapshot, exact session-id
     # match; additive enrichment that never touches liveness or row existence.
+    herdr_observed = None
     try:
         from . import herdr as _herdr
         observed = _herdr.enrich(sessions, wait_timeout=0.0 if fast_first else 0.2)
         if isinstance(observed, dict):
+            herdr_observed = observed
             observations["herdr"] = _observation_health(
                 job_key, "herdr", observed.get("last_error") if not observed.get("complete") else None)
     except Exception as exc:
@@ -568,8 +627,11 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
     tag_metadata = []
     try:
         from ..session_tags import assign
-        from ..session_handle import resolve_tag
         tag_metadata = assign(sessions)
+    except Exception:
+        pass
+    try:
+        from ..session_handle import resolve_tag
         for s in sessions:
             if s.harness in {"codex", "opencode"} and s.session_id:
                 s.session_tag = resolve_tag(s.harness, s.session_id)
@@ -787,6 +849,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         pass
 
     # --- dispatch section ---
+    herdr_session_observation = _session_census_observation(sessions, herdr_observed)
     jobs = []
     previous = _JOB_OBSERVATIONS.get(job_key)
     job_error = None
@@ -795,6 +858,7 @@ def _collect_all(harness_filter=None, jobs_path=None, usage="cache-only", fast_f
         from . import dispatch
         jobs = dispatch.collect(jobs_path=jobs_path, harness_filter=harness_filter,
                                 session_rows=sessions,
+                                session_observation=herdr_session_observation,
                                 **({"fast_first": True} if fast_first else {}))
         if answer_waits is not None:
             by_attempt = {}

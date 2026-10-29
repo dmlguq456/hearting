@@ -1415,8 +1415,25 @@ class TestCompletion(WorkflowFixture):
 # D. status projection and resource visibility
 # ---------------------------------------------------------------------------
 class TestStatusProjection(WorkflowFixture):
+    def setUp(self):
+        super().setUp()
+        self.artifact_root = self.base / "artifacts"
+        self.enterContext(mock.patch.dict(os.environ, {
+            "AGENT_ARTIFACT_ROOT": str(self.artifact_root),
+            "FLEET_ROUTE_CHAIN_DIR": str(self.base / "route-chain"),
+        }))
+        self.enterContext(mock.patch.object(SUP, "route_module", return_value=ROUTE))
+        self.enterContext(mock.patch.object(ROUTE, "_compose_artifact_root",
+                                           return_value=str(self.artifact_root)))
+        self.enterContext(mock.patch.object(ROUTE, "_route_chain_module", return_value=None))
+
     def test_closed_exact_terminal_projects_complete_without_writing_journal_or_registry(self):
-        route, path = self.two_stage_route()
+        route, path = self.two_stage_route(route_id="rt-0123456789abcdef")
+        canonical = ROUTE.canonical_route_path(self.artifact_root, route["route_id"])
+        canonical.parent.mkdir(parents=True)
+        path = path.rename(canonical)
+        jobs = self.base / "jobs.log"
+        jobs.touch()
         ledger = SUP.ledger_for(route)
         ledger.root.mkdir(parents=True)
         ledger.claim("a" * 32, {"predecessor": "eval-run", "successor": "verify",
@@ -1425,19 +1442,26 @@ class TestStatusProjection(WorkflowFixture):
         outcome = {"route_id": route["route_id"], "route_hash": route["route_hash"],
                    "terminal_gate_proven": True}
         ROUTE.outcome_path(path).write_text(json.dumps(outcome), encoding="utf-8")
-        before_registry = (self.base / "jobs.log").read_bytes() if (self.base / "jobs.log").exists() else None
-        before_journal = ledger.journal_path.read_bytes() if ledger.journal_path.exists() else None
+        def snapshot():
+            return {str(p.relative_to(self.base)): p.read_bytes()
+                    for p in self.base.rglob("*") if p.is_file()}
 
-        class Args:
-            route = str(path)
-            jobs = None
-            json = True
-
-        status_out = io.StringIO()
-        with mock.patch.object(SUP, "terminal_gate_state", return_value=gates), \
-             contextlib.redirect_stdout(status_out):
-            self.assertEqual(SUP.cmd_status(Args()), 0)
-        status = json.loads(status_out.getvalue())
+        before = snapshot()
+        statuses = []
+        for value in (str(path), route["route_id"]):
+            status_out = io.StringIO()
+            with mock.patch.object(SUP, "terminal_gate_state", return_value=gates), \
+                 mock.patch.object(ROUTE, "resolve_route_argument",
+                                   wraps=ROUTE.resolve_route_argument) as resolve, \
+                 contextlib.redirect_stdout(status_out):
+                self.assertEqual(SUP.cmd_status(SimpleNamespace(
+                    route=value, jobs=str(jobs), json=True)), 0)
+            resolve.assert_called_once_with(value, str(jobs))
+            statuses.append(json.loads(status_out.getvalue()))
+            self.assertEqual(snapshot(), before)
+        self.assertEqual(statuses[0], statuses[1])
+        status = statuses[0]
+        self.assertEqual(status["route_file"], str(path.resolve()))
 
         reader = type("GateReader", (), {
             "outcome_path": staticmethod(ROUTE.outcome_path),
@@ -1456,24 +1480,81 @@ class TestStatusProjection(WorkflowFixture):
             self.assertEqual(projection["next_stage"], [])
         self.assertEqual(status["journal_workflow_state"], "CREATED")
         self.assertTrue(status["claims"])
-        self.assertEqual(before_registry, (self.base / "jobs.log").read_bytes()
-                         if (self.base / "jobs.log").exists() else None)
-        self.assertEqual(before_journal, ledger.journal_path.read_bytes()
-                         if ledger.journal_path.exists() else None)
+        self.assertEqual(snapshot(), before)
+
+    def test_route_id_uses_explicit_jobs_lookup_and_ledger_over_ambient_state(self):
+        route, path = self.two_stage_route(route_id="rt-abcdef0123456789")
+        jobs = self.base / "explicit" / "jobs.log"
+        jobs.parent.mkdir()
+        ambient = self.base / "ambient" / "jobs.log"
+        ambient.parent.mkdir()
+        ambient.touch()
+        for key in ("owner_route", "route"):
+            with self.subTest(metadata=key):
+                jobs.write_text(f"now\topen\t1\tp\tt\t{key}_id={route['route_id']},"
+                                f"{key}_file={path}\n", encoding="utf-8")
+                ledger = SUP.ledger_for(route, str(jobs))
+                if not ledger.journal_path.exists():
+                    ledger.record("run", "RUNNING")
+                before = {str(p): p.read_bytes() for p in self.base.rglob("*") if p.is_file()}
+                statuses = []
+                with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(ambient),
+                                                   "AGENT_WORKFLOW_ROOT": str(self.base / "wrong")}):
+                    for value in (str(path), route["route_id"]):
+                        output = io.StringIO()
+                        with mock.patch.object(ROUTE, "resolve_route_argument",
+                                               wraps=ROUTE.resolve_route_argument) as resolve, \
+                             contextlib.redirect_stdout(output):
+                            self.assertEqual(SUP.cmd_status(SimpleNamespace(
+                                route=value, jobs=str(jobs), json=True)), 0)
+                        resolve.assert_called_once_with(value, str(jobs))
+                        statuses.append(json.loads(output.getvalue()))
+                self.assertEqual(statuses[0], statuses[1])
+                self.assertEqual(statuses[0]["route_file"], str(path.resolve()))
+                self.assertEqual(statuses[0]["current_stage"], ["run"])
+                self.assertEqual(statuses[0]["ledger_root_source"], "explicit-jobs")
+                self.assertEqual(statuses[0]["ledger_root"], str(ledger.root))
+                self.assertEqual(before, {str(p): p.read_bytes()
+                                         for p in self.base.rglob("*") if p.is_file()})
+
+    def test_unresolved_route_id_is_a_cli_error_without_traceback(self):
+        route_id = "rt-ffffffffffffffff"
+        with self.assertRaisesRegex(SUP.SupervisorError, "route-id-unresolved:" + route_id):
+            SUP.cmd_status(SimpleNamespace(route=route_id, jobs=None, json=True))
+        for value, error in ((route_id, "route-id-unresolved:" + route_id),
+                             (str(self.base / "missing.json"), "route unreadable:")):
+            with self.subTest(route=value):
+                captured = subprocess.run(
+                    [sys.executable, str(HERE / "workflow-supervisor.py"),
+                     "status", "--route", value, "--json"],
+                    cwd=self.base, capture_output=True, text=True,
+                    env={**os.environ, "AGENT_DISPATCH_JOBS": str(self.base / "jobs.log")})
+                self.assertEqual(captured.returncode, 64, captured.stderr)
+                self.assertIn("workflow-supervisor: " + error, captured.stderr)
+                self.assertNotIn("Traceback", captured.stderr)
+                self.assertEqual(captured.stdout, "")
 
     def test_status_exposes_workflow_stage_resource_and_failure(self):
-        route, path = self.two_stage_route()
+        route, path = self.two_stage_route(route_id="rt-0123456789abcdef")
+        canonical = ROUTE.canonical_route_path(self.artifact_root, route["route_id"])
+        canonical.parent.mkdir(parents=True)
+        path = path.rename(canonical)
         registry = self.resource_registry(exit_code=0)
         self.arm(path, registry)
         ledger = SUP.ledger_for(route)
         SUP.poll_once(route, ledger)
-        captured = subprocess.run(
-            [sys.executable, str(ROOT / "utilities" / "workflow-supervisor.py"),
-             "status", "--route", str(path), "--json"],
-            capture_output=True, text=True,
-            env={**os.environ, "AGENT_WORKFLOW_ROOT": str(self.workflow_root)})
-        self.assertEqual(captured.returncode, 0, captured.stderr)
-        payload = json.loads(captured.stdout)
+        payloads = []
+        for value in (str(path), route["route_id"]):
+            captured = subprocess.run(
+                [sys.executable, str(HERE / "workflow-supervisor.py"),
+                 "status", "--route", value, "--json"],
+                cwd=self.base, capture_output=True, text=True,
+                env={**os.environ, "AGENT_WORKFLOW_ROOT": str(self.workflow_root)})
+            self.assertEqual(captured.returncode, 0, captured.stderr)
+            payloads.append(json.loads(captured.stdout))
+        self.assertEqual(payloads[0], payloads[1])
+        payload = payloads[0]
+        self.assertEqual(payload["route_file"], str(path.resolve()))
         for field in ("workflow_state", "current_stage", "next_stage", "terminal_nodes",
                       "terminal_gates", "resource_children", "failure_reason",
                       "updated_at", "human_gate_bindings", "claims"):

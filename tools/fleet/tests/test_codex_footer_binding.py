@@ -250,11 +250,25 @@ class CodexFooterBindingTest(unittest.TestCase):
             (pane, "/endpoint/A.sock"),
             (pane, "/endpoint/A.sock"),
             (pane, "/endpoint/A.sock"),
+            (pane, "/endpoint/A.sock"),
         ])
         self.assertEqual(len(sent), 2)
         self.assertEqual([item[0][2] for item in sent],
                          ["report-agent-session", "report-metadata"])
         self.assertTrue(all(socket_path == "/endpoint/A.sock" for _, socket_path in sent))
+
+    def test_deferred_report_proof_rejects_socket_switch_after_assignment(self):
+        pane = "wC:p7"
+        sent = self.run_deferred_report_with_endpoints([
+            (pane, "/endpoint/A.sock"),
+            (pane, "/endpoint/A.sock"),
+            (pane, "/endpoint/A.sock"),
+            (pane, "/endpoint/B.sock"),
+        ])
+        self.assertEqual(len(sent), 1)
+        command, socket_path = sent[0]
+        self.assertEqual(command[1:4], ["pane", "report-agent-session", pane])
+        self.assertEqual(socket_path, "/endpoint/A.sock")
 
     def test_deferred_proof_helper_skips_only_known_incapable_frontend_config(self):
         for feasibility, should_spawn in (("incapable", False), ("capable", True), ("unknown", True)):

@@ -389,6 +389,21 @@ class PlanSlicesTest(unittest.TestCase):
         return route_path, worktree, slices_path, root / "out" / "chain.json"
 
     @staticmethod
+    def _private_defaults(root, *, enabled=("claude", "codex", "opencode"), version=4):
+        config = Path(root) / "dispatch-defaults.yaml"
+        harnesses = ", ".join(enabled)
+        config.write_text(
+            f"schema_version: {version}\nharnesses:\n  enabled: [{harnesses}]\nprofiles:\n"
+            + "".join(
+                f"  {profile}:\n    primary: [{harnesses}]\n    relief: []\n"
+                "    last_resort: []\n    promote_relief_below: 0\n"
+                for profile in ("deep", "balanced-deep", "balanced", "light", "mini")
+            ) + "allocation:\n  strategy: balanced\n  window: 30\ncapabilities:\n",
+            encoding="utf-8",
+        )
+        return config
+
+    @staticmethod
     def _seal_checked_tuples(route_path, harnesses=("claude", "codex")):
         """Seal checked evidence for `harnesses` into the route, as a depth-2 node needs to launch one."""
         row = lambda harness: {
@@ -473,7 +488,8 @@ class PlanSlicesTest(unittest.TestCase):
                     route = json.loads(route_path.read_text())
                     route["selection_pins"] = pins
                     route_path.write_text(json.dumps(route), encoding="utf-8")
-                with mock.patch.dict(os.environ):
+                config = self._private_defaults(td)
+                with mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)}):
                     for name in ("AGENT_DISPATCH_CURRENT_HARNESS", "AGENT_DISPATCH_CURRENT_TRANSPORT", "AGENT_DISPATCH_CURRENT_SANDBOX"):
                         os.environ.pop(name, None)
                     CHAIN.plan_slices(route_path=route_path, node_id="execute", worktree=worktree, slices_path=slices_path,
@@ -488,32 +504,96 @@ class PlanSlicesTest(unittest.TestCase):
         self.assertEqual(planned(pin("frame", "claude")), ["codex", "codex"])
 
     def test_plan_slices_applies_the_pin_only_while_the_pinned_harness_can_run_the_node(self):
-        """The manifest is the authority a slice launch follows, so a pin that `dispatch-node` would not
-        launch (outside the node's harness policy, under an active usage limit, or with no checked
-        tuple for this parent) must not be written over the requested adapter."""
+        """An enabled, checked sealed pin is explicit, even outside automatic bands/pool.
+
+        Disabled targets, active limits and missing evidence for the current parent
+        still leave the requested adapter in the manifest that dispatch-node follows.
+        """
         import dispatch_capacity_evidence as CAPACITY
-        def planned(*, policy=None, limits=None, tuples=("claude", "codex")):
+        def planned(*, policy=None, limits=None, tuples=("claude", "codex"),
+                    enabled=("claude", "codex", "opencode"), parent=None, version=4):
             with tempfile.TemporaryDirectory() as td:
                 route_path, worktree, slices_path, output = self._fixture(td)
                 self._seal_checked_tuples(route_path, tuples)
                 route = json.loads(route_path.read_text())
                 route["selection_pins"] = {"contract_version": 1, "worker": {"harness": "claude", "model": None, "effort": None}}
+                route["dispatch_allocation"] = {"strategy": "balanced", "window": 30, "harness_order": ["codex", "opencode"]}
                 if policy is not None:
                     route["nodes"][0]["harness_policy"] = policy
                 route_path.write_text(json.dumps(route), encoding="utf-8")
+                sealed = route_path.read_bytes()
+                config = self._private_defaults(td, enabled=enabled, version=version)
                 with mock.patch.object(CAPACITY, "active_limits", return_value=limits or {}), \
-                     mock.patch.dict(os.environ, {}):
+                     mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)}):
                     for name in ("AGENT_DISPATCH_CURRENT_HARNESS", "AGENT_DISPATCH_CURRENT_TRANSPORT",
                                  "AGENT_DISPATCH_CURRENT_SANDBOX"):
                         os.environ.pop(name, None)  # a manual caller: no runtime parent to filter by
+                    if parent:
+                        os.environ.update(AGENT_DISPATCH_CURRENT_HARNESS=parent,
+                                          AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                                          AGENT_DISPATCH_CURRENT_SANDBOX="default")
                     CHAIN.plan_slices(route_path=route_path, node_id="execute", worktree=worktree, slices_path=slices_path,
                                       output_path=output, default_adapter="codex", jobs=Path(td) / "jobs.log")
+                self.assertEqual(route_path.read_bytes(), sealed)
                 return [s["adapter"] for s in json.loads(output.read_text())["sessions"]]
         self.assertEqual(planned(), ["claude", "claude"])                                          # usable pin still wins
         self.assertEqual(planned(policy={"primary": ["claude", "codex"]}), ["claude", "claude"])
         self.assertEqual(planned(limits={"claude": {"reset_epoch": 4102444800}}), ["codex", "codex"])   # under a usage limit
-        self.assertEqual(planned(policy={"primary": ["codex"], "relief": ["opencode"]}), ["codex", "codex"])  # outside the node's policy
+        self.assertEqual(planned(policy={"primary": ["codex"], "relief": ["opencode"]}), ["claude", "claude"])
         self.assertEqual(planned(tuples=("codex",)), ["codex", "codex"])                           # no checked tuple for the pin
+        self.assertEqual(planned(parent="claude"), ["claude", "claude"])
+        self.assertEqual(planned(parent="codex"), ["codex", "codex"])  # only a foreign parent's evidence
+        for version in (3, 4):
+            for policy in ({"primary": ["claude", "codex"]}, {"primary": ["codex"], "relief": ["opencode"]}):
+                with self.subTest(version=version, policy=policy):
+                    self.assertEqual(planned(version=version, policy=policy, enabled=("codex", "opencode")),
+                                     ["claude", "claude"] if "claude" in policy["primary"] else ["codex", "codex"])
+                    # An admitted pin continues; a target absent from both the
+                    # sealed pool and node policy remains unavailable.
+
+    def test_plan_slices_cli_keeps_enabled_pin_distinct_from_automatic_pool(self):
+        """Public planning honors the pin without rewriting the pool or granting a disabled exception."""
+        import subprocess
+
+        for version in (3, 4):
+            for pinned, enabled, expected in (
+                (True, ("claude", "codex", "opencode"), ["claude", "claude"]),
+                (True, ("codex", "opencode"), ["codex", "codex"]),
+                (False, ("claude", "codex", "opencode"), ["codex", "codex"]),
+            ):
+                with self.subTest(version=version, pinned=pinned, enabled=enabled), tempfile.TemporaryDirectory() as td:
+                    route_path, worktree, slices_path, output = self._fixture(td)
+                    self._seal_checked_tuples(route_path, ("claude", "codex", "opencode"))
+                    route = json.loads(route_path.read_text())
+                    route["dispatch_allocation"] = {"strategy": "balanced", "window": 30, "harness_order": ["codex", "opencode"]}
+                    route["nodes"][0]["harness_policy"] = {
+                        "primary": ["codex"], "relief": ["opencode"], "last_resort": [], "promote_relief_below": 0,
+                    }
+                    if pinned:
+                        route["selection_pins"] = {"contract_version": 1, "worker": {"harness": "claude", "model": None, "effort": None}}
+                    route_path.write_text(json.dumps(route), encoding="utf-8")
+                    sealed = route_path.read_bytes()
+                    config = self._private_defaults(td, enabled=enabled, version=version)
+                    env = dict(os.environ, DISPATCH_DEFAULTS_CONFIG=str(config),
+                               FLEET_USAGE_STATE_DIR=str(Path(td) / "usage"),
+                               HEARTING_CAPACITY_PROBE_CLI="/dev/null",
+                               AGENT_DISPATCH_CURRENT_HARNESS="claude",
+                               AGENT_DISPATCH_CURRENT_TRANSPORT="headless",
+                               AGENT_DISPATCH_CURRENT_SANDBOX="default")
+                    jobs = Path(td) / "jobs.log"
+                    jobs.touch()
+                    result = subprocess.run(
+                        [sys.executable, str(PATH), "plan-slices", "--route", str(route_path),
+                         "--node", "execute", "--worktree", str(worktree), "--slices", str(slices_path),
+                         "--output", str(output), "--jobs", str(jobs)],
+                        env=env, capture_output=True, text=True, timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertEqual(json.loads(result.stdout)["planned"], "ok")
+                    manifest = json.loads(output.read_text())
+                    self.assertEqual([s["adapter"] for s in manifest["sessions"]], expected)
+                    self.assertEqual(route_path.read_bytes(), sealed)
+                    self.assertEqual(jobs.read_bytes(), b"")
 
     def test_plan_slices_worktree_must_be_the_sealed_cwd(self):
         """Round-1 B2: a foreign worktree is refused; omitting it uses the route's cwd."""

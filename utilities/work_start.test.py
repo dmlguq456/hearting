@@ -653,6 +653,8 @@ class WorkStartTest(unittest.TestCase):
 
     def test_automatic_frames_use_real_selector_usage_gate_before_wrapper_launch(self):
         owner = load("work_start_capacity_owner", W.ROOT / "utilities/dispatch-owner.py")
+        policy = Path(self.tmp.name)/"dispatch-defaults.yaml"
+        policy.write_text((W.ROOT/"profiles/dispatch-defaults.yaml").read_text())
         self.route.update(cwd=self.tmp.name, capability="autopilot-code", capability_mode="debug",
                           owner_model_profile="deep")
         for node in self.route["nodes"][:2]:
@@ -686,7 +688,7 @@ class WorkStartTest(unittest.TestCase):
         for headroom in (30, 60):
             with self.subTest(headroom=headroom), contextlib.ExitStack() as stack:
                 self.jobs.unlink(missing_ok=True); self.calls.clear(); launched.clear()
-                stack.enter_context(mock.patch.dict(os.environ, {}, clear=True))
+                stack.enter_context(mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG":str(policy)}, clear=True))
                 stack.enter_context(mock.patch.object(owner, "_authoritative_jobs", return_value=str(self.jobs)))
                 stack.enter_context(mock.patch.object(owner, "_sealed_owner_context", return_value=context))
                 # This case tests selector choice, while subprocess.run is the
@@ -4117,6 +4119,84 @@ class ModernNeverStartedOwnerNormalStartTest(NeverStartedReplacementNormalStartT
         for path, original in preserved.items():
             self.assertEqual(path.read_bytes(), original, str(path))
 
+    def test_returned_headless_model_refusal_is_typed_and_same_claim_resumes_once(self):
+        owner_a, owner_b, owner_c, claim_cd, preserved = self._build_claim_only_operational_shape()
+        self._store(owner_b, 'Keep the approved source and existing answers.', 'input-b-2')
+        answers_before = self.owner_input.retained(self.jobs, owner_b)
+        rows_before = self.replacement._rows(self.jobs.read_text().splitlines())
+        projection_before = self.replacement.effective_attempts(self.jobs, {owner_a})
+        owner_d = claim_cd['replacement_attempt_id']
+        binding_before = self.replacement.source_binding(self.jobs, rows_before[owner_c][1])
+        self.assertEqual(binding_before, (claim_cd['family_id'], owner_d, self.replacement._digest(claim_cd)))
+        claims_before = sorted((self.replacement._directory(self.jobs) / 'claims').glob('*.json'))
+        launches_before = len(self.launches)
+        payload_starts_before = len(self.delivered_prompts)
+        # Saved producer receipt shape, without invented spawn proof or selected model ID.
+        diagnostic = (
+            'trace.2=explicit=none;authorized=0\n'
+            'trace.4=configured=codex,claude,opencode;selected=codex;source=configured-balanced;deviation_reason=none\n'
+            'route_defaults=--capability,--capability-mode,--intensity,--model-profile,--dispatch-depth,--worker-type,--owner,--assigned-contract\n'
+            'check=failed\n'
+            'reason=headless-main-session-only-model\n'
+            'detail=model selected by profile:deep is interactive dispatch-depth-0 main-session only\n'
+        )
+        returned_launches = []
+        def refuse_selected(command, **_kwargs):
+            self.assertEqual(command[command.index('--attempt-id') + 1], owner_d)
+            self.assertEqual(command[command.index('--automatic-retry-of') + 1], owner_c)
+            returned_launches.append(command)
+            return subprocess.CompletedProcess(command, 64, '', diagnostic)
+
+        refused = self._cli_start(runner=refuse_selected)
+        self.assertEqual((refused['state'], refused['reason']),
+                         ('needs-attention', 'headless-main-session-only-model'))
+        attention, = refused['replacement_attention']
+        self.assertEqual((attention['state'], attention['reason'], attention['launcher_exit']),
+                         ('needs-attention', 'headless-main-session-only-model', 64))
+        self.assertEqual((attention['source_attempt_id'], attention['attempt_id'], attention['node']),
+                         (owner_c, owner_d, '__owner__'))
+        self.assertEqual(attention['record'], claim_cd)
+        self.assertEqual(attention['launcher_diagnostic'], '\n'.join(('\n' + diagnostic).splitlines()[-20:]))
+        self.assertEqual(attention['detail'],
+                         'model selected by profile:deep is interactive dispatch-depth-0 main-session only')
+        self.assertEqual(refused['next_step'], attention['next_step'])
+        self.assertIn('parent/controller', refused['next_step'])
+        self.assertIn('model-eligibility restriction', refused['next_step'])
+        self.assertNotIn('after the exact launch settles', json.dumps(refused))
+        for receipt in (refused, attention):
+            self.assertNotIn('next_action', receipt)
+            self.assertNotIn('retry_when', receipt)
+        self.assertEqual(len(returned_launches), 1)
+        self.assertEqual(len(self.launches), launches_before)
+        self.assertEqual(len(self.delivered_prompts), payload_starts_before)
+        self.assertNotIn(owner_d, self.replacement._rows(self.jobs.read_text().splitlines()))
+        self.assertNotEqual(refused.get('owner_attempt_id'), owner_d)
+        self.assertEqual(self.replacement.effective_attempts(self.jobs, {owner_a}), projection_before)
+        self.assertEqual(self.owner_input.retained(self.jobs, owner_b), answers_before)
+        for path, original in preserved.items():
+            self.assertEqual(path.read_bytes(), original, str(path))
+
+        # A later permitted ordinary start uses the existing controlled runner and same claim.
+        resumed = self._cli_start()
+        actual = self._assert_legacy_owner_started_with_all_answers(
+            owner_a, owner_b, owner_c, resumed, expected_answers=2)
+        self.assertEqual(actual, owner_d)
+        self.assertEqual(len(self.launches), launches_before + 1)
+        self.assertEqual(len(self.delivered_prompts), payload_starts_before + 1)
+        self.assertEqual(sum(item['attempt_id'] == owner_d for item in self.launches), 1)
+        replay = self._cli_start()
+        self.assertEqual(replay['owner_attempt_id'], owner_d)
+        self.assertEqual(len(self.launches), launches_before + 1)
+        self.assertEqual(len(returned_launches), 1)
+        rows_after = self.replacement._rows(self.jobs.read_text().splitlines())
+        self.assertEqual(set(rows_after) - set(rows_before), {owner_d})
+        self.assertEqual(self.replacement.source_binding(self.jobs, rows_after[owner_c][1]), binding_before)
+        self.assertEqual(sorted((self.replacement._directory(self.jobs) / 'claims').glob('*.json')), claims_before)
+        for aid in (owner_a, owner_b, owner_c):
+            self.assertEqual(rows_after[aid], rows_before[aid])
+        for path, original in preserved.items():
+            self.assertEqual(path.read_bytes(), original, str(path))
+
     def test_silent_legacy_claim_walk_uses_each_predecessor_launch_fence(self):
         _owner_a, owner_b, owner_c, claim_cd, _preserved = self._build_claim_only_operational_shape()
         owner_d = claim_cd["replacement_attempt_id"]
@@ -4836,6 +4916,54 @@ class BlockedOwnerAutoHarvestTest(unittest.TestCase):
     def test_normal_start_harvest_preserves_a_stored_answer(self):
         self._start(stored_answer=True)
 
+
+
+class D5PublicOwnerStartTest(unittest.TestCase):
+    def test_public_start_continues_admitted_target_and_refuses_target_disabled_at_admission(self):
+        fixture=load('d5_public_owner_fixture',Path(__file__).with_name('dispatch_owner.test.py'))
+        O=fixture.OWNER
+        for requested,admitted in ((None,True),('codex',True),('codex',False)):
+            with self.subTest(requested=requested,admitted=admitted), tempfile.TemporaryDirectory() as td:
+                enabled=('claude','codex','opencode') if admitted else ('claude','opencode')
+                config=fixture.d5_defaults(td,enabled=enabled)
+                env=fixture._isolated_env({'DISPATCH_DEFAULTS_CONFIG':str(config),'HARNESS_STATE_ROOT':str(Path(td)/'state'),
+                    'AGENT_DISPATCH_JOBS':str(Path(td)/'jobs.log'),'AGENT_DISPATCH_CALLER_HARNESS':'claude'})
+                for key in list(env):
+                    if key.startswith('AGENT_ARTIFACT_'):env.pop(key)
+                (Path(td)/'jobs.log').touch()
+                with mock.patch.dict(os.environ,env,clear=True):
+                    path,route=fixture.d5_public_route(td,text='codex 시켜' if requested else 'Continue approved work',owner=requested)
+                    before=path.read_bytes()
+                    fixture.d5_defaults(td)  # Codex is off at launch in all three cases.
+                    launched=[];commands=[]
+                    def run(command,**kwargs):
+                        commands.append(command)
+                        self.assertEqual(Path(command[1]).name,'dispatch-owner.py')
+                        self.assertIn('--start',command)
+                        out=io.StringIO()
+                        with contextlib.redirect_stdout(out):code=O.main(command[2:])
+                        return subprocess.CompletedProcess(command,code,out.getvalue(),'')
+                    with mock.patch.object(O,'_usage',return_value={h:'ok' for h in ('claude','codex','opencode')}) as usage, \
+                         mock.patch.object(O._capacity,'capacity_report',return_value={'scores':{'claude':80,'codex':99,'opencode':70},'sources':{}}), \
+                         mock.patch.object(O,'run_owner_wrapper',side_effect=lambda argv,env:launched.append(argv) or 0), \
+                         mock.patch('artifact_producer.prepare_route_artifact_env',return_value={}), \
+                         mock.patch.object(W,'prepare_task_request',return_value=None):
+                        result=W.start_work(route,path,Path(td)/'jobs.log',run=run)
+                    self.assertEqual(len(commands),1,result)
+                    self.assertEqual(path.read_bytes(),before)
+                    if requested and admitted:
+                        self.assertEqual(len(launched),1,result)
+                        self.assertEqual(Path(launched[0][0]).parts[-3],'codex')
+                        self.assertEqual(result['launches'][0]['receipt'].count('policy_note=disabled-since-admission'),1)
+                    elif requested:
+                        self.assertEqual(launched,[])
+                        self.assertIn('explicit-adapter-disabled-by-user-policy',result['launches'][0]['receipt'])
+                        usage.assert_not_called()
+                    else:
+                        self.assertEqual(len(launched),1,result)
+                        self.assertEqual(Path(launched[0][0]).parts[-3],'claude')
+                        self.assertEqual(usage.call_args.args[1],'deep')
+                        self.assertNotIn('headless-main-session-only-model',result['launches'][0]['receipt'])
 
 if __name__ == "__main__":
     unittest.main()

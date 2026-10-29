@@ -132,7 +132,8 @@ class ModelContextLaunchTest(unittest.TestCase):
                 context, "_resolved_config", side_effect=[configured, final]):
             launch = context.prepare_launch_context(
                 model=MODEL, context_window="800000", config_content="{}",
-                cwd="/tmp", environ={"OPENCODE_CONFIG_CONTENT": "{}"}, command="opencode",
+                cwd="/tmp", environ={"OPENCODE_CONFIG_CONTENT": "{}",
+                                     "OPENCODE_RUNTIME_VERSION": "1.19.0"}, command="opencode",
             )
         self.assertEqual(launch["configured_limits"], {
             "context": 700000, "input": 300000, "output": 80000,
@@ -154,7 +155,8 @@ class ModelContextLaunchTest(unittest.TestCase):
             with self.assertRaisesRegex(context.OpenCodeContextError, "higher-priority managed setting"):
                 context.prepare_launch_context(
                     model=MODEL, context_window="800000", config_content="{}",
-                    cwd="/tmp", environ={"OPENCODE_CONFIG_CONTENT": "{}"}, command="opencode",
+                    cwd="/tmp", environ={"OPENCODE_CONFIG_CONTENT": "{}",
+                                         "OPENCODE_RUNTIME_VERSION": "1.19.0"}, command="opencode",
                 )
 
     def test_native_compaction_policy_uses_final_input_and_reserve_once(self):
@@ -201,7 +203,8 @@ class ModelContextLaunchTest(unittest.TestCase):
                 context, "_resolved_config", side_effect=[configured, configured]):
             launch = context.prepare_launch_context(
                 model="local/custom", context_window="800000",
-                config_content=json.dumps(configured), cwd="/tmp", environ={},
+                config_content=json.dumps(configured), cwd="/tmp",
+                environ={"OPENCODE_RUNTIME_VERSION": "1.19.0"},
             )
         self.assertEqual(launch["catalog_limits"], {
             "context": None, "input": None, "output": None,
@@ -218,7 +221,8 @@ class ModelContextLaunchTest(unittest.TestCase):
             with self.assertRaisesRegex(context.OpenCodeContextError, "no standard model record"):
                 context.prepare_launch_context(
                     model="local/custom", context_window="800000",
-                    config_content="{}", cwd="/tmp", environ={},
+                    config_content="{}", cwd="/tmp",
+                    environ={"OPENCODE_RUNTIME_VERSION": "1.19.0"},
                 )
 
     def test_installed_opencode_v2_standalone_worker_consumes_prepared_custom_model_config(self):

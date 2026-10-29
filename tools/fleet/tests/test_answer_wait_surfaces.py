@@ -39,6 +39,57 @@ class AnswerWaitSurfaceTests(unittest.TestCase):
                 "unattributed": [], "total": 1, "health": [], "observed_at": 101,
                 "complete": True}
 
+    def test_codec_preserves_typed_request_ids_and_stale_clear_cannot_remove_replacement(self):
+        from fleet import interaction
+        for request in (501, "501"):
+            self.assertTrue(interaction.set_wait("sid-native", "codex", "decision", "codex-appserver",
+                                                 request_id=request))
+            observed = interaction.read_wait("sid-native", "codex")
+            self.assertIs(type(observed["request_id"]), type(request))
+            self.assertEqual(observed["request_id"], request)
+            other = str(request) if type(request) is int else int(request)
+            self.assertFalse(interaction.clear_wait("sid-native", "codex", request_id=other))
+            self.assertFalse(interaction.clear_wait("sid-native", "codex", request_id=True))
+            self.assertIsNotNone(interaction.read_wait("sid-native", "codex"))
+            self.assertTrue(interaction.clear_wait("sid-native", "codex", request_id=request))
+            self.assertIsNone(interaction.read_wait("sid-native", "codex"))
+
+    def test_opencode_hook_keeps_only_native_refs_and_distinguishes_permission_source(self):
+        import subprocess
+        env = {**os.environ, "FLEET_INTERACTION_STATE_DIR": str(Path(self.tmp.name) / "interactions")}
+        for key in ("AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD", "AGENT_DISPATCH_DEPTH",
+                    "OPENCODE_DISPATCH_SLUG", "FLEET_TITLE_REFRESH", "MEM_DISTILL"):
+            env[key] = ""
+        hook = ROOT / "hooks/fleet-interaction-state.py"
+        with mock.patch.dict(os.environ, env):
+            from fleet import interaction
+            for kind, source in (("decision", "opencode-form"), ("permission", "opencode-permission")):
+                payload = {"session_id": "ses-hook", "request_id": "request-current",
+                           "source": source, "question": "PRIVATE-PROMPT", "choices": ["PRIVATE-CHOICE"],
+                           "answers": ["PRIVATE-ANSWER"], "permission": "PRIVATE-TARGET"}
+                run = subprocess.run([sys.executable, str(hook), "set", "--harness", "opencode",
+                                      "--kind", kind], input=json.dumps(payload), env=env,
+                                     capture_output=True, text=True, timeout=10)
+                self.assertEqual((run.returncode, run.stdout), (0, ""), run.stderr)
+                observed = interaction.read_wait("ses-hook", "opencode")
+                self.assertEqual((observed["kind"], observed["source"], observed["request_id"]),
+                                 (kind, source, "request-current"))
+                self.assertNotIn("PRIVATE-", json.dumps(observed))
+                stale = subprocess.run([sys.executable, str(hook), "clear", "--harness", "opencode"],
+                                       input=json.dumps({"session_id": "ses-hook", "request_id": "old"}),
+                                       env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(stale.returncode, 0, stale.stderr)
+                self.assertIsNotNone(interaction.read_wait("ses-hook", "opencode"))
+
+    def test_missing_wait_counts_stay_unknown_and_private_keys_never_enter_projection(self):
+        result = self.result()
+        result.pop("total")
+        result.pop("complete")
+        result["items"][0].update(draft="PRIVATE-DRAFT", native_ref="PRIVATE-CONTROL")
+        view = fleet_answer_wait_view(result)
+        self.assertIsNone(view["total"])
+        self.assertNotIn("PRIVATE-", repr(view))
+
     def test_global_count_and_unattributed_description_hide_private_question(self):
         raw = self.result()
         raw["unattributed"] = ["S3:old-owner"]
@@ -1089,7 +1140,9 @@ class FleetQuestionBackendIntegrationTests(unittest.TestCase):
         text = "\n".join(draw(vm, restarted, 140, 45).text_rows())
         self.assertNotIn("Multiple question response is unavailable", text)
 
-        self._install_wait(kind="elicitation")
+        # This is a new native request. Reusing the answered request identity
+        # correctly keeps it out of the current body-free cache.
+        self._install_wait(kind="elicitation", request_id="native-elicitation-q2")
         self.ref["turn_id"] = None
         self.native_ref.update(kind="elicitation", method="mcpServer/elicitation/request",
                                turn_id=None)

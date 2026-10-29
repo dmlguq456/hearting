@@ -298,11 +298,9 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: run-tests-report-shard-${{ matrix.shard }}-of-8
+          name: run-tests-report-shard-${{ matrix.shard }}-of-8-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/shard-out
           if-no-files-found: ignore
-          # A re-run of a failed shard replaces the earlier attempt's artifact.
-          overwrite: true
 
   # The required check keeps its historical name; it now means "every shard ran
   # and together they cover the whole census".
@@ -334,8 +332,9 @@ jobs:
         if: needs.adaptation-boundary.outputs.full_tests == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          pattern: run-tests-report-shard-*-of-8
+          pattern: run-tests-report-shard-*
           path: ${{ runner.temp }}/shards
+          merge-multiple: false
 
       - name: Verify the shards add up to the census
         if: needs.adaptation-boundary.outputs.full_tests == 'true'

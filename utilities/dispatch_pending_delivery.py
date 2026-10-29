@@ -210,7 +210,8 @@ def _validate_courier_retry(retry: object) -> dict:
 
 
 def _validate_submission_fence(fence: object, record: dict) -> dict:
-    if (not isinstance(fence, dict) or set(fence) != SUBMISSION_FENCE_FIELDS
+    if (not isinstance(fence, dict)
+            or set(fence) - {"record_identity"} != SUBMISSION_FENCE_FIELDS
             or fence.get("schema_version") != SUBMISSION_FENCE_SCHEMA
             or fence.get("delivery_id") != record.get("delivery_id")
             or fence.get("recipient_digest") != record.get("recipient_digest")
@@ -238,6 +239,14 @@ def _validate_submission_fence(fence: object, record: dict) -> dict:
                 fence["attempt"] < 1 or fence["queue_submission_id"] is not None
                 or fence["rejection_reason"] is None))):
         raise PendingDeliveryError("delivery-persistence-refused", "submission-fence-invalid")
+    original = fence.get("record_identity")
+    if "record_identity" in fence and (
+            not isinstance(original, dict)
+            or set(original) != set(_received_ack_identity(record))
+            or any(original.get(key) != fence.get(key) for key in (
+                "delivery_id", "recipient_digest", "session_generation", "receipt_digest"))
+            or original.get("receipt_canonical_digest") != fence.get("receipt_digest")):
+        raise PendingDeliveryError("delivery-persistence-refused", "submission-fence-identity-invalid")
     return fence
 
 
@@ -728,6 +737,7 @@ def submission_fence_identity(record: dict, target_thread_id: str) -> dict:
         "session_generation": record.get("session_generation"),
         "target_thread_id": target_thread_id,
         "receipt_digest": record.get("receipt_digest"),
+        "record_identity": _received_ack_identity(record),
     }
 
 
@@ -739,7 +749,7 @@ _SUBMISSION_IDENTITY_FIELDS = frozenset({
 
 def _check_submission_identity(record: dict, expected_identity: dict) -> None:
     if (not isinstance(expected_identity, dict)
-            or set(expected_identity) != _SUBMISSION_IDENTITY_FIELDS
+            or set(expected_identity) - {"record_identity"} != _SUBMISSION_IDENTITY_FIELDS
             or expected_identity.get("delivery_id") != record.get("delivery_id")
             or expected_identity.get("recipient_digest") != record.get("recipient_digest")
             or expected_identity.get("session_generation") != record.get("session_generation")
@@ -749,21 +759,28 @@ def _check_submission_identity(record: dict, expected_identity: dict) -> None:
             or len(expected_identity["target_thread_id"]) > 512
             or any(ord(char) < 32 for char in expected_identity["target_thread_id"])):
         raise PendingDeliveryError("pending-delivery-identity-conflict", "submission-fence-identity")
+    original = expected_identity.get("record_identity")
+    if original is not None and _received_ack_identity(record) != original:
+        raise PendingDeliveryError("pending-delivery-identity-conflict", "submission-record-changed")
     fence = record.get(SUBMISSION_FENCE_FIELD)
     if fence is not None and any(fence.get(key) != expected_identity.get(key)
                                  for key in _SUBMISSION_IDENTITY_FIELDS):
         raise PendingDeliveryError("pending-delivery-identity-conflict", "submission-fence-changed")
+    if (fence is not None and fence.get("record_identity") is not None
+            and fence["record_identity"] != original):
+        raise PendingDeliveryError("pending-delivery-identity-conflict", "submission-record-changed")
 
 
 def read_submission_fence(root: Path, recipient_key: str, delivery_id: str, *,
-                          expected_identity: dict) -> dict | None:
+                          expected_identity: dict | None = None) -> dict | None:
     """Read internal queue-fence evidence without exposing it in public records."""
     path = record_path(root, recipient_key, delivery_id)
     with _record_reference_lock(path):
         value = _read_unlocked(path)
         if value is None:
             raise PendingDeliveryError("pending-delivery-identity-conflict", "record-missing")
-        _check_submission_identity(value, expected_identity)
+        if expected_identity is not None:
+            _check_submission_identity(value, expected_identity)
         fence = value.get(SUBMISSION_FENCE_FIELD)
         return dict(fence) if fence is not None else None
 
@@ -779,6 +796,9 @@ def prepare_submission_fence(root: Path, recipient_key: str, delivery_id: str, *
         if value.get("state") != "claimed" or value.get("claim_owner") != claim_owner:
             raise PendingDeliveryError("pending-delivery-claim-refused", "submission-fence-claim")
         _check_submission_identity(value, expected_identity)
+        deadline = value.get("claim_deadline_ns")
+        if type(deadline) is not int or deadline <= time.monotonic_ns():
+            raise PendingDeliveryError("pending-delivery-claim-refused", "submission-lease-expired")
         old = value.get(SUBMISSION_FENCE_FIELD)
         if old is None:
             attempt = 1
@@ -1123,6 +1143,7 @@ def claim(
     require_generation_proof: bool = False,
     live_recipient_generation: tuple[str, str] | None = None,
     expected_state: str = "pending",
+    expected_identity: dict | None = None,
     jobs: Path | str | None = None,
     retry_context: str | None = None,
     retry_base_delay_seconds: float = 0.05,
@@ -1164,6 +1185,9 @@ def claim(
             raise PendingDeliveryError("pending-delivery-identity-conflict", "recipient")
         if value["delivery_id"] != delivery_id:
             raise PendingDeliveryError("pending-delivery-identity-conflict", "delivery_id")
+        if (expected_identity is not None
+                and received_ack_identity(value, recipient_key, delivery_id) != expected_identity):
+            raise PendingDeliveryError("pending-delivery-identity-conflict", "claim-identity-changed")
         if live_recipient_generation is not None and (
             not require_generation_proof
             or len(live_recipient_generation) != 2
@@ -1346,7 +1370,8 @@ def _member_batch_snapshot(batch: dict | None, record: dict) -> dict | None:
 
 
 def mark_sent_ambiguous(
-    root: Path, recipient_key: str, delivery_id: str, *, claim_owner: str
+    root: Path, recipient_key: str, delivery_id: str, *, claim_owner: str,
+    expected_identity: dict | None = None,
 ) -> dict:
     """``claimed -> sent-ambiguous`` after a token-less emit (no ``acked``
     transition follows on that surface -- the carrier simply stops here)."""
@@ -1356,6 +1381,9 @@ def mark_sent_ambiguous(
         value = _read_unlocked(path)
         if value is None:
             raise PendingDeliveryError("pending-delivery-identity-conflict", "record-missing")
+        if (expected_identity is not None
+                and received_ack_identity(value, recipient_key, delivery_id) != expected_identity):
+            raise PendingDeliveryError("pending-delivery-identity-conflict", "send-identity-changed")
         if value["state"] != "claimed" or value["claim_owner"] != claim_owner:
             raise PendingDeliveryError(
                 "pending-delivery-claim-refused", f"state={value['state']}"
@@ -1442,6 +1470,11 @@ def received_ack_identity(record: dict, recipient_key: str, delivery_id: str) ->
     if (not isinstance(record, dict) or record.get("delivery_id") != delivery_id
             or record.get("recipient_digest") != recipient_digest(recipient_key)):
         raise PendingDeliveryError("pending-delivery-identity-conflict", "received-identity-binding")
+    return _received_ack_identity(record)
+
+
+def _received_ack_identity(record: dict) -> dict:
+    """The immutable portion shared by queue fences and exact receipt CAS."""
     canonical_digest = _canonical_receipt_digest(record.get("receipt"))
     if canonical_digest != record.get("receipt_digest"):
         raise PendingDeliveryError("pending-delivery-identity-conflict", "receipt-digest-mismatch")
@@ -1492,7 +1525,8 @@ def ack_received(
         return _public_record(updated)
 
 
-def reclaim(root: Path, recipient_key: str, delivery_id: str, *, now_ns: int) -> dict:
+def reclaim(root: Path, recipient_key: str, delivery_id: str, *, now_ns: int,
+            expected_identity: dict | None = None) -> dict:
     """Reclaim an expired lease without deciding whether to send again.
 
     Claims count ownership transfers, not emissions. A courier owns backoff,
@@ -1505,6 +1539,9 @@ def reclaim(root: Path, recipient_key: str, delivery_id: str, *, now_ns: int) ->
         value = _read_unlocked(path)
         if value is None:
             raise PendingDeliveryError("pending-delivery-identity-conflict", "record-missing")
+        if (expected_identity is not None
+                and received_ack_identity(value, recipient_key, delivery_id) != expected_identity):
+            raise PendingDeliveryError("pending-delivery-identity-conflict", "reclaim-identity-changed")
         if value["state"] not in {"claimed", "sent-ambiguous"}:
             raise PendingDeliveryError(
                 "pending-delivery-claim-refused", f"state={value['state']}"
@@ -1520,9 +1557,38 @@ def reclaim(root: Path, recipient_key: str, delivery_id: str, *, now_ns: int) ->
         return _public_record(updated)
 
 
+def renew_unsubmitted_claim(root: Path, recipient_key: str, delivery_id: str, *,
+                           claim_owner: str, expected_identity: dict,
+                           target_session: str, lease_seconds: float) -> dict:
+    """Renew the same owned lease for an exact peer transfer still pending I/O.
+
+    No ownership transfer, attempt increment, or submission-state change. The
+    caller owns the pending transfer lock; this store CAS protects concurrent
+    identity/owner/terminal/fence changes under the existing record lock.
+    """
+    path = record_path(root, recipient_key, delivery_id)
+    with _record_reference_lock(path):
+        value = _read_unlocked(path)
+        if (value is None or value.get("state") not in {"claimed", "sent-ambiguous"}
+                or value.get("claim_owner") != claim_owner
+                or received_ack_identity(value, recipient_key, delivery_id) != expected_identity
+                or type(value.get("claim_deadline_ns")) is not int):
+            raise PendingDeliveryError("pending-delivery-claim-refused", "renew-claim-changed")
+        _check_submission_identity(value, submission_fence_identity(value, target_session))
+        fence = value.get(SUBMISSION_FENCE_FIELD)
+        if fence is not None and fence.get("state") != "not-accepted":
+            raise PendingDeliveryError("pending-delivery-claim-refused", "submission-already-fenced")
+        if value["claim_deadline_ns"] <= time.monotonic_ns():
+            value = dict(value, claim_deadline_ns=time.monotonic_ns() + int(lease_seconds * 1e9))
+            _write_unlocked(path, value)
+        return _public_record(value)
+
+
 def release_claim(root: Path, recipient_key: str, delivery_id: str, *, claim_owner: str,
                   failure_reason: str | None = None,
-                  retry_base_delay_seconds: float | None = None) -> dict:
+                  retry_base_delay_seconds: float | None = None,
+                  expected_identity: dict | None = None,
+                  unsubmitted_to: str | None = None) -> dict:
     """Return only this carrier's claim and persist its next retry interval.
 
     Claim counts remain ownership transfers. The mutable courier retry fields
@@ -1536,6 +1602,21 @@ def release_claim(root: Path, recipient_key: str, delivery_id: str, *, claim_own
             raise PendingDeliveryError("pending-delivery-identity-conflict", "record-missing")
         if value.get("state") not in {"claimed", "sent-ambiguous"} or value.get("claim_owner") != claim_owner:
             return _public_record(value)
+        if (expected_identity is not None
+                and received_ack_identity(value, recipient_key, delivery_id) != expected_identity):
+            return _public_record(value)
+        if expected_identity is not None:
+            fence = value.get(SUBMISSION_FENCE_FIELD)
+            if fence is not None and fence.get("state") != "not-accepted":
+                return _public_record(value)
+        if unsubmitted_to is not None:
+            _check_submission_identity(value, submission_fence_identity(value, unsubmitted_to))
+            fence = value.get(SUBMISSION_FENCE_FIELD)
+            deadline = value.get("claim_deadline_ns")
+            if (value.get("state") != "claimed"
+                    or type(deadline) is not int or deadline <= time.monotonic_ns()
+                    or fence is not None and fence.get("state") != "not-accepted"):
+                return _public_record(value)
         updated = dict(value)
         retry = (_read_courier_retry_unlocked(path, value)
                  or _new_courier_retry())
@@ -1551,13 +1632,16 @@ def release_claim(root: Path, recipient_key: str, delivery_id: str, *, claim_own
 
 
 def reject_claimed(root: Path, recipient_key: str, delivery_id: str, *, claim_owner: str,
-                   reason: str) -> dict:
+                   reason: str, expected_identity: dict | None = None) -> dict:
     """Close a claimed delivery after a typed, permanent carrier refusal."""
     path = record_path(root, recipient_key, delivery_id)
     with _record_reference_lock(path):
         value = _read_unlocked(path)
         if value is None or value.get("state") != "claimed" or value.get("claim_owner") != claim_owner:
             raise PendingDeliveryError("pending-delivery-claim-refused", "claim-owner-or-state")
+        if (expected_identity is not None
+                and received_ack_identity(value, recipient_key, delivery_id) != expected_identity):
+            raise PendingDeliveryError("pending-delivery-identity-conflict", "reject-identity-changed")
         updated = dict(value)
         updated["state"] = "rejected"
         updated["expiry_reason"] = str(reason)[:1024] or "gateway-rejected"

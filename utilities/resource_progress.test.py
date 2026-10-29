@@ -1600,28 +1600,26 @@ class ExperimentObservationTest(unittest.TestCase):
                 "claude-parent-runtime"), ("claude", "sid-supervisor", "sid-supervisor"))
 
     def test_provenance_notice_follows_the_seat_successor_across_harnesses(self):
-        """A run that named only its launching session reaches whoever took that seat over."""
+        """The real ledger reader preserves provenance across a harness handoff."""
         import dispatch_seat_handover as handover
+        import session_tidy as tidy
         from peer_obligations import _ordinary_notice_target
-        identity = {"jobs": "/state/jobs.log", "storage_recipient": "sid-codex",
-                    "lineage": {"kind": "provenance", "harness": "codex", "session_id": "sid-codex"}}
-        rows = {"seat-b": [{"from": "sid-codex", "sid": "sid-claude", "harness": "claude",
-                            "source": "retire", "ts": 10.0}],
-                "seat-c": [{"from": "sid-claude", "sid": "sid-claude-2", "harness": "claude",
-                            "source": "clear", "ts": 20.0}]}
-        with mock.patch.object(handover, "_lineage_seats", return_value={}):
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.object(tidy, "state_root", return_value=Path(temporary)):
+            identity = {"jobs": str(Path(temporary) / "jobs.log"), "storage_recipient": "sid-codex",
+                        "lineage": {"kind": "provenance", "harness": "codex", "session_id": "sid-codex"}}
             self.assertEqual(handover.session_successor("sid-codex"), ("", ""))
             self.assertEqual(_ordinary_notice_target(identity, "codex-native-queue"),
                              ("codex", "sid-codex", "sid-codex"))
-        with mock.patch.object(handover, "_lineage_seats", return_value=rows):
+            for row in ({"event": "handover", "from": {"harness": "codex", "sid": "sid-codex"},
+                         "sid": "sid-claude", "harness": "claude", "source": "retire", "bindings": [], "ts": 10.0},
+                        {"event": "handover", "from": "sid-claude", "sid": "sid-claude-2",
+                         "harness": "claude", "source": "clear", "bindings": [], "ts": 20.0}):
+                tidy._append_ledger_entry(tidy.Seat("pane", row["sid"]), row)
             self.assertEqual(handover.session_successor("sid-codex"), ("sid-claude-2", "claude"))
-            # Delivery keeps the record under its stored key and only changes who receives it.
             self.assertEqual(_ordinary_notice_target(identity, "codex-native-queue"),
                              ("claude", "sid-claude-2", "sid-codex"))
-        with mock.patch.object(handover, "_lineage_seats", side_effect=OSError("ledger")):
-            self.assertEqual(_ordinary_notice_target(identity, "codex-native-queue"),
-                             ("codex", "sid-codex", "sid-codex"))
-
+            with mock.patch.object(handover, "_readable_lineage_signature", side_effect=OSError("ledger")):
+                self.assertIsNone(_ordinary_notice_target(identity, "codex-native-queue"))
     def test_terminal_observation_keeps_durable_live_checkpoint_and_adds_one_final_notice(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -9,8 +9,10 @@ Covers three layers per plan.md §2.4:
 d5/d7/d8/d9 below name the plan's exp5.py degradation-matrix scenarios this suite exercises
 in portable, dependency-free form (no snap.json fixture required).
 """
+import json
 import os
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -140,30 +142,44 @@ class L2CollectorIntegrationTest(unittest.TestCase):
         if utilities not in sys.path:
             sys.path.insert(0, utilities)
         import dispatch_seat_handover as handover
+        import session_tidy as tidy
 
         registry = "/fixture/jobs.log"
         metadata = {"parent_sid": "old-parent", "parent_harness": "claude",
                     "dispatch_depth": "1", "worker_type": "owner", "attempt_id": "att-owner",
                     "owner_route_id": "rt-exact", "owner_route_hash": "sha256:" + "a" * 64}
         binding = handover.binding_of(registry, metadata)
-        snapshot = {"seat": {"kind": "pane", "key": "fixture", "pane": "w1:new"},
-                    "bindings": [binding]}
-        for harness in ("claude", "codex", "opencode"):
-            with self.subTest(harness=harness):
-                model.reset_parent_edge_tracker()
-                successor = Session(harness=harness, pid=91, cwd="/new-project",
-                                    session_id="new-parent", title="successor", liveness="working")
-                predecessor = Session(harness="claude", pid=90, cwd="/old-project",
-                                      session_id="old-parent", liveness="dead")
-                job = DispatchJob(key="lab", slug="inherited-owner", harness="claude",
-                                  cwd=successor.cwd, parent_sid="old-parent", parent_cwd="/old-project",
-                                  is_child=True, liveness="working", worker_type="owner", depth=1)
-                job._registry_path = registry
-                job._registry_metadata = dict(metadata)
-                relation = {"from": "old-parent", "sid": "new-parent", "harness": harness,
-                            "ts": 1, "bindings": [binding]}
-                with mock.patch.object(handover, "_all_snapshots", return_value=[snapshot]), \
-                     mock.patch.object(handover, "handover_rows", return_value=[relation]):
+        with tempfile.TemporaryDirectory() as state_root, \
+             mock.patch.dict(os.environ, {"XDG_STATE_HOME": state_root}):
+            for harness in ("claude", "codex", "opencode"):
+                with self.subTest(harness=harness):
+                    model.reset_parent_edge_tracker()
+                    seat = tidy.Seat("pane", f"fixture-{harness}", f"w1:{harness}-new")
+                    snapshot = {"schema": handover.SCHEMA, "seat": seat.as_dict(),
+                                "from": {"harness": harness, "sid": "new-parent"},
+                                "at": 1, "bindings": [binding], "snapshot_id": f"fixture-{harness}"}
+                    relation = {"ts": 1, "event": "handover", "source": "retire",
+                                "from": "old-parent", "sid": "new-parent", "harness": harness,
+                                "bindings": [binding]}
+                    with tidy.seat_lock(seat.key):
+                        tidy._append_ledger_entry(seat, {
+                            "ts": 0.5, "first_seen": 0.5, "harness": harness,
+                            "sid": "new-parent", "event": "start", "source": "startup",
+                        })
+                        tidy.atomic_write_json(handover._snapshot_path(seat.key), snapshot)
+                        tidy._append_ledger_entry(seat, relation)
+                    handover._LINEAGE_GRAPH_CACHE.clear()
+
+                    successor = Session(harness=harness, pid=91, cwd="/new-project",
+                                        session_id="new-parent", title="successor", liveness="working")
+                    predecessor = Session(harness="claude", pid=90, cwd="/old-project",
+                                          session_id="old-parent", liveness="dead")
+                    job = DispatchJob(key="lab", slug="inherited-owner", harness="claude",
+                                      cwd=successor.cwd, parent_sid="old-parent", parent_cwd="/old-project",
+                                      is_child=True, liveness="working", worker_type="owner", depth=1)
+                    job._registry_path = registry
+                    job._registry_metadata = dict(metadata)
+
                     fleet_collectors._mark_dispatch_child_sessions([successor], [job])
                     self.assertFalse(successor.is_child)
                     fleet_collectors.resolve_parent_edges([predecessor, successor], [job])
@@ -175,15 +191,31 @@ class L2CollectorIntegrationTest(unittest.TestCase):
                     text = _text(render._build_lines([successor], [job], "both", False, 0,
                                                     term_width=168, governor=None))
                     self.assertNotIn("(orphan)", text)
-                self.assertEqual(job.parent_sid, "old-parent")
-                self.assertEqual(job._registry_metadata, metadata)
-                foreign = {**binding, "hash": "sha256:" + "b" * 64}
-                with mock.patch.object(handover, "_all_snapshots", return_value=[{**snapshot, "bindings": [foreign]}]), \
-                     mock.patch.object(handover, "handover_rows",
-                                       return_value=[{**relation, "bindings": [foreign]}]):
+                    self.assertEqual(job.parent_sid, "old-parent")
+                    self.assertEqual(job._registry_metadata, metadata)
+
+                    foreign = {**binding, "hash": "sha256:" + "b" * 64}
+                    foreign_snapshot = {**snapshot, "bindings": [foreign]}
+                    foreign_row = {**relation, "bindings": [foreign], "ts": 2}
+                    with tidy.seat_lock(seat.key):
+                        tidy.atomic_write_json(handover._snapshot_path(seat.key), foreign_snapshot)
+                        tidy.atomic_write(tidy._ledger_path(seat),
+                                          (json.dumps(foreign_row, sort_keys=True) + "\n").encode())
+                    handover._LINEAGE_GRAPH_CACHE.clear()
+                    fleet_collectors.resolve_parent_edges([predecessor, successor], [job])
+                    # The native-session ledger still contains the exact
+                    # binding. Replacing only its physical copy cannot revoke it.
+                    self.assertEqual(job._parent_edge_sid, "new-parent")
+                    logical = tidy.session_seat(seat, harness, "new-parent")
+                    with tidy.seat_lock(seat.key):
+                        tidy.atomic_write(tidy._native_ledger_path(logical),
+                                          (json.dumps(foreign_row, sort_keys=True) + "\n").encode())
+                    handover._LINEAGE_GRAPH_CACHE.clear()
                     fleet_collectors.resolve_parent_edges([predecessor, successor], [job])
                     self.assertIsNone(job._parent_edge_sid)
                     self.assertTrue(job._parent_edge_promoted_orphan)
+                    self.assertEqual(job.parent_sid, "old-parent")
+                    self.assertEqual(job._registry_metadata, metadata)
 
     def test_stale_app_server_and_absent_parent_all_grace_identically(self):
         # F-80 L2c: three different reasons a parent is "not visible" (stale filter,

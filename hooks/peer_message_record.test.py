@@ -101,10 +101,11 @@ class _BaseTest(unittest.TestCase):
 
 
 class NativeContextReceiptTest(_BaseTest):
-    def _seed_message(self, *, recipient_sid="sid-native-context", refs=()):
+    def _seed_message(self, *, recipient_sid="sid-native-context", refs=(),
+                      body="[steer] isolated native hook payload"):
         with mock.patch.dict(os.environ, self.env, clear=True):
             text, ref = peer_message.prepare_peer_message(
-                "[steer] isolated native hook payload",
+                body,
                 {"harness": "codex", "session_id": "thread-native-sender", "name": "sender"},
                 {"harness": "claude", "session_id": recipient_sid, "name": "receiver"},
                 defer=True, refs=refs,
@@ -133,7 +134,7 @@ class NativeContextReceiptTest(_BaseTest):
         store = peer_obligations.ObligationStore(root)
         store.create(duty_id, "registered-batch", identity, {"carrier": carrier})
         receipt = {
-            "schema_version": 2, "state": "delivered", "kind": "notice",
+            "schema_version": 2, "state": "delivered",
             "parent_attempt_id": "att-native-context-parent",
             "job_registry": str(self.jobs_path), "delivery_classification": "attention",
             "children": [{"attempt_id": attempt_id, "status": "done", "readiness": "ready",
@@ -153,6 +154,8 @@ class NativeContextReceiptTest(_BaseTest):
         binding = {"duty_id": duty_id, "jobs": str(self.jobs_path.resolve()),
                    "attempt_id": attempt_id, "carrier": carrier, "recipient_sid": sid,
                    "storage_recipient": sid, "delivery_id": delivery_id, "claim_owner": owner}
+        from dispatch_recipient_receipt import receipt_marker
+        marker = receipt_marker(pending_delivery.read(root, sid, delivery_id), sid)
         if runtime:
             producer = {
                 "schema": peer_message._RUNTIME_PRODUCER_SCHEMA,
@@ -164,13 +167,14 @@ class NativeContextReceiptTest(_BaseTest):
             }
             with mock.patch.dict(os.environ, self.env, clear=True):
                 text, ref = peer_message.prepare_peer_message(
-                    "[notice] runtime task completion",
+                    "[notice] runtime task completion\n" + marker,
                     {"harness": "runtime", "session_id": None, "name": "Hearting runtime"},
                     {"harness": "claude", "session_id": sid, "name": "receiver"},
                     defer=True, refs=[duty_id, attempt_id, delivery_id],
                     producer_binding=producer, receipt="native-pending")
         else:
-            text, ref = self._seed_message(recipient_sid=sid, refs=[duty_id])
+            text, ref = self._seed_message(recipient_sid=sid, refs=[duty_id],
+                                          body="[steer] isolated native hook payload\n" + marker)
         with mock.patch.dict(os.environ, self.env, clear=True):
             peer_message.bind_dispatch_notice(ref, binding)
         return text, ref, sid, duty_id, delivery_id, root
@@ -206,7 +210,8 @@ class NativeContextReceiptTest(_BaseTest):
             self.assertEqual(received["from"]["session_id"], "thread-native-sender")
             self.assertEqual(received["to"], {"harness": "claude", "session_id": sid,
                                                "name": "receiver"})
-            self.assertIsNone(received["text"])
+            # Registered ACK retries retain the sealed body/identity markers.
+            self.assertEqual(received["text"], text)
             transfer = peer_message._read_transfer_record(ref)
             self.assertEqual(transfer["body_sha256"], received["body_sha256"])
             self.assertEqual(pending_delivery.read(root, sid, delivery_id)["state"], "acked")

@@ -4,7 +4,7 @@ Canonical state:
   <state-root>/<harness>/<sid>.json
   {"title": str, "title_ts": float|null, "ts": float, "source": str, "offset": int, "cursor_kind": str,
    "summary": str, "summary_ts": float, "summary_failures": int,
-   "summary_error": str}  # optional bounded failure diagnostic
+   "summary_error": str, "requested_language": str}  # optional attempt diagnostics
 
 ``summary`` is additive (F-16/F-17 merge): the same haiku call that produces the
 title also returns a live one-sentence status, written alongside it. Absent on
@@ -202,7 +202,7 @@ def fresh_summary_with_ts(sid, harness="claude", now=None,
 
 def write(sid, title, source="refresher", offset=0, now=None, harness="claude", summary=None,
           summary_ts=None, cursor_kind=None, summary_failures=0, summary_error=None,
-          title_ts=_TITLE_TIME_UNSET):
+          title_ts=_TITLE_TIME_UNSET, requested_language=None):
     """Atomically write neutral fleet-owned state. ``title=''`` is allowed.
 
     ``summary`` is additive and omitted from the written dict when falsy — old
@@ -220,6 +220,8 @@ def write(sid, title, source="refresher", offset=0, now=None, harness="claude", 
     }
     if cursor_kind:
         data["cursor_kind"] = str(cursor_kind)
+    if isinstance(requested_language, str) and requested_language.strip():
+        data["requested_language"] = "".join(ch for ch in requested_language if ch.isprintable())[:80]
     if summary:
         data["summary"] = summary
         data["summary_ts"] = (

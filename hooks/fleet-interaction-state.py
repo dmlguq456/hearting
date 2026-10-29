@@ -56,7 +56,9 @@ def main():
             if index + 1 < len(sys.argv) and sys.argv[index + 1] in {"claude", "codex", "opencode"}:
                 harness = sys.argv[index + 1]
         if action == "clear":
-            interaction.clear_wait(session_id, harness)
+            if harness == "opencode" and payload.get("request_id") is None:
+                return 0
+            interaction.clear_wait(session_id, harness, request_id=payload.get("request_id"))
             return 0
         if action != "set" or "--kind" not in sys.argv:
             return 0
@@ -68,10 +70,14 @@ def main():
             "decision": "claude-asktool",
             "permission": "claude-permission",
         }.get(kind)
-        if harness == "opencode" and kind == "decision":
-            source = "opencode-question"
+        if harness == "opencode":
+            source = {"decision": "opencode-question", "permission": "opencode-permission"}.get(kind)
+            if kind == "decision" and payload.get("source") == "opencode-form":
+                source = "opencode-form"
         if source:
-            interaction.set_wait(session_id, harness, kind, source)
+            interaction.set_wait(session_id, harness, kind, source,
+                                 request_id=payload.get("request_id"),
+                                 turn_id=payload.get("turn_id"), item_id=payload.get("item_id"))
     except Exception:
         pass
     return 0

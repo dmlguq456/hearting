@@ -418,6 +418,9 @@ class EndpointDiscoveryTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
+        self.socket = str(self.root / "herdr.sock")
+        self.seat_key = session_tidy._digest("pane", session_tidy._digest(
+            "herdr-endpoint", "socket", self.socket), "w18:p7")
         self.repo = self.root / "repo"
         (self.repo / ".git").mkdir(parents=True)
         self.status_file = self.root / "status.json"
@@ -463,13 +466,13 @@ class EndpointDiscoveryTest(unittest.TestCase):
             "card_generation": 1, "prompt_seq": 1})
 
     def test_t1_viewer_outside_herdr_keys_the_pane_by_the_socket_herdr_reports(self):
-        self.status(running=True, socket=FIXTURE_SOCKET, session=None)
+        self.status(running=True, socket=self.socket, session=None)
         with self.process_env():
             seats = [session_tidy._pane_seat_of("w18:p7") for _ in range(3)]
             endpoint = session_tidy._endpoint_scope()
-        self.assertEqual([seat.key for seat in seats], [E8_KEY] * 3)
-        self.assertEqual(endpoint, session_tidy._endpoint_scope({"HERDR_SOCKET_PATH": FIXTURE_SOCKET}))
-        self.assertEqual((seats[0].endpoint, seats[0].socket_path), (endpoint, FIXTURE_SOCKET))
+        self.assertEqual([seat.key for seat in seats], [self.seat_key] * 3)
+        self.assertEqual(endpoint, session_tidy._endpoint_scope({"HERDR_SOCKET_PATH": self.socket}))
+        self.assertEqual((seats[0].endpoint, seats[0].socket_path), (endpoint, self.socket))
         self.assertNotIn("socket_path", seats[0].as_dict())
         self.assertEqual(self.calls(), ["status server --json"])
 
@@ -493,10 +496,10 @@ class EndpointDiscoveryTest(unittest.TestCase):
                 self.assertEqual(seat.socket_path, named if expected == by_socket else "")
                 self.assertEqual(self.calls(), ["--session left status server --json"])
         # The default server is null, "" or "default" in herdr's answer, never another name.
-        for name, expected in ((None, E8_KEY), ("", E8_KEY), ("default", E8_KEY), ("left", E8_LEGACY_KEY)):
+        for name, expected in ((None, self.seat_key), ("", self.seat_key), ("default", self.seat_key), ("left", E8_LEGACY_KEY)):
             with self.subTest(default_session=name):
                 session_tidy._HERDR_ENDPOINT_SOCKETS.clear()
-                self.status(running=True, socket=FIXTURE_SOCKET, session=name)
+                self.status(running=True, socket=self.socket, session=name)
                 with self.process_env():
                     self.assertEqual(session_tidy._pane_seat_of("w18:p7").key, expected)
 
@@ -515,15 +518,15 @@ class EndpointDiscoveryTest(unittest.TestCase):
                 self.assertEqual(session_tidy._pane_seat_of("w18:p7").key, E8_LEGACY_KEY)
             self.assertEqual(self.calls(), ["status server --json"])
             # herdr answers later: a miss older than the retry window is asked once more.
-            self.status(running=True, socket=FIXTURE_SOCKET, session=None)
+            self.status(running=True, socket=self.socket, session=None)
             found, asked = session_tidy._HERDR_ENDPOINT_SOCKETS[""]
             session_tidy._HERDR_ENDPOINT_SOCKETS[""] = (found, asked - session_tidy.HERDR_ENDPOINT_RETRY_SEC - 1)
-            self.assertEqual(session_tidy._pane_seat_of("w18:p7").key, E8_KEY)
-            self.assertEqual(session_tidy._pane_seat_of("w18:p7").key, E8_KEY)
+            self.assertEqual(session_tidy._pane_seat_of("w18:p7").key, self.seat_key)
+            self.assertEqual(session_tidy._pane_seat_of("w18:p7").key, self.seat_key)
         self.assertEqual(len(self.calls()), 2)
 
     def test_t4_an_inherited_socket_or_pane_is_used_without_asking_herdr(self):
-        self.status(running=True, socket=FIXTURE_SOCKET, session=None)
+        self.status(running=True, socket=self.socket, session=None)
         inherited = str(self.root / "inherited.sock")
         with self.process_env(HERDR_SOCKET_PATH=inherited, AGENT_HERDR_SESSION="left"):
             seat = session_tidy._pane_seat_of("w18:p7")
@@ -536,7 +539,7 @@ class EndpointDiscoveryTest(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
     def test_t5_explicit_env_keeps_writer_and_lock_keys_even_when_herdr_answers(self):
-        self.status(running=True, socket=FIXTURE_SOCKET, session=None)
+        self.status(running=True, socket=self.socket, session=None)
         with self.process_env(HERDR_PANE_ID="w18:p7"):
             self.assertEqual(session_tidy._endpoint_scope({}), "")
             self.assertEqual(session_tidy._endpoint_scope(os.environ), "")
@@ -555,11 +558,11 @@ class EndpointDiscoveryTest(unittest.TestCase):
         for sid in E8_SIDS:
             transcripts[sid] = self.root / f"{sid}.jsonl"
             transcripts[sid].write_text('{"type":"message"}\n', encoding="utf-8")
-        writer = {"HERDR_SOCKET_PATH": FIXTURE_SOCKET, "HERDR_PANE_ID": "w18:p7"}
+        writer = {"HERDR_SOCKET_PATH": self.socket, "HERDR_PANE_ID": "w18:p7"}
         with self.process_env(**writer):
             seat = session_tidy._pane_seat_of("w18:p7", endpoint=session_tidy._endpoint_scope(writer),
-                                              socket_path=FIXTURE_SOCKET)
-            self.assertEqual(seat.key, E8_KEY)
+                                              socket_path=self.socket)
+            self.assertEqual(seat.key, self.seat_key)
 
             def card(sid, body, now):
                 with session_tidy.seat_lock(seat.key):
@@ -580,7 +583,7 @@ class EndpointDiscoveryTest(unittest.TestCase):
 
         session = {"session_id": current, "harness": "claude", "cwd": str(self.repo)}
         with self.process_env():
-            self.status(running=True, socket=FIXTURE_SOCKET, session=None)
+            self.status(running=True, socket=self.socket, session=None)
             entries, pane, health = focus.read_seat_history(session, "claude", current, pane="w18:p7")
             chain = nav.generation_chain(entries, "claude", current)
             with mock.patch.object(focus, "read_pane_map", return_value={current: "w18:p7"}):
@@ -597,14 +600,23 @@ class EndpointDiscoveryTest(unittest.TestCase):
                          [old, middle, current])
         self.assertEqual(self.calls(), ["status server --json"])
 
-        # Without herdr's answer the viewer still reads the endpoint-free key, which e8 never wrote.
+        # A missing physical endpoint does not erase exact native session
+        # history. Only the confirmed middle -> current lineage is reachable;
+        # old is merely a chronological neighbour in the unavailable pane.
         session_tidy._HERDR_ENDPOINT_SOCKETS.clear()
         with self.process_env(), mock.patch.object(session_tidy, "_herdr_executable", return_value=None):
-            entries, _pane, _health = focus.read_seat_history(session, "claude", current, pane="w18:p7")
-        self.assertEqual(entries, ())
+            before = {path: (path.read_bytes(), path.stat().st_mtime_ns)
+                      for path in session_tidy.state_root().rglob("*.json*")}
+            entries, _pane, health = focus.read_seat_history(session, "claude", current, pane="w18:p7")
+        self.assertEqual(health.state, "success")
+        self.assertEqual([(entry["harness"], entry["sid"], entry["current"], entry["relation"])
+                          for entry in entries],
+                         [("claude", middle, False, "unknown"), ("claude", current, True, "confirmed")])
+        self.assertNotIn(old, [entry["sid"] for entry in entries])
+        self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in before}, before)
 
     def test_t7_legacy_ledger_is_read_only_for_its_exact_session_and_never_merged(self):
-        self.status(running=True, socket=FIXTURE_SOCKET, session=None)
+        self.status(running=True, socket=self.socket, session=None)
         with self.process_env():
             current = session_tidy._pane_seat_of("w:p")
             legacy = session_tidy.Seat("pane", session_tidy._digest("pane", "w:p"), "w:p", "claude")
@@ -638,7 +650,7 @@ class EndpointDiscoveryTest(unittest.TestCase):
         self.assertEqual(before, after)
 
     def test_t8_codex_pane_lookup_reads_the_legacy_ledger_and_booking_after_the_normalized_key(self):
-        self.status(running=True, socket=FIXTURE_SOCKET, session=None)
+        self.status(running=True, socket=self.socket, session=None)
 
         def agent(pane, sid, cwd):
             return {"agent": "codex", "pane_id": pane, "cwd": str(cwd), "foreground_cwd": str(cwd),

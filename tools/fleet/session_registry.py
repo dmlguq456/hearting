@@ -260,9 +260,9 @@ def apply_to_session(sess, record, harness):
     former claude.py:443 ``_apply_registry`` — F-26b generalizes it across harnesses).
     Each key is independently optional: a fresh row carrying only pid/sessionId must
     not lose the ones it has. The only harness-specific branch is the derived `<xx>`
-    tag: Claude mints it from its own `derived` registry name; Codex/OpenCode mint
-    their tag from the session id elsewhere (``collectors/codex.py`` `minted_tag`)
-    and must not have this branch overwrite it.
+    tag: Claude reads it from its own `derived` registry name; Codex/OpenCode
+    read their confirmed shared assignment elsewhere and must not have this
+    branch overwrite it.
     """
     sess.session_id = record.get("sessionId") or sess.session_id
     sess.status = record.get("status")               # idle | shell | busy | (absent → None)

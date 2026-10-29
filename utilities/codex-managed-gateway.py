@@ -1239,7 +1239,8 @@ class ManagedGateway:
                     fleet_interaction.set_wait(
                         thread_id,
                         "codex",
-                        "decision",
+                        ("approval" if all(self._interaction_kind(item.method) == "approval"
+                                           for item in pending) else "decision"),
                         "codex-appserver",
                         now=min(item.received_at for item in pending),
                         request_id=(pending[0].request_id if len(pending) == 1 else None),

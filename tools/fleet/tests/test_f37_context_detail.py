@@ -1111,6 +1111,9 @@ for line in sys.stdin:
             [sys.executable, supervisor, "--one-turn", "--worktree", self.worktree,
              "--sandbox", "read-only", "--app-server-command", f"{sys.executable} {fake}"],
             input="bounded stage prompt", text=True, capture_output=True, timeout=10,
+            # This private fake stage is not the enclosing route owner.
+            env={key: value for key, value in os.environ.items()
+                 if key != "AGENT_OWNER_RUNTIME_PERMISSION_CONTEXT"},
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         produced = [json.loads(line) for line in result.stdout.splitlines()]

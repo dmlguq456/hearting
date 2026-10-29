@@ -64,6 +64,21 @@ class CapacityTest(unittest.TestCase):
   self.assertEqual(state,"success");self.assertEqual(fields["model"],"gpt-5.6-luna")
   rows=F.registry_rows(self.jobs,"r","test");self.assertEqual(len(rows),2)
   self.assertEqual(rows[-1]["capacity_retry"],"1");self.assertEqual(rows[-1]["cooled_model"],"gpt-5.6-sol")
+ def test_disabled_since_launch_same_harness_retry_reaches_wrapper_and_records_difference(self):
+  import contextlib, io
+  diagnostic=io.StringIO()
+  command=[sys.executable,str(ROOT/"adapters/codex/bin/dispatch-headless.py"),
+           "--automatic-retry-of",self.failed["attempt_id"],"--capacity-retry","1"]
+  with mock.patch.object(F.DISPATCH_NODE,"current_launch_harnesses",return_value=("claude",)),\
+       mock.patch.object(F,"allowed_capacity_settings",return_value=True),\
+       mock.patch.object(F,"wrapper_command",return_value=command),\
+       mock.patch.object(F.subprocess,"run",side_effect=self.fake_retry()) as spawn,\
+       contextlib.redirect_stderr(diagnostic):
+   state,fields,_=F.capacity_retry(self.args,self.route,self.node,self.row,1,self.failed,[])
+  self.assertEqual(state,"success")
+  self.assertEqual(spawn.call_count,1)
+  self.assertEqual(fields["model"],"gpt-5.6-luna")
+  self.assertEqual(diagnostic.getvalue().count("policy_note=disabled-since-admission"),1)
  def test_second_capacity_descends_and_never_launches_third(self):
   with mock.patch.object(F,"allowed_capacity_settings",return_value=True),\
        mock.patch.object(F,"wrapper_command",return_value=["fake"]),\

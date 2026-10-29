@@ -117,6 +117,20 @@ class NoticeTest(unittest.TestCase):
         self.assertEqual(batch["delivery_ids"], (ids[0],))
         self.assertFalse(batch["held"])
 
+    def test_non_success_receipts_do_not_read_batch_registry_but_success_still_joins(self):
+        records, ids = self._success_batch_fixture()
+        seed = records[0]
+        receipts = [dict(seed["receipt"], delivery_classification="attention"),
+                    dict(seed["receipt"], kind="notice"),
+                    dict(seed["receipt"], replacement_attention=True),
+                    dict(seed["receipt"], children=[{"required_action": "inspect-done-failure"}])]
+        with mock.patch.object(Path, "read_text", side_effect=AssertionError("ineligible batch read")):
+            for receipt in receipts:
+                self.assertIsNone(notice.resolve_delivery_batch(self.jobs, dict(seed, receipt=receipt),
+                    recipient_key="parent", delivery_root=self.root))
+        batch = self._resolve_success_batch(seed)
+        self.assertEqual(set(batch["delivery_ids"]), set(ids))
+
     def test_missing_materialization_holds_only_for_wall_clock_grace(self):
         records, ids = self._success_batch_fixture(materialize_sibling=False)
         lines = self.jobs.read_text().splitlines()

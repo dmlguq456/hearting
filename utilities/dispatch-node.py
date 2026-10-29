@@ -741,18 +741,30 @@ def bind_dispatch_evidence(route, node, adapter, adapter_args, parent_identity=N
     return extra
 
 
+def current_launch_defaults():
+    """Read one current selection config with the node's typed diagnostics."""
+    defaults = ROUTE.DEFAULTS
+    try:
+        return defaults.load_and_validate(defaults.default_config_path(), defaults.default_topology_path())
+    except (OSError, ValueError, defaults.DefaultsConfigError) as exc:
+        raise DispatchNodeError("defaults-invalid", detail=str(exc)) from exc
+
+
+def current_launch_harnesses():
+    """Current automatic selection ceiling; not a revocation of admitted targets."""
+    return ROUTE.DEFAULTS.current_enabled_harnesses(current_launch_defaults())
+
+
 def pin_harness_available(route, node, harness, jobs, recheck=True):
     """Whether the route's sealed worker pin can run this node now.
 
-    The same hard checks `dispatch-batch` applies before it places a leg: the node's own harness
-    policy names the harness, no active usage limit holds it, and (for a dispatch-depth-2 node)
-    the checked tuple for this parent supports it. The soft usage gate is not one of them.
+    An enabled or previously admitted target uses its checked evidence for
+    this parent. Active usage limits still hold it; the
+    soft usage gate does not. Historical tuple readers remain policy-free.
     """
-    policy = node.get("harness_policy")
-    if isinstance(policy, dict):
-        members = {name for band in ("primary", "relief", "last_resort") for name in (policy.get(band) or [])}
-        if harness not in members:
-            return False
+    if (harness not in current_launch_harnesses()
+            and not ROUTE_AUTHORITY.harness_admitted(route, harness, node=node)):
+        return False
     from dispatch_capacity_evidence import active_limits
     if harness in active_limits(jobs, profile=node.get("model_profile"), recheck=recheck and harness == "claude"):
         return False
@@ -965,9 +977,13 @@ def main():
  overridden_adapter=None
  replaying=any(t=="--automatic-retry-of" or t.startswith("--automatic-retry-of=") for t in strip_leading_separator(a.adapter_args))
  if worker_type not in {"owner","frame"} and not a.subsession_id and not replaying:
-  a.adapter,overridden_adapter=ROUTE_AUTHORITY.pinned_launch_harness(
-   route,worker_type=worker_type,requested=a.adapter,
-   available=lambda harness:pin_harness_available(route,node,harness,registry.path,recheck=a.action!="dry-run"))
+  try:
+   a.adapter,overridden_adapter=ROUTE_AUTHORITY.pinned_launch_harness(
+    route,worker_type=worker_type,requested=a.adapter,
+    available=lambda harness:pin_harness_available(route,node,harness,registry.path,recheck=a.action!="dry-run"))
+  except DispatchNodeError as exc:
+   print("check=failed"); print(f"reason={exc.reason}"); print("child_spawned=0")
+   raise SystemExit(65)
  wrapper=ROOT/"adapters"/a.adapter/"bin"/"dispatch-headless.py"
  # SD-165: a borrowed part reads its origin capability's contract; the route binding stays the host's.
  contract=assigned_contract(capability=(node.get("part") or "").partition(":")[0] or route["capability"],worker_type=worker_type,route_node=node["id"],completion_gate=node.get("completion_gate"),root=ROOT)
@@ -1082,7 +1098,20 @@ def main():
  else:
   os.environ.pop(source_key, None)
  try:
+  enabled=current_launch_harnesses()
+  pin=ROUTE_AUTHORITY.sealed_pin_harness(route,worker_type=worker_type)
+  # replacement_task already verified the exact claim, route, node and harness;
+  # a retry flag alone is not that historical admission.
+  if pin and pin not in enabled and original_task is None and not ROUTE_AUTHORITY.harness_admitted(route,pin,node=node):
+   raise DispatchNodeError("explicit-adapter-disabled-by-user-policy",adapter=a.adapter)
+  if a.adapter not in enabled:
+   if original_task is None and not ROUTE_AUTHORITY.harness_admitted(route,a.adapter,node=node):
+    raise DispatchNodeError("explicit-adapter-disabled-by-user-policy",adapter=a.adapter)
+   print("policy_note=disabled-since-admission")
   result = run_launcher(argv,a.action,lifecycle)
+ except DispatchNodeError as exc:
+  print("check=failed"); print(f"reason={exc.reason}"); print("child_spawned=0")
+  raise SystemExit(65)
  finally:
   if had_source_key:
    os.environ[source_key] = previous_source or ""

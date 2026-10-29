@@ -26,7 +26,7 @@ if _TOOLS_DIR not in sys.path:
 
 from fleet.collectors import codex, herdr, procscan  # noqa: E402
 from fleet.model import Session  # noqa: E402
-from fleet.session_handle import minted_tag  # noqa: E402
+from fleet.session_tags import assign_observed  # noqa: E402
 
 _SID = "019facc9-fe83-7480-89f6-9e64fbebf0ca"
 _REAL_LISTDIR = os.listdir
@@ -159,10 +159,14 @@ class ManagedCodexAttributionTest(unittest.TestCase):
                  mock.patch.object(procscan, "read_environ", return_value={}):
                 tick = self._prepare([tui], {200: []}, home)
             self.assertEqual(tick.proc_paths, {200: rollout})
-            with mock.patch.dict(os.environ, {"CODEX_HOME": home}):
+            with mock.patch.dict(os.environ, {"CODEX_HOME": home, "XDG_STATE_HOME": tmp}):
                 codex.enrich(tui, tick=tick)
-            self.assertEqual(tui.session_id, _SID)
-            self.assertEqual(tui.session_tag, minted_tag(_SID))
+                self.assertEqual(tui.session_id, _SID)
+                self.assertIsNone(tui.session_tag)
+                confirmed = assign_observed("codex", _SID)
+                self.assertIsNotNone(confirmed)
+                codex.enrich(tui, tick=tick)
+                self.assertEqual(tui.session_tag, confirmed)
 
     def test_current_pane_thread_replaces_an_already_selected_old_rollout(self):
         with tempfile.TemporaryDirectory() as tmp:

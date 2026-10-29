@@ -187,10 +187,11 @@ def _candidate(adapter: str, values: dict[str, str], target: dict[str, str],
             profile_values = model_config._derive_balanced_values(adapter, values)
         if profile == "top" and "CFG_MODEL_PROFILE_TOP" not in values:
             try:
-                deep = model_profile.resolve_profile_values(adapter, values, "deep")
+                fallback = model_profile.resolve_profile_values(
+                    adapter, values, "top" if adapter == "opencode" else "deep")
             except ValueError as exc:
-                raise ModelSettingsError(f"cannot resolve deep profile for top declaration: {exc}") from exc
-            selected_budget = budget if budget is not None else deep["budget"]
+                raise ModelSettingsError(f"cannot resolve fallback for top declaration: {exc}") from exc
+            selected_budget = budget if budget is not None else fallback["budget"]
             changed["CFG_MODEL_PROFILE_TOP"] = f"model/{model}:{_profile_budget(adapter, selected_budget)}"
             return dict(values), changed
         try:

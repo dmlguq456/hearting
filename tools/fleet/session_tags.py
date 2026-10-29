@@ -27,11 +27,13 @@ def _read(path):
         key = (row.get("harness"), row.get("session_id"))
         seen = row.get("first_seen")
         started = row.get("started_at")
+        revision = row.get("observation_revision", 0)
         if (key[0] not in {"claude", "codex", "opencode"}
                 or not isinstance(key[1], str) or not key[1]
                 or not isinstance(row.get("tag"), str) or not _HEX.fullmatch(row["tag"])
                 or not isinstance(seen, (int, float)) or isinstance(seen, bool) or not math.isfinite(seen)
                 or not isinstance(started, (int, float)) or isinstance(started, bool) or not math.isfinite(started)
+                or not isinstance(revision, int) or isinstance(revision, bool) or revision < 0
                 or key in rows):
             raise ValueError("invalid tag assignment")
         rows[key] = row
@@ -45,24 +47,9 @@ def _read(path):
 
 
 def assigned_tag(harness, sid):
-    """Read the shared assignment, seeding a first-use live inventory automatically.
-
-    An existing lock with no snapshot means record loss, rather than first use;
-    that call stays on the hash fallback until ordinary collection recovers it.
-    """
-    path = _path()
+    """Read a confirmed snapshot row without allocation, discovery or locking."""
     try:
-        row = _read(path).get((harness, sid))
-        if row:
-            return row["tag"]
-    except FileNotFoundError:
-        if (path.parent / "tag-assignments.lock").exists():
-            return None
-    except (OSError, ValueError, TypeError):
-        return None
-    assign([])
-    try:
-        row = _read(path).get((harness, sid))
+        row = _read(_path()).get((harness, sid))
         return row["tag"] if row else None
     except (OSError, ValueError, TypeError):
         return None
@@ -134,7 +121,7 @@ def _inventory(sessions):
     return live, agents
 
 
-def _keep(row, panes_known):
+def _keep(row, agents):
     """Release only proven exited reservations, never uncertain live processes."""
     pid, start = row.get("pid"), row.get("proc_start")
     if pid and start:
@@ -143,36 +130,101 @@ def _keep(row, panes_known):
         if actual is not None:
             return str(actual) == str(start)
         return Path("/proc/%s" % pid).exists() and not is_terminal_state(pid)
-    return not (panes_known and row.get("pane_id"))
+    if agents is None or not row.get("pane_id"):
+        return True
+    unknown = False
+    for agent in agents:
+        identity = agent.get("agent_session") or {}
+        sid = identity.get("value") if isinstance(identity, dict) and identity.get("kind") == "id" else None
+        if not isinstance(sid, str) or not sid:
+            sid = None
+        same_harness = agent.get("agent") == row["harness"]
+        if same_harness and agent.get("pane_id") and sid is None:
+            unknown = True
+        if agent.get("pane_id") == row["pane_id"]:
+            # A present pane without native identity is not an observed exit.
+            if same_harness and (sid is None or sid == row["session_id"]):
+                return True
+    # An uncertain same-harness pane may be the session after a pane move.
+    # This reserves its number only; it does not attribute that pane to a SID.
+    return unknown
 
 
 def assign(sessions):
-    """Seed/refresh assignments under one lock without waiting for pane writes.
+    """Collect normal inventory before attempting the nonblocking shared writer."""
+    try:
+        try:
+            baseline = _read(_path())
+        except FileNotFoundError:
+            baseline = {}
+        live, agents = _inventory(sessions)
+        return _assign(live, agents, baseline=baseline)
+    except (OSError, ValueError, TypeError, ImportError):
+        return []
 
-    Unknown consumers only read the resulting snapshot. A corrupt file is left
-    untouched; a later normal collection can seed a missing file automatically.
+
+def assign_observed(harness, sid, *, pane_id=None, pid=None, proc_start=None):
+    """Attempt one already-proven native observation, without a native census.
+
+    A narrow event proves no other session's absence. Keep every reservation and
+    its evidence until the normal full inventory can establish an exit.
     """
+    if harness not in {"claude", "codex", "opencode"} or not isinstance(sid, str) or not sid.strip():
+        return None
+    row = {"harness": harness, "session_id": sid, "started_at": _started(harness, sid)}
+    row.update({key: value for key, value in
+                (("pane_id", pane_id), ("pid", pid), ("proc_start", proc_start))
+                if value is not None})
+    if harness == "claude":
+        from .session_handle import resolve_tag
+        row["tag"] = resolve_tag(harness, sid)
+    _assign({(harness, sid): row}, None, observed_only=True)
+    return assigned_tag(harness, sid)
+
+
+def _assign(live, agents, *, observed_only=False, baseline=None):
+    """Reserve against the latest snapshot and persist atomically under one lock."""
     from .session_handle import minted_tag
+    observed = set(live)
     path = _path()
     try:
         import fcntl
         path.parent.mkdir(parents=True, exist_ok=True)
         with (path.parent / "tag-assignments.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            live, agents = _inventory(sessions)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
                 old = _read(path)
             except FileNotFoundError:
                 old = {}
+            baseline = baseline or {}
+            if not observed_only:
+                # A newer full writer's deletion wins over this stale census.
+                for key in baseline.keys() - old.keys():
+                    live.pop(key, None)
+                    observed.discard(key)
             for key, row in old.items():
-                if key not in live and _keep(row, agents is not None):
+                # Only unchanged rows can be retired/refreshed by this census.
+                # Newer pane/PID evidence wins even when live contains the SID.
+                if ((not observed_only and row != baseline.get(key))
+                        or (key not in live and (observed_only or _keep(row, agents)))):
                     live[key] = row.copy()
+                    if not observed_only:
+                        observed.discard(key)
             now = time.time()
             for key, row in live.items():
                 previous = old.get(key, {})
                 if previous:
+                    # Missing fields in a narrow observation cannot erase prior
+                    # PID/start/pane evidence or a Claude fixed reservation.
+                    if observed_only:
+                        row = {**previous, **{k: v for k, v in row.items() if v is not None}}
+                        live[key] = row
                     row["started_at"] = previous["started_at"]
                 row["first_seen"] = previous.get("first_seen", now)
+                if key in observed:
+                    # A real reaffirmation is newer even if pane/PID data match.
+                    # Carried or superseded census rows are not new observations.
+                    row["observation_revision"] = previous.get("observation_revision", 0) + 1
                 if previous and row["harness"] != "claude":
                     row["tag"] = previous["tag"]
                 elif row["harness"] != "claude":
@@ -199,7 +251,7 @@ def assign(sessions):
                 tag = next((f"{(base + step) % 256:02x}" for step in range(256)
                             if f"{(base + step) % 256:02x}" not in taken), None)
                 if tag is None:
-                    row.pop("tag", None)  # namespace exhausted: honest hash fallback
+                    row.pop("tag", None)  # namespace exhausted: leave the number absent
                 else:
                     row["tag"] = tag
                     taken.add(tag)

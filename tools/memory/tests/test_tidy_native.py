@@ -612,7 +612,7 @@ class NativeCommandTest(NativeCase):
         import dispatch_seat_handover as handover
         with mock.patch.object(native, "attachment") as physical:
             row = handover.record_retire_handover("before", "claude", "session-A", "claude")
-        self.assertEqual((row["from"], row["sid"], row["bindings"]), ("before", "session-A", []))
+        self.assertEqual((st._handover_origin(row), row["sid"], row["bindings"]), (("claude", "before"), "session-A", []))
         physical.assert_not_called()
 
 

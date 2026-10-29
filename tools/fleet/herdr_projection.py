@@ -262,7 +262,7 @@ def _tag_metadata_identity(agent):
     harness = agent.get("agent")
     identity = agent.get("agent_session") or {}
     pane = agent.get("pane_id")
-    if (harness not in {"codex", "opencode"} or not pane
+    if (harness not in HARNESSES or not pane
             or not isinstance(identity, dict) or identity.get("kind") != "id"
             or identity.get("agent", harness) != harness):
         return None
@@ -683,8 +683,18 @@ def project(harness: str, session_id: str, *, pane_id=None, worker=None,
     if harness == "codex":
         lifecycle["_proof"] = lambda: may_report(
             harness, session_id, worker=worker, pane_id=pane)
+    if not report_session:
+        _assign_observed_tag(harness, session_id, pane)
     _report(harness, session_id, pane, report_session, **lifecycle)
     return True
+
+
+def _assign_observed_tag(harness, session_id, pane):
+    try:
+        from .session_tags import assign_observed
+        assign_observed(harness, session_id, pane_id=pane)
+    except Exception:
+        pass  # Optional numbering never rejects a successful native report.
 
 
 def _send_projection(command, observation):
@@ -761,9 +771,13 @@ def _report(harness: str, session_id: str, pane: str, report_session: bool,
             session_command += ["--session-start-source", session_start_source]
         if lifecycle.get("resume_argv"):
             session_command += ["--", *lifecycle["resume_argv"]]
-        # Publish the exact native identity before the number resolver observes
-        # this new pane. Otherwise its first metadata report still uses the hash.
+        # Publish the exact native identity before assigning its display number.
         _send_projection(session_command, observation)
+        if not current():
+            if observation is not None:
+                observation["reason"] = "guard-refused-before-metadata"
+            return
+        _assign_observed_tag(harness, session_id, pane)
     metadata = _metadata_command(herdr, harness, session_id, pane)
     if not current():
         if observation is not None:

@@ -4,7 +4,8 @@ The screens read the fixture's records positionally and by key. A live builder t
 puts an object where the fixture has a pair, or changes a type breaks a screen only on real data
 (that is how a ``ResourceJob`` object once reached the COMPUTE rail). Each section is compared here:
 the live record's keys are drawn from the fixture's keys, its value types are the fixture's types,
-and an unknown value is ``None``.
+and an unknown value is ``None``. Additive route fields have the explicit
+optional contract below, so old render fixtures remain valid inputs.
 """
 import time
 import unittest
@@ -22,6 +23,27 @@ FREE_KEYED = frozenset(("peer_edges.cards", "dialogue.logs", "models.shown", "mo
                         "models.token_units", "models.effort_keys"))
 # Sections only the selection pump's reads can fill: without them they are omitted (empty), never invented.
 OMITTED = ("seats", "generations", "cards", "dialogue", "attempts", "models")
+
+
+def route_extension(key, value):
+    """Validate only the three public route additions, including known zero."""
+    optional_number = lambda item: item is None or type(item) in (int, float)
+    optional_pct = lambda item: item is None or type(item) is int
+    pair = lambda item: isinstance(item, (list, tuple)) and len(item) == 2
+    if key == "owner_gauge":
+        return pair(value) and optional_pct(value[0]) and optional_number(value[1])
+    if key == "current":
+        return type(value) is bool
+    if key == "worker_contexts":
+        return isinstance(value, (list, tuple)) and all(
+            isinstance(row, dict) and set(row) == {"stage", "harness", "model", "context", "window"}
+            and isinstance(row["stage"], str)
+            and (row["harness"] is None or isinstance(row["harness"], str))
+            and (row["model"] is None or pair(row["model"]) and all(
+                isinstance(item, str) for item in row["model"]))
+            and optional_pct(row["context"]) and optional_number(row["window"])
+            for row in value)
+    raise ValueError(key)
 
 
 def bucket(value):
@@ -60,6 +82,10 @@ def conform(live, samples, path, problems):
     if kind == "map":
         keys = set().union(*(set(sample) for sample in samples if bucket(sample) == "map"))
         for key in live:
+            if path == "routes[]" and key in ("owner_gauge", "worker_contexts", "current"):
+                if not route_extension(key, live[key]):
+                    problems.append(f"{path}.{key}: invalid optional route field shape")
+                continue
             if path == "system.gpu_processes[]" and key == "session_tag":
                 if live[key] is not None and not isinstance(live[key], str):
                     problems.append(f"{path}.session_tag: expected optional string")
@@ -193,6 +219,42 @@ class SectionShapes(unittest.TestCase):
         vm = build_view_model({"sessions": [zero], "project_of": lambda _cwd: "synthetic-repo"})
         self.assertEqual(vm.sessions[0]["context"], 0)
         self.assertEqual(vm.sessions[0]["age"], "0m")
+
+    def test_route_extensions_accept_known_zero_unknown_and_legacy_records(self):
+        samples = self.fixture["routes"]
+        for fields in ({}, {"owner_gauge": [None, None], "worker_contexts": [], "current": False},
+                       {"owner_gauge": (0, 1.0), "current": True, "worker_contexts": [
+                           {"stage": "execute", "harness": "codex", "model": ["model", "fam_other"],
+                            "context": 0, "window": 1.0},
+                           {"stage": "test", "harness": None, "model": None,
+                            "context": None, "window": None}]}):
+            with self.subTest(fields=fields):
+                problems = []
+                conform({**samples[0], **fields}, samples, "routes[]", problems)
+                self.assertEqual(problems, [])
+
+    def test_route_extensions_reject_wrong_types_and_unlisted_fields(self):
+        worker = {"stage": "execute", "harness": "codex", "model": None, "context": 0, "window": 1}
+        invalid = [
+            {"owner_gauge": None}, {"worker_contexts": None}, {"current": None},
+            {"owner_gauge": [0]}, {"owner_gauge": [0, 1, 2]}, {"owner_gauge": [False, 1]},
+            {"owner_gauge": ["0", 1]}, {"owner_gauge": [0, "1M"]},
+            {"current": 0}, {"current": "true"}, {"worker_contexts": {}},
+            {"worker_contexts": [dict(worker, context=False)]},
+            {"worker_contexts": [dict(worker, window="1M")]},
+            {"worker_contexts": [dict(worker, harness=7)]},
+            {"worker_contexts": [dict(worker, stage=None)]},
+            {"worker_contexts": [dict(worker, model=["model"])]},
+            {"worker_contexts": [dict(worker, model=["model", 7])]},
+            {"worker_contexts": [dict(worker, foreign=1)]},
+            {"worker_contexts": [{key: val for key, val in worker.items() if key != "context"}]},
+            {"future_unknown_field": 0},
+        ]
+        for fields in invalid:
+            with self.subTest(fields=fields):
+                problems = []
+                conform({**self.fixture["routes"][0], **fields}, self.fixture["routes"], "routes[]", problems)
+                self.assertTrue(problems)
 
 
 class CensusHeaderTests(unittest.TestCase):

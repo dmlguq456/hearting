@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 import unittest.mock
+from contextlib import ExitStack
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -24,7 +25,139 @@ import claude_process_identity as claude_identity  # noqa: E402
 SID = "ses_abcDEF123"
 
 
+class FakeClaudeProc:
+    """Private proc/native files; readers and classification remain production code."""
+    def __init__(self, root):
+        self.root = Path(root) / "proc"
+        self.home = Path(root) / "claude"
+        self.root.mkdir()
+        (self.home / "sessions").mkdir(parents=True)
+
+    def process(self, pid=71, parent=1, start="101", argv=None, executable=None):
+        proc = self.root / str(pid)
+        proc.mkdir(exist_ok=True)
+        (proc / "stat").write_text(f"{pid} (native fixture) S {parent} " +
+                                   " ".join(["0"] * 17 + [start]))
+        (proc / "cmdline").write_bytes(b"\0".join(os.fsencode(x) for x in
+            (argv or ["claude"])) + b"\0")
+        (proc / "exe").unlink(missing_ok=True)
+        (proc / "exe").symlink_to(executable or "/opt/claude/versions/8.7.6")
+        return proc
+
+    def registry(self, pid=71, start="101", sid="current", **extra):
+        path = self.home / "sessions" / f"{pid}.json"
+        path.write_text(json.dumps({"pid": pid, "procStart": start, "sessionId": sid, **extra}))
+        return path
+
+    def tap(self, sid="current", pid=71, start="101"):
+        directory = self.home / ".statusline"
+        directory.mkdir(exist_ok=True)
+        (directory / f"{sid}.json").write_text(json.dumps({
+            "session_id": sid, "pid": pid, "proc_start": start}))
+
+
 class ClaudeNativeIdentityHelperTest(unittest.TestCase):
+    def test_focused_native_predicate_rejects_appearance_and_prompt_false_positives(self):
+        cases = [
+            ("/opt/claude/versions/8.7.6", ["claude"], "runtime"),
+            ("/usr/bin/claude", ["claude", "--model", "daemon"], "runtime"),
+            ("/opt/claude/versions/8.7.6", ["claude", "--session-id", "new",
+                "--fork-session", "--resume", "/old/transcript.jsonl"], "runtime"),
+            ("/usr/bin/node", ["node", "/opt/@anthropic-ai/claude-code/cli.js"], "runtime"),
+            ("/usr/bin/bun", ["bun", "/opt/@anthropic-ai/claude-code/cli.js", "daemon"], "service"),
+            ("/usr/bin/claude", ["claude", "daemon", "run"], "service"),
+            ("/opt/claude/versions/8.7.6", ["claude bg-pty-host", "--bg-pty-host", "/sock"], "service"),
+            ("/opt/claude/versions/8.7.6", ["claude bg-spare"], "service"),
+            ("/opt/claude/versions/8.7.6", ["claude", "--bg-pty-host", "/sock"], "service"),
+            ("/usr/bin/claude", ["claude", "-p", "daemon"], "runtime"),
+            ("/usr/bin/claude", ["claude", "--system-prompt", "daemon"], "runtime"),
+            ("/usr/bin/claude", ["claude", "--unknown", "daemon"], "unknown"),
+            ("/opt/claude/versions/8.7.6", ["rg", "claude"], "helper"),
+            ("/usr/bin/python3", ["python3", "/tmp/claude", "--resume", "sid"], "helper"),
+            ("/usr/bin/node", ["node", "/tmp/app.js", "@anthropic-ai/claude-code"], "helper"),
+            ("/tmp/8.7.6", ["8.7.6", "claude"], "helper"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            fixture = FakeClaudeProc(temporary)
+            for executable, argv, expected in cases:
+                with self.subTest(executable=executable, argv=argv):
+                    fixture.process(executable=executable, argv=argv)
+                    observed = claude_identity.observe_process(71, proc_root=fixture.root)
+                    self.assertEqual(observed["kind"], expected)
+                    self.assertEqual((observed["pid"], observed["proc_start"]), (71, "101"))
+            with unittest.mock.patch.object(claude_identity.os, "geteuid", return_value=os.getuid() + 1):
+                self.assertIsNone(claude_identity.observe_process(71, proc_root=fixture.root))
+
+    def test_nearest_runtime_binding_and_registry_loss_fallback(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            f = FakeClaudeProc(temporary)
+            f.process(73, parent=72, executable="/bin/bash", argv=["bash", "statusline.sh"])
+            f.process(72, parent=71, start="102")
+            f.process(71)
+            f.registry(71)
+            lookup = lambda: claude_identity.statusline_identity(73, "current", f.home, proc_root=f.root)
+            self.assertIsNone(lookup(), "must not borrow the upper runtime's registry")
+            path = f.registry(72, start="102", sid="foreign")
+            self.assertIsNone(lookup())
+            f.registry(72, start="102", sid="current")
+            self.assertEqual(lookup()["pid"], 72)
+            f.registry(72, start="stale", sid="current")
+            self.assertIsNone(lookup())
+            path.write_text("{")
+            self.assertIsNone(lookup())
+            path.unlink()
+            f.tap(pid=72, start="102")
+            self.assertEqual(lookup()["pid"], 72)
+            f.tap(sid="conflict", pid=72, start="102")
+            self.assertIsNone(lookup())
+            # An exact current native record outranks historical launch/tap claims.
+            f.registry(72, start="102")
+            self.assertEqual(lookup()["pid"], 72)
+
+    def test_focused_observation_revalidates_process_reads_and_binding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            f = FakeClaudeProc(temporary)
+            proc = f.process()
+            real_readlink = os.readlink
+            def reuse(path):
+                result = real_readlink(path)
+                f.process(start="102")
+                return result
+            with unittest.mock.patch.object(claude_identity.os, "readlink", side_effect=reuse):
+                self.assertIsNone(claude_identity.observe_process(71, proc_root=f.root))
+            f.process()
+            f.registry()
+            original_claim = claude_identity._native_session_observation
+            def exit_after_claim(*args):
+                result = original_claim(*args)
+                (proc / "cmdline").unlink()
+                return result
+            with unittest.mock.patch.object(claude_identity, "_native_session_observation", side_effect=exit_after_claim):
+                self.assertIsNone(claude_identity.statusline_identity(71, "current", f.home, proc_root=f.root))
+            with unittest.mock.patch.object(claude_identity.Path, "open", side_effect=PermissionError()):
+                self.assertIsNone(claude_identity.observe_process(71, proc_root=f.root))
+
+    def test_explicit_current_argument_and_unreadable_registry_never_borrow_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            f = FakeClaudeProc(temporary)
+            f.process(71, argv=["claude", "daemon", "run"])
+            f.registry(71)
+            for argv, bound in ((["claude", "--session-id", "current", "--fork-session",
+                                  "--resume", "/old.jsonl"], True),
+                                (["claude", "--session-id=foreign"], False),
+                                (["claude", "--resume", "current"], False),
+                                (["claude", "--model", "--session-id=current"], False),
+                                (["claude", "--unknown", "--session-id=current"], False),
+                                (["claude", "--bg-pty-host=/sock"], False)):
+                with self.subTest(argv=argv):
+                    f.process(72, parent=71, argv=argv)
+                    self.assertEqual(bool(claude_identity.statusline_identity(
+                        72, "current", f.home, proc_root=f.root)), bound)
+            f.process(72, parent=71)
+            f.registry(72)
+            with unittest.mock.patch.object(claude_identity.os, "open", side_effect=PermissionError()):
+                self.assertIsNone(claude_identity.statusline_identity(72, "current", f.home, proc_root=f.root))
+
     def test_indexed_and_direct_taps_match_fleet_exact_pid_start_claims(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
@@ -53,6 +186,178 @@ class ClaudeNativeIdentityHelperTest(unittest.TestCase):
             (taps / "bad.json").write_text("{")
             with self.assertRaises(OSError):
                 claude_identity.tap_claim_index(temp, strict=True)
+
+    def test_prior_exact_taps_precede_historical_launch_selectors(self):
+        for selector, taps, expected in (
+                ("current", ["foreign"], False),
+                ("old", ["current"], True),
+                ("current", ["current", "foreign"], False),
+                ("current", [], True),  # first event, missing directory
+                ("foreign", [], False)):
+            with self.subTest(selector=selector, taps=taps), tempfile.TemporaryDirectory() as tmp:
+                f = FakeClaudeProc(tmp)
+                f.process(argv=["claude", "--session-id", selector])
+                for sid in taps:
+                    f.tap(sid=sid)
+                result = claude_identity.statusline_identity(71, "current", f.home, proc_root=f.root)
+                self.assertEqual(bool(result), expected)
+
+    def test_launch_fallback_requires_complete_readable_inventory(self):
+        for inventory in ("empty", "malformed", "unreadable", "incomplete", "not-directory"):
+            with self.subTest(inventory=inventory), tempfile.TemporaryDirectory() as tmp:
+                f = FakeClaudeProc(tmp)
+                f.process(argv=["claude", "--session-id=current"])
+                directory = f.home / ".statusline"
+                if inventory == "not-directory":
+                    directory.write_text("not a directory")
+                else:
+                    directory.mkdir()
+                if inventory == "malformed":
+                    (directory / "bad.json").write_text("{")
+                elif inventory == "incomplete":
+                    for index in range(129):
+                        (directory / f"{index}.json").write_text("{}")
+                patch = (unittest.mock.patch.object(claude_identity.os, "scandir", side_effect=PermissionError())
+                         if inventory == "unreadable" else unittest.mock.patch.dict(os.environ, {}))
+                with patch:
+                    lookup = lambda: claude_identity.statusline_identity(71, "current", f.home, proc_root=f.root)
+                    self.assertEqual(bool(lookup()), inventory == "empty")
+                    # Exact current native selection is stronger even when taps
+                    # cannot be inventoried or the launch SID is historical.
+                    f.process(argv=["claude", "--session-id=old"])
+                    f.registry()
+                    self.assertEqual(lookup()["pid"], 71)
+                    f.registry(sid="foreign")
+                    self.assertIsNone(lookup())
+
+    def test_unknown_nearest_native_stops_but_known_embedded_helpers_allow_parent_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = FakeClaudeProc(tmp)
+            f.process(71)
+            f.registry(71)
+            f.registry(72, start="102", sid="foreign")
+            for argv0, expected in (("unrecognized-runtime-title", None),
+                                    ("rg", 71), ("ugrep", 71), ("bfs", 71)):
+                with self.subTest(argv0=argv0):
+                    f.process(72, parent=71, start="102", argv=[argv0])
+                    observation = claude_identity.observe_process(72, proc_root=f.root)
+                    self.assertEqual(observation["kind"], "unknown" if expected is None else "helper")
+                    result = claude_identity.statusline_identity(72, "current", f.home, proc_root=f.root)
+                    self.assertEqual(result["pid"] if result else None, expected)
+
+    def test_retained_claim_requires_fresh_owner_runtime_and_readable_exact_prior(self):
+        for case in ("conflict", "incomplete", "unreadable-inventory", "foreign-runtime",
+                     "foreign-tap", "unreadable-prior", "oversize-prior", "denied-prior",
+                     "replaced-prior", "reuse", "exit"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                f = FakeClaudeProc(tmp)
+                f.process()
+                f.tap()
+                f.tap(sid="old")
+                if case == "incomplete":
+                    for index in range(129):
+                        (f.home / ".statusline" / f"extra-{index}.json").write_text("{}")
+                elif case == "unreadable-inventory":
+                    stack.enter_context(unittest.mock.patch.object(claude_identity.os, "scandir",
+                                                                   side_effect=PermissionError()))
+                elif case in {"foreign-runtime", "foreign-tap"}:
+                    name = "geteuid" if case == "foreign-runtime" else "getuid"
+                    stack.enter_context(unittest.mock.patch.object(claude_identity.os, name,
+                                                                   return_value=os.getuid() + 1))
+                elif case == "unreadable-prior":
+                    (f.home / ".statusline/current.json").write_text("{")
+                elif case == "oversize-prior":
+                    path = f.home / ".statusline/current.json"
+                    row = json.loads(path.read_text())
+                    path.write_text(json.dumps({**row, "padding": "x" * 65536}))
+                elif case == "denied-prior":
+                    real_claim = claude_identity._focused_tap_claim
+                    def denied_claim(path, pid, start):
+                        if path.name == "current.json":
+                            raise PermissionError("private exact-prior read denied")
+                        return real_claim(path, pid, start)
+                    stack.enter_context(unittest.mock.patch.object(claude_identity, "_focused_tap_claim",
+                                                                   side_effect=denied_claim))
+                else:
+                    real_claim = claude_identity._focused_tap_claim
+                    def changed_claim(path, pid, start):
+                        result = real_claim(path, pid, start)
+                        if path.name == "current.json":
+                            if case == "reuse":
+                                f.process(start="102")
+                            elif case == "exit":
+                                (f.root / "71/cmdline").unlink(missing_ok=True)
+                        return result
+                    if case in {"reuse", "exit"}:
+                        stack.enter_context(unittest.mock.patch.object(claude_identity, "_focused_tap_claim",
+                                                                       side_effect=changed_claim))
+                    elif case == "replaced-prior":
+                        path = f.home / ".statusline/current.json"
+                        replacement = path.with_suffix(".new")
+                        real_read = claude_identity.os.read
+                        def replace_during_read(fd, size):
+                            reading_prior = os.fstat(fd).st_ino == path.stat().st_ino
+                            raw = real_read(fd, size)
+                            if reading_prior:
+                                replacement.write_bytes(raw)
+                                os.replace(replacement, path)
+                            return raw
+                        stack.enter_context(unittest.mock.patch.object(claude_identity.os, "read",
+                                                                       side_effect=replace_during_read))
+                current, tap, policy = claude_identity.statusline_bindings(71, "current", f.home, proc_root=f.root)
+                self.assertIsNone(current)
+                self.assertEqual(tap["pid"] if tap else None,
+                                 71 if case in {"conflict", "incomplete", "unreadable-inventory"} else None)
+                self.assertEqual(policy, "unobserved" if case in {
+                    "unreadable-prior", "oversize-prior", "denied-prior", "replaced-prior",
+                    "reuse", "exit"} else "replace")
+
+    def test_native_read_failures_are_unknown_but_raw_reader_stays_unusable(self):
+        for kind in ("runtime", "unknown"):
+            for fault in ("denied", "oversize", "replaced", "short-read"):
+                with self.subTest(kind=kind, fault=fault), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+                    f = FakeClaudeProc(tmp)
+                    f.process(argv=["claude"] if kind == "runtime" else ["unrecognized-runtime-title"])
+                    path = f.registry()
+                    f.tap()
+                    f.tap(sid="old")
+                    if fault == "oversize":
+                        row = json.loads(path.read_text())
+                        path.write_text(json.dumps({**row, "padding": "x" * 65536}))
+                    elif fault == "denied":
+                        real_open = os.open
+                        def denied_open(candidate, *args, **kwargs):
+                            if Path(candidate) == path:
+                                raise PermissionError("private native read denied")
+                            return real_open(candidate, *args, **kwargs)
+                        stack.enter_context(unittest.mock.patch.object(claude_identity.os, "open",
+                                                                       side_effect=denied_open))
+                    else:
+                        real_read = os.read
+                        def interrupted_read(fd, size):
+                            native = os.fstat(fd).st_ino == path.stat().st_ino
+                            raw = real_read(fd, size)
+                            if native:
+                                if fault == "short-read":
+                                    return raw[:len(raw) // 2]
+                                replacement = path.with_suffix(".new")
+                                replacement.write_bytes(raw)
+                                os.replace(replacement, path)
+                            return raw
+                        stack.enter_context(unittest.mock.patch.object(claude_identity.os, "read",
+                                                                       side_effect=interrupted_read))
+                    self.assertEqual(claude_identity._native_session_claim(f.home, "71", "101"), (None, False))
+                    self.assertEqual(claude_identity.statusline_bindings(
+                        71, "current", f.home, proc_root=f.root), (None, None, "unobserved"))
+
+    def test_foreign_prior_cannot_enable_launch_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f = FakeClaudeProc(tmp)
+            f.process(argv=["claude", "--session-id=current"])
+            f.tap()
+            with unittest.mock.patch.object(claude_identity.os, "getuid", return_value=os.getuid() + 1):
+                self.assertEqual(claude_identity.statusline_bindings(
+                    71, "current", f.home, proc_root=f.root), (None, None, "replace"))
 
 
 class OpenCodeProcessTest(unittest.TestCase):

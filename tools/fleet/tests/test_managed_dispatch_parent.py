@@ -59,20 +59,28 @@ class ManagedDispatchParentTest(unittest.TestCase):
         if str(utilities) not in sys.path:
             sys.path.insert(0, str(utilities))
         import dispatch_seat_handover as handover
+        import session_tidy as tidy
         job = self.job()
         meta = {"parent_sid": job.parent_sid, "parent_harness": "codex", "attempt_id": "att-coherent",
                 "dispatch_depth": "1", "worker_type": "owner", "route_id": "rt-coherent", "route_hash": "sha256:coherent"}
         job._registry_metadata, job._registry_path = meta, "/fixture/jobs.log"
         binding = handover.binding_of(job._registry_path, meta)
-        snapshot = {"seat": {"kind": "pane", "key": "coherent", "pane": "w1:pC"},
-                    "from": {"sid": job.parent_sid}, "bindings": [binding]}
-        rows = [[{"event": "handover", "source": "retire", "from": job.parent_sid,
-                  "sid": sid, "harness": harness, "bindings": [binding], "ts": n}]
-                for n, (sid, harness) in enumerate((("current-B", "claude"), ("current-C", "opencode")), 1)]
-        with mock.patch.object(handover, "_all_snapshots_uncached", return_value=[snapshot]) as snapshots, \
-             mock.patch.object(handover, "handover_rows", side_effect=rows) as ledgers:
-            self.assertEqual(_effective_job_parent(job), ("current-B", "claude"))
-        self.assertEqual((snapshots.call_count, ledgers.call_count), (1, 1))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+            seat = tidy.Seat("pane", "coherent")
+            def publish(sid, harness, ts):
+                tidy._append_ledger_entry(seat, {"event": "handover", "source": "retire",
+                    "from": {"harness": "codex", "sid": job.parent_sid},
+                    "sid": sid, "harness": harness, "bindings": [binding], "ts": ts})
+            publish("current-B", "claude", 1)
+            resolve = handover.resolve_recipient
+            def moved(*args, **kwargs):
+                answer = resolve(*args, **kwargs)
+                publish("current-C", "opencode", 2)
+                return answer
+            with mock.patch.object(handover, "resolve_recipient", side_effect=moved) as reader:
+                self.assertEqual(_effective_job_parent(job), ("current-B", "claude"))
+                reader.assert_called_once()
+            self.assertEqual(_effective_job_parent(job), ("current-C", "opencode"))
 
     def test_unreadable_lineage_retains_only_the_previously_confirmed_edge_for_existing_grace(self):
         from fleet.collectors import _effective_job_parent
@@ -80,17 +88,21 @@ class ManagedDispatchParentTest(unittest.TestCase):
         if str(utilities) not in sys.path:
             sys.path.insert(0, str(utilities))
         import dispatch_seat_handover as handover
+        import session_tidy as tidy
         job = self.job()
-        job._registry_metadata = {"parent_sid": job.parent_sid}
+        job._registry_metadata = {"parent_sid": job.parent_sid, "parent_harness": "codex",
+            "attempt_id": "att-grace", "dispatch_depth": "1", "worker_type": "owner",
+            "route_id": "rt-grace", "route_hash": "sha256:grace"}
         job._registry_path = "/fixture/jobs.log"
         parent = self.session(sid="confirmed-successor")
-        with mock.patch.object(handover, "effective_parent", return_value=parent.session_id), \
-             mock.patch.object(handover, "effective_parent_harness", return_value="codex"):
-            resolve_parent_edges([parent], [job])
-        self.assertEqual(job._parent_edge_sid, parent.session_id)
         original = job.parent_sid
-        with mock.patch.object(handover, "effective_parent", return_value=""), \
-             mock.patch.object(handover, "effective_parent_harness", return_value=""):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+            seat = tidy.Seat("pane", "grace")
+            tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear",
+                "harness": "codex", "sid": parent.session_id, "from": original, "ts": 1})
+            resolve_parent_edges([parent], [job])
+            self.assertEqual(job._parent_edge_sid, parent.session_id)
+            tidy._ledger_path(seat).write_text('{broken ledger\n')
             self.assertEqual(_effective_job_parent(job), ("", ""))
             for _ in range(3):
                 resolve_parent_edges([self.session(sid=original)], [job])

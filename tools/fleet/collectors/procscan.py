@@ -9,11 +9,31 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 from ..model import Session, etime_to_min, EXEC_WAIT_COMMS
 
+_UTILITIES = str(Path(__file__).resolve().parents[3] / "utilities")
+if _UTILITIES not in sys.path:
+    sys.path.insert(0, _UTILITIES)
+import claude_process_identity  # noqa: E402
+
 HARNESSES = ("claude", "codex", "opencode")
 _DELETED = " (deleted)"
+_PS_ETIME_RE = re.compile(r"(?:\d+-)?(?:\d+:)?\d+:\d{2}\Z")
+
+
+class _CensusRows(list):
+    """List-compatible observation rows with explicit census evidence."""
+
+    def __init__(self, rows=(), *, complete=False, reasons=()):
+        super().__init__(rows)
+        self.census_complete = complete is True
+        self.census_reasons = tuple(dict.fromkeys(reasons))
+
+    def mark_incomplete(self, reason):
+        self.census_complete = False
+        self.census_reasons = tuple(dict.fromkeys((*self.census_reasons, reason)))
 
 # Managed (client-server) Codex keeps one state dir per session and carries its socket
 # paths in argv: `--listen unix://<dir>/app-server.sock` on the session process that owns
@@ -32,11 +52,10 @@ def _managed_dir(args):
 # Native CLI command inventories translate argv to modes. The role judgment
 # consumes modes/ownership and has no daemon/proxy-name exclusion branches.
 _COMMANDS = {
-    "claude": set("agents auth daemon doctor install mcp plugin remote-control setup-token update upgrade".split()),
     "codex": set("exec app-server exec-server login logout mcp completion features debug apply resume fork cloud agents remote-control update doctor sandbox queue archive delete migrate-rollouts unarchive help review plugin".split()),
     "opencode": set("agent attach auth bench completion debug export github import models mcp run serve session stats tui upgrade web".split()),
 }
-_SESSION_COMMANDS = {"claude": set(), "codex": {"exec", "review", "resume", "fork"},
+_SESSION_COMMANDS = {"codex": {"exec", "review", "resume", "fork"},
                      "opencode": {"run", "attach", "tui"}}
 _VALUE_OPTIONS = set("--model -m --effort --config -c --enable --disable --remote --remote-auth-token-env --local-provider --profile -p --sandbox -s --add-dir --ask-for-approval -a --cd -C --image -i --session-id --resume -r --agent --permission-mode --allowedTools --disallowedTools --mcp-config --settings --append-system-prompt --system-prompt --cwd --port --hostname --log-level".split())
 _FLAG_OPTIONS = set("--oss --strict-config --approve-for-me --dangerously-bypass-approvals-and-sandbox --yolo --dangerously-bypass-hook-trust --worktree --no-alt-screen --no-daemon --search --help -h --version -V --dangerously-skip-permissions --allow-dangerously-skip-permissions --verbose --debug --continue --no-session-persistence --print-logs".split())
@@ -44,14 +63,14 @@ _FLAG_OPTIONS = set("--oss --strict-config --approve-for-me --dangerously-bypass
 
 def invocation_mode(harness, argv):
     """Native conversation/worker invocation, another CLI command, or unreadable."""
+    if harness == "claude":
+        return claude_process_identity.conversation_invocation(argv)
     if not argv or os.path.basename(argv[0]) != harness:
         return "unknown"
     i = 1
     while i < len(argv):
         word = argv[i]
         if word == "--":
-            return "session"
-        if harness == "claude" and word in {"-p", "--print"}:
             return "session"
         if word in _VALUE_OPTIONS:
             if i + 1 >= len(argv):
@@ -387,15 +406,41 @@ def _ps_lines():
     env = dict(os.environ, COLUMNS="100000")
     argv = _user_ps_args("pid=,comm=,etime=,args=")
     if argv is None:
-        return []
+        return _CensusRows(complete=False, reasons=("effective-uid-unavailable",))
     try:
-        out = subprocess.run(
+        result = subprocess.run(
             argv,
             capture_output=True, text=True, timeout=5, env=env,
-        ).stdout
-    except Exception:
-        return []
-    return out.splitlines()
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = getattr(exc, "stdout", None)
+        if output is None:
+            output = getattr(exc, "output", None)
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        lines = output.splitlines() if isinstance(output, str) else ()
+        return _CensusRows(lines, complete=False, reasons=("ps-timeout",))
+    except Exception as exc:
+        return _CensusRows(complete=False,
+                           reasons=("ps-error-" + type(exc).__name__,))
+
+    output = getattr(result, "stdout", None)
+    if isinstance(output, str):
+        lines = output.splitlines()
+        reasons = []
+    elif isinstance(output, bytes):
+        lines = output.decode("utf-8", "replace").splitlines()
+        reasons = ["ps-output-not-text"]
+    else:
+        lines = []
+        reasons = ["ps-output-unavailable"]
+
+    returncode = getattr(result, "returncode", None)
+    if not isinstance(returncode, int) or isinstance(returncode, bool):
+        reasons.append("ps-returncode-unavailable")
+    elif returncode != 0:
+        reasons.append("ps-nonzero-exit")
+    return _CensusRows(lines, complete=not reasons, reasons=reasons)
 
 
 # --- F-47 exec visibility (v30) --------------------------------------------------------
@@ -902,36 +947,71 @@ def scan(harness_filter=None):
     if os.name == "nt":
         # Windows: MSYS `ps` has no -eo/comm and there is no /proc — reconstruct
         # session existence from on-disk state (see _scan_disk).
-        return _scan_disk(harness_filter)
-    sessions = []
+        return _CensusRows(_scan_disk(harness_filter), complete=False,
+                           reasons=("disk-state-is-not-process-census",))
+    raw_lines = _ps_lines()
+    sessions = _CensusRows(
+        complete=getattr(raw_lines, "census_complete", False) is True,
+        reasons=getattr(raw_lines, "census_reasons", ("process-census-unverified",)),
+    )
+    try:
+        selected_harnesses = tuple(harness_filter) if harness_filter else ()
+    except TypeError:
+        selected_harnesses = ()
+        sessions.mark_incomplete("harness-filter-unreadable")
+    if selected_harnesses and not set(HARNESSES).issubset(
+            {name for name in selected_harnesses if isinstance(name, str)}):
+        sessions.mark_incomplete("harness-filter-partial")
     orca_panes = []                      # (Session, ORCA_RELAY_SOCKET_PATH) rows
     pid_tty = _pid_ttys()
     det_ttys = _detached_ttys()
     tree = proc_tree()                   # F-47: one ps for the whole parent/child map
     kids = children_index(tree)
-    for line in _ps_lines():
+    for line in raw_lines:
         line = line.strip()
         if not line:
             continue
         parts = line.split(None, 3)          # pid, comm, etime, args
         if len(parts) < 3:
+            sessions.mark_incomplete("process-row-malformed")
             continue
         pid_s, comm, etime = parts[0], parts[1], parts[2]
         args = parts[3] if len(parts) > 3 else ""
-        if comm not in HARNESSES:
-            continue
-        if harness_filter and comm not in harness_filter:
-            continue
         try:
             pid = int(pid_s)
         except ValueError:
+            sessions.mark_incomplete("process-row-pid-invalid")
+            continue
+        if pid <= 0:
+            sessions.mark_incomplete("process-row-pid-invalid")
+            continue
+        if not _PS_ETIME_RE.fullmatch(etime):
+            sessions.mark_incomplete("process-row-malformed")
+        harness = comm
+        claude_observation = None
+        if comm == "claude" or comm not in HARNESSES:
+            # Flat ps text is only a discovery hint. A version-shaped comm or
+            # a prompt mentioning Claude never proves a native process.
+            candidate = (comm == "claude" or comm in {"node", "nodejs", "bun"}
+                         or "/claude/versions/" in args
+                         or os.path.basename(args.split(" ", 1)[0]) in {"claude", "claude-code"})
+            if not candidate or selected_harnesses and "claude" not in selected_harnesses:
+                continue
+            claude_observation = claude_process_identity.observe_process(pid)
+            if claude_observation and claude_observation["kind"] in {"service", "helper"}:
+                continue
+            if comm != "claude" and (not claude_observation or claude_observation["kind"] != "runtime"):
+                continue
+            harness = "claude"
+        # Filter the proven harness, not a native runtime's version-shaped comm.
+        if selected_harnesses and harness not in selected_harnesses:
             continue
         # A defunct process (the shared Codex daemon never reaps the app-server children it
         # replaced) has no cwd, environ or session: not a row.
         if is_terminal_state(pid):
             continue
         cwd, orphan = _read_cwd(pid)
-        if comm == "codex":
+        if harness == "codex":
             proc_argv = _read_argv(pid)
             initial_env = read_environ(pid)
             initial_launch_pwd = initial_env.get("PWD")
@@ -941,20 +1021,23 @@ def scan(harness_filter=None):
         # false-positive on interactive sessions. COLUMNS is pinned to 100000 for the ps
         # call (see _ps_lines), so args are never truncated and the token stays visible
         # even for long command lines.
-        app_server = comm == "codex" and "app-server" in args
+        app_server = harness == "codex" and "app-server" in args
         # Cross-runtime headless child marker (SD-24). Unreadable environ fails open:
         # a process is never hidden merely from argv/PPID/cwd resemblance.
         env = read_environ(pid)                       # Read once and reuse.
         is_child = env.get("AGENT_SESSION_ROLE", "").lower() == "worker" or bool(env.get("AGENT_DISPATCH_DEPTH")) or env.get("AGENT_DISPATCH_CHILD") == "1" or (
-            comm == "claude" and env.get("CLAUDE_CODE_CHILD_SESSION") == "1"
+            harness == "claude" and env.get("CLAUDE_CODE_CHILD_SESSION") == "1"
         )
         # Tag memory workers and title refreshers to prevent inherited cwd/env misattribution.
         mem_worker = env.get("MEM_DISTILL") == "1" or env.get("FLEET_TITLE_REFRESH") == "1"
         detached = _is_detached(pid_tty.get(pid), app_server, det_ttys)
         proc_start = read_proc_start(pid)
-        managed_dir = _managed_dir(args) if comm == "codex" else None
+        if claude_observation and (proc_start != claude_observation["proc_start"]
+                                  or claude_process_identity.observe_process(pid) != claude_observation):
+            continue
+        managed_dir = _managed_dir(args) if harness == "codex" else None
         sess = Session(
-            harness=comm,
+            harness=harness,
             pid=pid,
             cwd=cwd,
             orphan=orphan,
@@ -993,7 +1076,8 @@ def scan(harness_filter=None):
         sess._proc_tree = tree
         sess._proc_kids = kids
         sess._tty = pid_tty.get(pid)
-        sess._invocation_mode = invocation_mode(comm, _read_argv(pid))
+        sess._invocation_mode = (claude_observation["invocation"] if claude_observation
+                                 else invocation_mode(harness, _read_argv(pid)))
         sessions.append(sess)
         orca_sock = env.get("ORCA_RELAY_SOCKET_PATH")
         if orca_sock:

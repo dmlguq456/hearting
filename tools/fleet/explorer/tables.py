@@ -42,6 +42,20 @@ def _cell(value, missing="·"):
     return missing if value is None or value == "" else str(value)
 
 
+def _draw_context_gauge(grid, x, y, pct, window):
+    """Draw the resolved session/attempt gauge in the shared 13-cell column."""
+    if pct is None:
+        grid.put(x + 9, y, "   ·", "dim")
+        return
+    pct = int(pct)
+    width = min(8, max(1, round(8 * float(window or 1))))
+    filled = gauge_cells(width, pct)
+    key = "g_blocked" if pct >= 80 else "g_idle" if pct >= 50 else "done"
+    grid.put(x, y, "━" * filled, key)
+    grid.put(x + filled, y, "─" * (width - filled), "dim")
+    grid.put(x + 9, y, f"{pct:3d}%", key if pct >= 50 else "dim")
+
+
 def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     use = max(0, grid.cols - x - 2)
     right = x + use + 1
@@ -59,6 +73,11 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     repos = tuple(vm.repos or ())
     sessions = tuple(vm.sessions or ())
     route_rows = [route for route in vm.routes if route.get("session_tag")]
+    current_routes = {}
+    for route in route_rows:
+        if route.get("current") is True:
+            tag = route["session_tag"]
+            current_routes[tag] = current_routes.get(tag, 0) + 1
     # The ROUTES summary and RECENT stay in view under a long session list: the page
     # viewport pins them to its bottom edge and only the sessions above them scroll.
     # A short screen keeps fewer RECENT rows (at least one) before it gives the pin up.
@@ -138,23 +157,23 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 # first, and a row whose branch is unknown draws no parentheses at all.
                 branch = session.get("branch")
                 tail = " (%s)" % _clip(str(branch), 12) if branch not in (None, "") else ""
-                room = max(6, c["title_w"] - _seg_width(tail))
+                route_count = current_routes.get(tag, 0)
+                route_tail = f" route {route_count}" if route_count and state.opened != tag else ""
+                # Current work remains visible while the session is folded.
+                # Reserve its cells before a long CJK title or branch is drawn.
+                if route_tail:
+                    tail = route_tail
+                room = max(0, c["title_w"] - _seg_width(tail))
                 title_text = _clip(title, room)
                 bold_key = {"claude": ("c", 1, 0), "codex": ("m", 1, 0),
                             "opencode": ("l", 1, 0)}.get(harness, "unknown")
-                title_end = grid.put(x + c["title"], y, title_text, bold_key)
+                title_end = grid.put(x + c["title"], y, title_text, bold_key,
+                                     limit=x + c["title"] + room)
                 if tail:
                     grid.put(title_end, y, tail, "dim", limit=x + c["title"] + c["title_w"])
             context = session.get("context")
-            if not c["narrow"] and context is not None:
-                gauge_width = max(1, round(8 * float(session.get("window") or 1)))
-                filled = gauge_cells(gauge_width, int(context))
-                gauge_key = ("g_blocked" if int(context) >= 80 else
-                             "g_idle" if int(context) >= 50 else "done")
-                grid.put(x + c["ctx"], y, "━" * filled, gauge_key)
-                grid.put(x + c["ctx"] + filled, y, "─" * (gauge_width - filled), "dim")
-                percent_key = gauge_key if int(context) >= 50 else "dim"
-                grid.put(x + c["ctx"] + 9, y, f"{int(context):3d}%", percent_key)
+            if not c["narrow"]:
+                _draw_context_gauge(grid, x + c["ctx"], y, context, session.get("window"))
             elif context is not None:
                 narrow_key = ("g_blocked" if int(context) >= 80 else
                               "g_idle" if int(context) >= 50 else "dim")
@@ -193,10 +212,13 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 return
     sessions_total = len(sessions)
     working_sessions = sum(1 for item in sessions if item.get("state") == "working")
-    questions = len(vm.questions or ())
+    waits = (vm.system or {}).get("answer_waits") or {}
+    questions = waits.get("total") if waits.get("state") == "complete" else None
+    if not waits:
+        questions = sum(1 for item in (vm.questions or ()) if not item.get("older"))
     from .chrome import count_word
     summary = (f"{count_word(sessions_total, 'session')} · {working_sessions} working · "
-               f"{questions} needs answer · {count_word(sum(1 for repo in repos if repo_label(repo.get('name', '·'))), 'project')}")
+               f"{questions if questions is not None else '?'} needs answer · {count_word(sum(1 for repo in repos if repo_label(repo.get('name', '·'))), 'project')}")
     grid.put(x + 1, y, summary, "dim")                # the summary runs to the screen edge and is cut there
     if sticky:
         pin(y + 1, tail_height, lambda target, top: _draw_overview_tail(
@@ -784,18 +806,16 @@ def draw_routes(grid, vm, state, x=34, y=3):
             owner_limit = min(owner_edge, age_edge)
             _draw_owner(grid, x + cols["own"], y, route, cols["narrow"], slim, owner_limit)
             if not slim:
-                context = route.get("owner_context")
-                if context:
+                if "owner_gauge" in route:
+                    pct, window = route["owner_gauge"]
+                elif route.get("owner_context"):
+                    context = route["owner_context"]
                     tokens, window = context
                     pct = round(100 * tokens / max(1, window))
-                    gauge_width = max(1, round(8 * window / 1_000_000))
-                    filled = gauge_cells(gauge_width, pct)
-                    grid.put(x + cols["ctx"], y, "━" * filled, "g_blocked" if pct >= 80 else "g_idle" if pct >= 50 else "done")
-                    grid.put(x + cols["ctx"] + filled, y, "─" * (gauge_width - filled), "dim")
-                    percent_key = "g_blocked" if pct >= 80 else "g_idle" if pct >= 50 else "dim"
-                    grid.put(x + cols["ctx"] + 9, y, f"{pct:3d}%", percent_key)
+                    window /= 1_000_000
                 else:
-                    grid.put(x + cols["ctx"] + 9, y, "   ·", "dim")
+                    pct, window = None, None
+                _draw_context_gauge(grid, x + cols["ctx"], y, pct, window)
             _draw_route_progress(grid, x + cols["prog"], age_edge - gap, y, route)
             grid.put(age_edge, y, age, "dim")
             if is_open:
@@ -860,6 +880,21 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _tint_row(grid, y - 1, x - 1, right, 236)
                 _tint_row(grid, y, x - 1, right, 236)
             y += 1
+            for index, worker_context in enumerate(route.get("worker_contexts") or ()):
+                grid.add_hit(y, x, right, action)
+                label = str(worker_context.get("stage") or "worker")
+                grid.put(route_start, y, _clip(f"└ {label} · {index + 1}", route_end - route_start),
+                         "title_dim", limit=route_end)
+                harness = str(worker_context.get("harness") or "·")
+                grid.put(x + cols["own"], y, harness, "hb_" + harness, limit=owner_limit)
+                if not slim:
+                    _draw_context_gauge(grid, x + cols["ctx"], y,
+                                        worker_context.get("context"), worker_context.get("window"))
+                else:
+                    pct = worker_context.get("context")
+                    grid.put(x + cols["prog"], y, "CTX ·" if pct is None else f"CTX {pct}%",
+                             "dim", limit=age_edge)
+                y += 1
             if is_open and y < bottom:
                 from .pages import draw_route_detail
                 if not getattr(state, "no_repo_group", False):

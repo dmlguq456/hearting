@@ -1942,7 +1942,7 @@ def compare_baseline(base_report: Path, head_report: Path) -> int:
 DURATION_COLUMNS = ["suite_path", "duration_s"]
 DEFAULT_SHARD_WEIGHT_S = 1.0
 CENSUS_MANIFEST = "census-suite-list.tsv"
-SHARD_DIR_RE = re.compile(r"^run-tests-report-shard-(\d+)-of-(\d+)$")
+SHARD_DIR_RE = re.compile(r"^run-tests-report-shard-(\d+)-of-(\d+)(?:-attempt-(\d+))?$")
 SHARD_HEADER_RE = re.compile(r"^# shard=(?:(\d+)/(\d+)|all)$")
 # Report rows that name a suite without being that suite's own verdict.
 NON_VERDICT_ROWS = frozenset({"STALE", "UNDECLARED-ISOLATION-OPTOUT", "ISOLATION-OPTOUT-UNNEEDED"})
@@ -2073,8 +2073,10 @@ def read_suite_list(path: Path) -> tuple[str, list[str]]:
 
 
 def verify_shards(directory: Path) -> int:
-    """Fail unless the shard manifests partition the census exactly and every
-    manifest suite has a verdict in its own shard's report."""
+    """Select each shard's latest numeric attempt (legacy ranks as zero), then
+    require an exact census partition and each suite's own report verdict.
+    Selection is independent of report validity/verdict and never edits inputs.
+    """
     problems: list[str] = []
     try:
         label, census = read_suite_list(directory / CENSUS_MANIFEST)
@@ -2087,14 +2089,37 @@ def verify_shards(directory: Path) -> int:
     if len(census_set) != len(census):
         problems.append(f"{CENSUS_MANIFEST}: repeats a suite path")
 
-    shard_dirs = sorted(d for d in directory.iterdir() if d.is_dir() and SHARD_DIR_RE.match(d.name))
+    # Select before reading payloads: an incomplete latest attempt must fail,
+    # never fall back to an older PASS. Keep count in the key so disagreement
+    # cannot disappear when the same shard index appears with different counts.
+    latest: dict[tuple[int, int], tuple[int, Path]] = {}
+    seen_attempts: dict[tuple[int, int, int], Path] = {}
+    for candidate in sorted(directory.iterdir()):
+        match = SHARD_DIR_RE.match(candidate.name)
+        if not candidate.is_dir() or not match:
+            continue
+        index, count = int(match.group(1)), int(match.group(2))
+        attempt = int(match.group(3) or 0)
+        identity = (index, count)
+        key = (index, count, attempt)
+        if key in seen_attempts:
+            problems.append(
+                f"shard {index}/{count} attempt {attempt} appears twice "
+                f"({seen_attempts[key].name}, {candidate.name})"
+            )
+            continue
+        seen_attempts[key] = candidate
+        if identity not in latest or attempt > latest[identity][0]:
+            latest[identity] = (attempt, candidate)
+
     counts: set[int] = set()
     seen_index: dict[int, str] = {}
     assigned: dict[str, list[int]] = {}
     report_missing: list[str] = []
     report_extra: list[str] = []
-    for shard_dir in shard_dirs:
-        dir_index, dir_count = (int(x) for x in SHARD_DIR_RE.match(shard_dir.name).groups())
+    for (dir_index, dir_count), (attempt, shard_dir) in sorted(latest.items()):
+        attempt_label = attempt if SHARD_DIR_RE.match(shard_dir.name).group(3) is not None else "legacy"
+        print(f"selected shard={dir_index}/{dir_count} attempt={attempt_label} directory={shard_dir.name}")
         try:
             shard_label, suites = read_suite_list(shard_dir / "suite-list.tsv")
         except (OSError, BaselineError) as exc:
@@ -2124,7 +2149,7 @@ def verify_shards(directory: Path) -> int:
     total = min(counts) if len(counts) == 1 else 0
     if total and sorted(seen_index) != list(range(1, total + 1)):
         problems.append(f"shard numbers {sorted(seen_index)} are not exactly 1..{total}")
-    if not shard_dirs:
+    if not latest:
         problems.append(f"no run-tests-report-shard-I-of-N directory under {directory}")
 
     missing = sorted(census_set - set(assigned))
@@ -2212,8 +2237,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--verify-shards", type=Path, default=None, metavar="DIR",
-        help="check that the shard manifests under DIR add up to census-suite-list.tsv "
-             "with no missing or duplicate suite, then exit",
+        help="select each shard's latest numeric attempt under DIR (legacy ranks as zero), "
+             "then check its manifest/report against census-suite-list.tsv with no missing "
+             "or duplicate suite and exit",
     )
     p.add_argument("--durations", type=Path, default=ROOT / "tools" / "test-durations.tsv",
                    help="suite duration table used to balance --shard")

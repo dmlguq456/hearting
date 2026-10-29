@@ -195,10 +195,10 @@ class QueueDeliveryTest(unittest.TestCase):
                 recipient.receipt_marker(row, THREAD)
             )
         expected_batch_body = (
-            "Hearting runtime delivery. Follow required_action; inspect-recovery is diagnostic. "
-            "Follow route's next-action receipt; runtime-v1 owners close/finalize. "
-            "Tracked-Workflow Continuation. Keep new failures/conflicts, unfinished work, questions; "
-            "no Monitor/dispatch-wait/polling.\n" +
+            "Hearting runtime delivery. Follow required_action/next-action receipt; "
+            "inspect-recovery: diagnostic. runtime-v1 finalizes. Tracked-Workflow Continuation. "
+            "Keep new failures/conflicts, unfinished work, questions; no extra "
+            "harness-scheduled calls/Monitor/dispatch-wait/polling.\n" +
             "\n".join("- " + line for line in batch_lines)
         )
         self.assertEqual(QUEUE.native_client_message_id(

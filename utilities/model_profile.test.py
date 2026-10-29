@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -63,6 +64,20 @@ def args(adapter: str, profile: str, **overrides):
 
 
 class ModelProfileTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="model-profile-isolated-")
+        self.addCleanup(self.temp.cleanup)
+        home = Path(self.temp.name)
+        patch = mock.patch.dict(os.environ, {
+            "HOME": str(home), "CODEX_HOME": str(home / "codex"),
+            "CLAUDE_CONFIG_DIR": str(home / "claude"),
+            "OPENCODE_CONFIG_DIR": str(home / "opencode"),
+            "HEARTING_MODEL_CONFIG_HOME": str(home / "model-config"),
+            "XDG_CONFIG_HOME": str(home / "config"),
+        })
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def test_pair_rotation_uses_declared_profiles_and_model_identity(self):
         for adapter in ("claude", "codex", "opencode"):
             config = PROFILE.load_config(ROOT / "adapters" / adapter / "config" / "models.conf")
@@ -570,6 +585,29 @@ class TopExceptionProfileTest(unittest.TestCase):
         with self.assertRaises(PROFILE.ModelProfileError) as refused:
             PROFILE.resolve_profile_values("claude", without, "top")
         self.assertEqual(refused.exception.reason, "profile-top-undeclared")
+
+    def test_opencode_omitted_top_uses_installed_balanced_deep_collapse_without_mutation(self):
+        config = PROFILE.load_config(ROOT / "adapters" / "opencode" / "config" / "models.conf")
+        without = {k: v for k, v in config.items() if not k.endswith("_TOP")}
+        without["CFG_TIER_BALANCED_DEEP_MODEL"] = "private-provider/custom-model"
+        without["CFG_MODEL_PROFILE_DEEP"] = "model/retired-provider/previous:high"
+        before = dict(without)
+        resolved = PROFILE.resolve_profile_values("opencode", without, "top")
+        balanced_deep = PROFILE.resolve_profile_values("opencode", without, "balanced-deep")
+        self.assertEqual((resolved["model"], resolved["budget"]),
+                         (balanced_deep["model"], balanced_deep["budget"]))
+        self.assertEqual(resolved["profile"], "top")
+        self.assertEqual(resolved["granularity"], "collapsed-top-to-balanced-deep")
+        self.assertEqual(without, before)
+
+    def test_opencode_explicit_top_is_preserved_and_invalid_top_still_is_invalid(self):
+        config = PROFILE.load_config(ROOT / "adapters" / "opencode" / "config" / "models.conf")
+        config["CFG_MODEL_PROFILE_TOP"] = "model/private-provider/explicit:xhigh"
+        self.assertEqual(PROFILE.resolve_profile_values("opencode", config, "top")["model"],
+                         "private-provider/explicit")
+        config["CFG_MODEL_PROFILE_TOP"] = ""
+        with self.assertRaises(PROFILE.ModelProfileError):
+            PROFILE.resolve_profile_values("opencode", config, "top")
 
     def test_explicit_top_never_comes_from_the_matrix(self):
         for judgment in ("predetermined", "important", "difficult-uncertain"):

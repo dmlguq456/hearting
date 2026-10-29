@@ -18,6 +18,29 @@ import dispatch_owner_input as owner_input  # noqa: E402
 
 
 class PendingWaitTest(unittest.TestCase):
+    def test_invalid_native_sidecar_projects_unknown_without_exposing_body(self):
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tools.fleet import interaction
+
+        with mock.patch.dict("os.environ", {
+            "FLEET_INTERACTION_STATE_DIR": str(self.root / "interactions"),
+            "XDG_STATE_HOME": str(self.root / "xdg"),
+        }):
+            self.assertTrue(interaction.set_wait(
+                "damaged-session", "codex", "decision", "codex-appserver", now=time.time()))
+            path = Path(interaction.sidecar_path("damaged-session", "codex"))
+            path.write_text('{"question":"PRIVATE damaged source"', encoding="utf-8")
+            before = path.read_bytes()
+            result = H.read_answer_waits(jobs_paths=[])
+            self.assertFalse(result["complete"])
+            self.assertEqual(result["items"], [])
+            self.assertIn({"source": "S1", "state": "unknown", "reason": "invalid-sidecar"},
+                          result["health"])
+            self.assertNotIn("PRIVATE", json.dumps(result))
+            self.assertEqual(path.read_bytes(), before)
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)

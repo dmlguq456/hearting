@@ -2,6 +2,7 @@
 """Hermetic registration and D-42 regression for the OpenCode V2 plugin API."""
 import os
 import importlib.util
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -27,6 +28,331 @@ def fixture_tempdir(stack):
 
 
 class OpenCodeV2PluginTest(unittest.TestCase):
+    def test_synchronous_completion_transport_preserves_existing_output_capacity(self):
+        node = shutil.which("node")
+        self.assertIsNotNone(node)
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            helper = folder / "reply.py"
+            helper.write_text("import json\nprint(json.dumps({'text': 'x'*1100000, 'records': []}))\n")
+            script = r'''
+import fs from 'node:fs'
+import {spawnSync} from 'node:child_process'
+import assert from 'node:assert/strict'
+const source = fs.readFileSync(process.env.PLUGIN_PATH, 'utf8')
+const a = source.indexOf('function carrierCommand(')
+const b = source.indexOf('function createCompletionCarrier(ctx)', a)
+assert(a >= 0 && b > a)
+const invoke = new Function('resolveRuntimeTarget', 'sweepRel', 'root', 'spawnSync', 'CARRIER_KIND',
+  source.slice(a,b) + '\nreturn carrierCommand("settle", "B", {}, () => {}, true)')
+const result = invoke(() => ({root: process.cwd(), helper: process.env.REPLY_HELPER}),
+  'utilities/dispatch_session_sweep.py', process.cwd(), spawnSync, 'opencode-turn')
+assert.equal(result?.text?.length, 1100000)
+console.log(JSON.stringify({bytes: result.text.length}))
+'''
+            result = subprocess.run([node, "--input-type=module", "-e", script], cwd=folder,
+                env=dict(BASE_ENV, PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                         REPLY_HELPER=str(helper)), capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def completion_case(self, **case):
+        """Exact carrier/helpers/events; real private notice, lineage, sweep and store.
+
+        Only pane admission, native SDK and the interval clock are deterministic.
+        Every case gets separate state, including the Python helper processes.
+        """
+        sys.path.insert(0, str(ROOT / "utilities"))
+        import dispatch_pending_delivery as pending
+        import dispatch_session_sweep as sweep
+        import peer_obligations
+        import session_notice
+        import session_tidy as tidy
+        for module in (pending, sweep, peer_obligations, session_notice, tidy):
+            self.assertTrue(Path(module.__file__).resolve().is_relative_to(ROOT))
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "node is required for behavioral carrier checks")
+        with ExitStack() as stack:
+            root = Path(fixture_tempdir(stack))
+            env = dict(BASE_ENV, AGENT_HOME=str(ROOT), HERDR_PANE_ID="w1:pCarrier",
+                       OPENCODE_SESSION_ID="B", AGENT_DISPATCH_CALLER_HARNESS="opencode",
+                       HARNESS_STATE_ROOT=str(root / "harness"), AGENT_PEER_LEDGER_ROOT=str(root / "peer"),
+                       AGENT_DISPATCH_JOBS=str(root / "jobs.log"),
+                       HERDR_SOCKET_PATH=str(root / "native.sock"),
+                       CODEX_HOME=str(root / "codex"), CLAUDE_CONFIG_DIR=str(root / "claude"))
+            for name in ("HOME", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME",
+                         "XDG_CACHE_HOME", "MEM_STORE", "TMPDIR"):
+                target = root / name.lower()
+                target.mkdir()
+                env[name] = str(target)
+            (root / "jobs.log").touch()
+            stack.enter_context(mock.patch.dict(os.environ, env, clear=True))
+            stack.enter_context(mock.patch("pane_ownership.verified_pane",
+                                          side_effect=lambda pane, *a, **kw: pane))
+            stack.enter_context(mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=False))
+            seat = tidy.resolve_seat("opencode", str(ROOT), os.environ, "B")
+            for row in (dict(event="start", harness="opencode", sid="A", ts=1),
+                        dict(event="succession", source="tidy-clear", harness="opencode",
+                             sid="B", **{"from": "A"}, ts=2),
+                        dict(event="start", harness="opencode", sid="B", ts=3)):
+                tidy._append_ledger_entry(seat, row)
+            storage = case.get("storage", "A")
+            notices = [session_notice.notify("opencode", storage, key=f"carrier-{index}",
+                subject="carrier fixture", text=f"private notice {index}", jobs=env["AGENT_DISPATCH_JOBS"])
+                for index in range(case.get("count", 1))]
+            identities = [pending.received_ack_identity(row, storage, row["delivery_id"]) for row in notices]
+            if case.get("historical"):
+                row = pending.claim(root, storage, notices[0]["delivery_id"], claim_owner="old-carrier",
+                                    lease_seconds=30, require_generation_proof=False)
+                row = pending.mark_sent_ambiguous(root, storage, row["delivery_id"], claim_owner="old-carrier")
+                case["history"] = sweep.delivery_context([(root, [{**row, sweep.STORAGE_KEY: storage}])])
+                pending.reclaim(root, storage, row["delivery_id"], now_ns=row["claim_deadline_ns"] + 1)
+            bridge = root / "bridge.py"
+            bridge.write_text(r'''
+import os, sys
+from pathlib import Path
+from unittest import mock
+root = Path(os.environ['AGENT_HOME']).resolve()
+sys.path[:0] = [str(root/'utilities'), str(root/'tools')]
+import dispatch_session_sweep as sweep
+import dispatch_pending_delivery as pending
+assert Path(sweep.__file__).resolve() == root/'utilities/dispatch_session_sweep.py'
+sweep._state_roots = lambda: [Path(os.environ['AGENT_DISPATCH_JOBS']).parent]
+if sys.argv[1] == 'move-lineage':
+    import json
+    import dispatch_seat_handover as handover
+    import session_tidy as tidy
+    folder = tidy.state_root() / 'sessions'
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / 'reviewer-late-successor.jsonl').write_text(json.dumps({
+        'event': 'succession', 'source': 'tidy-clear', 'harness': 'opencode',
+        'sid': 'C', 'from': 'B', 'ts': 4}) + '\n')
+    handed = json.load(sys.stdin)['records']
+    targets = [handover.record_recipient(pending.read(Path(r['root']), r['storage_key'], r['delivery_id']),
+        r['storage_key'], harness='opencode') for r in handed]
+    assert targets and set(targets) == {'C'}, targets
+    print(json.dumps({'actual_current_recipients': targets}))
+elif sys.argv[1] == 'replace-claim':
+    import json
+    handed = json.load(sys.stdin)['records'][0]
+    base, sid, did = Path(handed['root']), handed['storage_key'], handed['delivery_id']
+    row = pending.read(base, sid, did)
+    pending.reclaim(base, sid, did, now_ns=row['claim_deadline_ns']+1)
+    pending.claim(base, sid, did, claim_owner='replacement-carrier', lease_seconds=30,
+                  require_generation_proof=False)
+    print('{}')
+else:
+    with mock.patch('pane_ownership.verified_pane', side_effect=lambda pane,*a,**kw:pane):
+        sys.exit(sweep.main([sys.argv[1], '--recipient-kind', 'opencode-turn', '--session', sys.argv[2]]))
+''')
+            script = root / "carrier.mjs"
+            script.write_text(r'''
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import {createHash} from 'node:crypto'
+import {spawnSync} from 'node:child_process'
+const cfg = JSON.parse(process.env.CARRIER_CASE)
+const source = fs.readFileSync(process.env.PLUGIN_PATH, 'utf8')
+const extract = (start, end) => {
+  const a = source.indexOf(start), b = source.indexOf(end, a)
+  assert(a >= 0 && b > a, `missing actual source: ${start}`)
+  return source.slice(a, b)
+}
+let tick, carrier, api, handed, writes = 0, histories = 0, roots = 0, statuses = 0
+let changed = false
+const actions = [], logs = []
+const bridge = (action, data) => {
+  actions.push(action)
+  const result = spawnSync('python3', [process.env.CARRIER_BRIDGE, action, 'B'], {
+    input: data ? JSON.stringify(data) : '', encoding: 'utf8',
+  })
+  assert.equal(result.status, 0, result.stderr)
+  return JSON.parse(result.stdout)
+}
+const boundary = name => {
+  if (name !== cfg.boundary || changed) return
+  changed = true
+  if (cfg.change === 'origin') api.invalidate()
+  else if (cfg.change === 'client') ctx.client = {...ctx.client, session: {...session}}
+  else if (cfg.change === 'dispose') carrier.dispose(true)
+  else if (cfg.change === 'claim') bridge('replace-claim', handed)
+  else if (cfg.change === 'lineage') logs.push(bridge('move-lineage', handed))
+  else if (cfg.change === 'peer-working') api.peerStatus('working')
+  else carrier.status('B', cfg.change || 'blocked')
+}
+const nativeResponse = data => ({data, response: {ok: true, status: 200}})
+const session = {
+  get: async () => {
+    roots++
+    boundary(`root:${roots}`)
+    let info = {id: 'B', projectID: 'fixture', directory: process.cwd(), slug: 'fixture',
+      title: 'fixture', version: '1', time: {created: 1, updated: 1}}
+    if (cfg.native === 'wrong-root') info.id = 'C'
+    if (cfg.native === 'child') info.parentID = 'A'
+    if (cfg.native === 'malformed-root') delete info.time
+    return nativeResponse(info)
+  },
+  status: async () => {
+    statuses++
+    boundary(`status:${statuses}`)
+    if (cfg.native === 'unavailable') throw Error('fixture native unavailable')
+    if (cfg.native === 'invalid-response') return {data: {}, response: {ok: false, status: 503}}
+    const kind = cfg.native?.startsWith('final-')
+      ? (statuses > 1 ? cfg.native.slice(6) : 'idle') : cfg.native
+    const values = {empty: {}, missing: {other: {type: 'idle'}}, invalid: [],
+      unknown: {B: {type: 'unknown'}}, malformed: {B: {type: 'retry'}},
+      'invalid-other': {other: {type: 'unknown'}}, busy: {B: {type: 'busy'}},
+      retry: {B: {type: 'retry', attempt: 1, message: 'retry', next: 10}}}
+    return nativeResponse(values[kind] ?? {B: {type: 'idle'}})
+  },
+  messages: async () => {
+    histories++
+    boundary(`history:${histories}`)
+    if (cfg.receipt === 'unknown' || (cfg.receipt === 'final-unknown' && histories >= 2))
+      return {error: {name: 'unavailable'}}
+    let text = cfg.history || ''
+    if (handed && ['before', 'partial'].includes(cfg.receipt) && histories >= 2) text = handed.text
+    if (handed && cfg.receipt === 'after' && writes) text = handed.text
+    if (text && cfg.receipt === 'partial') text = text.slice(0, text.lastIndexOf('HEARTING_RECEIPT_V1'))
+    return nativeResponse(text ? [{info: {sessionID: cfg.wrongReceiver ? 'C' : 'B', role: 'user'},
+      parts: [{type: 'text', text}]}] : [])
+  },
+  promptAsync: async request => {
+    writes++
+    assert.equal(request.path.id, 'B')
+    assert(request.body.parts[0].text.includes('HEARTING_RECEIPT_V1'))
+    if (cfg.acceptance === 'ambiguous') throw Error('fixture lost response')
+    return {response: {ok: true, status: 204}}
+  },
+}
+if (cfg.native === 'missing-api') delete session.status
+const ctx = {directory: process.cwd(), client: {session, app: {log: async row => logs.push(row.body.extra)}}}
+const command = (action, sid, data, observe, synchronous = false) => {
+  const result = bridge(action, data)
+  if (action === 'deliver') handed = result
+  // Queue the event after the helper response, before the caller resumes.
+  if (cfg.afterAwait && action === cfg.boundary) queueMicrotask(() => boundary(action))
+  else boundary(action)
+  return synchronous ? result : Promise.resolve(result)
+}
+const setup = new Function('ctx', 'carrierCommand', 'path', 'readdirSync', 'readFileSync',
+  'realpathSync', 'createHash', 'setInterval', 'baseDir', 'isWorkerSession', 'pendingPeerDelivery',
+  `let paneNativeOrigin = {sid: 'B', directory: ctx.directory, state: 'pending'};
+   const paneContexts = new WeakMap([[ctx, {active: true, ownsOrigin: true}]]);
+   let paneOwningContext = ctx;
+   const pendingPeerStatus = new Map();
+   ${extract('function pendingPeerRoot(ctx, sid)', 'function nativeMessageTime')}
+   ${extract('function sdkResponseData(result)', 'function runCompactHook')}
+   ${extract('async function compactMessages(ctx, sid)', '// A declared sub-session')}
+   ${extract('const CARRIER_ENV =', '// One bounded sweep step')}
+   ${extract('function createCompletionCarrier(ctx)', '// Session card / tidy notice')}
+   const completionCarrier = createCompletionCarrier(ctx);
+   const observeCompactRuntimeStatus = () => {};
+   const event = event => {
+     ${extract('    if (event && ["question.asked", "permission.asked"]', '    if (event && event.type === "session.idle")')}
+   };
+   return {carrier: completionCarrier, event, invalidate: () => {paneNativeOrigin.state = 'invalidated'},
+     peerStatus: type => pendingPeerStatus.set('B', type)};`)
+// The event's external telemetry is silent under its existing worker check;
+// delivery itself runs as a normal carrier in the same exact function.
+let eventMode = false
+api = setup(ctx, command, path, fs.readdirSync, fs.readFileSync, fs.realpathSync, createHash,
+  fn => {tick = fn; return {unref(){}}}, x => x.directory, () => eventMode, async () => {})
+carrier = api.carrier
+carrier.env('B')
+carrier.status('B', cfg.local || 'idle')
+const drain = async () => {for (let i=0; i<100; i++) await new Promise(resolve => setImmediate(resolve))}
+try {
+  if (cfg.event) {
+    eventMode = true; api.event({type: cfg.event+'.asked', properties: {sessionID: 'B'}}); eventMode = false
+    tick(); await drain(); assert.equal(writes, 0)
+    eventMode = true; api.event({type: cfg.event+'.replied', properties: {sessionID: 'B'}}); eventMode = false
+    tick(); await drain(); assert.equal(writes, 0)
+    api.peerStatus('idle'); carrier.status('B','idle')
+  }
+  tick(); await drain()
+  assert.equal(writes, cfg.writes, JSON.stringify({cfg, writes, actions, logs}))
+  if (cfg.boundary) assert(changed, `boundary not reached: ${cfg.boundary}`)
+  console.log(JSON.stringify({writes, actions, logs, changed, roots, statuses, histories}))
+} finally {carrier.dispose(true)}
+''')
+            result = subprocess.run([node, str(script)], cwd=ROOT, env=dict(env,
+                CARRIER_CASE=json.dumps(case), CARRIER_BRIDGE=str(bridge),
+                PLUGIN_PATH=str(ROOT / "adapters/opencode/plugins/hearting-guards.js")),
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            observed = json.loads(result.stdout)
+            final = [pending.read(root, storage, row["delivery_id"]) for row in notices]
+            self.assertEqual([pending.received_ack_identity(row, storage, row["delivery_id"])
+                              for row in final], identities)
+            self.assertTrue(all(row["state"] == case.get("state", "pending") for row in final), final)
+            self.assertTrue(all(pending.read(root, "B" if storage == "A" else "A", row["delivery_id"])
+                                is None for row in notices))
+            return observed, final
+
+    def test_completion_carrier_rechecks_lineage_after_native_and_helper_awaits(self):
+        for storage in ("A", "B"):
+            for boundary in ("root:2", "status:2", "history:2", "settle"):
+                for count in (1, 2):
+                    with self.subTest(storage=storage, boundary=boundary, count=count):
+                        self.completion_case(storage=storage, boundary=boundary,
+                                             change="lineage", writes=0, count=count,
+                                             afterAwait=boundary == "settle")
+
+    def test_completion_carrier_withholds_own_and_inherited_non_idle_turns(self):
+        for storage in ("A", "B"):
+            for status in ("blocked", "working", "busy", "retry", "idle"):
+                with self.subTest(storage=storage, status=status):
+                    self.completion_case(storage=storage, local=status, writes=int(status == "idle"))
+
+    def test_completion_carrier_uses_existing_exact_native_root_and_idle_contract(self):
+        for native in ("empty", "missing", "busy", "retry", "invalid", "unknown", "malformed",
+                       "invalid-other", "unavailable", "invalid-response", "wrong-root", "child",
+                       "malformed-root", "missing-api", "final-busy", "final-unknown", "final-invalid"):
+            with self.subTest(native=native):
+                self.completion_case(native=native, writes=int(native in {"empty", "missing"}))
+
+    def test_completion_carrier_rechecks_every_prewrite_await_and_releases_own_claim(self):
+        for boundary in ("roots", "recipients", "root:1", "status:1", "history:1", "deliver",
+                         "root:2", "status:2", "history:2", "settle"):
+            for change in ("blocked", "working", "origin", "client"):
+                with self.subTest(boundary=boundary, change=change):
+                    self.completion_case(boundary=boundary, change=change, writes=0)
+        for change in ("blocked", "peer-working", "dispose", "client"):
+            with self.subTest(afterAwait=change):
+                self.completion_case(boundary="settle", afterAwait=True, change=change, writes=0)
+
+    def test_completion_carrier_question_and_permission_resume_only_after_idle(self):
+        for event in ("question", "permission"):
+            with self.subTest(event=event):
+                self.completion_case(event=event, writes=1)
+
+    def test_completion_carrier_preserves_claim_change_and_exact_receipts(self):
+        observed, rows = self.completion_case(boundary="status:2", change="claim", writes=0, state="claimed")
+        self.assertEqual(rows[0]["claim_owner"], "replacement-carrier")
+        self.assertNotIn("release", observed["actions"])
+        for case in (dict(receipt="before", boundary="root:2", change="blocked", writes=0, state="acked"),
+                     dict(receipt="after", writes=1, state="acked"),
+                     dict(receipt="after", wrongReceiver=True, writes=1),
+                     dict(historical=True, writes=0, state="acked"),
+                     dict(acceptance="ambiguous", writes=1),
+                     dict(receipt="unknown", writes=0),
+                     dict(receipt="final-unknown", writes=0),
+                     dict(count=2, receipt="partial", writes=1),
+                     dict(count=2, receipt="before", writes=0, state="acked")):
+            with self.subTest(case=case):
+                self.completion_case(**case)
+
+    def test_completion_carrier_queries_shared_lineage_and_bounds_negative_cache(self):
+        source = (ROOT / "adapters/opencode/plugins/hearting-guards.js").read_text(encoding="utf-8")
+        self.assertIn('command("recipients", sid)', source)
+        self.assertIn('const recipientCache = new Map()', source)
+        self.assertIn("cached.generation !== current.generation", source)
+        self.assertIn("CARRIER_RECIPIENT_CACHE_MS", source)
+        self.assertIn("CARRIER_NEGATIVE_CACHE_MS", source)
+        self.assertIn("cached.negativeUntil = now + CARRIER_NEGATIVE_CACHE_MS", source)
+        self.assertIn("for (const digest of cached.digests)", source)
+
     def test_pending_peer_delivery_releases_only_prewrite_reservations(self):
         node = shutil.which("node")
         if not node:
@@ -482,11 +808,104 @@ try {
   assert.equal(calls.length, 5, "provider observations were duplicated")
 } finally { await cleanup() }
 '''
-            env = {**os.environ,
+            env = {**os.environ, "HOME": tmp, "XDG_STATE_HOME": str(Path(tmp) / "state"),
+                   "FLEET_SESSION_REGISTRY_DIR": str(Path(tmp) / "state/agent-fleet/sessions"),
+                   "AGENT_DISPATCH_ATTEMPT_ID": "",
                    "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
                    "TEMP_ROOT": tmp, "AGENT_HOME": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
             result = subprocess.run([node, "--input-type=module", "-e", script],
                                     cwd=ROOT, env=env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_v2_form_permission_refs_and_model_limits_are_exact_body_free_observations(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is unavailable")
+        with tempfile.TemporaryDirectory() as tmp:
+            script = r'''
+import assert from "node:assert/strict"
+import fs from "node:fs"
+import childProcess from "node:child_process"
+import { syncBuiltinESMExports } from "node:module"
+import { pathToFileURL } from "node:url"
+const writes = []
+let releaseFirst
+childProcess.spawn = (command, args) => ({
+  on(name, callback) {
+    if (name === "close" && args[0].endsWith("fleet-interaction-state.py")) {
+      if (!releaseFirst) releaseFirst = callback
+      else queueMicrotask(() => callback(0))
+    }
+  },
+  unref() {}, kill() {}, stdin: { on() {}, end(body) { writes.push({ args, body }) } },
+})
+syncBuiltinESMExports()
+const plugin = (await import(pathToFileURL(process.env.PLUGIN_PATH))).default
+const hooks = new Map()
+let drained
+const eventsDone = new Promise(resolve => { drained = resolve })
+const nativeEvents = [
+  { type: "form.created", data: { form: { sessionID: "ses_exact", id: "form_a",
+    questions: [{ question: "PRIVATE-PROMPT", options: ["PRIVATE-CHOICE"] }] } } },
+  { type: "form.replied", data: { sessionID: "ses_exact", id: "form_a", answers: ["PRIVATE-ANSWER"] } },
+  { type: "permission.asked", data: { sessionID: "ses_exact", id: "perm_b", pattern: "PRIVATE-PATH" } },
+  { type: "permission.replied", data: { sessionID: "ses_exact", requestID: "perm_b", reply: "always" } },
+]
+const ctx = {
+  location: { directory: process.env.TEMP_ROOT },
+  session: { hook: async (name, fn) => hooks.set(name, fn),
+    get: async ({ sessionID }) => ({ id: sessionID, title: "Main work" }) },
+  tool: { hook: async () => {} }, shell: { hook: async () => {} },
+  permission: { hook: async () => {} },
+  event: { subscribe: async function* ({ signal }) {
+    for (const event of nativeEvents) yield event
+    drained()
+    await new Promise(resolve => signal.addEventListener("abort", resolve, { once: true }))
+  } },
+}
+const cleanup = await plugin.setup(ctx)
+try {
+  await eventsDone
+  assert.equal(writes.filter(call => call.args[0].endsWith("fleet-interaction-state.py")).length, 1,
+    "a reply overtook the still-running set hook")
+  releaseFirst(0)
+  for (let i = 0; i < 10; i++) await new Promise(resolve => setImmediate(resolve))
+  const calls = writes.filter(call => call.args[0].endsWith("fleet-interaction-state.py"))
+  assert.equal(calls.length, 4)
+  assert.deepEqual(calls.map(call => JSON.parse(call.body)), [
+    { session_id: "ses_exact", request_id: "form_a", source: "opencode-form" },
+    { session_id: "ses_exact", request_id: "form_a" },
+    { session_id: "ses_exact", request_id: "perm_b" },
+    { session_id: "ses_exact", request_id: "perm_b" },
+  ])
+  assert.equal(calls[2].args.at(-1), "permission")
+  assert.doesNotMatch(JSON.stringify(calls), /PRIVATE-|answers|questions|pattern/)
+  await hooks.get("http.response")({ sessionID: "ses_exact",
+    model: { providerID: "fixture", id: "model", limit: { context: 900000, output: 8192 } },
+    response: new Response("", { status: 200 }) })
+  const directory = `${process.env.XDG_STATE_HOME}/agent-fleet/context-policy/opencode`
+  let record = JSON.parse(fs.readFileSync(`${directory}/${fs.readdirSync(directory)[0]}`))
+  assert.equal(record.session_id, "ses_exact")
+  assert.equal(record.model, "fixture/model")
+  assert.equal(record.policy.effective_window_tokens, 900000)
+  assert.equal(record.policy.state, "unknown")
+  assert.equal(record.policy.applied_trigger_tokens, null)
+  await hooks.get("http.response")({ sessionID: "ses_other",
+    model: { providerID: "fixture", id: "no-limits" }, response: new Response("", { status: 200 }) })
+  record = JSON.parse(fs.readFileSync(`${directory}/${fs.readdirSync(directory)[0]}`))
+  assert.equal(record.session_id, "ses_other")
+  assert.equal(record.policy.effective_window_tokens, null)
+  assert.equal(record.policy.reason, "native-model-window-not-observed")
+} finally { cleanup() }
+'''
+            env = {**BASE_ENV, "HOME": tmp, "XDG_STATE_HOME": str(Path(tmp) / "state"),
+                   "XDG_CONFIG_HOME": str(Path(tmp) / "config"),
+                   "FLEET_SESSION_REGISTRY_DIR": str(Path(tmp) / "state/agent-fleet/sessions"),
+                   "AGENT_DISPATCH_ATTEMPT_ID": "", "OPENCODE_VERSION": "2.0.32",
+                   "PLUGIN_PATH": str(ROOT / "adapters/opencode/plugins/hearting-guards.js"),
+                   "TEMP_ROOT": tmp, "AGENT_HOME": str(ROOT), "PYTHONDONTWRITEBYTECODE": "1"}
+            result = subprocess.run([node, "--input-type=module", "-e", script],
+                                    cwd=ROOT, env=env, text=True, capture_output=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_v2_shell_env_carries_the_executing_session(self):

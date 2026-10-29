@@ -428,7 +428,7 @@ def parent_successor(jobs: str | Path, parent: str, attempts, *, current_session
         observed = handover.resolve_recipient("job-holder", metadata=row[1], jobs=jobs, read_context=context)
         if observed.state == "unreadable":
             raise handover.RegistryUnreadable(observed.reason)
-        successor = handover.effective_parent(row[1], jobs, read_context=context)
+        successor = observed.session_id
         if not successor or successor == parent:
             missing = True
             continue

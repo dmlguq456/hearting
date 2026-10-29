@@ -67,6 +67,16 @@ class ContextPolicyReaderTest(unittest.TestCase):
         self.assertIsNone(read_policy(harness="opencode", pid=123, proc_start="456",
                                       session_id="ses_abc123", model="p/m"))
 
+    def test_conflicting_nested_session_or_attempt_is_not_rebound(self):
+        for field, foreign in (("session_id", "ses_other"), ("attempt_id", "att-other")):
+            with self.subTest(field=field):
+                path = self._write(attempt_id="att-1")
+                record = json.loads(path.read_text())
+                record["policy"][field] = foreign
+                path.write_text(json.dumps(record))
+                self.assertIsNone(read_policy(harness="opencode", attempt_id="att-1",
+                                              session_id="ses_abc123", model="p/m"))
+
 
 class CodexStartupPolicyTest(unittest.TestCase):
     def setUp(self):

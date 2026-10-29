@@ -55,15 +55,26 @@ def _chips(grid, x, y, items, current, chosen, action_key, right, labels=None):
     return x
 
 
+def _wrapped_chips(grid, x, y, items, current, chosen, key, right):
+    """Keep every short choice visible and clickable, wrapping at the pane edge."""
+    start = x
+    for item in items:
+        size = cell_width(str(item)) + 4
+        if x > start and x + size > right:
+            x, y = start, y + 1
+        if x + size <= right:
+            x = _chips(grid, x, y, (item,), current, chosen, key, right)
+    return x, y
+
+
 PICK_ROWS = 8          # visible rows of the model list; the box grows by this many rows, the list scrolls
 
 
 def _same_model(item, model):
-    """``item`` names ``model``; a profile cell may drop the ``opencode-go/`` provider the catalog keeps."""
+    """Native catalog identity includes the provider; never invent a missing prefix."""
     if item is None or model is None:
         return False
-    item, model = str(item), str(model)
-    return item == model or item == "opencode-go/" + model or model == "opencode-go/" + item
+    return str(item) == str(model)
 
 
 def _chips_fit(items, labels, room):
@@ -154,6 +165,8 @@ def _catalog_note(data, harness):
     source = _dict(_dict(data.get("catalog_sources")).get(harness))
     if source.get("state") != "available":
         return ""
+    if str(source.get("source") or "").endswith("#/api/model"):
+        return "from runtime catalog, callability not checked"
     return "from cache, callability not checked"
 
 
@@ -219,7 +232,9 @@ def _draw_context(grid, data, state, x, y, width):
         y += 1
         grid.put(x + 3, y, "window", "label")
         choices = ("400k", "600k", "800k", "1M")
-        chip_end = _chips(grid, bx, y, choices, "800k", selected, "ctx:" + harness, right - 1)
+        current = next((label for label in choices if units.get(label) == context.get(harness)), None)
+        chip_end, y = _wrapped_chips(grid, bx, y, choices, current, selected,
+                                     "ctx:" + harness, right - 1)
         source_text = source.get(harness, "·")
         if source_text:
             grid.put(chip_end + 1, y, clip_cells(source_text, x + width - chip_end - 2), "dim", limit=right)
@@ -233,10 +248,16 @@ def _draw_context(grid, data, state, x, y, width):
     grid.put(x + 1, y, "tidy+clear notice points", "soft", limit=right)
     y += 1
     grid.put(x + 3, y, "notice", "label")
-    _chips(grid, bx, y, ("300K", "400K", "500K", "600K"), "500K", chosen1, "tidy1", right - 1)
+    current1 = next((label for label, amount in units.items() if amount == tidy[0]
+                     and label.endswith("K")), None)
+    _, y = _wrapped_chips(grid, bx, y, ("300K", "400K", "500K", "600K"),
+                          current1, chosen1, "tidy1", right - 1)
     y += 1
     grid.put(x + 3, y, "urgent", "label")
-    _chips(grid, bx, y, ("600K", "650K", "700K", "750K"), "700K", chosen2, "tidy2", right - 1)
+    current2 = next((label for label, amount in units.items() if amount == tidy[1]
+                     and label.endswith("K")), None)
+    _, y = _wrapped_chips(grid, bx, y, ("600K", "650K", "700K", "750K"),
+                          current2, chosen2, "tidy2", right - 1)
     y += 1
     grid.put(x + 3, y, "세 하네스 공통 · 설정은 Apply로 변경", "dim", limit=right)
     y += 1
@@ -249,6 +270,7 @@ def _draw_context(grid, data, state, x, y, width):
         grid.add_hit(y, cursor + 2, cursor + 11,
                      ("models.apply", harness, "context-window", amount, False))
         y += 1
+    return y
 
 
 _EDITED_FIELDS = ("strategy:", "weights:", "affinity:")   # read-only lines the editor replaces
@@ -591,6 +613,9 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     grid.put(cursor, box_top, " ", "branch_s")
     grid.put(box_left + 3, y + 1, "now", "label")
     _model_cell(grid, box_left + 12, y + 1, harness, current, shown, effort_keys, 40, limit=right)
+    catalog = _dict(_dict(data.get("catalog_sources")).get(harness))
+    missing_current = (current_model and catalog.get("state") in ("available", "empty")
+                       and not any(_same_model(item, current_model) for item in harness_choices))
     if changed:
         grid.put(box_left + 56, y + 1, "→", "line", limit=right)
         _model_cell(grid, box_left + 59, y + 1, harness, (model_choice, effort_choice), shown, effort_keys, 40,
@@ -603,6 +628,8 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     else:
         _chips(grid, box_left + 12, y + 3, harness_choices, current_model, values.get("ui:model"), "model",
                right - 2, shown)
+    if missing_current:
+        grid.put(box_left + 12, y + 2, "not in catalog · choose from the current list", "dim", limit=right)
     grid.put(box_left + 3, y + 4 + extra, "effort", "label")
     effort_options = tuple(data.get("efforts", ())) + (("runtime-default",) if harness == "opencode" else ())
     _chips(grid, box_left + 12, y + 4 + extra, effort_options, current_effort, values.get("ui:effort"), "effort",
@@ -644,8 +671,10 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     grid.put(box_left + 3, box_bottom, foot, "dim", limit=right)
     grid.put(min(right - 1, x + 96), box_bottom, " ", "branch_s")
     beside = grid.cols - x - 2 - left > 70
+    context_end = 3
     if beside:
-        _draw_context(grid, data, state, x + left + GAP + 2, 3, grid.cols - (x + left + GAP + 4))
+        context_end = _draw_context(grid, data, state, x + left + GAP + 2, 3,
+                                    grid.cols - (x + left + GAP + 4))
     allocation = _dict(data.get("allocation"))
     _section(grid, x, left, y, "DISPATCH ALLOCATION", "~/.config/hearting/dispatch-defaults.yaml")
     y += 1
@@ -668,4 +697,9 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
         _section(grid, x, left, y, "SUPERVISION", "steward · same file")
         y = _draw_steward_editor(grid, steward, state, x, y + 1, right) - 1
     if not beside:
-        _draw_context(grid, data, state, x, y + 2, min(grid.cols - x - 2, 100))
+        context_end = _draw_context(grid, data, state, x, y + 2, min(grid.cols - x - 2, 100))
+    # A blank row at the viewport's overflow probe is not the end of MODELS.
+    # Its geometry is already known, including wrapped choices and Apply rows.
+    report_end = getattr(grid, "report_natural_page_end", None)
+    if callable(report_end):
+        report_end(max(y, context_end))

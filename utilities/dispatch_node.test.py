@@ -85,7 +85,10 @@ def fixture_state_environ(tmpdir):
     nothing ambient leaks in, no real user home is touched -- while giving the
     registry/completion derivation a resolvable root inside the test's tempdir.
     """
-    return {"HARNESS_STATE_ROOT": str(Path(tmpdir) / "state")}
+    defaults = Path(tmpdir) / "fixture-defaults.yaml"
+    defaults.write_text((ROOT / "profiles/dispatch-defaults.yaml").read_text())
+    return {"HARNESS_STATE_ROOT": str(Path(tmpdir) / "state"),
+            "DISPATCH_DEFAULTS_CONFIG": str(defaults)}
 
 
 def make_node(depth=2, dispatch_fallback=None):
@@ -776,6 +779,58 @@ class MainMaterializationTest(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 65)
         self.assertEqual(run.call_count, 1)
 
+
+    def test_d5_new_target_is_refused_but_admitted_stage_and_pin_continue(self):
+        with tempfile.TemporaryDirectory() as td:
+            policy = Path(td) / "defaults.yaml"
+            policy.write_text((ROOT / "profiles/dispatch-defaults.yaml").read_text().replace(
+                "  enabled: [claude, codex, opencode]", "  enabled: [claude, opencode]"))
+            for adapter in ("claude", "codex", "opencode"):
+                for pin, replay, admitted in ((False, False, False), (True, False, False),
+                                              (False, False, True), (True, False, True), (True, True, True)):
+                    node = make_node()
+                    if admitted:
+                        node["harness_policy"] = {"primary": [adapter], "relief": [], "last_resort": []}
+                    route = make_route(node)
+                    if pin:
+                        route["selection_pins"] = {"contract_version": 1, "worker": {"harness": adapter}}
+                    out = io.StringIO()
+                    with self.subTest(adapter=adapter, pin=pin, replay=replay, admitted=admitted), mock.patch.object(N, "replacement_task", return_value=None), contextlib.redirect_stdout(out):
+                        got = self._run_main(["--node", "execute", "--adapter", adapter, "--slug", "d5", "--parent", "owner",
+                            *(["--", "--automatic-retry-of", "att-original"] if replay else [])], route,
+                            environ={"DISPATCH_DEFAULTS_CONFIG": str(policy)})
+                    self.assertEqual(got is None, adapter == "codex" and not admitted, out.getvalue())
+                    if adapter == "codex" and admitted:
+                        self.assertEqual(out.getvalue().count("policy_note=disabled-since-admission"), 1)
+            # Historical successful tuples remain valid even with no readable defaults.
+            parent = {"parent_harness": "claude", "parent_transport": "headless", "parent_sandbox": "default", "launch_authority": "conductor"}
+            with mock.patch.dict(N.os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(Path(td)/"absent")}):
+                selected = N.resolve_checked_tuple(make_route(make_node()), make_node(), "codex", parent)
+                self.assertEqual(selected.candidate["child_harness"], "codex")
+                bad = {**parent, "parent_harness": "opencode"}
+                with self.assertRaises(N.DispatchNodeError):
+                    N.resolve_checked_tuple(make_route(make_node()), make_node(), "codex", bad)
+
+    def test_d5_final_launch_keeps_admitted_pin_after_policy_change(self):
+        route = make_route(make_node())
+        route["dispatch_allocation"]={"harness_order":["claude","codex"]}
+        route["selection_pins"]={"contract_version":1,"worker":{"harness":"codex"}}
+        with mock.patch.object(N, "current_launch_harnesses", side_effect=[("claude", "codex", "opencode"),("claude", "opencode")]) as policy, \
+             mock.patch("dispatch_capacity_evidence.active_limits",return_value={}):
+            got = self._run_main(["--node", "execute", "--adapter", "claude", "--slug", "d5-final", "--parent", "owner"], route)
+        self.assertIsNotNone(got)
+        self.assertEqual(policy.call_count,2)
+
+    def test_d5_verified_replay_keeps_harness_without_legacy_policy(self):
+        for task in (None, "exact predecessor task"):
+            out = io.StringIO()
+            with mock.patch.object(N, "current_launch_harnesses", return_value=("claude",)), \
+                 mock.patch.object(N, "replacement_task", return_value=task), contextlib.redirect_stdout(out):
+                got = self._run_main(["--node", "execute", "--adapter", "codex", "--slug", "d5-replay",
+                    "--parent", "owner", "--", "--automatic-retry-of", "att-original"], make_route(make_node()))
+            self.assertEqual(got is not None, task is not None, out.getvalue())
+            if task is not None:
+                self.assertEqual(out.getvalue().count("policy_note=disabled-since-admission"), 1)
 
 class RoundProtocolTest(unittest.TestCase):
     """Verdict-less history gets full-scope first-pass guidance; real verdicts

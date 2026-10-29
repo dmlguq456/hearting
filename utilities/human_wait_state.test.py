@@ -12,10 +12,14 @@ import tempfile
 import threading
 import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from unittest import mock
 from types import SimpleNamespace
 
+# Standalone class selections must not depend on another test importing the
+# project namespace first (PYTHONPATH=tools:utilities does not include ROOT).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import human_wait_state as state
 import human_gate_observation as observation
 
@@ -477,9 +481,61 @@ class _StrictOpenCodeTransport:
             if not isinstance(payload, dict) or set(payload) != {"decision"}:
                 self.unexpected.append((method, path, "permission-reply-shape"))
                 return {"status": 400, "reason": "fixture-reply-shape"}
+            if self.post_status == 204 and self.after_post:
+                self.after_post()
             return {"status": self.post_status, "body": None}
         self.unexpected.append((method, path, payload))
         return {"status": 0, "reason": "fixture-endpoint-unsupported"}
+
+
+class _OpenCodeHTTPConsumer:
+    """Strict local consumer: only the exact original reply can advance work."""
+
+    def __init__(self, api, reply_path, expected, marker):
+        self.consumed = []
+        self.continuations = []
+        self.allowed_work = []
+        consumer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                result = api({"url": "http://127.0.0.1:4096"}, "GET", self.path)
+                self.send_response(result["status"])
+                self.end_headers()
+                self.wfile.write(json.dumps(result.get("body")).encode())
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                # No receipt, completion event or marker is produced by a
+                # different path, wrong answer, duplicate, or absent response.
+                if self.path != reply_path or body != expected or consumer.consumed:
+                    self.send_response(409)
+                    self.end_headers()
+                    return
+                result = api({"url": "http://127.0.0.1:4096"}, "POST", self.path, body)
+                if result["status"] == 204:
+                    consumer.consumed.append((api.session_id, self.path, body))
+                    if body.get("decision") != "reject":
+                        consumer.allowed_work.append("original-task-work")
+                    consumer.continuations.append("original-session-next-step")
+                    marker.write_text(json.dumps(consumer.continuations), encoding="utf-8")
+                self.send_response(result["status"])
+                self.end_headers()
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.url = "http://127.0.0.1:" + str(self.server.server_address[1])
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        if self.thread.is_alive():
+            raise AssertionError("owned HTTP consumer did not stop")
 
 
 class SelectedQuestionActionsTest(unittest.TestCase):
@@ -496,6 +552,7 @@ class SelectedQuestionActionsTest(unittest.TestCase):
                          "server_urls": ["http://127.0.0.1:4096"],
                          "frontend_pid": 1234, "frontend_proc_start": "123"}
         self.api = _StrictOpenCodeTransport(self.sid)
+        self.real_http = state._opencode_http
         env = mock.patch.dict(os.environ, {
             "XDG_STATE_HOME": self.tmp.name,
             "HOME": self.tmp.name,
@@ -687,9 +744,12 @@ class SelectedQuestionActionsTest(unittest.TestCase):
         deferred = state.submit_selected_response(selected, {"decision": "defer"})
         self.assertEqual(deferred["state"], "open")
         self.assertFalse([call for call in self.api.calls if call[0] == "POST"])
+        selected = state.write_selected_draft(selected, "keep until native consumption is known")
         approved = state.submit_selected_response(selected, {"decision": "approve"},
                                                  action_id="approve-once")
-        self.assertEqual(approved["state"], "applied")
+        self.assertEqual(approved["state"], "received")
+        self.assertEqual(approved["result"]["runtime"], "unknown")
+        self.assertEqual(approved["draft"], selected["draft"])
         posts = [call for call in self.api.calls if call[0] == "POST"]
         self.assertEqual(posts, [("POST", f"/api/session/{self.sid}/permission/per_1/reply",
                                   {"decision": "once"})])
@@ -706,10 +766,158 @@ class SelectedQuestionActionsTest(unittest.TestCase):
                                                 "session_id": self.sid})
         result = state.submit_selected_response(selected, {"decision": "reject"},
                                                 action_id="reject-once")
-        self.assertEqual(result["state"], "applied")
+        self.assertEqual(result["state"], "received")
         self.assertEqual([call for call in self.api.calls if call[0] == "POST"], [
             ("POST", f"/api/session/{self.sid}/permission/per_1/reply", {"decision": "reject"})])
         self.assertEqual(self.api.unexpected, [])
+
+    def _exercise_http_consumer(self, *, permission=False, decision="approve"):
+        project_root = str(Path(__file__).resolve().parents[1])
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tools.fleet import interaction
+
+        request_id = "per_http" if permission else "frm_http"
+        kind = "permission" if permission else "decision"
+        if permission:
+            self.api.permission(request_id)
+            expected = {"decision": "once" if decision == "approve" else "reject"}
+            response = {"decision": decision}
+            collection = "permission"
+            turn = "msg_permission"
+        else:
+            self.api.question(request_id)
+            expected = {"answer": {"choice": ["red"]}}
+            response = {"answers": {"choice": ["red"]}}
+            collection = "form"
+            turn = "msg_1"
+        path = f"/api/session/{self.sid}/{collection}/{request_id}/reply"
+        marker = Path(self.tmp.name) / "original-task-next-step.json"
+        consumer = _OpenCodeHTTPConsumer(self.api, path, expected, marker)
+        self.addCleanup(consumer.close)
+        self.endpoint["url"] = consumer.url
+        self.endpoint["server_urls"] = [consumer.url]
+        self.assertTrue(interaction.set_wait(
+            self.sid, "opencode", kind, "opencode-question", now=self.now,
+            request_id=request_id, turn_id=turn))
+        self.assertTrue(state.publish_cache(observation.read_answer_waits(jobs_paths=[])))
+        fleet = state.cached_fleet_view(request=False)
+        self.assertEqual(fleet["total"], 1)
+        row = fleet["items"][0]
+        self.assertEqual(row["request_id"], request_id)
+        with mock.patch.object(state, "_opencode_http", self.real_http):
+            selected = state.read_selected_request(row)
+            self.assertTrue(selected["support"]["supported"], selected)
+            selected = state.write_selected_draft(selected, "private consumer draft")
+            self.assertFalse(marker.exists())
+            self.assertEqual(consumer.consumed, [])
+            if permission:
+                deferred = state.submit_selected_response(selected, {"decision": "defer"})
+                self.assertEqual(deferred["state"], "open")
+                self.assertFalse(marker.exists())
+            result = state.submit_selected_response(selected, response, action_id="http-once")
+            self.assertEqual(result["state"], "received" if permission else "applied")
+            self.assertEqual(len(consumer.consumed), 1)
+            self.assertEqual(json.loads(marker.read_text()), ["original-session-next-step"])
+            self.assertEqual(consumer.allowed_work,
+                             [] if permission and decision == "reject" else ["original-task-work"])
+            duplicate = state.submit_selected_response(selected, response, action_id="http-duplicate")
+            self.assertNotEqual(duplicate["state"], "open")
+            self.assertEqual(len(consumer.consumed), 1)
+        fleet_bytes = state._fleet_cache_path().read_text()
+        for private in ("Pick a color", "Run a shell command", "private consumer draft", consumer.url):
+            self.assertNotIn(private, fleet_bytes)
+
+    def test_http_form_consumer_advances_original_session_only_after_exact_answer(self):
+        self._exercise_http_consumer()
+
+    def test_http_permission_consumer_approve_advances_but_receipt_stays_received(self):
+        self._exercise_http_consumer(permission=True)
+
+    def test_http_permission_consumer_reject_skips_work_and_continues_once(self):
+        self._exercise_http_consumer(permission=True, decision="reject")
+
+    def test_answered_form_requery_retains_binding_and_distinguishes_progress(self):
+        self.api.question()
+        selected = state.read_selected_request({"id": self.item_id})
+        selected = state.write_selected_draft(selected, "private answered draft")
+        submitted = state.submit_selected_response(
+            selected, {"answers": {"choice": ["red"]}}, action_id="form-once")
+        self.assertEqual(submitted["state"], "applied")
+        reread = state.read_selected_request(selected)
+        self.assertEqual(reread["native_ref"], selected["native_ref"])
+        self.assertEqual(reread["state"], "applied")
+        self.assertEqual(reread["result"]["runtime"], "answered")
+        self.assertEqual(reread["result"]["progress"], "unknown")
+        self.assertEqual(reread["draft"], "")
+        self.assertEqual(reread["actions"], [])
+
+    def test_answered_exact_observation_does_not_reappear_as_current_after_refresh(self):
+        self.api.question()
+        self._publish_wait(request_id="frm_1", turn_id="msg_1")
+        observation_snapshot = state._read_cache()
+        selected = state.read_selected_request({"id": self.item_id})
+        result = state.submit_selected_response(
+            selected, {"answers": {"choice": ["red"]}}, action_id="answered-once")
+        self.assertEqual(result["state"], "applied")
+        self.assertTrue(state.publish_cache(observation_snapshot))
+        fleet = state.cached_fleet_view(request=False)
+        self.assertEqual((fleet["total"], fleet["items"]), (0, []))
+        self.assertEqual(state.cached_count("opencode", self.sid), (0, 0))
+        # A new observation (or a different exact request/turn) is not the old
+        # answered row, even when the session and displayed kind are the same.
+        self._publish_wait(request_id="frm_2", turn_id="msg_2", stamp=self.now + .5)
+        self.assertEqual(state.cached_fleet_view(request=False)["total"], 1)
+
+    def test_permission_loss_and_restart_preserve_draft_and_never_replay(self):
+        for index, status in enumerate((0, 204)):
+            with self.subTest(http_status=status):
+                request_id = "per_loss_" + str(index)
+                self.api.permission_ids = []
+                self.api.permission(request_id)
+                self._publish_wait(kind="permission", request_id=request_id,
+                                   stamp=self.now + index)
+                selected = state.write_selected_draft(
+                    state.read_selected_request({"id": self.item_id}), "uncertain permission draft")
+                self.api.post_status = status
+                self.api.after_post = lambda: self.endpoint.update(generation="restarted-generation")
+                before = len([row for row in self.api.calls if row[0] == "POST"])
+                result = state.submit_selected_response(
+                    selected, {"decision": "approve"}, action_id="permission-loss-" + str(index))
+                self.assertEqual(result["state"], "unknown")
+                self.assertEqual(result["draft"], selected["draft"])
+                state.submit_selected_response(selected, {"decision": "approve"}, action_id="no-replay")
+                self.assertEqual(len([row for row in self.api.calls if row[0] == "POST"]), before + 1)
+
+    def test_corrupt_fleet_cache_metadata_remains_unknown(self):
+        path = state._fleet_cache_path()
+        original = json.loads(path.read_text())
+        for patch in ({"observed_at": float("nan")}, {"observed_at": True},
+                      {"total": True}, {"total": -1}, {"items": [None]},
+                      {"items": [{"id": "bad", "stale": []}]}):
+            with self.subTest(patch=patch):
+                state._write(path, {**original, **patch})
+                self.assertIsNone(state.cached_fleet_view(request=False))
+
+    def test_missing_or_expired_projection_keeps_exact_private_draft_read_only(self):
+        self.api.question()
+        selected = state.write_selected_draft(
+            state.read_selected_request({"id": self.item_id}), "private offline draft")
+        projection = state._read_cache_file()
+        projection["observed_at"] -= state._DISPLAY_TTL + 1
+        self.assertTrue(state._write_cache_value(projection))
+        unknown = state.read_selected_request(selected)
+        self.assertEqual(unknown["state"], "unknown")
+        self.assertFalse(unknown["support"]["supported"])
+        self.assertEqual(unknown["draft"], "private offline draft")
+        self.assertEqual(unknown["actions"], [])
+        projection["observed_at"] = time.time()
+        projection["items"] = []
+        self.assertTrue(state._write_cache_value(projection))
+        missing = state.read_selected_request(selected)
+        self.assertEqual(missing["draft"], "private offline draft")
+        self.assertEqual(missing["state"], "unknown")
+        self.assertFalse([call for call in self.api.calls if call[0] == "POST"])
 
     def test_replaced_cancelled_and_restarted_requests_are_refused(self):
         self.api.question()
@@ -880,6 +1088,7 @@ class SelectedAnswerIntegrationTest(unittest.TestCase):
         spec.loader.exec_module(self.gateway_tests)
         self.gateway_fixture = self.gateway_tests.ManagedGatewayTest("runTest")
         self.gateway_fixture.setUp()
+        self.addCleanup(self.gateway_fixture.doCleanups)
         self.addCleanup(self.gateway_fixture.tearDown)
         self.control = self._control_binding()
         self._codex_control_patch = mock.patch.object(
@@ -941,6 +1150,91 @@ class SelectedAnswerIntegrationTest(unittest.TestCase):
         selected = state.read_selected_request(ref)
         self.assertIsNotNone(selected.get("native_ref"))
         return selected
+
+    def test_native_observation_to_consumer_resumes_only_exact_reply_once(self):
+        fixture = self.gateway_fixture
+        cases = [
+            ("question", "item/tool/requestUserInput", {"questions": [
+                {"id": "choice", "header": "Route", "question": "Private original question",
+                 "options": [{"label": "Proceed", "description": "Continue original work"}]}]},
+             {"answers": {"choice": ["Proceed"]}},
+             {"answers": {"choice": {"answers": ["Proceed"]}}}),
+            ("command", "item/commandExecution/requestApproval", {"command": "fixture task"},
+             {"decision": "approve"}, {"decision": "accept"}),
+            ("reject", "item/commandExecution/requestApproval", {"command": "fixture task"},
+             {"decision": "reject"}, {"decision": "decline"}),
+            ("file", "item/fileChange/requestApproval", {"reason": "Update private report"},
+             {"decision": "approve"}, {"decision": "accept"}),
+            ("permissions", "item/permissions/requestApproval", {
+                "permissions": {"network": {"enabled": True}, "fileSystem": None},
+                "reason": "Fixture network"},
+             {"decision": "approve"},
+             {"permissions": {"network": {"enabled": True}}, "scope": "turn"}),
+        ]
+        for name, method, extra, portable, native in cases:
+            with self.subTest(path=name):
+                request_id = 502 if name == "question" else "original-" + name
+                turn_id, item_id = "turn-" + name, "item-" + name
+                request = {"jsonrpc": "2.0", "id": request_id, "method": method,
+                           "params": {"threadId": "thread-1", "turnId": turn_id,
+                                      "itemId": item_id, **extra}}
+                marker = Path(self.tmp.name) / (name + ".progress.json")
+                consumer = fixture.server.expect_interaction_response(request, native, marker)
+                # Wrong/missing responses do not produce progress even at the
+                # strict upstream, before any Fleet selected-response handling.
+                fixture.server._consume_interaction_response(fixture.server.current, {
+                    "id": "different-request", "result": native})
+                fixture.server.current.write_json({"jsonrpc": "2.0", "method": "turn/started",
+                    "params": {"threadId": "thread-1", "turn": {
+                        "id": turn_id, "status": "inProgress", "items": []}}})
+                fixture.client.wait_for(lambda message: message.get("method") == "turn/started"
+                    and message.get("params", {}).get("turn", {}).get("id") == turn_id)
+                self._server_request(request)
+                observed = observation.read_answer_waits(jobs_paths=[])
+                self.assertTrue(state.publish_cache(observed))
+                fleet = state.cached_fleet_view(request=False)
+                self.assertEqual(fleet["total"], 1)
+                row = fleet["items"][0]
+                self.assertEqual(row["request_id"], request_id)
+                self.assertEqual(row["source"], "S1-question" if name == "question" else "S1-approval")
+                selected = self._selected(row)
+                selected = state.write_selected_draft(selected, "private original draft")
+                self.assertFalse(marker.exists())
+                self.assertFalse(consumer["progress"].is_set())
+                if name != "question":
+                    deferred = state.submit_selected_response(selected, {"decision": "defer"})
+                    self.assertEqual(deferred["state"], "open")
+                    self.assertEqual(consumer["consumed"], [])
+                    self.assertFalse(marker.exists())
+                if name == "file":
+                    fixture.server.current.write_json({"jsonrpc": "2.0", "method": "item/started",
+                        "params": {"threadId": "thread-1", "turnId": turn_id, "item": {
+                            "id": item_id, "type": "fileChange", "status": "inProgress",
+                            "changes": [{"path": "/repo/report.py", "kind": {"type": "update"},
+                                         "diff": "PRIVATE-DIFF"}]}}})
+                    fixture.client.wait_for(lambda message: message.get("method") == "item/started"
+                        and message.get("params", {}).get("item", {}).get("id") == item_id)
+                    selected = self._selected(row)
+                result = state.submit_selected_response(selected, portable, action_id="consume-" + name)
+                self.assertIn(result["state"], {"submitted", "received", "applied"}, result)
+                self.assertTrue(consumer["progress"].wait(5))
+                fixture.client.wait_for(lambda message: message.get("method") == "item/completed"
+                    and message.get("params", {}).get("item", {}).get("id") == item_id)
+                progress = json.loads(marker.read_text())
+                self.assertEqual((progress["thread_id"], progress["turn_id"], progress["request_id"]),
+                                 ("thread-1", turn_id, request_id))
+                self.assertEqual(progress["work_performed"], name != "reject")
+                self.assertEqual(consumer["allowed_work"], [] if name == "reject" else ["original-task-work"])
+                applied = state.read_selected_request(selected)
+                self.assertEqual(applied["state"], "applied")
+                duplicate = state.submit_selected_response(selected, portable, action_id="duplicate-" + name)
+                self.assertEqual(duplicate["state"], "applied")
+                self.assertEqual(len(consumer["consumed"]), 1)
+                self.assertEqual(consumer["rejected"], [])
+                self.assertEqual(observation.read_answer_waits(jobs_paths=[])["total"], 0)
+                fleet_bytes = state._fleet_cache_path().read_text()
+                self.assertNotIn("Private original question", fleet_bytes)
+                self.assertNotIn("private original draft", fleet_bytes)
 
     def test_shared_question_answers_all_native_questions_and_tracks_receipt(self):
         fixture = self.gateway_fixture
@@ -1577,9 +1871,16 @@ class WorkflowSelectedResponseTest(unittest.TestCase):
 
     def test_s3_consumed_receipt_preserves_its_actual_source_and_request(self):
         import dispatch_owner_input
+        import dispatch_replacement
 
         item = self._blocked_owner_wait()
         selected = state.read_selected_request({"id": item["id"]})
+        marker = self.root / "original-owner-next-step.json"
+        consumed = set()
+        proof = {"source_result": "BLOCKED", "corrections": []}
+        before = dispatch_replacement._correction_context(self.jobs, item["attempt_id"], proof)
+        self.assertNotIn('"id": "owner-consumed"', before)
+        self.assertFalse(marker.exists())
         received = state.submit_selected_response(
             selected, {"answers": {"owner-correction": ["continue the approved work"]}},
             action_id="owner-consumed")
@@ -1587,8 +1888,36 @@ class WorkflowSelectedResponseTest(unittest.TestCase):
         with mock.patch.object(dispatch_owner_input.OwnerInput, "notify_unresolved"):
             consumer = dispatch_owner_input.OwnerInput(
                 self.jobs, item["attempt_id"], "actual-owner-thread", "codex-next-turn", lambda _: None)
-        consumer.record(["owner-consumed"], "accepted", turn_id="actual-owner-turn")
-        consumer.completed("actual-owner-turn")
+        retained = dispatch_owner_input.retained(self.jobs, item["attempt_id"])
+        proof["corrections"] = [{"id": row["id"], "digest": row["digest"]} for row in retained]
+        prompt = dispatch_replacement._correction_context(self.jobs, item["attempt_id"], proof)
+
+        def continue_original_owner(native_prompt):
+            # The normal replacement prompt reader feeds a controlled native
+            # consumer. Completion is conditional on the exact retained answer,
+            # never on the selected transport's receipt alone.
+            for line in native_prompt.splitlines():
+                if not line.startswith('{"id":'):
+                    continue
+                answer = json.loads(line)
+                if answer != {"id": "owner-consumed", "text": "continue the approved work"}:
+                    continue
+                if answer["id"] in consumed:
+                    continue
+                consumer.record([answer["id"]], "accepted", turn_id="actual-owner-turn")
+                marker.write_text(json.dumps({"route_id": self.route["route_id"],
+                    "thread_id": consumer.thread_id, "next_step": "original-owner-continued"}),
+                    encoding="utf-8")
+                consumed.add(answer["id"])
+                consumer.completed("actual-owner-turn")
+
+        continue_original_owner(before)
+        self.assertFalse(marker.exists())
+        continue_original_owner(prompt)
+        continue_original_owner(prompt)
+        self.assertEqual(consumed, {"owner-consumed"})
+        self.assertEqual(json.loads(marker.read_text())["route_id"], self.route["route_id"])
+        self.assertEqual(dispatch_owner_input.retained(self.jobs, item["attempt_id"]), [])
         applied = state.read_selected_request(selected)
         self.assertEqual(applied["state"], "applied")
         self.assertEqual(applied["result"], {
@@ -1632,6 +1961,81 @@ class WorkflowSelectedResponseTest(unittest.TestCase):
             action_id="must-not-release")
         self.assertFalse(refused["support"]["supported"])
         self.assertEqual(journal.read_bytes(), before)
+
+    def _bound_human_gate_wait(self):
+        import workflow_state
+
+        self.route["nodes"] = [
+            {"id": "owner", "kind": "resource-runner", "depends_on": [],
+             "continuation": {"kind": "human-gate", "gate": "frame-review"}},
+            {"id": "execute", "kind": "review-worker", "depends_on": ["owner"]},
+        ]
+        self.route["human_gate_bindings"] = [{"gate": "frame-review", "node": "execute"}]
+        self._seal_route()
+        self._write_owner("open")
+        artifact = self.artifacts / "review.md"
+        artifact.write_text("Review the original fixture task", encoding="utf-8")
+        ledger = workflow_state.WorkflowLedger(self.route["route_id"],
+                                                self.route["route_hash"], jobs=self.jobs)
+        ledger.set_workflow_state("BLOCKED_HUMAN_GATE", evidence={
+            "gate": "frame-review", "artifact": str(artifact),
+            "release_authority": "depth-0"}, actor="fixture-original-request")
+        item = next(row for row in self._observe()["items"] if row["source"] == "S2")
+        return state.read_selected_request({"id": item["id"]}), ledger
+
+    def test_s2_exact_person_reply_releases_once_and_successor_consumes_original_route(self):
+        selected, ledger = self._bound_human_gate_wait()
+        self.assertTrue(selected["support"]["supported"], selected)
+        marker = self.root / "same-route-next-step.json"
+        consumed = set()
+
+        def run_available_successors():
+            for key, claim in ledger.claims().items():
+                self.assertEqual(claim["route_id"], self.route["route_id"])
+                self.assertEqual(claim["successor"], "execute")
+                if key not in consumed:
+                    marker.write_text(json.dumps({"route_id": claim["route_id"],
+                                                   "next_node": "execute"}), encoding="utf-8")
+                    consumed.add(key)
+
+        run_available_successors()
+        self.assertFalse(marker.exists())
+        self.assertEqual(ledger.claims(), {})
+        empty = state.submit_selected_response(
+            selected, {"answers": {"gate-decision": [""]}}, action_id="empty-gate")
+        self.assertEqual(empty["state"], "open")
+        run_available_successors()
+        self.assertFalse(marker.exists())
+        applied = state.submit_selected_response(
+            selected, {"answers": {"gate-decision": ["proceed"]}}, action_id="gate-consumed")
+        self.assertEqual(applied["state"], "applied", applied)
+        self.assertEqual(applied["result"]["actor_kind"], "user")
+        run_available_successors()
+        self.assertEqual(json.loads(marker.read_text()), {
+            "route_id": self.route["route_id"], "next_node": "execute"})
+        self.assertEqual(len(consumed), 1)
+        duplicate = state.submit_selected_response(
+            selected, {"answers": {"gate-decision": ["proceed"]}}, action_id="gate-duplicate")
+        self.assertEqual(duplicate["state"], "applied")
+        run_available_successors()
+        self.assertEqual(len(consumed), 1)
+        releases = [row for row in ledger.journal()
+                    if (row.get("evidence") or {}).get("selected_request_id") == "gate-consumed"
+                    and row.get("workflow_state") == "RUNNING"]
+        self.assertEqual(len(releases), 1)
+        self.assertEqual(self._observe()["total"], 0)
+
+    def test_s2_replaced_epoch_or_artifact_preserves_draft_without_release(self):
+        selected, ledger = self._bound_human_gate_wait()
+        selected = state.write_selected_draft(selected, "private gate draft")
+        artifact = self.artifacts / "review.md"
+        artifact.write_text("Changed review target", encoding="utf-8")
+        refused = state.submit_selected_response(
+            selected, {"answers": {"gate-decision": ["proceed"]}}, action_id="stale-gate")
+        self.assertFalse(refused["support"]["supported"])
+        self.assertEqual(refused["draft"], "private gate draft")
+        self.assertEqual(ledger.claims(), {})
+        self.assertEqual(state._selected_entry(selected)["draft"], "private gate draft")
 
     def test_s4_marker_detail_and_draft_never_fabricate_a_reply(self):
         import human_gate_observation

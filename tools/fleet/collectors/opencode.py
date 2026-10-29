@@ -613,19 +613,34 @@ def _enrich_v2(sess, tick, db):
     sess.tokens = sum(value for value in values if isinstance(value, (int, float))) or None
     sess.session_total_tokens = sess.tokens
     messages = observed.get("messages") or []
-    latest = next((row for row in reversed(messages)
-                   if row.get("type") == "assistant" and row.get("tokens")), None)
-    if latest:
-        last_ctx = _context_tokens_from_payload({"tokens": latest["tokens"]})
-        if isinstance(last_ctx, (int, float)) and last_ctx >= 0:
+    sess.active_context_tokens = None
+    latest = None
+    for row in reversed(messages):
+        if row.get("type") != "assistant":
+            continue
+        last_ctx = _context_tokens_from_payload({"tokens": row.get("tokens")})
+        if last_ctx == 0 and not (row.get("finish") or row.get("completed")):
+            continue
+        latest = row
+        if last_ctx is not None:
             sess.active_context_tokens = int(last_ctx)
+        break
     from ..token_budget import context_policy_snapshot, context_policy_used_pct
     from ..context_policy import read_policy
-    model_ref = f"{model.get('providerID') or ''}/{sess.model or ''}"
+    request_model = latest.get("model") if latest and isinstance(latest.get("model"), dict) else model
+    model_ref = f"{request_model.get('providerID') or ''}/{request_model.get('id') or ''}"
     policy_record = read_policy(harness="opencode", session_id=sid, pid=sess.pid,
                                 proc_start=sess.proc_start, model=model_ref)
     policy_data = policy_record.get("policy") if isinstance(policy_record, dict) else None
-    if isinstance(policy_data, dict):
+    updated = latest.get("updated") if latest else None
+    if type(updated) not in (int, float):
+        updated = native.get("time_updated")
+    policy_current = bool(
+        policy_record and type(updated) in (int, float)
+        and type(policy_record.get("observed_at")) in (int, float)
+        and math.isfinite(policy_record["observed_at"])
+        and policy_record["observed_at"] <= updated / 1000.0 + 1.0)
+    if isinstance(policy_data, dict) and policy_current:
         sess.context_policy = context_policy_snapshot(
             source=policy_data.get("source") or "opencode-native-chat-params",
             runtime_version=policy_data.get("runtime_version"),
@@ -1117,7 +1132,7 @@ def _context_tokens_from_payload(payload):
     cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
     total_tokens = tokens.get("total")
     if (isinstance(total_tokens, (int, float)) and not isinstance(total_tokens, bool)
-            and math.isfinite(total_tokens) and total_tokens > 0):
+            and math.isfinite(total_tokens) and total_tokens >= 0):
         return int(total_tokens)
     total = 0
     observed = False
@@ -1259,8 +1274,7 @@ def enrich(sess, tick=None):
     sess.subagents = subagents
     if sid:
         sess.session_id = sid
-        # F-100b — OpenCode has no derived session name either (Q-3: sqlite title/slug
-        # only), so the `[xx]` badge tag is minted from the session id the same way.
+        # Read only a confirmed shared assignment; normal collection seeds new tags.
         from fleet.session_handle import resolve_tag
         sess.session_tag = resolve_tag("opencode", sid)
     if slug:

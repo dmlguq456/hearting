@@ -74,6 +74,9 @@ def read_policy(*, harness, session_id, pid=None, proc_start=None, attempt_id=No
     policy = record.get("policy")
     if not isinstance(policy, dict) or policy.get("state") not in {"applied", "disabled", "unknown"}:
         return None
+    if (policy.get("session_id") not in (None, session_id)
+            or policy.get("attempt_id") not in (None, attempt_id or None)):
+        return None
     return record
 
 

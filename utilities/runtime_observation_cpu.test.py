@@ -780,6 +780,8 @@ def _start_foreground_waiters(root: Path, jobs: Path, source: Path, contract):
 
 def _hook_delivery_roundtrip(source: Path, jobs: Path):
     pending = __import__("dispatch_pending_delivery")
+    sweep = __import__("dispatch_session_sweep")
+    from dispatch_recipient_receipt import receipt_marker
     session = "fixture-hook-recipient"
     aid = "att-fixture-hook-notice"
     delivery_id = "delivery-" + "d" * 32
@@ -788,13 +790,14 @@ def _hook_delivery_roundtrip(source: Path, jobs: Path):
                "children": [{"attempt_id": aid, "status": "done", "readiness": "ready",
                              "reason": "terminal-failure-or-unclosed", "required_action": "inspect-done-failure",
                              "delivery_classification": "attention"}]}
-    pending.create(root=jobs.parent, recipient_kind="claude-parent-runtime", recipient_key=session,
+    original = pending.create(root=jobs.parent, recipient_kind="claude-parent-runtime", recipient_key=session,
         delivery_id=delivery_id, session_generation="", session_generation_supported="0",
         attempt_ids=[aid], parent_attempt_id="att-fixture-hook-parent", route_id="rt-fixture-notice",
         route_node="execute", receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt),
         row_revisions={aid: "fixture-record-revision"})
     environment = {**os.environ, "AGENT_SESSION_ROLE": "worker", "AGENT_DISPATCH_DEPTH": "2"}
     rounds = []
+    contexts = []
     for _ in range(2):
         started = time.monotonic()
         try:
@@ -803,12 +806,24 @@ def _hook_delivery_roundtrip(source: Path, jobs: Path):
                 capture_output=True, text=True, env=environment, timeout=10)
             rounds.append({"elapsed_seconds": time.monotonic()-started, "returncode": run.returncode,
                            "notice_emitted": delivery_id in run.stdout, "timed_out": False,
-                           "stderr_tail": run.stderr[-500:]})
-        except subprocess.TimeoutExpired:
+                           "stdout": run.stdout, "stderr_tail": run.stderr[-500:]})
+            contexts.append(json.loads(run.stdout)["hookSpecificOutput"]["additionalContext"]
+                            if run.stdout else "")
+        except subprocess.TimeoutExpired as exc:
             rounds.append({"elapsed_seconds": time.monotonic()-started, "returncode": None,
-                           "notice_emitted": False, "timed_out": True})
+                           "notice_emitted": False, "timed_out": True,
+                           "partial_stdout": (exc.stdout or b"").decode("utf-8", "replace"),
+                           "partial_stderr": (exc.stderr or b"").decode("utf-8", "replace")})
+            contexts.append("")
     record = pending.read(jobs.parent, session, delivery_id)
+    marker = receipt_marker(original, session)
+    expected_context = sweep.delivery_context([(jobs.parent, [{**record, sweep.STORAGE_KEY: session}])])
     return {"rounds": rounds, "state": record["state"], "claim_attempts": record["attempts"],
+            "marker_counts": [context.splitlines().count(marker) for context in contexts],
+            "context_matches_original_record": contexts == [expected_context, ""],
+            "original_receipt_preserved": record["receipt"] == original["receipt"],
+            "original_identity_preserved": pending.received_ack_identity(record, session, delivery_id)
+                == pending.received_ack_identity(original, session, delivery_id),
             "worker_carrier_without_projection": True, "delivery_id": delivery_id}
 
 
@@ -1415,7 +1430,11 @@ class RuntimeObservationCpuFixture(unittest.TestCase):
                     if ([item["notice_emitted"] for item in hook_result["rounds"]] != [True, False]
                             or any(item["timed_out"] or item["returncode"] != 0
                                    for item in hook_result["rounds"])
-                            or hook_result["state"] != "acked" or hook_result["claim_attempts"] != 1):
+                            or hook_result["state"] != "acked" or hook_result["claim_attempts"] != 1
+                            or hook_result["marker_counts"] != [1, 0]
+                            or not hook_result["context_matches_original_record"]
+                            or not hook_result["original_receipt_preserved"]
+                            or not hook_result["original_identity_preserved"]):
                         raise AssertionError(f"worker hook failed output/ack exactly-once fixture: {hook_result}")
 
                 # Exercise real completed-retire successor locks, attached to

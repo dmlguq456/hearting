@@ -1064,6 +1064,51 @@ class ClaimCasTest(IsolatedRootMixin, unittest.TestCase):
             PD.read(self.root, kwargs["recipient_key"], kwargs["delivery_id"])
         self.assertEqual(ctx.exception.detail, "submission-fence-invalid")
 
+    def test_submission_fence_keeps_original_full_identity_for_historical_reads(self):
+        did = self.kwargs["delivery_id"]
+        claimed = PD.claim(self.root, "sess-claim", did, claim_owner="original", lease_seconds=30)
+        identity = PD.submission_fence_identity(claimed, "original-thread")
+        PD.prepare_submission_fence(self.root, "sess-claim", did,
+            claim_owner="original", expected_identity=identity)
+        path = PD.record_path(self.root, "sess-claim", did)
+        replacement = json.loads(path.read_text())
+        replacement["route_id"] = "replacement-with-same-receipt"
+        path.write_text(json.dumps(replacement))
+        before = path.read_bytes()
+        historical = PD.read_submission_fence(self.root, "sess-claim", did)
+        self.assertEqual(historical["record_identity"], identity["record_identity"])
+        self.assertNotIn("record_identity", PD.read(self.root, "sess-claim", did))
+        for operation in (
+                lambda: PD.record_submission_accepted(self.root, "sess-claim", did,
+                    claim_owner="original", expected_identity=identity),
+                lambda: PD.record_submission_not_accepted(self.root, "sess-claim", did,
+                    claim_owner="original", expected_identity=identity, expected_attempt=1,
+                    reason="queue-rpc-refused:thread/queue/add:private"),
+                lambda: PD.reject_claimed(self.root, "sess-claim", did, claim_owner="original",
+                    expected_identity=identity["record_identity"], reason="private-refusal"),
+                lambda: PD.reclaim(self.root, "sess-claim", did, now_ns=claimed["claim_deadline_ns"] + 1,
+                    expected_identity=identity["record_identity"]),
+                lambda: PD.ack_received(self.root, "sess-claim", did,
+                    expected_identity=identity["record_identity"], acked_by="original")):
+            with self.subTest(operation=operation), self.assertRaises(PD.PendingDeliveryError):
+                operation()
+            self.assertEqual(path.read_bytes(), before)
+
+    def test_submission_fence_first_write_requires_strict_future_integer_lease(self):
+        did = self.kwargs["delivery_id"]
+        claimed = PD.claim(self.root, "sess-claim", did, claim_owner="original", lease_seconds=30)
+        identity = PD.submission_fence_identity(claimed, "original-thread")
+        path = PD.record_path(self.root, "sess-claim", did)
+        original = json.loads(path.read_text())
+        for deadline in (True, float(time.monotonic_ns() + 10**12), time.monotonic_ns() - 1):
+            with self.subTest(deadline=deadline):
+                path.write_text(json.dumps(dict(original, claim_deadline_ns=deadline)))
+                before = path.read_bytes()
+                with self.assertRaises(PD.PendingDeliveryError):
+                    PD.prepare_submission_fence(self.root, "sess-claim", did,
+                        claim_owner="original", expected_identity=identity)
+                self.assertEqual(path.read_bytes(), before)
+
     def test_generic_ack_does_not_gain_pending_state_authority(self):
         path = PD.record_path(self.root, "sess-claim", self.kwargs["delivery_id"])
         before = path.read_bytes()

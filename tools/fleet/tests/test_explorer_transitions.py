@@ -31,41 +31,6 @@ def _frame_json(frame):
     return cells, hits
 
 
-def _normalize_legacy_compute_label(cells):
-    """The checked traces use the old display name; preserve internal COMPUTE hits."""
-    for row in cells:
-        start = next((index for index in range(len(row) - 6)
-                      if "".join(cell[0] for cell in row[index:index + 7]) == "COMPUTE"), None)
-        if start is None or start + 9 > len(row):
-            continue
-        old_end = start + 7
-        next_text = next((index for index in range(old_end, len(row))
-                          if row[index][0] not in ("", " ")), None)
-        if next_text is not None and next_text - old_end <= 3:
-            for index in range(len(row) - 1, old_end + 1, -1):
-                row[index] = row[index - 2]
-            row[old_end] = row[old_end + 1] = [" ", None, None]
-        elif row[old_end][0] == " ":
-            row[old_end + 2] = row[old_end]
-        style = row[start][1:]
-        for offset, char in enumerate("RESOURCES"):
-            row[start + offset] = [char, *style]
-    return cells
-
-
-def _normalize_legacy_session_branches(cells):
-    """Update checked old tree glyphs while leaving cell styles and hits intact."""
-    replacements = {"┣": "├", "┗": "└", "┃": "│"}
-    for row in cells:
-        for index in range(min(32, len(row))):
-            char, key, tint = row[index]
-            if char in replacements:
-                row[index] = [replacements[char], key, tint]
-                if char in ("┣", "┗") and index + 1 < len(row) and row[index + 1][0] == "━":
-                    row[index + 1][0] = "─"
-    return cells
-
-
 class ViewerByteTrace(unittest.TestCase):
     """Replay chunks through fleet2's incremental decoder, reducer and real draw."""
 
@@ -104,47 +69,10 @@ class ViewerByteTrace(unittest.TestCase):
                         expected_frame = frames[expected["frame"]]
                         actual = draw(vm, state, case["cols"], 45, beat=1)
                         actual_cells, actual_hits = _frame_json(actual)
-                        expected_cells = _normalize_legacy_session_branches(
-                            _normalize_legacy_compute_label(
-                                _expand([row_pool[index] for index in expected_frame["cells"]])))
-                        from tools.fleet.tests.test_explorer_oracle import (
-                            _fixture_header_identity, normalize_f70_method_delta,
-                            normalize_new_tree_viewport_row, normalize_session_open_link)
-                        actual_cells, actual_hits = normalize_session_open_link(
-                            actual_cells, actual_hits)
-                        version, method = _fixture_header_identity(vm)
-                        actual_cells = normalize_f70_method_delta(
-                            actual_cells, expected_cells, version=version, method=method)
-                        expected_cells, expected_hits = normalize_new_tree_viewport_row(
-                            actual_cells, expected_cells, actual_hits, expected_frame["hits"],
-                            actual.tree_scroll)
-                        for row_index, row in enumerate(expected_cells):
-                            for col, cell in enumerate(row):
-                                if (cell[0] == actual_cells[row_index][col][0]
-                                        and isinstance(cell[1], str) and cell[1].startswith("hb_")
-                                        and (actual_cells[row_index][col][1] == "g_idle"
-                                             or str(actual_cells[row_index][col][1]).startswith("fam_"))):
-                                    cell[1] = actual_cells[row_index][col][1]
-                            if (state.view in ("COMPUTE", "SYSTEM") and row
-                                    and row[-1] == ["─", "dim", None]
-                                    and actual_cells[row_index][-1] == [" ", None, None]):
-                                row[-1] = actual_cells[row_index][-1]
-                        if state.view == "ROUTES" or state.scope != "-":
-                            # The approved route-list column allocation is responsive now;
-                            # dedicated layout checks cover its geometry, while this trace
-                            # still checks exact navigation and hit-map transitions.
-                            for row_index in range(3, len(expected_cells) - 4):
-                                expected_cells[row_index][34:] = actual_cells[row_index][34:]
-                        pinned_top = int(actual.pane_scroll[3])
-                        if state.view == "OVERVIEW" and state.scope == "-" and pinned_top < 45 - 4:
-                            # ROUTES and RECENT now stay pinned above the footer under a long
-                            # session list; their own layout checks cover the pinned rows,
-                            # while every row and hit above them still matches the trace.
-                            for row_index in range(pinned_top, 45 - 4):
-                                expected_cells[row_index][34:] = actual_cells[row_index][34:]
-                            in_pin = lambda hit: pinned_top <= hit[0] < 45 - 4 and hit[2] > 34
-                            expected_hits = [hit for hit in expected_hits if not in_pin(hit)]
-                            actual_hits = [hit for hit in actual_hits if not in_pin(hit)]
+                        # Current accepted renderer: compare every cell and ordered hit.
+                        # Historical input chunks and expected navigation states are unchanged.
+                        expected_cells = _expand([row_pool[index] for index in expected_frame["cells"]])
+                        expected_hits = expected_frame["hits"]
                         difference = _first_cell_difference(expected_cells, actual_cells)
                         self.assertIsNone(difference, f"{context}: {difference or 'cell grids differ'}")
                         if actual_hits != expected_hits:
@@ -670,7 +598,4 @@ class SessionOpenPath(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    # The isolated runner executes this file directly. The ViewerByteTrace goldens are stale
-    # against the current renderer (they already fail under `python3 -m unittest` at 03a0c7175)
-    # and stay with their owner; this entry point runs the contracts that hold today.
-    unittest.main(defaultTest=["SessionOpenPath"])
+    unittest.main()

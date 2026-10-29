@@ -390,16 +390,22 @@ def _join_subagent_budget(path, calls):
 
 
 def _apply_statusline(sess, d):
+    if not isinstance(d, dict) or d.get("session_id") not in (None, sess.session_id):
+        return
     m = d.get("model") or {}
+    m = m if isinstance(m, dict) else {}
     sess.model = m.get("display_name") or m.get("id") or sess.model
     eff = (d.get("effort") or {}).get("level")
     if eff:
         sess.effort = eff
     cw = d.get("context_window") or {}
+    cw = cw if isinstance(cw, dict) else {}
     up = cw.get("used_percentage")
     raw_percentage = (up if isinstance(up, (int, float)) and not isinstance(up, bool)
                       and math.isfinite(up) and 0 <= up <= 100 else None)
     sess.ctx_pct = None
+    sess.active_context_tokens = None
+    sess.context_window_tokens = None
     current = cw.get("current_usage") or {}
     def count(value):
         if type(value) is int and value >= 0:

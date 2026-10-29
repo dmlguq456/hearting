@@ -44,6 +44,54 @@ def _step(vm, state, event, cols):
 
 
 class ModelPicker(unittest.TestCase):
+    def test_saved_id_absent_from_current_catalog_is_marked_and_latest_choice_applies(self):
+        vm = _vm()
+        values = vm.to_mapping()
+        values["models"]["profile_map"]["opencode"]["balanced"] = ["old-provider/retired", "high"]
+        vm = ExplorerViewModel.from_mapping(values)
+        for cols in (140, 168, 180):
+            state = _state()
+            frame = draw(vm, state, cols, 70, beat=1)
+            self.assertIn("not in catalog", "\n".join(frame.text_rows()))
+            hit = next(hit for hit in _picks(frame))
+            state, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
+            selected = draw(vm, state, cols, 70, beat=1)
+            self.assertTrue(any(item.action[:5] == ("models.apply", "opencode", "profile", "balanced",
+                                                    hit.action[2]) for item in selected.hits))
+
+    def test_top_omission_and_provider_ids_follow_the_selected_config_resolver(self):
+        from tools.fleet.explorer import focus
+        import model_profile
+        from tools.fleet.explorer.model_catalog import ModelCatalog
+        values = {"CFG_MODEL_PROFILE_DEEP": "deep:high", "CFG_TIER_DEEP_MODEL": "other/deep-model",
+                  "CFG_TIER_DEEP_VARIANT": "high", "CFG_MODEL_PROFILE_BALANCED_DEEP": "balanced:high",
+                  "CFG_TIER_BALANCED_MODEL": "other/provider-model", "CFG_TIER_BALANCED_VARIANT": "high",
+                  "CFG_MODEL_CONTEXT_WINDOW": "1000000"}
+        config = SimpleNamespace(resolve_config=lambda _adapter: (values, {}))
+        utility = focus.utility
+        def load(name):
+            return config if name == "model_config" else model_profile if name == "model_profile" else utility(name)
+        with mock.patch.object(focus, "utility", side_effect=load), \
+                mock.patch("tools.fleet.explorer.model_catalog.read_catalogs", return_value={
+                    "opencode": ModelCatalog("opencode", state="available", source="native-v2", observed_at=1,
+                                               models=("other/provider-model", "other/new-model"))}):
+            observed = focus.read_model_config()
+        self.assertEqual(observed["profile_map"]["opencode"]["top"], ["other/provider-model", "high"])
+        self.assertEqual(observed["model_choices"]["opencode"], ["other/provider-model", "other/new-model"])
+        self.assertEqual(focus._profile_cell({"CFG_MODEL_PROFILE_MINI": "model/opencode-go/model-id:low"}, "mini"),
+                         ["opencode-go/model-id", "low"])
+        self.assertNotIn("CFG_MODEL_PROFILE_TOP", values)
+
+    def test_known_empty_catalog_marks_saved_id_but_unknown_catalog_does_not(self):
+        vm = _vm()
+        for catalog_state, absent in (("empty", True), ("unknown", False)):
+            values = vm.to_mapping()
+            values["models"]["model_choices"]["opencode"] = []
+            values["models"]["catalog_sources"]["opencode"]["state"] = catalog_state
+            frame = draw(ExplorerViewModel.from_mapping(values), _state(), 140, 70)
+            self.assertEqual("not in catalog" in "\n".join(frame.text_rows()), absent)
+            self.assertFalse(_picks(frame))
+
     def test_every_catalog_model_is_reachable_and_the_last_one_applies(self):
         vm = _vm()
         for cols in (120, 180):
@@ -106,7 +154,7 @@ class ModelPicker(unittest.TestCase):
         self.assertNotIn("ui:mfind", state.fold_map())
         self.assertNotIn("ui:mfocus", state.fold_map())
 
-    def test_profile_value_without_provider_matches_its_catalog_entry(self):
+    def test_saved_id_without_provider_needs_an_explicit_qualified_selection(self):
         vm = _vm()
         values = vm.to_mapping()
         models = dict(values["models"])
@@ -117,8 +165,10 @@ class ModelPicker(unittest.TestCase):
         vm = ExplorerViewModel.from_mapping(values)
         state = _state(**{"ui:model": "opencode-go/go-model-05"})
         frame = draw(vm, state, 120, 70, beat=1)
-        self.assertFalse([hit for hit in frame.hits if hit.action[:1] == ("models.apply",)
-                          and hit.action[2] == "profile"])
+        self.assertIn("not in catalog", "\n".join(frame.text_rows()))
+        self.assertTrue([hit for hit in frame.hits if hit.action[:1] == ("models.apply",)
+                         and hit.action[2] == "profile"
+                         and hit.action[4] == "opencode-go/go-model-05"])
 
     def test_filter_matches_every_word_case_insensitively(self):
         self.assertEqual(model_matches(CATALOG, "OA 1"),

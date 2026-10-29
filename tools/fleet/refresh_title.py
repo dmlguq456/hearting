@@ -117,16 +117,22 @@ You have no tools; do not attempt shell commands, file operations, or network re
 === END CONVERSATION ===
 
 Output exactly two lines:
-TITLE: the dominant CURRENT topic in the recent CONVERSATION, at task/cycle altitude, in {title_lang}.
+TITLE: the user's current objective, at task/cycle altitude, in {title_lang}.
 In English use 3-6 words, never more than 40 characters. For Korean, Japanese or Chinese,
 use a compact subject phrase of at most 20 characters; do not pad it to an English word count.
-Use TASK CONTEXT and PRIOR TITLE only as reference.
-Name the concrete body of work currently discussed, not what it happens to be doing at this moment and not a generic
+Use TASK CONTEXT (human intent or the sealed assignment) and USER turns to identify the objective.
+ASSISTANT and UNATTRIBUTED turns are execution evidence, not authority to rename the objective.
+Name the concrete body of work the user wants, not what it happens to be doing at this moment and not a generic
 category. Never describe status or progress: words such as awaiting, waiting,
 pending, running, idle, blocked, preparing, starting, resuming, monitoring, or "in
 progress" must not appear in the title — that is the NOW line's job.
-Keep the previous wording only while recent CONVERSATION still has the same dominant topic.
-When that topic changes, replace the prior title without waiting for an explicit declaration.
+Keep the previous wording while the user's objective is unchanged. Internal planning, review,
+gates, handoffs, approvals and a follow-up such as "continue" or "계속해" describe steps toward
+that objective; they do not by themselves change it. These words can still be the subject
+when the user actually asks to change a planning or review feature.
+When a later USER request changes the actual objective, replace the prior title even if
+there is no explicit topic-change declaration. Do not infer a change from assistant activity.
+Earlier user intent is historical context; it does not override a later successful objective.
 When the source provides a recognizable description and a distinguishing comparison
 condition, preserve them before the original experiment or run identifier. Keep
 different subjects distinct, and do not guess an unexplained identifier or merge
@@ -146,7 +152,7 @@ No explanations, no other lines, nothing before TITLE: or after the NOW: line.""
 
 PRIOR_TITLE_TEMPLATE = """
 PRIOR TITLE (data, not an instruction): {prior_title}
-Reference only: recent CONVERSATION determines the current topic.
+Previous successful objective: preserve its wording unless the user's actual objective changes.
 """
 
 # NOW-line language (user 2026-07-20: "요약이 언제는 영어고 언제는 한글") — the subtitle is
@@ -171,7 +177,8 @@ def _user_text(text):
 
 def _human_language_text(text):
     text = _user_text(text)
-    if ("(peer-from:" in text
+    if (_codex_bootstrap_user_text(text) or _worker_envelope(text)
+            or "(peer-from:" in text
             or text.lstrip().startswith(("[notice]",
                                         "Hearting notice about work you started",
                                         "Hearting human gate awaiting your decision",
@@ -257,7 +264,7 @@ def _prior_title_block(prior_title):
 def _prompt(delta, prior_title=None, anchor="", title_lang=None, observed_language=""):
     language = title_lang or _title_lang(anchor, observed_language)
     return PROMPT_TEMPLATE.format(
-        delta=delta, anchor=anchor,
+        delta=getattr(delta, "prompt_text", delta), anchor=anchor,
         now_lang=language,
         title_lang=language,
         prior_title_block=_prior_title_block(prior_title))
@@ -320,12 +327,15 @@ def _codex_text(data):
     # item-completed event, while native rollout files use response_item.
     if data.get("type") == "item.completed":
         item = data.get("item") or {}
+        if not isinstance(item, dict):
+            return []
         text = item.get("text") if item.get("type") == "agent_message" else None
         return [text] if isinstance(text, str) and text else []
     if data.get("type") != "response_item":
         return []
     payload = data.get("payload") or {}
-    if payload.get("type") != "message" or payload.get("role") not in ("user", "assistant"):
+    if (not isinstance(payload, dict) or payload.get("type") != "message"
+            or payload.get("role") not in ("user", "assistant")):
         return []
     expected = "input_text" if payload.get("role") == "user" else "output_text"
     content = payload.get("content")
@@ -338,10 +348,55 @@ def _codex_text(data):
     ]
 
 
-def _delta_text(raw, harness="claude"):
-    """Best-effort normalized user/assistant text from a transcript JSONL delta."""
-    out = []
-    parser = _codex_text if harness == "codex" else _claude_text
+class _DialogueText(str):
+    """Keep legacy string/empty consumers while carrying roles to the prompt."""
+
+    def __new__(cls, entries):
+        entries = [(role or "unattributed", text.strip()) for role, text in entries
+                   if isinstance(text, str) and text.strip()]
+        value = super().__new__(cls, "\n".join(text for _, text in entries)[-TEXT_CAP:])
+        blocks = ["%s:\n%s" % (role.upper(), text) for role, text in entries]
+        rendered = "\n\n".join(blocks)
+        if len(rendered) > TEXT_CAP:
+            # A long assistant tail must not erase the most recent user request.
+            # Every retained fragment keeps its role, including a truncated tail.
+            selected = {}
+            user = next((i for i in range(len(entries) - 1, -1, -1)
+                         if entries[i][0] in ("user", "assignment")), None)
+            if user is not None:
+                selected[user] = blocks[user][:TEXT_CAP // 2]
+            remaining = TEXT_CAP - sum(len(block) + 2 for block in selected.values())
+            for i in range(len(entries) - 1, -1, -1):
+                if i in selected:
+                    continue
+                label = entries[i][0].upper() + ":\n"
+                if remaining <= len(label) + 2:
+                    break
+                text = entries[i][1][-(remaining - len(label) - 2):]
+                selected[i] = label + text
+                remaining -= len(selected[i]) + 2
+            rendered = "\n\n".join(selected[i] for i in sorted(selected))
+        value.prompt_text = rendered
+        return value
+
+
+def _visible_record(data, harness):
+    role, exposed = _record_role(data, harness)
+    if exposed and role not in ("user", "assistant"):
+        return None, ""
+    parser = (_codex_text if harness == "codex" else
+              (lambda value: [_opencode_text(value)]) if harness == "opencode" else _claude_text)
+    text = "\n".join(v for v in parser(data) if isinstance(v, str) and v)
+    if role == "user":
+        text = _user_text(text)
+        if _codex_bootstrap_user_text(text):
+            return None, ""
+        if _worker_envelope(text):
+            return "assignment", _assignment_text(text)
+    return role, text
+
+
+def _dialogue_records(raw, harness):
     for line in raw.splitlines():
         line = line.strip()
         if not line:
@@ -350,14 +405,14 @@ def _delta_text(raw, harness="claude"):
             data = json.loads(line)
         except Exception:
             continue
-        if harness == "opencode":
-            extracted = _opencode_text(data)
-            if extracted:
-                out.append(extracted)
-        else:
-            out.extend(text for text in parser(data) if isinstance(text, str) and text)
-    text = "\n".join(out).strip()
-    return text[-TEXT_CAP:] if len(text) > TEXT_CAP else text
+        role, text = _visible_record(data, harness)
+        if text:
+            yield role, text, data
+
+
+def _delta_text(raw, harness="claude"):
+    """Normalized string/empty contract, with bounded prompt-only role metadata."""
+    return _DialogueText((role, text) for role, text, _ in _dialogue_records(raw, harness))
 
 
 def _bounded_data_text(value, cap):
@@ -380,14 +435,25 @@ def _codex_bootstrap_user_text(value):
     return (
         stripped.startswith("# AGENTS.md instructions")
         and "<INSTRUCTIONS>" in stripped
-        and "Codex Adapter Bootstrap" in stripped
+        and "</INSTRUCTIONS>" in stripped
+        and ("Codex Adapter Bootstrap" in stripped
+             or "Codex masked-profile attach layer" in stripped)
     )
+
+
+def _worker_envelope(value):
+    return (isinstance(value, str) and value.lstrip().startswith("# Portable Worker Kernel\n")
+            and "\n# Worker Type:" in value and "\nDispatch metadata:" in value)
 
 
 def _record_role(data, harness):
     if not isinstance(data, dict):
         return None, False
     if harness == "codex":
+        if (data.get("type") == "item.completed"
+                and isinstance(data.get("item"), dict)
+                and data["item"].get("type") == "agent_message"):
+            return "assistant", True
         payload = data.get("payload") or {}
         role = payload.get("role") if isinstance(payload, dict) else None
         return (str(role).lower() if role else None), bool(role)
@@ -432,6 +498,10 @@ def _origin_text(raw, harness="claude", latest=False):
             joined = _user_text(joined)
         if role == "user" and harness == "codex" and _codex_bootstrap_user_text(joined):
             continue
+        if role == "user" and _worker_envelope(joined):
+            if latest:
+                continue  # Synthetic assignments are not human language observations.
+            joined = _assignment_text(joined)
         text = _bounded_data_text(joined, ANCHOR_TEXT_CAP)
         if not text:
             continue
@@ -481,15 +551,96 @@ def read_prompt_anchor(prompt_path):
             raw = handle.read(ANCHOR_SCAN_CAP).decode("utf-8", "replace")
     except OSError:
         return ""
-    matches = list(re.finditer(r"(?m)^Assignment:\n", raw))
+    return _assignment_text(raw)
+
+
+def _assignment_text(raw):
+    """Only one outer assignment and one terminal rule; reject nested delimiters."""
+    matches = list(re.finditer(r"(?m)^[ \t]*Assignment:[ \t]*\r?\n", raw))
     if len(matches) != 1:
         return ""
     start = matches[0].end()
-    endings = list(re.finditer(r"(?m)^End with the kernel's exact three-line handoff.*$", raw[start:]))
-    if len(endings) != 1:
+    wait_prefix = (
+        "End an intermediate child-registration or resource-wait turn only with the "
+        "standalone line `runtime_wait: registered-children`, without a three-line handoff. ")
+    endings = list(re.finditer(
+        r"(?m)^[ \t]*(?:End with the kernel's exact three-line handoff|"
+        r"End an intermediate child-registration or resource-wait turn[^\n]*|"
+        r"For the terminal final response, end with the kernel's exact three-line handoff)[^\n]*$", raw))
+    if len(endings) != 1 or endings[0].start() < start or raw[endings[0].end():].strip():
         return ""
-    payload = raw[start:start + endings[0].start()].strip()
+    payload = raw[start:endings[0].start()].strip()
+    ending = endings[0].group().strip()
+    if ending.startswith(wait_prefix):
+        ending = ending[len(wait_prefix):]
+    if not ending.startswith("End with the kernel"):
+        if ending != (
+                "For the terminal final response, end with the kernel's exact three-line "
+                "handoff as the entire message — no summary sentence before it, nothing after it."):
+            return ""
+        boundaries = list(re.finditer(r"(?m)^Completion precedence:\s*$", payload))
+        if len(boundaries) != 1:
+            return ""
+        payload = payload[:boundaries[0].start()].strip()
     return _bounded_data_text(payload, ANCHOR_TEXT_CAP)
+
+
+def _task_context_text(entries):
+    """Bounded human intent history, so a continuation does not erase its goal."""
+    intents = [(role, text) for role, text in entries
+               if role == "assignment" or (role == "user" and _human_language_text(text))]
+    if not intents:
+        return ""
+    # Keep every fitting intent; only overflow favors recent input. The provider
+    # still decides which requests change the objective and which continue it.
+    selected = []
+    remaining = ANCHOR_TEXT_CAP
+    for i in range(len(intents) - 1, -1, -1):
+        role, text = intents[i]
+        label = "%s %s:\n" % ("EARLIER" if i == 0 else "LATER", role.upper())
+        separator = 2 if selected else 0
+        room = remaining - len(label) - separator
+        if room <= 0:
+            break
+        text = _bounded_data_text(text, room)
+        if not text:
+            continue
+        selected.append(label + text)
+        remaining -= len(selected[-1]) + separator
+    return "\n\n".join(reversed(selected))
+
+
+def read_task_context(transcript, harness="claude"):
+    """Read only bounded head/recent user context; tools cannot become intent."""
+    try:
+        with open(transcript, "rb") as handle:
+            head = handle.read(ANCHOR_SCAN_CAP).decode("utf-8", "replace")
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            raw = head
+            if size > ANCHOR_SCAN_CAP:
+                window = ANCHOR_SCAN_CAP
+                while True:
+                    start = max(0, size - window)
+                    handle.seek(start)
+                    tail = handle.read(min(window, size)).decode("utf-8", "replace")
+                    tail_entries = [(role, text) for role, text, _ in _dialogue_records(tail, harness)]
+                    intents = [text for role, text in tail_entries if role == "assignment"
+                               or (role == "user" and _human_language_text(text))]
+                    # Several short follow-ups need little model input. Keep
+                    # looking within the existing scan bound for their purpose.
+                    if sum(map(len, intents)) >= ANCHOR_TEXT_CAP or window >= min(MAX_SCAN, size):
+                        if start < ANCHOR_SCAN_CAP:
+                            handle.seek(0)
+                            raw = handle.read(size).decode("utf-8", "replace")
+                        else:
+                            raw = head + "\n" + tail
+                        break
+                    window = min(window * 4, MAX_SCAN, size)
+    except OSError:
+        return ""
+    entries = [(role, text) for role, text, _ in _dialogue_records(raw, harness)]
+    return _task_context_text(entries) or read_origin(transcript, harness)
 
 
 def _read_window(transcript, start, size, harness):
@@ -661,6 +812,8 @@ def _opencode_text(value):
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
+        if value.get("synthetic") or value.get("ignored"):
+            return ""
         role = str(value.get("role") or value.get("type") or "").lower()
         if role in _OPENCODE_SKIP_TYPES:
             return ""
@@ -775,8 +928,59 @@ def read_opencode_activity(connection, session_id):
     return result
 
 
+def _opencode_rows(connection, table, data_col, session_id, after=0, cap=None, descending=False):
+    """Carry native message roles through v1 part rows using the exact session."""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(%s)" % table)}
+    join = ""
+    role_column = "t.role" if "role" in columns else "NULL"
+    role_is_json = False
+    if table == "part" and "message_id" in columns:
+        message_columns = {row[1] for row in connection.execute("PRAGMA table_info(message)")}
+        if {"id", "session_id"}.issubset(message_columns):
+            join = " LEFT JOIN message m ON m.id=t.message_id AND m.session_id=t.session_id"
+            if "role" in message_columns:
+                role_column = "m.role"
+            elif "data" in message_columns:
+                role_column, role_is_json = "m.data", True
+    field = "substr(t.%s,1,%d)" % (data_col, cap) if cap else "t." + data_col
+    rows = connection.execute(
+        "SELECT t.rowid, %s, %s FROM %s t%s WHERE t.session_id=? AND t.rowid>? ORDER BY t.rowid %s"
+        % (field, role_column, table, join, "DESC" if descending else "ASC"), (session_id, int(after or 0)))
+    for rowid, raw, role in rows:
+        try:
+            payload = json.loads(raw) if isinstance(raw, str) else raw
+        except (TypeError, ValueError):
+            payload = None
+        try:
+            if role_is_json:
+                role = (json.loads(role) or {}).get("role")
+        except (TypeError, ValueError, AttributeError):
+            role = None
+        if isinstance(payload, dict) and role and not payload.get("role"):
+            payload = dict(payload, role=role)
+        yield rowid, payload, len(raw) if isinstance(raw, (str, bytes)) else 0
+
+
+def _read_opencode_task_context(connection, table, data_col, session_id):
+    """Bound both origin and recent intent independently of the delta cursor."""
+    entries = {}
+    for descending in (False, True):
+        examined = 0
+        for rowid, payload, size in _opencode_rows(
+                connection, table, data_col, session_id, cap=ANCHOR_SCAN_CAP, descending=descending):
+            if examined + size > ANCHOR_SCAN_CAP:
+                break
+            examined += size
+            role, text = _visible_record(payload, "opencode")
+            if text:
+                entries[rowid] = role, text
+    ordered = [entries[rowid] for rowid in sorted(entries)]
+    return (_task_context_text(ordered) or next((
+        _bounded_data_text(text, ANCHOR_TEXT_CAP) for role, text in ordered if role is None), ""))
+
+
 def _read_opencode_anchor(connection, table, data_col, session_id):
-    """Read the earliest usable exact-session anchor within bounded material."""
+    """Legacy earliest-text string API, with a lazy cumulative scan budget."""
     cursor = connection.execute(
         "SELECT substr(%s, 1, ?) FROM %s WHERE session_id=? ORDER BY rowid ASC"
         % (data_col, table), (ANCHOR_SCAN_CAP, session_id))
@@ -810,9 +1014,9 @@ def read_opencode_delta(db_path, session_id, last_cursor=0, table=None, connecti
             session_id, db_path=db_path, generation="v2", after_seq=int(last_cursor or 0))
         if observed.get("state") != "observed":
             return "", int(last_cursor or 0), table
-        chunks = [row["text"] for row in observed.get("messages", [])
+        chunks = [_visible_record(row, "opencode") for row in observed.get("messages", [])
                   if row.get("type") in ("user", "assistant") and row.get("text")]
-        return "\n".join(chunks)[-TEXT_CAP:], int(observed.get("cursor") or last_cursor or 0), table
+        return _DialogueText(chunks), int(observed.get("cursor") or last_cursor or 0), table
     if table is None and session_id:
         observed = opencode_runtime.read_session_observation(session_id, db_path=db_path)
         if observed.get("state") == "observed" and observed.get("generation") == "v2":
@@ -830,22 +1034,14 @@ def read_opencode_delta(db_path, session_id, last_cursor=0, table=None, connecti
             data_col = next((c for c in ("data", "content", "message", "text") if c in columns), None)
             if not data_col:
                 return "", int(last_cursor or 0), table
-            rows = con.execute(
-                "SELECT rowid, %s FROM %s WHERE session_id=? AND rowid>? ORDER BY rowid ASC"
-                % (data_col, table), (session_id, int(last_cursor or 0))).fetchall()
             cursor = int(last_cursor or 0)
             chunks = []
-            for rowid, raw in rows:
+            for rowid, payload, _ in _opencode_rows(con, table, data_col, session_id, last_cursor):
                 cursor = max(cursor, int(rowid))
-                try:
-                    payload = json.loads(raw) if isinstance(raw, str) else raw
-                except Exception:
-                    continue
-                text = _opencode_text(payload).strip()
+                role, text = _visible_record(payload, "opencode")
                 if text:
-                    chunks.append(text)
-            normalized = "\n".join(chunks)
-            return normalized[-TEXT_CAP:], cursor, table
+                    chunks.append((role, text))
+            return _DialogueText(chunks), cursor, table
     except Exception:
         return "", int(last_cursor or 0), table
 
@@ -866,7 +1062,7 @@ def validate_title(raw, language="English"):
     labeled = _labeled_line(raw, _TITLE_LINE_RE)
     source = labeled if labeled is not None else raw
     line = next((candidate.strip() for candidate in source.splitlines() if candidate.strip()), "")
-    if not line:
+    if not line or (labeled is None and _NOW_LINE_RE.match(line)):
         return None
     line = line.strip('"“”\'`').rstrip(".。").strip()
     line = "".join(ch for ch in line if ch.isprintable())
@@ -1987,11 +2183,13 @@ def _maybe_spawn_unadmitted(harness, sid, transcript=None, now=None, debounce=DE
     anchor = anchor_text or (read_prompt_anchor(prompt_path) if prompt_path else "")
     if not anchor and transcript and source_kind != "opencode-db" and previous.get("title"):
         anchor = read_origin(transcript, harness)
-    language_changed = _language_changed(previous, _title_lang(anchor))
+    title_lang = _title_lang(anchor)
+    language_changed = _language_changed(previous, title_lang)
+    language_request_changed = language_changed and previous.get("requested_language") != title_lang
     ts = previous.get("ts") if isinstance(previous.get("ts"), (int, float)) else 0
     failures = _summary_failures(previous)
     retry_delay = SUMMARY_RETRY_DELAYS[failures - 1] if failures else debounce
-    if (ts and now - ts <= retry_delay and not language_changed and not cursor_migrating
+    if (ts and now - ts <= retry_delay and not language_request_changed and not cursor_migrating
             and quota_class not in ("initial", "final")):
         return False
     try:
@@ -2002,11 +2200,11 @@ def _maybe_spawn_unadmitted(harness, sid, transcript=None, now=None, debounce=DE
             transcript_mtime = os.path.getmtime(transcript) if transcript else now
     except OSError:
         return False
-    if (ts and transcript_mtime <= ts and not failures and not language_changed
+    if (ts and transcript_mtime <= ts and not failures and not language_request_changed
             and not cursor_migrating and quota_class not in ("initial", "final")):
         return False
     if (source_kind != "opencode-db" and previous.get("title") and previous.get("summary")
-            and not failures and not language_changed and not priority
+            and not failures and not language_request_changed and not priority
             and quota_class not in ("initial", "final") and not cursor_migrating):
         offset = previous.get("offset")
         if isinstance(offset, int):
@@ -2356,8 +2554,8 @@ def main(argv=None):
         previous_title = previous.get("title", "") if isinstance(previous.get("title"), str) else ""
         previous_summary = previous.get("summary") if isinstance(previous.get("summary"), str) else None
         # A prior NOW proves this session has already had its first refresh.
-        # Language repair may clear its title on failure; that and a caller's
-        # retry priority must not turn later periodic calls into first starts.
+        # Language repair and a caller's retry priority must not turn later
+        # periodic calls into first starts.
         first_title_now = not previous_summary
         previous_summary_ts = (
             previous.get("summary_ts", previous.get("ts"))
@@ -2387,8 +2585,8 @@ def main(argv=None):
                     offset = 0
                 delta, new_offset, _ = read_opencode_delta(
                     args.opencode_db, args.opencode_session, offset, table=table)
-                anchor = next((row["text"] for row in observation.get("messages", [])
-                               if row.get("type") == "user" and row.get("text")), "")[:ANCHOR_TEXT_CAP]
+                anchor = _task_context_text(_visible_record(row, "opencode")
+                    for row in observation.get("messages", []) if row.get("text"))
             else:
                 # The V1 fallback is bounded to the exact selected session. V2
                 # never clones its multi-gigabyte database or WAL.
@@ -2406,7 +2604,7 @@ def main(argv=None):
                                 "PRAGMA table_info(%s)" % table)]
                             data_col = next((c for c in ("data", "content", "message", "text") if c in columns), None)
                             if data_col:
-                                anchor = _read_opencode_anchor(
+                                anchor = _read_opencode_task_context(
                                     opencode_connection, table, data_col, args.opencode_session)
                 except Exception:
                     return 0
@@ -2414,8 +2612,9 @@ def main(argv=None):
             delta, new_offset = read_delta(args.transcript, offset, harness=args.harness)
             anchor = explicit_anchor or (
                 read_prompt_anchor(args.prompt)
-                if args.prompt else read_origin(args.transcript, args.harness)
+                if args.prompt else read_task_context(args.transcript, args.harness)
             )
+        cursor_migrating = bool(cursor_kind and previous.get("cursor_kind") != cursor_kind)
         source = previous.get("source") or _provider_source()
         observation = (_USER_LANGUAGE_SOURCE.search(source).group(0)
                        if _USER_LANGUAGE_SOURCE.search(source) else "")
@@ -2439,11 +2638,8 @@ def main(argv=None):
                              if observation and not args.sid.startswith("dispatch-") else "")
         title_lang = _title_lang(anchor, observed_language)
         if _language_changed(previous, title_lang):
-            if not _title_language_matches(previous_title, title_lang):
-                previous_title = ""
-            if not _title_language_matches(previous_summary, title_lang):
-                previous_summary = ""
-                previous_summary_ts = None
+            # Replay source material for the requested language, but keep the
+            # last successes until each replacement actually passes validation.
             offset = 0
             if args.opencode_db:
                 delta, new_offset, _ = read_opencode_delta(
@@ -2469,13 +2665,15 @@ def main(argv=None):
                 cursor_kind=stored_cursor_kind,
                 summary_error=previous.get("summary_error"),
                 title_ts=previous.get("title_ts"),
+                requested_language=previous.get("requested_language"),
             )
             titles.sweep()
             return 0
 
         provider_box = {}
         output = run_worker(
-            _prompt(delta, prior_title=previous_title, anchor=anchor, title_lang=title_lang,
+            _prompt(delta, prior_title=(previous_title if _title_language_matches(
+                previous_title, title_lang) else None), anchor=anchor, title_lang=title_lang,
                     observed_language=observed_language),
             capacity_held=True, label=args.sid, provider_box=provider_box,
             priority=bool(first_title_now or args.quota_class in ("initial", "final")),
@@ -2495,8 +2693,7 @@ def main(argv=None):
             title if title else previous_title,
             source=_language_source(("refresher:" + answered) if (title and answered)
                                     else (_provider_source() if title else source), observation),
-            offset=(new_offset if summary else
-                    previous_offset if cursor_migrating else offset),
+            offset=new_offset if summary else previous_offset,
             harness=args.harness,
             summary=summary or previous_summary,
             summary_ts=None if summary else previous_summary_ts,
@@ -2505,6 +2702,7 @@ def main(argv=None):
                          else previous.get("cursor_kind")),
             summary_error=provider_box.get("error"),
             title_ts=time.time() if title else previous.get("title_ts"),
+            requested_language=title_lang,
         )
         titles.sweep()
         return 0

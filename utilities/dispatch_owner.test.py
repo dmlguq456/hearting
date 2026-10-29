@@ -142,7 +142,7 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                      mock.patch.object(OWNER, "_sealed_owner_context", return_value={
                          "harnesses": {"claude", "codex"}, "policy": None,
                          "allocation": allocation}), \
-                     mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3}), \
+                     mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3, "harnesses": {"enabled": ["claude", "codex", "opencode"]}}), \
                      mock.patch.object(OWNER._defaults, "query_profile_policy", return_value=policy), \
                      mock.patch.object(OWNER, "_usage", return_value={
                          "claude": "ok", "codex": "ok", "opencode": "ok"}), \
@@ -198,7 +198,7 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                  mock.patch.object(OWNER, "_authoritative_jobs", return_value=str(jobs)), \
                  mock.patch.object(OWNER, "_sealed_owner_context", return_value={
                      "harnesses": {"claude"}, "policy": None, "allocation": allocation}), \
-                 mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3}), \
+                 mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3, "harnesses": {"enabled": ["claude", "codex", "opencode"]}}), \
                  mock.patch.object(OWNER._defaults, "query_profile_policy", return_value=policy), \
                  mock.patch.object(OWNER, "_usage", return_value={"claude": "ok"}), \
                  mock.patch.object(OWNER._allocation, "attempt_counts", return_value={"claude": 0}), \
@@ -256,7 +256,7 @@ class FrameAlternativeSelectionTest(unittest.TestCase):
                      mock.patch.object(OWNER, "_authoritative_jobs", return_value=str(jobs)), \
                      mock.patch.object(OWNER, "_sealed_owner_context", return_value={
                          "harnesses": {"claude", "codex"}, "policy": None, "allocation": allocation}), \
-                     mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3}), \
+                     mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3, "harnesses": {"enabled": ["claude", "codex", "opencode"]}}), \
                      mock.patch.object(OWNER._defaults, "query_profile_policy", return_value=policy), \
                      mock.patch.object(OWNER, "_usage", return_value={
                          "claude": "limited(usage-gate)", "codex": "ok", "opencode": "ok"}), \
@@ -315,7 +315,7 @@ class FrameTopDeclarationTest(unittest.TestCase):
                  mock.patch.object(OWNER, "_authoritative_jobs", return_value=str(jobs)), \
                  mock.patch.object(OWNER, "_sealed_owner_context", return_value={
                      "harnesses": set(self.HARNESSES), "policy": None, "allocation": allocation}), \
-                 mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3}), \
+                 mock.patch.object(OWNER, "_load_defaults", return_value={"schema_version": 3, "harnesses": {"enabled": ["claude", "codex", "opencode"]}}), \
                  mock.patch.object(OWNER._defaults, "query_profile_policy", return_value=policy), \
                  mock.patch.object(OWNER, "_usage", return_value={h: "ok" for h in self.HARNESSES}), \
                  mock.patch.object(OWNER._allocation, "attempt_counts", return_value={h: 0 for h in self.HARNESSES}), \
@@ -2158,7 +2158,8 @@ class RouteOwnerPinTest(unittest.TestCase):
             capacity_report["freshness"] = freshness
         with mock.patch.object(OWNER.subprocess, "run",
                                side_effect=lambda cmd, **kw: (calls.append(cmd), SimpleNamespace(returncode=0))[1]), \
-             mock.patch.object(OWNER, "_usage", return_value=usage or {"claude": "ok", "codex": "ok", "opencode": "ok"}), \
+             mock.patch.object(OWNER, "_usage", side_effect=usage if callable(usage) else None,
+                               return_value=usage or {"claude": "ok", "codex": "ok", "opencode": "ok"}) as usage_probe, \
              mock.patch.object(OWNER._capacity, "capacity_report",
                                return_value=capacity_report), \
              mock.patch.object(OWNER, "validate_owner_route_binding", return_value=binding), \
@@ -2174,7 +2175,8 @@ class RouteOwnerPinTest(unittest.TestCase):
         cmd = calls[0] if calls else []
         wrapper = Path(cmd[0]).parts[-3] if cmd else None
         flag = cmd[cmd.index("--explicit-adapter") + 1] if "--explicit-adapter" in cmd else None
-        return SimpleNamespace(rc=rc, out=out, wrapper=wrapper, flag=flag, calls=calls)
+        return SimpleNamespace(rc=rc, out=out, wrapper=wrapper, flag=flag, calls=calls,
+                               usage_profile=usage_probe.call_args.args[1] if usage_probe.called else None)
 
     def test_owner_order_uses_sealed_policy_and_keeps_hard_limits_pins_and_candidates(self):
         scores = {"claude": 80, "opencode": 80, "codex": 90}
@@ -2291,6 +2293,168 @@ class RouteOwnerPinTest(unittest.TestCase):
         self.assertNotEqual(got.rc, 0)
         self.assertIn("forbidden-flag", got.out)
         self.assertEqual(got.calls, [])
+
+
+def d5_defaults(directory, enabled=("claude", "opencode"), version=4):
+    """Private policy for new-launch tests; never edits the user's defaults."""
+    text = (ROOT / "profiles/dispatch-defaults.yaml").read_text()
+    text = text.replace("schema_version: 4\n", f"schema_version: {version}\n")
+    if version == 3:
+        lines=[];skip=False
+        for line in text.splitlines(keepends=True):
+            if line and not line[0].isspace() and line[0] != "#" and ":" in line:
+                skip=line.split(":",1)[0] in {"confirmation","steward","runtime","worker_account"}
+            if not skip:lines.append(line)
+        text="".join(lines)
+    text = text.replace("  enabled: [claude, codex, opencode]", "  enabled: [" + ", ".join(enabled) + "]")
+    path = Path(directory) / "d5-defaults.yaml"
+    path.write_text(text)
+    return path
+
+
+def d5_public_route(directory, *, text="Continue approved work", owner=None, cwd=None, pin=None):
+    """Real compose/verify/binding; only runtime probes are supplied fixture evidence."""
+    import owner_route_binding as binding
+    router=binding.ROUTE
+    cwd=Path(cwd or ROOT).resolve()
+    artifact=Path(directory)/"reports";artifact.mkdir(exist_ok=True)
+    rows=[]
+    for parent in ("claude","codex","opencode"):
+        for child in ("claude","codex","opencode"):
+            rows.append({"parent_harness":parent,"parent_transport":"headless",
+                "parent_sandbox":router.WRAPPER_PARENT_SANDBOXES[parent][0],
+                "child_harness":child,"launch_authority":"conductor","status":"supported",
+                "probe_source":"d5-private-fixture","probe_time":"2026-10-28T00:00:00Z",
+                "failure_class":"","checked_worktree":str(cwd),"failure_scope":"none",
+                "codex_command":"ok" if child=="codex" else "not-applicable","retry_on_isolated_worktree":0})
+    route=router.compose_route(capability="autopilot-code",capability_mode="dev",shape="staged",
+        graph="plan,plan-check,execute,impl-review,test,report",slug="d5-public",cwd=cwd,artifact_root=artifact,
+        spec_read="fixture",drift_verdict="fixture",unassigned=True,dispatch_evidence={"tuples":rows},
+        work_request={"text":text,"owner_harness":owner},
+        selection_pins={"owner": {"harness": pin, "model": None, "effort": None}} if pin else None)
+    router.verify_route(route,cwd)
+    path=Path(directory)/"public-route.json";path.write_text(json.dumps(route))
+    return path,route
+
+
+class D5LiveOwnerPolicyTest(unittest.TestCase):
+    _route = RouteOwnerPinTest._route
+    _launch = RouteOwnerPinTest._launch
+
+    def test_stale_policy_auto_and_fallback_never_revive_disabled_harness_v3_v4(self):
+        with tempfile.TemporaryDirectory() as td:
+            for version in (3, 4):
+                config = d5_defaults(td, version=version)
+                with self.subTest(version=version), mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)}):
+                    path = self._route(sealed=("claude", "codex", "opencode"))
+                    before = path.read_bytes()
+                    got = self._launch(path, None, scores={"claude": 80, "codex": 99, "opencode": 70})
+                    self.assertEqual((got.rc, got.wrapper, got.usage_profile), (0, "claude", "deep"), got.out)
+                    self.assertIn("configured_candidates=claude,opencode", got.out)
+                    self.assertEqual(before, path.read_bytes())
+                    fallback = self._launch(path, None, usage={"claude": "limited", "opencode": "ok", "codex": "ok"})
+                    self.assertEqual(fallback.wrapper, "opencode", fallback.out)
+                    limited = self._launch(path, None, usage={"claude": "limited", "opencode": "limited", "codex": "ok"})
+                    self.assertNotEqual(limited.rc, 0, limited.out)
+                    self.assertEqual(limited.calls, [])
+                    for pin in (None, "codex"):
+                        continued = self._launch(self._route(pin=pin), "codex" if pin is None else None)
+                        self.assertEqual(continued.wrapper, "codex", continued.out)
+                        self.assertEqual(continued.out.count("policy_note=disabled-since-admission"), 1)
+
+    def test_disabled_target_absent_at_admission_is_refused_despite_checked_tuple(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = d5_defaults(td)
+            with mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)}):
+                for pin in (None, "codex"):
+                    path = self._route(pin=pin)
+                    route = json.loads(path.read_text())
+                    route["dispatch_allocation"]["harness_order"] = ["claude"]
+                    route["owner_harness_policy"].update(primary=["claude"], relief=[], last_resort=[])
+                    path.write_text(json.dumps(route))
+                    got = self._launch(path, "codex" if pin is None else None)
+                    self.assertEqual(got.calls, [])
+                    self.assertIn("explicit-adapter-disabled-by-user-policy", got.out)
+
+    def test_disabled_admitted_pin_still_yields_to_usage_limit(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = d5_defaults(td)
+            with mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)}):
+                got = self._launch(self._route(pin="codex"), None,
+                                   usage={"codex": "limited", "claude": "ok", "opencode": "ok"})
+            self.assertEqual(got.rc, 0, got.out)
+            self.assertNotEqual(got.wrapper, "codex", got.out)
+
+    def test_route_document_and_worker_frame_pin_do_not_suppress_model_provider_eligibility(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = d5_defaults(td, enabled=("claude", "codex", "opencode"))
+            with mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)}):
+                def states(_jobs, profile=None, **_kw):
+                    return {"claude": "ok", "opencode": "ok", "codex": "limited(provider-model-unavailable)" if profile == "deep" else "ok"}
+                for target in (None, "worker", "frame"):
+                    path = self._route(sealed=("claude", "codex", "opencode"))
+                    doc = json.loads(path.read_text())
+                    if target:
+                        doc["selection_pins"] = {"contract_version": 1, target: {"harness": "codex"}}
+                    path.write_text(json.dumps(doc))
+                    got = self._launch(path, None, usage=states, scores={"claude": 80, "codex": 99, "opencode": 70})
+                    self.assertEqual((got.wrapper, got.usage_profile), ("claude", "deep"), got.out)
+                for pin, explicit in (("claude", None), (None, "claude")):
+                    got = self._launch(self._route(pin=pin), explicit, usage=states)
+                    self.assertEqual((got.wrapper, got.usage_profile), ("claude", None), got.out)
+                # Profile forwarding changes automatic behavior; exact enabled targets
+                # still reach their wrapper's own provider/model diagnostics.
+                exact = self._launch(self._route(), "codex", usage=states)
+                self.assertEqual(exact.wrapper, "codex", exact.out)
+
+    def test_usage_profile_reaches_usage_check_argv(self):
+        with mock.patch.object(OWNER.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="claude ok\ncodex ok\nopencode ok\n")) as run:
+            OWNER._usage("/fixture/jobs.log", "deep")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[argv.index("--model-profile") + 1], "deep")
+
+    def test_enabled_explicit_target_outside_original_pool_requires_checked_evidence(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = d5_defaults(td)
+            with mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)}):
+                for checked in (True, False):
+                    path = self._route(pin="opencode", sealed=("claude", "opencode") if checked else ("claude",))
+                    doc = json.loads(path.read_text())
+                    doc["dispatch_allocation"]["harness_order"] = ["claude"]
+                    doc["owner_harness_policy"].update(primary=["claude"], relief=[])
+                    path.write_text(json.dumps(doc)); before = path.read_bytes()
+                    got = self._launch(path, "opencode")
+                    self.assertEqual(got.wrapper, "opencode" if checked else None, got.out)
+                    self.assertEqual(path.read_bytes(), before)
+
+    def test_policy_changed_after_selection_only_stops_automatic_choice(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = d5_defaults(td, enabled=("claude", "codex", "opencode"))
+            def states(*args, **kwargs):
+                d5_defaults(td)
+                return {"claude": "ok", "codex": "ok", "opencode": "ok"}
+            with mock.patch.dict(os.environ, {"DISPATCH_DEFAULTS_CONFIG": str(config)}):
+                exact = self._launch(self._route(), "codex", usage=states)
+                self.assertEqual(exact.wrapper, "codex", exact.out)
+                self.assertIn("policy_note=disabled-since-admission", exact.out)
+                d5_defaults(td, enabled=("claude", "codex", "opencode"))
+                got = self._launch(self._route(), None, usage=states,
+                                   scores={"claude": 80, "codex": 99, "opencode": 70})
+            self.assertEqual(got.calls, [])
+            self.assertIn("explicit-adapter-disabled-by-user-policy", got.out)
+
+    def test_legacy_config_preserves_sealed_candidates_beyond_declared_owner_order(self):
+        with tempfile.TemporaryDirectory() as td:
+            path=self._route()
+            route=json.loads(path.read_text());route["dispatch_allocation"]["harness_order"]=["claude"]
+            path.write_text(json.dumps(route))
+            config=Path(td)/"legacy.yaml"
+            for version in (1,2):
+                config.write_text(f"schema_version: {version}\ndepth1_owner: [claude]\nopencode:\n  relief_only: {str(version == 1).lower()}\n"+
+                    ("allocation:\n  strategy: least-recent-attempts\n  window: 30\n" if version==2 else "")+"capabilities:\n")
+                with mock.patch.dict(os.environ,{"DISPATCH_DEFAULTS_CONFIG":str(config)}):
+                    got=self._launch(path,None)
+                self.assertEqual(got.wrapper,"codex",got.out)
 
 if __name__ == "__main__":
     unittest.main()

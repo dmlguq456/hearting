@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -364,6 +365,56 @@ def legacy_claude_receipt_bindings(root: str | Path, recipient_kind: str,
         except (KeyError, TypeError, ValueError, pending.PendingDeliveryError):
             continue
     return result
+
+
+def claimed_send_current(root, storage, record, claim_owner, harness, session, *, jobs=None,
+                         claim_states=("claimed",)):
+    """Fresh authority for a first write; historical receipt settlement is separate.
+
+    Call after semantic/native work, for every actual output member. Parsed
+    read contexts are deliberately not authority at the transport boundary.
+    """
+    from dispatch_seat_handover import record_for_session
+    try:
+        delivery_id = record["delivery_id"]
+        identity = record.get(IDENTITY_KEY) or pending.received_ack_identity(record, storage, delivery_id)
+        fresh = pending.read(Path(root), storage, delivery_id)
+        deadline = fresh.get("claim_deadline_ns") if fresh else None
+        if (fresh is None or pending.received_ack_identity(fresh, storage, delivery_id) != identity
+                or fresh.get("state") not in claim_states or fresh.get("claim_owner") != claim_owner
+                or type(deadline) is not int or deadline <= time.monotonic_ns()):
+            return False
+        if jobs is None:
+            from dispatch_session_sweep import record_jobs
+            jobs = record_jobs(Path(root), fresh)
+            if jobs is None and (fresh.get("receipt") or {}).get("job_registry"):
+                return False
+        if not record_for_session(fresh, None, storage_key=storage,
+                harness=harness, session=session, jobs=jobs):
+            return False
+        fence = pending.read_submission_fence(Path(root), storage, delivery_id,
+            expected_identity=pending.submission_fence_identity(fresh, session))
+        return fence is None or fence.get("state") == "not-accepted"
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return False
+
+
+def release_unsubmitted_claim(root, storage, record, claim_owner, session, **kwargs):
+    """Return only the unchanged owned first-write claim through the store CAS."""
+    try:
+        identity = record.get(IDENTITY_KEY) or pending.received_ack_identity(
+            record, storage, record["delivery_id"])
+        fresh = pending.read(Path(root), storage, record["delivery_id"])
+        if (fresh is None or fresh.get("state") != "claimed"
+                or fresh.get("claim_owner") != claim_owner
+                or pending.received_ack_identity(fresh, storage, record["delivery_id"]) != identity):
+            return None
+        return pending.release_claim(Path(root), storage, record["delivery_id"],
+            claim_owner=claim_owner,
+            expected_identity=identity,
+            unsubmitted_to=session, **kwargs)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return None
 
 
 def settle_native_receipt(root: str | Path, storage_recipient: str,

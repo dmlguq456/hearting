@@ -794,6 +794,30 @@ def query_owners(config):
     return config.get("depth1_owner", [])
 
 
+def current_enabled_harnesses(config=None):
+    """Current automatic selection ceiling, separate from prior exact admission.
+
+    Call only for new choices/launches, never for historical evidence readers.
+    Legacy schemas have no disabled-harness declaration: their owner ordering
+    and fallback meanings remain with the existing selectors.
+    """
+    if config is None:
+        try:
+            config = load_and_validate(default_config_path(), default_topology_path())
+        except (OSError, ValueError) as exc:
+            raise DefaultsConfigError(f"defaults-invalid:{exc}") from exc
+    if config.get("schema_version") in {3, 4}:
+        return tuple(query_owners(config))
+    return tuple(sorted(DISPATCHABLE_HARNESSES))
+
+
+def restrict_harness_policy(policy, harnesses):
+    """Intersect existing bands without normalizing or filling an empty band."""
+    allowed = set(harnesses)
+    return {**policy, **{band: [h for h in policy.get(band, []) if h in allowed]
+                         for band in QUALITY_BANDS}}
+
+
 def query_worker_account(config, harness):
     """Return the optional authentication-source path for one harness."""
     if harness not in DISPATCHABLE_HARNESSES or config.get("schema_version") != 4:

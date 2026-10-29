@@ -1904,7 +1904,7 @@ def _parse_claude_stream_tail(path):
         return cached[1]
     disk_key = parse_cache.key("claude-attempt", path, cache_key,
                                (_CLAUDE_STREAM_HEAD_BYTES, _CLAUDE_STREAM_TAIL_BYTES,
-                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v1"))
+                                _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-context-policy-v2"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _CLAUDE_STREAM_CACHE[path] = (cache_key, parsed)
@@ -1991,11 +1991,7 @@ def _parse_claude_stream_tail(path):
                     if max_output:
                         model_max_output[model_id] = max_output
     window = model_windows.get(latest_model)
-    if window is None and len(model_windows) == 1:
-        window = next(iter(model_windows.values()))
     max_output = model_max_output.get(latest_model)
-    if max_output is None and len(model_max_output) == 1:
-        max_output = next(iter(model_max_output.values()))
     active = None
     if latest_usage is not None:
         parts = [_counter(latest_usage.get(key)) for key in (
@@ -2521,7 +2517,7 @@ def _parse_opencode_attempt_tail(path):
     if cached and cached[0] == cache_key:
         return cached[1]
     disk_key = parse_cache.key("opencode-attempt", path, cache_key,
-                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-session-v3"))
+                               (_CLAUDE_STREAM_TAIL_BYTES, _CLAUDE_SUPERVISOR_HEAD_BYTES, "native-session-v4"))
     parsed = parse_cache.load(disk_key)
     if isinstance(parsed, dict):
         _OPENCODE_ATTEMPT_CACHE[path] = (cache_key, parsed)
@@ -2580,7 +2576,7 @@ def _parse_opencode_attempt_tail(path):
         total = _counter(tokens.get("total"))
         parts = [_counter(tokens.get("input")), _counter(tokens.get("output")),
                  _counter(cache.get("read")), _counter(cache.get("write"))]
-        if total:
+        if total is not None:
             active = total
         elif any(value is not None for value in parts):
             active = sum(value or 0 for value in parts)     # native fallback; last step wins
@@ -2736,9 +2732,11 @@ def _enrich_opencode_attempt_session(job, fast_first=False):
     if parsed.get("session_id") and job.attempt_id and _native_home_admitted(job):
         try:
             from ..context_policy import read_policy
-            record = read_policy(
-                harness="opencode", session_id=parsed["session_id"],
-                attempt_id=job.attempt_id)
+            model = getattr(job, "resolved_model", None) or getattr(job, "model", None)
+            if isinstance(model, str) and model:
+                record = read_policy(
+                    harness="opencode", session_id=parsed["session_id"],
+                    attempt_id=job.attempt_id, model=model)
         except Exception:
             record = None
     policy_data = record.get("policy") if isinstance(record, dict) else None
@@ -4309,12 +4307,13 @@ def _annotate_orphan_conductors(jobs, now, jobs_path=None, *, orphan_rows_cache=
             j.resume_boundary = boundary or "-"
 
 
-def _pending_delivery_counts(paths):
+def _pending_delivery_counts(paths, *, session_observation=None):
     """SD-111 P6: read-only pending/expired visibility. Never transitions
-    any state -- glob + json.loads only, mirroring the enumeration pattern
-    `dispatch_completion_join.reconcile_pending_delivery()` already uses
-    (`pending_root.glob("*/*.json")`). Fleet's F-27 control module is the
-    only fleet surface with write authority; this collector has none.
+    any state -- it mirrors the `dispatch_completion_join.reconcile_pending_delivery()`
+    enumeration pattern (`pending_root.glob("*/*.json")`) and validates
+    observed path identity before using a row for no-recipient accounting.
+    Fleet's F-27 control module is the only fleet surface with write authority;
+    this collector has none.
 
     `pending` is the sum of two terms (plan §1.6-1, §9 R-9 -- both are
     mandatory): rows that stamped `delivery_intent` but have no
@@ -4337,32 +4336,93 @@ def _pending_delivery_counts(paths):
     it already had either way.
     """
 
-    intent_rows = set()
+    # Keep the original registry and all current metadata until after recipient
+    # resolution. Equal delivery identities in other roots can have different
+    # authority; numeric deduplication must not hide those observations.
+    intent_rows = []
+    registry_unknown = False
+    unavailable_registries = set()
     for path in paths:
         try:
-            rows = parsed_registry_rows(path)
+            view = _dispatch_registry_cache.registry_view(Path(path))
         except OSError:
+            unavailable_registries.add(path)
             continue
-        for _order, _fields, parsed_meta in rows:
-            meta = dict(parsed_meta)
-            if meta.get("delivery_intent") != "1":
+        registry_unknown |= bool(view.completeness_reason)
+        latest = view.handover_latest()
+        # A stamped intent survives later metadata updates. Its original
+        # delivery/storage identity stays fixed; authority uses the current row.
+        for line in view.lines:
+            fields = line.split("\t")
+            if len(fields) != 6:
                 continue
-            attempt_id = meta.get("attempt_id") or ""
-            if not attempt_id:
-                continue
-            intent_rows.add(
-                (attempt_id, meta.get("parent_sid") or "", meta.get("delivery_id") or "")
-            )
+            observed = _parse_pipe_meta(fields[5] or "")
+            if observed.get("delivery_intent") == "1":
+                current = latest.get(observed.get("attempt_id"))
+                intent_rows.append((path, observed, current[1] if current else None))
 
     pending = 0
     expired = 0
     retained_batch_duties = 0
+    no_recipient = None
+    live_sessions = None
+    graph = None
+    from peer_read_context import PeerReadContext
+    read_context = PeerReadContext()
+    if (isinstance(session_observation, dict)
+            and session_observation.get("complete") is True
+            and session_observation.get("herdr_complete") is True
+            and session_observation.get("process_complete") is True
+            and session_observation.get("native_sid_complete") is True):
+        observed_live = session_observation.get("live")
+        if isinstance(observed_live, (set, frozenset, tuple, list)):
+            normalized_live = set()
+            try:
+                for item in observed_live:
+                    harness, sid = item
+                    if not isinstance(harness, str) or not isinstance(sid, str) or not harness or not sid:
+                        raise ValueError("invalid live session identity")
+                    normalized_live.add((harness.lower(), sid))
+            except (TypeError, ValueError):
+                normalized_live = None
+            if normalized_live is not None:
+                live_sessions = normalized_live
+                no_recipient = 0
+                try:
+                    from dispatch_seat_handover import lineage_graph
+                    graph = lineage_graph(read_context=read_context)
+                except Exception:
+                    graph = None
+                    no_recipient = None
     all_records = set()
+    open_records = set()
     seen_roots = set()
+    seen_no_recipient = {}
+    seen_record_identity = {}
+    registry_free_roots = set()
+    no_recipient_unknown = registry_unknown
+    try:
+        from dispatch_pending_delivery import record_path as pending_record_path
+        from dispatch_pending_delivery import recipient_digest as pending_recipient_digest
+        from dispatch_pending_delivery import received_ack_identity as pending_record_identity
+    except Exception:
+        pending_record_path = None
+        pending_recipient_digest = None
+        pending_record_identity = None
+
+    def _matches_recipient_digest(sid, expected_digest):
+        if pending_recipient_digest is None or not isinstance(sid, str) or not sid:
+            return False
+        try:
+            return pending_recipient_digest(sid) == expected_digest
+        except (UnicodeError, RuntimeError, TypeError, ValueError):
+            return False
+
     for path in paths:
         try:
             root = dispatch_state_root(path)
         except (OSError, TypeError, ValueError):
+            no_recipient_unknown = True
             continue
         if root in seen_roots:
             continue
@@ -4383,40 +4443,199 @@ def _pending_delivery_counts(paths):
                     "observing", "delivery-pending", "unknown"}:
                 retained_batch_duties += 1
         pending_root = root / "pending-delivery"
-        if not pending_root.is_dir():
-            continue
         try:
-            record_files = list(pending_root.glob("*/*.json"))
-        except OSError:
+            info = pending_root.stat()
+        except FileNotFoundError:
             continue
+        except OSError:
+            no_recipient_unknown = True
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            no_recipient_unknown = True
+            continue
+        record_files = []
+        try:
+            # Explicit enumeration preserves failures that glob can suppress.
+            for recipient_dir in sorted(pending_root.iterdir()):
+                try:
+                    if stat.S_ISDIR(recipient_dir.stat().st_mode):
+                        record_files.extend(sorted(path for path in recipient_dir.iterdir()
+                                                   if path.suffix == ".json"))
+                except OSError:
+                    no_recipient_unknown = True
+        except OSError:
+            no_recipient_unknown = True
         for record_file in record_files:
             try:
                 record = json.loads(record_file.read_text(encoding="utf-8"))
             except (OSError, ValueError):
+                no_recipient_unknown = True
                 continue
             if not isinstance(record, dict):
+                no_recipient_unknown = True
                 continue
             delivery_id = record.get("delivery_id")
             recipient_digest = record.get("recipient_digest")
-            if delivery_id and recipient_digest:
+            if (isinstance(delivery_id, str) and delivery_id
+                    and isinstance(recipient_digest, str) and recipient_digest):
                 all_records.add((delivery_id, recipient_digest))
             state = record.get("state")
-            if state in {"pending", "claimed", "sent-ambiguous"}:
+            receipt = record.get("receipt")
+            is_notice = isinstance(receipt, dict) and receipt.get("kind") == "notice"
+            if isinstance(state, str) and state in {"pending", "claimed", "sent-ambiguous"}:
                 pending += 1
+                if is_notice:
+                    registry_free_roots.add(root)
+                if (isinstance(delivery_id, str) and delivery_id
+                        and isinstance(recipient_digest, str) and recipient_digest):
+                    open_records.add((delivery_id, recipient_digest))
+                if no_recipient is not None and graph is not None:
+                    # Validate each observed row before deduplication; a
+                    # misplaced duplicate must not disappear behind a valid
+                    # row with the same immutable delivery identity.
+                    if (not isinstance(delivery_id, str)
+                            or not delivery_id.startswith("delivery-")
+                            or not isinstance(recipient_digest, str)
+                            or record_file.parent.name != recipient_digest
+                            or record_file.name != f"{delivery_id}.json"):
+                        no_recipient_unknown = True
+                        continue
+                    kind = record.get("recipient_kind")
+                    if not isinstance(kind, str):
+                        no_recipient_unknown = True
+                        continue
+                    harness = kind.split("-", 1)[0].lower()
+                    if harness not in {"claude", "codex", "opencode"}:
+                        no_recipient_unknown = True
+                        continue
+                    storage_candidates = {
+                        sid for candidate_harness, sid in graph.ledger_keys
+                        if candidate_harness == harness
+                        and _matches_recipient_digest(sid, recipient_digest)
+                    }
+                    storage_candidates.update(
+                        sid for candidate_harness, sid in live_sessions
+                        if candidate_harness == harness
+                        and _matches_recipient_digest(sid, recipient_digest)
+                    )
+                    if len(storage_candidates) != 1:
+                        no_recipient_unknown = True
+                        continue
+                    storage_sid = next(iter(storage_candidates))
+                    if pending_record_path is None or pending_recipient_digest is None:
+                        no_recipient_unknown = True
+                        continue
+                    try:
+                        storage_digest = pending_recipient_digest(storage_sid)
+                        expected_path = pending_record_path(root, storage_sid, delivery_id)
+                    except (UnicodeError, RuntimeError, TypeError, ValueError):
+                        no_recipient_unknown = True
+                        continue
+                    if (storage_digest != recipient_digest
+                            or record_file.parent.name != storage_digest
+                            or record_file.name != f"{delivery_id}.json"
+                            or record_file != expected_path):
+                        no_recipient_unknown = True
+                        continue
+
+                    identity = (delivery_id, recipient_digest)
+                    try:
+                        body_identity = pending_record_identity(record, storage_sid, delivery_id)
+                        if (identity in seen_record_identity
+                                and seen_record_identity[identity] != body_identity):
+                            no_recipient_unknown = True
+                        seen_record_identity[identity] = body_identity
+                        from dispatch_seat_handover import record_recipient_binding
+                        from dispatch_session_sweep import record_jobs
+                        jobs = record_jobs(root, record, observed_jobs=path)
+                        if jobs is None and not is_notice:
+                            no_recipient_unknown = True
+                            continue
+                        if jobs is not None:
+                            try:
+                                registry = _dispatch_registry_cache.registry_view(jobs)
+                                no_recipient_unknown |= bool(registry.completeness_reason)
+                            except OSError:
+                                if not is_notice:
+                                    no_recipient_unknown = True
+                        recipient = record_recipient_binding(
+                            record, storage_sid, harness=harness, jobs=jobs, read_context=read_context)
+                    except Exception:
+                        recipient = None
+                    if recipient is None:
+                        no_recipient_unknown = True
+                    elif identity in seen_no_recipient:
+                        # Every observed body must resolve, even when its count
+                        # is deduplicated. Conflicting bindings stay unknown.
+                        if seen_no_recipient[identity] != recipient:
+                            no_recipient_unknown = True
+                    else:
+                        seen_no_recipient[identity] = recipient
+                        if recipient not in live_sessions:
+                            no_recipient += 1
             elif state == "expired":
                 expired += 1
+            elif not isinstance(state, str) or state not in {"acked", "rejected"}:
+                no_recipient_unknown = True
 
-    unmaterialized = 0
-    for _attempt_id, parent_sid, delivery_id in intent_rows:
-        if not parent_sid or not delivery_id:
-            unmaterialized += 1
+    for path in unavailable_registries:
+        # Route-free notices have their own stored lineage and need no jobs
+        # file. All other missing registry observations remain unknown.
+        try:
+            if dispatch_state_root(path) not in registry_free_roots:
+                no_recipient_unknown = True
+        except (OSError, TypeError, ValueError):
+            no_recipient_unknown = True
+
+    unmaterialized = set()
+    seen_intent_authority = {}
+    for path, observed, meta in intent_rows:
+        parent_sid, delivery_id = observed.get("parent_sid"), observed.get("delivery_id")
+        if parent_sid and delivery_id:
+            recipient_digest = hashlib.sha256(parent_sid.encode("utf-8")).hexdigest()
+            identity = (delivery_id, recipient_digest)
+        else:
+            identity = (path, observed.get("attempt_id"), parent_sid, delivery_id)
+        if identity not in all_records:
+            unmaterialized.add(identity)
+        # A terminal materialized delivery has no remaining absence to count.
+        # Open bodies and intents are both checked before count deduplication.
+        if identity in all_records and identity not in open_records:
             continue
-        recipient_digest = hashlib.sha256(parent_sid.encode("utf-8")).hexdigest()
-        if (delivery_id, recipient_digest) not in all_records:
-            unmaterialized += 1
+        if no_recipient is None:
+            continue
+        try:
+            from dispatch_seat_handover import _effective, _registered_parent_harness, eligible_row, route_identity
+            if (not delivery_id or not delivery_id.startswith("delivery-")
+                    or not meta or meta.get("parent_sid") != parent_sid
+                    or not eligible_row(meta) or not _registered_parent_harness(meta)):
+                no_recipient_unknown = True
+                continue
+            sid, harness = _effective(meta, path, read_context=read_context)
+            if not sid or harness not in {"claude", "codex", "opencode"}:
+                no_recipient_unknown = True
+                continue
+            recipient = (harness, sid)
+            authority = (parent_sid, _registered_parent_harness(meta), route_identity(meta),
+                         meta.get("delivery_receipt_digest"), meta.get("delivery_row_revision"))
+            if identity in seen_intent_authority and seen_intent_authority[identity] != authority:
+                no_recipient_unknown = True
+            seen_intent_authority[identity] = authority
+            if identity in seen_no_recipient:
+                if seen_no_recipient[identity] != recipient:
+                    no_recipient_unknown = True
+            else:
+                seen_no_recipient[identity] = recipient
+                if recipient not in live_sessions:
+                    no_recipient += 1
+        except Exception:
+            no_recipient_unknown = True
 
-    return {"pending": pending + unmaterialized, "expired": expired,
-            "retained_batch_duties": retained_batch_duties}
+    if no_recipient_unknown:
+        no_recipient = None
+    return {"pending": pending + len(unmaterialized), "expired": expired,
+            "retained_batch_duties": retained_batch_duties,
+            "no_recipient": no_recipient}
 
 
 def _fill_locations(jobs):
@@ -4629,7 +4848,8 @@ def attempt_decision_payload(status, metadata, state_evidence=None):
     }
 
 
-def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=False):
+def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=False,
+             session_observation=None):
     """Return merged [DispatchJob]. harness_filter does not restrict dispatch — the section
     is cross-harness by design (jobs, not sessions).
 
@@ -4876,7 +5096,8 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
     # change. Enumeration failure fails open: keep every job row, drop the count.
     try:
         if not fast_first:
-            collect.last_pending_delivery = _pending_delivery_counts(paths)
+            collect.last_pending_delivery = _pending_delivery_counts(
+                paths, session_observation=session_observation)
     except Exception:
         collect.last_pending_delivery = None
     return jobs
@@ -4885,10 +5106,11 @@ def _collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=Fa
 _ARTIFACT_READ_CACHE = artifact_reader.ReadCache() if artifact_reader is not None else None
 
 
-def collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=False):
+def collect(jobs_path=None, harness_filter=None, session_rows=(), fast_first=False,
+            session_observation=None):
     """One inventory observation per root/tick; unchanged records reuse it live."""
     from contextlib import ExitStack
-    args = (jobs_path, harness_filter, session_rows, fast_first)
+    args = (jobs_path, harness_filter, session_rows, fast_first, session_observation)
     import artifact_producer
     with ExitStack() as stack:
         if artifact_reader is not None:

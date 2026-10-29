@@ -108,6 +108,14 @@ The portable invariant is **token pressure ⊥ intensity**. Pressure is an obser
 
 Portable telemetry distinguishes active context, cumulative session counters, and a response-policy score. Never reuse a generic adapter field with different runtime meaning. Unknown, stale, malformed, unsupported, or decreasing counters fail open to the selected pipeline and report degraded availability. Forks and subagents have separate denominators.
 
+Context belongs to the exact native session or registered attempt observed. A
+parent, neighboring worker, shared directory, or recent transcript cannot supply
+another session's numerator or denominator. Keep requested configuration, native
+effective window, cumulative usage and an observed applied compaction trigger
+separate. Display may use that session's native measurements when its applied
+policy is unknown; missing measurements remain unknown, including a missing
+owner when only workers were observed.
+
 Pressure cannot reduce validation, tests, error and data-loss handling, security, auth, permissions, accessibility, spec and plan gates, sandbox and approval, git/write/hook/liveness guards, required tools, or input context. Automatic pruning stays off. An adapter may inject a compact output directive only on a verified pressure-band transition; normal, unknown, unsupported, native-owned, and repeated bands inject zero bytes. Runtime-owned budget config is read-only unless the user explicitly chooses a separately verified native opt-in.
 
 ## §2. Portable Model Roles
@@ -176,7 +184,7 @@ a scalar quality ranking:
 | `balanced` | Predetermined work with an extended multi-step execution | light model with high execution budget | allowed |
 | `light` | Predetermined, short local execution | configured light budget | allowed |
 | `mini` | Lifecycle, classification, title, or explicitly micro-semantic help | configured micro budget | forbidden for substantive registered dispatch-depth-1/2 owner, stage, and review nodes |
-| `top` | Above deep: the harness's main-session-only model, only by a route-sealed explicit selection under important or difficult-uncertain judgment | configured top budget, opt-in (undeclared runtime config refuses typed) | route-sealed dispatch-depth-1 owner only; not a stage node, leg, review worker, matrix cell, policy band, or capacity cascade |
+| `top` | Above deep: the harness's main-session-only model, only by a route-sealed explicit selection under important or difficult-uncertain judgment | configured top budget, opt-in; an older OpenCode user file may omit it and use the installed default collapse without rewriting that file | route-sealed dispatch-depth-1 owner only; not a stage node, leg, review worker, matrix cell, policy band, or capacity cascade |
 
 Compile and compose use one pure resolver. `profile_demand`
 contains `schema_version: 1`, `judgment_requirement`, `execution_scope`, nonempty

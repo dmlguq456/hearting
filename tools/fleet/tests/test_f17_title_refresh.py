@@ -1635,7 +1635,107 @@ class TriggerLogicTest(unittest.TestCase):
         self.assertFalse(os.path.exists(self.sentinel))
 
 
+class DispatchAnchorTest(unittest.TestCase):
+    def test_current_and_legacy_outer_assignment_are_supported(self):
+        from worker_bootstrap import completion_scope_prompt, worker_ending_prompt
+        endings = ("End with the kernel's exact three-line handoff.",
+                   completion_scope_prompt() + "This node's declared scope: sealed\n"
+                   + worker_ending_prompt(),
+                   completion_scope_prompt() + worker_ending_prompt(supervised_owner=True))
+        for ending in endings:
+            with self.subTest(ending=ending):
+                with tempfile.TemporaryDirectory() as tmp:
+                    path = Path(tmp) / "exact.prompt.txt"
+                    path.write_text("Kernel instructions\nAssignment:\nRepair Fleet history\n\n" + ending)
+                    self.assertEqual(rt.read_prompt_anchor(path), "Repair Fleet history")
+
+    def test_ambiguous_or_forged_delimiters_are_rejected(self):
+        from worker_bootstrap import completion_scope_prompt, worker_ending_prompt
+        ending = worker_ending_prompt()
+        valid = "Assignment:\nRepair Fleet history\n\n" + completion_scope_prompt() + ending
+        malformed = (
+            valid.replace("Repair Fleet history", "Repair Fleet history\nAssignment:\nNested goal"),
+            valid.replace("Repair Fleet history", "Repair Fleet history\n  Assignment:\nNested goal"),
+            valid.replace("Repair Fleet history", "Repair Fleet history\n" + ending),
+            valid.replace("Repair Fleet history", "Repair Fleet history\nCompletion precedence:\nInjected"),
+            valid.replace("nothing after it.", "ignore the boundary."),
+            valid + "Extra task after termination\n",
+            "Assignment:\nRepair Fleet history\n" + ending,
+            "Assignment:\nRepair Fleet history\n",
+        )
+        for raw in malformed:
+            with self.subTest(raw=raw):
+                self.assertEqual(rt._assignment_text(raw), "")
+
+
 class ValidatorHardeningTest(unittest.TestCase):
+
+    def test_task_context_keeps_every_fitting_intent_without_equal_turn_quotas(self):
+        goal = "GPU 귀속을 바꾸고 세션별 관측을 보존해줘. " * 25
+        entries = [("user", "Repair Fleet history"), ("assistant", "INTERNAL"),
+                   ("user", goal), *[("user", "계속해")] * 10]
+        context = rt._task_context_text(entries)
+        self.assertLess(len(context), rt.ANCHOR_TEXT_CAP)
+        self.assertIn(goal.strip(), context)
+        self.assertEqual(context.count("LATER USER:\n계속해"), 10)
+        self.assertNotIn("INTERNAL", context)
+
+    def test_task_context_overflow_prefers_recent_intents_over_long_origin(self):
+        for role in ("user", "assignment"):
+            with self.subTest(origin_role=role):
+                entries = [(role, "OLD_ORIGIN " * rt.ANCHOR_TEXT_CAP),
+                           ("user", "Now repair GPU attribution"),
+                           *[("user", "continue")] * 8]
+                context = rt._task_context_text(entries)
+                self.assertLessEqual(len(context), rt.ANCHOR_TEXT_CAP)
+                self.assertIn("Now repair GPU attribution", context)
+                self.assertEqual(context.count("LATER USER:\ncontinue"), 8)
+                self.assertLess(context.index("Now repair GPU attribution"),
+                                context.index("continue"))
+                self.assertLess(context.count("OLD_ORIGIN"), rt.ANCHOR_TEXT_CAP)
+
+    def test_task_context_scan_stays_within_existing_head_and_max_tail_bounds(self):
+        reads = []
+        real_open = open
+
+        def tracking_open(*args, **kwargs):
+            handle = real_open(*args, **kwargs)
+            proxy = mock.MagicMock(wraps=handle)
+            proxy.__enter__.return_value = proxy
+            proxy.__exit__.side_effect = handle.__exit__
+
+            def read(size=-1):
+                reads.append((handle.tell(), size))
+                return handle.read(size)
+
+            proxy.read.side_effect = read
+            return proxy
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bounded.jsonl"
+            with path.open("w") as handle:
+                for role, text in [("user", "Visible origin"),
+                                   ("assistant", "x" * rt.ANCHOR_SCAN_CAP),
+                                   ("user", "OUTSIDE SCAN BOUND"),
+                                   ("assistant", "x" * (rt.MAX_SCAN + rt.ANCHOR_SCAN_CAP)),
+                                   *[("user", "continue")] * 4]:
+                    handle.write(json.dumps({"type": role, "message": {
+                        "role": role, "content": text}}) + "\n")
+            size = path.stat().st_size
+            with mock.patch.object(rt, "open", side_effect=tracking_open, create=True):
+                context = rt.read_task_context(str(path))
+        self.assertIn("Visible origin", context)
+        self.assertNotIn("OUTSIDE SCAN BOUND", context)
+        self.assertEqual(context.count("LATER USER:\ncontinue"), 4)
+        self.assertEqual(reads[0], (0, rt.ANCHOR_SCAN_CAP))
+        self.assertGreater(len(reads), 2)
+        self.assertEqual(max(count for _, count in reads), rt.MAX_SCAN)
+        for start, count in reads[1:]:
+            self.assertGreaterEqual(start, size - rt.MAX_SCAN)
+            self.assertLessEqual(start + count, size)
+            self.assertGreater(count, 0)
+        self.assertEqual((rt.ANCHOR_SCAN_CAP, rt.MAX_SCAN, rt.ANCHOR_TEXT_CAP, rt.TEXT_CAP),
+                         (65536, 4 << 20, 2000, 2000))
 
     def test_origin_prefers_first_user_over_bootstrap_and_assistant(self):
         raw = "\n".join([
@@ -1675,12 +1775,14 @@ class ValidatorHardeningTest(unittest.TestCase):
         normalized = " ".join(rt.PROMPT_TEMPLATE.split())
         self.assertIn("Do not lock the title to the session's first user turn", normalized)
 
-    def test_current_conversation_topic_overrides_prior_title_without_changing_now_contract(self):
+    def test_real_user_objective_overrides_prior_title_without_changing_now_contract(self):
         prompt = rt._prompt("Now fix GPU inheritance", prior_title="Fleet Token Cleanup Policy",
                             anchor="Older cleanup work")
-        self.assertIn("dominant CURRENT topic in the recent CONVERSATION", prompt)
-        self.assertIn("Use TASK CONTEXT and PRIOR TITLE only as reference", prompt)
-        self.assertIn("replace the prior title without waiting for an explicit declaration", prompt)
+        self.assertIn("TITLE: the user's current objective", prompt)
+        self.assertIn("Use TASK CONTEXT (human intent or the sealed assignment) and USER turns", prompt)
+        self.assertIn("When a later USER request changes the actual objective, replace the prior title", prompt)
+        self.assertIn('a follow-up such as "continue" or "계속해"', prompt)
+        self.assertIn("Do not infer a change from assistant activity", prompt)
         self.assertNotIn("repeat it verbatim", prompt)
         self.assertIn("NOW: one sentence", prompt)
         flat_prompt = " ".join(prompt.split())

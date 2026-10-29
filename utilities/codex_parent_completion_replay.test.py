@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import tomllib
 import unittest
 from contextlib import ExitStack, contextmanager
@@ -416,11 +417,23 @@ class NativeAcceptanceFixtureTests(unittest.TestCase):
                          jobs=jobs, thread_id=thread_id)
             return result
 
-        class FakeObligationStore:
-            def __init__(self, _root=None):
-                pass
+        real_obligation_store = peer_obligations.ObligationStore
 
-            def get(self, _duty_id):
+        class FakeObligationStore(real_obligation_store):
+            # Keep real root selection and readonly discovery, including list().
+            # Only the exact native-consumer result is supplied by this fixture.
+            def __init__(self, root=None, *, allow_state_root_creation=True):
+                super().__init__(root, allow_state_root_creation=allow_state_root_creation)
+
+            def get(self, duty_id):
+                if self.state_root != state["runtime"]:
+                    return super().get(duty_id)
+                identity = {"jobs": str(state["jobs"].resolve()),
+                            "attempt_id": state["completion_record"]["attempt_ids"][0],
+                            "session_id": state["thread_id"],
+                            "harness": "codex", "server": "default"}
+                if duty_id != peer_obligations.stable_duty_id("registered-batch", identity):
+                    return super().get(duty_id)
                 return {
                     "state": "complete",
                     "observation": {
@@ -548,7 +561,10 @@ class NativeAcceptanceFixtureTests(unittest.TestCase):
             stack.enter_context(mock.patch.object(replay.codex_queue_delivery, "list_queue",
                                                   return_value=[]))
             stack.enter_context(mock.patch.object(replay.time, "sleep", return_value=None))
+            thread_errors = stack.enter_context(mock.patch.object(
+                threading, "excepthook", wraps=threading.excepthook))
             yield state
+            thread_errors.assert_not_called()
 
     def _assert_case_records(self, stored, case_ids):
         for case_id in case_ids:
@@ -1570,7 +1586,17 @@ class NativeAcceptanceFixtureTests(unittest.TestCase):
                          if isinstance(value, dict) and isinstance(value.get("value"), str)] \
             if isinstance(additional, dict) else []
         self.assertEqual(len(notice_values), 1)
-        notice_text = notice_values[0]
+        from dispatch_recipient_receipt import receipt_marker_for_identity
+        # The native queue proves generation 1 at the claim boundary. The
+        # marker binds that original claimed identity, not the pre-claim row.
+        expected_claim = {**late, "session_generation": "1",
+                          "session_generation_supported": "1"}
+        notice_identity = pending.received_ack_identity(
+            expected_claim, "idle-parent", late["delivery_id"])
+        notice_text = notice_values[0] + "\n" + receipt_marker_for_identity(
+            late["delivery_id"], notice_identity)
+        self.assertEqual(watcher._native_notice_text(expected_claim, "idle-parent"),
+                         (notice_text, notice_values[0]))
         native_turn_id = "isolated-native-turn-1"
         native_requests = []
         prepared_fences = []
@@ -1635,10 +1661,13 @@ class NativeAcceptanceFixtureTests(unittest.TestCase):
             return observation
 
         real_send = queue.send_at_least_once
-        real_ack = pending.ack
+        real_claim = pending.claim
+        real_ack = pending.ack_received
 
         def ack_after_exact_consumption(*args, **kwargs):
             self.assertIn("exact-consumption-observed", events)
+            self.assertEqual(args, (self.root, "idle-parent", late["delivery_id"]))
+            self.assertEqual(kwargs["expected_identity"], notice_identity)
             events.append("acked")
             return real_ack(*args, **kwargs)
 
@@ -1649,11 +1678,18 @@ class NativeAcceptanceFixtureTests(unittest.TestCase):
                 queue, "_rpc", side_effect=fake_rpc))
             native_observe = stack.enter_context(mock.patch.object(
                 queue, "_observe_peer_message", side_effect=observe_native_history))
+            late_claim = stack.enter_context(mock.patch.object(
+                pending, "claim", wraps=real_claim))
             late_ack = stack.enter_context(mock.patch.object(
-                pending, "ack", side_effect=ack_after_exact_consumption))
+                pending, "ack_received", side_effect=ack_after_exact_consumption))
             watcher._one(late_path)
 
+        self.assertFalse(watcher.errors, list(watcher.errors))
         late_send.assert_called_once()
+        late_claim.assert_called_once()
+        self.assertTrue(late_claim.call_args.kwargs["require_generation_proof"])
+        self.assertEqual(late_claim.call_args.kwargs["live_recipient_generation"],
+                         ("idle-parent", "1"))
         self.assertEqual(late_send.call_args.kwargs["message"], notice_text)
         self.assertTrue(late_send.call_args.kwargs["require_message_match"])
         self.assertTrue(callable(late_send.call_args.kwargs["before_add"]))
@@ -1675,14 +1711,28 @@ class NativeAcceptanceFixtureTests(unittest.TestCase):
         late_record = pending.read(self.root, "idle-parent", late["delivery_id"])
         self.assertEqual(late_record["state"], "acked")
         self.assertEqual(late_record["acked_by"], watcher.owner)
+        self.assertEqual(pending.received_ack_identity(
+            late_record, "idle-parent", late["delivery_id"]), notice_identity)
         fence_identity = pending.submission_fence_identity(late_record, "idle-parent")
         accepted_fence = pending.read_submission_fence(
             self.root, "idle-parent", late["delivery_id"], expected_identity=fence_identity)
         self.assertEqual(accepted_fence["state"], "accepted")
         self.assertEqual(accepted_fence["queue_submission_id"], native_turn_id)
+        self.assertEqual(accepted_fence["record_identity"], notice_identity)
         old_after_conflict = pending.read(self.root, "idle-parent", completion["delivery_id"])
         self.assertEqual(pending.received_ack_identity(
             old_after_conflict, "idle-parent", completion["delivery_id"]), old_ack)
+
+        # Check repeat observation separately from the exact first-send trace.
+        with mock.patch.object(queue, "send_at_least_once") as repeat_send, \
+             mock.patch.object(queue, "_rpc") as repeat_rpc:
+            watcher._one(late_path)
+        repeat_send.assert_not_called()
+        repeat_rpc.assert_not_called()
+        self.assertFalse(watcher.errors, list(watcher.errors))
+        self.assertEqual(pending.received_ack_identity(
+            pending.read(self.root, "idle-parent", late["delivery_id"]),
+            "idle-parent", late["delivery_id"]), notice_identity)
 
     def test_resolver_rejects_symlink_into_group_or_world_writable_directory(self):
         with tempfile.TemporaryDirectory(prefix="parent-replay-unsafe-endpoint-") as temporary:

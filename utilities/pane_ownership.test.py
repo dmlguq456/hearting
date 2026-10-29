@@ -838,6 +838,9 @@ class NativeCurrentSelectionTest(unittest.TestCase):
 class TerminalCallerTest(unittest.TestCase):
     """Private controlling PTYs, with a foreground job distinct from its shell."""
 
+    def tty_variants(self, info):
+        return (info, {k: v for k, v in info.items() if k != "tty"}, {**info, "tty": None})
+
     def terminal(self, foreground=True):
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)
@@ -886,13 +889,24 @@ finally:
         self.assertEqual(os.readlink(f"/proc/{pid}/fd/0"), "/dev/null")
         self.assertTrue(po.verified_terminal_caller(info, pid=pid))
 
+    def test_optional_tty_with_redirected_stdio_is_proved_from_proc(self):
+        info, pid = self.terminal()
+        self.assertNotEqual(po._process(pid)[3], 0)
+        self.assertEqual(os.readlink(f"/proc/{pid}/fd/0"), "/dev/null")
+        for variant in self.tty_variants(info):
+            with self.subTest(info=variant):
+                self.assertTrue(po.verified_terminal_caller(variant, pid=pid))
+
     def test_background_job_and_other_terminal_are_refused(self):
         background, pid = self.terminal(foreground=False)
-        self.assertFalse(po.verified_terminal_caller(background, pid=pid))
+        for variant in self.tty_variants(background):
+            self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
         first, pid = self.terminal()
         other, other_pid = self.terminal()
-        self.assertFalse(po.verified_terminal_caller(other, pid=pid))
-        self.assertFalse(po.verified_terminal_caller(first, pid=other_pid))
+        for variant in self.tty_variants(other):
+            self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
+        for variant in self.tty_variants(first):
+            self.assertFalse(po.verified_terminal_caller(variant, pid=other_pid))
 
     def test_stale_start_inaccessible_uid_namespace_and_worker_are_refused(self):
         info, pid = self.terminal()
@@ -905,20 +919,38 @@ finally:
                 if calls["n"] > 1:
                     return (*record[:5], str(int(record[5]) + 1))
             return record
-        with mock.patch.object(po, "_process", side_effect=stale):
-            self.assertFalse(po.verified_terminal_caller(info, pid=pid))
-        with mock.patch.object(po, "_process", side_effect=lambda p: None if p == info["shell_pid"] else read(p)):
-            self.assertFalse(po.verified_terminal_caller(info, pid=pid))
-        with mock.patch.object(po, "_registered_worker", return_value=True):
-            self.assertFalse(po.verified_terminal_caller(info, pid=pid))
-        with mock.patch.object(po, "_runtime", return_value=("codex", True)):
-            self.assertFalse(po.verified_terminal_caller(info, pid=pid))
+        for variant in self.tty_variants(info):
+            calls["n"] = 0
+            with mock.patch.object(po, "_process", side_effect=stale):
+                self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
+            with mock.patch.object(po, "_process", side_effect=lambda p: None if p == info["shell_pid"] else read(p)):
+                self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
+            with mock.patch.object(po.os, "getuid", return_value=os.getuid() + 1):
+                self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
+            with mock.patch.object(po, "_registered_worker", return_value=True):
+                self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
+            with mock.patch.object(po, "_runtime", return_value=("codex", True)):
+                self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
 
-    def test_missing_tty_and_wrong_foreground_group_are_refused(self):
+    def test_missing_proc_tty_and_wrong_foreground_evidence_are_refused(self):
         info, pid = self.terminal()
-        for altered in ({**info, "tty": None}, {**info, "foreground_process_group_id": info["shell_pid"]},
-                        {**info, "foreground_processes": []}, {**info, "shell_pid": 999999999}):
-            self.assertFalse(po.verified_terminal_caller(altered, pid=pid))
+        read = po._process
+        for variant in self.tty_variants(info):
+            for altered in ({**variant, "foreground_process_group_id": info["shell_pid"]},
+                            {**variant, "foreground_processes": []}, {**variant, "shell_pid": 999999999}):
+                self.assertFalse(po.verified_terminal_caller(altered, pid=pid))
+            def no_tty(value):
+                record = read(value)
+                return (*record[:3], 0, *record[4:]) if record else None
+            with mock.patch.object(po, "_process", side_effect=no_tty):
+                self.assertFalse(po.verified_terminal_caller(variant, pid=pid))
+
+    def test_present_invalid_or_other_tty_is_refused(self):
+        info, pid = self.terminal()
+        other, _ = self.terminal()
+        for tty in (other["tty"], "/dev/null", "/dev/does-not-exist", "", "pts/0", 0, []):
+            with self.subTest(tty=tty):
+                self.assertFalse(po.verified_terminal_caller({**info, "tty": tty}, pid=pid))
 
 
 if __name__ == "__main__":

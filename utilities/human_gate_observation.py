@@ -496,6 +496,13 @@ def read_answer_waits(*, jobs_paths, sessions=(), now=None):
                 sid = path.stem
                 sess = sessions_by_key.get((harness, sid))
                 sidecar = interaction.read_wait(sid, harness)
+                if sidecar is None:
+                    # A damaged observation cannot prove that this source has
+                    # no current request. Keep health body-free and advisory.
+                    if path.exists():
+                        health.append({"source": "S1", "state": "unknown",
+                                       "reason": "invalid-sidecar"})
+                    continue
                 activity_since = None
                 if sidecar and sidecar.get("source") != "codex-appserver":
                     activity_since = (getattr(sess, "_interaction_activity", None)

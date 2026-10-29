@@ -19,6 +19,32 @@ import safe_fs
 
 
 class NativeContextTests(unittest.TestCase):
+    def test_codex_1m_request_roundtrip_repairs_drift_without_touching_existing_rollout(self):
+        self.seed_models(value="1000000")
+        config = self.home / "config.toml"
+        config.write_bytes(b'# keep comment\r\nmodel_context_window = 800000 # native\r\n')
+        rollout = self.home / "sessions/existing.jsonl"
+        rollout.parent.mkdir()
+        recorded = b'{"payload":{"type":"token_count","info":{"model_context_window":760000}}}\n'
+        rollout.write_bytes(recorded)
+        for value, status in (("1000000", "unchanged"), ("800000", "changed"),
+                              ("1000000", "changed")):
+            result = model_settings.set_model("codex", "context-window", value,
+                                              runtime=self.home, source_root=ROOT)
+            self.assertEqual(result["status"], status)
+            self.assertEqual(result["new_context_window"], value)
+            self.assertEqual(model_settings.get_context_window(
+                "codex", runtime=self.home, source_root=ROOT)["context_window"], value)
+            self.assertEqual(config.read_bytes(), (
+                f'# keep comment\r\nmodel_context_window = {value} # native\r\n').encode())
+            self.assertEqual(rollout.read_bytes(), recorded)
+        before = config.read_bytes()
+        result = model_settings.set_model("codex", "context-window", "800000", dry_run=True,
+                                          runtime=self.home, source_root=ROOT)
+        self.assertEqual(result["status"], "planned")
+        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(rollout.read_bytes(), recorded)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="native-context-")
         self.home = Path(self.temp.name)

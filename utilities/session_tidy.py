@@ -65,6 +65,7 @@ import datetime
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -75,6 +76,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Mapping
 from typing import Callable, Iterator, Optional
 
 SCHEMA = 1
@@ -134,7 +136,9 @@ COMPACT_CARD_INSTRUCTIONS = (
     "Carry the source description and distinguishing comparison condition before the "
     "original identifier; preserve document/revision and checkpoint references when they "
     "affect meaning. Keep failed, interrupted and unfinished states with their next action, "
-    "and leave unexplained identifiers unresolved."
+    "and leave unexplained identifiers unresolved. In the existing related or other fields, "
+    "keep a session's confirmed Fleet number together with its observed pane and full exact "
+    "native SID; leave any unknown number, pane or SID unknown."
     " Some recent turns may remain verbatim after compaction, depending on the runtime. "
     "Do not infer that an omitted request or reply was undelivered. When known, say which "
     "last turn this summary covers; note when the preserved transcript needs checking. "
@@ -826,48 +830,137 @@ def _native_ledger_path(seat: Seat) -> Path:
     return state_root() / "sessions" / f"{seat_state_key(seat)}.jsonl"
 
 
-def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True, strict: bool = False) -> list[dict]:
-    path = _native_ledger_path(seat)
-    physical = _physical_ledger_path(seat)
-    scope = _LEDGER_READ_SCOPE.get()
+class _LedgerLines(list):
+    """Legacy row list with observation health for authority readers."""
+    usable = True
+
+
+def _handover_origin(row) -> Optional[tuple[str, str]]:
+    """Normalize the existing string/structured origin without inventing an edge."""
+    harness = row.get("harness")
+    if not isinstance(harness, str) or harness not in HARNESSES:
+        return None
+    origin = row.get("from")
+    if isinstance(origin, dict):
+        harness, origin = origin.get("harness"), origin.get("sid")
+    if (not isinstance(harness, str) or harness not in HARNESSES
+            or not isinstance(origin, str) or not origin):
+        return None
+    return harness, origin
+
+
+def _parse_ledger_lines(raw: Optional[bytes], *, strict: bool = False) -> list[dict]:
+    """Preserve observation health while parsing one ledger incarnation."""
+    entries = _LedgerLines()
+    entries.usable = raw is not None
+    if raw is not None:
+        try:
+            raw.decode("utf-8")
+        except UnicodeDecodeError:
+            entries.usable = False
+    for line in (raw or b"").decode("utf-8", "replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except ValueError:
+            entries.usable = False
+            continue
+        if not isinstance(item, dict):
+            entries.usable = False
+            continue
+        if strict and not item.get("sid"):
+            entries.usable = False
+        event, source = item.get("event"), item.get("source")
+        if event in {"handover", "succession"}:
+            try:
+                if not math.isfinite(float(item.get("ts", 0) or 0)):
+                    entries.usable = False
+            except (ValueError, TypeError):
+                entries.usable = False
+            bindings = item.get("bindings", [])
+            if (not isinstance(bindings, list) or not all(
+                    isinstance(binding, dict)
+                    and all(isinstance(binding.get(key), str) and binding[key]
+                            for key in ("jobs", "route", "hash"))
+                    and ("attempt" not in binding or isinstance(binding["attempt"], str) and binding["attempt"])
+                    and isinstance(binding.get("node"), str)
+                    and ("parent" not in binding or isinstance(binding["parent"], str) and binding["parent"])
+                    for binding in bindings)):
+                entries.usable = False
+        # Schema-1 handovers predate source annotations. Their exact logical
+        # bindings remain authority, but tidy_lineage_edge deliberately gives
+        # these rows no unbound succession edge.
+        if event == "handover" and "source" not in item:
+            bindings = item.get("bindings")
+            origin = _handover_origin(item)
+            if (type(item.get("schema", 1)) is not int or item.get("schema", 1) != 1
+                    or not all(isinstance(value, str) and value
+                               for value in (item.get("harness"), item.get("sid"))) or origin is None
+                    or item.get("harness") not in HARNESSES
+                    or not isinstance(bindings, list) or not bindings
+                    or not all(isinstance(binding, dict)
+                               and all(isinstance(binding.get(key), str) and binding[key]
+                                       for key in ("jobs", "route", "hash"))
+                               and isinstance(binding.get("node"), str) for binding in bindings)):
+                entries.usable = False
+            if item.get("sid"):
+                entries.append(item)
+            continue
+        if event in ("handover", "succession") and not isinstance(source, str):
+            entries.usable = False
+        relation = (event == "succession" and (source is None or source == "tidy-clear")
+                    or event == "handover" and (source is None or isinstance(source, str)
+                        and source in {"clear", "reservation", "first-message", "retire"}))
+        if relation:
+            origin = _handover_origin(item)
+            if (not source or not all(isinstance(value, str) and value
+                                      for value in (item.get("harness"), item.get("sid")))
+                    or origin is None or source != "retire" and origin[0] != item.get("harness")
+                    or not isinstance(item.get("bindings", []), list)):
+                entries.usable = False
+        if isinstance(item, dict) and item.get("sid"):
+            entries.append(item)
+    return entries
+
+
+def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True,
+                       strict: bool = False, raw: Optional[bytes] = None) -> list[dict]:
+    """Parse one observed incarnation, preserving health for every reader."""
+    if raw is not None:
+        entries = _parse_ledger_lines(raw, strict=True) if strict else _parse_ledger_lines(raw)
+        if strict and not entries.usable:
+            raise ValueError("seat-ledger-schema-invalid")
+        return entries
+    path, physical = _native_ledger_path(seat), _physical_ledger_path(seat)
+    scope = None if strict else _LEDGER_READ_SCOPE.get()
     read_only = _LEDGER_READ_ONLY.get()
     cache_key = os.fspath(path) + ("#lineage" if include_physical_relations and path != physical else "")
-    if strict:
-        scope = None  # Fresh authority reads; PeerReadContext owns read-pass reuse.
-    if scope is not None:
-        cached = scope.get(cache_key)
-        if cached is not None:
-            return cached if read_only else copy.deepcopy(cached)
-    def parse(source: Path) -> list[dict]:
-        entries = []
+    if scope is not None and cache_key in scope:
+        cached = scope[cache_key]
+        return cached if read_only else copy.deepcopy(cached)
+
+    def parse(source):
         if strict:
             _reject_symlink(source)
             try:
-                raw = source.read_bytes()
+                observed = source.read_bytes()
             except FileNotFoundError:
-                raw = b""
+                observed = b""
         else:
-            raw = read_bytes(source) or b""
-        for line in raw.decode("utf-8", "strict" if strict else "replace").splitlines():
-            try:
-                item = json.loads(line)
-            except ValueError:
-                if strict:
-                    raise
-                continue
-            if strict and (not isinstance(item, dict) or not item.get("sid")):
-                raise ValueError("seat-ledger-schema-invalid")
-            if isinstance(item, dict) and item.get("sid"):
-                entries.append(item)
-        return entries
+            observed = read_bytes(source)
+        rows = _parse_ledger_lines(observed, strict=True) if strict else _parse_ledger_lines(observed)
+        if strict and not rows.usable:
+            raise ValueError("seat-ledger-schema-invalid")
+        return rows
 
     entries = parse(path)
     if include_physical_relations and path != physical:
-        # A confirmed seat transition is physical provenance shared by every
-        # native session at that seat. Read those existing rows without mixing
-        # neighboring session activity into this session's logical ledger.
+        physical_rows = parse(physical)
+        if physical.exists():
+            entries.usable = entries.usable and physical_rows.usable
         seen = {json.dumps(row, ensure_ascii=False, sort_keys=True) for row in entries}
-        for row in parse(physical):
+        for row in physical_rows:
             if row.get("event") not in {"handover", "succession", "steward-release"}:
                 continue
             identity = json.dumps(row, ensure_ascii=False, sort_keys=True)
@@ -877,7 +970,6 @@ def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True, s
     if scope is not None:
         scope[cache_key] = entries if read_only else copy.deepcopy(entries)
     return entries
-
 
 def _append_ledger_entry(seat: Seat, entry: dict) -> None:
     """Append logical state and retain the same event in its physical seat ledger."""
@@ -906,7 +998,9 @@ def _append_ledger_entry(seat: Seat, entry: dict) -> None:
                         and row.get("snapshot_id") == entry.get("snapshot_id")
                         and row.get("harness") == entry.get("harness")
                         and row.get("sid") == entry.get("sid")
-                        and row.get("from") == entry.get("from")):
+                        and row.get("from") == entry.get("from")
+                        and row.get("source") == entry.get("source")
+                        and row.get("bindings", []) == entry.get("bindings", [])):
                     found = True
                     break
             if found:
@@ -1040,8 +1134,12 @@ def prompt_state(seat: Seat) -> Optional[dict]:
 
 def session_summary(seat: Seat) -> dict[tuple[str, str], dict]:
     """Fold the ledger: ``(harness, sid) -> first_seen, last_seen, epoch, transcript, cwd, ...``."""
+    return _summarize_sessions(_read_ledger_lines(seat))
+
+
+def _summarize_sessions(rows) -> dict[tuple[str, str], dict]:
     out: dict[tuple[str, str], dict] = {}
-    for item in _read_ledger_lines(seat):
+    for item in rows:
         if item.get("event") in {"handover", "succession", "steward-release", "tidy-claim",
                                   "real-prompt", "native-address"}:
             # Relations, revocation and prompt provenance are not session activity.
@@ -1072,22 +1170,27 @@ def latest_session(seat: Seat, harness: Optional[str] = None) -> Optional[dict]:
 
 
 def _project_seat_lineage(rows: list[dict], cards: dict, locations: dict,
-                          *, harness=None, sid=None) -> list[dict]:
+                          *, harness=None, sid=None, graph=None) -> list[dict]:
     """Pure projection of already-read seat rows, cards and transcript locations."""
     grouped = {}
     starts = {}
     edges = {}
+    outgoing = {}
+    if graph is not None:
+        for edge_harness, source, target in graph.edges:
+            edges.setdefault((edge_harness, target), set()).add(source)
+            outgoing.setdefault((edge_harness, source), set()).add(target)
     for row in rows:
         name, session = str(row.get("harness") or ""), str(row.get("sid") or "")
         if not name or not session or row.get("event") == "native-address":
             continue
         key = (name, session)
-        if row.get("event") in {"handover", "succession"}:
-            source = row.get("from")
-            if isinstance(source, dict):
-                source = source.get("sid") if source.get("harness") == name else None
-            if isinstance(source, str) and source and source != session:
-                edges.setdefault(key, set()).add(source)
+        edge = None if graph is not None else tidy_lineage_edge(row)
+        if edge is not None:
+            edge_harness, source, target = edge
+            if edge_harness == name:
+                edges.setdefault((name, target), set()).add(source)
+                outgoing.setdefault((name, source), set()).add(target)
             continue
         item = grouped.setdefault(key, {"sid": session, "harness": name,
                                         "started_at": None, "source": "unknown",
@@ -1125,7 +1228,11 @@ def _project_seat_lineage(rows: list[dict], cards: dict, locations: dict,
         key = (item["harness"], item["sid"])
         predecessors = edges.get(key, set())
         item["predecessor"] = None
-        if len(predecessors) == 1:
+        unresolved = graph is not None and key in graph.unresolved
+        if unresolved:
+            item["relation"] = "unknown"
+        elif (len(predecessors) == 1
+                and len(outgoing.get((item["harness"], next(iter(predecessors))), ())) == 1):
             item["relation"] = "confirmed"
             item["predecessor"] = {"harness": item["harness"], "sid": next(iter(predecessors))}
         elif len(predecessors) > 1:
@@ -1133,6 +1240,29 @@ def _project_seat_lineage(rows: list[dict], cards: dict, locations: dict,
         elif index + 1 < len(output) and output[index + 1]["harness"] == item["harness"]:
             item["relation"] = "chronological"
     return output
+
+
+def tidy_lineage_edge(row: dict) -> Optional[tuple[str, str, str]]:
+    """Normalize the only ledger rows that establish a same-harness lineage edge."""
+    if not isinstance(row, Mapping):
+        return None
+    event, source_kind = row.get("event"), row.get("source")
+    if event == "succession":
+        if source_kind != "tidy-clear":
+            return None
+    elif event == "handover":
+        if not isinstance(source_kind, str) or source_kind not in {"clear", "reservation", "first-message"}:
+            return None
+    else:
+        return None
+    harness, target = row.get("harness"), row.get("sid")
+    source = _handover_origin(row)
+    if source is None or source[0] != harness:
+        return None
+    origin = source[1]
+    if not all(isinstance(value, str) and value for value in (harness, origin, target)):
+        return None
+    return harness, origin, target
 
 
 def _lineage_card_status(path: Path) -> str:
@@ -1181,25 +1311,77 @@ def _lineage_transcript(harness: str, sid: str, hint: str) -> dict:
 
 
 def seat_lineage(seat: Seat, *, harness=None, sid=None) -> list[dict]:
-    """Read the seat's bounded existing lineage without updating any state.
-
-    A pane seat's endpoint-free legacy ledger replaces (never joins) the endpoint ledger only when
-    the endpoint ledger lacks the asked session and the legacy one holds exactly that session."""
+    """Project this seat's history and confirmed relatives from the shared graph."""
     physical = physical_seat(seat)
-    sessions = session_summary(physical)
-    wanted = (str(harness or session_identity(seat)[0] or ""), str(sid or session_identity(seat)[1] or ""))
-    legacy = _legacy_pane_seat(physical) if all(wanted) and wanted not in sessions else None
-    if legacy is not None:
-        legacy_sessions = session_summary(legacy)
-        if wanted in legacy_sessions:
-            physical, sessions = legacy, legacy_sessions
-    rows = _read_ledger_lines(physical)
+    logical_harness, logical_sid = session_identity(seat)
+    sid = sid or logical_sid or None
+    if sid:
+        harness = harness or logical_harness or None
+    wanted = (str(harness or ""), str(sid or ""))
+    graph = None
+    try:
+        import dispatch_seat_handover
+        graph = dispatch_seat_handover.lineage_graph()
+    except Exception:  # noqa: BLE001 - keep the requested seat's local history
+        pass
+    ledgers = dict(graph.ledger_rows) if graph is not None else {}
+    own_rows = ledgers.get(physical.key)
+    if own_rows is None:
+        own_rows = _read_ledger_lines(physical)
+    if all(wanted) and wanted not in _summarize_sessions(own_rows):
+        legacy = _legacy_pane_seat(physical)
+        if legacy is not None:
+            legacy_rows = ledgers.get(legacy.key)
+            if legacy_rows is None:
+                legacy_rows = _read_ledger_lines(legacy)
+            if wanted in _summarize_sessions(legacy_rows):
+                physical, own_rows = legacy, legacy_rows
+    ledgers.setdefault(physical.key, own_rows)
+    rows, sessions, session_seats = [], {}, {}
+    own_sessions = _summarize_sessions(ledgers[physical.key])
+    for ledger_key, ledger_rows in ledgers.items():
+        ledger_seat = physical if ledger_key == physical.key else Seat("pane", ledger_key)
+        rows.extend(ledger_rows)
+        for session_key, summary in _summarize_sessions(ledger_rows).items():
+            current = sessions.get(session_key)
+            if current is None or float(summary.get("last_seen", 0) or 0) >= float(
+                    current.get("last_seen", 0) or 0):
+                sessions[session_key] = summary
+                session_seats[session_key] = ledger_seat
+    related = {key for key in own_sessions if not harness or key[0] == harness}
+    current_sid = sid
+    if not current_sid:
+        current = max((summary for key, summary in own_sessions.items()
+                       if not harness or key[0] == harness),
+                      key=lambda summary: float(summary.get("last_seen", 0) or 0), default=None)
+        current_sid = current.get("sid") if current else None
+    if current_sid:
+        related.update(key for key in sessions if key[1] == current_sid
+                       and (not harness or key[0] == harness))
+    if graph is not None:
+        adjacent = {}
+        for name, origin, target in graph.edges:
+            left, right = (name, origin), (name, target)
+            if left in graph.unresolved or right in graph.unresolved:
+                continue
+            adjacent.setdefault(left, set()).add(right)
+            adjacent.setdefault(right, set()).add(left)
+        remaining = list(related)
+        while remaining:
+            for key in adjacent.get(remaining.pop(), ()):
+                if key not in related:
+                    related.add(key)
+                    remaining.append(key)
+    # Filter before any card or transcript lookup. The graph is global; a
+    # history/focus view must not open unrelated seats' native files.
+    sessions = {key: summary for key, summary in sessions.items() if key in related}
+    rows = [row for row in rows if (row.get("harness"), row.get("sid")) in related]
     cards, locations = {}, {}
     for key, summary in sessions.items():
         name, session = key
         if harness and name != harness:
             continue
-        author_seat = session_seat(physical, name, session)
+        author_seat = session_seat(session_seats.get(key, physical), name, session)
         current_path = card_json_path(author_seat)
         history_path = state_root() / "card-history" / card_key(author_seat)
         found = []
@@ -1238,7 +1420,14 @@ def seat_lineage(seat: Seat, *, harness=None, sid=None) -> list[dict]:
             cards[key] = ([{"generation": max(generations), "path": None, "status": "expired"}]
                           if generations else [])
         locations[key] = _lineage_transcript(name, session, str(summary.get("transcript") or ""))
-    return _project_seat_lineage(rows, cards, locations, harness=harness, sid=sid)
+    projected = _project_seat_lineage(rows, cards, locations, harness=harness,
+                                     sid=current_sid, graph=graph)
+    if graph is None:
+        # Readable local history cannot establish uniqueness in an unavailable
+        # shared graph. Keep the rows without inventing a second authority.
+        for item in projected:
+            item["predecessor"], item["relation"] = None, "unknown"
+    return projected
 
 
 def _confirmed_predecessor(lineage: list[dict], harness: str, sid: str) -> Optional[dict]:
@@ -2214,11 +2403,29 @@ def mark_card_handed_off(seat: Seat) -> None:
             atomic_write_json(card_json_path(seat), card)
 
 
+def _card_author_label(card: dict) -> str:
+    """Use the stored author's exact identity, independently of the current seat."""
+    author = card.get("author") if isinstance(card.get("author"), dict) else {}
+    seat = card.get("seat") if isinstance(card.get("seat"), dict) else {}
+    harness, sid = author.get("harness") or "-", author.get("sid") or "-"
+    tag = None
+    if sid != "-":
+        try:
+            tools = str(Path(__file__).resolve().parents[1] / "tools")
+            if tools not in sys.path:
+                sys.path.insert(0, tools)
+            from fleet.session_handle import resolve_tag
+            tag = resolve_tag(harness, sid)
+        except Exception:
+            pass
+    badge = f" [{tag}]" if isinstance(tag, str) and re.fullmatch(r"[0-9a-f]{2}", tag) else ""
+    return f"{harness}{badge} pane={seat.get('pane') or '-'} sid={sid}"
+
+
 def render_card_text(card: dict) -> str:
     """The readable card file: header, the card body (layer A), and the "참고할 기억" section (layer B)."""
-    author = card.get("author") or {}
     header = (f"# session card {card.get('generation')} — {card.get('authored_at')} "
-              f"({author.get('harness', '')} {str(author.get('sid', ''))[:8]})\n\n")
+              f"({_card_author_label(card)})\n\n")
     text = header + str(card.get("body", "")) + "\n"
     refs = card.get("memory_refs")
     if isinstance(refs, dict) and refs.get("revision"):
@@ -2537,11 +2744,11 @@ def _ago(seconds: float) -> str:
 def build_card_injection(card: dict, card_path: Path, now: float, cap: int,
                          previous_transcript: Optional[dict] = None) -> str:
     """Card text within ``cap`` UTF-8 bytes; guidance is part of the fixed header."""
-    author = card.get("author") or {}
     stamp = time.strftime("%Y-%m-%d %H:%M", time.localtime(float(card.get("authored_at_epoch") or now)))
-    header = (f"[세션 카드] 같은 자리에서 이어받는 작업 카드 — 작성 {stamp} "
-              f"({_ago(now - float(card.get('authored_at_epoch') or now))}, {author.get('harness', '')} "
-              f"{str(author.get('sid', ''))[:8]})\n{CARD_FIRST_REPLY_GUIDANCE}")
+    prefix = (f"[세션 카드] 같은 자리에서 이어받는 작업 카드 — 작성 {stamp} "
+              f"({_ago(now - float(card.get('authored_at_epoch') or now))})")
+    identity = f" · {_card_author_label(card)}"
+    header = f"{prefix}{identity}\n{CARD_FIRST_REPLY_GUIDANCE}"
     footer = f"카드 전문: {card_path}"
     previous_line = ""
     if isinstance(previous_transcript, dict):
@@ -2564,14 +2771,24 @@ def build_card_injection(card: dict, card_path: Path, now: float, cap: int,
     if fixed > cap and previous_line:
         previous_line = ""
         fixed = len(header.encode("utf-8")) + len(footer.encode("utf-8")) + 2
+    if fixed > cap:
+        header = prefix + identity
+        fixed = len(header.encode("utf-8")) + len(footer.encode("utf-8")) + 2
+    if fixed > cap:
+        # A tiny cap drops identity as a unit, never an apparently exact SID prefix.
+        header = prefix
+        fixed = len(header.encode("utf-8")) + len(footer.encode("utf-8")) + 2
     room = cap - fixed
     if room <= 0:
         return _cut_bytes(f"{header}\n{footer}" + (f"\n{previous_line}" if previous_line else ""), cap)[0]
     if len(body.encode("utf-8")) <= room:
         return f"{header}\n{body}\n{footer}" + (f"\n{previous_line}" if previous_line else "")
-    room -= len(cut_note.encode("utf-8")) + 1
-    trimmed = _cut_bytes(body, max(0, room))[0].rstrip()
-    return f"{header}\n{trimmed}\n{cut_note}\n{footer}" + (f"\n{previous_line}" if previous_line else "")
+    if room > len(cut_note.encode("utf-8")) + 1:
+        room -= len(cut_note.encode("utf-8")) + 1
+        trimmed = _cut_bytes(body, room)[0].rstrip() + "\n" + cut_note
+    else:
+        trimmed = _cut_bytes(body, room)[0].rstrip()
+    return f"{header}\n{trimmed}\n{footer}" + (f"\n{previous_line}" if previous_line else "")
 
 
 # ---------------------------------------------------------------------------

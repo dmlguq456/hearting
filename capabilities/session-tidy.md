@@ -75,6 +75,19 @@ target transport they keep their checked pane path and manual fallback.
 Claude's messaging inbox carries text, not new-conversation commands; an inbox
 message containing `/clear` is never evidence that the conversation cleared.
 
+Confirmed tidy succession and same-seat handover edges form one lineage for
+both previous-conversation display and pending-result delivery. A resume that
+moves panes remains connected by its recorded session id; a fork or incomplete
+lineage does not grant a successor. Open records stored under a predecessor's
+session key may be delivered to the unique confirmed same-harness chain end,
+while storage, delivery id, claim, and acknowledgement stay under the original
+key. An explicit registered-job binding to another recipient takes precedence.
+Only tidy-created succession and handover rows are lineage edges; manual
+`/clear`, chronological neighbors, pane aliases, and card text do not create
+edges. Unclear liveness or lineage remains unresolved. Existing activation,
+prompt, and runner sweeps discover open records that have no retained duty.
+New notices retain a duty when written so an idle recipient can be woken.
+
 Adapters may expose this capability through native commands, skill files, prompt instructions, or explicit wrappers. The adapter must report unsupported runtime mechanics instead of silently treating another runtime's native file format as portable.
 
 ## Portable Procedure
@@ -107,7 +120,10 @@ beginning of the card; read the full file for the rest. The memory worker's
 When naming work in any of those existing fields, keep the source description
 and the comparison condition that distinguishes it, then add the original
 identifier as a reference. Preserve document/revision and checkpoint links
-when they affect meaning. Record failed, interrupted and unfinished work in
+when they affect meaning. When referencing a session in the existing related or
+other card fields, retain its confirmed Fleet number together with the observed
+pane and full exact native SID. Leave an unknown number, pane or SID unknown;
+do not fill it from a hash or another session. Record failed, interrupted and unfinished work in
 the same fields with its actual status and next action; do not guess what an
 unexplained identifier means.
 
@@ -210,3 +226,10 @@ read-and-accept command. It is not user approval and does not change registered
 completion identity; mere delivery never accepts the handoff.
 
 Logical handoff records the explicitly requested transfer by the current holder, independently of card delivery, explicit receiver acceptance and physical retirement. A missing card or pane does not discard that relation. Never send empty context or infer acceptance from delivery. Retire waits for preserved context and an exact physical lifetime; native acceptance may succeed with `retire=deferred`. `--harness` selects the source caller; the shared target resolver determines the receiver harness.
+
+Current recipient interpretation uses the shared qualified ledger graph, including
+logical-session and physical-seat rows. Exact job bindings take precedence; only
+confirmed tidy edges advance a holder without another binding. Card delivery,
+explicit acceptance and physical retirement remain separate from this logical
+record. An unreadable graph waits with the existing controller and preserves
+the original storage and receipt identities.

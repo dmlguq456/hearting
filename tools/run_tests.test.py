@@ -2900,8 +2900,9 @@ class ShardCliFixture(RunTestsFixtureBase):
             "--isolation=isolated", "--jobs", "2", "--timeout", "5", "--no-leak-sweep",
         ]
 
-    def run_shard(self, index: int, count: int, extra=None, listing=True):
-        out = self.root / "out" / f"run-tests-report-shard-{index}-of-{count}"
+    def run_shard(self, index: int, count: int, extra=None, listing=True, attempt=None):
+        suffix = f"-attempt-{attempt}" if attempt is not None else ""
+        out = self.root / "out" / f"run-tests-report-shard-{index}-of-{count}{suffix}"
         out.mkdir(parents=True, exist_ok=True)
         args = self.base_args() + ["--shard", f"{index}/{count}", "--report", str(out / "run-tests-report.tsv")]
         if listing:
@@ -2919,14 +2920,36 @@ class ShardCliFixture(RunTestsFixtureBase):
     def manifest(self, path: Path) -> list[str]:
         return path.read_text(encoding="utf-8").splitlines()
 
-    def run_all_shards(self, count=3):
+    def run_all_shards(self, count=3, attempt=None):
         self.write_census()
         for index in range(1, count + 1):
-            result, _ = self.run_shard(index, count)
+            result, _ = self.run_shard(index, count, attempt=attempt)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    def copy_attempt(self, source: Path, attempt: int) -> Path:
+        import shutil
+        target = source.with_name(source.name.split("-attempt-")[0] + f"-attempt-{attempt}")
+        return Path(shutil.copytree(source, target))
+
     def verify(self):
-        return run_runner(["--verify-shards", str(self.root / "out")])
+        directory = self.root / "out"
+
+        def snapshot():
+            return {p.relative_to(directory): p.read_bytes() for p in directory.rglob("*") if p.is_file()}
+
+        before = snapshot()
+        result = run_runner(["--verify-shards", str(directory)])
+        self.assertEqual(snapshot(), before, "verification changed artifact files or bytes")
+        return result
+
+    def assert_selected(self, result, expected):
+        lines = []
+        for index, count, attempt in expected:
+            suffix = f"-attempt-{attempt}" if attempt is not None else ""
+            label = attempt if attempt is not None else "legacy"
+            lines.append(f"selected shard={index}/{count} attempt={label} "
+                         f"directory=run-tests-report-shard-{index}-of-{count}{suffix}")
+        self.assertEqual([line for line in result.stdout.splitlines() if line.startswith("selected ")], lines)
 
     def test_shard_census_sums_to_the_unsharded_census(self):
         total = 0
@@ -2965,6 +2988,174 @@ class ShardCliFixture(RunTestsFixtureBase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("missing=0 duplicate=0", result.stdout)
         self.assertIn("shards=3/3", result.stdout)
+
+    def test_first_attempt_verifies_each_shard_once(self):
+        self.run_all_shards(2, attempt=1)
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("census=6 assigned=6 shards=2/2 missing=0 duplicate=0", result.stdout)
+        self.assert_selected(result, [(1, 2, 1), (2, 2, 1)])
+
+    def test_partial_rerun_preserves_payloads_and_never_falls_back_for_a_missing_verdict(self):
+        self.run_all_shards(2, attempt=9)
+        for out in (self.root / "out").glob("run-tests-report-shard-*"):
+            # Representative upload payloads that coverage must not touch.
+            (out / "run-tests-seed-baseline.tsv").write_bytes(b"seed\tfixture\n")
+            (out / "progress.log").write_bytes(b"attempt 9\n\x00")
+            diagnostics = out / "run-tests-diagnostics" / "suite" / "stderr.log"
+            diagnostics.parent.mkdir(parents=True)
+            diagnostics.write_bytes(b"original diagnostic\n\xff")
+        old = self.root / "out" / "run-tests-report-shard-2-of-2-attempt-9"
+        latest = self.copy_attempt(old, 10)
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("shards=2/2 missing=0 duplicate=0", result.stdout)
+        self.assert_selected(result, [(1, 2, 9), (2, 2, 10)])
+        report = latest / "run-tests-report.tsv"
+        lines = self.manifest(report)
+        victim = lines[2].split("\t")[0]
+        self.assertIn(victim, (old / report.name).read_text())
+        report.write_text("\n".join(lines[:2] + lines[3:]) + "\n")
+        result = self.verify()
+        self.assertEqual(result.returncode, 1)
+        self.assert_selected(result, [(1, 2, 9), (2, 2, 10)])
+        self.assertIn(f"report-missing: {victim} (shard 2)", result.stdout)
+
+    def test_full_rerun_selects_the_numeric_latest_in_either_creation_order(self):
+        self.run_all_shards(2, attempt=10)
+        for index in (1, 2):
+            newer = self.root / "out" / f"run-tests-report-shard-{index}-of-2-attempt-10"
+            self.copy_attempt(newer, 9)  # Older attempt created after the newer one.
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_selected(result, [(1, 2, 10), (2, 2, 10)])
+        # Now create the newest attempt after both older ones, for every shard.
+        for index in (1, 2):
+            self.copy_attempt(self.root / "out" / f"run-tests-report-shard-{index}-of-2-attempt-9", 11)
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_selected(result, [(1, 2, 11), (2, 2, 11)])
+
+    def test_latest_verdict_is_selected_without_filtering_for_pass(self):
+        self.write_census()
+        for old_exit, latest_exit in ((1, 0), (0, 1)):
+            with self.subTest(old_exit=old_exit, latest_exit=latest_exit):
+                outputs = []
+                for attempt, code in ((9, old_exit), (10, latest_exit)):
+                    write_suite(self.root, "a.test.py", f"import sys\nsys.exit({code})\n")
+                    result, out = self.run_shard(1, 1, attempt=attempt)
+                    self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                    verdict = b"FAIL" if code else b"PASS"
+                    self.assertIn(b"a.test.py\t-\t" + verdict + b"\t", (out / "run-tests-report.tsv").read_bytes())
+                    outputs.append(out)
+                result = self.verify()
+                # A complete FAIL report covers its suites; the job status is
+                # checked separately by the workflow's SHARDS guard.
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assert_selected(result, [(1, 1, 10)])
+                if old_exit:
+                    (outputs[0] / "run-tests-report.tsv").unlink()
+                    (outputs[0] / "suite-list.tsv").write_text("interrupted old attempt\n")
+                    self.assertEqual(self.verify().returncode, 0)
+
+    def test_latest_broken_payloads_are_not_hidden_by_an_older_pass(self):
+        self.run_all_shards(2, attempt=9)
+        latest = self.copy_attempt(self.root / "out" / "run-tests-report-shard-2-of-2-attempt-9", 10)
+        originals = {p: p.read_bytes() for p in latest.iterdir()}
+        cases = [
+            ("run-tests-report.tsv", None, "run-tests-report.tsv unreadable"),
+            ("run-tests-report.tsv", b"wrong header\n", "expected header"),
+            ("suite-list.tsv", None, "suite-list.tsv"),
+            ("suite-list.tsv", b"wrong header\n", "not a suite manifest"),
+            ("suite-list.tsv", b"# shard=1/2\nsuite_path\n", "manifest says '# shard=1/2'"),
+            ("suite-list.tsv", b"# shard=all\nsuite_path\n", "manifest says '# shard=all'"),
+        ]
+        for filename, contents, error in cases:
+            with self.subTest(filename=filename, contents=contents):
+                for path, data in originals.items():
+                    path.write_bytes(data)
+                target = latest / filename
+                if contents is None:
+                    target.unlink()
+                else:
+                    target.write_bytes(contents)
+                result = self.verify()
+                self.assertEqual(result.returncode, 1)
+                self.assert_selected(result, [(1, 2, 9), (2, 2, 10)])
+                self.assertIn(error, result.stderr)
+
+    def test_same_numeric_attempt_alias_is_an_error_even_when_superseded(self):
+        import shutil
+        self.run_all_shards(2, attempt=9)
+        original = self.root / "out" / "run-tests-report-shard-2-of-2-attempt-9"
+        alias = original.with_name("run-tests-report-shard-02-of-2-attempt-09")
+        shutil.copytree(original, alias)
+        for superseded in (False, True):
+            with self.subTest(superseded=superseded):
+                if superseded:
+                    self.copy_attempt(original, 10)
+                result = self.verify()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("shard 2/2 attempt 9 appears twice", result.stderr)
+                self.assertIn(original.name, result.stderr)
+                self.assertIn(alias.name, result.stderr)
+
+    def test_legacy_shards_can_mix_with_explicit_attempts(self):
+        self.run_all_shards(2)
+        legacy = self.root / "out" / "run-tests-report-shard-2-of-2"
+        self.copy_attempt(legacy, 1)
+        (legacy / "run-tests-report.tsv").unlink()
+        result = self.verify()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assert_selected(result, [(1, 2, None), (2, 2, 1)])
+
+    def test_attempt_selection_preserves_count_and_index_errors(self):
+        import shutil
+        self.run_all_shards(2, attempt=9)
+        original = self.root / "out" / "run-tests-report-shard-1-of-2-attempt-9"
+        for index, count, error in ((1, 3, "disagree on the shard count"), (3, 2, "not exactly 1..2")):
+            with self.subTest(index=index, count=count):
+                alias = original.with_name(f"run-tests-report-shard-{index}-of-{count}-attempt-10")
+                shutil.copytree(original, alias)
+                manifest = alias / "suite-list.tsv"
+                manifest.write_text(manifest.read_text().replace("# shard=1/2", f"# shard={index}/{count}"))
+                result = self.verify()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(error, result.stderr)
+                shutil.rmtree(alias)
+        shutil.rmtree(self.root / "out" / "run-tests-report-shard-2-of-2-attempt-9")
+        result = self.verify()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not exactly 1..2", result.stderr)
+
+    def test_selected_attempt_keeps_census_and_non_verdict_validation(self):
+        self.run_all_shards(2, attempt=9)
+        latest = self.copy_attempt(self.root / "out" / "run-tests-report-shard-2-of-2-attempt-9", 10)
+        manifest = latest / "suite-list.tsv"
+        report = latest / "run-tests-report.tsv"
+        census = self.root / "out" / "census-suite-list.tsv"
+        originals = {p: p.read_text() for p in (manifest, report, census)}
+        victim = self.manifest(manifest)[2]
+        lines = originals[manifest].splitlines()
+        report_row = next(row for row in originals[report].splitlines()[2:] if row.split("\t")[0] == victim)
+        cases = [
+            (manifest, "\n".join(lines[:2] + lines[3:]) + "\n", f"missing: {victim}"),
+            (manifest, originals[manifest] + victim + "\n", f"duplicate: {victim}"),
+            (manifest, originals[manifest] + "extra.test.py\n", "extra: extra.test.py"),
+            (census, originals[census] + victim + "\n", "repeats a suite path"),
+            (report, originals[report] + report_row.replace(victim, "extra.test.py", 1) + "\n", "report-extra: extra.test.py"),
+        ]
+        for verdict in ("STALE", "UNDECLARED-ISOLATION-OPTOUT", "ISOLATION-OPTOUT-UNNEEDED"):
+            cases.append((report, originals[report].replace(report_row, report_row.replace("\tPASS\t", f"\t{verdict}\t")),
+                          f"report-missing: {victim}"))
+        for path, contents, error in cases:
+            with self.subTest(path=path.name, error=error):
+                for target, text in originals.items():
+                    target.write_text(text)
+                path.write_text(contents)
+                result = self.verify()
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(error, result.stdout + result.stderr)
 
     def test_select_and_exclude_apply_before_the_split(self):
         census = self.write_census(["--exclude", "sub/*", "--exclude", "e.test.py"])

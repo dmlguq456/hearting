@@ -491,10 +491,10 @@ def _worker_segments(node, resources, state_text=None):
 
 
 def _owner_job(jobs):
-    for job in jobs:
-        if (_get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1) and not _get(job, "route_node"):
-            return job
-    return jobs[0] if jobs else None
+    owners = [job for job in jobs
+              if (_get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1)
+              and not _get(job, "route_node")]
+    return owners[0] if len(owners) == 1 else None
 
 
 def _route_stem(path):
@@ -699,7 +699,18 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         view = slot["view"] or {}
         record = slot["record"] or {}
         jobs = slot["jobs"]
-        owner = _owner_job(jobs)
+        expected_owner = _text(record.get("owner_attempt_id"))
+        if expected_owner == "-":
+            expected_owner = None
+        owner_jobs = [job for job in jobs
+                      if not expected_owner or _get(job, "attempt_id") == expected_owner]
+        owner = _owner_job(owner_jobs)
+        if owner is None and expected_owner:
+            exact_sessions = [session for session in slot["sessions"]
+                              if _get(session, "attempt_id") == expected_owner
+                              and _get(_work(session), "source") == "route-exact"]
+            if len(exact_sessions) == 1:
+                owner = exact_sessions[0]
         owner_tag = None
         for session in slot["sessions"]:
             tag = _text(_get(session, "session_tag"))
@@ -766,12 +777,10 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         worker = _worker_segments(worker_node, run_children, state_text)
         dead = state in ("dead", "stale")
         owner_model = None if dead else (
-            _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None) or \
-            (session_row or {}).get("model")
-        owner_harness = (_text(_get(owner, "harness")) if owner is not None else None) or \
-            (session_row or {}).get("harness")
+            _model_pair(_get(owner, "resolved_model", "model")) if owner is not None else None)
+        owner_harness = _text(_get(owner, "harness")) if owner is not None else None
         owner_effort = None if dead else (
-            _effort(_get(owner, "effort")) if owner is not None else None) or (session_row or {}).get("effort")
+            _effort(_get(owner, "effort")) if owner is not None else None)
         worktree = None
         if cwd and ("-wt" in cwd or "/.worktrees/" in cwd):
             worktree = os.path.basename(cwd.rstrip("/")) or None
@@ -790,15 +799,44 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             title = title or session_row["title"]
         worker_stage = _text(worker_node.get("id")) if worker_node else None
         worker_unit = _text(worker_node.get("unit")) if worker_node else None
-        context = None
-        if owner is not None:
-            tokens = _num(_get(owner, "active_context_tokens"))
-            window = _num(_get(owner, "context_window_tokens"))
-            if window is None and session_row is not None and session_row.get("window") and \
-                    _text(_get(owner, "harness")) == session_row.get("harness"):
-                window = int(session_row["window"] * 1_000_000)
-            if tokens is not None and window:
-                context = [int(tokens), int(window)]
+        # Navigation ancestry never authorizes metrics from the parent session.
+        # Each attempt uses the same applied-policy/native gauge as a session.
+        owner_gauge = _context_gauge(owner) if owner is not None else (None, None)
+        worker_contexts = []
+        for job in jobs:
+            node_id = _text(_get(job, "route_node"))
+            if not node_id or _get(job, "liveness") not in ("working", "idle", "blocked"):
+                continue
+            node = next((n for n in view_nodes if n.get("id") == node_id), None)
+            if node is None or node.get("state") not in ("active", "reconciling", "recovering"):
+                continue
+            attempt = _text(_get(job, "attempt_id"))
+            anchor = next((item for item in jobs
+                           if _get(item, "attempt_id") == node.get("attempt_id")), None)
+            anchor_meta = _get(anchor, "_registry_metadata") or {}
+            job_meta = _get(job, "_registry_metadata") or {}
+            parallel_sibling = (
+                isinstance(anchor_meta, dict) and isinstance(job_meta, dict)
+                and bool(anchor_meta.get("session_chain_id"))
+                and bool(anchor_meta.get("parent_attempt_id"))
+                and all(meta.get("subsession_mode") == "parallel"
+                        and meta.get("stage_authority") == "0"
+                        and meta.get("route_id") == rid and meta.get("route_node") == node_id
+                        for meta in (anchor_meta, job_meta))
+                and all(anchor_meta.get(key) == job_meta.get(key)
+                        for key in ("session_chain_id", "parent_attempt_id"))
+                and (not expected_owner or job_meta.get("parent_attempt_id") == expected_owner)
+            )
+            if not parallel_sibling and (
+                    node.get("attempt_id") and node.get("attempt_id") != attempt
+                    or node.get("harness") and node.get("harness") != _get(job, "harness")):
+                continue
+            # Multiple registered sub-sessions are individual rows, never one
+            # latest/aggregate context value for the whole stage.
+            pct, window = _context_gauge(job) if attempt else (None, None)
+            worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
+                                    "model": _model_pair(_get(job, "resolved_model", "model")),
+                                    "context": pct, "window": window})
         resume = None
         if state == "dead":
             resume = next((n.get("id") for n in view_nodes if _stage_state(n) == "failed"), None) or \
@@ -806,11 +844,15 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         legs = _chain_legs(chain_nodes, rid, short, leg_status, progress) if chain_nodes else \
             ([[short or "·", leg_status, progress]] if short else [])
         mode = _text(view.get("capability_mode")) or _text(record.get("capability_mode"))
+        current = bool(run_children or worker_contexts
+                       or owner_live in ("working", "idle", "blocked")
+                       and total and done != total and (active is not None or not failed))
+        running = current and (active is not None or state == "working" or run_children or worker_contexts)
         route = {
             "id": rid, "repo": repo, "session_tag": owner_tag, "title": title, "state": state,
             "outcome": _text(_get(result, "result", "status")),
             "worker": worker, "age": age, "legs": legs,
-            "stages": stages, "resume": resume, "activity": "running" if active is not None or state == "working" else "ended",
+            "stages": stages, "resume": resume, "activity": "running" if running else "ended",
             "loops": None, "worktree": worktree, "tree_label": short,
             "harness": owner_harness, "model": owner_model, "effort": owner_effort,
             "mode": mode,
@@ -819,7 +861,9 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "capability": short, "shape": shape, "past_from": None,
             "worker_stage": worker_stage or "·", "worker_unit": worker_unit,
             "worker_stage_key": None, "worker_step_key": None,
-            "owner_context": context, "subworker": None,
+            "owner_context": None, "owner_gauge": list(owner_gauge),
+            "worker_contexts": worker_contexts, "subworker": None,
+            "current": current,
         }
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status)
@@ -988,7 +1032,7 @@ def _question_records(snapshot, session_rows, session_index, now):
             "pane": session["pane"] if session else None,
             "marker": "◑" if source == "S2" else "●",
         })
-        if session:
+        if session and not older:
             session["ask"] = "answer needed"
             marker = "◑" if source == "S2" else "●"
             if session.get("answer_wait_marker") != "●":
@@ -1670,6 +1714,9 @@ def _system_record(snapshot, session_rows, compute, accepted_detail, usage, now=
         pending = _num(delivery.get("pending", delivery.get("total")))
         if pending is not None:
             peer_delivery["pending"] = int(pending)
+        no_recipient = delivery.get("no_recipient")
+        if isinstance(no_recipient, int) and not isinstance(no_recipient, bool):
+            peer_delivery["no_recipient"] = no_recipient
     peer_messages = _get(snapshot, "peer_messages")
     records = _get(peer_messages, "records") if peer_messages is not None else None
     if isinstance(records, (list, tuple)):

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import tempfile
+import json
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -45,6 +47,56 @@ class RecipientReceiptTest(unittest.TestCase):
         self.assertEqual(marker, receipt.receipt_marker(self.record, self.storage))
         changed = dict(self.record, route_node="other")
         self.assertNotEqual(marker, receipt.receipt_marker(changed, self.storage))
+
+    def test_first_write_authority_and_release_preserve_changed_or_submitted_records(self):
+        for mutation in ("current", "other-owner", "expired", "boolean-lease", "identity",
+                         "ambiguous", "prepared", "accepted", "acked"):
+            with self.subTest(mutation=mutation):
+                root = self.root / mutation
+                seed = pending.create(root, recipient_kind="claude-parent-runtime",
+                    recipient_key=self.storage, delivery_id=self.delivery_id,
+                    session_generation="", session_generation_supported="0",
+                    attempt_ids=self.record["attempt_ids"], parent_attempt_id="parent",
+                    route_id="route", route_node="execute", receipt=self.record["receipt"],
+                    receipt_digest=self.record["receipt_digest"], row_revisions=self.record["row_revisions"])
+                seed = pending.claim(root, self.storage, self.delivery_id, claim_owner="carrier",
+                                     lease_seconds=30, require_generation_proof=False)
+                path = pending.record_path(root, self.storage, self.delivery_id)
+                if mutation in {"other-owner", "expired", "boolean-lease", "identity"}:
+                    raw = json.loads(path.read_text())
+                    if mutation == "other-owner": raw["claim_owner"] = "different"
+                    elif mutation == "expired": raw["claim_deadline_ns"] = time.monotonic_ns() - 1
+                    elif mutation == "boolean-lease": raw["claim_deadline_ns"] = True
+                    else: raw["row_revisions"] = {seed["attempt_ids"][0]: "changed"}
+                    path.write_text(json.dumps(raw))
+                elif mutation == "ambiguous":
+                    pending.mark_sent_ambiguous(root, self.storage, self.delivery_id, claim_owner="carrier")
+                elif mutation in {"prepared", "accepted"}:
+                    identity = pending.submission_fence_identity(seed, self.storage)
+                    prepared = pending.prepare_submission_fence(root, self.storage, self.delivery_id,
+                        claim_owner="carrier", expected_identity=identity)
+                    if mutation == "accepted":
+                        pending.record_submission_accepted(root, self.storage, self.delivery_id,
+                            claim_owner="carrier", expected_identity=identity,
+                            expected_attempt=prepared["attempt"], queue_submission_id="q")
+                elif mutation == "acked":
+                    pending.ack_received(root, self.storage, self.delivery_id,
+                        expected_identity=pending.received_ack_identity(seed, self.storage, self.delivery_id),
+                        acked_by="other-carrier-exact-receipt")
+                before = path.read_bytes()
+                self.assertEqual(receipt.claimed_send_current(root, self.storage, seed, "carrier",
+                    "claude", self.storage), mutation == "current")
+                receipt.release_unsubmitted_claim(root, self.storage, seed, "carrier", self.storage)
+                if mutation == "current":
+                    self.assertEqual(pending.read(root, self.storage, self.delivery_id)["state"], "pending")
+                else:
+                    self.assertEqual(path.read_bytes(), before)
+                    if mutation in {"other-owner", "boolean-lease", "identity", "prepared", "accepted", "acked"}:
+                        with self.assertRaises(pending.PendingDeliveryError):
+                            pending.renew_unsubmitted_claim(root, self.storage, self.delivery_id,
+                                claim_owner="carrier", target_session=self.storage, lease_seconds=30,
+                                expected_identity=pending.received_ack_identity(seed, self.storage, self.delivery_id))
+                        self.assertEqual(path.read_bytes(), before)
 
     def test_opencode_receipts_require_the_exact_expected_carrier_body(self):
         marker = receipt.receipt_marker(self.record, self.storage)

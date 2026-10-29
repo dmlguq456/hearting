@@ -236,6 +236,15 @@ class ExactCompletionSequenceTest(unittest.TestCase):
                          ("ready", str(jobs), "parent-session-legacy"))
         self.assertEqual(recovered["children"], receipt["children"])
         self.assertEqual(pending.record_path(legacy_root, sid, did).read_bytes(), before)
+        # Historical verification is read-only even when current lineage is
+        # unavailable. It cannot authorize another send or manufacture an ACK.
+        from unittest import mock
+        with mock.patch("dispatch_seat_handover._effective", side_effect=OSError("current lineage unavailable")), \
+                mock.patch.object(pending, "ack_received") as ack:
+            self.assertTrue(obligations.received_registered_ack(jobs, record, sid))
+            self.assertEqual(list(obligations._registered_delivery_bindings(
+                message, roots=[legacy_root], require_current_recipient=True)), [])
+            ack.assert_not_called()
         peer_path = legacy_root / "peer-messages/pending" / (ref + ".json")
         for change in ({"receipt": "unverified"}, {"dispatch_notice": {
                 **message["dispatch_notice"], "delivery_id": "delivery-other"}}):

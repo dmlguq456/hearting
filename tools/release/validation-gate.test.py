@@ -2,6 +2,7 @@
 """Exercise release admission and the workflow's prerequisite wiring."""
 
 import copy
+import fnmatch
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -241,12 +243,39 @@ class ChecksWorkflowContractTest(unittest.TestCase):
             self.assertIn(option, shard)
         self.assertIn("bash tools/release/install-ci-fixtures.sh ripgrep strace", shard)
 
-    def test_shard_and_marker_uploads_replace_an_earlier_attempt(self):
+    def test_shard_uploads_preserve_each_attempt_and_its_whole_payload(self):
         shard = job_block(self.checks, "full-suite-shard")
         upload = shard.split("- name: Upload shard report", 1)[1]
         self.assertIn("if: always()", upload)
-        self.assertIn("name: run-tests-report-shard-${{ matrix.shard }}-of-8", upload)
-        self.assertIn("overwrite: true", upload)
+        self.assertIn("name: run-tests-report-shard-${{ matrix.shard }}-of-8-attempt-${{ github.run_attempt }}\n", upload)
+        self.assertIn("path: ${{ runner.temp }}/shard-out\n", upload)
+        self.assertIn("if-no-files-found: ignore", upload)
+        self.assertNotIn("overwrite:", upload)
+
+    def test_download_keeps_legacy_and_all_attempts_in_separate_directories(self):
+        aggregate = job_block(self.checks, "full-test-suite")
+        download = aggregate.split("- name: Download the shard reports", 1)[1].split("\n      - name:", 1)[0]
+        pattern = re.search(r"(?m)^          pattern: (.+)$", download).group(1)
+        for name in ("run-tests-report-shard-1-of-8", "run-tests-report-shard-2-of-8-attempt-9",
+                     "run-tests-report-shard-2-of-8-attempt-10"):
+            self.assertTrue(fnmatch.fnmatchcase(name, pattern), name)
+        self.assertIn("path: ${{ runner.temp }}/shards\n", download)
+        self.assertIn("merge-multiple: false", download)
+        for override in ("github.run_attempt", "run-id:", "github-token:"):
+            self.assertNotIn(override, download)
+
+    def test_aggregate_requires_success_even_when_fail_reports_have_complete_coverage(self):
+        aggregate = job_block(self.checks, "full-test-suite")
+        guard = aggregate.split("- name: Require every shard to have succeeded", 1)[1].split("\n      - name:", 1)[0]
+        self.assertIn("SHARDS: ${{ needs.full-suite-shard.result }}", guard)
+        script = textwrap.dedent(guard.split("        run: |\n", 1)[1])
+        for status in ("success", "failure", "cancelled", "skipped"):
+            with self.subTest(status=status):
+                result = subprocess.run(["bash", "-c", script], env=dict(os.environ, SHARDS=status),
+                                        capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0 if status == "success" else 1, result.stderr)
+
+    def test_marker_upload_still_replaces_an_earlier_attempt(self):
         marker = job_block(self.checks, "validated-tree-marker")
         self.assertIn("name: validated-tree-${{ steps.tree.outputs.tree }}", marker)
         self.assertIn("overwrite: true", marker)

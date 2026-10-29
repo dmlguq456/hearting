@@ -6,6 +6,7 @@ runs Claude's statusline.sh against isolated pid, title, config and state paths.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -195,21 +196,67 @@ class DerivedSessionThreeSurfaceFixtureTest(_HermeticStateRoot):
         self.assertEqual(fleet_name, "my-custom-name")
 
 
-@unittest.skipUnless(os.path.isfile("/proc/self/comm"),
-                     "Claude pid-name walk-up requires Linux /proc")
+@unittest.skipUnless(os.path.isfile("/proc/self/stat") and shutil.which("cc"),
+                     "native Claude fixture requires Linux /proc and cc")
 class StatuslineSubprocessTest(_HermeticStateRoot):
-    """Run the production shell script with writable state under TemporaryDirectory."""
+    """Real statusline with native executable/argv and exact private registry."""
+
+    @classmethod
+    def setUpClass(cls):
+        native = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(native.cleanup)
+        root = Path(native.name)
+        source = root / "runtime.c"
+        source.write_text(r'''#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/wait.h>
+int main(void) {
+    char buffer[8192], path[8192];
+    snprintf(path, sizeof(path), "/proc/%d/stat", getpid());
+    FILE *f = fopen(path, "r");
+    if (!f || !fgets(buffer, sizeof(buffer), f)) return 2;
+    fclose(f);
+    char *token = strtok(strrchr(buffer, ')') + 2, " ");
+    for (int i=0; i<19 && token; i++) token = strtok(NULL, " ");
+    if (!token) return 3;
+    snprintf(path, sizeof(path), "%s/sessions/%d.json", getenv("CLAUDE_CONFIG_DIR"), getpid());
+    f = fopen(path, "w");
+    if (!f) return 4;
+    fprintf(f, "{\"pid\":%d,\"procStart\":\"%s\",\"sessionId\":\"%s\","
+            "\"name\":\"%s\",\"nameSource\":\"%s\"}", getpid(), token, getenv("TEST_SESSION_ID"),
+            getenv("TEST_SESSION_NAME"), getenv("TEST_NAME_SOURCE"));
+    if (fclose(f) != 0) return 5;
+    pid_t child = fork();
+    if (child < 0) return 6;
+    if (child == 0) { execl("/bin/bash", "bash", getenv("STATUSLINE_TEST_SCRIPT"), NULL); _exit(7); }
+    int status;
+    if (waitpid(child, &status, 0) != child) return 8;
+    return WIFEXITED(status) ? WEXITSTATUS(status) : 9;
+}
+''', encoding="utf-8")
+        cls.binary = root / "claude" / "versions" / "8.7.6"
+        cls.binary.parent.mkdir(parents=True)
+        subprocess.run([shutil.which("cc"), str(source), "-o", str(cls.binary)],
+                       check=True, capture_output=True, timeout=30)
 
     def setUp(self):
         super().setUp()
-        tools_link = Path(self.tmp.name) / "tools"
-        tools_link.mkdir()
-        (tools_link / "fleet").symlink_to(Path(_TOOLS_DIR) / "fleet",
-                                          target_is_directory=True)
         self.title_state = Path(self.tmp.name) / "title-state"
         self.title_state.mkdir()
         self.claude_config = Path(self.tmp.name) / "claude-config"
         self.claude_config.mkdir()
+        (self.claude_config / "sessions").mkdir()
+        # Both the native registry and legacy name reader use this private home.
+        tools_link = self.claude_config / "tools"
+        tools_link.mkdir()
+        (tools_link / "fleet").symlink_to(Path(_TOOLS_DIR) / "fleet",
+                                          target_is_directory=True)
+        utilities = self.claude_config / "utilities"
+        utilities.mkdir()
+        (utilities / "claude_process_identity.py").symlink_to(
+            Path(_REPO_ROOT) / "utilities" / "claude_process_identity.py")
 
     def _run_statusline(self, sid, cwd_name, *, name, name_source, title=None,
                         native_name="automatic stdin title"):
@@ -223,11 +270,12 @@ class StatuslineSubprocessTest(_HermeticStateRoot):
             }), encoding="utf-8")
         env = dict(os.environ)
         env.update({
-            "AGENT_HOME": self.tmp.name,
+            "AGENT_HOME": str(self.claude_config),
             "CLAUDE_CONFIG_DIR": str(self.claude_config),
             "FLEET_TITLE_STATE_DIR": str(self.title_state),
             "FLEET_TITLE_DISABLE": "1",
             "STATUSLINE_TEST_SCRIPT": _STATUSLINE,
+            "TEST_SESSION_ID": sid,
             "TEST_SESSION_NAME": name,
             "TEST_NAME_SOURCE": name_source,
         })
@@ -235,25 +283,24 @@ class StatuslineSubprocessTest(_HermeticStateRoot):
             "session_id": sid, "session_name": native_name, "cwd": str(cwd),
             "model": {"display_name": "Fixture"},
         })
-        runner = """
-import ctypes, json, os, subprocess, sys
-ctypes.CDLL(None).prctl(15, b"claude", 0, 0, 0)
-sessions = os.path.join(os.environ["AGENT_HOME"], "sessions")
-os.makedirs(sessions, exist_ok=True)
-with open(os.path.join(sessions, str(os.getpid()) + ".json"), "w", encoding="utf-8") as f:
-    json.dump({"name": os.environ["TEST_SESSION_NAME"],
-               "nameSource": os.environ["TEST_NAME_SOURCE"]}, f)
-result = subprocess.run(["bash", os.environ["STATUSLINE_TEST_SCRIPT"]],
-                        input=sys.stdin.read(), text=True, capture_output=True,
-                        env=os.environ.copy())
-sys.stdout.write(result.stdout)
-sys.stderr.write(result.stderr)
-raise SystemExit(result.returncode)
-"""
-        result = subprocess.run([sys.executable, "-c", runner], input=payload,
-                                text=True, capture_output=True, env=env, timeout=15)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        return result.stdout
+        # The isolated suite runner owns the timeout and descendant cleanup.
+        # The native parent waits for statusline before fixture paths retire.
+        with subprocess.Popen([str(self.binary)], stdin=subprocess.PIPE,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, env=env) as proc:
+            output, error = proc.communicate(payload)
+        self.assertEqual(proc.returncode, 0, error)
+        registry = json.loads((self.claude_config / "sessions" /
+                               (str(proc.pid) + ".json")).read_text(encoding="utf-8"))
+        tap = json.loads((self.claude_config / ".statusline" /
+                          (sid + ".json")).read_text(encoding="utf-8"))
+        self.assertEqual(tap["session_id"], registry["sessionId"])
+        self.assertEqual(tap["session_id"], sid)
+        self.assertEqual(registry["pid"], proc.pid)
+        self.assertEqual(tap["pid"], proc.pid)
+        self.assertRegex(tap["proc_start"], r"^[0-9]+$")
+        self.assertEqual(tap["proc_start"], registry["procStart"])
+        return output
 
     def test_real_statusline_selects_user_name_last_success_blank_and_cwd_name(self):
         explicit = self._run_statusline(

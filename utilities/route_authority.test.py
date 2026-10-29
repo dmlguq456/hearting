@@ -126,12 +126,40 @@ class Case1ParentSessionTest(unittest.TestCase):
              "parent_sid": "codex-sid", "parent_harness": "codex",
              "owner_route_id": "rt-96bab699717dba8f", "owner_route_hash": "sha256:96ba"}
 
+    def _record_handover(self, binding, predecessor, successor,
+                         successor_harness, seat_key, timestamp, source):
+        import session_tidy as tidy
+        seat = tidy.Seat("pane", seat_key, f"w1:{seat_key}")
+        snapshot = {
+            "schema": HANDOVER.SCHEMA,
+            "seat": seat.as_dict(),
+            "from": {"harness": successor_harness, "sid": successor},
+            "at": timestamp,
+            "bindings": [binding],
+            "snapshot_id": f"snapshot-{seat_key}",
+        }
+        row = {"ts": timestamp, "harness": successor_harness, "sid": successor,
+               "event": "handover", "from": predecessor, "source": source,
+               "bindings": [binding]}
+        with tidy.seat_lock(seat.key):
+            tidy._append_ledger_entry(seat, {
+                "ts": timestamp - 0.5, "first_seen": timestamp - 0.5,
+                "harness": successor_harness, "sid": successor, "event": "start",
+                "source": "clear" if source == "clear" else "startup",
+            })
+            tidy.atomic_write_json(HANDOVER._snapshot_path(seat.key), snapshot)
+            tidy._append_ledger_entry(seat, row)
+        HANDOVER._LINEAGE_GRAPH_CACHE.clear()
+
     def _owns_after(self, successor_sid, successor_harness):
         with tempfile.TemporaryDirectory() as td:
-            jobs = Path(td) / "jobs.log"
-            handover = {"from": "codex-sid", "sid": successor_sid, "harness": successor_harness,
-                        "bindings": [HANDOVER.binding_of(jobs, self.OWNER)], "ts": 1}
-            with mock.patch.object(HANDOVER, "_lineage_seats", return_value={"seat": [handover]}):
+            root = Path(td)
+            jobs = root / "jobs.log"
+            binding = HANDOVER.binding_of(jobs, self.OWNER)
+            source = "clear" if successor_harness == "codex" else "retire"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                self._record_handover(binding, "codex-sid", successor_sid, successor_harness,
+                                      f"case1-{successor_harness}", 1, source)
                 return RA.owns(self.OWNER, successor_sid, jobs)
 
     def test_the_registered_session_owns_its_route(self):
@@ -150,18 +178,18 @@ class Case1ParentSessionTest(unittest.TestCase):
         self.assertTrue(self._owns_after("claude-sid", "claude"))
 
     def test_only_current_recipient_owns_after_two_handovers(self):
-        jobs = Path("/tmp/registered-parent-handover-jobs")
-        binding = HANDOVER.binding_of(jobs, self.OWNER)
-        rows = [
-            {"from": "codex-sid", "sid": "claude-sid", "harness": "claude",
-             "bindings": [binding], "ts": 1},
-            {"from": "claude-sid", "sid": "opencode-sid", "harness": "opencode",
-             "bindings": [binding], "ts": 2},
-        ]
-        with mock.patch.object(HANDOVER, "_lineage_seats", return_value={"seat": rows}):
-            self.assertFalse(RA.owns(self.OWNER, "codex-sid", jobs))
-            self.assertFalse(RA.owns(self.OWNER, "claude-sid", jobs))
-            self.assertTrue(RA.owns(self.OWNER, "opencode-sid", jobs))
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            jobs = root / "jobs.log"
+            binding = HANDOVER.binding_of(jobs, self.OWNER)
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                self._record_handover(binding, "codex-sid", "claude-sid",
+                                      "claude", "case1-claude", 1, "retire")
+                self._record_handover(binding, "claude-sid", "opencode-sid",
+                                      "opencode", "case1-opencode", 2, "retire")
+                self.assertFalse(RA.owns(self.OWNER, "codex-sid", jobs))
+                self.assertFalse(RA.owns(self.OWNER, "claude-sid", jobs))
+                self.assertTrue(RA.owns(self.OWNER, "opencode-sid", jobs))
 
     def test_old_parent_cannot_write_a_second_snapshot_but_current_successor_can(self):
         import session_tidy as tidy
@@ -202,7 +230,7 @@ class Case1ParentSessionTest(unittest.TestCase):
 
     def test_unreadable_handover_waits_without_registered_parent_authority(self):
         jobs = Path("/tmp/registered-parent-unreadable-jobs")
-        with mock.patch.object(HANDOVER, "_lineage_seats", side_effect=OSError("unreadable")):
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature", side_effect=OSError("unreadable")):
             self.assertFalse(RA.owns(self.OWNER, "codex-sid", jobs))
             self.assertFalse(RA.owns(self.OWNER, "claude-sid", jobs))
 

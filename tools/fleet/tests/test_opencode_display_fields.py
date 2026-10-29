@@ -31,7 +31,7 @@ from fleet import refresh_title as rt                       # noqa: E402
 from fleet.collectors import dispatch                       # noqa: E402
 from fleet.collectors import opencode                       # noqa: E402
 from fleet.model import DispatchJob, Session                # noqa: E402
-from fleet.context_policy import SCHEMA, policy_path       # noqa: E402
+from fleet.context_policy import SCHEMA, policy_path, read_policy  # noqa: E402
 
 
 def _envelope(event_type, part):
@@ -255,6 +255,31 @@ class DispatchTelemetryTest(unittest.TestCase):
             dispatch._enrich_opencode_attempt_session(job)
         self.assertEqual(job.active_context_tokens, 19691)
 
+    def test_completed_native_zero_is_observed_without_cumulative_fallback(self):
+        step = json.loads(json.dumps(_STEP_LINE))
+        step["part"]["tokens"] = {"total": 0}
+        job = self._job([step])
+        dispatch._enrich_opencode_attempt_session(job)
+        self.assertEqual(job.active_context_tokens, 0)
+        self.assertIsNone(job.context_window_tokens)
+
+    def test_other_models_policy_does_not_replace_this_attempts_observed_model(self):
+        job = self._job([_STEP_LINE])
+        path = policy_path("opencode", attempt_id=job.attempt_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "schema": SCHEMA, "harness": "opencode", "session_id": "ses_test",
+            "attempt_id": job.attempt_id, "model": "other-provider/other-model",
+            "observed_at": time.time(), "policy": {
+                "state": "applied", "effective_window_tokens": 1_000_000,
+                "applied_trigger_tokens": 40000, "enabled": True, "enforced": True},
+        }))
+        dispatch._enrich_opencode_attempt_session(job)
+        self.assertEqual(job.active_context_tokens, 19691)
+        self.assertIsNone(job.context_window_tokens)
+        self.assertIsNone(job.ctx_pct)
+        self.assertNotEqual(job.resolved_model, "other-provider/other-model")
+
     def test_native_fallback_sum_includes_output_and_cache(self):
         step = json.loads(json.dumps(_STEP_LINE))
         del step["part"]["tokens"]["total"]
@@ -418,7 +443,7 @@ class CurrentSessionBindingTest(unittest.TestCase):
         self.assertIsNone(sess.title)
         self.assertIsNone(sess._refresh_source)
 
-    def _run_v2(self, sess, claim, observed):
+    def _run_v2(self, sess, claim, observed, *, policy_reader=None):
         runtime = mock.Mock()
         runtime.credential_store_present.return_value = True
         runtime.read_session_observation.return_value = observed
@@ -429,7 +454,8 @@ class CurrentSessionBindingTest(unittest.TestCase):
                 mock.patch.object(opencode.session_registry, "read", return_value=None), \
                 mock.patch.object(opencode, "_opencode_v2_runtime", return_value=runtime), \
                 mock.patch.object(opencode, "_attach_v2_shell_tasks"), \
-                mock.patch("fleet.context_policy.read_policy", return_value=None), \
+                mock.patch("fleet.context_policy.read_policy", return_value=None,
+                           side_effect=policy_reader), \
                 self._title_patches()[0], self._title_patches()[1], self._title_patches()[2]:
             opencode.enrich(sess)
         return sess, runtime
@@ -449,6 +475,65 @@ class CurrentSessionBindingTest(unittest.TestCase):
         self.assertEqual((sess.title, sess.summary), ("Title B", "Summary B"))
         self.assertEqual(sess.active_context_tokens, 123)
         self.assertEqual(sess._refresh_source["session_id"], "ses_b")
+
+    def test_v2_pending_zero_does_not_erase_last_observed_context_but_finished_zero_does(self):
+        for completed, expected in ((None, 123), (1000, 0)):
+            with self.subTest(completed=completed):
+                observed = {"state": "observed", "generation": "v2", "cursor": 8,
+                            "session": {"model": {"id": "m", "providerID": "p"},
+                                        "time_updated": 1000, "tokens_input": 999999},
+                            "messages": [
+                                {"type": "assistant", "tokens": {"total": 123}, "completed": 900},
+                                {"type": "assistant", "tokens": {"total": 0}, "completed": completed}]}
+                sess, _ = self._run_v2(self._session(),
+                                       ("ses_b", "opencode-tui-selection"), observed)
+                self.assertEqual(sess.active_context_tokens, expected)
+                self.assertEqual(sess.session_input_tokens, 999999)
+
+    def test_v2_exact_request_policy_keeps_raw_window_when_trigger_is_unknown(self):
+        observed = {"state": "observed", "generation": "v2", "cursor": 8,
+                    "session": {"model": {"id": "m", "providerID": "p"},
+                                "time_updated": 2000000, "tokens_input": 999999},
+                    "messages": [{"type": "assistant", "model": {"id": "m", "providerID": "p"},
+                                  "tokens": {"total": 123456}, "updated": 2000000}]}
+        with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(self.root / "state"),
+                                          "FLEET_SESSION_REGISTRY_DIR": str(self.root / "sessions")}):
+            path = policy_path("opencode", pid=4242, proc_start="123")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"schema": SCHEMA, "harness": "opencode", "session_id": "ses_b",
+                      "pid": 4242, "proc_start": "123", "attempt_id": None, "model": "p/m",
+                      "observed_at": 1999.0, "policy": {
+                          "state": "unknown", "runtime_version": "2.0.32",
+                          "source": "opencode-v2-request", "effective_window_tokens": 950000,
+                          "session_id": "ses_b", "reason": "native-v2-compaction-behavior-unverified"}}
+            for change, expected in (({}, 950000), ({"model": "p/other"}, None),
+                                     ({"session_id": "ses_other"}, None),
+                                     ({"proc_start": "124"}, None),
+                                     ({"observed_at": 2002.0}, None)):
+                with self.subTest(change=change):
+                    path.write_text(json.dumps({**record, **change}))
+                    sess, _ = self._run_v2(self._session(),
+                                           ("ses_b", "opencode-tui-selection"), observed,
+                                           policy_reader=read_policy)
+                    self.assertEqual(sess.active_context_tokens, 123456)
+                    self.assertEqual(sess.context_window_tokens, expected)
+                    self.assertEqual(sess.session_input_tokens, 999999)
+                    self.assertIsNone(sess.ctx_pct)
+                    self.assertIsNone(sess.context_display_window_tokens)
+
+    def test_v2_missing_or_malformed_latest_tokens_do_not_reuse_an_older_request(self):
+        for tokens in (None, {"total": -1}, {"total": "invalid"}):
+            with self.subTest(tokens=tokens):
+                observed = {"state": "observed", "generation": "v2", "cursor": 8,
+                            "session": {"time_updated": 1000, "tokens_input": 999999},
+                            "messages": [
+                                {"type": "assistant", "tokens": {"total": 123}, "completed": 900},
+                                {"type": "assistant", "tokens": tokens, "completed": 1000}]}
+                sess, _ = self._run_v2(self._session(),
+                                       ("ses_b", "opencode-tui-selection"), observed)
+                self.assertIsNone(sess.active_context_tokens)
+                self.assertEqual(sess.session_input_tokens, 999999)
+                self.assertIsNone(sess.ctx_pct)
 
     def test_v2_real_reader_keeps_selected_directory_when_launch_cwd_differs(self):
         from fleet import session_cwd

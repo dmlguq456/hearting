@@ -140,6 +140,23 @@ class ClaudeInteractiveTest(unittest.TestCase):
         self.assertIsNone(session.context_window_tokens)
         self.assertIsNone(session.ctx_pct)
 
+    def test_statusline_foreign_sid_does_not_supply_context(self):
+        tap = _statusline_tap(self.home, sid="sid-other", window=1_000_000)
+        session = self._session(tap, "sid-selected")
+        self.assertIsNone(session.active_context_tokens)
+        self.assertIsNone(session.context_window_tokens)
+        self.assertIsNone(session.context_policy)
+
+    def test_repeated_statusline_does_not_keep_a_missing_or_malformed_raw_pair(self):
+        tap = _statusline_tap(self.home, sid="sid-same")
+        session = self._session(tap, "sid-same")
+        for context in ({"total_input_tokens": 999_999}, [], "malformed"):
+            with self.subTest(context=context):
+                claude._apply_statusline(session, {"session_id": "sid-same", "context_window": context})
+                self.assertIsNone(session.active_context_tokens)
+                self.assertIsNone(session.context_window_tokens)
+                self.assertIsNone(session.ctx_pct)
+
 
 def _wrapper_module():
     for entry in (ROOT / "utilities", ROOT / "adapters" / "claude" / "bin"):
@@ -205,6 +222,17 @@ class ClaudeRegisteredTest(unittest.TestCase):
         self.assertEqual(payload["context_policy"]["attempt_id"], "att-claude-reg")
         self.assertEqual(payload["ctx_pct"], 50)
         self.assertIn("50%", row)
+
+    def test_another_models_result_window_is_not_a_window_for_the_latest_model(self):
+        rows = self._rows(123_456)
+        rows[-1]["modelUsage"] = {"claude-sonnet-5-5": {
+            "contextWindow": 1_000_000, "maxOutputTokens": 128_000}}
+        job = self._job({"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000"}, rows)
+        payload, _ = self._collect(job)
+        self.assertEqual(payload["active_context_tokens"], 123_456)
+        self.assertIsNone(payload["context_window_tokens"])
+        self.assertIsNone(payload["context_display_window_tokens"])
+        self.assertIsNone(payload["ctx_pct"])
 
     def test_launch_override_and_disable_are_honoured(self):
         job = self._job({"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "800000",
@@ -337,6 +365,18 @@ class _CodexFixture:
 
 
 class CodexInteractiveTest(_CodexFixture, unittest.TestCase):
+    def test_0163_existing_native_760k_does_not_become_current_config_1m(self):
+        self.catalogue(version="0.163.0")
+        self.config("model_context_window = 1000000\n")
+        _, payload, row = self._collect(self.rollout(version="0.163.0"))
+        self.assertEqual(payload["context_window_tokens"], 760_000)
+        self.assertEqual(payload["active_context_tokens"], 360_000)
+        self.assertEqual(payload["session_total_tokens"], 720_000)
+        self.assertEqual(payload["context_policy"]["state"], "unknown")
+        self.assertEqual(payload["context_policy"]["reason"], "native-consumer-version-unverified")
+        self.assertIsNone(payload["context_display_window_tokens"])
+        self.assertIn("47%", row)
+
     def _policy_case(self, **kwargs):
         _session, payload, row = self._collect(self.rollout(**kwargs))
         return payload, row

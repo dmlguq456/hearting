@@ -3,6 +3,7 @@
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from unittest import mock
 from concurrent.futures import ThreadPoolExecutor
@@ -46,6 +47,51 @@ class SessionNoticeTest(unittest.TestCase):
         self.assertEqual(self.notify("opencode", "k-oc")["recipient_kind"], "opencode-turn")
         self.assertIsNone(self.notify("other", "k-other"))
         self.assertIsNone(N.notify("claude", "", key="k", subject="s", text="t", jobs=self.jobs))
+
+    def test_writer_retains_idempotent_notice_duty_and_pending_survives_runner_failure(self):
+        import peer_obligations
+        env = {"HOME": str(self.jobs.parent / "home"),
+               "XDG_STATE_HOME": str(self.jobs.parent / "state"),
+               "AGENT_DISPATCH_JOBS": str(self.jobs)}
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=False) as ensure, \
+             mock.patch.object(peer_obligations, "request_dispatch_reconciliation", return_value=False):
+            first = N.notify("claude", "sid-1", key="writer-idempotent", subject="compute run",
+                             text="finished", jobs=self.jobs)
+            second = N.notify("claude", "sid-1", key="writer-idempotent", subject="compute run",
+                              text="finished", jobs=self.jobs)
+            duties = peer_obligations.ObligationStore(self.jobs.parent).list(
+                kinds={"run-notice"})
+        self.assertEqual(first["delivery_id"], second["delivery_id"])
+        self.assertEqual(len(duties), 1)
+        identity = duties[0]["intent"]["identity"]
+        self.assertEqual(identity["storage_recipient"], "sid-1")
+        self.assertEqual(identity["recipient_harness"], "claude")
+        self.assertEqual(duties[0]["intent"]["delivery_id"], first["delivery_id"])
+        self.assertEqual(duties[0]["intent"]["receipt_digest"], first["receipt_digest"])
+        self.assertNotIn("recipient_sid", identity)
+        self.assertEqual(ensure.call_count, 2)
+
+    def test_runner_failure_does_not_remove_the_pending_notice(self):
+        import dispatch_pending_delivery as pending
+        import peer_obligations
+        env = {"HOME": str(self.jobs.parent / "home"),
+               "XDG_STATE_HOME": str(self.jobs.parent / "state"),
+               "AGENT_DISPATCH_JOBS": str(self.jobs)}
+        with mock.patch.dict("os.environ", env), \
+             mock.patch.object(peer_obligations, "ensure_normal_runner",
+                               side_effect=OSError("runner unavailable")) as ensure:
+            receipt = {"schema_version": 1, "kind": "notice", "key": "run:durable",
+                       "subject": "compute run", "text": "finished", "required_action": "read-notice"}
+            with self.assertRaisesRegex(OSError, "runner unavailable"):
+                N.notify("claude", "sid-1", key=receipt["key"], subject=receipt["subject"],
+                         text=receipt["text"], jobs=self.jobs)
+            stored = pending.read(self.jobs.parent, "sid-1", N.gateway_delivery_id(receipt))
+            duties = peer_obligations.ObligationStore(self.jobs.parent).list(kinds={"run-notice"})
+        self.assertEqual(ensure.call_count, 1)
+        self.assertEqual(len(duties), 1)
+        self.assertEqual(stored["state"], "pending")
+        self.assertEqual(stored["receipt_digest"], N.receipt_digest(receipt))
 
     def test_a_malformed_notice_is_never_shown(self):
         with self.assertRaises(ValueError):

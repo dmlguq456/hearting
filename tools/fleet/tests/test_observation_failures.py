@@ -1,5 +1,6 @@
 """Fleet audit P3: failed observations never establish negative facts."""
 from contextlib import ExitStack
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -280,13 +281,120 @@ class JobFailures(unittest.TestCase):
 
 
 class PaneMetadata(unittest.TestCase):
+    def test_derived_claude_idle_metadata_is_repaired_by_existing_detail_path(self):
+        sid = "1d334a90-4214-4d30-a3ad-4c0b20f1ca28"
+        observed = {"agent": "claude", "pane_id": "idle-pane", "agent_status": "idle",
+                    "revision": 0, "agent_session": {"kind": "id", "agent": "claude", "value": sid}}
+        with tempfile.TemporaryDirectory() as temporary, ExitStack() as stack:
+            home = Path(temporary) / "claude"
+            (home / "sessions").mkdir(parents=True)
+            (home / "sessions/77.json").write_text(json.dumps({
+                "pid": 77, "sessionId": sid, "name": "project-2e", "nameSource": "derived"}))
+            stack.enter_context(mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(home),
+                "XDG_STATE_HOME": temporary + "/state", "FLEET_TITLE_STATE_DIR": temporary + "/titles",
+                "HERDR_PANE_ID": ""}))
+            stack.enter_context(mock.patch.object(herdr, "list_agents", return_value=[observed]))
+            stack.enter_context(mock.patch.object(herdr_projection.shutil, "which", return_value="herdr"))
+            stack.enter_context(mock.patch.object(herdr_projection, "_formatter_overrides", return_value=(None, None)))
+            stack.enter_context(mock.patch.object(herdr_projection, "session_title", return_value="Existing subject"))
+            writer = stack.enter_context(mock.patch.object(herdr_projection, "_send_projection", autospec=True))
+            forbidden = [stack.enter_context(mock.patch.object(owner, name, side_effect=AssertionError(name)))
+                         for owner, name in ((herdr_projection, "_report"),
+                             (herdr_projection, "_session_lifecycle"), (herdr_projection, "_assign_observed_tag"),
+                             (session_tags, "assign"), (session_tags, "assign_observed"))]
+            for name, value in (("_fill_locations", None), ("_campaign_labels", None),
+                                ("_scan_degradations", {}), ("_pending_delivery_counts", {})):
+                stack.enter_context(mock.patch.object(dispatch, name, return_value=value))
+            stack.enter_context(mock.patch.object(projection, "attach_projections"))
+            stack.enter_context(mock.patch("fleet.route_chain.enrich"))
+            stack.enter_context(mock.patch("fleet.collectors.peer_messages.collect"))
+            self.assertEqual(herdr_projection.resolve_tag("claude", sid), "2e")
+            # The already published basic snapshot is the input to the existing
+            # detail worker; there is no hook/lifecycle/number assignment here.
+            details._enrich(LiveSnapshot(tag_metadata=[observed]))
+            writer.assert_called_once()
+            command, observation = writer.call_args.args
+            self.assertEqual(command[:4], ["herdr", "pane", "report-metadata", "idle-pane"])
+            self.assertEqual(command[command.index("--source") + 1], "herdr:claude")
+            self.assertEqual(command[command.index("--display-agent") + 1], "[2e] claude")
+            self.assertIn("[2e]", command[command.index("--title") + 1])
+            self.assertIn("Existing subject", command[command.index("--title") + 1])
+            self.assertIsNone(observation)
+            for spy in forbidden:
+                spy.assert_not_called()
+            writer.reset_mock()
+            (home / "sessions/77.json").write_text(json.dumps({
+                "pid": 77, "sessionId": sid, "name": "Automatic subject", "nameSource": "auto"}))
+            self.assertIsNone(herdr_projection.resolve_tag("claude", sid))
+            details._enrich(LiveSnapshot(tag_metadata=[observed]))
+            writer.assert_not_called()
+            for spy in forbidden:
+                spy.assert_not_called()
+
+    def test_missing_unknown_auto_or_already_correct_metadata_never_sends(self):
+        for harness in herdr_projection.HARNESSES:
+            observed = {"agent": harness, "pane_id": "pane-a",
+                        "agent_session": {"kind": "id", "agent": harness, "value": "observed-sid"}}
+            for row, tag in ((observed, None), ({**observed, "display_agent": "[ab] " + harness}, "ab"),
+                    ({**observed, "pane_id": None}, "ab"), ({**observed, "agent_session": None}, "ab"),
+                    ({**observed, "agent_session": {"kind": "id", "value": ""}}, "ab"),
+                    ({**observed, "agent_session": {"kind": "name", "value": "observed-sid"}}, "ab"),
+                    ({**observed, "agent_session": {"kind": "id", "agent": "foreign", "value": "observed-sid"}}, "ab")):
+                with self.subTest(harness=harness, row=row, tag=tag), \
+                        mock.patch.object(herdr_projection, "resolve_tag", return_value=tag), \
+                        mock.patch.object(herdr_projection, "_send_projection") as writer, \
+                        mock.patch.object(herdr_projection.shutil, "which", return_value="herdr"):
+                    herdr_projection.refresh_observed_tag_metadata([row])
+                    writer.assert_not_called()
+
+    def test_first_collection_assigns_and_failure_still_reads_confirmed_snapshot(self):
+        with tempfile.TemporaryDirectory() as td, ExitStack() as stack:
+            stack.enter_context(mock.patch.dict(os.environ, {"XDG_STATE_HOME": td}))
+            sessions = [Session(harness=h, pid=os.getpid(), session_id="native-" + h, session_tag="ff")
+                        for h in ("codex", "opencode")]
+            live = {(s.harness, s.session_id): {"harness": s.harness,
+                    "session_id": s.session_id, "started_at": 10} for s in sessions}
+            for target, result in (
+                ("fleet.collectors.procscan.scan", sessions),
+                ("fleet.collectors.codex.prepare_tick", None),
+                ("fleet.collectors.codex.enrich", None),
+                ("fleet.collectors.opencode.enrich", None),
+                ("fleet.collectors.herdr.enrich", None),
+                ("fleet.collectors.usage_cache.account_usage", {}),
+                ("fleet.collectors.resource_runs.collect", []),
+                ("fleet.projection.attach_projections", None),
+                ("fleet.route_chain.enrich", None),
+                ("fleet.collectors.peer_messages.collect", None),
+                ("fleet.session_tags._inventory", (live, [])),
+                ("fleet.collectors.dispatch.collect", []),
+            ):
+                stack.enter_context(mock.patch(target, return_value=result))
+            path = session_tags._path()
+            path.parent.mkdir(parents=True)
+            with path.with_suffix(".lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                pending = collectors.collect_all(jobs_path=td + "/jobs", fast_first=True)
+            self.assertEqual([s.session_tag for s in pending.sessions], [None, None])
+            self.assertFalse(path.exists())
+            confirmed = collectors.collect_all(jobs_path=td + "/jobs", fast_first=True)
+            tags = [s.session_tag for s in confirmed.sessions]
+            self.assertTrue(all(tags))
+            for s in sessions:
+                s.session_tag = "ff"  # stale enrichment may not survive a missing row
+            sessions.append(Session(harness="codex", pid=os.getpid(), session_id="new-native", session_tag="ff"))
+            with mock.patch.object(session_tags, "assign", side_effect=OSError("optional writer")):
+                failed = collectors.collect_all(jobs_path=td + "/jobs", fast_first=True)
+            self.assertEqual([s.session_tag for s in failed.sessions], tags + [None])
+
+
     def test_pane_metadata_wait_cannot_delay_basic_publication(self):
         with tempfile.TemporaryDirectory() as state:
-            agents = [{"agent": "codex", "pane_id": str(i),
+            agents = [{"agent": herdr_projection.HARNESSES[i % 3], "pane_id": str(i),
                        "agent_session": {"kind": "id", "value": "audit-pane-%d" % i}}
                       for i in range(6)]
-            live = {("codex", "audit-pane-%d" % i):
-                    {"harness": "codex", "session_id": "audit-pane-%d" % i,
+            live = {(herdr_projection.HARNESSES[i % 3], "audit-pane-%d" % i):
+                    {"harness": herdr_projection.HARNESSES[i % 3], "session_id": "audit-pane-%d" % i,
+                     "tag": "ab" if i % 3 == 0 else None,
                      "started_at": 10, "pid": 1, "proc_start": "audit"}
                     for i in range(6)}
             published, reporting, release = threading.Event(), threading.Event(), threading.Event()
@@ -343,66 +451,81 @@ class PaneMetadata(unittest.TestCase):
                 self.assertEqual(writer.call_count, len(agents))
 
     def test_delayed_metadata_never_writes_to_a_changed_or_unconfirmed_pane(self):
-        observed = {"agent": "codex", "pane_id": "pane-a",
-                    "agent_session": {"kind": "id", "value": "observed-sid"}}
-        changed = {**observed, "agent_session": {"kind": "id", "value": "new-sid"}}
-        for current, count in (([observed], 1), ([changed], 0), (None, 0),
-                               ([observed, changed], 0)):
-            with self.subTest(current=current), \
-                 mock.patch.object(herdr, "list_agents", return_value=current), \
-                 mock.patch.object(herdr_projection, "resolve_tag", return_value="ab"), \
-                 mock.patch.object(herdr_projection, "_send_projection", autospec=True) as writer, \
-                 mock.patch.object(herdr_projection, "session_title", return_value=""), \
-                 mock.patch.object(herdr_projection, "_formatter_overrides", return_value=(None, None)), \
-                 mock.patch.object(herdr_projection, "compose", return_value=("[ab] codex", "")), \
-                 mock.patch.object(herdr_projection.shutil, "which", return_value="herdr"), \
-                 mock.patch.object(dispatch, "_fill_locations"), \
-                 mock.patch.object(dispatch, "_campaign_labels"), \
-                 mock.patch.object(dispatch, "_scan_degradations", return_value={}), \
-                 mock.patch.object(dispatch, "_pending_delivery_counts", return_value={}), \
-                 mock.patch.object(projection, "attach_projections"), \
-                 mock.patch("fleet.route_chain.enrich"), \
-                 mock.patch("fleet.collectors.peer_messages.collect", return_value=None):
-                details._enrich(LiveSnapshot(tag_metadata=[observed]))
-                self.assertEqual(writer.call_count, count)
+        for harness in herdr_projection.HARNESSES:
+            observed = {"agent": harness, "pane_id": "pane-a",
+                        "agent_session": {"kind": "id", "value": "observed-sid"}}
+            changed = {**observed, "agent_session": {"kind": "id", "value": "new-sid"}}
+            foreign = {**observed, "agent": "foreign"}
+            moved = {**observed, "pane_id": "different-pane"}
+            for current, count in (([observed], 1), ([changed], 0), (None, 0),
+                                   ([observed, changed], 0), ([observed, observed], 0),
+                                   ([foreign], 0), ([moved], 0)):
+                with self.subTest(harness=harness, current=current), \
+                     mock.patch.object(herdr, "list_agents", return_value=current), \
+                     mock.patch.object(herdr_projection, "resolve_tag", return_value="ab"), \
+                     mock.patch.object(herdr_projection, "_send_projection", autospec=True) as writer, \
+                     mock.patch.object(herdr_projection, "session_title", return_value=""), \
+                     mock.patch.object(herdr_projection, "_formatter_overrides", return_value=(None, None)), \
+                     mock.patch.object(herdr_projection, "compose", return_value=("[ab] " + harness, "")), \
+                     mock.patch.object(herdr_projection.shutil, "which", return_value="herdr"), \
+                     mock.patch.object(dispatch, "_fill_locations"), \
+                     mock.patch.object(dispatch, "_campaign_labels"), \
+                     mock.patch.object(dispatch, "_scan_degradations", return_value={}), \
+                     mock.patch.object(dispatch, "_pending_delivery_counts", return_value={}), \
+                     mock.patch.object(projection, "attach_projections"), \
+                     mock.patch("fleet.route_chain.enrich"), \
+                     mock.patch("fleet.collectors.peer_messages.collect", return_value=None):
+                    details._enrich(LiveSnapshot(tag_metadata=[observed]))
+                    self.assertEqual(writer.call_count, count)
 
     def test_formatter_delay_cannot_write_old_metadata_after_pane_switch(self):
-        observed = {"agent": "codex", "pane_id": "pane-a",
-                    "agent_session": {"kind": "id", "value": "observed-sid"}}
-        current = [observed]
+        for harness in herdr_projection.HARNESSES:
+            for change in ("sid", "harness", "pane", "tag"):
+                observed = {"agent": harness, "pane_id": "pane-a",
+                            "agent_session": {"kind": "id", "value": "observed-sid"}}
+                current, tag = [observed], ["ab"]
 
-        def formatter(*args):
-            current[:] = [{**observed, "agent_session": {"kind": "id", "value": "new-sid"}}]
-            return None, None
+                def formatter(*args):
+                    if change == "tag":
+                        tag[:] = ["cd"]
+                    elif change == "harness":
+                        current[:] = [{**observed, "agent": "foreign"}]
+                    elif change == "pane":
+                        current[:] = [{**observed, "pane_id": "pane-b"}]
+                    else:
+                        current[:] = [{**observed, "agent_session": {"kind": "id", "value": "new-sid"}}]
+                    return None, None
 
-        with mock.patch.object(herdr, "list_agents", side_effect=lambda: current.copy()), \
-             mock.patch.object(herdr_projection, "resolve_tag", return_value="ab"), \
-             mock.patch.object(herdr_projection, "_send_projection", autospec=True) as writer, \
-             mock.patch.object(herdr_projection, "session_title", return_value=""), \
-             mock.patch.object(herdr_projection, "_formatter_overrides", side_effect=formatter), \
-             mock.patch.object(herdr_projection, "compose", return_value=("[ab] codex", "")), \
-             mock.patch.object(herdr_projection.shutil, "which", return_value="herdr"):
-            herdr_projection.refresh_observed_tag_metadata([observed])
-        writer.assert_not_called()
+                with self.subTest(harness=harness, change=change), \
+                     mock.patch.object(herdr, "list_agents", side_effect=lambda: current.copy()), \
+                     mock.patch.object(herdr_projection, "resolve_tag", side_effect=lambda *a: tag[0]), \
+                     mock.patch.object(herdr_projection, "_send_projection", autospec=True) as writer, \
+                     mock.patch.object(herdr_projection, "session_title", return_value=""), \
+                     mock.patch.object(herdr_projection, "_formatter_overrides", side_effect=formatter), \
+                     mock.patch.object(herdr_projection, "compose", return_value=("[ab] " + harness, "")), \
+                     mock.patch.object(herdr_projection.shutil, "which", return_value="herdr"):
+                    herdr_projection.refresh_observed_tag_metadata([observed])
+                writer.assert_not_called()
 
     def test_identity_lookup_delay_cannot_write_a_reassigned_number(self):
-        observed = {"agent": "codex", "pane_id": "pane-a",
-                    "agent_session": {"kind": "id", "value": "observed-sid"}}
-        tag = ["ab"]
+        for harness in herdr_projection.HARNESSES:
+            observed = {"agent": harness, "pane_id": "pane-a",
+                        "agent_session": {"kind": "id", "value": "observed-sid"}}
+            tag = ["ab"]
 
-        def current_agents():
-            tag[:] = ["cd"]
-            return [observed]
+            def current_agents():
+                tag[:] = ["cd"]
+                return [observed]
 
-        with mock.patch.object(herdr, "list_agents", side_effect=current_agents), \
-             mock.patch.object(herdr_projection, "resolve_tag", side_effect=lambda *a: tag[0]), \
-             mock.patch.object(herdr_projection, "_send_projection", autospec=True) as writer, \
-             mock.patch.object(herdr_projection, "_metadata_command",
-                               return_value=["herdr", "pane", "report-metadata", "pane-a",
-                                             "--display-agent", "[ab] codex"]), \
-             mock.patch.object(herdr_projection.shutil, "which", return_value="herdr"):
-            herdr_projection.refresh_observed_tag_metadata([observed])
-        writer.assert_not_called()
+            with mock.patch.object(herdr, "list_agents", side_effect=current_agents), \
+                 mock.patch.object(herdr_projection, "resolve_tag", side_effect=lambda *a: tag[0]), \
+                 mock.patch.object(herdr_projection, "_send_projection", autospec=True) as writer, \
+                 mock.patch.object(herdr_projection, "_metadata_command",
+                                   return_value=["herdr", "pane", "report-metadata", "pane-a",
+                                                 "--display-agent", "[ab] " + harness]), \
+                 mock.patch.object(herdr_projection.shutil, "which", return_value="herdr"):
+                herdr_projection.refresh_observed_tag_metadata([observed])
+            writer.assert_not_called()
 
 
 class PublishedSnapshots(unittest.TestCase):

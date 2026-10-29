@@ -1,4 +1,5 @@
 """Operator-language titles and stable failure fallback; no live model calls."""
+import ast
 import json
 import os
 import sqlite3
@@ -14,6 +15,327 @@ from fleet.collectors import codex, opencode
 from fleet.model import Session
 from fleet.session_handle import current_session_subject
 from fleet.tests.test_f17_title_refresh import _ConfigHomeMixin
+
+
+class IntentInputTest(_ConfigHomeMixin, unittest.TestCase):
+    """Input provenance and storage behavior, not assertions of model quality."""
+
+    def transcript(self, harness, turns):
+        rows = []
+        for role, text in turns:
+            if harness == "codex":
+                row = {"type": "response_item", "payload": {"type": "message", "role": role,
+                       "content": [{"type": "input_text" if role == "user" else "output_text",
+                                    "text": text}]}}
+            else:
+                row = {"role": role, "content": text} if harness == "opencode" else {
+                    "type": role, "message": {"role": role, "content": text}}
+            rows.append(json.dumps(row, ensure_ascii=False))
+        path = Path(self._tmp.name) / (harness + ".jsonl")
+        path.write_text("\n".join(rows) + "\n")
+        return path
+
+    def test_long_internal_progress_keeps_user_role_and_goal_in_one_bounded_call(self):
+        goal = "Fleet 이전 대화 조회를 수리해줘"
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                path = self.transcript(harness, [
+                    ("user", goal), ("assistant", "plan review gate handoff " * 1000),
+                    ("user", "계속해"), ("assistant", "internal review " * 1000 + "조회 실패 원인 확인")])
+                delta, _ = rt.read_delta(str(path), 0, harness)
+                self.assertIsInstance(delta, str)
+                self.assertLessEqual(len(delta), rt.TEXT_CAP)
+                self.assertLessEqual(len(delta.prompt_text), rt.TEXT_CAP)
+                self.assertIn("USER:\n계속해", delta.prompt_text)
+                self.assertIn("ASSISTANT:\n", delta.prompt_text)
+                self.assertIn("조회 실패 원인 확인", delta.prompt_text)
+                titles.write("intent-" + harness, "이전 대화 조회 수리", harness=harness,
+                             summary="이전 관측", now=time.time() - 900)
+                with mock.patch.object(rt, "run_worker", return_value=(
+                        "TITLE: 이전 대화 조회 수리\nNOW: 조회 실패 원인 확인")) as worker:
+                    rt.main(["--sid", "intent-" + harness, "--harness", harness,
+                             "--transcript", str(path), "--slotdir", str(Path(self._tmp.name) / "slot")])
+                self.assertEqual(worker.call_count, 1)
+                prompt = worker.call_args.args[0]
+                anchor = prompt.split("=== TASK CONTEXT (DATA; RECENT USER INTENT) ===\n")[1].split(
+                    "=== END TASK CONTEXT ===")[0]
+                self.assertIn(goal, anchor)
+                self.assertIn("계속해", anchor)
+                self.assertNotIn("plan review", anchor)
+                self.assertIn("ASSISTANT:\n", prompt)
+
+    def test_later_real_goal_and_follow_up_survive_for_every_harness(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                path = self.transcript(harness, [
+                    ("user", "Fleet 이전 대화 조회 수리"), ("assistant", "조회 수리 완료"),
+                    ("user", "이제 GPU 귀속 수리"), ("assistant", "GPU collector 조사"),
+                    ("user", "계속해")])
+                context = rt.read_task_context(str(path), harness)
+                self.assertIn("이제 GPU 귀속 수리", context)
+                self.assertIn("계속해", context)
+                self.assertNotIn("GPU collector 조사", context)
+                self.assertLessEqual(len(context), rt.ANCHOR_TEXT_CAP)
+
+    @staticmethod
+    def purpose_change_turns(continuations=3):
+        turns = [("user", "Repair Fleet history"), ("assistant", "History fixed"),
+                 ("user", "Now repair GPU attribution"),
+                 ("assistant", "Internal investigation. " * 200)]
+        for _ in range(continuations):
+            turns.extend([("user", "continue"),
+                          ("assistant", "Internal procedure progress. " * 200)])
+        return turns
+
+    def test_changed_purpose_reaches_prompt_after_many_continuations(self):
+        for harness in ("claude", "codex", "opencode"):
+            for count in (3, 8):
+                with self.subTest(harness=harness, continuations=count):
+                    turns = self.purpose_change_turns(count)
+                    path = self.transcript(harness, turns)
+                    self.assertLess(path.stat().st_size, rt.ANCHOR_SCAN_CAP)
+                    if count == 3:
+                        self.assertLess(path.stat().st_size, 23 * 1024)
+                    context = rt.read_task_context(str(path), harness)
+                    delta, cursor = rt.read_delta(str(path), 0, harness)
+                    # The progress tail offers no other copy of the new objective.
+                    self.assertNotIn("Now repair GPU attribution", delta.prompt_text)
+                    self.assertLessEqual(len(context), rt.ANCHOR_TEXT_CAP)
+                    self.assertLessEqual(len(delta.prompt_text), rt.TEXT_CAP)
+                    self.assertEqual(cursor, path.stat().st_size)
+                    prompt = rt._prompt(delta, prior_title="Repair Fleet history",
+                                        anchor=context, title_lang="English")
+                    self.assertIn("Now repair GPU attribution", prompt)
+                    self.assertIn("EARLIER USER:\nRepair Fleet history", context)
+                    self.assertEqual(context.count("LATER USER:\ncontinue"), count)
+                    self.assertLess(context.index("Repair Fleet history"),
+                                    context.index("Now repair GPU attribution"))
+
+    def test_four_short_tail_intents_do_not_end_scan_before_changed_purpose(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                turns = [("user", "Repair Fleet history"),
+                         ("assistant", "Earlier internal procedure. " * 3000),
+                         ("user", "Now repair GPU attribution"),
+                         ("assistant", "Current internal procedure. " * 3000),
+                         *self.purpose_change_turns(4)[4:]]
+                path = self.transcript(harness, turns)
+                with path.open("rb") as handle:
+                    handle.seek(-rt.ANCHOR_SCAN_CAP, os.SEEK_END)
+                    tail = handle.read().decode()
+                self.assertNotIn("Now repair GPU attribution", tail)
+                self.assertEqual(tail.count("continue"), 4)
+                context = rt.read_task_context(str(path), harness)
+                delta, _ = rt.read_delta(str(path), 0, harness)
+                self.assertNotIn("Now repair GPU attribution", delta.prompt_text)
+                self.assertIn("Now repair GPU attribution", rt._prompt(
+                    delta, prior_title="Repair Fleet history", anchor=context, title_lang="English"))
+
+    def test_opencode_v1_v2_share_purpose_packing_in_actual_producer(self):
+        turns = self.purpose_change_turns()
+        db = str(Path(self._tmp.name) / "purpose.db")
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE message (session_id, data)")
+            con.executemany("INSERT INTO message VALUES (?,?)", [
+                ("exact", json.dumps({"role": role, "text": text})) for role, text in turns])
+            con.execute("INSERT INTO message VALUES (?,?)",
+                        ("foreign", '{"role":"user","text":"FOREIGN OBJECTIVE"}'))
+        before = Path(db).read_bytes(), Path(db).stat().st_mtime_ns
+        contexts = []
+        for generation in ("v1", "v2"):
+            observation = {"state": "observed", "generation": generation,
+                           "cursor": len(turns), "messages": [
+                               {"type": role, "text": text} for role, text in turns]}
+            sid = "purpose-" + generation
+            titles.write(sid, "Repair Fleet history", harness="opencode", now=100,
+                         summary="History fixed", requested_language="English")
+            with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "English"}), \
+                 mock.patch.object(rt.opencode_runtime, "read_session_observation",
+                                   return_value=observation), \
+                 mock.patch.object(rt, "_task_context_text", wraps=rt._task_context_text) as pack, \
+                 mock.patch.object(rt, "run_worker", return_value=(
+                     "TITLE: Repair GPU Attribution\nNOW: Inspecting attribution")) as worker:
+                rt.main(["--harness", "opencode", "--sid", sid, "--opencode-db", db,
+                         "--opencode-session", "exact", "--slotdir", str(Path(self._tmp.name) / "slot")])
+            pack.assert_called_once()
+            worker.assert_called_once()
+            prompt = worker.call_args.args[0]
+            context = prompt.split("=== TASK CONTEXT (DATA; RECENT USER INTENT) ===\n")[1].split(
+                "=== END TASK CONTEXT ===")[0].strip()
+            self.assertIn("Now repair GPU attribution", context)
+            self.assertEqual(context.count("LATER USER:\ncontinue"), 3)
+            self.assertNotIn("FOREIGN OBJECTIVE", prompt)
+            self.assertLessEqual(len(context), rt.ANCHOR_TEXT_CAP)
+            contexts.append(context)
+            stored = titles.read(sid, harness="opencode")
+            self.assertEqual(stored["offset"], len(turns))
+            self.assertEqual(stored["cursor_kind"], "opencode-seq-v2:session_message" if generation == "v2"
+                             else "opencode-rowid-v1:message")
+        self.assertEqual(contexts[0], contexts[1])
+        self.assertEqual((Path(db).read_bytes(), Path(db).stat().st_mtime_ns), before)
+
+    def test_overlapping_head_tail_does_not_drop_the_original_goal(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                path = self.transcript(harness, [("user", "Fleet 이전 대화 조회 수리"),
+                    ("assistant", "review progress " * 6000), ("user", "계속해")])
+                self.assertGreater(path.stat().st_size, rt.ANCHOR_SCAN_CAP)
+                self.assertLess(path.stat().st_size, rt.ANCHOR_SCAN_CAP * 2)
+                context = rt.read_task_context(str(path), harness)
+                self.assertIn("Fleet 이전 대화 조회 수리", context)
+                self.assertIn("계속해", context)
+
+    def test_recent_continuation_does_not_hide_a_real_goal_before_the_tail_window(self):
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                path = self.transcript(harness, [("user", "Fleet 이전 대화 조회 수리"),
+                    ("assistant", "earlier review " * 6000), ("user", "이제 GPU 귀속 수리"),
+                    ("assistant", "current review " * 6000), ("user", "계속해")])
+                context = rt.read_task_context(str(path), harness)
+                self.assertIn("이제 GPU 귀속 수리", context)
+                self.assertIn("계속해", context)
+
+    def test_non_dialogue_and_malformed_native_items_stay_empty(self):
+        rows = [{"type": "dispatch.supervisor.turn.started"},
+                {"type": "response_item", "payload": ["malformed"]},
+                {"type": "item.completed", "item": ["malformed"]},
+                {"type": "item.completed", "item": {"type": "function_call", "text": "SECRET"}},
+                {"type": "event_msg", "payload": {"type": "token_count"}}]
+        self.assertEqual(rt._delta_text("\n".join(map(json.dumps, rows)), "codex"), "")
+        for harness in ("claude", "opencode"):
+            path = self.transcript(harness, [("system", "SECRET"), ("developer", "SECRET")])
+            self.assertEqual(rt.read_delta(str(path), 0, harness)[0], "")
+
+    def test_codex_bootstrap_only_is_empty_but_ordinary_discussion_is_visible(self):
+        for marker in ("# AGENTS.md — Codex Adapter Bootstrap",
+                       "## Codex masked-profile attach layer"):
+            bootstrap = ("# AGENTS.md instructions for /work\n\n<INSTRUCTIONS>\n" + marker
+                         + "\nEnglish runtime policy\n</INSTRUCTIONS>\n"
+                         "<environment_context>...</environment_context>")
+            path = self.transcript("codex", [("user", bootstrap)])
+            self.assertEqual(rt.read_delta(str(path), 0, "codex")[0], "")
+            self.assertEqual(rt.read_origin(str(path), "codex", latest=True), "")
+            self.assertEqual(rt.read_task_context(str(path), "codex"), "")
+        discussion = "Explain the Codex masked-profile attach layer and Codex Adapter Bootstrap"
+        path = self.transcript("codex", [("user", discussion)])
+        self.assertIn(discussion, rt.read_task_context(str(path), "codex"))
+
+    def test_current_worker_envelope_exposes_assignment_without_becoming_human_language(self):
+        from worker_bootstrap import completion_scope_prompt, worker_ending_prompt
+        envelope = ("# Portable Worker Kernel\nInternal rules\n# Worker Type: Stage\n"
+                    "Dispatch metadata:\n- harness: codex\nAssignment:\n이전 대화 조회 수리\n\n"
+                    + completion_scope_prompt() + "This node's declared scope: sealed\n"
+                    + worker_ending_prompt())
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness):
+                path = self.transcript(harness, [("user", envelope)])
+                delta = rt.read_delta(str(path), 0, harness)[0]
+                self.assertEqual(delta, "이전 대화 조회 수리")
+                self.assertEqual(delta.prompt_text, "ASSIGNMENT:\n이전 대화 조회 수리")
+                self.assertEqual(rt.read_origin(str(path), harness, latest=True), "")
+                self.assertEqual(rt._human_language_text(envelope), "")
+                self.assertNotIn("Internal rules", rt.read_task_context(str(path), harness))
+
+    def test_v1_parts_join_exact_native_message_roles_and_do_not_write_source(self):
+        db = str(Path(self._tmp.name) / "roles.db")
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE message (id, session_id, data)")
+            con.execute("CREATE TABLE part (session_id, message_id, data)")
+            con.executemany("INSERT INTO message VALUES (?,?,?)", [
+                ("m1", "exact", '{"role":"user"}'),
+                ("m1", "other", '{"role":"assistant"}'),
+                ("m2", "exact", '{"role":"assistant"}')])
+            con.executemany("INSERT INTO part VALUES (?,?,?)", [
+                ("exact", "m1", '{"type":"text","text":"Repair Fleet history"}'),
+                ("other", "m1", '{"type":"text","text":"FOREIGN"}'),
+                ("exact", "m2", '{"type":"text","text":"Review complete"}')])
+        before = Path(db).read_bytes(), Path(db).stat().st_mtime_ns
+        delta, cursor, _ = rt.read_opencode_delta(db, "exact", table="part")
+        self.assertEqual(delta, "Repair Fleet history\nReview complete")
+        self.assertEqual(delta.prompt_text, "USER:\nRepair Fleet history\n\nASSISTANT:\nReview complete")
+        self.assertEqual(cursor, 3)
+        with rt._opencode_snapshot(db) as con:
+            context = rt._read_opencode_task_context(con, "part", "data", "exact")
+        self.assertIn("Repair Fleet history", context)
+        self.assertNotIn("Review complete", context)
+        self.assertEqual((Path(db).read_bytes(), Path(db).stat().st_mtime_ns), before)
+
+    def test_v2_sequence_preserves_roles_and_cursor_in_existing_string_contract(self):
+        observation = {"state": "observed", "cursor": 42, "messages": [
+            {"type": "user", "text": "Repair Fleet history"},
+            {"type": "assistant", "text": "Inspecting history"},
+            {"type": "tool", "text": "SECRET"}]}
+        with mock.patch.object(rt.opencode_runtime, "read_session_observation", return_value=observation):
+            delta, cursor, _ = rt.read_opencode_delta("fixture", "exact", 40,
+                table=rt._OPENCODE_V2_SEQUENCE_TABLE)
+        self.assertEqual((delta, cursor), ("Repair Fleet history\nInspecting history", 42))
+        self.assertEqual(delta.prompt_text, "USER:\nRepair Fleet history\n\nASSISTANT:\nInspecting history")
+
+    def test_v1_recent_goal_survives_a_large_internal_history(self):
+        db = str(Path(self._tmp.name) / "recent.db")
+        with sqlite3.connect(db) as con:
+            con.execute("CREATE TABLE message (session_id, data)")
+            rows = [("exact", json.dumps({"role": role, "text": text})) for role, text in (
+                ("user", "Fleet 이전 대화 조회 수리"),
+                *[("assistant", "review progress " * 80)] * 100,
+                ("user", "이제 GPU 귀속 수리"), ("user", "계속해"))]
+            con.executemany("INSERT INTO message VALUES (?,?)", rows)
+            con.commit()
+            context = rt._read_opencode_task_context(con, "message", "data", "exact")
+        for text in ("Fleet 이전 대화 조회 수리", "이제 GPU 귀속 수리", "계속해"):
+            self.assertIn(text, context)
+
+    def test_failed_language_attempt_respects_retry_and_unchanged_source_debounce(self):
+        path = self.transcript("claude", [("user", "세션 제목 수리")])
+        os.utime(path, (50, 50))
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            titles.write("language-retry", "Previous English Subject", now=100,
+                summary="Previous progress", summary_failures=1, requested_language="Korean")
+            with mock.patch.object(rt, "worker_argv", return_value=["missing"]) as probe, \
+                 mock.patch.object(rt, "_executable_available", return_value=False):
+                self.assertFalse(rt.maybe_spawn("claude", "language-retry", str(path), now=120))
+                probe.assert_not_called()
+                self.assertFalse(rt.maybe_spawn("claude", "language-retry", str(path), now=131))
+                probe.assert_called_once_with("probe")
+                probe.reset_mock()
+                # A successful NOW with an invalid TITLE is not new dialogue.
+                titles.write("language-retry", "Previous English Subject", now=100,
+                    summary="요청 근거 확인 중", requested_language="Korean")
+                self.assertFalse(rt.maybe_spawn("claude", "language-retry", str(path), now=701))
+                probe.assert_not_called()
+                # A genuinely new language declaration retains the existing immediate repair.
+                with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Japanese"}):
+                    self.assertFalse(rt.maybe_spawn("claude", "language-retry", str(path), now=120))
+                probe.assert_called_once_with("probe")
+
+    def test_language_repair_partial_success_preserves_each_failed_field_time_and_cursor(self):
+        cases = (("", False, False), ("TITLE: untitled\nNOW: unknown", False, False),
+                 ("TITLE: 세션 제목 수리\nNOW: unknown", True, False),
+                 ("TITLE: untitled\nNOW: 요청 근거 확인 중", False, True),
+                 ("NOW: 요청 근거 확인 중", False, True))
+        with mock.patch.dict(os.environ, {"FLEET_NOW_LANG": "Korean"}):
+            for harness in ("claude", "codex", "opencode"):
+                path = self.transcript(harness, [("user", "세션 제목 수리")])
+                for i, (output, title_ok, now_ok) in enumerate(cases):
+                    with self.subTest(harness=harness, output=output):
+                        sid = "%s-partial-%s" % (harness, i)
+                        titles.write(sid, "Previous English Subject", harness=harness,
+                            summary="Previous English progress", now=100, title_ts=90,
+                            summary_ts=95, offset=1, source="refresher:fixture")
+                        with mock.patch.object(rt.time, "time", return_value=2000), \
+                             mock.patch.object(rt, "run_worker", return_value=output) as worker, \
+                             mock.patch.object(rt, "_provider_source", return_value="refresher:fixture"):
+                            rt.main(["--harness", harness, "--sid", sid, "--transcript", str(path),
+                                     "--slotdir", str(Path(self._tmp.name) / "slot")])
+                        after = titles.read(sid, harness=harness)
+                        self.assertEqual(worker.call_count, 1)
+                        self.assertEqual(after["title"], "세션 제목 수리" if title_ok else "Previous English Subject")
+                        self.assertEqual(after["title_ts"], 2000 if title_ok else 90)
+                        self.assertEqual(after["summary"], "요청 근거 확인 중" if now_ok else "Previous English progress")
+                        self.assertEqual(after["summary_ts"], 2000 if now_ok else 95)
+                        self.assertEqual(after["offset"], path.stat().st_size if now_ok else 1)
+                        self.assertEqual(after.get("summary_failures", 0), 0 if now_ok else 1)
+                        self.assertEqual(after["requested_language"], "Korean")
 
 
 class TitleConsistencyTest(_ConfigHomeMixin, unittest.TestCase):
@@ -163,7 +485,7 @@ class TitleConsistencyTest(_ConfigHomeMixin, unittest.TestCase):
             config.config_path().write_text('{"title_language":"en"}\n')
             self.assertEqual(rt._title_lang("제목 언어를 맞춰줘"), "English")
 
-    def test_wrong_language_prior_is_regenerated_even_without_new_delta_and_dropped_on_failure(self):
+    def test_wrong_language_prior_is_regenerated_without_new_delta_and_preserved_on_failure(self):
         with mock.patch.dict(os.environ, {"LANG": "en_US.UTF-8", "LC_ALL": "",
                                           "LC_MESSAGES": "", "FLEET_NOW_LANG": ""}):
             for harness in ("claude", "codex", "opencode"):
@@ -171,14 +493,17 @@ class TitleConsistencyTest(_ConfigHomeMixin, unittest.TestCase):
                     path = self._transcript(harness)
                     sid = harness + "-old-language"
                     titles.write(sid, "Old English Subject", harness=harness,
-                                 offset=path.stat().st_size, summary="이전 요약")
+                                 offset=path.stat().st_size, summary="이전 요약", now=time.time() - 700)
+                    before = titles.read(sid, harness=harness)
                     with mock.patch.object(rt, "run_worker", return_value="") as worker:
                         rt.main(["--harness", harness, "--sid", sid, "--transcript", str(path),
                                  "--slotdir", str(Path(self._tmp.name) / "slot")])
                     self.assertEqual(worker.call_count, 1)
                     self.assertIn("in Korean.", worker.call_args.args[0])
                     self.assertNotIn("PRIOR TITLE (data", worker.call_args.args[0])
-                    self.assertIsNone(titles.last_title(sid, harness=harness))
+                    after = titles.read(sid, harness=harness)
+                    for key in ("title", "title_ts", "summary", "summary_ts", "offset"):
+                        self.assertEqual(after[key], before[key], key)
 
     def test_language_change_reaches_existing_scheduler_despite_recent_unchanged_source(self):
         path = self._transcript("claude")
@@ -220,8 +545,16 @@ class TitleConsistencyTest(_ConfigHomeMixin, unittest.TestCase):
             self.assertEqual(rt._title_lang(), "Japanese")
 
     def test_generated_inputs_do_not_replace_the_last_real_user_language(self):
+        producer = Path(__file__).resolve().parents[3] / "utilities" / "dispatch_session_sweep.py"
+        current_header = next(
+            ast.literal_eval(node.value) for node in ast.parse(producer.read_text()).body
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "COMPLETION_DELIVERY_HEADER"
+                for target in node.targets)
+        )
         automated = ("[notice] Your peer message ref abc is still pending",
                      "Hearting runtime delivery (SD-111 durable pending records)",
+                     current_header,
                      "Hearting notice about work you started (a remote run ended)",
                      "Hearting human gate awaiting your decision (SD-123/129)",
                      "Hearting supervision needs attention. This is not workflow completion. reason=join-deadline owner=att-example.",

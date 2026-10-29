@@ -78,9 +78,9 @@ WRAPPER_FALLBACK_TIERS: dict[str, dict[str, str]] = {
 
 TIER_REFERENCE_KEYS = ("CFG_TIER_DEEP_FAILOVER", "CFG_NATIVE_SUBAGENT", "CFG_LIFECYCLE_NUDGE", "CFG_LIFECYCLE_CURATE")
 # Profile keys a complete user copy may omit. `balanced` is derived from light
-# in memory (below); `top` is never derived -- a copy without it simply has no
-# top exception profile, and its TOP tier keys become unreferenced like any
-# other tier a release added (SD-145). Nothing here writes to the user file.
+# in memory (below); an absent `top` does not replace the whole selected file.
+# OpenCode resolves it through its balanced-deep collapse; other runtimes require
+# opt-in. Unreferenced TOP tier keys are optional (SD-145). Nothing writes to the file.
 # `CFG_MODEL_PROFILE_GRANULARITY_DEEP` (2026-09-30) is receipt metadata only: the
 # resolver falls back to the global granularity when it is absent, so a copy seeded
 # before the shipped OpenCode file started naming its deep collapse stays selected.

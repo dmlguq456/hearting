@@ -16,8 +16,8 @@ class PeerReadContext:
         self.registry_append_only = registry_append_only
         self._registry_views = {}
         self._handover_snapshots = None
-        self._handover_index = None
         self._handover_ledgers = {}
+        self._lineage_graphs = {}
         self._recipient_censuses = {}
         self._transfer_roots = None
         self._peer_notice_records = None
@@ -90,8 +90,18 @@ class PeerReadContext:
             self._handover_ledgers[key] = tuple(loader())
         return self._handover_ledgers[key]
 
-    def handover_index(self, loader):
-        """One validated discovery/ledger answer, including unreadability, per pass."""
-        if self._handover_index is None:
-            self._handover_index = loader()
-        return self._handover_index
+    def lineage_graph(self, signature, loader):
+        """Reuse this read-only pass's graph; normal observations replace it.
+
+        The signature detects writer changes inside the pass. Current authority
+        at an effect boundary comes from a fresh readable lineage observation,
+        even when that boundary was preceded by this same context's discovery.
+        """
+        key = tuple(signature)
+        if key not in self._lineage_graphs:
+            self._lineage_graphs = {key: loader()}
+        return self._lineage_graphs[key]
+
+    def invalidate_lineage_graph(self):
+        """An unavailable current dependency cannot leave authority cached."""
+        self._lineage_graphs.clear()

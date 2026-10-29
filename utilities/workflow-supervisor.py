@@ -4345,18 +4345,23 @@ def _closed_terminal_projection(route, route_file, gates, node_states, claims):
 
 
 def cmd_status(args):
-    route = load_route(args.route)
-    ledger = ledger_for(route, getattr(args, "jobs", None))
+    jobs = getattr(args, "jobs", None)
+    try:
+        route_file = route_module().resolve_route_argument(args.route, jobs)
+    except ValueError as exc:
+        raise SupervisorError(str(exc)) from exc
+    route = load_route(route_file)
+    ledger = ledger_for(route, jobs)
     state = ledger.read_only_state()
     armed = read_armed(ledger)
     terminal_nodes = WS.route_terminal_nodes(route)
-    gates = terminal_gate_state(route, getattr(args, "jobs", None))
+    gates = terminal_gate_state(route, jobs)
     node_states = state["nodes"]
     claims = ledger.claims()
     failed = {node: row for node, row in node_states.items()
               if str(row.get("state", "")).startswith("FAILED")}
     running, next_stage = _stage_projection(route, node_states)
-    closed_complete = _closed_terminal_projection(route, args.route, gates, node_states, claims)
+    closed_complete = _closed_terminal_projection(route, route_file, gates, node_states, claims)
     derived = WS.derive_workflow_state(
         node_states, terminal_nodes,
         terminal_gates_passed=bool(gates) and all(row["passed"] for row in gates.values()),
@@ -4367,7 +4372,7 @@ def cmd_status(args):
         running, next_stage = [], []
     payload = {
         "route_id": route["route_id"],
-        "route_file": str(Path(args.route).resolve()),
+        "route_file": str(Path(route_file).resolve()),
         "capability": route.get("capability"),
         "capability_mode": route.get("capability_mode"),
         "effective_intensity": route.get("effective_intensity"),
@@ -4396,7 +4401,7 @@ def cmd_status(args):
                              for row in read_resource_watches(ledger)],
         "claims": claims,
         "resource_children": resource_children(route, ledger),
-        **ledger_metadata(getattr(args, "jobs", None), ledger),
+        **ledger_metadata(jobs, ledger),
     }
     if args.json:
         print(json.dumps(payload, sort_keys=True, indent=2))
@@ -4964,7 +4969,7 @@ def build_parser():
                                     "so `frame_interview.py render-intent` can consume them")
 
     status = sub.add_parser("status", help="portable workflow/stage/resource projection")
-    status.add_argument("--route", required=True)
+    status.add_argument("--route", required=True, help="route ID or route file")
     status.add_argument("--jobs")
     status.add_argument("--json", action="store_true")
 

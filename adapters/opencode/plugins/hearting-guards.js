@@ -27,6 +27,33 @@ const checkpointTrigger = path.join(root, "utilities", "artifact_checkpoint_trig
 const sessionTidy = path.join(root, "utilities", "session_tidy.py")
 const sessionTidyIdle = path.join(root, "utilities", "session_tidy_idle.py")
 const fleetInteractionState = path.join(root, "hooks", "fleet-interaction-state.py")
+const interactionWrites = new Map()
+
+function publishInteraction(action, sessionID, refs = {}, kind = null) {
+  // Observation stays off the native event consumer. Serialize the existing
+  // short-lived hook per session so a slow set cannot land after its reply.
+  const previous = interactionWrites.get(sessionID) || Promise.resolve()
+  const pending = previous.catch(() => {}).then(() => new Promise((resolve) => {
+    let timer
+    const done = () => { clearTimeout(timer); resolve() }
+    try {
+      const args = [fleetInteractionState, action, "--harness", "opencode"]
+      if (kind) args.push("--kind", kind)
+      const child = spawn("python3", args, { stdio: ["pipe", "ignore", "ignore"], detached: true })
+      child.on("error", done)
+      child.on("close", done)
+      child.stdin?.on?.("error", () => {})
+      timer = setTimeout(() => { try { child.kill("SIGKILL") } catch {} }, 5000)
+      timer.unref?.()
+      child.unref()
+      child.stdin?.end(JSON.stringify({ session_id: sessionID, ...refs }))
+    } catch { done() }
+  })).finally(() => {
+    if (interactionWrites.get(sessionID) === pending) interactionWrites.delete(sessionID)
+  })
+  interactionWrites.set(sessionID, pending)
+}
+
 const herdrProjection = path.join(root, "tools", "fleet", "herdr_projection.py")
 const coreWriteGuard = path.join(root, "hooks", "core-write-guard.py")
 const routePresenceGate = path.join(root, "utilities", "route_presence_gate.py")
@@ -984,23 +1011,40 @@ async function setupOpenCodeV2(ctx) {
   }
   const sessionMessages = async ({ path: target, sessionID } = {}) => {
     const sid = sessionID || target?.id
-    if (!sid || typeof ctx.session?.context !== "function") return []
+    if (!sid || typeof ctx.session?.context !== "function") return { error: true }
     try {
       const result = await ctx.session.context({ sessionID: sid })
       const rows = result?.data ?? result
-      if (!Array.isArray(rows)) return []
-      return rows.flatMap((row) => row?.type === "user" && typeof row.text === "string"
+      if (result?.error || !Array.isArray(rows)) return { error: true }
+      return { data: rows.flatMap((row) => row?.type === "user" && typeof row.text === "string"
         ? [{ info: { id: row.id, sessionID: sid, role: "user", time: row.time },
             parts: [{ type: "text", text: row.text }] }]
-        : [])
-    } catch { return [] }
+        : []), response: { ok: true, status: 200 } }
+    } catch { return { error: true } }
   }
   const legacyContext = {
     ...ctx,
     directory: ctx.location?.directory || "",
     client: {
       session: {
-        get: ({ path: target, sessionID }) => sessionInfo(sessionID || target?.id),
+        get: async ({ path: target, sessionID }) => {
+          // Admission uses a fresh native read, never sessionInfo's display cache.
+          const result = await ctx.session.get({ sessionID: sessionID || target?.id })
+          if (result?.error) return { error: result.error }
+          return { data: result?.data ?? result, response: { ok: true, status: 200 } }
+        },
+        wait: async ({ sessionID: sid }) => {
+          // V2 has no session.status query. Its exact session.wait resolves
+          // only after native execution is idle; the common carrier bounds it.
+          if (!sid || !pendingPeerRoot(legacyContext, sid)
+              || typeof ctx.session?.wait !== "function") throw new Error("native-idle-unavailable")
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), 1000)
+          try {
+            const result = await ctx.session.wait({ sessionID: sid }, { signal: controller.signal })
+            if (result?.error || controller.signal.aborted) throw new Error("native-idle-unavailable")
+          } finally { clearTimeout(timer) }
+        },
         // V2 exposes the post-compaction user messages as session.context.
         messages: sessionMessages,
         promptAsync: sessionPrompt,
@@ -1011,6 +1055,7 @@ async function setupOpenCodeV2(ctx) {
       project: ctx.project,
     },
   }
+  registerPaneContext(legacyContext)
   const hooks = await AgentHarnessGuards(legacyContext, { initialize: false })
 
   await ctx.tool.hook("execute.before", async (event) => {
@@ -1110,6 +1155,9 @@ async function setupOpenCodeV2(ctx) {
     const model = event.model
     const status = event.response?.status
     if (!model?.providerID || !model?.id || !Number.isInteger(status)) return
+    // The V2 request's model is exact to this session. Retain only limits the
+    // callback actually supplies; V1's compaction formula is not a V2 policy.
+    writeContextPolicy({ sessionID: event.sessionID, model, contextObservation: "v2-http-response" }, {})
     // The runtime consumes the original body after this callback returns.
     // Reading/cancelling its clone must not hold that consumer behind telemetry.
     void (async () => {
@@ -1134,7 +1182,7 @@ async function setupOpenCodeV2(ctx) {
       for await (const native of ctx.event.subscribe({ signal: controller.signal })) {
         const data = native?.data || native?.properties || {}
         const info = data.info || data.session || null
-        const sessionID = data.sessionID || info?.id || native?.sessionID || ""
+        const sessionID = data.sessionID || data.form?.sessionID || info?.id || native?.sessionID || ""
         if (!sessionID) continue
         if (native.type === "session.deleted" && v2WorkerSessions.has(sessionID)) {
           v2WorkerSessions.delete(sessionID)
@@ -1144,8 +1192,19 @@ async function setupOpenCodeV2(ctx) {
         }
         await withSession(sessionID, async (current) => {
           if (v2WorkerSessions.has(sessionID)) return
-          const event = { ...native, properties: { ...data,
+          const type = ["session.execution.succeeded", "session.execution.failed",
+            "session.execution.interrupted"].includes(native.type) ? "session.idle" : native.type
+          const event = { ...native, type, properties: { ...data,
+            ...(native.type === "session.execution.started" ? { status: { type: "busy" } } : {}),
             ...(info ? { info } : {}), sessionID } }
+          if (native.type === "session.execution.started") event.type = "session.status"
+          if (native.type === "form.created") {
+            event.type = "question.asked"
+            event.properties = { sessionID, id: data.form?.id, source: "opencode-form" }
+          } else if (["form.replied", "form.cancelled"].includes(native.type)) {
+            event.type = native.type === "form.replied" ? "question.replied" : "question.rejected"
+            event.properties = { sessionID, requestID: data.id, source: "opencode-form" }
+          }
           await hooks.event?.({ event })
         })
         if (native.type === "session.deleted") v2SessionInfo.delete(sessionID)
@@ -1158,6 +1217,7 @@ async function setupOpenCodeV2(ctx) {
   return () => {
     controller.abort()
     hooks.dispose?.({ silent: true })
+    retirePaneContext(legacyContext)
     v2WorkerSessions.clear()
     v2ContractSessions.clear()
     v2SessionInfo.clear()
@@ -1498,11 +1558,27 @@ const CARRIER_ENV = "AGENT_PARENT_COMPLETION_CARRIER"
 const CARRIER_KIND = "opencode-turn"
 const CARRIER_INTERVAL_MS = 5000
 const CARRIER_ROOTS_RETRY_MS = 60000
+const CARRIER_RECIPIENT_CACHE_MS = 10000
+const CARRIER_NEGATIVE_CACHE_MS = 1200
 const sweepRel = path.join("utilities", "dispatch_session_sweep.py")
 const OWED_STATES = new Set(["pending", "claimed", "sent-ambiguous"])
 
-// One bounded sweep step off the server's event loop; any failure is null.
-function carrierCommand(action, sid, handed, observe = () => {}) {
+// One bounded sweep step; any failure is null. Ordinary steps are asynchronous;
+// the last effect check uses the same operation synchronously before the write.
+function carrierCommand(action, sid, handed, observe = () => {}, synchronous = false) {
+  if (synchronous) {
+    // At the effect boundary, a Promise response would leave another event-loop
+    // turn in which the returned authority could become stale. Reuse the same
+    // settle operation synchronously, then call promptAsync without an await.
+    const target = resolveRuntimeTarget(sweepRel)
+    try {
+      const result = spawnSync("python3", [target.helper, action, "--recipient-kind", CARRIER_KIND,
+        "--session", sid || ""], { cwd: target.root,
+        env: { ...process.env, AGENT_HOME: target.root }, input: JSON.stringify(handed || {}),
+        encoding: "utf8", timeout: 10000, killSignal: "SIGKILL", maxBuffer: Infinity })
+      return !result.error && result.status === 0 ? JSON.parse(result.stdout || "null") : null
+    } catch { return null }
+  }
   return new Promise((resolve) => {
     let out = ""
     let child
@@ -1543,6 +1619,7 @@ function createCompletionCarrier(ctx) {
   const sessions = new Set()
   const status = new Map()
   const busy = new Set()
+  const recipientCache = new Map()
   let roots = null
   let rootsAt = 0
   let timer = null
@@ -1572,18 +1649,42 @@ function createCompletionCarrier(ctx) {
       roots = (await command("roots", sid)) || []
       log("roots", sid, roots.length ? "resolved" : "unavailable", { roots })
     }
-    const digest = createHash("sha256").update(sid).digest("hex")
+    if (!sid) return false
+    const now = Date.now()
+    const current = await command("recipients", sid)
+    let cached = recipientCache.get(sid)
+    if (current && typeof current.generation === "string" && Array.isArray(current.digests)) {
+      if (!cached || cached.generation !== current.generation || now >= cached.expiresAt) {
+        cached = {
+          generation: current.generation,
+          digests: current.digests.filter(value => /^[0-9a-f]{64}$/.test(value)),
+          expiresAt: now + CARRIER_RECIPIENT_CACHE_MS,
+          negativeUntil: 0,
+        }
+        recipientCache.set(sid, cached)
+      }
+    } else if (!cached || now >= cached.expiresAt) {
+      log("skip", sid, "lineage-unavailable")
+      return false
+    }
+    if (!cached || now < cached.negativeUntil) return false
     for (const base of roots) {
-      let names = []
-      try { names = readdirSync(path.join(base, "pending-delivery", digest)) } catch { continue }
-      for (const name of names) {
-        if (!name.startsWith("delivery-") || !name.endsWith(".json")) continue
-        try {
-          const record = JSON.parse(readFileSync(path.join(base, "pending-delivery", digest, name), "utf8"))
-          if (record?.recipient_kind === CARRIER_KIND && OWED_STATES.has(record.state)) return true
-        } catch {}
+      for (const digest of cached.digests) {
+        let names = []
+        try { names = readdirSync(path.join(base, "pending-delivery", digest)) } catch { continue }
+        for (const name of names) {
+          if (!name.startsWith("delivery-") || !name.endsWith(".json")) continue
+          try {
+            const record = JSON.parse(readFileSync(path.join(base, "pending-delivery", digest, name), "utf8"))
+            if (record?.recipient_kind === CARRIER_KIND && OWED_STATES.has(record.state)) {
+              cached.negativeUntil = 0
+              return true
+            }
+          } catch {}
+        }
       }
     }
+    cached.negativeUntil = now + CARRIER_NEGATIVE_CACHE_MS
     return false
   }
 
@@ -1591,26 +1692,64 @@ function createCompletionCarrier(ctx) {
     if (!sid) return
     if (busy.has(sid)) { log("skip", sid, "delivery-in-flight"); return }
     if (!available()) { log("skip", sid, isWorkerSession() ? "worker-session" : "promptAsync-unavailable"); return }
-    if (status.get(sid) === "busy" || status.get(sid) === "retry") {
+    const paused = () => ["busy", "retry", "blocked", "working"].includes(status.get(sid))
+      || ["busy", "retry", "blocked", "working"].includes(pendingPeerStatus.get(sid))
+    if (paused()) {
       log("skip", sid, `session-${status.get(sid)}`); return
+    }
+    const origin = paneNativeOrigin
+    const client = prompter()
+    const current = () => available() && sessions.has(sid) && !paused()
+      && prompter() === client && paneNativeOrigin === origin && pendingPeerRoot(ctx, sid)
+    // Use the peer carrier's exact root and native status interpretation. An
+    // empty complete status map is idle; unavailable or malformed is unknown.
+    const nativeIdle = async () => {
+      if (!current() || typeof client?.get !== "function"
+          || (typeof client?.status !== "function" && typeof client?.wait !== "function")) return false
+      let nativeTimeout
+      const bounded = async call => {
+        try {
+          return await Promise.race([call, new Promise((_, reject) => {
+            nativeTimeout = setTimeout(() => reject(new Error("carrier-context-timeout")), 1000)
+          })])
+        } finally { clearTimeout(nativeTimeout) }
+      }
+      try {
+        const info = pendingPeerSdkData(await bounded(client.get({
+          path: { id: sid }, query: { directory: origin.directory },
+        })))
+        if (!current() || !pendingPeerIsNativeRoot(info, sid, origin)) return false
+        if (typeof client.wait === "function") {
+          await bounded(client.wait({ sessionID: sid }))
+          return current()
+        }
+        const result = await bounded(client.status({ query: { directory: origin.directory } }))
+        return current() && pendingPeerNativeStatusType(pendingPeerSdkData(result), sid) === "idle"
+      } catch { return false }
     }
     busy.add(sid)
     let timeout
     try {
       if (look && !(await owed(sid))) { log("skip", sid, "no-owed-record"); return }
+      if (!(await nativeIdle()) || !current()) { log("skip", sid, "native-admission-withheld"); return }
       // The shared courier checks native user-message evidence before claim.
       // This read is scoped to the one session and its bounded recent history.
       const beforeMessages = await compactMessages(ctx, sid)
+      if (!Array.isArray(beforeMessages)) { log("skip", sid, "native-history-unavailable"); return }
       const claimed = await command("deliver", sid, { messages: beforeMessages })
       if (!claimed?.text || !Array.isArray(claimed.records) || !claimed.records.length) {
         log("skip", sid, claimed === null ? "claim-unavailable" : "nothing-claimed"); return
       }
       log("claim", sid, "claimed", { deliveries: claimed.records.map(record => record.delivery_id) })
+      const canSend = await nativeIdle()
       // A second native read is the final output/send recheck. If another
       // carrier's exact receipt appeared after our first read, settle it here
-      // and never submit this copy to promptAsync.
-      const beforeSend = await command("settle", sid, {
-        records: claimed.records, messages: await compactMessages(ctx, sid), text: claimed.text,
+      // and never submit this copy to promptAsync. Keep this claim/receipt
+      // recheck after the native admission awaits, including when admission
+      // failed: historical exact receipts still settle without a new send.
+      const finalMessages = await compactMessages(ctx, sid)
+      let beforeSend = await command("settle", sid, {
+        records: claimed.records, messages: finalMessages, text: claimed.text,
       })
       if (!beforeSend) {
         await command("release", sid, { records: claimed.records })
@@ -1635,12 +1774,33 @@ function createCompletionCarrier(ctx) {
         log("settle", sid, "empty-context-released")
         return
       }
+      // Revalidate after the asynchronous helper response too. No native read
+      // follows this transport-boundary check; exact receipts still settle first.
+      beforeSend = carrierCommand("settle", sid, {
+        records: claimed.records, messages: finalMessages, text: claimed.text,
+      }, (reason, extra) => log("command", sid, reason, extra), true)
+      if (!beforeSend) {
+        await command("release", sid, { records: claimed.records })
+        log("settle", sid, "effect-boundary-unavailable-released")
+        return
+      }
+      if (!beforeSend?.text || !beforeSend.records?.length || beforeSend.unknown_ids?.length) {
+        log("settle", sid, "effect-boundary-withheld")
+        return
+      }
+      // No await between this last local/identity check and promptAsync.
+      // Only the remaining claims validated by settle may be released here.
+      if (!canSend || !Array.isArray(finalMessages) || !current()) {
+        await command("release", sid, { records: beforeSend.records })
+        log("skip", sid, "final-admission-withheld-released")
+        return
+      }
       let taken = false
       let promptReason = "not-accepted"
       let httpStatus
       try {
         const result = await Promise.race([
-          prompter().promptAsync({ path: { id: sid },
+          client.promptAsync({ path: { id: sid },
             body: { parts: [{ type: "text", text: beforeSend.text }] } }),
           new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("carrier-timeout")), 5000) }),
         ])
@@ -1911,11 +2071,17 @@ function pendingPeerSdkNoContent(result) {
 function pendingPeerIsNativeRoot(info, sid, origin) {
   if (!info || typeof info !== "object" || Array.isArray(info)
       || info.id !== sid || typeof info.projectID !== "string"
-      || typeof info.directory !== "string" || typeof info.slug !== "string"
-      || typeof info.title !== "string"
-      || typeof info.version !== "string" || !info.time
+      || !info.time
       || !Number.isFinite(info.time.created) || !Number.isFinite(info.time.updated)
       || (info.parentID !== undefined && info.parentID !== null)) return false
+  const directory = info.location?.directory
+  if (typeof directory === "string") {
+    // V2 Session.Info uses location, with optional title and no slug/version.
+    if (info.title !== undefined && typeof info.title !== "string") return false
+    try { return realpathSync(directory) === origin.directory } catch { return false }
+  }
+  if (typeof info.directory !== "string" || typeof info.slug !== "string"
+      || typeof info.title !== "string" || typeof info.version !== "string") return false
   try { return realpathSync(info.directory) === origin.directory } catch { return false }
 }
 
@@ -2305,6 +2471,11 @@ function contextPolicyFromChat(input, output) {
     attempt_id: process.env.AGENT_DISPATCH_ATTEMPT_ID || null,
     reason: "native-policy-input-unavailable",
   }
+  if (input?.contextObservation === "v2-http-response") {
+    policy.source = "opencode-native-v2-http-response"
+    policy.reason = context === null ? "native-model-window-not-observed" : "native-consumer-version-unverified"
+    return policy
+  }
   if (contextPolicyRuntimeVersion !== nativeContextPolicyVersion) {
     policy.reason = "native-consumer-version-unverified"
     return policy
@@ -2494,12 +2665,9 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       const sid = event.properties?.sessionID || ""
       if (sid) { pendingPeerStatus.set(sid, "blocked"); completionCarrier.status(sid, "blocked") }
       observeCompactRuntimeStatus(ctx, sid, "blocked")
-      if (event.type === "question.asked" && sid && !isWorkerSession()) {
-        const child = spawn("python3", [fleetInteractionState, "set", "--harness", "opencode",
-          "--kind", "decision"], { stdio: ["pipe", "ignore", "ignore"], detached: true })
-        child.on("error", () => {})
-        child.unref()
-        child.stdin?.end(JSON.stringify({ session_id: sid }))
+      if (sid && !isWorkerSession()) {
+        publishInteraction("set", sid, { request_id: event.properties?.id, source: event.properties?.source },
+          event.type === "permission.asked" ? "permission" : "decision")
       }
     }
     if (event && ["question.replied", "question.rejected", "permission.replied"].includes(event.type)) {
@@ -2507,11 +2675,7 @@ export const AgentHarnessGuards = async (ctx, options = {}) => {
       if (sid) { pendingPeerStatus.set(sid, "working"); completionCarrier.status(sid, "working") }
       observeCompactRuntimeStatus(ctx, sid, "working")
       if (sid && !isWorkerSession()) {
-        const child = spawn("python3", [fleetInteractionState, "clear", "--harness", "opencode"], {
-          stdio: ["pipe", "ignore", "ignore"], detached: true })
-        child.on("error", () => {})
-        child.unref()
-        child.stdin?.end(JSON.stringify({ session_id: sid }))
+        publishInteraction("clear", sid, { request_id: event.properties?.requestID })
       }
     }
     if (event && event.type === "session.idle") {

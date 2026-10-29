@@ -1517,7 +1517,9 @@ class LedgerTest(TidyCase):
     def test_hook_records_the_session_transcript_and_cwd(self):
         self.hook("codex", "start", "thr-1", "--transcript", "/x/rollout.jsonl", "--source", "startup")
         with self.library():
-            seat = st.session_seat(st.resolve_seat("codex", str(self.cwd)), "codex", "thr-1")
+            # The hook records exact native identity even when a shared service
+            # correctly refuses its inherited physical pane.
+            seat = st.resolve_seat("codex", str(self.cwd), sid="thr-1")
             row = st.session_summary(seat)[("codex", "thr-1")]
         self.assertEqual((row["transcript"], row["cwd"], row["epoch"]), ("/x/rollout.jsonl", str(self.cwd), 0))
         self.assertGreater(row["first_seen"], 0)
@@ -4941,10 +4943,10 @@ class SeatHandoverTest(TidyCase):
                             observed.append((threading.current_thread().name, key))
                             yield
                     def publish(seat, row):
-                        if row["from"] == first[0]:
+                        if st._handover_origin(row)[1] == first[0]:
                             publishing.set()
                             self.assertTrue(contender.wait(5), "second writer never reached exclusion/publication")
-                        elif row["from"] == second[0]:
+                        elif st._handover_origin(row)[1] == second[0]:
                             # Also releases the negative-control baseline without the new mutex.
                             contender.set()
                         return append(seat, row)
@@ -5050,7 +5052,8 @@ class SeatHandoverTest(TidyCase):
                 self.assertEqual(self.handover.effective_parent(meta, self.jobs), "")
                 self.assertFalse(self.handover.owns(meta, "sid-A", self.jobs))
                 self.assertEqual(self.handover.storage_recipients("sid-B"), [])
-                self.assertEqual(self.handover.effective_parent(meta, self.jobs, read_context=context), "sid-B")
+                # The generation-checked pass also observes changed dependencies.
+                self.assertEqual(self.handover.effective_parent(meta, self.jobs, read_context=context), "")
                 with self.handover.lineage_effect_lock(meta, self.jobs, "sid-B") as allowed:
                     self.assertFalse(allowed)
             finally:
@@ -5233,7 +5236,7 @@ class SeatHandoverTest(TidyCase):
 
         # The next clear uses the merged snapshot as its bounded authority set.
         _out, next_rows = self.start("sid-C", pane=PANE_BESIDE)
-        self.assertEqual([(r["from"], r["sid"]) for r in next_rows],
+        self.assertEqual([(st._handover_origin(r)[1], r["sid"]) for r in next_rows],
                          [("sid-A", "sid-B"), ("sid-B", "sid-C")])
         self.assertEqual({(b["attempt"], b["parent"]) for b in next_rows[-1]["bindings"]},
                          {(b["attempt"], b["parent"]) for b in snapshot["bindings"]})
@@ -5273,6 +5276,7 @@ class SeatHandoverTest(TidyCase):
         out, rows = self.start("sid-B")
         self.assertEqual([(r["from"], r["sid"], r["source"]) for r in rows], [("sid-A", "sid-B", "clear")])
         self.assertEqual(self.effective(meta), "sid-B")
+
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
             self.assertTrue(self.handover.owns(meta, "sid-B", self.jobs))
             self.assertFalse(self.handover.owns(meta, "sid-A", self.jobs))    # the registered parent no longer owns after handover
@@ -5280,6 +5284,18 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual(meta["parent_sid"], "sid-A")                    # the registry row is untouched
         again, rows2 = self.start("sid-B", event="prompt", source="")
         self.assertEqual(len(rows2), 1)                                  # the same A -> B again is a no-op
+
+    def test_real_registry_row_without_parent_harness_uses_completion_carrier(self):
+        meta = self.row("att-real-row")
+        meta.pop("parent_harness")
+        meta["parent_completion_delivery"] = "claude-parent-runtime"
+        self.rows[-1] = self.rows[-1].replace(",parent_harness=claude", "")
+        self.rows[-1] = self.rows[-1].replace(",route_file=", ",parent_completion_delivery=claude-parent-runtime,route_file=")
+        self.jobs.write_text("\n".join(self.rows) + "\n", encoding="utf-8")
+        self.snapshot(now=st.now_epoch() - 5)
+        self.start("sid-B")
+        self.assertEqual(self.handover.effective_parent_harness(meta, self.jobs), "claude")
+        self.assertEqual(self.effective(meta), "sid-B")
 
     def test_the_card_gets_the_verified_route_and_the_existing_resume_command(self):
         self.row("att-1", route_file="/tmp/rt-1.json")
@@ -5380,8 +5396,8 @@ class SeatHandoverTest(TidyCase):
         replacement = self.row("att-2")                                   # same route, hash and node, still parent A
         self.assertEqual(self.effective(replacement), "sid-B")
         other_node = self.row("att-3", node="other")
-        self.assertEqual(self.effective(other_node), "sid-A")             # a different node was never bound
-        self.assertEqual(self.effective(self.row("att-4", digest="sha256:bb")), "sid-A")
+        self.assertEqual(self.effective(other_node), "sid-B")             # eligible unbound work follows the confirmed seat lineage
+        self.assertEqual(self.effective(self.row("att-4", digest="sha256:bb")), "sid-B")
 
     def test_opencode_hands_over_at_the_first_message_of_the_new_session(self):
         meta = self.row("att-1", parent="ses_A", harness="opencode")
@@ -5426,6 +5442,26 @@ class SeatHandoverTest(TidyCase):
             self.assertFalse(self.handover.record_for_session({"attempt_ids": []}, allowed))
             self.assertEqual(self.handover.storage_recipients("sid-A"), [("sid-A", None)])
 
+    def test_succession_only_ledger_discovers_route_free_notice_storage(self):
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            seat = self.seat()
+            path = st._ledger_path(seat)
+            st.ensure_dir(path.parent)
+            path.write_text(json.dumps({"ts": 10, "harness": "claude", "sid": "sid-B",
+                "event": "succession", "from": "sid-A", "source": "tidy-clear"}) + "\n",
+                encoding="utf-8")
+            recipients = self.handover.storage_recipients("sid-B", harness="claude")
+            self.assertEqual(recipients[0], ("sid-B", None))
+            self.assertIn("sid-A", [key for key, _scope in recipients])
+            scope = next(scope for key, scope in recipients if key == "sid-A")
+            import session_notice
+            receipt = session_notice.validate({"schema_version": 1, "kind": "notice",
+                "subject": "done", "text": "ok", "required_action": "read-notice", "key": "run-1"})
+            record = {"receipt": receipt, "receipt_digest": session_notice.receipt_digest(receipt),
+                      "attempt_ids": ["notice-123"]}
+            self.assertTrue(self.handover.record_for_session(record, scope))
+            self.assertFalse(self.handover.record_for_session({"attempt_ids": ["unbound"]}, scope))
+
     def test_folding_the_ledger_keeps_the_handover_rows_and_leaves_sessions_alone(self):
         meta = self.row("att-1")
         self.snapshot(now=st.now_epoch() - 5)
@@ -5449,7 +5485,8 @@ class SeatHandoverTest(TidyCase):
         meta = self.row("att-1", parent="sid-A", harness="codex")
         self.row("att-depth2", parent="sid-A", harness="codex", depth="2")
         row = self.retire("sid-A", "codex", "sid-B", "claude")
-        self.assertEqual((row["from"], row["sid"], row["harness"], row["source"]), ("sid-A", "sid-B", "claude", "retire"))
+        self.assertEqual((st._handover_origin(row), row["sid"], row["harness"], row["source"]),
+                             (("codex", "sid-A"), "sid-B", "claude", "retire"))
         self.assertEqual([(b["attempt"], b["parent"]) for b in row["bindings"]], [("att-1", "sid-A")])
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE_BESIDE}):
             self.assertEqual(self.handover.effective_parent(meta, self.jobs), "sid-B")
@@ -5714,20 +5751,90 @@ class SeatHandoverTest(TidyCase):
         self.killed_or_cancelled_owner_is_handed_over("cancelled")
 
     def test_lineage_reads_each_seat_ledger_once_per_read_context(self):
+        from collections import Counter
         from peer_read_context import PeerReadContext
         metas = [self.owner_row(f"att-owner-{n}", status="running", route=f"rt-{n}", digest=f"sha256:{n}{n}")
                  for n in range(3)]
         self.write_snapshot(PANE, "sid-A", [self.binding(metas[0])])
         self.write_snapshot(PANE_BESIDE, "sid-A", [self.binding(metas[1])])
-        reads = mock.patch.object(st, "_read_ledger_lines", wraps=st._read_ledger_lines)
-        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), reads as counted:
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            st.record_event(self.seat(PANE), "claude", "sid-A", "start", cwd=str(self.cwd), now=100)
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE_BESIDE}):
+            st.record_event(self.seat(PANE_BESIDE), "claude", "sid-A", "start", cwd=str(self.cwd), now=101)
+        # The native session is shared across the two physical seats: three
+        # distinct canonical files, each read and parsed once per cold pass.
+        with self.iso.patched_environ():
+            paths = {st._ledger_path(self.seat(pane)) for pane in (PANE, PANE_BESIDE)}
+            paths.add(st._native_ledger_path(st.session_seat(self.seat(PANE), "claude", "sid-A")))
+        raw_reads = []
+        real_read = st.read_bytes
+        def read(path):
+            if Path(path).suffix == ".jsonl":
+                raw_reads.append(path)
+            return real_read(path)
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
+                mock.patch.object(st, "read_bytes", side_effect=read), \
+                mock.patch.object(st, "_read_ledger_lines", wraps=st._read_ledger_lines) as counted:
+            self.handover._LINEAGE_GRAPH_CACHE.clear()
             context = PeerReadContext()
             for meta in metas:
-                self.handover.effective_parent(meta, self.jobs, read_context=context)
-            self.assertEqual(counted.call_count, 2)                    # one read per seat, not per attempt
+                self.assertEqual(self.handover.effective_parent(meta, self.jobs, read_context=context), "sid-A")
+            self.assertEqual(Counter(raw_reads), Counter(paths))
+            self.assertEqual(Counter(st._ledger_path(call.args[0]) for call in counted.call_args_list),
+                             Counter(paths))
             counted.reset_mock()
-            self.handover.current_bindings("claude", "sid-A", self.jobs)
-            self.assertLessEqual(counted.call_count, 2)                # a context of its own reads each once
+            raw_reads.clear()
+            self.handover._LINEAGE_GRAPH_CACHE.clear()
+            self.assertEqual(len(self.handover.current_bindings("claude", "sid-A", self.jobs)), len(metas))
+            self.assertEqual(Counter(raw_reads), Counter(paths))
+            self.assertEqual(Counter(st._ledger_path(call.args[0]) for call in counted.call_args_list),
+                             Counter(paths))
+
+    def test_shared_graph_marks_fork_merge_and_cycle_unresolved(self):
+        from peer_read_context import PeerReadContext
+        owner = self.owner_row("att-ambiguous", status="running", parent="sid-A")
+        self.append_row(PANE, {"ts": 1, "from": "sid-A", "sid": "sid-B", "harness": "claude",
+                               "source": "clear", "bindings": []})
+        self.append_row(PANE_BESIDE, {"ts": 2, "from": "sid-A", "sid": "sid-C", "harness": "claude",
+                                      "source": "reservation", "bindings": []})
+        self.append_row("test:pane-third", {"ts": 3, "from": "sid-B", "sid": "sid-D", "harness": "claude",
+                                            "source": "first-message", "bindings": []})
+        self.append_row("test:pane-third", {"ts": 4, "from": "sid-C", "sid": "sid-D", "harness": "claude",
+                                            "source": "clear", "bindings": []})
+        self.append_row("test:pane-third", {"ts": 5, "from": "sid-D", "sid": "sid-A", "harness": "claude",
+                                            "source": "clear", "bindings": []})
+        with self.iso.patched_environ():
+            graph = self.handover.lineage_graph(read_context=PeerReadContext())
+            self.assertIn(("claude", "sid-A", "sid-B"), graph.edges)
+            for sid in ("sid-A", "sid-B", "sid-C", "sid-D"):
+                self.assertEqual(self.handover.chain_end("claude", sid)[1], "unresolved")
+                self.assertEqual(self.handover._lineage_successor({}, sid, "claude"), sid)
+            self.assertEqual(self.handover.effective_parent(owner, self.jobs), "")
+            self.assertFalse(self.handover.owns(owner, "sid-B", self.jobs))
+        self.assertIsInstance(graph.unresolved, frozenset)
+        self.assertIsInstance(graph.ledger_keys, type(__import__("types").MappingProxyType({})))
+        projected = st._project_seat_lineage([
+            {"event": "start", "harness": "claude", "sid": sid, "ts": index}
+            for index, sid in enumerate(("sid-A", "sid-B", "sid-C", "sid-D"), 1)
+        ] + [dict(row) for rows in graph.ledger_rows.values() for row in rows], {}, {},
+            sid="sid-B", graph=graph)
+        self.assertNotEqual(projected[0]["relation"], "confirmed")
+
+    def test_lineage_card_projects_pane_moved_chain_from_all_ledgers(self):
+        with self.library():
+            first, second = self.seat(PANE), self.seat(PANE_BESIDE)
+            st.record_event(first, "claude", "sid-A", "start", source="startup", cwd=str(self.cwd), now=100)
+            st.record_event(first, "claude", "sid-B", "start", source="clear", cwd=str(self.cwd), now=200)
+            st._append_ledger_entry(first, {"ts": 201, "event": "handover", "harness": "claude",
+                                             "sid": "sid-B", "from": "sid-A", "source": "clear"})
+            st.record_event(second, "claude", "sid-C", "start", source="clear", cwd=str(self.cwd), now=300)
+            st._append_ledger_entry(second, {"ts": 301, "event": "succession", "harness": "claude",
+                                              "sid": "sid-C", "from": {"harness": "claude", "sid": "sid-B"},
+                                              "source": "tidy-clear"})
+            lineage = st.seat_lineage(second, harness="claude", sid="sid-C")
+        self.assertEqual(lineage[0]["sid"], "sid-C")
+        self.assertEqual(lineage[0]["relation"], "confirmed")
+        self.assertEqual(lineage[0]["predecessor"], {"harness": "claude", "sid": "sid-B"})
 
     def test_ownership_checks_never_resolve_a_project_key(self):
         owner, _frame = self.chain(owner_status="running")
@@ -6263,6 +6370,68 @@ class SeatHandoverTest(TidyCase):
             self.assertTrue(any(row.get("event") == "steward-release"
                                 for _key, row in self.handover._transition_rows(seat.key)))
             self.assertEqual(st.session_summary(seat)[("claude", "sid-A")]["last_seen"], 100)
+
+
+class CardExactIdentityTest(TidyCase):
+    def test_stored_author_full_sid_and_pane_survive_a_different_current_seat(self):
+        with self.library({"HERDR_PANE_ID": "successor:pane"}):
+            sys.path.insert(0, str(ROOT / "tools"))
+            from fleet import session_tags
+            for harness in st.HARNESSES:
+                sid = "stored-" + harness + "-full-native-session-0123456789"
+                if harness == "claude":
+                    directory = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "sessions"
+                    directory.mkdir(parents=True, exist_ok=True)
+                    (directory / "99999.json").write_text(json.dumps({"sessionId": sid,
+                        "nameSource": "derived", "name": "fixture-93"}))
+                    confirmed = "93"
+                else:
+                    confirmed = session_tags.assign_observed(harness, sid)
+                card = {"author": {"harness": harness, "sid": sid},
+                        "seat": {"pane": "stored:pane"}, "authored_at_epoch": 10,
+                        "body": "원래 목표: 보존할 원문\n관련: 작업"}
+                for text in (st.render_card_text(card),
+                             st.build_card_injection(card, Path("/card.md"), 10, 2400)):
+                    self.assertIn("sid=" + sid, text)
+                    self.assertIn("pane=stored:pane", text)
+                    self.assertIn("[" + confirmed + "]", text)
+                    self.assertNotIn("successor:pane", text)
+                    self.assertIn(card["body"], text)
+                if harness != "claude":
+                    path = session_tags._path()
+                    for snapshot in (None, "{broken"):
+                        path.unlink(missing_ok=True)
+                        if snapshot:
+                            path.write_text(snapshot)
+                        text = st.render_card_text(card)
+                        self.assertNotIn("[" + confirmed + "]", text)
+                        self.assertIn("sid=" + sid, text)
+                        self.assertIn("pane=stored:pane", text)
+                    path.unlink()
+
+    def test_sparse_cards_and_tiny_caps_never_claim_a_truncated_sid(self):
+        sid = "full-native-session-" + "한" * 100
+        with self.library():
+            for card in ({}, {"author": None, "seat": None},
+                         {"author": {"harness": "codex", "sid": sid},
+                          "body": "한글 " * 2500, "seat": {}}):
+                readable = st.render_card_text(card)
+                self.assertIn("pane=-", readable)
+                for cap in (0, 1, 100, 250, 500, 1000, 1600, 2400):
+                    text = st.build_card_injection(card, Path("/card.md"), 10, cap)
+                    self.assertLessEqual(len(text.encode("utf-8")), cap)
+                    if "sid=" in text:
+                        self.assertIn("sid=" + (sid if card.get("author") else "-"), text)
+                    text.encode("utf-8").decode("utf-8")
+
+    def test_related_session_instructions_reach_compact_and_nonce_card_requests(self):
+        self.assertIn("observed pane and full exact", st.COMPACT_CARD_INSTRUCTIONS)
+        for origin in ("idle", "compact"):
+            text = clear.idle_card_request_text({"nonce": "fixture-nonce", "origin": origin})
+            self.assertIn("관측 pane·전체 native SID", text)
+            self.assertIn("관련 등 기존 칸", text)
+            self.assertIn("미확인", text)
+
 
 
 if __name__ == "__main__":

@@ -241,8 +241,13 @@ class ModelSettingsCliTest(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 original = b"".join(line for line in model_config.shipped_path(adapter).read_bytes().splitlines(keepends=True)
                                     if not line.startswith(b"CFG_MODEL_PROFILE_TOP="))
+                if adapter == "opencode":
+                    import re
+                    original = re.sub(rb"(?m)^CFG_MODEL_PROFILE_DEEP=.*$",
+                                      b"CFG_MODEL_PROFILE_DEEP=model/private-provider/previous:max", original)
                 path.write_bytes(original)
-                deep = model_profile.resolve_profile_values(adapter, model_config.parse_config(path), "deep")
+                fallback = model_profile.resolve_profile_values(
+                    adapter, model_config.parse_config(path), "top" if adapter == "opencode" else "deep")
                 code, output = self.run_cli(adapter, "profile/top", "vendor-top", "--dry-run", "--json")
                 self.assertEqual(code, 0, output)
                 self.assertEqual(json.loads(output)["status"], "planned")
@@ -253,7 +258,7 @@ class ModelSettingsCliTest(unittest.TestCase):
                 self.assertEqual(result["old_model"], None)
                 self.assertEqual(Path(result["backup"]).read_bytes(), original)
                 top = model_profile.resolve_profile_values(adapter, model_config.parse_config(path), "top")
-                self.assertEqual((top["model"], top["budget"]), ("vendor-top", deep["budget"]))
+                self.assertEqual((top["model"], top["budget"]), ("vendor-top", fallback["budget"]))
                 code, output = self.run_cli(adapter, "profile/top", "vendor-top", "--json")
                 self.assertEqual(code, 0, output)
                 self.assertEqual(json.loads(output)["status"], "unchanged")

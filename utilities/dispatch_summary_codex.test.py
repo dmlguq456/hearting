@@ -66,6 +66,16 @@ class CodexDispatchSummaryTest(unittest.TestCase):
         )
         self.assertEqual(S.announced_session(self.log), (False, None))
 
+    def test_masked_bootstrap_without_dialogue_does_not_select_attempt_log(self):
+        self.write(control(), rollout_message("user", (
+            "# AGENTS.md instructions for /work\n<INSTRUCTIONS>\n"
+            "## Codex masked-profile attach layer\nInternal rules\n</INSTRUCTIONS>\n"
+            "<environment_context>fixture</environment_context>")))
+        self.assertEqual(S.announced_session(self.log), (False, None))
+        with self.log.open("ab") as handle:
+            handle.write(line(codex_message("실제 구현 진행")))
+        self.assertEqual(S.announced_session(self.log), (True, None))
+
     def test_empty_and_partial_prefix_are_undecided(self):
         self.log.write_bytes(b"")
         self.assertEqual(S.announced_session(self.log), (False, None))

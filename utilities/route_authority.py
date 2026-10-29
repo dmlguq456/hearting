@@ -1013,6 +1013,21 @@ def review_owner_authority(route, jobs, author_attempt_id) -> None:
 PIN_TARGETS = ("owner", "frame", "worker")
 
 
+def harness_admitted(route, harness, *, node=None) -> bool:
+    """Read the existing admission of an exact target, never automatic eligibility.
+
+    Checked tuples alone prove runtime support, not enabled-at-admission policy.
+    Callers still validate those tuples and their ordinary launch authority.
+    """
+    if not isinstance(route, dict) or not harness:
+        return False
+    allocation = route.get("dispatch_allocation") or {}
+    policy = (node or {}).get("harness_policy") if node is not None else route.get("owner_harness_policy")
+    return (harness in allocation.get("harness_order", [])
+            or isinstance(policy, dict) and any(
+                harness in (policy.get(band) or []) for band in ("primary", "relief", "last_resort")))
+
+
 def selection_pin_rows(route) -> dict:
     """Copied pins in force for a descendant route, without the schema envelope."""
     pins = route_in_force(route).get("selection_pins") if isinstance(route, dict) else None

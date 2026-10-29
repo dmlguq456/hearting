@@ -28,6 +28,8 @@ WAIT_SOURCES = (
     "codex-rollout",
     "codex-appserver",
     "opencode-question",
+    "opencode-form",
+    "opencode-permission",
 )
 _BASE_KEYS = frozenset(
     ("schema_version", "harness", "session_id", "kind", "source", "waiting_since")
@@ -53,6 +55,14 @@ def _safe_native_ref(value):
     if not value or len(value) > 200 or not _SAFE_KEY_RE.fullmatch(value):
         return None
     return value
+
+
+def _safe_identity_ref(name, value):
+    # JSON-RPC request 501 and request "501" are different requests. Other
+    # optional native refs retain the historical string representation.
+    if name == "request_id" and type(value) is int:
+        return value
+    return _safe_native_ref(value)
 
 
 def state_root():
@@ -97,7 +107,7 @@ def _encode(harness, session_id, kind, source, waiting_since, *,
     for name, ref in (("request_id", request_id), ("turn_id", turn_id), ("item_id", item_id)):
         if ref is None:
             continue
-        safe_ref = _safe_native_ref(ref)
+        safe_ref = _safe_identity_ref(name, ref)
         if safe_ref is None:
             return None
         value[name] = safe_ref
@@ -118,7 +128,7 @@ def _prepare_directory(directory):
 def _atomic_write(path, payload):
     if not _BASE_KEYS.issubset(payload) or not set(payload).issubset(_ALLOWED_KEYS):
         raise ValueError("interaction payload key set violates the allowlist")
-    if any(_safe_native_ref(payload[name]) != payload[name]
+    if any(_safe_identity_ref(name, payload[name]) != payload[name]
            for name in _OPTIONAL_ID_KEYS if name in payload):
         raise ValueError("interaction native identity ref is invalid")
     directory = os.path.dirname(path)
@@ -162,9 +172,14 @@ def set_wait(session_id, harness, kind, source, now=None, *,
         return False
 
 
-def clear_wait(session_id, harness):
+def clear_wait(session_id, harness, *, request_id=None):
     """Remove only the exact harness/session marker."""
     try:
+        if request_id is not None:
+            current = read_wait(session_id, harness)
+            expected = _safe_identity_ref("request_id", request_id)
+            if expected is None or current is None or current.get("request_id") != expected:
+                return False
         path = sidecar_path(session_id, harness)
         os.unlink(path)
         return True
@@ -192,7 +207,7 @@ def read_wait(session_id, harness):
         if (not isinstance(payload, dict) or not _BASE_KEYS.issubset(payload)
                 or not set(payload).issubset(_ALLOWED_KEYS)):
             return None
-        if any(_safe_native_ref(payload[name]) != payload[name]
+        if any(_safe_identity_ref(name, payload[name]) != payload[name]
                for name in _OPTIONAL_ID_KEYS if name in payload):
             return None
         if payload.get("schema_version") != SCHEMA_VERSION:

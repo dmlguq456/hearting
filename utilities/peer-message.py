@@ -58,7 +58,8 @@ _STEWARD_TARGETS_MAX = 32
 # F-100c — the harness-neutral sender trailer a steward appends to a herdr prompt so the
 # RECEIVER (Claude UserPromptSubmit hook, Codex userprompt hook, OpenCode plugin) can write
 # its own `notice` record with an exact sender. New trailers display [tag] and
-# an opaque transfer ref; legacy full-session-id trailers remain receive-only.
+# observed pane/full SID and an opaque transfer ref; the bracket keeps exact
+# receipt attribution on the sealed-ref path. Legacy full-id trailers are receive-only.
 # Native Claude SendMessage already wraps its delivery in <cross-session-message from=…>;
 # a herdr prompt has no envelope, so the trailer is the envelope.
 _PEER_TRAILER_RE = re.compile(
@@ -66,6 +67,7 @@ _PEER_TRAILER_RE = re.compile(
     r"(?P<sid>[^\s)]+)(?:\s+(?P<name>[^)]*?))?\s*\)")
 _EXACT_RECEIVER_PROVENANCE = "validated-peer-ref-receiver-v1"
 _RUNTIME_PRODUCER_SCHEMA = "registered-runtime-completion-v1"
+_SESSION_NOTICE_PRODUCER_SCHEMA = "session-notice-runtime-v1"
 _RUNTIME_NOTICE_SCHEMA = "retained-runtime-notice-v1"
 
 
@@ -105,15 +107,21 @@ def peer_alias(harness, session_id):
     return f"[{tag}]" if isinstance(tag, str) and re.fullmatch(r"[0-9a-f]{2}", tag) else "[?]"
 
 
-def peer_trailer(harness, session_id, name=None, *, transfer_ref=None):
-    """Human display; old receivers reject bracketed tags as session identities."""
-    parts = [str(harness or "unknown"), peer_alias(harness, session_id)]
-    clean = " ".join(str(name or "").replace(")", " ").replace(";", " ").split())
+def peer_trailer(harness, session_id, name=None, *, transfer_ref=None, pane_id=None):
+    """Human display; the bracket token keeps display identity off the legacy path."""
+    def clean(value):
+        return " ".join("".join(ch if ch.isprintable() and ch not in ");" else " "
+                                for ch in str(value or "")).split())
+
+    parts = [clean(harness) or "unknown", peer_alias(harness, session_id)]
+    display_name = clean(name)
     if session_id:
-        clean = clean.replace(str(session_id), parts[1])
-    if clean:
-        parts.append(clean)
-    suffix = f" ; ref={transfer_ref}" if transfer_ref else ""
+        display_name = display_name.replace(str(session_id), parts[1])
+    if display_name:
+        parts.append(display_name)
+    suffix = " ; pane=%s ; sid=%s" % (clean(pane_id) or "-", usable_session_id(session_id) or "-")
+    if transfer_ref:
+        suffix += f" ; ref={transfer_ref}"
     tag = "runtime-from" if harness == "runtime" else "peer-from"
     return "(%s: %s%s)" % (tag, " ".join(parts), suffix)
 
@@ -199,7 +207,9 @@ def _unknown_sender(endpoint):
 
 
 def _valid_runtime_producer_binding(binding, sender, recipient=None, refs=None):
-    """Validate a retained runtime completion or ordinary-notice sender."""
+    """Validate the existing registered and retained notice producer schemas."""
+    if isinstance(binding, dict) and binding.get("schema") == _SESSION_NOTICE_PRODUCER_SCHEMA:
+        return _valid_session_notice_producer_binding(binding, sender, recipient, refs)
     if (not isinstance(binding, dict) or not isinstance(sender, dict)
             or sender.get("harness") != "runtime"
             or sender.get("session_id") not in (None, "")
@@ -283,6 +293,43 @@ def _valid_runtime_producer_binding(binding, sender, recipient=None, refs=None):
                 or binding["delivery_id"] != notices[0]["delivery_id"]
                 or binding["receipt_digest"] != notices[0]["receipt_digest"]):
             return False
+    return True
+
+
+def _valid_session_notice_producer_binding(binding, sender, recipient=None, refs=None):
+    """Validate per-record route-free notice provenance without jobs attempts."""
+    keys = {"schema", "duty_id", "jobs", "records", "recipient"}
+    if (not isinstance(binding, dict) or set(binding) != keys
+            or binding.get("schema") != _SESSION_NOTICE_PRODUCER_SCHEMA
+            or not isinstance(sender, dict) or sender.get("harness") != "runtime"
+            or sender.get("session_id") not in (None, "")
+            or sender.get("name") != "Hearting runtime"):
+        return False
+    if (not isinstance(binding.get("duty_id"), str)
+            or not re.fullmatch(r"(?:session|run)-notice-[0-9a-f]{32}", binding["duty_id"])
+            or not isinstance(binding.get("jobs"), str) or not Path(binding["jobs"]).is_absolute()
+            or not isinstance(binding.get("recipient"), dict)
+            or not _valid_transfer_endpoint(binding["recipient"])):
+        return False
+    rows = binding.get("records")
+    if not isinstance(rows, list) or not rows or len(rows) > 32:
+        return False
+    required = {"duty_id", "storage_sid", "delivery_id", "receipt_digest"}
+    refs = set(refs or ())
+    for row in rows:
+        if (not isinstance(row, dict) or set(row) != required
+                or not re.fullmatch(r"(?:session|run)-notice-[0-9a-f]{32}", str(row.get("duty_id") or ""))
+                or not all(isinstance(row.get(key), str) and row[key]
+                           for key in ("storage_sid", "delivery_id"))
+                or not re.fullmatch(r"(?:sha256:)?[0-9a-f]{64}",
+                                    str(row.get("receipt_digest") or ""))
+                or row["duty_id"] not in refs or row["delivery_id"] not in refs):
+            return False
+    if binding["duty_id"] not in refs:
+        return False
+    if recipient is not None and any(binding["recipient"].get(key) != recipient.get(key)
+                                     for key in ("harness", "session_id")):
+        return False
     return True
 
 
@@ -371,11 +418,18 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
 
     This immutable record shares the ledger's local write trust boundary; it is
     not an authorization token. The final ledger row refers to this message_id.
-    Full identities live here, never in the generated display trailer.
+    The sealed endpoints own attribution; visible trailer identities are only display.
     """
     if producer_binding is not None and not _valid_runtime_producer_binding(
             producer_binding, sender, recipient, list(refs)):
         raise ValueError("peer-runtime-producer-binding-invalid")
+    if (producer_binding is not None
+            and producer_binding.get("schema") == _SESSION_NOTICE_PRODUCER_SCHEMA):
+        from peer_obligations import session_notice_submission_current
+        if not session_notice_submission_current({"producer_binding": producer_binding,
+                "from": sender, "to": recipient, "refs": list(refs), "text": body,
+                "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest()}):
+            raise ValueError("peer-notice-recipient-changed")
     if sender.get("harness") == "runtime" and producer_binding is None:
         raise ValueError("peer-runtime-producer-binding-required")
     if producer_binding is not None and not include_trailer:
@@ -386,6 +440,9 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
     command = handoff_accept_command(ref) if handoff is not None else ""
     wire_body = normalized + ("\n\nRead the complete card and referenced documents, then accept with:\n" + command if command else "")
     inline_body = wire_body
+    trailer = peer_trailer(
+        sender.get("harness"), sender.get("session_id"), sender.get("name"),
+        transfer_ref=ref, pane_id=sender.get("pane_id")) if include_trailer else None
     body_ref = None
     payload_path = None
     raw_body = body.encode("utf-8")
@@ -394,7 +451,7 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
         try:
             body_ref, payload_path = _write_body_payload(ref, raw_body, source_sha256)
             wire_body = _body_reference_envelope(
-                body, payload_path, len(raw_body), sender, ref, command=command)
+                body, payload_path, len(raw_body), sender, ref, command=command, prepared_trailer=trailer)
             if wire_body is None:
                 payload_path.unlink()
                 body_ref, payload_path, wire_body = None, None, inline_body
@@ -404,8 +461,7 @@ def _prepare_peer_message(body, sender, recipient, *, include_trailer=True,
             body_ref, payload_path, wire_body = None, None, inline_body
     text = wire_body
     if include_trailer:
-        text += "\n\n" + peer_trailer(
-            sender.get("harness"), sender.get("session_id"), sender.get("name"), transfer_ref=ref)
+        text += "\n\n" + trailer
     record = {"schema_version": 1, "message_id": ref, "from": dict(sender),
               "to": dict(recipient), "body_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
               "refs": list(refs)}
@@ -515,12 +571,14 @@ def handoff_accept_command(ref):
     return 'python3 "$AGENT_HOME/utilities/session_tidy.py" handoff accept ' + ref
 
 
-def _body_reference_envelope(body, payload_path, raw_size, sender, ref, *, command=""):
+
+def _body_reference_envelope(body, payload_path, raw_size, sender, ref, *, command="", prepared_trailer=None):
     lines = body.splitlines()
     first_line = lines[0] if lines else ""
     path = str(payload_path)
-    trailer = peer_trailer(
-        sender.get("harness"), sender.get("session_id"), sender.get("name"), transfer_ref=ref)
+    trailer = prepared_trailer if prepared_trailer is not None else peer_trailer(
+        sender.get("harness"), sender.get("session_id"), sender.get("name"),
+        transfer_ref=ref, pane_id=sender.get("pane_id"))
     for preview_bytes in range(_BODY_REFERENCE_PREVIEW_BYTES, -1, -16):
         preview = _truncate_utf8(first_line, preview_bytes) or "(empty first line)"
         envelope = (
@@ -1624,6 +1682,17 @@ def reserve_pending_herdr(ref, recipient, *, receipt="herdr-delivery-inflight",
         return dict(row, rpc_claim=claim)
 
 
+def _registered_submission_current(row):
+    from peer_obligations import registered_submission_current
+    body = row.get("text")
+    if row.get("body_ref") is not None:
+        try:
+            body = read_peer_payload(row["ref"])["body"]
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
+    return registered_submission_current(row, original_body=body)
+
+
 def begin_pending_write(row, *, recipient=None, receipt=None, claimant=None):
     """Mark an exact reserved pending transfer unverified immediately before I/O.
 
@@ -1653,6 +1722,8 @@ def begin_pending_write(row, *, recipient=None, receipt=None, claimant=None):
                 or (not claim.get("first_input")
                     and not _pending_target_matches(current, recipient))
                 or _registered_delivery_settled(current)):
+            return None
+        if not _registered_submission_current(current):
             return None
         updated = dict(current, state="unverified", receipt=receipt or claim.get("receipt")
                        or "delivery-inflight")
@@ -1771,6 +1842,8 @@ def deliver_pending_codex(ref, *, timeout=1.0):
             current = _read_pending(ref)
             if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
                 raise QueueDeliveryError("peer-claim-changed-before-add")
+            if not _registered_submission_current(current):
+                raise QueueDeliveryError("peer-dispatch-recipient-changed-before-add")
             _save_pending(dict(current, state="unverified", receipt="native-queue-inflight"))
 
     error = None
@@ -1815,7 +1888,7 @@ def deliver_pending_codex(ref, *, timeout=1.0):
             if rc:
                 _save_pending(dict(current, rpc_claim=None))
                 return {"status": "unverified", "reason": "peer-receive-ledger-unavailable"}
-            received = dict(current, state="received", text=None, rpc_claim=None,
+            received = dict(current, state="received", text=_received_delivery_text(current), rpc_claim=None,
                             receipt="exact-native-history",
                             actual_message_id=native_message_id,
                             exact_receiver_receipt=proof)
@@ -1898,8 +1971,11 @@ def parse_peer_trailer(text, recipient=None, *, include_ref=False):
     }
     if match.group("sid").startswith("["):
         display_name, sep, ref = (match.group("name") or "").rpartition("; ref=")
-        if sep:
-            result["name"] = display_name.strip() or None
+        if not sep:
+            display_name = match.group("name") or ""
+        # Decorative native identity never selects a sender or a legacy path.
+        display_name = display_name.split("; pane=", 1)[0].strip()
+        result["name"] = display_name or None
         # A missing display tag does not decide identity. Malformed metadata,
         # wrong actual recipient and changed bodies remain unattributed.
         if not _valid_transfer_endpoint(recipient) or not re.fullmatch(r"\[(?:[0-9a-f]{2}|\?)\]", match.group("sid")):
@@ -2137,14 +2213,14 @@ def _received_notice_exists(ref, recipient):
             or _native_history_notice_exists(ref, recipient))
 
 
-def _validated_pending_transfer(ref, row):
+def _validated_pending_transfer(ref, row, *, roots=None):
     """Recheck the immutable transfer against its verified pending row.
 
     Version-1 transfers written before refs were added remain valid when the
     pending row supplies that same immutable callback binding.
     """
     try:
-        transfer = _read_transfer_record(ref)
+        transfer = _read_transfer_record(ref, roots=roots)
     except (OSError, ValueError, KeyError, TypeError):
         return None, None
     pending_refs = (row or {}).get("refs", [])
@@ -2179,8 +2255,8 @@ def _validated_pending_transfer(ref, row):
 
 
 def _validated_native_history_receipt(ref, row, recipient, binding, provenance,
-                                      actual_message_id):
-    transfer, _refs = _validated_pending_transfer(ref, row)
+                                      actual_message_id, *, roots=None):
+    transfer, _refs = _validated_pending_transfer(ref, row, roots=roots)
     if transfer is None:
         return None
     bound_recipient = (binding or {}).get("recipient") or {}
@@ -2290,13 +2366,13 @@ def recover_missing_pending_receipt(ref, intent, *, roots=None, read_context=Non
             dict(effective))
 
 
-def _validated_pending_receiver_proof(row):
+def _validated_pending_receiver_proof(row, *, roots=None):
     """Build exact receipt evidence from a current trusted pending receipt row."""
     ref = (row or {}).get("ref")
     if (not isinstance(row, dict) or row.get("state") != "received"
             or not isinstance(ref, str) or not re.fullmatch(r"[0-9a-f]{32}", ref)):
         return None
-    transfer, _refs = _validated_pending_transfer(ref, row)
+    transfer, _refs = _validated_pending_transfer(ref, row, roots=roots)
     if transfer is None:
         return None
     binding = pending_delivery_binding(row, include_acked=True)
@@ -2304,7 +2380,7 @@ def _validated_pending_receiver_proof(row):
     if not isinstance(recipient, dict):
         return None
     if row.get("receipt") == "exact-peer-ref":
-        candidate = _exact_receiver_evidence(ref, transfer, row, recipient)
+        candidate = _exact_receiver_evidence(ref, transfer, row, recipient, roots=roots)
         if candidate is None:
             return None
         saved = row.get("exact_receiver_receipt")
@@ -2327,7 +2403,7 @@ def _validated_pending_receiver_proof(row):
         if provenance is None:
             return None
         candidate = _validated_native_history_receipt(
-            ref, row, recipient, binding, provenance, row.get("actual_message_id"))
+            ref, row, recipient, binding, provenance, row.get("actual_message_id"), roots=roots)
         if candidate is None:
             return None
         saved = row.get("exact_receiver_receipt")
@@ -2481,11 +2557,25 @@ def acknowledge_message_obligations(received, *, pending_lock_held=False):
         return False
 
 
+def _received_delivery_text(row, original_text=None):
+    """Retain the existing original body while an exact delivery ACK may need retrying."""
+    if (row.get("dispatch_notice") or row.get("dispatch_notices")
+            or (row.get("producer_binding") or {}).get("schema") in {
+                _SESSION_NOTICE_PRODUCER_SCHEMA, _RUNTIME_NOTICE_SCHEMA}):
+        text = row.get("text") or original_text
+        if (isinstance(text, str)
+                and hashlib.sha256(text.encode("utf-8")).hexdigest() == row.get("body_sha256")):
+            return text
+    return None
+
+
 def _ack_registered_delivery(received, *, message_obligation=True):
     registered = False
     try:
-        from peer_obligations import acknowledge_registered_delivery
+        from peer_obligations import (acknowledge_registered_delivery,
+                                      acknowledge_session_notice_delivery)
         registered = acknowledge_registered_delivery(received)
+        registered = acknowledge_session_notice_delivery(received) or registered
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         pass  # The retained courier retries the same receipt, never another send.
     if message_obligation:
@@ -2587,7 +2677,7 @@ def _ordinary_receiver_guidance():
             "Review exact results and do approved follow-through. Receipt/queue/ACK is not execution.")
 
 
-def _exact_receiver_evidence(ref, transfer, pending, recipient):
+def _exact_receiver_evidence(ref, transfer, pending, recipient, *, roots=None):
     """Bind the validated original body to the receiver and current watch generation."""
     if (not isinstance(transfer, dict) or transfer.get("message_id") != ref
             or type(transfer.get("schema_version")) is not int
@@ -2599,7 +2689,7 @@ def _exact_receiver_evidence(ref, transfer, pending, recipient):
             or not _valid_transfer_target(transfer.get("to"))):
         return None
     if pending is not None:
-        checked_transfer, refs = _validated_pending_transfer(ref, pending)
+        checked_transfer, refs = _validated_pending_transfer(ref, pending, roots=roots)
         if checked_transfer is None or checked_transfer != transfer:
             return None
     else:
@@ -2966,7 +3056,7 @@ def receive_peer_message(text, recipient, project="", *, summary_text=""):
                 return rc
         received_at = proof["received_at"]
         if pending:
-            received = dict(pending, state="received", text=None, rpc_claim=None,
+            received = dict(pending, state="received", text=_received_delivery_text(pending, text), rpc_claim=None,
                             receipt="exact-peer-ref", received_at=received_at,
                             exact_receiver_receipt=proof)
             _save_pending(received)
@@ -3261,7 +3351,7 @@ def cmd_pending(args):
                     producer_binding=row.get("producer_binding")))
                 if rc:
                     return rc
-            received = dict(row, state="received", text=None, rpc_claim=None,
+            received = dict(row, state="received", text=_received_delivery_text(row), rpc_claim=None,
                             receipt="exact-native-history", received_at=time.time(),
                             actual_message_id=message_id,
                             exact_receiver_receipt=proof)

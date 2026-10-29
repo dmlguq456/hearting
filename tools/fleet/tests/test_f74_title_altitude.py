@@ -31,7 +31,7 @@ from fleet import titles                        # noqa: E402
 class PromptAltitudeTest(unittest.TestCase):
     def test_title_instruction_asks_for_the_session_subject_not_the_moment(self):
         prompt = rt._prompt("hello")
-        self.assertIn("dominant CURRENT topic in the recent CONVERSATION", prompt)
+        self.assertIn("TITLE: the user's current objective", prompt)
         self.assertIn("task/cycle altitude", prompt)
         self.assertIn("not what it happens to be doing at this moment", prompt)
 
@@ -61,7 +61,7 @@ class PriorTitleBlockTest(unittest.TestCase):
         prompt = rt._prompt("hello", prior_title="Memory pipeline revival")
         self.assertIn("PRIOR TITLE", prompt)
         self.assertIn("Memory pipeline revival", prompt)
-        self.assertIn("Reference only: recent CONVERSATION determines the current topic", prompt)
+        self.assertIn("preserve its wording unless the user's actual objective changes", prompt)
 
     def test_prior_title_enters_as_labeled_data_before_the_conversation_block(self):
         prompt = rt._prompt("hello", prior_title="Memory pipeline revival")
@@ -140,6 +140,8 @@ class MainKeepsThePriorTitleTest(unittest.TestCase):
 
     def test_a_real_subject_change_still_replaces_the_title(self):
         titles.write("sidAlt2", "Memory pipeline revival", offset=0, now=time.time() - 600)
+        with open(self.path, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"type": "user", "message": "Now repair Fleet display"}) + "\n")
         self._run("sidAlt2", "TITLE: Fleet display fixes cycle\nNOW: route 판정 수정 중")
         self.assertEqual(titles.read("sidAlt2")["title"], "Fleet display fixes cycle")
 

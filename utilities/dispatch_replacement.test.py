@@ -21,6 +21,19 @@ import route_identity
 os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a real Claude login
 
 
+# Relevant technical lines from the saved exit-64 receipt; no spawn proof or model ID.
+HEADLESS_MODEL_REFUSAL = (
+    'trace.1=cascade=explicit>hard-eligibility>quality-band>capacity>recent-attempt-balance\n'
+    'trace.2=explicit=none;authorized=0\n'
+    'trace.3=eligibility=claude:ok,codex:ok,opencode:ok\n'
+    'trace.4=configured=codex,claude,opencode;selected=codex;source=configured-balanced;deviation_reason=none\n'
+    'route_defaults=--capability,--capability-mode,--intensity,--model-profile,--dispatch-depth,--worker-type,--owner,--assigned-contract\n'
+    'check=failed\n'
+    'reason=headless-main-session-only-model\n'
+    'detail=model selected by profile:deep is interactive dispatch-depth-0 main-session only\n'
+)
+
+
 _STATE_TMP = None
 _STATE_OLD = None
 
@@ -792,6 +805,95 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(calls[0][calls[0].index('--attempt-id')+1],record['replacement_attempt_id'])
         self.assertEqual(result['reason'],'replacement-launch-pending')
         self.assertEqual(len(list((R._directory(self.jobs)/'claims').glob('*.json'))),1)
+
+    def test_returned_headless_model_refusal_is_not_launch_pending(self):
+        record = self.claim()
+        source_before = R._rows(self.jobs.read_text().splitlines())['att-source']
+        claim_path = R._record_path(self.jobs, record['family_id'])
+        claim_before = claim_path.read_bytes()
+        self.assertEqual(R.recovery_delivery_state(self.jobs, 'att-source'), 'accepted')
+        # Older/noisy output must neither supply detail nor escape the diagnostic bound.
+        output = ('check=failed\nreason=old-refusal\ndetail=old-detail\n'
+                  + 'selection-noise\n' * 25 + HEADLESS_MODEL_REFUSAL)
+        for stream in ('stdout', 'stderr'):
+            with self.subTest(stream=stream):
+                runner = mock.Mock(return_value=subprocess.CompletedProcess(
+                    ['launcher'], 64, output if stream == 'stdout' else '',
+                    output if stream == 'stderr' else ''))
+                with mock.patch('dispatch_replacement_batch.command', return_value=None):
+                    result = R.advance(self.jobs, 'att-source', run=runner,
+                                       authority_check=lambda *_: True)
+                runner.assert_called_once()
+                command = runner.call_args.args[0]
+                self.assertEqual(command[command.index('--attempt-id') + 1], record['replacement_attempt_id'])
+                self.assertEqual((result['state'], result['reason'], result['launcher_exit']),
+                                 ('needs-attention', 'headless-main-session-only-model', 64))
+                self.assertEqual((result['source_attempt_id'], result['attempt_id'], result['node']),
+                                 ('att-source', record['replacement_attempt_id'], 'frame'))
+                self.assertEqual(result['record'], record)
+                self.assertEqual(result['detail'],
+                                 'model selected by profile:deep is interactive dispatch-depth-0 main-session only')
+                combined = '\n'.join((output, '') if stream == 'stdout' else ('', output))
+                self.assertEqual(result['launcher_diagnostic'], '\n'.join(combined.splitlines()[-20:]))
+                self.assertIn('parent/controller', result['next_step'])
+                self.assertIn('model-eligibility restriction', result['next_step'])
+                self.assertIn('same replacement claim', result['next_step'])
+                self.assertNotIn('pending', result['next_step'])
+                self.assertNotIn('Retry', result['next_step'])
+                self.assertNotIn('retry_when', result)
+                self.assertNotIn('next_action', result)
+                self.assertEqual(R.effective_attempts(self.jobs, {'att-source'}), ({'att-source'}, []))
+                self.assertNotIn(record['replacement_attempt_id'], R._rows(self.jobs.read_text().splitlines()))
+                self.assertEqual(R.recovery_delivery_state(self.jobs, 'att-source'), 'accepted')
+                self.assertEqual(R._rows(self.jobs.read_text().splitlines())['att-source'], source_before)
+                self.assertEqual(claim_path.read_bytes(), claim_before)
+
+    def test_untyped_or_incomplete_launcher_result_remains_pending(self):
+        cases = [
+            ('no-registration', 0, ''),
+            ('untyped-exit75', 75, 'launcher unavailable\n'),
+            ('unstructured-exit64', 64, 'headless-main-session-only-model\n'),
+            ('missing-check', 64, 'reason=headless-main-session-only-model\n'),
+            ('missing-reason', 64, 'check=failed\ndetail=incomplete\n'),
+            ('different-exit', 65, HEADLESS_MODEL_REFUSAL),
+            ('success-exit', 0, HEADLESS_MODEL_REFUSAL),
+            ('later-incomplete', 64, HEADLESS_MODEL_REFUSAL + 'check=failed\n'),
+            ('later-success', 64, HEADLESS_MODEL_REFUSAL + 'check=ok\n'),
+            ('later-unknown', 64, HEADLESS_MODEL_REFUSAL + 'check=\n'),
+            ('different-reason', 64, 'check=failed\nreason=unknown-refusal\n'),
+        ]
+        record = self.claim()
+        for name, exit_code, output in cases:
+            with self.subTest(name=name), \
+                 mock.patch('dispatch_replacement_batch.command', return_value=None):
+                result = R.advance(self.jobs, 'att-source', authority_check=lambda *_: True,
+                    run=lambda *args, **kwargs: subprocess.CompletedProcess(args[0], exit_code, output, ''))
+                self.assertEqual((result['state'], result['reason'], result['launcher_exit']),
+                                 ('needs-attention', 'replacement-launch-pending', exit_code))
+                self.assertEqual(result['attempt_id'], record['replacement_attempt_id'])
+                self.assertNotIn('detail', result)
+                self.assertNotIn('next_step', result)
+                self.assertEqual(R.effective_attempts(self.jobs, {'att-source'}), ({'att-source'}, []))
+                self.assertNotIn(record['replacement_attempt_id'], R._rows(self.jobs.read_text().splitlines()))
+                self.assertEqual(R.recovery_delivery_state(self.jobs, 'att-source'), 'accepted')
+
+    def test_registered_successor_wins_over_launcher_refusal(self):
+        record = self.claim()
+        def register_then_refuse(command, **_kwargs):
+            self._successor(record, self.meta, 'open', launch_started='1')
+            return subprocess.CompletedProcess(command, 64, HEADLESS_MODEL_REFUSAL, '')
+        runner = mock.Mock(side_effect=register_then_refuse)
+        with mock.patch('dispatch_replacement_batch.command', return_value=None):
+            first = R.advance(self.jobs, 'att-source', run=runner, authority_check=lambda *_: True)
+            replay = R.advance(self.jobs, 'att-source', run=runner, authority_check=lambda *_: True)
+        for result in (first, replay):
+            self.assertEqual((result['state'], result['attempt_id']),
+                             ('running', record['replacement_attempt_id']))
+            self.assertNotIn('launcher_exit', result)
+        runner.assert_called_once()
+        effective, lineage = R.effective_attempts(self.jobs, {'att-source'})
+        self.assertEqual(effective, {record['replacement_attempt_id']})
+        self.assertEqual(lineage[0]['replacement_attempt_id'], record['replacement_attempt_id'])
 
     def test_slow_launcher_is_named_and_the_same_attempt_relaunches(self):
         import dispatch_lifecycle as L
@@ -3063,6 +3165,85 @@ class ReplacementTest(unittest.TestCase):
                 else:
                     self.assertIn('no-eligible-route-evidence-candidate', selected.out)
 
+
+    def test_d5_automatic_owner_replacement_public_start_never_launches_disabled_codex(self):
+        self._d5_owner_replacement_public_start()
+
+    def test_d5_owner_replacement_continues_admitted_pin_disabled_since_admission(self):
+        self._d5_owner_replacement_public_start(pin='codex')
+
+    def _d5_owner_replacement_public_start(self, pin=None):
+        spec=importlib.util.spec_from_file_location('d5_replacement_owner_fixture',Path(__file__).with_name('dispatch_owner.test.py'))
+        suite=importlib.util.module_from_spec(spec);spec.loader.exec_module(suite)
+        self._blocked_owner();self._answer()
+        config=suite.d5_defaults(self.root,enabled=('claude','codex','opencode'))
+        env=suite._isolated_env({'DISPATCH_DEFAULTS_CONFIG':str(config),'HARNESS_STATE_ROOT':str(self.root/'state'),
+             'AGENT_DISPATCH_JOBS':str(self.jobs),'AGENT_DISPATCH_CALLER_HARNESS':'claude'})
+        for key in list(env):
+            if key.startswith('AGENT_ARTIFACT_'):env.pop(key)
+        with mock.patch.dict(os.environ,env,clear=True):
+            for command in (["git","init","-q",str(self.root)],
+                            ["git","-C",str(self.root),"-c","user.name=Fixture","-c","user.email=fixture@example.com","commit","--allow-empty","-qm","fixture"]):
+                subprocess.run(command,check=True,capture_output=True)
+            path,route=suite.d5_public_route(self.root,cwd=self.root,pin=pin)
+            # Keep the existing replacement family/claim and original task. The
+            # selector consumes this real verified stale route at its public seam.
+            self.route.update(route);self.path.write_text(json.dumps(self.route))
+            source_before=self.jobs.read_bytes();route_before=self.path.read_bytes()
+            suite.d5_defaults(self.root)
+            launched=[];commands=[];outputs=[]
+            def run(command,**kwargs):
+                commands.append(command)
+                self.assertEqual(Path(command[1]).name,'dispatch-owner.py')
+                self.assertIn('--start',command)
+                self.assertNotIn('--adapter',command)
+                out=io.StringIO()
+                with contextlib.redirect_stdout(out):code=suite.OWNER.main(command[2:])
+                outputs.append(out.getvalue())
+                return SimpleNamespace(returncode=code,stdout=out.getvalue(),stderr='')
+            with mock.patch('dispatch_capacity_evidence.harness_hold',return_value=None), \
+                 mock.patch.object(suite.OWNER,'_usage',return_value={h:'ok' for h in ('claude','codex','opencode')}) as usage, \
+                 mock.patch.object(suite.OWNER._capacity,'capacity_report',return_value={'scores':{'claude':80,'codex':99,'opencode':70},'sources':{}}), \
+                 mock.patch.object(suite.OWNER,'run_owner_wrapper',side_effect=lambda argv,env:launched.append(argv) or 0), \
+                 mock.patch('artifact_producer.prepare_route_artifact_env',return_value={}):
+                result=R.advance(self.jobs,'att-source',run=run,authority_check=lambda *_:True,resume_capacity=True)
+            self.assertEqual(len(commands),1,result)
+            self.assertEqual(len(launched),1,result)
+            self.assertEqual(Path(launched[0][0]).parts[-3],pin or 'claude')
+            self.assertEqual(usage.call_args.args[1],None if pin else 'deep')
+            if pin:
+                self.assertEqual(outputs[0].count('policy_note=disabled-since-admission'),1)
+            self.assertIn('--automatic-retry-of',launched[0])
+            self.assertIn('att-source',launched[0])
+            self.assertEqual(self.path.read_bytes(),route_before)
+            # A fake wrapper registers nothing; e0 owns its status classification.
+            self.assertNotIn('headless-main-session-only-model',result.get('launcher_diagnostic',''))
+            # The existing claim binds the source row once; all historical
+            # values survive and no successor row is fabricated by the fake.
+            original=R._rows(source_before.decode().splitlines())
+            current=R._rows(self.jobs.read_text().splitlines())
+            self.assertEqual(set(current),set(original))
+            for aid, (fields, meta) in original.items():
+                self.assertEqual(current[aid][0][:5],fields[:5])
+                for key,value in meta.items():self.assertEqual(current[aid][1][key],value)
+
+    def test_d5_disabled_fixed_replay_launches_exact_source_with_policy_note(self):
+        spec=importlib.util.spec_from_file_location('d5_fixed_replay_fixture',Path(__file__).with_name('dispatch_owner.test.py'))
+        suite=importlib.util.module_from_spec(spec);spec.loader.exec_module(suite)
+        config=suite.d5_defaults(self.root)
+        self.meta.update(launch_started='1', launch_outcome='spawned')
+        self.write(self.meta)
+        commands=[]; diagnostic=io.StringIO()
+        with mock.patch.dict(os.environ,{'DISPATCH_DEFAULTS_CONFIG':str(config)}), \
+             mock.patch('dispatch_capacity_evidence.harness_hold',return_value=None), \
+             contextlib.redirect_stderr(diagnostic):
+            result=R.advance(self.jobs,'att-source',run=lambda command,**kw:(commands.append(command) or
+                SimpleNamespace(returncode=0,stdout='',stderr='')),authority_check=lambda *_:True)
+        self.assertEqual(len(commands),1,result)
+        self.assertEqual(Path(commands[0][1]).parts[-3],'codex')
+        self.assertIn('--automatic-retry-of',commands[0])
+        self.assertEqual(diagnostic.getvalue().count('policy_note=disabled-since-admission'),1)
+
     def test_gpu_lab_correction_prepares_compute_defaults_instead_of_replaying_old_access(self):
         import execution_access as EA
         inventory = self.root / 'config/hearting/compute-hosts.yaml'
@@ -3082,6 +3263,7 @@ class ReplacementTest(unittest.TestCase):
         self.assertTrue(request['network']['required'])
         self.assertIn(str(inventory.parent), request['read_roots'])
         self.assertEqual(access['source'], 'compute-runtime-defaults')
+        self.assertIsNone(access['at'])
         self.assertEqual(old.read_bytes(), old_bytes)
         replay = {'argv': ['--execution-access-file', str(old)], 'harness': 'opencode'}
         argv = R._replacement_argv({'execution_access': access}, {'worker_type': 'owner'}, replay)
@@ -4449,6 +4631,24 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
             self.assertEqual(selected_rows[0][0], "codex")
             self.assertIsNotNone(R._capacity_hold(self.jobs, self.meta, allow_frame_peer=False))
 
+
+    def test_d5_disabled_successful_frame_peer_cannot_release_a_new_capacity_choice(self):
+        config=self.root/'d5-frame-policy.yaml'
+        config.write_text((R.ROOT/'profiles/dispatch-defaults.yaml').read_text().replace(
+            '  enabled: [claude, codex, opencode]','  enabled: [claude, opencode]'))
+        capacity=R._capacity_reader()
+        before=self.jobs.read_bytes()
+        with mock.patch.dict(os.environ,{'DISPATCH_DEFAULTS_CONFIG':str(config)}), \
+             mock.patch('dispatch_capacity_evidence.harness_hold',return_value={'label':'limited'}), \
+             mock.patch('dispatch_capacity_evidence.usage_states',return_value={'claude':'limited(now)','codex':'ok','opencode':'limited'}), \
+             mock.patch('model_config.resolve_config',return_value=({},'fixture')), \
+             mock.patch('model_profile.resolve_profile_values',side_effect=lambda h,c,p:{'model':h+'-'+p}), \
+             mock.patch.object(R,'_capacity_reader',return_value=capacity), \
+             mock.patch.object(capacity,'capacity_report',return_value={'scores':{'claude':0,'codex':99,'opencode':0},'sources':{}}), \
+             mock.patch('dispatch_allocation.attempt_counts',return_value={'claude':0,'codex':0,'opencode':0}):
+            self.assertIsNotNone(R._capacity_hold(self.jobs,self.meta,allow_frame_peer=True))
+        self.assertEqual(self.jobs.read_bytes(),before)
+
     def test_wrong_raw_identity_auth_runtime_and_non_capacity_results_are_refused(self):
         self.assertIsNone(self.kind(reconcile_reason="terminal-invalid:claude-result-auth"))
         self.assertIsNone(self.kind(note="dead-worker-fail", failure_class="fail"))
@@ -4667,7 +4867,7 @@ class FrameCapacityFlow:
         case.assertNotIn(record['replacement_attempt_id'], fx.rows())
 
     def run_undeclared_profile(self):
-        """An effective user config without opt-in `top` cannot create a frame launch."""
+        """Claude/Codex still require an effective user config to opt in to `top`."""
         case = self.case
         fx = self.fixture({'note': 'dead-capacity', 'failure_class': 'capacity'})
         shipped = self.wrapper.ROOT/'adapters'/self.harness/'config/models.conf'
@@ -4679,6 +4879,67 @@ class FrameCapacityFlow:
         case.assertEqual(refused.exception.reason, 'invalid-dispatch-model-profile')
         case.assertIn('does not declare CFG_MODEL_PROFILE_TOP', str(refused.exception))
         case.assertNotIn('att-unsupported', fx.rows())
+        case.assertFalse((R._directory(fx.jobs)/'claims').exists())
+
+    def run_opencode_undeclared_profile(self):
+        """OpenCode's old whole-file config resolves TOP in memory; launch guards still apply."""
+        case = self.case
+        case.assertEqual(self.harness, 'opencode')
+        fx = self.fixture({'note': 'dead-capacity', 'failure_class': 'capacity'})
+        shipped = self.wrapper.ROOT/'adapters/opencode/config/models.conf'
+        fx.model_config_path = fx.root/'models-without-top.conf'
+        fx.model_config_path.write_text('\n'.join(line for line in shipped.read_text().splitlines()
+            if not line.startswith(('CFG_MODEL_PROFILE_TOP=', 'CFG_MODEL_PROFILE_GRANULARITY_TOP=')))+'\n')
+        config_before, route_before, jobs_before = (
+            fx.model_config_path.read_bytes(), fx.path.read_bytes(), fx.jobs.read_bytes())
+        args = self.args(fx, self.cli(fx, 'att-undeclared-top', 'top'))
+        # Resolve the comparison through the same parser and actual user-file
+        # reader, rather than hard-coding the shipped provider/model.
+        balanced = self.args(fx, self.cli(fx, 'att-balanced-read', 'balanced-deep'))
+        settings = args.resolved_model_settings
+        case.assertEqual((settings['profile'], settings['tier'], settings['granularity']),
+                         ('top', 'balanced-deep', 'collapsed-top-to-balanced-deep'))
+        case.assertEqual((settings['model'], settings['variant']),
+                         (balanced.resolved_model_settings['model'], balanced.resolved_model_settings['variant']))
+        import model_profile
+        case.assertEqual(model_profile.selection_receipt(args)['profile_selection_source'], 'explicit')
+        case.assertEqual(self.guard(fx, args), 0)
+        case.assertEqual(json.loads(args.route_validation)['status'], 'ok')
+        # Resolution alone does not register or authorize a process spawn.
+        case.assertNotIn(args.attempt_id, fx.rows())
+        with case.assertRaises(D.DispatchContractError) as refused:
+            self.spawn(fx, args.attempt_id)
+        case.assertEqual(refused.exception.reason, 'attempt-row-not-unique')
+        wrong = self.args(fx, self.cli(fx, 'att-wrong-profile', 'deep'))
+        case.assertEqual(self.guard(fx, wrong), 65)
+        for extra, reason in ((('--model', settings['model'], '--variant', settings['variant']),
+                               'model-profile-override-forbidden'),
+                              (('--capacity-retry', '1', '--model', settings['model'], '--variant', settings['variant']),
+                               'profile-top-override-forbidden')):
+            with case.subTest(extra=extra), case.assertRaises(self.wrapper.ModelSelectionError) as refused:
+                self.args(fx, self.cli(fx, 'att-forged-model', 'top', *extra))
+            case.assertEqual(refused.exception.reason, reason)
+        case.assertEqual(fx.model_config_path.read_bytes(), config_before)
+        # Explicit invalid TOP remains invalid; absence alone admits collapse.
+        fx.model_config_path.write_bytes(config_before + b'CFG_MODEL_PROFILE_TOP=missing:xhigh\n')
+        invalid_before = fx.model_config_path.read_bytes()
+        with case.assertRaises(self.wrapper.ModelSelectionError) as refused:
+            self.args(fx, self.cli(fx, 'att-invalid-top', 'top'))
+        case.assertEqual(refused.exception.reason, 'invalid-dispatch-model-profile')
+        case.assertIn('names tier', str(refused.exception))
+        case.assertEqual(fx.model_config_path.read_bytes(), invalid_before)
+        case.assertEqual(fx.path.read_bytes(), route_before)
+        case.assertEqual(fx.jobs.read_bytes(), jobs_before)
+        case.assertFalse((R._directory(fx.jobs)/'claims').exists())
+        # The route-authorized ordinary TOP launch is still admitted through
+        # the real registry/spawn guard, using the collapsed model. Capacity
+        # replacements and claimless DEEP remain covered by run/run_claimless.
+        fx.model_config_path.write_bytes(config_before)
+        case.assertTrue(self.register(fx, args))
+        row = fx.rows()[args.attempt_id][1]
+        case.assertEqual((row['model_profile'], row['model']), ('top', settings['model']))
+        case.assertEqual(self.spawn(fx, args.attempt_id), [args.attempt_id])
+        case.assertEqual(fx.model_config_path.read_bytes(), config_before)
         case.assertFalse((R._directory(fx.jobs)/'claims').exists())
 
 

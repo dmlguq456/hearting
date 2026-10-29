@@ -110,7 +110,8 @@ class AliasReceive(unittest.TestCase):
 
     def test_exact_body_recipient_and_transfer_record(self):
         text, ref = self.prepare()
-        self.assertNotIn(self.sender["session_id"], text)
+        self.assertIn(" ; sid=" + self.sender["session_id"], text)
+        self.assertIn(" ; pane=- ;", text)
         self.assertEqual(self.parse(text), self.sender["session_id"])
         self.assertIsNone(self.parse(text + "변조"))
         self.assertIsNone(self.parse(text.replace("실제", "다른")))
@@ -123,6 +124,31 @@ class AliasReceive(unittest.TestCase):
         self.assertEqual(record["from"], self.sender)
         self.assertEqual(record["to"], self.recipient)
         self.assertNotIn("검증할", json.dumps(record, ensure_ascii=False))
+
+    def test_visible_sid_and_pane_never_bypass_ref_recipient_or_body_validation(self):
+        for harness in ("claude", "codex", "opencode"):
+            sender = dict(self.sender, harness=harness, pane_id="w:sender")
+            text, ref = self.prepare(sender=sender)
+            self.assertIn(" ; pane=w:sender ; sid=" + sender["session_id"], text)
+            self.assertEqual(self.parse(text), sender["session_id"])
+            self.assertEqual(pm.parse_peer_trailer(text)["name"], sender["name"])
+            for changed in (text.replace(" ; ref=" + ref, ""),
+                            text.replace("pane=w:sender", "pane=w:recipient"),
+                            text.replace("sid=" + sender["session_id"], "sid=other-session"),
+                            text.replace("동명", "다른 이름")):
+                self.assertIsNone(self.parse(changed), changed)
+        unknown = pm.peer_trailer("runtime", None, "Hearting runtime")
+        self.assertIn("[?]", unknown)
+        self.assertIn("pane=- ; sid=-", unknown)
+        self.assertIsNone(pm.parse_peer_trailer(unknown)["session_id"])
+
+    def test_trailer_control_characters_cannot_create_another_sender(self):
+        sender = dict(self.sender, pane_id="w:p)\n; injected", name="작업\x00 ; ) 이름")
+        text, _ = self.prepare(sender=sender)
+        self.assertEqual(text.count("(peer-from:"), 1)
+        self.assertNotIn("\x00", text)
+        self.assertEqual(text.count(")"), 1)
+        self.assertEqual(self.parse(text), sender["session_id"])
 
     def test_whitespace_a_runtime_adds_around_the_prompt_keeps_the_attribution(self):
         # OpenCode delivers the typed prompt with a trailing space; every OpenCode receipt was
@@ -137,9 +163,10 @@ class AliasReceive(unittest.TestCase):
         self.assertIsNone(self.parse(text.replace("실제 본문", "실제  본문")))
 
     def test_collision_same_name_and_swapped_refs(self):
-        # A real 8-bit collision, not a mock alias resolver.
-        tag = pm.peer_alias("codex", self.sender["session_id"])
-        other = next(f"other-{n}" for n in range(10000) if pm.peer_alias("codex", f"other-{n}") == tag)
+        # Identical unknown aliases still require independent sealed transfers.
+        self.assertEqual(pm.peer_alias("codex", self.sender["session_id"]), "[?]")
+        other = "other-unassigned-session"
+        self.assertEqual(pm.peer_alias("codex", other), "[?]")
         sender2 = dict(self.sender, session_id=other)
         one, r1 = self.prepare("첫 본문")
         two, r2 = self.prepare("둘째 본문", sender=sender2)

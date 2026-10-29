@@ -17,8 +17,8 @@ PORTABLE_PROFILES = ("deep", "balanced-deep", "balanced", "light", "mini")
 # selection, with a full demand, for its dispatch-depth-1 owner (see
 # `TOP_WORKER_TYPES` and `require_top_route`). It is not portable in the
 # five-profile sense: no matrix cell resolves to it, no policy band names it,
-# no capacity cascade enters or leaves it, and a runtime config that does not
-# declare CFG_MODEL_PROFILE_TOP refuses it typed instead of deriving a model.
+# no capacity cascade enters or leaves it. OpenCode's omitted top declaration
+# follows its installed balanced-deep collapse; other runtimes require an explicit top.
 TOP_PROFILE = "top"
 EXCEPTION_PROFILES = (TOP_PROFILE,)
 KNOWN_PROFILES = PORTABLE_PROFILES + EXCEPTION_PROFILES
@@ -238,6 +238,13 @@ def resolve_profile_values(
         raise ModelProfileError(f"unknown adapter: {adapter!r}")
     profile_key = "CFG_MODEL_PROFILE_" + profile.upper().replace("-", "_")
     spec = config.get(profile_key)
+    if adapter == "opencode" and profile == TOP_PROFILE and profile_key not in config:
+        # OpenCode ships top collapsed onto balanced-deep.
+        # Older whole-file user copies retain that behavior without being rewritten
+        # or borrowing a concrete model from the shipped config over their tiers.
+        resolved = resolve_profile_values(adapter, config, "balanced-deep")
+        return {**resolved, "profile": TOP_PROFILE,
+                "granularity": "collapsed-top-to-balanced-deep"}
     if profile == TOP_PROFILE and not spec:
         # Opt-in only: the selected runtime file (the user's whole-file copy or
         # the shipped default) must say what `top` is; nothing is derived.

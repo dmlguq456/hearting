@@ -106,7 +106,8 @@ def reap(marker: str, *, fifo: str | None = None, timeout: float = 10.0) -> list
             time.sleep(0.01)
         else:
             alive = sorted(pid for pid, ticks in killed.items() if not _gone(pid, ticks))
-            raise TimeoutError("fixture processes survived SIGKILL: %s" % alive)
+            if alive:
+                raise TimeoutError("fixture processes survived SIGKILL: %s" % alive)
         if not batch:
             break
     if fifo and os.path.exists(fifo):

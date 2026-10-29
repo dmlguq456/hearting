@@ -3844,6 +3844,8 @@ def _pin_change_probe(route, jobs, target, harness, caller):
     frame harness. A quick route (one owner, its registered-headless candidates) is probed for
     candidates instead; it starts no stage, so a worker change there needs nothing probed.
     Nothing supported for the new pin is refused before anything is recorded."""
+    if harness not in DEFAULTS.current_enabled_harnesses():
+        raise ValueError(f"explicit-adapter-disabled-by-user-policy:{target}={harness}")
     import route_authority as RA
     view = RA.route_in_force(route)
     quick = route.get("effective_intensity") == "quick" or route.get("registered_headless_candidates") is not None
@@ -3986,24 +3988,19 @@ def _filter_top_pins(pins):
 
 
 def _compose_default_children(pins=None):
-    """Child harnesses compose probes when `--children` is not given: every
-    harness the user's policy enables (`all-enabled-candidates`) plus any
-    harness a pin names.  An unreadable or absent policy falls back to the
-    shipped default set; a harness that is not installed shows up as an
-    `unsupported` probe tuple, never as a refusal."""
-    children = list(COMPOSE_DEFAULT_CHILDREN)
-    try:
-        path = DEFAULTS.default_config_path()
-        if os.path.exists(path):
-            cfg = DEFAULTS.load_and_validate(path, DEFAULTS.default_topology_path())
-            enabled = [h for h in DEFAULTS.query_owners(cfg) if isinstance(h, str)]
-            if enabled:
-                children = enabled
-    except (DEFAULTS.DefaultsConfigError, OSError, ValueError):
-        pass
+    """Probe current enabled children; pins cannot widen policy or unreadable defaults.
+
+    A missing user file still resolves to the existing shipped fallback through
+    default_config_path. A selected but unreadable/malformed file is an error.
+    """
+    config = DEFAULTS.load_and_validate(DEFAULTS.default_config_path(), DEFAULTS.default_topology_path())
+    enabled = DEFAULTS.current_enabled_harnesses(config)
+    children = list(DEFAULTS.query_owners(config))
     for pin in (pins or {}).values():
+        if pin["harness"] not in enabled:
+            raise ValueError("explicit-adapter-disabled-by-user-policy:" + pin["harness"])
         if pin["harness"] not in children:
-            children.append(pin["harness"])
+            children.append(pin["harness"])  # legacy schemas declare ordering, not a prohibition
     return tuple(children)
 
 
@@ -4032,6 +4029,10 @@ def _apply_selection_pins(route, pins):
     """
     if not pins:
         return
+    enabled = DEFAULTS.current_enabled_harnesses()
+    for pin in pins.values():
+        if pin["harness"] not in enabled:
+            raise ValueError("explicit-adapter-disabled-by-user-policy:" + pin["harness"])
     route["selection_pins"] = {
         "contract_version": SELECTION_PIN_CONTRACT_VERSION,
         **{target: dict(pins[target]) for target in SELECTION_PIN_TARGETS if target in pins},
@@ -4188,6 +4189,11 @@ def compose_route(*, capability, capability_mode, shape, graph, slug, cwd, artif
     signals = sorted(set(signals or ()))
     if shape == "direct" and signals:
         raise ValueError("compose-direct-signals-conflict")
+    if selection_pins:
+        enabled = DEFAULTS.current_enabled_harnesses()
+        for pin in selection_pins.values():
+            if pin["harness"] not in enabled:
+                raise ValueError("explicit-adapter-disabled-by-user-policy:" + pin["harness"])
     readiness = None
     find_input = None
     frame_ids = [n["id"] for n in base["standard_plus"]["nodes"] if _frame_node(n)]
@@ -13430,7 +13436,7 @@ if __name__=="__main__":
     try: main()
     # OSError too: completion walks a worker-supplied tree, and a refusal there
     # must be a typed line, never a traceback (review S-a).
-    except (ValueError,OSError,TOPO.TopologyError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)
+    except (ValueError,OSError,TOPO.TopologyError,DEFAULTS.DefaultsConfigError) as exc: print(f"capability-route: {exc}",file=sys.stderr); raise SystemExit(64)
     except Exception as exc:
         # A producer refusal (e.g. cutover-inactive) is a typed line too, never a traceback.
         import artifact_producer

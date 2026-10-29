@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 import json
 import hashlib
+import base64
+import http.client
 import os
 from pathlib import Path
 import re
@@ -26,7 +28,7 @@ import tempfile
 import threading
 import time
 from types import MappingProxyType
-from urllib.parse import quote
+from urllib.parse import quote, urlencode, urlsplit
 
 
 VERSION_RE = re.compile(r"(?:^|\D)(\d+)\.(\d+)\.(\d+)(?:\D|$)")
@@ -308,6 +310,112 @@ def is_v2(binary: str = "opencode", version: tuple[int, int, int] | None = None,
     # downgrade or migration. An unavailable version probe stays unknown and
     # must never turn a retained V2 database into a V2 CLI assumption.
     return bool(version and version[0] >= 2)
+
+
+def read_model_catalog(*, directory=None, environ=None):
+    """Read the existing V2 service's catalog without starting or refreshing it.
+
+    ``None`` permits the V1 cache reader. A known V2 service/version with no
+    readable current snapshot stays unknown; its retained V1 cache is not current.
+    Only model identities leave this boundary, never service credentials/settings.
+    The native location is the caller's cwd unless an existing caller supplies
+    a directory. An unavailable directory stays unknown, never server-default.
+    """
+    env = os.environ if environ is None else environ
+    home = Path(env.get("HOME") or Path.home())
+    state = Path(env.get("XDG_STATE_HOME") or home / ".local/state")
+    path = state / "opencode" / "service.json"
+    source = str(path) + "#/api/model"
+    unknown = {"state": "unknown", "source": source, "models": (), "observed_at": None}
+
+    def generation():
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or info.st_size > MAX_AUTH_BYTES):
+            raise ValueError("service record unavailable")
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+    try:
+        before = generation()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as stream:
+            raw_service = stream.read(MAX_AUTH_BYTES + 1)
+        if len(raw_service) > MAX_AUTH_BYTES:
+            return unknown
+        service = json.loads(raw_service)
+        if generation() != before or not isinstance(service, dict):
+            return unknown
+    except FileNotFoundError:
+        return unknown if is_v2(resolve_binary(environ=env), environ=env) else None
+    except (OSError, ValueError):
+        return unknown
+    version = parse_version(service.get("version"))
+    if not version or version[0] < 2:
+        return unknown if is_v2(resolve_binary(environ=env), environ=env) else None
+    try:
+        directory = os.getcwd() if directory is None else os.fspath(directory)
+        if not isinstance(directory, str) or not directory:
+            return unknown
+        directory = Path(directory).resolve(strict=True)
+        if not directory.is_dir():
+            return unknown
+        url = service.get("url")
+        if not isinstance(url, str):
+            return unknown
+        parsed = urlsplit(url)
+        if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "::1", "localhost"}
+                or not parsed.port or parsed.username or parsed.password
+                or parsed.path not in ("", "/") or parsed.query or parsed.fragment):
+            return unknown
+        headers = {"Accept": "application/json"}
+        password = service.get("password")
+        if isinstance(password, str) and password:
+            headers["Authorization"] = "Basic " + base64.b64encode(
+                ("opencode:" + password).encode()).decode("ascii")
+
+        # urllib.request loads platform proxy helpers. Keep that dependency at
+        # the HTTP boundary, away from shared runtime/dispatch-only imports.
+        import urllib.request
+
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args, **kwargs):
+                return None
+
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+        query = urlencode({"location[directory]": str(directory)})
+        request = urllib.request.Request(url.rstrip("/") + "/api/model?" + query, headers=headers)
+        limit = 16 * 1024 * 1024
+        with opener.open(request, timeout=2.0) as response:
+            if response.status != 200:
+                return unknown
+            raw = response.read(limit + 1)
+        if len(raw) > limit or generation() != before:
+            return unknown
+        payload = json.loads(raw)
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return unknown
+        models = []
+        seen = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                return unknown
+            provider, model = row.get("providerID"), row.get("id")
+            if (not isinstance(provider, str) or not provider or "/" in provider
+                    or not isinstance(model, str) or not model
+                    or any(ch.isspace() or ord(ch) < 32 for ch in provider + model)):
+                return unknown
+            if row.get("enabled") is not True or row.get("status") not in {
+                    "active", "alpha", "beta", "deprecated"}:
+                continue
+            identifier = provider + "/" + model
+            if identifier not in seen:
+                seen.add(identifier)
+                models.append(identifier)
+        return {"state": "available" if models else "empty", "source": source,
+                "models": tuple(models), "observed_at": time.time()}
+    except (OSError, ValueError, TypeError, RuntimeError, http.client.HTTPException):
+        return unknown
 
 
 @lru_cache(maxsize=32)

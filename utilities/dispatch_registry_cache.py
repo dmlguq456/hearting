@@ -427,6 +427,19 @@ class RegistryView:
             self.has_partial_tail = bool(self._tail)
 
     @property
+    def completeness_reason(self) -> str:
+        """The same absence judgment for a snapshot or a generation-checked view."""
+        if self.has_invalid_utf8:
+            return "registry-invalid-utf8"
+        if self.has_partial_tail:
+            return "registry-partial-tail"
+        if self.malformed_rows:
+            return "registry-malformed"
+        if not self._prefix_reuse_eligible:
+            return "registry-line-boundary-invalid"
+        return ""
+
+    @property
     def lines(self) -> tuple[str, ...]:
         result = tuple(line for segment in self._segments for line in segment.lines)
         if self._tail:
@@ -986,17 +999,7 @@ def registry_snapshot(jobs: Path) -> RegistrySnapshot:
             return registry_snapshot(path)
     entry = _pinned_generation(scope, path)
     view, lines = entry[0], _pinned_lines(entry)
-    reason = ""
-    if view.has_invalid_utf8:
-        reason = "registry-invalid-utf8"
-    elif view.has_partial_tail:
-        reason = "registry-partial-tail"
-    elif view.malformed_rows:
-        reason = "registry-malformed"
-    elif not view._prefix_reuse_eligible:
-        # The segmented view indexes LF records. Non-canonical splitlines
-        # separators remain readable for diagnostics but cannot prove absence.
-        reason = "registry-line-boundary-invalid"
+    reason = view.completeness_reason
     return RegistrySnapshot(
         path_identity=str(path.absolute()), resolved_path=view.resolved_path,
         signature=tuple(view.signature), view=view, lines=tuple(lines),

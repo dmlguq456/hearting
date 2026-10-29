@@ -335,9 +335,9 @@ class QuotaTest(unittest.TestCase):
             repaired = titles.read("language-now", "claude")
             self.assertIn("_StartBudgetReached", repaired["summary_error"])
             self.assertEqual((repaired["summary"], repaired["offset"]), ("기존 작업 중", 0))
-            self.assertIsNone(titles.last_title("language-now", "claude"))
-            # The language policy drops the invalid title even on failure.
-            # Its next retry must remain ordinary despite that blank title.
+            self.assertEqual(titles.last_title("language-now", "claude"), "Existing Title")
+            # A failed language repair preserves the last successful title.
+            # Its next retry remains ordinary despite the language mismatch.
             now[0] += 61
             rt.main(args + retry_flags)
             repaired_again = titles.read("language-now", "claude")

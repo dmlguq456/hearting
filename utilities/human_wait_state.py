@@ -37,7 +37,7 @@ _SELECTED_DRAFT_MAX = 4096
 _SELECTED_RESPONSE_MAX = 256
 _SELECTED_STATES = frozenset(("open", "submitted", "received", "applied",
                               "cancelled", "expired", "unknown"))
-_SELECTED_ENTRY_KEYS = frozenset(("identity", "draft", "state", "action_id",
+_SELECTED_ENTRY_KEYS = frozenset(("identity", "selected_id", "draft", "state", "action_id",
                                   "response", "result", "updated_at"))
 
 
@@ -384,10 +384,43 @@ def publish_cache(result: dict) -> bool:
         with _cache_write_lock():
             previous = _read_cache_file()
             selected = previous.get("selected_responses", {}) if previous else {}
-            if not isinstance(selected, dict) or len(selected) > _SELECTED_RESPONSE_MAX:
+            if not _valid_selected_overlay(selected):
                 return False
             if selected:
                 value["selected_responses"] = selected
+                # A producer may briefly see an old native sidecar after its
+                # exact selected request was answered. Suppress only that
+                # observation, including its original timestamp-derived id;
+                # a replacement request/incarnation keeps its own current row.
+                settled = {entry.get("selected_id"): entry["identity"]
+                           for entry in selected.values()
+                           if entry.get("selected_id")
+                           and entry.get("state") in {"applied", "cancelled", "expired"}}
+                def answered(row):
+                    identity = settled.get(row["id"])
+                    owner = row["owner"]
+                    return (row["source"] == "S1" and identity is not None
+                            and identity["harness"] == owner["harness"]
+                            and identity["session_id"] == owner["session_id"]
+                            and _same_request_id(identity["request_id"], row.get("request_id"))
+                            and all(identity.get(key) == row.get(key)
+                                    for key in ("turn_id", "item_id")))
+                removed = {row["id"] for row in items if answered(row)}
+                if removed:
+                    value["items"] = [row for row in items if row["id"] not in removed]
+                    value["by_session"] = {key: [ref for ref in refs if ref not in removed]
+                                           for key, refs in by_session.items()
+                                           if any(ref not in removed for ref in refs)}
+                    fleet_value["items"] = [row for row in fleet_value["items"]
+                                            if row["id"] not in removed]
+                    current_total = sum(not row.get("stale") for row in value["items"])
+                    older_total = len(value["items"]) - current_total
+                    for projection in (value, fleet_value):
+                        projection["total"] = current_total
+                        projection["older"] = older_total
+                        projection["unattributed"] = [ref for ref in projection["unattributed"]
+                                                       if ref not in removed]
+                    value["stale_total"] = value["older"]
             if not _write_cache_value(value):
                 return False
             _write(_fleet_cache_path(), fleet_value)
@@ -449,6 +482,15 @@ def cached_fleet_view(*, now=None, request=True):
     current = time.time() if now is None else float(now)
     if (not isinstance(value, dict) or value.get("schema_version") != 1
             or not isinstance(value.get("observed_at"), (int, float))
+            or isinstance(value.get("observed_at"), bool)
+            or not math.isfinite(float(value["observed_at"]))
+            or type(value.get("complete")) is not bool
+            or type(value.get("total")) is not int or value["total"] < 0
+            or type(value.get("older")) is not int or value["older"] < 0
+            or not isinstance(value.get("items"), list)
+            or any(not isinstance(row, dict) or not isinstance(row.get("id"), str)
+                   or row.get("stale") not in ("current", "older")
+                   for row in value["items"])
             or current - float(value["observed_at"]) < 0
             or current - float(value["observed_at"]) > _DISPLAY_TTL):
         value = None
@@ -544,6 +586,9 @@ def _valid_selected_overlay(value):
             return False
         if entry.get("action_id") is not None and not _SAFE.fullmatch(str(entry["action_id"])):
             return False
+        if (entry.get("selected_id") is not None
+                and (not isinstance(entry["selected_id"], str) or len(entry["selected_id"]) > 512)):
+            return False
         response = entry.get("response")
         if response is not None:
             if not isinstance(response, dict):
@@ -581,6 +626,8 @@ def _store_selected_entry(envelope, entry):
     key = _selected_entry_key(identity)
     entry = dict(entry)
     entry["identity"] = identity
+    if isinstance(envelope.get("selected_id"), str):
+        entry["selected_id"] = envelope["selected_id"]
     entry["updated_at"] = time.time()
     if not _valid_selected_overlay({key: entry}):
         return False
@@ -664,6 +711,8 @@ def _claim_selected_action(envelope, action_id, response):
                             "action_id": action_id, "response": response,
                             "result": {"status": "submitted"},
                             "updated_at": time.time()})
+            if isinstance(envelope.get("selected_id"), str):
+                claimed["selected_id"] = envelope["selected_id"]
             claimed.setdefault("draft", envelope.get("draft", ""))
             if not _valid_selected_overlay({key: claimed}):
                 return False, None
@@ -1230,10 +1279,9 @@ def _opencode_current_selected(base, *, requested_id=None):
                 "support": supported, "native_ref": native_ref}
 
     form_state = detail.get("state")
-    if not isinstance(form_state, dict) or form_state.get("status") != "pending":
-        status = form_state.get("status") if isinstance(form_state, dict) else None
-        return {"state": "cancelled" if status == "cancelled" else
-                "applied" if status == "answered" else "unknown",
+    form_status = form_state.get("status") if isinstance(form_state, dict) else None
+    if form_status not in {"pending", "answered", "cancelled"}:
+        return {"state": "unknown",
                 "reason": "opencode-form-not-pending", "kind": kind,
                 "request_id": request_id, "native_ref": native_ref}
     fields = detail.get("fields")
@@ -1284,12 +1332,15 @@ def _opencode_current_selected(base, *, requested_id=None):
                              "field_type": question["field_type"]})
     choices = questions[0].get("choices") if len(questions) == 1 else None
     supported = schema_error is None and schema_binding is not None
-    return {"state": "open" if supported else "unknown",
-            "reason": None if supported else
+    terminal = {"answered": "applied", "cancelled": "cancelled"}.get(form_status)
+    return {"state": terminal if supported and terminal else "open" if supported else "unknown",
+            "reason": "opencode-form-not-pending" if terminal else None if supported else
             (schema_error or "opencode-form-schema-unsupported"),
             "kind": kind, "request_id": request_id, "turn_id": turn_id,
             "question_id": question_id, "detail": detail_value,
-            "choices": choices, "support": supported, "native_ref": native_ref}
+            "choices": choices, "support": supported and terminal is None, "native_ref": native_ref,
+            **({"result": {"source": "opencode-http-v2", "runtime": form_status,
+                           "progress": "unknown"}} if supported and terminal else {})}
 
 
 def _codex_control_path(argv):
@@ -2310,11 +2361,14 @@ def _selected_fallback(base, reason, *, state="unknown"):
              "kind": kind, "detail": None, "state": state,
              "support": {"supported": False, "reason": reason},
              "actions": [], "result": {"reason": reason}}
-    for key in ("route_id", "question_id"):
+    for key in ("route_id", "question_id", "item_id", "gate_epoch"):
         if base.get(key) is not None:
             value[key] = base[key]
-    if base.get("id"):
-        value["selected_id"] = base["id"]
+    identity = _selected_identity(base)
+    if identity is not None:
+        value.update(identity)
+    if base.get("id") or base.get("selected_id"):
+        value["selected_id"] = base.get("id") or base["selected_id"]
     entry = _selected_entry(value)
     if entry:
         value["draft"] = entry.get("draft", "")
@@ -2392,6 +2446,8 @@ def _selected_envelope(base, resolved):
     native_ref = resolved.get("native_ref")
     if isinstance(native_ref, dict):
         envelope["native_ref"] = native_ref
+    if isinstance(resolved.get("result"), dict):
+        envelope["result"] = resolved["result"]
     support = bool(resolved.get("support"))
     reason = resolved.get("reason")
     envelope["support"] = {"supported": support}
@@ -2401,7 +2457,7 @@ def _selected_envelope(base, resolved):
     entry = _selected_entry(envelope)
     if entry:
         envelope["draft"] = entry.get("draft", "")
-        if entry.get("result") is not None:
+        if entry.get("result") is not None and "result" not in envelope:
             envelope["result"] = entry["result"]
         if entry.get("state") in {"submitted", "received", "applied", "cancelled", "expired", "unknown"}:
             if envelope["state"] == "open":
@@ -2512,7 +2568,9 @@ def read_selected_request(ref):
     """Read one selected current native request; details never enter shared projections."""
     base, reason = _selected_base(ref)
     if base is None:
-        return _selected_fallback(None, reason)
+        # An expired/temporarily missing projection cannot authorize a reply,
+        # but the caller's exact selected identity can still recover its draft.
+        return _selected_fallback(ref if _selected_identity(ref) is not None else None, reason)
     requested_id = base.get("request_id")
     resolved = _selected_transport(base, requested_id=requested_id)
     if not isinstance(resolved, dict):
@@ -2547,10 +2605,12 @@ def read_selected_request(ref):
                 if envelope["state"] == "applied":
                     previous["draft"] = ""
                 receipt = resolved.get("result")
-                previous["result"] = ({"source": "hearting-owner-input", **receipt}
-                                      if base.get("source") == "S3" and isinstance(receipt, dict)
-                                      else {"source": "codex-managed-gateway",
-                                            "status": envelope["state"]})
+                source = ({"S3": "hearting-owner-input", "S2": "hearting-human-gate"}
+                          .get(base.get("source")) or
+                          ("opencode-http-v2" if base.get("harness") == "opencode"
+                           else "codex-managed-gateway"))
+                previous["result"] = {"source": source, **receipt} if isinstance(receipt, dict) else {
+                    "source": source, "status": envelope["state"]}
                 if _store_selected_entry(envelope, previous):
                     stored = _selected_entry(envelope)
                     if stored:
@@ -2564,7 +2624,7 @@ def write_selected_draft(ref, draft):
     """Persist only a selected request's private draft in the owner-only cache overlay."""
     base, reason = _selected_base(ref)
     if base is None:
-        return _selected_fallback(None, reason)
+        return _selected_fallback(ref if _selected_identity(ref) is not None else None, reason)
     if isinstance(ref, dict) and ref.get("state") in {"applied", "cancelled", "expired"}:
         return dict(ref)
     identity = _selected_identity(ref) if isinstance(ref, dict) else None
@@ -3155,7 +3215,9 @@ def _opencode_submit(envelope, portable):
             return "unknown", {"reason": "opencode-permission-response-ambiguous"}
         if not _opencode_identity_matches(endpoint, base["session_id"]):
             return "unknown", {"reason": "opencode-server-replaced-after-response"}
-        return "applied", {"transport": "received", "runtime": "applied", "http_status": 204}
+        # HTTP success acknowledges receipt, not permission consumption or
+        # subsequent execution. Preserve the draft until application is known.
+        return "received", {"transport": "received", "runtime": "unknown", "http_status": 204}
     answer_value, validation_error = _opencode_form_answers(
         envelope, portable.get("answers") if isinstance(portable, dict) else None)
     if validation_error:
@@ -3175,8 +3237,11 @@ def _opencode_submit(envelope, portable):
             and detail.get("sessionID") == base["session_id"]
             and isinstance(detail.get("state"), dict)
             and detail["state"].get("status") == "answered"):
-        return "applied", {"transport": "received", "runtime": "applied", "http_status": 204}
+        return "applied", {"transport": "received", "runtime": "answered", "progress": "unknown",
+                           "http_status": 204}
     if (confirmation.get("status") == 200 and isinstance(detail, dict)
+            and detail.get("id") == envelope["request_id"]
+            and detail.get("sessionID") == base["session_id"]
             and isinstance(detail.get("state"), dict)
             and detail["state"].get("status") == "cancelled"):
         return "cancelled", {"reason": "opencode-form-cancelled"}
@@ -3222,7 +3287,7 @@ def submit_selected_response(ref, response, *, action_id=None):
     """Submit one explicit response to the exact live request; ambiguous delivery never retries."""
     base, reason = _selected_base(ref)
     if base is None:
-        return _selected_fallback(None, reason)
+        return _selected_fallback(ref if _selected_identity(ref) is not None else None, reason)
     if isinstance(ref, dict) and ref.get("state") in {"applied", "cancelled", "expired"}:
         return dict(ref)
     identity = _selected_identity(ref) if isinstance(ref, dict) else None

@@ -119,6 +119,19 @@ class PeerReadContextTest(unittest.TestCase):
         self.assertEqual(PeerReadContext().peer_notice_records(next_scan), ())
         next_scan.assert_called_once_with()
 
+    def test_lineage_graph_cache_is_generation_keyed_and_pass_local(self):
+        context = PeerReadContext()
+        first = mock.Mock(return_value="graph-a")
+        self.assertEqual(context.lineage_graph(("a",), first), "graph-a")
+        self.assertEqual(context.lineage_graph(("a",), first), "graph-a")
+        first.assert_called_once_with()
+        second = mock.Mock(return_value="graph-b")
+        self.assertEqual(context.lineage_graph(("b",), second), "graph-b")
+        second.assert_called_once_with()
+        fresh = mock.Mock(return_value="next-pass")
+        self.assertEqual(PeerReadContext().lineage_graph(("b",), fresh), "next-pass")
+        fresh.assert_called_once_with()
+
 
 if __name__ == "__main__":
     unittest.main()
