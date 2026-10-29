@@ -115,6 +115,96 @@ class SourceSubjectTest(unittest.TestCase):
         renamed = self.observe()["digest"]
         self.assertNotEqual(deleted, renamed)
 
+    def test_source_snapshot_works_when_repository_status_is_unavailable(self):
+        before = self.observe()
+        original_git = SUBJECT._git
+
+        def without_status(root, *args, **kwargs):
+            if args and args[0] == "status":
+                raise SUBJECT.SourceSubjectError("repository-status-unavailable")
+            return original_git(root, *args, **kwargs)
+
+        with mock.patch.object(SUBJECT, "_git", side_effect=without_status):
+            current = self.observe()
+        self.assertEqual(current["digest"], before["digest"])
+        self.assertEqual(current["manifest"], before["manifest"])
+
+    def test_new_untracked_source_during_capture_is_reobserved(self):
+        original_reader = SUBJECT._read_regular
+        added = False
+
+        def add_source(path):
+            nonlocal added
+            result = original_reader(path)
+            if path.name == "engine.py" and not added:
+                added = True
+                (self.repo / "late_source.py").write_text("late = True\n", encoding="utf-8")
+            return result
+
+        with mock.patch.object(SUBJECT, "_read_regular", side_effect=add_source):
+            current = self.observe()
+        self.assertIn("late_source.py", {item["path"] for item in current["manifest"]})
+
+    def test_source_edit_during_final_inventory_is_reobserved(self):
+        original_entries = SUBJECT._index_entries
+        calls = 0
+        updated = "value = 'late'\n"
+
+        def edit_after_inventory(root):
+            nonlocal calls
+            result = original_entries(root)
+            calls += 1
+            if calls == 2:
+                (self.repo / "engine.py").write_text(updated, encoding="utf-8")
+            return result
+
+        with mock.patch.object(SUBJECT, "_index_entries", side_effect=edit_after_inventory):
+            current = self.observe()
+        engine = next(item for item in current["manifest"] if item["path"] == "engine.py")
+        self.assertEqual(engine["content_sha256"], hashlib.sha256(updated.encode()).hexdigest())
+
+    def test_unrelated_artifact_churn_does_not_block_source_capture(self):
+        before = self.observe()
+        original_reader = SUBJECT._read_regular
+        writes = 0
+
+        def append_artifact(path):
+            nonlocal writes
+            result = original_reader(path)
+            if path.name == "engine.py":
+                writes += 1
+                (self.repo / "dev_logs" / f"output-{writes}.bin").write_bytes(b"output\n")
+            return result
+
+        with mock.patch.object(SUBJECT, "_read_regular", side_effect=append_artifact):
+            current = self.observe()
+        self.assertEqual(current["digest"], before["digest"])
+        self.assertEqual(writes, 1)
+
+    def test_head_and_index_changes_during_capture_are_reobserved(self):
+        original_reader = SUBJECT._read_regular
+        for change in ("head", "index"):
+            with self.subTest(change=change):
+                before = self.observe()
+                changed = False
+
+                def change_git_state(path):
+                    nonlocal changed
+                    result = original_reader(path)
+                    if path.name == "engine.py" and not changed:
+                        changed = True
+                        if change == "head":
+                            self.git("commit", "--allow-empty", "-qm", "during capture")
+                        else:
+                            self.git("update-index", "--chmod=+x", "engine.py")
+                    return result
+
+                with mock.patch.object(SUBJECT, "_read_regular", side_effect=change_git_state):
+                    current = self.observe()
+                key = "head" if change == "head" else "index_tree"
+                self.assertNotEqual(current["provenance"][key], before["provenance"][key])
+                self.assertEqual(current["digest"], before["digest"])
+
     def test_semantic_markdown_is_source_and_reports_docs_and_artifacts_are_not(self):
         before = self.observe()["digest"]
         (self.repo / "README.md").write_text("changed readme\n", encoding="utf-8")
@@ -680,6 +770,37 @@ class SourceSubjectTest(unittest.TestCase):
         before = self.observe()["digest"]
         (sub / "library.py").write_text("x = 2\n", encoding="utf-8")
         self.assertNotEqual(before, self.observe()["digest"])
+
+    def test_submodule_changes_during_later_parent_reads_are_reobserved(self):
+        sub = self.repo / "vendor"
+        sub.mkdir()
+        subprocess.run(["git", "init", "-q", str(sub)], check=True)
+        subprocess.run(["git", "-C", str(sub), "config", "user.email", "fixture@example.com"], check=True)
+        subprocess.run(["git", "-C", str(sub), "config", "user.name", "Fixture"], check=True)
+        (sub / "library.py").write_text("x = 1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(sub), "add", "library.py"], check=True)
+        subprocess.run(["git", "-C", str(sub), "commit", "-qm", "submodule"], check=True)
+        oid = subprocess.check_output(["git", "-C", str(sub), "rev-parse", "HEAD"], text=True).strip()
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{oid},vendor")
+        original_reader = SUBJECT._read_regular
+        for change in ("edit", "new-source"):
+            with self.subTest(change=change):
+                (self.repo / "z.py").write_text("parent = 'before'\n", encoding="utf-8")
+                changed = False
+
+                def change_submodule(path):
+                    nonlocal changed
+                    if path == self.repo / "z.py" and not changed:
+                        changed = True
+                        nested_path = sub / ("library.py" if change == "edit" else "late_source.py")
+                        nested_path.write_text("x = 'after'\n", encoding="utf-8")
+                        path.write_text("parent = 'after'\n", encoding="utf-8")
+                    return original_reader(path)
+
+                with mock.patch.object(SUBJECT, "_read_regular", side_effect=change_submodule):
+                    current = self.observe()
+                self.assertTrue(changed)
+                self.assertEqual(current["digest"], self.observe()["digest"])
 
     def test_snapshot_race_stays_unknown_instead_of_publishing_a_mixed_subject(self):
         original_reader = SUBJECT._read_regular
