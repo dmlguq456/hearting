@@ -1405,6 +1405,9 @@ class CompletionMarkerTest(unittest.TestCase):
             (ROOT / "utilities" / "dispatch_state_root_rotation.test.py").resolve(),
             # Asserts dispatch-batch stops on the real gate's route-state refusal.
             (ROOT / "utilities" / "dispatch-batch.test.py").resolve(),
+            # Asserts the real gate refuses changed saved outputs, config drift,
+            # cancellation and pending corrections before verifier admission.
+            (ROOT / "utilities" / "resource_sequence.test.py").resolve(),
             # Reproduces the real pre-repair gate refusal for preserved resources.
             (ROOT / "utilities" / "preserved_resource_handoff.test.py").resolve(),
         }
