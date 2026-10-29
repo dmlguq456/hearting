@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import select
 import shlex
 import signal
 import subprocess
@@ -819,6 +820,49 @@ class TestRunner(unittest.TestCase):
             if watch.poll() is None:
                 watch.terminate()
             watch.wait(timeout=3)
+
+    def test_cleanup_waits_for_exit_when_supervisor_observation_is_unknown(self):
+        code = textwrap.dedent("""
+            import os, signal, time
+            def stop(signum, frame):
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                time.sleep(.1)
+                os.kill(os.getpid(), signal.SIGTERM)
+            signal.signal(signal.SIGTERM, stop)
+            print('ready', flush=True)
+            time.sleep(30)
+        """)
+        watch = subprocess.Popen([sys.executable, "-c", code], env=CLEAN_ENV,
+                                 stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertTrue(select.select([watch.stdout], [], [], 3)[0])
+            self.assertEqual(watch.stdout.readline(), "ready\n")
+            supervision = R.launched_identity(watch)
+            self.assertIsNotNone(supervision)
+            self.registry.write_text(json.dumps({"runs": {
+                "observer": {"supervision": supervision}}}))
+            alive = R.RESOURCE_RESUME.supervisor_alive
+            observed = False
+
+            def lose_command_observation(binding):
+                nonlocal observed
+                if observed:
+                    # A non-working projection can be unknown before the
+                    # exact process has finished handling its termination.
+                    return False
+                observed = True
+                return alive(binding)
+
+            with mock.patch.object(R.RESOURCE_RESUME, "supervisor_alive",
+                                   side_effect=lose_command_observation):
+                self._stop_started_runs()
+            self.assertEqual(watch.poll(), -signal.SIGTERM,
+                             "unknown observation is not an exit acknowledgement")
+        finally:
+            if watch.poll() is None:
+                watch.terminate()
+            watch.wait(timeout=3)
+            watch.stdout.close()
 
     def test_resource_run_probe_attributes_both_gpu_spawn_paths_to_route_parent(self):
         harness = textwrap.dedent(r"""
@@ -1853,6 +1897,7 @@ class TestRunner(unittest.TestCase):
         self.assertEqual(json.loads(resolved.stdout)["output_dir"], str(output / "logs"))
 
     def _stop_started_runs(self):
+        from dispatch_contract import process_identity_disposition
         try:
             runs = json.loads(self.registry.read_text()).get("runs", {})
         except (AttributeError, OSError, ValueError):
@@ -1885,10 +1930,14 @@ class TestRunner(unittest.TestCase):
             except ProcessLookupError:
                 continue
             deadline = time.monotonic() + 3
-            while R.RESOURCE_RESUME.supervisor_alive(supervision) and time.monotonic() < deadline:
+            # Command metadata may become unreadable before exit is waitable.
+            # Keep unknown pending; the exact PID/start must positively exit.
+            def disposition():
+                return process_identity_disposition(pid, str(supervision["starttime"]))
+            while disposition() != "dead" and time.monotonic() < deadline:
                 time.sleep(0.02)
-            self.assertFalse(R.RESOURCE_RESUME.supervisor_alive(supervision),
-                             f"fixture workflow observer {pid} did not stop")
+            self.assertEqual(disposition(), "dead",
+                             f"fixture workflow observer {pid} did not exit")
 
     def cli(self, *args, cwd=None, pass_fds=(), input=None, extra_env=None):
         return subprocess.run([

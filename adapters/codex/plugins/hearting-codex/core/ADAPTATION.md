@@ -330,6 +330,13 @@ Those paths may symlink into versioned projection directories such as
 directory must make it clear whether each entry is native adapter output,
 portable passthrough, or compatibility debt.
 
+A plugin ID has one active discovery carrier for the observed runtime
+generation. Its implementation module is a separate dependency, not another
+discovery entry. Unknown generations preserve an existing layout and explicit
+disabled siblings; verification uses the selected carrier and its actual
+module. Generation changes retire only exact installer-owned leaves through
+the existing transaction, preserving user changes and disabled copies.
+
 **Projection completeness**: a cross-adapter guard that checks whether every
 portable source item has a corresponding adapter-side projection must
 **enumerate the source domain** (iterate the actual current entries) rather

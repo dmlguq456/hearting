@@ -40,6 +40,89 @@ def seal_fixture_route(route, route_file, root, jobs, owner):
         f"owner_route_id={route['route_id']},owner_route_hash={route['route_hash']},owner_route_file={route_file}\n")
 
 
+class RecordedNoticeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        spec = importlib.util.spec_from_file_location("recorded_notice_fixture", Path(__file__).with_name("dispatch_notice_state.test.py"))
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        self.jobs, self.meta, self.request = fixture.recorded_owner_fixture(Path(self.tmp.name))
+
+    def test_stored_sealed_checkpoint_does_not_imply_publication_or_goal_completion(self):
+        with mock.patch.object(T, "owner_completion_state", side_effect=AssertionError("full completion")), \
+             mock.patch.object(T, "_completion_request", side_effect=AssertionError("full request")), \
+             mock.patch.object(T, "_observe_settled_transaction", side_effect=AssertionError("settlement")), \
+             mock.patch.object(T, "_publication_observation", side_effect=AssertionError("publication")):
+            result = T.recorded_owner_completion_notice(self.jobs, "done", self.meta)
+        self.assertEqual((result["state"], result["checkpoint"]), ("closure-pending", "owner-envelope-sealed"))
+        self.assertEqual(result["route_id"], self.meta["owner_route_id"])
+
+    def test_missing_corrupt_foreign_and_symlink_transaction_remain_unknown(self):
+        path = T._commit_state_path(self.request)
+        original = path.read_text()
+        for case in ("missing", "corrupt", "foreign-owner", "wrong-id", "symlink"):
+            with self.subTest(case=case):
+                path.unlink(missing_ok=True)
+                if case == "corrupt":
+                    path.write_text("{")
+                elif case == "symlink":
+                    foreign = path.with_name("foreign.json")
+                    foreign.write_text(original)
+                    path.symlink_to(foreign)
+                elif case in {"foreign-owner", "wrong-id"}:
+                    value = json.loads(original)
+                    value["owner_attempt_id" if case == "foreign-owner" else "terminal_commit_id"] = "foreign"
+                    path.write_text(json.dumps(value))
+                result = T.recorded_owner_completion_notice(self.jobs, "done", self.meta)
+                self.assertEqual(result["state"], "closure-pending" if case == "missing" else "unknown")
+                self.assertNotEqual(result.get("state"), "completed")
+
+    def test_context_reuses_many_refusals_and_invalidates_in_place_updates(self):
+        from dispatch_notice_state import NoticeReadContext
+        import dispatch_supervision
+        import dispatch_session_sweep
+        for index in range(12):
+            T._record_attempt(self.request, "producer-finalize-failed", f"output-invalid: locator-invalid-component:artifacts/bad{index}|name")
+        directory = T._commit_state_path(self.request).parent / "attempts"
+        (directory / ("f" * 64 + ".json")).write_text("{")
+        record = dispatch_supervision.materialize(self.jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+        context = NoticeReadContext()
+        with mock.patch.object(T, "recorded_owner_completion_notice", wraps=T.recorded_owner_completion_notice) as reader, \
+             mock.patch.object(T.os, "open", wraps=os.open) as opened:
+            self.assertTrue(dispatch_supervision.notice_is_current(record, notice_context=context))
+            first_reads = opened.call_count
+            def diagnostic_reads():
+                return sum(str(call.args[0]).endswith(".json") for call in opened.call_args_list)
+            first_diagnostic_reads = diagnostic_reads()
+            rendered = dispatch_session_sweep._bounded_receipt_text({**record,
+                dispatch_session_sweep.NOTICE_CONTEXT_KEY: context})
+            self.assertIn("last recorded closure refusal", rendered)
+            self.assertEqual(reader.call_count, 1)
+            self.assertEqual(diagnostic_reads(), first_diagnostic_reads)
+            # Rendering still opens the exact registry row; that is not cached authority.
+            self.assertLessEqual(opened.call_count, first_reads + 1)
+            self.assertTrue(dispatch_supervision.notice_is_current(record, notice_context=context))
+            self.assertEqual(reader.call_count, 1)
+            # Updating an existing refusal leaves the directory membership unchanged.
+            T._record_attempt(self.request, "producer-finalize-failed", "output-invalid: locator-invalid-component:artifacts/bad0|name")
+            updated = context.owner_completion(self.jobs, "done", self.meta)
+            self.assertEqual(updated["last_refusal"]["count"], 2)
+            self.assertEqual(reader.call_count, 2)
+            path = T._commit_state_path(self.request)
+            state = json.loads(path.read_text())
+            state["state"] = "route-closed"
+            path.write_text(json.dumps(state))
+            self.assertEqual(context.owner_completion(self.jobs, "done", self.meta)["checkpoint"], "route-closed")
+            self.assertEqual(reader.call_count, 3)
+            self.jobs.write_text(self.jobs.read_text().rstrip() + ",generation_note=updated\n")
+            context.owner_completion(self.jobs, "done", self.meta)
+            self.assertEqual(reader.call_count, 4)
+            NoticeReadContext().owner_completion(self.jobs, "done", self.meta)
+            self.assertEqual(reader.call_count, 5)
+        print(f"recorded notice: 12 valid + 1 corrupt refusals; select/render reader=1; os.open={first_reads}")
+
+
 class ProducerBindingTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

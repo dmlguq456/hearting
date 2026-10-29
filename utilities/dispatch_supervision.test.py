@@ -515,7 +515,8 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
                          "record_path": str(self.root / "attempts" / "event.json"),
                          "remediation": "Correct the reported locator, mark the exact directory, or move it outside the cycle; the controller retries automatically.",
                      }}
-        with mock.patch.object(dispatch_terminal_commit, "inspect_owner_completion", return_value=diagnosis):
+        with mock.patch.object(dispatch_terminal_commit, "recorded_owner_completion_notice", return_value=diagnosis), \
+             mock.patch.object(dispatch_terminal_commit, "inspect_owner_completion", side_effect=AssertionError("heavy inspect")):
             text = supervision.render_text(receipt)
         self.assertIn("output-invalid", text)
         self.assertIn("artifacts/bad|name.txt", text)
@@ -526,6 +527,46 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertIn("read-only diagnosis", text)
         self.assertNotIn(" finish ", text)
         self.assertEqual(supervision.receipt_digest(receipt), digest)
+
+    def test_notice_observation_leaves_full_controller_pending_observation_intact(self):
+        import dispatch_notice_state
+        from types import SimpleNamespace
+        meta = {**CURRENT, "attempt_id": "att-owner", "workflow_completion": "runtime-v1"}
+        rows = {"att-owner": ("done", meta)}
+        with mock.patch.object(supervision, "_settlement_decision", return_value=(None, SimpleNamespace(action="advance"))), \
+             mock.patch("route_parent_close.row_requested", return_value=False), \
+             mock.patch("dispatch_terminal_commit.recorded_owner_completion_notice", return_value={"state": "unknown"}), \
+             mock.patch("dispatch_terminal_commit.owner_completion_pending", return_value=True) as full:
+            self.jobs.write_text("")
+            self.assertTrue(supervision._pending(rows, ["att-owner"], self.jobs))
+            full.assert_called_once()
+            full.reset_mock()
+            self.assertTrue(supervision._pending(rows, ["att-owner"], self.jobs,
+                notice_context=dispatch_notice_state.NoticeReadContext()))
+            full.assert_not_called()
+
+    def test_reused_receipt_never_reuses_an_unmonitored_siblings_recipient_authority(self):
+        from dispatch_notice_state import NoticeReadContext
+        from types import SimpleNamespace
+        self.jobs.write_text("")
+        metadata = {aid: {"attempt_id": aid, "parent_sid": "parent", "delivery_id": "delivery-result",
+                         "parent_completion_delivery": "claude-parent-runtime"} for aid in ("att-owner", "att-sibling")}
+        completed = {"parent_attempt_id": "-", "children": [
+            {"attempt_id": aid, "status": "done", "readiness": "ready", "required_action": "advance-completed"}
+            for aid in metadata]}
+        receipt = {"job_registry": str(self.jobs), "monitored_attempt_ids": ["att-owner"], "recipient_thread_id": "parent"}
+        targets = {aid: "parent" for aid in metadata}
+        context = NoticeReadContext()
+        with mock.patch("dispatch_completion_join.current_attempt_row", side_effect=lambda _jobs, aid: SimpleNamespace(metadata=metadata[aid])), \
+             mock.patch("dispatch_seat_handover.effective_parent", side_effect=lambda meta, _jobs: targets[meta["attempt_id"]]), \
+             mock.patch.object(pending, "read", return_value={"receipt": completed}), \
+             mock.patch("dispatch_completion_join.current_batch_receipt_projection", return_value=completed) as projection:
+            self.assertIsNotNone(supervision._recorded_completion_result(receipt, require_ack=False, notice_context=context))
+            self.assertIsNotNone(supervision._recorded_completion_result(receipt, require_ack=False, notice_context=context))
+            projection.assert_called_once()
+            targets["att-sibling"] = "other-parent"
+            self.assertIsNone(supervision._recorded_completion_result(receipt, require_ack=False, notice_context=context))
+            projection.assert_called_once()
 
     def test_residue_pid_is_named_in_the_notice_only_while_it_runs(self):
         self._notice_rows()

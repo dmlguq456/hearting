@@ -395,9 +395,11 @@ def native_queue_prompt_receipts(sid: str):
         return [], []
     from dispatch_contract import dispatch_state_roots, resolve_agent_home
     from dispatch_session_sweep import delivery_context, sweep_deliver
+    from dispatch_notice_state import NoticeReadContext
+    notice_context = NoticeReadContext()
     batches = []
     for root in dict.fromkeys(dispatch_state_roots(resolve_agent_home())):
-        records, _ = sweep_deliver(root, "codex-native-queue", sid)
+        records, _ = sweep_deliver(root, "codex-native-queue", sid, notice_context=notice_context)
         if records:
             batches.append((root, records))
     context = delivery_context(batches)

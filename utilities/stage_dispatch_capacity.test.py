@@ -14,6 +14,10 @@ os.environ.setdefault("HEARTING_CAPACITY_PROBE_CLI", os.devnull)  # never ask a 
 class CapacityTest(unittest.TestCase):
  def setUp(self):
   self.tmp=tempfile.TemporaryDirectory();self.jobs=Path(self.tmp.name)/"jobs.log"
+  # active_limits consults Fleet gauges too; never let a developer's actual
+  # exhausted quota decide whether these synthetic retry fixtures can launch.
+  usage_state=mock.patch.dict(os.environ,{"FLEET_USAGE_STATE_DIR":str(Path(self.tmp.name)/"usage-state")})
+  usage_state.start();self.addCleanup(usage_state.stop)
   self.args=type("Args",(),{"slug":"s","parent":"p","parent_attempt_id":"att-parent",
    "jobs":self.jobs,
    "capacity_model":"gpt-5.6-luna","capacity_reasoning":"medium",

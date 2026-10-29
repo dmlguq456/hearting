@@ -14,6 +14,11 @@ from fleet.collectors import usage_cache
 
 class F51OptOutTest(unittest.TestCase):
     def setUp(self):
+        # Usage fixtures have no native pane source; do not start a live Herdr
+        # observation transport while testing account-cache/opt-out behavior.
+        pane_patch = mock.patch("fleet.collectors.herdr.enrich", return_value=None)
+        pane_patch.start()
+        self.addCleanup(pane_patch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.dispatch_tmp = tempfile.TemporaryDirectory()
         self.old_state_dir = os.environ.get("FLEET_USAGE_STATE_DIR")

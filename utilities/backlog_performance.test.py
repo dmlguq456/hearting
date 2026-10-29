@@ -145,15 +145,15 @@ class BacklogPerformanceTest(unittest.TestCase):
     def test_capacity_snapshot_rechecks_same_size_rewrite_with_fixed_mtime(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
             jobs = Path(temp_dir) / "jobs.log"
-            first_line = "2026-10-03T00:00:00Z\tdone\ta\tb\tc\tharness=codex,note=dead-limit-a\n"
-            second_line = "2026-10-03T00:00:00Z\tdone\ta\tb\tc\tharness=codex,note=dead-limit-b\n"
+            first_line = "2026-10-03T00:00:00Z\tdone\ta\tb\tc\tharness=codex,note=dead-usage-limit,reset=2099-01-01T00:00:00Z\n"
+            second_line = "2026-10-03T00:00:00Z\tdone\ta\tb\tc\tharness=codex,note=dead-usage-limit,reset=2099-01-02T00:00:00Z\n"
             self.assertEqual(len(first_line), len(second_line))
             jobs.write_text(first_line, encoding="utf-8")
             frozen_mtime = jobs.stat().st_mtime_ns
             with mock.patch.object(CAPACITY, "_settled", return_value=True), \
                  mock.patch.object(CAPACITY, "_DISK_CACHE", True):
                 before = CAPACITY._snapshot(jobs, 1790985600)
-                self.assertEqual(before["legacy"][0]["n"], "dead-limit-a")
+                self.assertEqual(before["legacy"][0]["r"], "2099-01-01T00:00:00Z")
                 CAPACITY._persist(before)
                 original_key = CAPACITY._stat_key(jobs)
                 jobs.write_text(second_line, encoding="utf-8")
@@ -161,7 +161,7 @@ class BacklogPerformanceTest(unittest.TestCase):
                 changed_key = CAPACITY._stat_key(jobs)
                 self.assertNotEqual(original_key, changed_key)
                 after = CAPACITY._snapshot(jobs, 1790985600)
-            self.assertEqual(after["legacy"][0]["n"], "dead-limit-b")
+            self.assertEqual(after["legacy"][0]["r"], "2099-01-02T00:00:00Z")
 
     def test_governor_default_root_resolves_artifact_root_environment(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:

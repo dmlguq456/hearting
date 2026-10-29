@@ -10,8 +10,11 @@ carrier passes, zero and two both fail, and the merge never touches user entries
 from __future__ import annotations
 
 import importlib
+from contextlib import contextmanager
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -264,6 +267,614 @@ class OpenCodeNativeLeafPreservationTest(unittest.TestCase):
                          self.commands / self.foreign_command):
                 self.assertEqual(by_dest[str(path)]["status"], "preserved", path)
         self._assert_user_entries_untouched()
+
+
+class OpenCodeGuardProjectionTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="opencode-guard-driver-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.source = self.root / "source"
+        files = {
+            "core/CORE.md": "# core\n", "capabilities/README.md": "# capabilities\n",
+            "roles/README.md": "# roles\n", "adapters/opencode/AGENTS.md": "# instructions\n",
+            "adapters/opencode/skills/demo/SKILL.md": "# demo\n",
+            "adapters/opencode/agents/memory-scout/memory-scout.md": "# scout\n",
+            "adapters/opencode/plugins/hearting-guards.js": 'export default { id: "hearting-guards" }\n',
+        }
+        for relative in ("adapters/opencode/plugins/hearting-guards/index.ts",
+                         "adapters/opencode/config/models.conf",
+                         "adapters/opencode/plugins/herdr-agent-state.js",
+                         "adapters/opencode/tui/herdr-tui-session.js",
+                         "adapters/opencode/tui/herdr-opencode/tui.js"):
+            files[relative] = (SOURCE_ROOT / relative).read_text()
+        for relative, content in files.items():
+            path = self.source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.env = fixture_env.build_environment(self.root / "fixture", self.source)
+        self.env.update(OPENCODE_RUNTIME_VERSION="2.0.32", OPENCODE_BIN=str(self.root / "no-opencode"),
+                        HARNESS_NO_NODE_INSTALL="1")
+        fixture_env.prepare_environment(self.env)
+        environment = mock.patch.dict(os.environ, self.env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.driver = _load_driver()
+        self.home = self.driver.paths.runtime_home("opencode")
+        self.package = self.home / "plugins/hearting-guards/index.ts"
+        self.js = self.home / "plugins/hearting-guards.js"
+
+    def manifest(self):
+        return json.loads((self.home / ".harness/manifest.json").read_text())
+
+    def uninstall(self):
+        proc = subprocess.run(["sh", str(SOURCE_ROOT / "tools/install/harness.sh"),
+                               "uninstall", "opencode", "--yes", "--json"],
+                              env=dict(os.environ), text=True, capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_legacy_v2_dry_run_render_update_noop_and_manifest_uninstall(self):
+        self.assertFalse(self.driver.install(dry_run=True)["blocked"])
+        self.assertFalse(self.package.exists())
+        self.assertFalse((self.home / ".harness/manifest.json").exists())
+        report = self.driver.install()
+        self.assertFalse(report["blocked"], report)
+        self.assertFalse(self.js.exists())
+        self.assertTrue(self.package.is_file() and not self.package.is_symlink())
+        self.assertIn(str(self.source / "adapters/opencode/plugins/hearting-guards.js"), self.package.read_text())
+        before = self.package.stat().st_mtime_ns
+        self.assertFalse(self.driver.install()["blocked"])
+        self.assertEqual(self.package.stat().st_mtime_ns, before)
+        relative = "plugins/hearting-guards/index.ts"
+        self.assertEqual(self.manifest()["files"][relative], hashlib.sha256(self.package.read_bytes()).hexdigest())
+        self.assertEqual((self.home / ".harness/pristine" / relative).read_bytes(), self.package.read_bytes())
+        template = self.source / "adapters/opencode/plugins/hearting-guards/index.ts"
+        template.write_text(template.read_text() + "// updated entry\n")
+        self.assertFalse(self.driver.install()["blocked"])
+        self.assertIn("updated entry", self.package.read_text())
+        self.assertTrue(self.driver._guard_check("global")["ok"])
+        self.uninstall()
+        self.assertFalse(self.package.exists())
+
+    def test_user_edited_render_is_preserved_and_never_reregistered(self):
+        self.assertFalse(self.driver.install()["blocked"])
+        recorded = self.manifest()["files"].copy()
+        self.package.write_text(self.package.read_text() + "// user bytes\n")
+        before = (self.package.read_bytes(), self.package.stat().st_mtime_ns)
+        for dry in (True, False):
+            report = self.driver.install(dry_run=dry)
+            self.assertTrue(report["blocked"], report)
+            self.assertEqual((self.package.read_bytes(), self.package.stat().st_mtime_ns), before)
+            self.assertEqual(self.manifest()["files"], recorded)
+        # The existing reapply consumer reports missing canonical render input,
+        # rather than treating a source template as rendered runtime bytes.
+        reapply = self.driver.manifest.reapply(["opencode"], sources={"opencode": {}}, dry_run=True)
+        self.assertTrue(reapply["verify_failed"], reapply)
+        self.assertEqual((self.package.read_bytes(), self.package.stat().st_mtime_ns), before)
+        self.uninstall()
+        self.assertEqual(self.package.read_bytes(), before[0])
+
+    def test_foreign_manifest_identity_cannot_authorize_render_replacement(self):
+        self.assertFalse(self.driver.install()["blocked"])
+        manifest_path = self.home / ".harness/manifest.json"
+        record = self.manifest()
+        record["runtime"] = "claude"
+        manifest_path.write_text(json.dumps(record))
+        before = self.package.stat().st_mtime_ns
+        report = self.driver.install(dry_run=True)
+        self.assertTrue(report["blocked"], report)
+        self.assertEqual(self.package.stat().st_mtime_ns, before)
+
+    def test_manifest_failure_rolls_back_render_and_receipt_for_normal_retry(self):
+        original = self.driver.manifest.record
+
+        def fail_after_record(*args, **kwargs):
+            original(*args, **kwargs)
+            raise OSError("guard-manifest-publication-failure")
+
+        with mock.patch.object(self.driver.manifest, "record", side_effect=fail_after_record):
+            report = self.driver.install()
+        self.assertTrue(report["blocked"], report)
+        self.assertFalse(self.package.exists())
+        self.assertFalse((self.home / ".harness/manifest.json").exists())
+        self.assertFalse((self.home / ".harness/pristine/plugins/hearting-guards/index.ts").exists())
+        self.assertFalse(self.driver.install()["blocked"])
+        self.assertTrue(self.package.is_file())
+
+    def test_other_install_conflict_does_not_leave_the_render_without_a_receipt(self):
+        self.home.mkdir(parents=True)
+        (self.home / "opencode.json").write_text('{"skills":"user-conflict"}')
+        report = self.driver.install()
+        self.assertTrue(report["blocked"], report)
+        self.assertTrue(self.package.is_file())
+        self.assertEqual(self.manifest()["files"]["plugins/hearting-guards/index.ts"],
+                         hashlib.sha256(self.package.read_bytes()).hexdigest())
+        (self.home / "opencode.json").write_text('{}')
+        self.assertFalse(self.driver.install()["blocked"])
+
+    @contextmanager
+    def receipt_scenario(self, phase):
+        case = OpenCodeGuardProjectionTest()
+        case.setUp()
+        try:
+            if phase != "first":
+                self.assertFalse(case.driver.install()["blocked"])
+            if phase == "update":
+                template = case.source / "adapters/opencode/plugins/hearting-guards/index.ts"
+                template.write_text(template.read_text() + "// next render\n")
+            yield case
+        finally:
+            case.doCleanups()
+
+    def receipt_paths(self):
+        return {"entry": self.package, "manifest": self.home / ".harness/manifest.json",
+                "pristine": self.home / ".harness/pristine/plugins/hearting-guards/index.ts"}
+
+    def write_successor(self, target):
+        path = self.receipt_paths()[target]
+        payload = (json.dumps({"schema": 1, "runtime": "opencode", "scope": "global",
+                               "files": {"user.txt": "a" * 64}, "user": "successor"}).encode()
+                   if target == "manifest" else b"// user successor\n")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return payload
+
+    def assert_successor(self, target, payload):
+        self.assertEqual(self.receipt_paths()[target].read_bytes(), payload)
+        if target == "entry":
+            manifest_path = self.receipt_paths()["manifest"]
+            if manifest_path.exists():
+                self.assertNotEqual(self.manifest()["files"].get("plugins/hearting-guards/index.ts"),
+                                    hashlib.sha256(payload).hexdigest())
+            pristine = self.receipt_paths()["pristine"]
+            if pristine.exists():
+                self.assertNotEqual(pristine.read_bytes(), payload)
+
+    def test_render_receipt_preserves_successors_before_publication_and_retry(self):
+        for phase in ("first", "update", "unchanged"):
+            for target in ("entry", "manifest", "pristine"):
+                for fail in (False, True):
+                    with self.subTest(phase=phase, target=target, fail=fail), self.receipt_scenario(phase) as case:
+                        original = case.driver.manifest.record
+                        successors = []
+
+                        def interleave(*args, **kwargs):
+                            if args[1]:
+                                successors.append(case.write_successor(target))
+                                if fail:
+                                    raise OSError("injected receipt failure")
+                            return original(*args, **kwargs)
+
+                        with mock.patch.object(case.driver.manifest, "record", side_effect=interleave):
+                            result = case.driver.install()
+                        self.assertTrue(result["blocked"], result)
+                        self.assertEqual(len(successors), 1)
+                        case.assert_successor(target, successors[0])
+                        # A normal retry cannot turn a user package into an
+                        # installer render by registering its bytes.
+                        retry = case.driver.install()
+                        if target == "entry":
+                            self.assertTrue(retry["blocked"], retry)
+                        case.assert_successor(target, successors[0])
+
+    def test_partial_render_receipt_preserves_all_successor_leaves(self):
+        for phase in ("first", "update", "unchanged"):
+            for boundary in ("pristine", "manifest"):
+                for target in ("entry", "manifest", "pristine"):
+                    with self.subTest(phase=phase, boundary=boundary, target=target), self.receipt_scenario(phase) as case:
+                        if boundary == "pristine" and case.receipt_paths()["pristine"].exists():
+                            # destructive-ok: reason=exercise a partial pristine publication on an existing render; boundary=exact fixture pristine leaf
+                            case.receipt_paths()["pristine"].unlink()
+                        transaction_type = case.driver.safe_fs.Transaction
+                        original = transaction_type.write_bytes
+                        successors = []
+
+                        def interleave(transaction, name, payload, mode):
+                            result = original(transaction, name, payload, mode)
+                            if name == boundary:
+                                successors.append(case.write_successor(target))
+                                raise OSError("injected partial receipt failure")
+                            return result
+
+                        with mock.patch.object(transaction_type, "write_bytes", new=interleave):
+                            result = case.driver.install()
+                        self.assertTrue(result["blocked"], result)
+                        self.assertEqual(len(successors), 1)
+                        case.assert_successor(target, successors[0])
+                        retry = case.driver.install()
+                        if target == "entry":
+                            self.assertTrue(retry["blocked"], retry)
+                        case.assert_successor(target, successors[0])
+
+    def test_partial_receipt_failures_restore_exact_bytes_for_normal_retry(self):
+        for phase in ("first", "update", "unchanged"):
+            for boundary in ("pristine", "manifest"):
+                with self.subTest(phase=phase, boundary=boundary), self.receipt_scenario(phase) as case:
+                    if boundary == "pristine" and case.receipt_paths()["pristine"].exists():
+                        # destructive-ok: reason=exercise missing pristine repair rollback; boundary=exact fixture pristine leaf
+                        case.receipt_paths()["pristine"].unlink()
+                    before = {key: path.read_bytes() if path.exists() else None
+                              for key, path in case.receipt_paths().items()}
+                    transaction_type = case.driver.safe_fs.Transaction
+                    original = transaction_type.write_bytes
+
+                    def fail(transaction, name, payload, mode):
+                        result = original(transaction, name, payload, mode)
+                        if name == boundary:
+                            raise OSError("injected partial receipt failure")
+                        return result
+
+                    with mock.patch.object(transaction_type, "write_bytes", new=fail):
+                        self.assertTrue(case.driver.install()["blocked"])
+                    self.assertEqual({key: path.read_bytes() if path.exists() else None
+                                      for key, path in case.receipt_paths().items()}, before)
+                    self.assertFalse(case.driver.install()["blocked"])
+                    self.assertTrue(case.driver._guard_check("global")["ok"])
+
+    def test_legacy_handover_refresh_repeat_update_and_deactivate(self):
+        import installer
+        import runtime_activation
+        relative = "plugins/hearting-guards/index.ts"
+        for mode in ("linked", "packaged"):
+            with self.subTest(mode=mode), self.receipt_scenario("unchanged") as case:
+                manifest_path = case.receipt_paths()["manifest"]
+                data = case.manifest()
+                unrelated = case.home / "user.txt"
+                unrelated.write_bytes(b"user copy\n")
+                data["files"]["user.txt"] = hashlib.sha256(unrelated.read_bytes()).hexdigest()
+                data["custom"] = {"keep": True}
+                manifest_path.write_text(json.dumps(data))
+                pristine = case.receipt_paths()["pristine"].read_bytes()
+                active = runtime_activation.activate("opencode", mode, str(case.source))
+                self.assertEqual(active["freshness"], "fresh", active)
+                del data["files"][relative]
+                self.assertEqual(case.manifest(), data)
+                self.assertEqual(case.receipt_paths()["pristine"].read_bytes(), pristine)
+                args = installer.build_parser().parse_args(["update", "--runtime", "opencode", "--dry-run", "--json"])
+                self.assertEqual(installer.cmd_update(args)["exit"], 0)
+                self.assertFalse(case.driver.manifest.reapply(["opencode"], sources={"opencode": {}}, dry_run=True)["verify_failed"])
+                self.assertFalse(case.driver.install()["blocked"])
+                module = case.source / "adapters/opencode/plugins/hearting-guards.js"
+                module.write_text(module.read_text() + "// new bundle\n")
+                updated = runtime_activation.refresh("opencode")
+                self.assertEqual(updated["freshness"], "fresh", updated)
+                self.assertIn(updated["active_root"], case.package.read_text())
+                self.assertFalse(case.driver.install()["blocked"])
+                self.assertNotIn(relative, case.manifest()["files"])
+                self.assertEqual(installer.cmd_update(args)["exit"], 0)
+                next_source = case.root / "new-source"
+                shutil.copytree(case.source, next_source)
+                switched = runtime_activation.activate("opencode", mode, str(next_source))
+                self.assertEqual(switched["freshness"], "fresh", switched)
+                self.assertIn(switched["active_root"], case.package.read_text())
+                self.assertFalse(case.driver.install()["blocked"])
+                self.assertNotIn(relative, case.manifest()["files"])
+                case.package.write_text(case.package.read_text() + "// real user drift\n")
+                before = case.package.read_bytes()
+                self.assertIn(str(case.package), runtime_activation.status("opencode")["user_changed"])
+                self.assertTrue(case.driver.install()["blocked"])
+                self.assertIn(str(case.package), runtime_activation.deactivate("opencode")["preserved"])
+                self.assertEqual(case.package.read_bytes(), before)
+                case.uninstall()
+                self.assertEqual(case.package.read_bytes(), before)
+
+    def test_handover_state_failure_restores_legacy_hash_and_invocation_snapshot(self):
+        import runtime_activation
+        for mode in ("linked", "packaged"):
+            with self.subTest(mode=mode), self.receipt_scenario("unchanged") as case:
+                before = {key: path.read_bytes() for key, path in case.receipt_paths().items()}
+                original = runtime_activation._atomic_json
+
+                def fail_state(path, data):
+                    if path == runtime_activation._state_path("opencode"):
+                        raise OSError("handover state publication failure")
+                    return original(path, data)
+
+                with mock.patch.object(runtime_activation, "_atomic_json", side_effect=fail_state):
+                    with self.assertRaisesRegex(OSError, "handover state publication failure"):
+                        runtime_activation.activate("opencode", mode, str(case.source))
+                self.assertEqual({key: path.read_bytes() for key, path in case.receipt_paths().items()}, before)
+                snapshot = runtime_activation.capture_runtime_state("opencode", str(case.source))
+                try:
+                    runtime_activation.activate("opencode", mode, str(case.source),
+                                                transaction_snapshot=snapshot)
+                    runtime_activation.seal_runtime_state(snapshot)
+                    runtime_activation.restore_runtime_state(snapshot)
+                    self.assertEqual({key: path.read_bytes() for key, path in case.receipt_paths().items()}, before)
+                finally:
+                    runtime_activation.discard_runtime_state(snapshot)
+                self.assertFalse(case.driver.install()["blocked"])
+
+    def test_handover_rollback_preserves_a_manifest_successor(self):
+        import runtime_activation
+        self.assertFalse(self.driver.install()["blocked"])
+        manifest_path = self.receipt_paths()["manifest"]
+        old_files = self.manifest()["files"].copy()
+        original = runtime_activation._atomic_json
+        successor = []
+
+        def fail_state(path, data):
+            if path == runtime_activation._state_path("opencode"):
+                # Handover has already removed only the guard's old hash.
+                self.assertNotIn("plugins/hearting-guards/index.ts", self.manifest()["files"])
+                successor.append(self.write_successor("manifest"))
+                raise OSError("state failure after user manifest successor")
+            return original(path, data)
+
+        with mock.patch.object(runtime_activation, "_atomic_json", side_effect=fail_state):
+            with self.assertRaisesRegex(runtime_activation.ActivationError, "concurrent-successor"):
+                runtime_activation.activate("opencode", "packaged", str(self.source))
+        self.assertEqual(manifest_path.read_bytes(), successor[0])
+        self.assertNotEqual(self.manifest()["files"], old_files)
+
+    def public_runtime_args(self, command, mode):
+        import installer
+        argv = ["runtime", command, "--runtime", "opencode", "--json"]
+        if command == "activate":
+            argv.extend(["--mode", mode, "--source", str(self.source)])
+        return installer.build_parser().parse_args(argv)
+
+    def prepare_public_handover(self, command, mode):
+        import runtime_activation
+        self.assertFalse(self.driver.install()["blocked"])
+        if command == "refresh":
+            runtime_activation.activate("opencode", mode, str(self.source))
+            # An exact legacy receipt alongside an existing activation: refresh
+            # must retire this authority in the same transaction as activate.
+            data = self.manifest()
+            data["files"]["plugins/hearting-guards/index.ts"] = hashlib.sha256(
+                self.package.read_bytes()).hexdigest()
+            self.receipt_paths()["manifest"].write_text(json.dumps(data))
+
+    def test_public_handover_failure_preserves_manifest_successors(self):
+        import installer
+        import runtime_activation
+        for command, mode, boundary in (
+            (command, mode, boundary)
+            for command in ("activate", "refresh")
+            for mode in ("linked", "packaged")
+            for boundary in ("captured-snapshot", "state-write", "restored-file")
+        ):
+            with self.subTest(command=command, mode=mode, boundary=boundary), self.receipt_scenario("first") as case:
+                case.prepare_public_handover(command, mode)
+                manifest_path = case.receipt_paths()["manifest"]
+                original = runtime_activation._atomic_json
+                write = runtime_activation.safe_fs.atomic_write_bytes
+                successors = []
+                captured = []
+                capture = runtime_activation.capture_runtime_state
+
+                def capture_snapshot(*args, **kwargs):
+                    snapshot = capture(*args, **kwargs)
+                    captured.append(snapshot)
+                    if boundary == "captured-snapshot":
+                        successors.append(case.write_successor("manifest"))
+                    return snapshot
+
+                def fail_state(path, data):
+                    if path == runtime_activation._state_path("opencode"):
+                        self.assertNotIn("plugins/hearting-guards/index.ts", case.manifest()["files"])
+                        if boundary == "state-write":
+                            successors.append(case.write_successor("manifest"))
+                        raise OSError("state failure after user manifest successor")
+                    return original(path, data)
+
+                def write_then_successor(auth, *args, **kwargs):
+                    postimage = write(auth, *args, **kwargs)
+                    if (boundary == "restored-file" and auth.target == manifest_path
+                            and auth.owner == "runtime-activation:journal-file-restore"):
+                        successors.append(case.write_successor("manifest"))
+                    return postimage
+
+                with mock.patch.object(runtime_activation, "_atomic_json", side_effect=fail_state), \
+                     mock.patch.object(runtime_activation, "capture_runtime_state", side_effect=capture_snapshot), \
+                     mock.patch.object(runtime_activation.safe_fs, "atomic_write_bytes", side_effect=write_then_successor):
+                    result = installer.cmd_runtime(case.public_runtime_args(command, mode))
+                self.assertEqual(result["exit"], installer.EXIT_BLOCKED, result)
+                self.assertEqual(len(successors), 1)
+                self.assertEqual(manifest_path.read_bytes(), successors[0])
+                self.assertIn("concurrent-successor", "\n".join(result["lines"]))
+                self.assertTrue(captured)
+                for snapshot in captured:
+                    self.assertIsNone(snapshot["_locks"])
+                    self.assertFalse(Path(snapshot["root"]).exists())
+                self.assertFalse(list((case.home / ".harness/transactions").glob("*")))
+                if command == "refresh":
+                    with mock.patch.object(runtime_activation, "reconnect_peer_obligations"), \
+                         mock.patch.object(runtime_activation, "reconnect_resource_observers"), \
+                         mock.patch.object(installer.bootstrap, "restore_memory", return_value={"action": "skipped", "detail": "fixture"}):
+                        retry = installer.cmd_runtime(case.public_runtime_args(command, mode))
+                    self.assertEqual(retry["exit"], 0, retry)
+                    self.assertEqual(manifest_path.read_bytes(), successors[0])
+
+    def test_public_handover_state_failure_restores_receipts_and_retries(self):
+        import installer
+        import runtime_activation
+        for command in ("activate", "refresh"):
+            for mode in ("linked", "packaged"):
+                with self.subTest(command=command, mode=mode), self.receipt_scenario("first") as case:
+                    case.prepare_public_handover(command, mode)
+                    before = {key: path.read_bytes() for key, path in case.receipt_paths().items()}
+                    state_path = runtime_activation._state_path("opencode")
+                    old_state = state_path.read_bytes() if state_path.exists() else None
+                    original = runtime_activation._atomic_json
+                    captured = []
+                    capture = runtime_activation.capture_runtime_state
+
+                    def capture_snapshot(*args, **kwargs):
+                        snapshot = capture(*args, **kwargs)
+                        captured.append(snapshot)
+                        return snapshot
+
+                    def fail_state(path, data):
+                        if path == state_path:
+                            raise OSError("public handover state failure")
+                        return original(path, data)
+
+                    with mock.patch.object(runtime_activation, "_atomic_json", side_effect=fail_state), \
+                         mock.patch.object(runtime_activation, "capture_runtime_state", side_effect=capture_snapshot):
+                        with self.assertRaisesRegex(OSError, "public handover state failure"):
+                            installer.cmd_runtime(case.public_runtime_args(command, mode))
+                    self.assertEqual({key: path.read_bytes() for key, path in case.receipt_paths().items()}, before)
+                    self.assertEqual(state_path.read_bytes() if state_path.exists() else None, old_state)
+                    self.assertFalse(list((case.home / ".harness/transactions").glob("*")))
+                    for snapshot in captured:
+                        self.assertIsNone(snapshot["_locks"])
+                        self.assertFalse(Path(snapshot["root"]).exists())
+                    # All projection and post-activation work use the real public
+                    # path; reconnect/memory are independent best-effort duties.
+                    with mock.patch.object(runtime_activation, "reconnect_peer_obligations"), \
+                         mock.patch.object(runtime_activation, "reconnect_resource_observers"), \
+                         mock.patch.object(installer.bootstrap, "restore_memory", return_value={"action": "skipped", "detail": "fixture"}):
+                        retry = installer.cmd_runtime(case.public_runtime_args(command, mode))
+                    self.assertEqual(retry["exit"], 0, retry)
+                    self.assertNotIn("plugins/hearting-guards/index.ts", case.manifest()["files"])
+                    self.assertFalse(case.js.exists())
+
+    def test_public_multi_runtime_failure_restores_completed_handover(self):
+        import installer
+        import runtime_activation
+        for mode in ("linked", "packaged"):
+            with self.subTest(mode=mode), self.receipt_scenario("unchanged") as case:
+                before = {key: path.read_bytes() for key, path in case.receipt_paths().items()}
+                args = case.public_runtime_args("activate", mode)
+                # This source intentionally has no Claude adapter. The public
+                # invocation commits OpenCode, then fails the second runtime.
+                args.runtime.append("claude")
+                result = installer.cmd_runtime(args)
+                self.assertEqual(result["exit"], installer.EXIT_BLOCKED, result)
+                self.assertEqual(result["runtimes"][0]["runtime"], "opencode")
+                self.assertTrue(result["runtimes"][0]["rolled_back"])
+                self.assertFalse(any("rollback errors:" in line for line in result["lines"]), result)
+                self.assertEqual({key: path.read_bytes() for key, path in case.receipt_paths().items()}, before)
+                for runtime in ("opencode", "claude"):
+                    self.assertFalse(runtime_activation._state_path(runtime).exists())
+                    transactions = runtime_activation.paths.harness_state_dir(runtime) / "transactions"
+                    self.assertFalse(list(transactions.glob("*")))
+
+    def test_legacy_handover_clean_deactivate_and_uninstall(self):
+        import runtime_activation
+        for mode in ("linked", "packaged"):
+            for operation in ("deactivate", "uninstall"):
+                with self.subTest(mode=mode, operation=operation), self.receipt_scenario("unchanged") as case:
+                    self.assertEqual(runtime_activation.activate("opencode", mode, str(case.source))["freshness"], "fresh")
+                    self.assertNotIn("plugins/hearting-guards/index.ts", case.manifest()["files"])
+                    if operation == "deactivate":
+                        runtime_activation.deactivate("opencode")
+                    else:
+                        case.uninstall()
+                    self.assertFalse(case.package.exists())
+                    self.assertFalse(case.js.exists())
+
+    def test_handover_rejects_modified_or_foreign_identity_and_keeps_unknown_receipt(self):
+        import runtime_activation
+        for kind in ("modified", "foreign", "unknown"):
+            with self.subTest(kind=kind), self.receipt_scenario("unchanged") as case:
+                manifest_path = case.receipt_paths()["manifest"]
+                if kind == "modified":
+                    case.package.write_text(case.package.read_text() + "// user edit\n")
+                elif kind == "foreign":
+                    data = case.manifest()
+                    data["runtime"] = "claude"
+                    manifest_path.write_text(json.dumps(data))
+                else:
+                    os.environ["OPENCODE_RUNTIME_VERSION"] = "invalid"
+                    # destructive-ok: reason=exercise single legacy receipt recovery before handover; boundary=exact fixture package leaf
+                    case.package.unlink()
+                    self.assertFalse(case.driver.install()["blocked"])
+                before = (case.package.read_bytes(), manifest_path.read_bytes())
+                if kind != "unknown":
+                    with self.assertRaisesRegex(runtime_activation.ActivationError, "foreign guard"):
+                        runtime_activation.activate("opencode", "packaged", str(case.source))
+                else:
+                    result = runtime_activation.activate("opencode", "packaged", str(case.source))
+                    self.assertEqual(result["freshness"], "fresh", result)
+                    self.assertEqual((case.package.read_bytes(), manifest_path.read_bytes()), before)
+                    os.environ["OPENCODE_RUNTIME_VERSION"] = "2.0.32"
+                    self.assertEqual(runtime_activation.refresh("opencode")["freshness"], "fresh")
+                    self.assertNotIn("plugins/hearting-guards/index.ts", case.manifest()["files"])
+                    continue
+                self.assertEqual((case.package.read_bytes(), manifest_path.read_bytes()), before)
+
+    def test_foreign_file_and_symlink_never_become_owned(self):
+        self.package.parent.mkdir(parents=True)
+        self.package.write_bytes(b"// foreign package\n")
+        for kind in ("file", "symlink"):
+            if kind == "symlink":
+                # destructive-ok: reason=replace a test-created foreign file with a foreign link; boundary=package leaf in this test's TemporaryDirectory
+                self.package.unlink()
+                self.package.symlink_to(self.source / "adapters/opencode/plugins/hearting-guards/index.ts")
+            before = self.package.lstat().st_mtime_ns
+            for dry in (True, False):
+                report = self.driver.install(dry_run=dry)
+                self.assertTrue(report["blocked"], report)
+                self.assertEqual(self.package.lstat().st_mtime_ns, before)
+                self.assertEqual(self.package.is_symlink(), kind == "symlink")
+            self.assertFalse((self.home / ".harness/manifest.json").exists())
+
+    def test_active_bundle_binding_and_old_js_migration_use_activation_transaction(self):
+        import runtime_activation
+        initial = runtime_activation.activate("opencode", "packaged", str(self.source))
+        self.assertFalse(self.driver.install()["blocked"])
+        self.assertIn(initial["active_root"], self.package.read_text())
+        self.js.symlink_to(Path(initial["active_root"]) / "adapters/opencode/plugins/hearting-guards.js")
+        state_path = runtime_activation._state_path("opencode")
+        state = json.loads(state_path.read_text())
+        state["owned_paths"].append(runtime_activation._entry(
+            Path(os.readlink(self.js)), self.js, "hook_config"))
+        runtime_activation._atomic_json(state_path, state)
+        self.assertFalse(self.driver.install(dry_run=True)["blocked"])
+        self.assertTrue(self.js.is_symlink())
+        applied = self.driver.install()
+        self.assertFalse(applied["blocked"], applied)
+        self.assertFalse(self.js.exists())
+        self.assertIn(initial["active_root"], self.package.read_text())
+        self.assertNotIn("plugins/hearting-guards/index.ts", self.manifest()["files"])
+
+    def test_disabled_unknown_and_v1_layouts_keep_explicit_intent(self):
+        self.js.parent.mkdir(parents=True)
+        disabled = self.js.with_name("hearting-guards.js.dup-disabled-20261029")
+        disabled.symlink_to(self.root / "gone.js")
+        before = (os.readlink(disabled), disabled.lstat().st_mtime_ns)
+        for version in ("invalid", "1.4.0", "2.0.32"):
+            os.environ["OPENCODE_RUNTIME_VERSION"] = version
+            report = self.driver.install()
+            self.assertFalse(report["blocked"], report)
+            self.assertFalse(self.js.exists() or self.js.is_symlink())
+            self.assertEqual((os.readlink(disabled), disabled.lstat().st_mtime_ns), before)
+        self.assertTrue(self.package.is_file())
+
+    def test_unknown_restores_single_legacy_receipt_without_inventing_a_binding(self):
+        self.assertFalse(self.driver.install()["blocked"])
+        # destructive-ok: reason=exercise missing legacy package recovery; boundary=exact package in this test's private runtime home
+        self.package.unlink()
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "invalid"
+        report = self.driver.install()
+        self.assertFalse(report["blocked"], report)
+        self.assertTrue(self.package.is_file())
+        self.assertFalse(self.js.exists())
+        # A changed template cannot prove the binding of a missing prior file.
+        # destructive-ok: reason=exercise unresolved legacy receipt; boundary=exact package in this test's private runtime home
+        self.package.unlink()
+        template = self.source / "adapters/opencode/plugins/hearting-guards/index.ts"
+        template.write_text(template.read_text() + "// different template\n")
+        self.assertTrue(self.driver.install()["blocked"])
+        self.assertFalse(self.package.exists())
+        self.assertFalse(self.js.exists())
+
+    def test_public_install_v2_and_manifest_based_uninstall(self):
+        env = dict(os.environ, AGENT_HOME=str(SOURCE_ROOT))
+        proc = subprocess.run(["sh", str(SOURCE_ROOT / "tools/install/harness.sh"),
+                               "install", "opencode", "--yes", "--json"],
+                              env=env, text=True, capture_output=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(self.package.is_file() and not self.package.is_symlink())
+        self.assertFalse(self.js.exists())
+        self.assertIn(str(SOURCE_ROOT / "adapters/opencode/plugins/hearting-guards.js"), self.package.read_text())
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.uninstall()
+        self.assertFalse(self.package.exists())
 
 
 if __name__ == "__main__":
