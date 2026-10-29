@@ -10842,6 +10842,11 @@ def marker_bound_delivery_transaction(
             advanced=advanced,
             completion_proven=(
                 _delivery_commit_proven(refreshed_metadata)
+                # A transient publication closes with an attention receipt.
+                # Recovery retains that receipt, but the verified marker now
+                # proves the completed publication independently of delivery.
+                or (deferred_completion(refreshed_metadata) == "completed"
+                    and bool(refreshed_marker is not None and refreshed_marker_digest))
                 if refreshed_metadata.get("delivery_intent") else
                 # Read compatibility for rows predating the one-time receipt.
                 # New terminal kinds use the common committed receipt, not

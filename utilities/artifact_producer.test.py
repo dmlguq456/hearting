@@ -5406,9 +5406,11 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
                         fallback_hop="same-harness-headless", failure_class="pass", note="completed-supervisor",
                         workflow_completion="runtime-v1", launch_outcome="reaped-before-publish",
                         parent_sid="fixture-parent", parent_completion_delivery="codex-managed-gateway")
-            fields[1]="done"; fields[5]=",".join(f"{k}={v}" for k,v in meta.items());lines[i]="\t".join(fields)
+            fields[5]=",".join(f"{k}={v}" for k,v in meta.items());lines[i]="\t".join(fields)
         jobs.write_text("\n".join(lines)+"\n")
-        return meta
+        # Use the normal close edge so recovery has the same immutable delivery
+        # intent/receipt as a real owner, rather than only a synthetic done row.
+        self.assertTrue(D.close_attempt_row(jobs, owner, "completed-supervisor"))
 
     def test_official_continuation_owner_settlement_recovers_published_manifest_before_seal(self):
         import dispatch_terminal_commit as terminal
@@ -5545,11 +5547,15 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
     def test_runtime_completion_failure_keeps_pass_notice_and_recovers_without_a_model(self):
         import dispatch_terminal_commit as terminal
         import dispatch_supervision as supervision
+        import dispatch_notice_state as notice
+        import dispatch_pending_delivery as pending
         from dispatch_completion_join import exact_attempt_row, join_selected_attempts, materialize_after_terminal_close
         route,path,jobs,owner,result,artifact,request=self._prepare_fixture()
         self._closed_owner(jobs,owner); meta=exact_attempt_row(jobs,owner).metadata; before=jobs.read_bytes()
+        self.assertEqual(meta["delivery_intent"], "1")
         with mock.patch.object(P,"finalize_exact_cycle",side_effect=P.ProducerError("fixture-busy")):
             materialize_after_terminal_close(jobs,owner)
+            self.assertIsNone(pending.read(jobs.parent, meta["parent_sid"], meta["delivery_id"]))
             self.assertTrue(terminal.owner_completion_pending(jobs,"done",meta))
             import workflow_state
             self.assertNotEqual(workflow_state.WorkflowLedger(route["route_id"],route["route_hash"],jobs=jobs).state()["workflow_state"],"COMPLETE")
@@ -5561,7 +5567,24 @@ class TerminalTransactionIntegrationTest(ProducerTestBase):
 
         receipt=join_selected_attempts(jobs=jobs,expected_attempts={owner},timeout=2,recover=True)
         self.assertEqual(receipt["state"],"ready",receipt)
-        self.assertFalse(supervision.notice_is_current(notices[0]))
+        completed = pending.read(jobs.parent, meta["parent_sid"], meta["delivery_id"])
+        self.assertIsNotNone(completed)
+        self.assertEqual(completed["state"], "pending")
+        with contextlib.ExitStack() as stack:
+            heavy = [stack.enter_context(mock.patch.object(module, name,
+                         side_effect=AssertionError("heavy notice observation: " + name)))
+                     for module, names in (
+                         (terminal, ("owner_completion_state", "owner_completion_pending",
+                                     "inspect_owner_completion", "_completion_request",
+                                     "_observe_settled_transaction", "_publication_observation")),
+                         (P, ("completed_spec_publication", "_code_spec_tree_changed", "_spec_bytes")),
+                         (R, ("terminal_gate_observation",))) for name in names]
+            self.assertFalse(supervision.notice_is_current(notices[0]))
+            self.assertTrue(notice.notice_is_current(completed, jobs=jobs))
+            self.assertIsNone(supervision._acknowledged_completion_result(notices[0]["receipt"]))
+            for reader in heavy:
+                reader.assert_not_called()
+        self.assertEqual(pending.read(jobs.parent, meta["parent_sid"], meta["delivery_id"]), completed)
         self.assertEqual(jobs.read_bytes(),before)
 
     def test_completed_retry_history_does_not_block_closure_or_allow_late_start(self):

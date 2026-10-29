@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import select
 import shlex
 import signal
 import subprocess
@@ -648,6 +649,11 @@ class TestProgressLaunch(unittest.TestCase):
                 "nodes": [{"id": "eval-run", "kind": "resource-runner", "resource_transport": "detached-process"}]}))
             payload = (f"import sys, time; sys.path.insert(0, {str(ROOT / 'utilities')!r}); "
                        "from resource_progress import write_progress; assert write_progress(1, 'item'); time.sleep(.2)")
+            smoke_spec = importlib.util.spec_from_file_location("progress_smoke_fixture", SMOKE)
+            smoke = importlib.util.module_from_spec(smoke_spec)
+            smoke_spec.loader.exec_module(smoke)
+            smoke_input = root / "smoke-input"
+            smoke_input.write_text("progress fixture\n")
             children = []
             real_popen = subprocess.Popen
             def spawn(*args, **kwargs):
@@ -659,6 +665,14 @@ class TestProgressLaunch(unittest.TestCase):
                  mock.patch.dict(os.environ, {"CUDA_VISIBLE_DEVICES": "",
                                              "AGENT_RESOURCE_PROGRESS_FILE": str(root / "foreign.json"),
                                              "AGENT_RESOURCE_RUN_ID": "foreign", "AGENT_RESOURCE_NODE": "other"}):
+                # Use the normal producer payload and seal for this launch's
+                # exact command/cwd/environment, alongside the earlier mocks.
+                attestation = smoke.payload([smoke_input], [sys.executable, "-c", payload], root)
+                attestation.update(status="passed", exit_code=0)
+                attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+                    attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                smoke.verify(attestation)
+                (root / "smoke.json").write_text(json.dumps(attestation))
                 R.main(["--registry", str(registry), "start", "--run-id", "auto", "--cwd", str(root),
                         "--log", str(log), "--route", str(route), "--node", "eval-run",
                         "--smoke-attestation", str(root / "smoke.json"), "--", sys.executable, "-c", payload])
@@ -740,6 +754,52 @@ class TestRunner(unittest.TestCase):
                 self.assertEqual(json.loads(result_path.read_text()),
                                  {"args": ["payload-arg"], "stdin": "", "bash_env": str(startup)})
 
+    def test_queued_payload_uses_smoke_execution_environment(self):
+        import importlib.util
+        overlay = self.base / "smoke-only-overlay"
+        overlay.mkdir()
+        (overlay / "frame_overlay.py").write_text("VALUE = 'smoke-only'\n")
+        smoke_command = ["env", "PYTHONPATH=" + str(overlay), sys.executable,
+                         "-c", "import frame_overlay; assert frame_overlay.VALUE == 'smoke-only'"]
+        smoke = self.base / "smoke-only-environment.json"
+        smoke_tool = importlib.util.spec_from_file_location("environment_smoke_fixture", SMOKE)
+        module = importlib.util.module_from_spec(smoke_tool)
+        smoke_tool.loader.exec_module(module)
+        attestation = module.payload([self.repo / "config"], smoke_command, self.repo)
+        smoke_result = subprocess.run(smoke_command, cwd=self.repo, env=CLEAN_ENV,
+                                      text=True, capture_output=True, check=False)
+        self.assertEqual(smoke_result.returncode, 0, smoke_result.stderr)
+        attestation.update(exit_code=0, status="passed")
+        attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        smoke.write_text(json.dumps(attestation, sort_keys=True))
+        payload_code = ("import sys,time; from pathlib import Path; time.sleep(.1); "
+                        "import frame_overlay; Path(sys.argv[1]).write_text(frame_overlay.VALUE)")
+        args = list(self.start_args(smoke=smoke, run_id="smoke-env-boundary"))
+        separator = args.index("--")
+        args[separator + 1:] = [sys.executable, "-c", payload_code, str(self.launch)]
+        outcome = self.cli(*args, cwd=self.repo)
+        self.assertNotEqual(outcome.returncode, 0,
+                            "the detached payload must be refused before launch when smoke-only PYTHONPATH differs")
+        self.assertIn("smoke-execution-environment-mismatch", outcome.stderr)
+        self.assertFalse(self.launch.exists())
+        if self.registry.exists():
+            rows = json.loads(self.registry.read_text()).get("runs", {})
+            self.assertNotIn("smoke-env-boundary", rows)
+
+        legacy = dict(attestation)
+        legacy.pop("execution_environment")
+        legacy.pop("attestation_hash")
+        legacy["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            legacy, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        legacy_path = self.base / "legacy-unbound-smoke.json"
+        legacy_path.write_text(json.dumps(legacy, sort_keys=True))
+        legacy_args = self.start_args(smoke=legacy_path, run_id="legacy-unbound-smoke")
+        legacy_outcome = self.cli(*legacy_args, cwd=self.repo)
+        self.assertNotEqual(legacy_outcome.returncode, 0)
+        self.assertIn("smoke-execution-environment-unbound", legacy_outcome.stderr)
+        self.assertFalse(self.launch.exists())
+
     def test_cleanup_stops_only_its_exact_supervisor(self):
         watch = subprocess.Popen(
             [sys.executable, "-c", "import time; time.sleep(30)"], env=CLEAN_ENV)
@@ -760,6 +820,49 @@ class TestRunner(unittest.TestCase):
             if watch.poll() is None:
                 watch.terminate()
             watch.wait(timeout=3)
+
+    def test_cleanup_waits_for_exit_when_supervisor_observation_is_unknown(self):
+        code = textwrap.dedent("""
+            import os, signal, time
+            def stop(signum, frame):
+                signal.signal(signal.SIGTERM, signal.SIG_DFL)
+                time.sleep(.1)
+                os.kill(os.getpid(), signal.SIGTERM)
+            signal.signal(signal.SIGTERM, stop)
+            print('ready', flush=True)
+            time.sleep(30)
+        """)
+        watch = subprocess.Popen([sys.executable, "-c", code], env=CLEAN_ENV,
+                                 stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertTrue(select.select([watch.stdout], [], [], 3)[0])
+            self.assertEqual(watch.stdout.readline(), "ready\n")
+            supervision = R.launched_identity(watch)
+            self.assertIsNotNone(supervision)
+            self.registry.write_text(json.dumps({"runs": {
+                "observer": {"supervision": supervision}}}))
+            alive = R.RESOURCE_RESUME.supervisor_alive
+            observed = False
+
+            def lose_command_observation(binding):
+                nonlocal observed
+                if observed:
+                    # A non-working projection can be unknown before the
+                    # exact process has finished handling its termination.
+                    return False
+                observed = True
+                return alive(binding)
+
+            with mock.patch.object(R.RESOURCE_RESUME, "supervisor_alive",
+                                   side_effect=lose_command_observation):
+                self._stop_started_runs()
+            self.assertEqual(watch.poll(), -signal.SIGTERM,
+                             "unknown observation is not an exit acknowledgement")
+        finally:
+            if watch.poll() is None:
+                watch.terminate()
+            watch.wait(timeout=3)
+            watch.stdout.close()
 
     def test_resource_run_probe_attributes_both_gpu_spawn_paths_to_route_parent(self):
         harness = textwrap.dedent(r"""
@@ -803,11 +906,19 @@ class TestRunner(unittest.TestCase):
                 with mock.patch.object(G, "local_observation", return_value=observation), \
                      contextlib.redirect_stdout(output):
                     if mode == "main":
+                        smoke = load(root / "tools" / "smoke-attestation.py", "probe_smoke_fixture")
+                        attestation = smoke.payload([route_file], command, base)
+                        attestation.update(status="passed", exit_code=0)
+                        attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+                            attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                        smoke.verify(attestation)
+                        smoke_path = base / "smoke.json"
+                        smoke_path.write_text(json.dumps(attestation))
                         with mock.patch.object(runner, "verify_launch_input"), \
                              mock.patch.object(runner, "register_registry"):
                             runner.main(["--registry", str(registry), "start", "--run-id", run_id,
                                 "--cwd", str(base), "--log", str(log), "--route", str(route_file),
-                                "--node", node_id, "--smoke-attestation", str(base / "unused-attestation"),
+                                "--node", node_id, "--smoke-attestation", str(smoke_path),
                                 "--", *command])
                     else:
                         import artifact_producer
@@ -1092,6 +1203,90 @@ class TestRunner(unittest.TestCase):
             foreign={**running,"pid_namespace":"pid:[foreign]"}
             self.assertEqual(R.classify_identity(foreign)[0],"stale")
             self.assertEqual(R.classify_identity(foreign)[2],"process-namespace-mismatch")
+
+    def test_queued_controller_rechecks_smoke_environment_before_release(self):
+        import artifact_producer
+        import importlib.util
+        jobs = self.base / "queued-environment-jobs.log"
+        jobs.write_text("")
+        route = json.loads(self.route.read_text())
+        run_id = "queued-environment"
+        effect = self.base / "queued-environment-payload"
+        command = [sys.executable, "-c",
+                   f"from pathlib import Path; Path({str(effect)!r}).write_text('released')"]
+        smoke_path = self.base / "queued-environment-smoke.json"
+        smoke_spec = importlib.util.spec_from_file_location("queued_environment_smoke", SMOKE)
+        smoke_module = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_module)
+        attestation = smoke_module.payload([self.repo / "config"], [sys.executable, "-c", "pass"], self.repo)
+        attestation.update(status="passed", exit_code=0)
+        attestation["attestation_hash"] = "sha256:" + hashlib.sha256(json.dumps(
+            attestation, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        smoke_path.write_text(json.dumps(attestation, sort_keys=True))
+        args = SimpleNamespace(jobs=str(jobs), run_id=run_id, node="full-run",
+                               smoke_attestation=str(smoke_path), config_manifest=None)
+        body = {"run_id": run_id, "cwd": str(self.repo), "log": str(self.log),
+            "command": command, "route": str(self.route), "node": "full-run",
+            "status": "launching", "sentinel": str(self.log) + ".exit",
+            "jobs": str(jobs), "parent_attempt_id": "att-parent",
+            "owner_wait": {"session_id": "same-native", "launch_scope": "codex-owner-controller"}}
+        route_watch = mock.Mock(pid=os.getpid())
+        route_watch.poll.return_value = None
+        runner = R
+        payloads=[]
+        real_popen=subprocess.Popen
+        def capture_popen(*args,**kwargs):
+            process=real_popen(*args,**kwargs)
+            payloads.append(process)
+            return process
+        with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(jobs)}), \
+             mock.patch.object(artifact_producer, "prepare_route_artifact_env",
+                return_value={"AGENT_ARTIFACT_OUTPUT_DIR": str(self.base)}), \
+             mock.patch.object(runner, "register_registry"), \
+             mock.patch.object(runner.subprocess, "run"), \
+             mock.patch.object(runner.gpu_leases, "resource_admission",
+                               return_value=(None, None, {"CUDA_VISIBLE_DEVICES": ""})), \
+             mock.patch.object(runner, "start_watch", return_value=(route_watch, runner.proc_identity(os.getpid()))), \
+             mock.patch.object(runner.subprocess, "Popen", side_effect=capture_popen), \
+             mock.patch("sys.stdout"):
+            runner.start_verified(self.registry, args, route, self.route, dict(body))
+            current_registry = json.loads(self.registry.read_text())
+            self.assertIn(run_id, current_registry.get("runs", {}), current_registry)
+            queued = current_registry["runs"][run_id]
+            self.assertEqual(queued["launch_state"], "queued")
+            before = self.registry.read_bytes()
+            controller = SimpleNamespace(expected=queued,
+                identity={**runner.proc_identity(os.getpid()),
+                          "pid_namespace": os.readlink("/proc/self/ns/pid")},
+                command=command, sandbox={"mode": "workspace-write", "enforcement": "os-sandbox"},
+                guard=contextlib.nullcontext, registry=str(self.registry))
+            refused=None
+            with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.base / "different-overlay")}):
+                try:
+                    runner.start_verified(self.registry, args, route, self.route,
+                                          dict(queued), controller=controller)
+                except ValueError as error:
+                    refused=error
+            for process in payloads:
+                process.wait(timeout=5)
+            self.assertIsNotNone(refused,
+                "the controller released payload under an environment different from smoke")
+            self.assertIn("smoke-execution-environment-mismatch", str(refused))
+            self.assertEqual(payloads, [])
+            self.assertEqual(self.registry.read_bytes(), before)
+            self.assertFalse(effect.exists())
+            runner.start_verified(self.registry, args, route, self.route,
+                                  dict(queued), controller=controller)
+            final_registry=json.loads(self.registry.read_text())
+            self.assertIn(run_id, final_registry.get("runs", {}), json.dumps(final_registry, sort_keys=True))
+            self.assertEqual(len(payloads), 1, json.dumps(final_registry["runs"][run_id], sort_keys=True))
+            self.assertEqual(payloads[0].wait(timeout=5), 0)
+            self.assertEqual(effect.read_text(), "released")
+            final_registry=json.loads(self.registry.read_text())
+            self.assertIn(run_id, final_registry.get("runs", {}), json.dumps(final_registry, sort_keys=True))
+            running = final_registry["runs"][run_id]
+            self.assertEqual(running["launch_state"], "started")
+            self.assertEqual(runner.read_sentinel(running["sentinel"]), 0)
 
     def _host_route(self):
         """A real lab eval route that borrowed the GPU-free host part (the catalog is the only source)."""
@@ -1702,6 +1897,7 @@ class TestRunner(unittest.TestCase):
         self.assertEqual(json.loads(resolved.stdout)["output_dir"], str(output / "logs"))
 
     def _stop_started_runs(self):
+        from dispatch_contract import process_identity_disposition
         try:
             runs = json.loads(self.registry.read_text()).get("runs", {})
         except (AttributeError, OSError, ValueError):
@@ -1734,10 +1930,14 @@ class TestRunner(unittest.TestCase):
             except ProcessLookupError:
                 continue
             deadline = time.monotonic() + 3
-            while R.RESOURCE_RESUME.supervisor_alive(supervision) and time.monotonic() < deadline:
+            # Command metadata may become unreadable before exit is waitable.
+            # Keep unknown pending; the exact PID/start must positively exit.
+            def disposition():
+                return process_identity_disposition(pid, str(supervision["starttime"]))
+            while disposition() != "dead" and time.monotonic() < deadline:
                 time.sleep(0.02)
-            self.assertFalse(R.RESOURCE_RESUME.supervisor_alive(supervision),
-                             f"fixture workflow observer {pid} did not stop")
+            self.assertEqual(disposition(), "dead",
+                             f"fixture workflow observer {pid} did not exit")
 
     def cli(self, *args, cwd=None, pass_fds=(), input=None, extra_env=None):
         return subprocess.run([

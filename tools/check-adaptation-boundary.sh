@@ -1280,7 +1280,7 @@ check_codex_utility_projection() {
   # codex-adapter-parity audit P-40 (2026-07-04): derived under-projection completeness pair — every
   # top-level utilities/* entry must be classified projected or deferred, else fail loud (closes the
   # leak window where a newly added utility silently has no projection decision).
-  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py token-budget.py token-budget-experiment.py worker_bootstrap.py codex_tui_config.py"
+  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py token-budget.py token-budget-experiment.py worker_bootstrap.py codex_tui_config.py resource_execution_environment.py"
   UTILITY_DEFERRED=$(census utility-deferred)
   utility_count=0
   for f in utilities/*; do
@@ -2319,7 +2319,7 @@ check_opencode_utility_projection() {
   # codex-adapter-parity audit P-40 (2026-07-04): derived under-projection completeness pair — every
   # top-level utilities/* entry must be classified projected or deferred, else fail loud (closes the
   # leak window where a newly added utility silently has no projection decision).
-  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py worker_bootstrap.py codex_tui_config.py"
+  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py worker_bootstrap.py codex_tui_config.py resource_execution_environment.py"
   UTILITY_DEFERRED=$(census utility-deferred)
   utility_count=0
   for f in utilities/*; do
