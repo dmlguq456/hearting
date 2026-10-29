@@ -15,6 +15,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import stat
+import importlib.util
+import signal
+import uuid
+import threading
+import resource
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +38,7 @@ from dispatch_contract import (
 OPEN_STATES = {"open", "running"}
 MAX_AUDIT_BYTES = 1024 * 1024
 KEEP_AUDIT_BYTES = 512 * 1024
+OBSERVATION_TIMEOUT = 60
 
 
 # Plain mutable classes, not @dataclass: this module is hyphenated (loaded
@@ -79,6 +86,69 @@ class Verdict:
         self.active_pids = active_pids if active_pids is not None else []
         self.process_scan = process_scan
         self.repository_mode = repository_mode
+        self.local_integration_commit = ""
+
+
+_OBSERVATION_LIFECYCLE = None
+
+
+class UnsettledObservation(RuntimeError):
+    """The pass must retain diagnostics and perform no further mutations."""
+
+
+def observation_lifecycle():
+    global _OBSERVATION_LIFECYCLE
+    if _OBSERVATION_LIFECYCLE is None:
+        spec = importlib.util.spec_from_file_location(
+            "cleanup_observation_lifecycle", ROOT / "utilities/verification-background-lease.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _OBSERVATION_LIFECYCLE = module
+    return _OBSERVATION_LIFECYCLE
+
+
+def observe_command(argv):
+    """Private child boundary: the existing subreaper owns only this probe.
+
+    Its descendant helper deliberately includes all immediate children. Running
+    it in the importing caller would also claim unrelated caller children.
+    """
+    lifecycle = observation_lifecycle()
+    if not lifecycle.become_subreaper():
+        raise RuntimeError("owned observation lifecycle unavailable")
+    scope = uuid.uuid4().hex
+    status = 1
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, interrupted)
+    observed = {}
+    try:
+        result = subprocess.run(argv, env={**os.environ, lifecycle.SCOPE_ENV: scope},
+                                timeout=OBSERVATION_TIMEOUT, check=False)
+        status = result.returncode
+    except subprocess.TimeoutExpired:
+        print("observation timed out: " + " ".join(argv), file=sys.stderr)
+        status = 124
+    except SystemExit as exc:
+        status = exc.code if isinstance(exc.code, int) else 143
+    finally:
+        # In this single-threaded private subreaper, every surviving descendant
+        # of the waited command is now an immediate child (also after setsid or
+        # closing output fds). The common no-child case needs no host-wide scan.
+        try:
+            children = (Path("/proc/self/task") / str(os.getpid()) / "children").read_text().split()
+        except OSError:
+            children = None
+        if children or children is None:
+            lifecycle.end_scope(scope, observed=observed)
+            lifecycle._remember_scope(lifecycle.process_snapshot(), scope, observed)
+            live, unknown = lifecycle._owned_process_state(observed)
+            if live or unknown or children is None:
+                print(f"observation descendants unresolved: live={sorted(live)} unknown={unknown}", file=sys.stderr)
+                status = 125
+        lifecycle.reap_zombies()
+    return status
 
 
 def run(
@@ -88,15 +158,88 @@ def run(
     check: bool = True,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        argv,
-        cwd=str(cwd) if cwd else None,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-        env=env,
-    )
+    # Fork the small observer after loading the shared lifecycle once. This
+    # gives it a private child boundary without interpreter/registry startup
+    # on every Git read. No observer survives its command's settled lifetime.
+    observation_lifecycle()
+    private = Path(tempfile.mkdtemp(prefix="cleanup-observation-"))
+    process = None
+    pid = None
+    handlers = {}
+    settled = False
+    child_env = {**(os.environ if env is None else env), **git_optional_locks_env()}
+    def interrupted(signum, _frame):
+        raise SystemExit(128 + signum)
+    try:
+        with (private / "stdout").open("w+b") as output, (private / "stderr").open("w+b") as errors:
+            if hasattr(os, "fork") and threading.active_count() == 1:
+                pid = os.fork()
+                if pid == 0:
+                    try:
+                        os.setsid()
+                        os.dup2(output.fileno(), 1)
+                        os.dup2(errors.fileno(), 2)
+                        # Do not retain caller locks or registry descriptors.
+                        limit = resource.getrlimit(resource.RLIMIT_NOFILE)[0]
+                        os.closerange(3, int(limit if limit != resource.RLIM_INFINITY else 1048576))
+                        sys.stdout = os.fdopen(os.dup(1), "w", buffering=1)
+                        sys.stderr = os.fdopen(os.dup(2), "w", buffering=1)
+                        if cwd is not None:
+                            os.chdir(cwd)
+                        os.environ.clear()
+                        os.environ.update(child_env)
+                        status = observe_command(argv)
+                    except BaseException as exc:
+                        print(f"observation interrupted: {exc}", file=sys.stderr)
+                        status = exc.code if isinstance(exc, SystemExit) and isinstance(exc.code, int) else 125
+                    os._exit(status if status >= 0 else 128 - status)
+            else:
+                process = subprocess.Popen(
+                    [sys.executable, str(Path(__file__).resolve()), "_observe", str(OBSERVATION_TIMEOUT),
+                     json.dumps(argv)], cwd=str(cwd) if cwd else None, stdout=output, stderr=errors,
+                    start_new_session=True, env=child_env)
+                pid = process.pid
+            if threading.current_thread() is threading.main_thread():
+                for signum in (signal.SIGTERM, signal.SIGHUP):
+                    handlers[signum] = signal.signal(signum, interrupted)
+            waited = False
+            try:
+                if process is None:
+                    _pid, status = os.waitpid(pid, 0)
+                    code = os.waitstatus_to_exitcode(status)
+                else:
+                    code = process.wait()
+                waited = True
+                settled = code != 125 and code >= 0
+            finally:
+                if not waited:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    try:
+                        if process is None:
+                            _pid, status = os.waitpid(pid, 0)
+                            settled = os.waitstatus_to_exitcode(status) != 125
+                        else:
+                            settled = process.wait() != 125
+                    except ChildProcessError:
+                        pass
+            output.seek(0)
+            errors.seek(0)
+            result = subprocess.CompletedProcess(argv, code,
+                output.read().decode("utf-8", errors="replace"), errors.read().decode("utf-8", errors="replace"))
+    finally:
+        for signum, previous in handlers.items():
+            signal.signal(signum, previous)
+        if settled:
+            shutil.rmtree(private)
+        else:
+            print(f"observation diagnostics retained: {private}", file=sys.stderr)
+    if not settled:
+        raise UnsettledObservation(f"observation descendants unresolved; diagnostics={private}")
+    if result.returncode in {69, 70, 124, 125, 126, 137, 143}:
+        raise RuntimeError("observation unavailable: " + result.stderr.strip())
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout or "command failed").strip()
         raise RuntimeError(f"{' '.join(argv)}: {detail}")
@@ -105,6 +248,104 @@ def run(
 
 def normalize(path: str | Path) -> Path:
     return Path(path).expanduser().resolve(strict=False)
+
+
+def lexical(path: str | Path) -> Path:
+    """Compare proc/registry paths without following NAS directory symlinks."""
+    return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def known_exists(path):
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+class CleanupPass:
+    """Stable observations for one check/apply call, never removal authority."""
+
+    def __init__(self, repo: Path, jobs: Path):
+        self.entries = worktree_entries(repo)
+        if not self.entries:
+            raise RuntimeError("git reported no registered worktrees")
+        self.primary = self.entries[0].path
+        self.common = common_git_dir(repo)
+        self.rows = registry_rows(jobs)
+        self.processes = process_snapshot()
+        self.remote_defaults = {}
+        self.remote_commits = {}
+        self.remote_urls = {}
+        self.graph_results = {}
+
+    def graph(self, *args):
+        # Callers supply exact object IDs, never mutable ref names. Rechecking
+        # the target and integration refs remains mandatory before removal.
+        if args not in self.graph_results:
+            self.graph_results[args] = run(["git", "-C", str(self.primary), *args], check=False)
+        return self.graph_results[args]
+
+    def default_branch(self, remote):
+        if remote not in self.remote_defaults:
+            try:
+                self.remote_defaults[remote] = remote_default_branch(self.primary, remote)
+            except RuntimeError as exc:
+                self.remote_defaults[remote] = exc
+        value = self.remote_defaults[remote]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def fetched(self, remote, branch):
+        key = (remote, branch)
+        if key not in self.remote_commits:
+            # Failed evidence stays failed for this pass, too.
+            try:
+                self.remote_commits[key] = fetch_remote_commit(self.primary, remote, branch)
+                self.remote_urls[remote] = run(
+                    ["git", "-C", str(self.primary), "remote", "get-url", "--all", remote]).stdout
+            except RuntimeError as exc:
+                self.remote_commits[key] = exc
+        value = self.remote_commits[key]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def before_remove(self, target, jobs, integration_ref, repository_mode, previous):
+        # Keep the pass inventory but replace this target's mutable entry with
+        # direct current HEAD/branch/registration/lock evidence. No full census
+        # is needed to recheck one linked checkout.
+        identity = target.stat()
+        if (identity.st_dev, identity.st_ino) != previous.path_identity:
+            raise RuntimeError("worktree directory changed")
+        for remote, expected in self.remote_urls.items():
+            if run(["git", "-C", str(self.primary), "remote", "get-url", "--all", remote]).stdout != expected:
+                raise RuntimeError("integration remote changed")
+        gitdir = git_path(target, "--git-dir")
+        if common_git_dir(target) != self.common:
+            raise RuntimeError("worktree common directory changed")
+        backlink = Path((gitdir / "gitdir").read_text().strip())
+        if lexical(backlink) != lexical(target / ".git"):
+            raise RuntimeError("worktree registration changed")
+        head = run(["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"]).stdout.strip()
+        branch = run(["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], check=False).stdout.strip()
+        fresh = WorktreeEntry(target, head, branch, os.path.lexists(gitdir / "locked"))
+        entries = [fresh if entry.path == target else entry for entry in self.entries]
+        rows = registry_rows(jobs)
+        checked = evaluate(target, jobs, integration_ref, repository_mode,
+                           context=self, entries=entries, rows=rows, fresh_processes=True)
+        old_rows = tuple(fields for fields, _meta in self.rows if lexical(fields[3]) == target)
+        new_rows = tuple(fields for fields, _meta in rows if lexical(fields[3]) == target)
+        if old_rows != new_rows:
+            checked.reasons.append("registry-changed")
+        for field in ("head", "branch", "integration_ref", "integration_commit", "upstream",
+                      "local_integration_commit"):
+            if getattr(previous, field) != getattr(checked, field):
+                checked.reasons.append("worktree-or-integration-changed")
+                break
+        checked.eligible = not checked.reasons
+        return checked
 
 
 def resolve_agent_home() -> Path:
@@ -228,33 +469,83 @@ def fetch_remote_commit(primary: Path, remote: str, branch: str) -> str:
 
 def git_operation(worktree: Path) -> str:
     gitdir = git_path(worktree, "--git-dir")
-    if (gitdir / "MERGE_HEAD").exists():
+    if known_exists(gitdir / "MERGE_HEAD"):
         return "merge"
-    if (gitdir / "rebase-merge").exists() or (gitdir / "rebase-apply").exists():
+    if known_exists(gitdir / "rebase-merge") or known_exists(gitdir / "rebase-apply"):
         return "rebase"
-    if (gitdir / "CHERRY_PICK_HEAD").exists():
+    if known_exists(gitdir / "CHERRY_PICK_HEAD"):
         return "cherry-pick"
     return "none"
 
 
-def parse_registry(jobs: Path, target: Path) -> tuple[int, list[int]]:
+def registry_rows(jobs: Path):
+    """Reuse the common generation-checked reader; do not invent another log reader."""
+    from dispatch_registry_cache import registry_view
+    try:
+        if jobs.is_symlink():
+            raise RuntimeError("registry symlink is not cleanup evidence")
+        view = registry_view(jobs)
+    except FileNotFoundError:
+        return ()
+    if view.completeness_reason:
+        raise RuntimeError("registry observation incomplete: " + view.completeness_reason)
+    return tuple((record.fields, record.completion_metadata()) for record in view.records)
+
+
+def parse_registry(jobs: Path, target: Path, *, rows=None) -> tuple[int, list[int]]:
     stale = 0
     active: list[int] = []
-    if not jobs.is_file():
-        return stale, active
-    for line in jobs.read_text(encoding="utf-8", errors="replace").splitlines():
-        fields = line.split("\t")
-        if len(fields) != 6 or fields[1] not in OPEN_STATES:
+    for fields, meta in registry_rows(jobs) if rows is None else rows:
+        if fields[1] not in OPEN_STATES:
             continue
-        if normalize(fields[3]) != target:
+        if lexical(fields[3]) != target:
             continue
-        match = re.search(r"(?:^|,)pid=([0-9]+)(?:,|$)", fields[5])
-        start = re.search(r"(?:^|,)pid_start=([0-9]+)(?:,|$)", fields[5])
-        if match and pid_is_live(int(match.group(1)), start.group(1) if start else None):
-            active.append(int(match.group(1)))
+        pid = meta.get("pid", "")
+        if pid.isdigit() and pid_is_live(int(pid), meta.get("pid_start")):
+            active.append(int(pid))
         else:
             stale += 1
     return stale, sorted(set(active))
+
+
+def registry_duty(jobs, target, rows):
+    """A dead PID is not release of a route, paused result or retained answer."""
+    from dispatch_attempt_policy import readable_result, terminal_conflict_pending
+    from worker_home_retention import _route_evidence, _delivery_state
+    import dispatch_owner_input as owner_input
+    for fields, meta in rows:
+        if lexical(fields[3]) != target:
+            continue
+        if fields[1] not in OPEN_STATES | {"done", "killed", "cancelled"}:
+            return True
+        if terminal_conflict_pending(meta):
+            return True
+        route_state, _age, _cause = _route_evidence(jobs, meta)
+        if route_state in {"open", "pending", "unknown"}:
+            return True
+        if readable_result(meta) and route_state != "closed":
+            return True
+        if _delivery_state(dispatch_state_root(jobs), meta)[0] in {"open", "pending", "unknown"}:
+            return True
+        if meta.get("attempt_id"):
+            path = owner_input._path(jobs, meta["attempt_id"])
+            try:
+                if path.is_symlink():
+                    return True
+                value = json.loads(path.read_text())
+            except FileNotFoundError:
+                continue
+            except (OSError, ValueError):
+                return True
+            if (not isinstance(value, dict) or value.get("schema_version") != 1
+                    or value.get("attempt_id") != meta["attempt_id"]):
+                return True
+            requests = value.get("requests", [])
+            if not isinstance(requests, list) or any(
+                    not isinstance(item, dict) or item.get("state") != "turn-completed"
+                    for item in requests):
+                return True
+    return False
 
 
 def pid_is_live(pid: int, pid_start: str | None = None) -> bool:
@@ -262,7 +553,8 @@ def pid_is_live(pid: int, pid_start: str | None = None) -> bool:
     pid whose /proc starttime differs is a host PID reuse, not this attempt.
     Bare-pid probing survives only for legacy rows that never captured it."""
     if pid_start is not None:
-        return read_proc_start(pid) == pid_start
+        current = read_proc_start(pid)
+        return current == pid_start or (current is None and Path(f"/proc/{pid}").exists())
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -290,26 +582,75 @@ def read_proc_start(pid: int) -> str | None:
         return None
 
 
-def process_cwds(target: Path) -> tuple[str, list[int]]:
+def proc_is_gone(entry):
+    """Only positive disappearance/zombie evidence clears a raced cwd read."""
+    try:
+        raw = (entry / "stat").read_text()
+        return raw[raw.rindex(")") + 1:].split()[0] in {"Z", "X"}
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError, IndexError):
+        return False
+
+
+def process_snapshot():
     proc = Path("/proc")
-    matches: list[int] = []
     if proc.is_dir():
-        for entry in proc.iterdir():
+        rows = []
+        unknown = False
+        for entry in tuple(proc.iterdir()):
             if not entry.name.isdigit():
                 continue
             pid = int(entry.name)
             if pid == os.getpid():
                 continue
             try:
-                cwd = normalize(os.readlink(entry / "cwd"))
-            except (FileNotFoundError, PermissionError, OSError):
+                if entry.stat().st_uid != os.geteuid():
+                    continue
+                before = read_proc_start(pid)
+                if before is None:
+                    # A readable zombie has no cwd and is not live. An
+                    # unreadable live same-UID identity remains unknown.
+                    raw = (entry / "stat").read_text()
+                    if raw[raw.rindex(")") + 1:].split()[0] == "Z":
+                        continue
+                    unknown = True
+                    continue
+                raw_cwd = os.readlink(entry / "cwd")
+                after = read_proc_start(pid)
+                if after is None:
+                    try:
+                        raw = (entry / "stat").read_text()
+                    except FileNotFoundError:
+                        continue
+                    if raw[raw.rindex(")") + 1:].split()[0] == "Z":
+                        continue
+                if before != after:
+                    unknown = True
+                    continue
+                # A deleted cwd still has a kernel-reported lexical path. It
+                # keeps that target, rather than blocking unrelated targets.
+                if raw_cwd.endswith(" (deleted)"):
+                    raw_cwd = raw_cwd[:-len(" (deleted)")]
+                rows.append((pid, before, lexical(raw_cwd)))
+            except FileNotFoundError:
+                if not proc_is_gone(entry):
+                    unknown = True
                 continue
-            if cwd == target or target in cwd.parents:
-                matches.append(pid)
-        return "procfs", sorted(set(matches))
+            except (OSError, ValueError, IndexError):
+                unknown = True
+        return ("procfs-unknown" if unknown else "procfs"), tuple(rows)
+    return "unavailable", ()
+
+
+def process_cwds(target: Path, *, snapshot=None) -> tuple[str, list[int]]:
+    kind, rows = process_snapshot() if snapshot is None else snapshot
+    if kind != "unavailable":
+        return kind, sorted(pid for pid, _start, cwd in rows if cwd == target or target in cwd.parents)
 
     lsof = shutil.which("lsof")
     if lsof:
+        matches = []
         result = run([lsof, "-t", "+D", str(target)], check=False)
         if result.returncode not in (0, 1):
             return "lsof-error", []
@@ -325,8 +666,9 @@ def evaluate(
     jobs: Path,
     integration_ref: str | None,
     repository_mode: str = "remote",
+    *, context: CleanupPass | None = None, entries=None, rows=None, fresh_processes=False,
 ) -> Verdict:
-    entries = worktree_entries(target)
+    entries = entries if entries is not None else (context.entries if context else worktree_entries(target))
     if not entries:
         raise RuntimeError("git reported no registered worktrees")
     primary = entries[0].path
@@ -356,11 +698,37 @@ def evaluate(
 
     if target == primary:
         verdict.reasons.append("primary-worktree")
+    if lexical(target) != normalize(target) or target.is_symlink():
+        verdict.reasons.append("worktree-path-ambiguous")
     worktree_gitdir = git_path(target, "--git-dir")
-    if entry.locked or (worktree_gitdir / "locked").exists():
+    if entry.locked or any(known_exists(worktree_gitdir / name)
+                           for name in ("locked", "index.lock", "HEAD.lock")):
+        verdict.reasons.append("locked")
+    common = context.common if context else common_git_dir(target)
+    if any(known_exists(path) for path in (common / "packed-refs.lock",
+                                         common / (entry.branch + ".lock"))):
         verdict.reasons.append("locked")
     if not target.is_dir():
         verdict.reasons.append("worktree-path-missing")
+        return verdict
+    if target.stat().st_uid != os.geteuid():
+        verdict.reasons.append("worktree-owner-unknown")
+    identity = target.stat()
+    verdict.path_identity = (identity.st_dev, identity.st_ino)
+
+    rows = rows if rows is not None else (context.rows if context else registry_rows(jobs))
+    verdict.stale_rows, registered_pids = parse_registry(jobs, target, rows=rows)
+    scan_kind, cwd_pids = (process_cwds(target) if context is None else
+                           process_cwds(target, snapshot=context.processes))
+    verdict.process_scan = scan_kind
+    verdict.active_pids = sorted(set(registered_pids + cwd_pids))
+    if verdict.active_pids:
+        verdict.reasons.append("active-process")
+    if scan_kind in {"unavailable", "lsof-error", "procfs-unknown"}:
+        verdict.reasons.append("process-scan-unavailable")
+    if registry_duty(jobs, target, rows):
+        verdict.reasons.append("retained-work")
+    if verdict.reasons:
         return verdict
 
     dirty = run(
@@ -374,6 +742,9 @@ def evaluate(
     if operation != "none":
         verdict.reasons.append(f"git-operation-{operation}")
 
+    def graph(*args):
+        return context.graph(*args) if context else run(["git", "-C", str(primary), *args], check=False)
+
     if repository_mode == "local-only":
         ref_check = run(
             ["git", "-C", str(primary), "rev-parse", "--verify", f"{chosen_ref}^{{commit}}"],
@@ -384,13 +755,7 @@ def evaluate(
             verdict.reasons.append("integration-ref-missing")
         else:
             verdict.integration_commit = ref_check.stdout.strip()
-            merged = run(
-                [
-                    "git", "-C", str(primary), "merge-base", "--is-ancestor",
-                    entry.head, verdict.integration_commit,
-                ],
-                check=False,
-            )
+            merged = graph("merge-base", "--is-ancestor", entry.head, verdict.integration_commit)
             if merged.returncode == 1:
                 verdict.reasons.append("unmerged")
             elif merged.returncode != 0:
@@ -404,7 +769,7 @@ def evaluate(
 
         if integration_ref is None:
             remote = "origin"
-            branch = remote_default_branch(primary, remote)
+            branch = context.default_branch(remote) if context else remote_default_branch(primary, remote)
             local_ref = f"refs/heads/{branch}"
             display_ref = f"{remote}/{branch}"
         else:
@@ -441,18 +806,17 @@ def evaluate(
                     verdict.reasons.append("no-upstream-configured")
 
         if remote is not None and branch is not None:
-            remote_commit = fetch_remote_commit(primary, remote, branch)
+            remote_commit = context.fetched(remote, branch) if context else fetch_remote_commit(primary, remote, branch)
+            if context:
+                current_tracking = run(["git", "-C", str(primary), "rev-parse", "--verify",
+                                        f"refs/remotes/{remote}/{branch}^{{commit}}"], check=False)
+                if current_tracking.returncode or current_tracking.stdout.strip() != remote_commit:
+                    verdict.reasons.append("integration-ref-changed")
             verdict.integration_ref = display_ref
             verdict.integration_commit = remote_commit
             verdict.upstream = f"{remote}/{branch}"
 
-            merged = run(
-                [
-                    "git", "-C", str(primary), "merge-base", "--is-ancestor",
-                    entry.head, remote_commit,
-                ],
-                check=False,
-            )
+            merged = graph("merge-base", "--is-ancestor", entry.head, remote_commit)
             if merged.returncode == 1:
                 verdict.reasons.append("unmerged")
             elif merged.returncode != 0:
@@ -464,28 +828,17 @@ def evaluate(
             ) if local_ref else None
             if local_result is not None and local_result.returncode == 0:
                 local_commit = local_result.stdout.strip()
+                verdict.local_integration_commit = local_commit
                 if not local_commit:
                     raise RuntimeError("cannot resolve local integration commit")
                 if require_local_inclusion:
-                    local_merged = run(
-                        [
-                            "git", "-C", str(primary), "merge-base", "--is-ancestor",
-                            entry.head, local_commit,
-                        ],
-                        check=False,
-                    )
+                    local_merged = graph("merge-base", "--is-ancestor", entry.head, local_commit)
                     if local_merged.returncode == 1:
                         if "unmerged" not in verdict.reasons:
                             verdict.reasons.append("unmerged")
                     elif local_merged.returncode != 0:
                         raise RuntimeError("cannot verify worktree HEAD against local integration ref")
-                counts_result = run(
-                    [
-                        "git", "-C", str(primary), "rev-list", "--left-right", "--count",
-                        f"{remote_commit}...{local_commit}",
-                    ],
-                    check=False,
-                )
+                counts_result = graph("rev-list", "--left-right", "--count", f"{remote_commit}...{local_commit}")
                 if counts_result.returncode != 0:
                     raise RuntimeError("cannot compare local integration commits with fetched remote")
                 counts = counts_result.stdout.split()
@@ -509,15 +862,25 @@ def evaluate(
                 if local_ref_exists.returncode != 1:
                     raise RuntimeError("cannot verify local integration ref existence")
 
-    verdict.stale_rows, registered_pids = parse_registry(jobs, target)
-    scan_kind, cwd_pids = process_cwds(target)
-    verdict.process_scan = scan_kind
-    verdict.active_pids = sorted(set(registered_pids + cwd_pids))
-    if verdict.active_pids:
-        verdict.reasons.append("active-process")
-    if scan_kind in {"unavailable", "lsof-error"}:
-        verdict.reasons.append("process-scan-unavailable")
-
+    if fresh_processes:
+        # Do the volatile registry/process observation after Git checks so a
+        # process born (or chdir) during those checks is still a keep veto.
+        latest_rows = registry_rows(jobs)
+        relevant = lambda source: tuple(fields for fields, _meta in source if lexical(fields[3]) == target)
+        if relevant(latest_rows) != relevant(rows) or registry_duty(jobs, target, latest_rows):
+            verdict.reasons.append("registry-changed-or-retained")
+        scan_kind, cwd_pids = process_cwds(target)
+        _stale, pids = parse_registry(jobs, target, rows=latest_rows)
+        verdict.process_scan = scan_kind
+        verdict.active_pids = sorted(set(pids + cwd_pids))
+        if verdict.active_pids:
+            verdict.reasons.append("active-process")
+        if scan_kind in {"unavailable", "lsof-error", "procfs-unknown"}:
+            verdict.reasons.append("process-scan-unavailable")
+        if any(known_exists(worktree_gitdir / name) for name in ("locked", "index.lock", "HEAD.lock")):
+            verdict.reasons.append("locked")
+        if git_operation(target) != "none":
+            verdict.reasons.append("git-operation-changed")
     verdict.eligible = not verdict.reasons
     return verdict
 
@@ -554,7 +917,7 @@ def reconcile_registry(jobs: Path, target: Path) -> int:
                 len(fields) == 6
                 and fields[1] in OPEN_STATES
                 and current_attempt
-                and normalize(fields[3]) == target
+                and lexical(fields[3]) == target
             ):
                 fields[1] = "done"
                 if not re.search(r"(?:^|,)note=cleanup-merged(?:,|$)", fields[5]):
@@ -613,37 +976,21 @@ def emit(verdict: Verdict, status: str, reconciled: int = 0) -> None:
     print("reasons=" + (",".join(verdict.reasons) if verdict.reasons else "-"))
 
 
-def registered_job_worktrees(jobs: Path, repo: Path) -> list[Path]:
-    if not jobs.is_file():
-        return []
-    expected_common = common_git_dir(repo)
+def registered_job_worktrees(jobs: Path, repo: Path, *, context: CleanupPass | None = None) -> list[Path]:
+    context = context or CleanupPass(repo, jobs)
     found: list[Path] = []
-    for line in jobs.read_text(encoding="utf-8", errors="replace").splitlines():
-        fields = line.split("\t")
-        if len(fields) != 6:
-            continue
+    registered = {entry.path for entry in context.entries}
+    for fields, metadata in context.rows:
         try:
-            metadata = parse_registry_metadata(fields[5])
             validate_attempt_metadata(metadata)
         except DispatchContractError:
             continue
         if not metadata.get("attempt_id"):
             continue
-        candidate = normalize(fields[3])
+        candidate = lexical(fields[3])
         if candidate in found or not candidate.is_dir():
             continue
-        result = run(
-            ["git", "-C", str(candidate), "rev-parse", "--git-common-dir"],
-            check=False,
-        )
-        if result.returncode == 0:
-            candidate_common = Path(result.stdout.strip())
-            if not candidate_common.is_absolute():
-                candidate_common = candidate / candidate_common
-            candidate_common = normalize(candidate_common)
-        else:
-            candidate_common = Path()
-        if result.returncode == 0 and candidate_common == expected_common:
+        if candidate in registered:
             found.append(candidate)
     return found
 
@@ -684,73 +1031,130 @@ def main(argv: list[str]) -> int:
     )
     audit = normalize(args.audit or dispatch_state_root(jobs) / "worktree-cleanup.jsonl")
 
+    repo = normalize(args.repo) if args.all_eligible else lexical(args.worktree)
+    try:
+        context = CleanupPass(repo, jobs)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print("status=blocked\nreasons=evidence-error")
+        print(f"detail={exc}")
+        return 3
     if args.all_eligible:
-        targets = registered_job_worktrees(jobs, normalize(args.repo))
+        targets = registered_job_worktrees(jobs, repo, context=context)
         if not targets:
             print("status=no-candidates")
             print("candidate_source=job-registry")
             return 0
     else:
-        targets = [normalize(args.worktree)]
+        targets = [lexical(args.worktree)]
 
     blocked = 0
-    for index, target in enumerate(targets):
-        if index:
-            print()
-        try:
-            verdict = evaluate(
-                target, jobs, args.integration_ref, args.repository_mode
-            )
-        except (OSError, RuntimeError) as e:
-            print("status=blocked")
-            print(f"worktree={target}")
-            print("reasons=evidence-error")
-            print(f"detail={e}")
-            blocked += 1
-            continue
+    removed_primaries = set()
+    unsettled = False
+    try:
+        for index, target in enumerate(targets):
+            if index:
+                print()
+            try:
+                verdict = evaluate(
+                    target, jobs, args.integration_ref, args.repository_mode, context=context
+                )
+            except (OSError, RuntimeError, ValueError) as e:
+                if isinstance(e, UnsettledObservation):
+                    raise
+                print("status=blocked")
+                print(f"worktree={target}")
+                print("reasons=evidence-error")
+                print(f"detail={e}")
+                blocked += 1
+                continue
 
-        if not verdict.eligible:
-            emit(verdict, "blocked")
-            blocked += 1
-            continue
-        if not apply:
-            emit(verdict, "eligible")
-            continue
+            if not verdict.eligible:
+                emit(verdict, "blocked")
+                blocked += 1
+                continue
+            if not apply:
+                emit(verdict, "eligible")
+                continue
 
-        result = run(
-            ["git", "-C", str(verdict.primary), "worktree", "remove", str(target)],
-            check=False,
-        )
-        if result.returncode != 0:
-            verdict.reasons.append("remove-failed")
-            emit(verdict, "blocked")
-            if result.stderr.strip():
-                print(f"detail={result.stderr.strip()}")
-            blocked += 1
-            continue
-        run(["git", "-C", str(verdict.primary), "worktree", "prune"])
-        reconciled = reconcile_registry(jobs, target)
-        record = {
-            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "action": "removed",
-            "worktree": str(target),
-            "primary_worktree": str(verdict.primary),
-            "integration_ref": verdict.integration_ref,
-            "integration_upstream": verdict.upstream,
-            "integration_commit": verdict.integration_commit,
-            "repository_mode": verdict.repository_mode,
-            "head": verdict.head,
-            "branch": verdict.branch,
-            "branch_deleted": False,
-            "registry_reconciled": reconciled,
-            "artifact_harvest_required": False,
-        }
-        append_audit(audit, record)
-        emit(verdict, "removed", reconciled)
-        print(f"audit_log={audit}")
+            try:
+                verdict = context.before_remove(target, jobs, args.integration_ref,
+                                                args.repository_mode, verdict)
+                if not verdict.eligible:
+                    emit(verdict, "blocked")
+                    blocked += 1
+                    continue
+                result = run(
+                    ["git", "-C", str(verdict.primary), "worktree", "remove", str(target)],
+                    check=False,
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                if isinstance(exc, UnsettledObservation):
+                    raise
+                verdict.reasons.append("fresh-evidence-or-remove-error")
+                emit(verdict, "blocked")
+                print(f"detail={exc}")
+                blocked += 1
+                continue
+            if result.returncode != 0:
+                verdict.reasons.append("remove-failed")
+                emit(verdict, "blocked")
+                if result.stderr.strip():
+                    print(f"detail={result.stderr.strip()}")
+                blocked += 1
+                continue
+            removed_primaries.add(verdict.primary)
+            # Successful removal is audited even if registry reconciliation fails.
+            reconciled = 0
+            reconciliation_error = None
+            try:
+                reconciled = reconcile_registry(jobs, target)
+            except (OSError, RuntimeError, ValueError) as exc:
+                reconciliation_error = str(exc)
+                blocked += 1
+            record = {
+                "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "action": "removed",
+                "worktree": str(target),
+                "primary_worktree": str(verdict.primary),
+                "integration_ref": verdict.integration_ref,
+                "integration_upstream": verdict.upstream,
+                "integration_commit": verdict.integration_commit,
+                "repository_mode": verdict.repository_mode,
+                "head": verdict.head,
+                "branch": verdict.branch,
+                "branch_deleted": False,
+                "registry_reconciled": reconciled,
+                "artifact_harvest_required": False,
+            }
+            if reconciliation_error:
+                record["registry_reconciliation_error"] = reconciliation_error
+            append_audit(audit, record)
+            emit(verdict, "removed", reconciled)
+            print(f"audit_log={audit}")
+
+    except UnsettledObservation as exc:
+        unsettled = True
+        blocked += 1
+        print("status=blocked\nreasons=observation-descendants-unresolved")
+        print(f"detail={exc}")
+    finally:
+        # One prune after successful removals, including a partial/interrupted
+        # pass. Branch refs are deliberately retained for rollback.
+        for primary in removed_primaries:
+            if unsettled:
+                print(f"prune_deferred={primary}: observation descendants unresolved", file=sys.stderr)
+                continue
+            try:
+                run(["git", "-C", str(primary), "worktree", "prune"])
+            except (OSError, RuntimeError) as exc:
+                print(f"prune_deferred={exc}", file=sys.stderr)
+                blocked += 1
 
     return 3 if blocked else 0
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 4 and sys.argv[1] == "_observe":
+        OBSERVATION_TIMEOUT = float(sys.argv[2])
+        raise SystemExit(observe_command(json.loads(sys.argv[3])))
     raise SystemExit(main(sys.argv))

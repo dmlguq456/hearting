@@ -65,8 +65,13 @@ framed first legs, successors, printed next-leg commands, and `direct` routes;
 an explicit primary cwd or supplied dispatch evidence is not an exemption.
 A framed start also prepares the cwd that its frame will read, even when its
 route does not itself change source. From a primary checkout,
-preparation fetches the remote default branch and creates the worktree from the
-commit SHA observed after that successful fetch.
+preparation observes the remote default branch and creates the worktree from
+that exact commit SHA. It may reuse the local tracking ref only when the current
+advertisement names the same default ref and OID and its reachable objects are
+available locally; otherwise it uses the existing fetch and failure path.
+Common-directory identity and one preparation's ref/worktree inventory are
+shared, and allocation stops at the first available candidate. Fresh attachment
+checks around a failed allocation remain separate from that inventory.
 When the repository has no remotes, preparation uses the primary worktree's
 current `HEAD` commit without a fetch; if `HEAD` does not resolve to a commit,
 preparation fails before publication.
@@ -1011,6 +1016,7 @@ A legacy hash collision is diagnostic
    - Artifact relocation uses that same authority to protect live work. A no-live history move does not transfer parent authority, and historical redirects never authorize root-local writes.
    - **Inline finish history:** cycle-wide pending lookup excludes only `finished` slots; a continuation can finish the same cycle while earlier receipts remain recorded.
      Route-scoped reads and completion replay keep that history and reverify its exact authority, binding, marker and outcome; unknown states remain pending.
+   - Dispatch prepares source, review, route, parent-process and permission observations outside the global jobs lock. Same-attempt launch preparation is serialized separately; the short registry transaction rechecks the exact fresh child, parent, cancellation and competing claims before publishing an identity or releasing its fenced payload. Source content is revalidated outside the jobs lock immediately before release, with the prepared registry dependencies pinned by the final transaction. Governor reservations and leases retain their existing owners throughout preparation and fenced admission.
    - **Route authority:** `utilities/route_authority.py` is the one place that answers who continues a route (the parent session and its successor), on which harness (sealed selection pins and their recorded changes), how many attempts of which kind (sub-session standing, retry links, round budget, the result envelope), and what it may access (the execution access grant). Frame proposals, later plan legs and continuations inherit the pins in force through this same judgment. If `start --pin owner=H` differs from a running owner's harness, its receipt gives the existing `close` command with resource preservation; settled close prepares the ordinary continuation from the first unfinished stage and gives its `start` command. The running identity stays intact, and completed stages stay reused. `decide_continuation` owns continuation, completion settlement and inline finish with their matching existing recovery actions; callers observe evidence and execute those transitions. Live or unknown execution prevents duplicate launch, and history and answers remain intact. Unknown observations include the condition that lets the same command proceed after reobservation, with bounded waiting. Round limits apply to registered verdicts, while remaining fallback and reporting continue. A proven not-started failure returns to the same owner. The round census (`review_round_cap`) and access grant (`execution_access`) keep their observation modules and are reached through it.
    - **Stage-session separation:** every planned sub-session carries a stable `subsession_id`, ordered index/count, serial-or-parallel mode, fixed file list, narrow verification command, expected round trips, phase brief, and worker-state ledger. It retains the parent route id/hash/node, stage scope, and gate, but records `stage_authority=0`: it may produce a bounded handoff and terminal attempt result, never publish or satisfy the stage completion marker. The dispatch-depth-1 owner publishes exactly one stage marker only after all declared sub-sessions are semantic-terminal, execution-quiescent, and their combined stage evidence meets the original gate. Planned subdivision consumes no gate-failure retry budget. A later gate failure may open only a gap session containing unfinished items from the prior handoff; it is a retry, not retroactive subdivision. The runtime records a sub-session opened after the node's latest settled round failed or ended `BLOCKED` as `gap-retry` whatever its manifest says, and a dry-run preview of a declared sub-session reads the same no-stage-authority admission as its launch; the round cap keeps binding full-stage rounds only.
    - **Auxiliary legs are advisory, never gate-holding.** A declared `parallel_group` leg with `leg_class: auxiliary` widens the group with one closed narrow check on the `light` budget. Its unit verdict enum carries no blocking token, so an auxiliary finding can never satisfy or fail the stage gate alone — it exists to feed the arbiter's `auxiliary_findings_considered` merge (the completion gate compares the merged array length against the realized auxiliary leg count). The `all` join policy is a separate axis: it joins every realized leg, including auxiliary ones, but joining evidence is not the same as letting an auxiliary verdict block. At least one realized **peer** leg must land on a quality-peer harness (SD-100 ①) whenever the user's policy defines one (an unavailable defined peer still refuses; a policy that defines none — for example OpenCode-only — proceeds and records `sole-gate-non-peer-harness` instead of refusing); auxiliary legs may legitimately use any eligible harness including OpenCode.
@@ -1145,6 +1151,12 @@ A legacy hash collision is diagnostic
      reconciled to `done,note=cleanup-merged` only after every other safety
      gate passes. `--all-eligible` considers only worktrees referenced by the
      selected jobs registry; `git worktree lock` is an explicit keep veto.
+     One cleanup pass may reuse stable repository and inventory observations;
+     apply rechecks mutable Git, process and registry safety before removal.
+     Display caches and last-good status are observations without mutation or
+     cleanup authority.
+     Main retains the actual check/apply result and protected targets in the
+     existing handoff; preparing or closing a route does not itself run cleanup.
    - Runtime lifecycle events such as Claude `SessionEnd`, Codex `Stop`, or
      OpenCode `session.idle` do not prove merge/push completion and must never
      perform destructive cleanup. They may expose diagnostics only.

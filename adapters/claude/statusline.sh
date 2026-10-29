@@ -90,6 +90,7 @@ elif (all(value is not None for value in parts)
 else:
     cpct = -1
 print("S_CWD=" + shlex.quote(cwd))
+print("S_PROJECT_DIR=" + shlex.quote((d.get("workspace") or {}).get("project_dir") or cwd))
 print("S_MS=" + shlex.quote(" ".join(ms_parts)))
 print("S_MODEL=" + shlex.quote(model))
 print("S_EFFORT=" + shlex.quote(effort))
@@ -101,7 +102,25 @@ print("S_5H_RST=" + shlex.quote(rlrem("five_hour")))
 print("S_7D_RST=" + shlex.quote(rlrem("seven_day")))
 print("S_CTX=" + shlex.quote(str(cpct)))
 ' 2>/dev/null)"
-: "${S_CWD:=$PWD}" "${S_MODEL:=?}" "${S_EFFORT:=}" "${S_SID:=}" "${S_5H:=}" "${S_7D:=}" "${S_5H_RST:=}" "${S_7D_RST:=}" "${S_CTX:=-1}" "${S_MS:=}" "${S_TRANSCRIPT:=}"
+: "${S_PROJECT_DIR:=$PWD}" "${S_CWD:=$PWD}" "${S_MODEL:=?}" "${S_EFFORT:=}" "${S_SID:=}" "${S_5H:=}" "${S_7D:=}" "${S_5H_RST:=}" "${S_7D_RST:=}" "${S_CTX:=-1}" "${S_MS:=}" "${S_TRANSCRIPT:=}"
+
+# Shared local observation: no Git, cwd resolution or legacy census in render.
+git_repo=unknown; git_branch=unknown; git_operation=unknown
+git_merged=unknown; git_branch_done=unknown; git_extra_worktrees=unknown
+git_project_auto_compact_disabled=unknown; git_observation=unknown; git_observed_label='?'; git_jobs=''
+git_helper="$AGENT_HOME/tools/fleet/gitinfo.py"
+[ -f "$git_helper" ] || git_helper="$(dirname "${BASH_SOURCE[0]}")/../../tools/fleet/gitinfo.py"
+if [ -f "$git_helper" ]; then
+  eval "$(python3 "$git_helper" --display shell --project-dir "$S_PROJECT_DIR" "$S_CWD" 2>/dev/null || true)"
+fi
+branch="$git_branch"; gflag=""
+case "$git_operation" in
+  merge|rebase|cherry-pick) gflag="⚠️$git_operation" ;;
+  unknown) gflag='⚠️?' ;;
+esac
+if [ "$git_operation" = none ]; then
+  if [ "$git_merged" = 1 ] || [ "$git_branch_done" = 1 ]; then gflag='💀merged'; fi
+fi
 
 # F-87/F-99 shared session handle projection; unavailable helpers are deliberately silent.
 # Own pid + /proc starttime (F-26 tier-2 identity — see the tap write below, whose own
@@ -219,12 +238,10 @@ def config_disables_auto_compact():
     # `autoCompactEnabled: false` in a settings source this process reads. Presence only;
     # the effective window and trigger are computed by the collector from the request.
     cfg = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.join(os.path.expanduser("~"), ".claude")
-    cwd = (value.get("workspace") or {}).get("project_dir") or value.get("cwd") or ""
     paths = [os.path.join(cfg, "settings.json"), os.path.join(cfg, ".claude.json"),
              os.path.join(os.path.expanduser("~"), ".claude.json")]
-    if cwd:
-        paths += [os.path.join(cwd, ".claude", "settings.json"),
-                  os.path.join(cwd, ".claude", "settings.local.json")]
+    if sys.argv[5] == "1":
+        return True  # project settings observed by the finite shared refresh
     for path in paths:
         try:
             with open(path, encoding="utf-8") as fh:
@@ -245,7 +262,7 @@ value["hearting_context_request"] = {
     "auto_compact_enabled": False if config_disables_auto_compact() else None,
 }
 sys.stdout.write(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
-    ' "$tap_pid" "$tap_start" "$tap_policy" "$sldir/$S_SID.json" 2>/dev/null) || tap_with_policy=""
+    ' "$tap_pid" "$tap_start" "$tap_policy" "$sldir/$S_SID.json" "$git_project_auto_compact_disabled" 2>/dev/null) || tap_with_policy=""
     [ -n "$tap_with_policy" ] && tap_json=$tap_with_policy
   fi
   # atomic write (temp + rename) so a concurrent reader (tools/fleet dashboard) never sees a
@@ -289,14 +306,13 @@ fi
 title_root="${FLEET_TITLE_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-fleet/titles}"
 if [ -n "$S_SID" ] && [ -n "${S_TRANSCRIPT:-}" ] && [ "${FLEET_TITLE_REFRESH:-}" != "1" ] \
    && [ "${FLEET_TITLE_DISABLE:-}" != "1" ] && [ ! -e "$title_root/.refresh-disabled" ] \
-   && [ -f "$S_TRANSCRIPT" ] && command -v python3 >/dev/null 2>&1; then
+   && command -v python3 >/dev/null 2>&1; then
   refresher="$AGENT_HOME/tools/fleet/refresh_title.py"
   [ -f "$refresher" ] || refresher="$(dirname "$AGENT_HOME")/tools/fleet/refresh_title.py"
   title_dir="$title_root/claude"
   sc="$title_dir/$S_SID.json"
   now=$(date +%s)
   scts=0; [ -f "$sc" ] && scts=$(stat -c %Y "$sc" 2>/dev/null || echo 0)
-  trm=$(stat -c %Y "$S_TRANSCRIPT" 2>/dev/null || echo 0)
   sf=0
   if [ -f "$sc" ]; then
     sf=$(sed -n 's/.*"summary_failures": *\([0-9][0-9]*\).*/\1/p' "$sc" 2>/dev/null | head -n 1)
@@ -306,54 +322,36 @@ if [ -n "$S_SID" ] && [ -n "${S_TRANSCRIPT:-}" ] && [ "${FLEET_TITLE_REFRESH:-}"
   case "$sf" in 1) retry=30 ;; 2) retry=60 ;; 3|4|5|6|7|8|9) retry=120 ;; esac
   if [ "$scts" -eq 0 ] || [ $((now - scts)) -gt "$retry" ]; then
     # 실패 상태는 cursor가 보존됐으므로 transcript mtime과 무관하게 같은 delta를 재시도한다.
-    if [ "$scts" -eq 0 ] || [ "$trm" -gt "$scts" ] || [ "$sf" -gt 0 ]; then
-      lockdir="$title_dir/.lock-$S_SID"
-      if [ -f "$refresher" ] && mkdir -p "$title_dir" 2>/dev/null \
-         && mkdir "$lockdir" 2>/dev/null; then
-        # 세션당 동시 1개. child 가 trap 으로 lock 해제. 즉시 반환(&).
-        # 서브셸 자체도 stdout/stderr 를 /dev/null 로 돌려야 한다 — 안 그러면 서브셸이
-        # statusline 의 stdout pipe fd 를 그대로 물고 있어(내부 setsid 커맨드만 리다이렉트해도
-        # 서브셸 프로세스 자신은 fork 시점에 상속한 fd 를 계속 들고 있음), 호출자가 stdout 을
-        # 파이프로 읽을 때(Claude Code 의 실제 statusLine 소비 방식) EOF 가 refresher 종료까지
-        # 지연돼 "즉시 반환" 불변식이 깨진다.
-        ( trap 'rmdir "$lockdir" 2>/dev/null || true' EXIT
-          priority_arg=
-          quota_arg=
-          if [ "$scts" -eq 0 ] || [ "$sf" -gt 0 ]; then
-            priority_arg=--priority
-          fi
-          if [ "$scts" -eq 0 ]; then
-            quota_arg='--quota-class initial'
-          fi
-          FLEET_TITLE_REFRESH=1 setsid python3 "$refresher" \
-            --harness claude --sid "$S_SID" --transcript "$S_TRANSCRIPT" $priority_arg $quota_arg >/dev/null 2>&1 </dev/null
-        ) >/dev/null 2>&1 &
-      fi
+    lockdir="$title_dir/.lock-$S_SID"
+    if [ -f "$refresher" ] && mkdir -p "$title_dir" 2>/dev/null \
+       && mkdir "$lockdir" 2>/dev/null; then
+      # 세션당 동시 1개. child 가 trap 으로 lock 해제. 즉시 반환(&).
+      # 서브셸 자체도 stdout/stderr 를 /dev/null 로 돌려야 한다 — 안 그러면 서브셸이
+      # statusline 의 stdout pipe fd 를 그대로 물고 있어(내부 setsid 커맨드만 리다이렉트해도
+      # 서브셸 프로세스 자신은 fork 시점에 상속한 fd 를 계속 들고 있음), 호출자가 stdout 을
+      # 파이프로 읽을 때(Claude Code 의 실제 statusLine 소비 방식) EOF 가 refresher 종료까지
+      # 지연돼 "즉시 반환" 불변식이 깨진다.
+      ( trap 'rmdir "$lockdir" 2>/dev/null || true' EXIT
+        # NAS transcript metadata belongs to the existing finite title owner.
+        [ -f "$S_TRANSCRIPT" ] || exit 0
+        trm=$(stat -c %Y "$S_TRANSCRIPT" 2>/dev/null || echo 0)
+        if [ "$scts" -gt 0 ] && [ "$sf" -eq 0 ] && [ "$trm" -le "$scts" ]; then exit 0; fi
+        priority_arg=
+        quota_arg=
+        if [ "$scts" -eq 0 ] || [ "$sf" -gt 0 ]; then
+          priority_arg=--priority
+        fi
+        if [ "$scts" -eq 0 ]; then
+          quota_arg='--quota-class initial'
+        fi
+        FLEET_TITLE_REFRESH=1 setsid python3 "$refresher" \
+          --harness claude --sid "$S_SID" --transcript "$S_TRANSCRIPT" $priority_arg $quota_arg >/dev/null 2>&1 </dev/null
+      ) >/dev/null 2>&1 &
     fi
   fi
 fi
 
 dir=$(basename "$S_CWD")
-
-# git 브랜치 + 위험 상태 플래그 (⚠️ merge/rebase 진행 중 · 💀 머지 완료된 죽은 브랜치)
-branch=""; gflag=""
-if command -v git >/dev/null 2>&1; then
-  branch=$(git -C "$S_CWD" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
-  if [ -n "$branch" ]; then
-    gd=$(git -C "$S_CWD" rev-parse --git-dir 2>/dev/null || true)
-    if [ -n "$gd" ]; then
-      case "$gd" in /*) ;; *) gd="$S_CWD/$gd" ;; esac
-      if [ -f "$gd/MERGE_HEAD" ]; then gflag="⚠️merge"
-      elif [ -d "$gd/rebase-merge" ] || [ -d "$gd/rebase-apply" ]; then gflag="⚠️rebase"
-      else
-        def=$(git -C "$S_CWD" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true); def=${def:-main}
-        if [ "$branch" != "$def" ] && [ "$branch" != "HEAD" ] && git -C "$S_CWD" rev-parse -q --verify "origin/$def" >/dev/null 2>&1; then
-          [ "$(git -C "$S_CWD" rev-list --count "origin/$def..HEAD" 2>/dev/null)" = "0" ] && gflag="💀merged"
-        fi
-      fi
-    fi
-  fi
-fi
 
 # ANSI 색 + 퍼센트 색 헬퍼 (녹 <50 / 황 <80 / 적 ≥80)
 DIM=$'\033[2m'; CYAN=$'\033[36m'; YEL=$'\033[33m'; GRN=$'\033[32m'; RED=$'\033[31m'; MAG=$'\033[35m'; RST=$'\033[0m'
@@ -363,139 +361,18 @@ pcol(){ if [ "${1:-0}" -ge 80 ] 2>/dev/null; then printf '%s' "$RED"; elif [ "${
 segs_arr=()
 segs_arr+=("📁 ${CYAN}${dir}${RST}")
  [ -n "$S_SESSION_DISPLAY" ] && segs_arr+=("${DIM}${S_SESSION_DISPLAY}${RST}")
-if [ -n "$branch" ]; then
+if [ "$git_repo" = 0 ]; then
+  segs_arr+=("${DIM}⎇ no-git · ${git_observed_label}${RST}")
+else
   bseg="${DIM}⎇${RST}${YEL}${branch}${RST}"
   [ -n "$gflag" ] && bseg="${bseg} ${RED}${gflag}${RST}"
-  # 병렬 작업장 카운터 — 이 repo 에 연결된 추가 worktree 수 (§5.10 디스패치·잔존 감지)
-  wt=$(git -C "$S_CWD" worktree list --porcelain 2>/dev/null | grep -c '^worktree ' || true)
-  [ "${wt:-1}" -gt 1 ] 2>/dev/null && bseg="${bseg} ${YEL}🚧 $((wt-1))${RST}"
+  wt="$git_extra_worktrees"
+  if [ "$wt" = unknown ]; then bseg="${bseg} ${DIM}🚧 ?${RST}"
+  elif [ "$wt" -gt 0 ] 2>/dev/null; then bseg="${bseg} ${YEL}🚧 ${wt}${RST}"; fi
+  bseg="${bseg} ${DIM}${git_observation} · ${git_observed_label}${RST}"
   segs_arr+=("$bseg")
-else segs_arr+=("${DIM}⎇ no-git${RST}"); fi
-
-# 도는 headless 파이프·루프 상세 ("N shells" 배지의 중간 단계 — 무엇이·얼마나·뭘 하는지)
-jobs_lbl=$(COLUMNS=100000 ps -eo pid=,etime=,args= 2>/dev/null | python3 -c '
-# COLUMNS 고정 필수 — CC 가 statusline env 에 터미널 폭을 넣고, ps 는 파이프여도 COLUMNS 로 args 를 잘라 /autopilot- 매칭이 전멸한다 (2026-06-11 실측)
-import sys, re, os, glob
-CWD = sys.argv[1] if len(sys.argv) > 1 else ""
-def related(jcwd):
-    # 프로젝트 파이프는 같은 디렉토리 트리의 세션에만 표시 (전사 루프는 무조건)
-    if not CWD or not jcwd: return True
-    if jcwd == CWD or jcwd.startswith(CWD + "/") or CWD.startswith(jcwd + "/"): return True
-    # 형제 worktree(<repo>-wt/<slug>, §5.10 디스패치)는 같은 repo 로 취급 — 세션이 repo 안일 때 worktree job 누락 방지 (2026-06-11)
-    if jcwd.startswith(CWD + "-wt/") or CWD.startswith(jcwd + "-wt/"): return True
-    pj, pc = os.path.dirname(jcwd), os.path.dirname(CWD)
-    return pj == pc and pj.endswith("-wt")
-C = {"draft":"35","apply":"35","refine":"33","code":"32","spec":"36","research":"34","lab":"96","design":"95","ship":"32","note":"37","oncall":"37","study":"37","drill":"37"}
-def paint(key, s): return f"\033[{C.get(key,'33')}m{s}\033[0m"
-def mins(et):
-    et = et.strip(); d = 0
-    if "-" in et: d, et = et.split("-", 1)
-    parts = [int(x) for x in et.split(":")]
-    while len(parts) < 3: parts.insert(0, 0)
-    tot = int(d) * 1440 + parts[0] * 60 + parts[1]
-    return f"{tot//60}h{tot%60:02d}m" if tot >= 60 else f"{tot}m"
-def has_entries(p):
-    try: return any(True for _ in os.scandir(p))
-    except Exception: return False
-def live_stage(jcwd, slug, fb):
-    # worktree slug → plans/*_<slug>/ 산출물로 실제 파이프 단계 유도 (argv 라벨이 정적 → 실시간 반영). fb = argv 추정 단계.
-    if not jcwd or not slug: return fb
-    ar = ".agent_reports" if os.path.isdir(jcwd + "/.agent_reports") else ".claude_reports"
-    # W7I — 새 cycle 산출물은 campaigns/*/*/artifacts/plans 에 있고 W7C의
-    # campaigns/*/cycles/*/artifacts/plans 도 읽기 호환한다. 최상위 plans/ 는
-    # 읽기 전용 레거시 폴백(뒤에 붙임). 정본 리졸버는
-    # utilities/artifact_reader.py 지만 statusline 은 매 렌더 경로라 import 40ms 를
-    # 피해 같은 레이아웃을 glob 로 미러링한다 (읽기만, 아티팩트 쓰기 없음).
-    bases = sorted(set(
-        glob.glob(jcwd + "/" + ar + "/campaigns/*/*/artifacts/plans") +
-        glob.glob(jcwd + "/" + ar + "/campaigns/*/cycles/*/artifacts/plans")
-    ))
-    if os.path.isdir(jcwd + "/" + ar + "/plans"): bases.append(jcwd + "/" + ar + "/plans")
-    def kids(b):
-        try: return [b + "/" + d for d in os.listdir(b)]
-        except Exception: return []
-    cand = sorted((d for b in bases for d in kids(b) if os.path.basename(d).endswith("_" + slug)), key=os.path.basename)
-    if not cand:
-        # slug 불일치 폴백 — 헤드리스 autopilot-code 가 plan 폴더를 _task 기반_ slug 로 만들면
-        # (예: worktree=detail-perf / plan=…_detail-modal-perf) 정확 매칭이 실패해 stage 가 안 뜬다.
-        # 워크트리 slug 와 하이픈 토큰 겹침이 최대인 plan 폴더로 폴백(겹침 0 이면 argv 추정 유지).
-        stoks = set(t for t in slug.split("-") if t)
-        dirs = [d for b in bases for d in kids(b) if not os.path.basename(d).startswith(".") and os.path.isdir(d)]
-        best, bestn, bestm = None, 0, -1.0
-        for d in dirs:
-            if os.path.exists(d + "/pipeline_summary.md"): continue   # 완료(done) 폴더는 폴백 후보 제외 — 새 worktree slug 가 옛 done 폴더와 generic 토큰 1개만 겹쳐 "done"으로 오인되는 것 방지(정확 매칭 경로는 보존)
-            name = os.path.basename(d)
-            dslug = name.split("_", 1)[-1] if "_" in name else name
-            n = len(stoks & set(t for t in dslug.split("-") if t))
-            try: m = os.path.getmtime(d)
-            except Exception: m = 0.0
-            if n > bestn or (n == bestn and n > 0 and m > bestm):
-                best, bestn, bestm = d, n, m
-        if not best or bestn == 0: return fb   # plan 폴더 전 or 무관 → argv 추정 유지
-        cand = [best]
-    pd = cand[-1]
-    if os.path.exists(pd + "/pipeline_summary.md"): return "done"
-    if has_entries(pd + "/test_logs"): return "test"
-    if has_entries(pd + "/dev_logs"): return "exec"
-    try:   # dev_logs 쓰기 전 early-execute: checklist 체크 진행 = exec
-        with open(pd + "/plan/checklist.md") as _f:
-            if "[x]" in _f.read().lower(): return "exec"
-    except Exception: pass
-    try:   # 워크트리 소스 dirty = execute 중 (디자인팀 직접편집 등 dev_logs 미경유 흐름)
-        import subprocess
-        # GIT_OPTIONAL_LOCKS=0: the 2 s timeout SIGKILLs a slow status, and one killed
-        # mid index refresh leaves a holderless index.lock that blocks every later commit there.
-        if subprocess.run(["git", "-C", jcwd, "status", "--porcelain", "--untracked-files=no"],
-                          capture_output=True, text=True, timeout=2,
-                          env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}).stdout.strip():
-            return "exec"
-    except Exception: pass
-    if os.path.exists(pd + "/plan/plan.md"): return "plan"
-    return "plan"
-seen = {}
-for line in sys.stdin:
-    line = line.rstrip("\n")
-    if not line: continue
-    fields = line.lstrip().split(None, 2)
-    if len(fields) < 3: continue
-    pid, etime, args = fields
-    ms = re.findall(r"/autopilot-([a-z-]+)", args)
-    if ms and "claude" in args:
-        try: jcwd = os.readlink(f"/proc/{pid}/cwd")
-        except Exception: jcwd = ""
-        if not related(jcwd): continue
-        if os.path.basename(args.split(None, 1)[0]) in ("zsh", "bash", "sh", "dash"): continue  # 런처 셸 wrapper 제외 — 실 claude 프로세스만
-        key = ms[-1]
-        # 유효값만 매칭 + 첫 매치(실 플래그는 quoted 프롬프트 텍스트보다 앞) — \w 가 한글까지 잡아 프롬프트 안 "--qa 없으면" 을 qa 로 오인하던 버그 방지
-        modes = re.findall(r"--mode ([a-z][a-z-]*)", args); md = modes[0] if modes else None
-        qas = re.findall(r"--qa (quick|light|standard|thorough|adversarial)\b", args); qv = qas[0] if qas else None
-        # 제목 = worktree/디렉토리 슬러그 우선 (프롬프트 어절 추출은 한국어 프롬프트에서 노이즈 — 2026-06-11)
-        slug = os.path.basename(jcwd.rstrip("/")) if jcwd else ""
-        desc = slug if (slug and slug != os.path.basename(CWD.rstrip("/"))) else ""
-        stage = live_stage(jcwd, slug, key)
-        QA = {"quick":"qck","light":"lgt","standard":"std","thorough":"thr","adversarial":"adv"}
-        QAC = {"qck":"2","lgt":"32","std":"33","thr":"35","adv":"31"}
-        D = "\033[2m"; R = "\033[0m"
-        parts = []
-        if md: parts.append(f"\033[36m{md}{R}")
-        if qv:
-            q = QA.get(qv, qv)
-            parts.append(f"\033[{QAC.get(q,'33')}m{q}{R}")
-        opts = f"{D}\u00b7{R}".join(parts)
-        label = f"{key}▸{stage}" if stage != key else key
-        head = paint(key, label) + (f"{D}({R}{opts}{D}){R}" if opts else "")
-        lbl = head + f" {D}\u23f3{mins(etime)}{R}" + (f" {desc}" if desc else "")
-        dkey = f"{key}:{slug}"  # \uc2ac\ub7ec\uadf8 \ub2e8\uc704 \u2014 \uac19\uc740 \ud30c\uc774\ud504 N\uac1c \ubcd1\ub82c \ubd84\uc0ac\uac00 \ud55c \ud56d\ubaa9\uc73c\ub85c \ubb49\uac1c\uc9c0\uc9c0 \uc54a\uac8c (2026-06-11)
-    else:
-        l = re.search(r"loops/(oncall|note|study|drill|runtime-watch)", args)
-        if not l: continue
-        key = l.group(1); lbl = paint(key, key) + f" \033[2m\u23f3{mins(etime)}\033[0m"
-        dkey = key
-    seen.setdefault(dkey, lbl)
-out = list(seen.values())[:3]
-if len(seen) > 3: out.append(f"+{len(seen)-3}")
-print(" \033[1;37m/\033[0m ".join(out))
-' "$S_CWD" 2>/dev/null || true)
+fi
+jobs_lbl="$git_jobs"
 
 # context gauge — mid-line ━/─ (fleet design): filled in the level color, empty track dim
 if [ "${S_CTX}" -ge 0 ] 2>/dev/null; then

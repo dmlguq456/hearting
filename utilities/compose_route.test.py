@@ -73,6 +73,47 @@ for unit in UNITS:
         "execution_reason": "One bounded fixture artifact.", "evidence_refs": ["fixture-task"]}
 
 
+class CampaignInputSnapshotTest(unittest.TestCase):
+    def test_resolve_hint_selection_and_cwd_share_one_validated_input(self):
+        import artifact_producer as P
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            folder = root / "campaigns/2026-10-29_existing-stream"
+            folder.mkdir(parents=True)
+            record = {"schema_version": 1, "campaign_id": "camp_" + "1" * 32,
+                      "state": "active", "key": "existing-stream", "title": "Existing",
+                      "cycles": ["cyc_" + "2" * 32] * 4}
+            (folder / "campaign.json").write_text(json.dumps(record))
+            with mock.patch.object(P.artifact_campaign, "campaign_state", wraps=P.artifact_campaign.campaign_state) as folds, \
+                    mock.patch.object(P, "read_cycle_record", side_effect=AssertionError("classification reads cycles")):
+                with R.compose_campaign_snapshot():
+                    self.assertEqual(R.compose_resolve_campaign_key(root, folder.name), ("existing-stream", folder.name))
+                    self.assertIn("existing-stream(4)", R.compose_campaign_hint(root, root))
+                    route = {"artifact_root": str(root), "campaign_key": "existing-stream"}
+                    self.assertEqual(R.compose_campaign_selection(route)["mode"], "join")
+                    self.assertEqual(R.cwd_campaign_keys(root, root), [])
+                    self.assertEqual(folds.call_count, 1)
+                with R.compose_campaign_snapshot():
+                    R.compose_campaign_selection(route)
+                self.assertEqual(folds.call_count, 2)
+
+    def test_failed_scan_stays_unavailable_and_empty_stays_empty_for_one_input(self):
+        import artifact_producer as P
+        for result in ([], OSError("fixture unavailable")):
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as temp:
+                with mock.patch.object(P, "_list_campaign_summaries",
+                        **({"side_effect": result} if isinstance(result, Exception) else {"return_value": result})) as scan:
+                    with R.compose_campaign_snapshot():
+                        rows = R.compose_campaign_summaries(temp)
+                        self.assertEqual(rows, None if isinstance(result, Exception) else [])
+                        mode = R.compose_campaign_selection({"artifact_root": temp, "campaign_key": "new"})
+                        self.assertEqual(mode["mode"], "unresolved" if rows is None else "create")
+                        R.compose_campaign_hint(temp, temp)
+                        # Explicit unknown rows must not trigger a second scan.
+                        self.assertEqual(R.cwd_campaign_keys(temp, temp, rows=None), [])
+                    self.assertEqual(scan.call_count, 1)
+
+
 class TestComposeRoute(unittest.TestCase):
     def _gate_index(self):
         return C.unit_io_gate_index(C._load_topology().load_registry())

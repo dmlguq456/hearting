@@ -7,6 +7,9 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
+import fcntl
+import signal
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -483,6 +486,338 @@ class F51GitTelemetryTest(unittest.TestCase):
             self.assertEqual(row.branch, "main")
             self.assertEqual((row.branch_ahead, row.branch_behind), (2, 1))
             self.assertEqual(row.worktree_count, 4)
+
+
+class DisplayGitObservationTests(unittest.TestCase):
+    """Private repositories and a finite delayed Git shim; no live NAS probes."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="git-display-")
+        self.base = Path(self.temp.name)
+        self.root = self.base / "repo"
+        self.root.mkdir()
+        self.artifacts = self.base / "artifacts"
+        self.artifacts.mkdir()
+        self.jobs = self.base / "jobs.log"
+        self.jobs.write_text("")
+        self.env = mock.patch.dict(os.environ, {
+            "HARNESS_STATE_ROOT": str(self.base / "state"),
+            "XDG_STATE_HOME": str(self.base / "xdg"),
+            "CLAUDE_CONFIG_DIR": str(self.base / "claude"),
+            "AGENT_HOME": str(Path(__file__).resolve().parents[3]),
+            "AGENT_ARTIFACT_ROOT": str(self.artifacts),
+            "GIT_CEILING_DIRECTORIES": str(self.base),
+            "AGENT_DISPATCH_JOBS": str(self.jobs),
+            "FLEET_TITLE_DISABLE": "1", "HARNESS_CAPACITY_REFRESH_DISABLE": "1",
+            "PYTHONDONTWRITEBYTECODE": "1", "GIT_OPTIONAL_LOCKS": "0"})
+        self.env.start()
+        (self.base / "claude").mkdir()
+        self.addCleanup(self.env.stop)
+        self.addCleanup(self.temp.cleanup)
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "user.name", "Fixture")
+        (self.root / "tracked").write_text("base\n")
+        self.git("add", "tracked")
+        self.git("commit", "-qm", "base")
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.root), *args], check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout.strip()
+
+    def refresh(self, cwd=None):
+        request = gitinfo._display_request(str(cwd or self.root))
+        fd = gitinfo._display_claim(request)
+        try:
+            with mock.patch.object(gitinfo, "_legacy_display_jobs", return_value=""):
+                return gitinfo.refresh_display(request, fd)
+        finally:
+            os.close(fd)
+
+    def until(self, predicate, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return
+            time.sleep(0.01)
+        self.fail("private display fixture did not settle")
+
+    def drain(self, cwd=None):
+        request = gitinfo._display_request(str(cwd or self.root))
+        def settled():
+            try:
+                fd = gitinfo._display_claim(request)
+            except BlockingIOError:
+                return False
+            os.close(fd)
+            return True
+        self.until(settled)
+
+    def shim(self, mode="slow"):
+        real = subprocess.check_output(["sh", "-c", "command -v git"], text=True).strip()
+        bindir = self.base / "bin"
+        bindir.mkdir(exist_ok=True)
+        script = bindir / "git"
+        script.write_text("#!" + sys.executable + "\n" + '''import json, os, pathlib, subprocess, sys, time
+base = pathlib.Path(os.environ["DISPLAY_FIXTURE"])
+with (base / "calls").open("a") as out:
+    out.write(json.dumps([sys.argv[1:], os.environ.get("GIT_OPTIONAL_LOCKS")]) + "\\n")
+if "rev-parse" in sys.argv and not (base / "ready").exists():
+    (base / "ready").write_text(str(os.getpid()))
+    if os.environ["DISPLAY_MODE"] in ("grandchild", "closed-grandchild"):
+        code = "import pathlib,time,sys; p=pathlib.Path(sys.argv[1]); (p/'grandchild').write_text('ready');\\nwhile not (p/'release').exists(): time.sleep(.01)"
+        child = subprocess.Popen([sys.executable, "-c", code, str(base)],
+                                 close_fds=os.environ["DISPLAY_MODE"] == "closed-grandchild")
+        sys.exit(1)
+    deadline = time.monotonic() + 10
+    while not (base / "release").exists() and time.monotonic() < deadline:
+        time.sleep(.01)
+os.execv(os.environ["DISPLAY_REAL_GIT"], [os.environ["DISPLAY_REAL_GIT"], *sys.argv[1:]])
+''')
+        script.chmod(0o700)
+        os.environ.update(PATH=str(bindir) + os.pathsep + os.environ["PATH"],
+                          DISPLAY_FIXTURE=str(self.base), DISPLAY_MODE=mode, DISPLAY_REAL_GIT=real)
+        # Always release owned descendants before TemporaryDirectory cleanup,
+        # including after assertion failures. The command's verification lease
+        # is the final subreaper for a deliberately detached grandchild.
+        def finish():
+            (self.base / "release").touch()
+            self.drain()
+        self.addCleanup(finish)
+
+    def test_git_semantics_dirty_rename_operation_and_total_vs_extra(self):
+        self.git("switch", "-qc", "topic")
+        self.git("branch", "--set-upstream-to=main")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+        self.git("worktree", "add", "-q", "-b", "linked", str(self.base / "linked"))
+        self.git("mv", "tracked", "renamed")
+        (self.root / "new\nfile").write_text("new")
+        fields = self.refresh()["git"]
+        self.assertEqual((fields["dirty_tracked"], fields["untracked"], fields["dirty_total"]), (1, 1, 2))
+        self.assertEqual((fields["worktree_count"], fields["extra_worktrees"]), (2, 1))
+        self.assertEqual((fields["upstream"], fields["ahead"], fields["behind"]), ("main", 0, 0))
+        self.assertEqual((fields["branch_done"], fields["merged"]), (1, 1))
+        for name, operation in (("MERGE_HEAD", "merge"), ("rebase-merge", "rebase"),
+                                ("CHERRY_PICK_HEAD", "cherry-pick")):
+            marker = self.root / ".git" / name
+            marker.mkdir() if name == "rebase-merge" else marker.write_text("fixture")
+            self.assertEqual(self.refresh()["git"]["operation"], operation)
+            marker.rmdir() if marker.is_dir() else marker.unlink()
+        linked = self.refresh(self.base / "linked")["git"]
+        self.assertEqual(linked["branch"], "linked")
+        self.assertNotEqual(linked["gitdir"], linked["common"])
+
+    def test_nested_detached_nongit_and_missing_are_distinct(self):
+        nested = self.root / "nested"
+        nested.mkdir()
+        self.assertEqual(self.refresh(nested)["git"]["branch"], "main")
+        self.git("switch", "--detach", "-q")
+        detached = self.refresh()["git"]
+        self.assertEqual(detached["detached"], 1)
+        self.assertEqual(detached["branch"], self.git("rev-parse", "HEAD")[:7])
+        self.assertEqual(self.refresh(self.artifacts)["git"]["repo"], 0)
+        self.assertIsNone(self.refresh(self.base / "absent")["git"]["repo"])
+
+    def test_unreadable_worktree_and_operation_never_become_zero_or_none(self):
+        real = gitinfo._display_command
+        def failing(argv, fd):
+            if "worktree" in argv:
+                return 1, ""
+            return real(argv, fd)
+        original = os.stat
+        def unreadable(path, *args, **kwargs):
+            if str(path).endswith("/MERGE_HEAD"):
+                raise PermissionError("private fixture")
+            return original(path, *args, **kwargs)
+        with mock.patch.object(gitinfo, "_display_command", side_effect=failing), \
+             mock.patch.object(gitinfo.os, "stat", side_effect=unreadable):
+            fields = self.refresh()["git"]
+        self.assertIsNone(fields["worktree_count"])
+        self.assertIsNone(fields["extra_worktrees"])
+        self.assertIsNone(fields["operation"])
+
+    def test_cache_only_cold_warm_stale_branch_and_other_repo_binding(self):
+        value = self.refresh()
+        request = gitinfo._display_request(str(self.root))
+        with mock.patch.object(gitinfo, "resolve_gitdir", side_effect=AssertionError), \
+             mock.patch.object(gitinfo.os.path, "realpath", side_effect=AssertionError), \
+             mock.patch.object(gitinfo.subprocess, "Popen", side_effect=AssertionError):
+            self.assertEqual(gitinfo.cached_display(str(self.root)), value)
+            self.assertIsNone(gitinfo.cached_display(str(self.artifacts), request=False))
+        self.git("switch", "-qc", "new-branch")
+        before = gitinfo.cached_display(str(self.root), request=False)
+        self.assertEqual(before["git"]["branch"], "main")
+        self.assertEqual(before["observed_at"], value["observed_at"])
+        self.assertEqual(self.refresh()["git"]["branch"], "new-branch")
+        value["observed_at"] -= 90
+        gitinfo._publish_display(request, value)
+        self.assertEqual(gitinfo.cached_display(str(self.root), request=False)["observed_at"], value["observed_at"])
+
+    def test_private_cache_rejects_symlink_fifo_schema_and_future_timestamp(self):
+        value = self.refresh()
+        request = gitinfo._display_request(str(self.root))
+        _, path, _ = gitinfo._display_paths(request)
+        for mutate in (lambda x: x.update(version=99),
+                       lambda x: x.update(observed_at=time.time() + 500),
+                       lambda x: x["git"].update(worktree_count="0")):
+            changed = json.loads(json.dumps(value))
+            mutate(changed)
+            gitinfo._publish_display(request, changed)
+            self.assertIsNone(gitinfo.cached_display(str(self.root), request=False))
+        os.unlink(path)
+        os.symlink(self.root / "tracked", path)
+        self.assertIsNone(gitinfo.cached_display(str(self.root), request=False))
+        os.unlink(path)
+        os.mkfifo(path, 0o600)
+        self.assertIsNone(gitinfo.cached_display(str(self.root), request=False))
+
+    def test_slow_concurrent_same_repo_has_one_owner_other_repo_independent(self):
+        self.shim()
+        created = []
+        original = subprocess.Popen
+        def capture(*args, **kwargs):
+            child = original(*args, **kwargs)
+            if "--display-refresh" in args[0]:
+                created.append(child)
+            return child
+        with mock.patch.object(gitinfo.subprocess, "Popen", side_effect=capture):
+            threads = [threading.Thread(target=gitinfo.cached_display, args=(str(self.root),)) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.until(lambda: (self.base / "ready").exists())
+            self.assertEqual(len(created), 1)
+            with mock.patch.object(gitinfo, "_TTL", -1):
+                gitinfo.cached_display(str(self.root))  # age does not replace a live owner
+            self.assertEqual(len(created), 1)
+            gitinfo.cached_display(str(self.artifacts))
+            self.assertEqual(len(created), 2)
+        try:
+            created[1].wait(timeout=5)
+            self.assertEqual(gitinfo.cached_display(str(self.artifacts), request=False)["git"]["repo"], 0)
+        finally:
+            (self.base / "release").touch()
+            for child in created:
+                child.wait(timeout=10)
+        self.drain()
+        calls = [json.loads(line) for line in (self.base / "calls").read_text().splitlines()]
+        self.assertTrue(all(locks == "0" for _args, locks in calls))
+
+    def test_renderer_cancel_and_stdout_eof_do_not_release_probe_lock(self):
+        self.shim()
+        helper = str(Path(gitinfo.__file__).resolve())
+        code = ("import importlib.util,sys,time; s=importlib.util.spec_from_file_location('g',sys.argv[1]); "
+                "g=importlib.util.module_from_spec(s); s.loader.exec_module(g); "
+                "g.cached_display(sys.argv[2]); print('rendered',flush=True); time.sleep(10)")
+        renderer = subprocess.Popen([sys.executable, "-c", code, helper, str(self.root)],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(renderer.stdout.readline().strip(), "rendered")
+            self.until(lambda: (self.base / "ready").exists())
+            renderer.send_signal(signal.SIGTERM)  # exact task-owned caller only
+            renderer.communicate(timeout=2)  # detached probe never retains stdout
+            with self.assertRaises(BlockingIOError):
+                gitinfo._display_claim(gitinfo._display_request(str(self.root)))
+            payload = json.dumps({"cwd": str(self.root), "model": {"id": "fixture"}})
+            started = time.monotonic()
+            rendered = subprocess.run(["bash", os.environ["AGENT_HOME"] + "/adapters/claude/statusline.sh"],
+                input=payload, text=True, capture_output=True, timeout=5)
+            self.assertEqual(rendered.returncode, 0, rendered.stderr)
+            self.assertIn("unknown", rendered.stdout)
+            self.assertNotIn("no-git", rendered.stdout)
+            self.assertLess(time.monotonic() - started, 3)
+        finally:
+            if renderer.poll() is None:
+                renderer.terminate()
+                renderer.communicate(timeout=2)
+            (self.base / "release").touch()
+            self.drain()
+
+    def test_grandchild_retains_lock_after_refresh_parent_exit(self):
+        self._grandchild_keeps_owner("grandchild")
+
+    def test_closed_fd_grandchild_is_waited_by_finite_refresh_owner(self):
+        self._grandchild_keeps_owner("closed-grandchild")
+
+    def _grandchild_keeps_owner(self, mode):
+        self.shim(mode)
+        created = []
+        original = subprocess.Popen
+        def capture(*args, **kwargs):
+            child = original(*args, **kwargs)
+            created.append(child)
+            return child
+        with mock.patch.object(gitinfo.subprocess, "Popen", side_effect=capture):
+            gitinfo.cached_display(str(self.root))
+        self.until(lambda: (self.base / "grandchild").exists())
+        self.until(lambda: gitinfo.cached_display(str(self.root), request=False) is not None)
+        self.assertIsNone(created[0].poll())  # owner waits, even after direct Git exit
+        with self.assertRaises(BlockingIOError):
+            gitinfo._display_claim(gitinfo._display_request(str(self.root)))
+        (self.base / "release").touch()
+        created[0].wait(timeout=5)
+        self.assertEqual(created[0].returncode, 0)
+        self.drain()
+
+    def test_read_only_status_keeps_index_lock_and_index_bytes(self):
+        index = self.root / ".git/index"
+        before = index.read_bytes()
+        lock = self.root / ".git/index.lock"
+        lock.write_text("owned-by-another-command")
+        (self.root / "tracked").write_text("changed\n")
+        self.assertEqual(self.refresh()["git"]["dirty"], 1)
+        self.assertEqual(index.read_bytes(), before)
+        self.assertEqual(lock.read_text(), "owned-by-another-command")
+
+    def test_unknown_survives_real_harness_and_adapter_prompt_consumers(self):
+        value = self.refresh()
+        value["git"] = dict.fromkeys(gitinfo._DISPLAY_FIELDS)
+        gitinfo._publish_display(gitinfo._display_request(str(self.root)), value)
+        root = Path(os.environ["AGENT_HOME"])
+        for harness in ("codex", "opencode"):
+            done = subprocess.run([str(root / "adapters" / harness / "bin/preflight.sh"),
+                                   "prompt-signal", str(self.root), "fixture-unknown"],
+                                  capture_output=True, text=True, timeout=15)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertIn("git_operation=unknown\n", done.stdout)
+            if harness == "codex":
+                for field in ("dirty_tracked", "untracked", "extra_worktrees", "branch_done"):
+                    self.assertIn("git_" + field + "=unknown\n", done.stdout)
+        done = subprocess.run([str(root / "utilities/harness-status.sh"), str(self.root), "fixture"],
+                              capture_output=True, text=True, timeout=15)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for field in ("repo", "operation", "dirty", "worktree_count", "branch_done"):
+            self.assertIn("git_" + field + "=unknown\n", done.stdout)
+
+    def test_legacy_fallback_defers_to_exact_route_and_never_infers_done(self):
+        ps = "123 00:01 claude /autopilot-code\n"
+        with mock.patch.object(gitinfo, "_display_command", return_value=(0, ps)), \
+             mock.patch.object(gitinfo.os, "readlink", return_value=str(self.root)), \
+             mock.patch.object(gitinfo, "_display_job_stage", return_value="execute"), \
+             mock.patch.object(gitinfo.os, "scandir", side_effect=AssertionError):
+            self.assertIn("code▸execute", gitinfo._legacy_display_jobs(str(self.root), -1))
+        plans = self.root / ".agent_reports/campaigns/campaign/cycle/artifacts/plans/2026_repo"
+        plans.mkdir(parents=True)
+        (plans / "pipeline_summary.md").write_text("not completion evidence")
+        (plans / "dev_logs").mkdir()
+        with mock.patch.object(gitinfo, "_display_command", return_value=(0, ps)), \
+             mock.patch.object(gitinfo.os, "readlink", return_value=str(self.root)), \
+             mock.patch.object(gitinfo, "_display_job_stage", return_value=None):
+            result = gitinfo._legacy_display_jobs(str(self.root), -1)
+        self.assertIn("exec~", result)
+        self.assertNotIn("done", result)
+
+    def test_existing_fleet_worker_uses_optional_locks_without_api_change(self):
+        def run(argv, **kwargs):
+            self.assertEqual(kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+            return subprocess.CompletedProcess(argv, 0, stdout="2 1", stderr="")
+        with mock.patch.object(gitinfo, "_configured", return_value=True), \
+             mock.patch.object(gitinfo.subprocess, "run", side_effect=run):
+            gitinfo._worker(str(self.root), "main")
+        self.assertEqual(gitinfo._CACHE[str(self.root)][1], (2, 1))
 
 
 if __name__ == "__main__":

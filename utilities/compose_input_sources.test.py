@@ -82,6 +82,23 @@ class SourceBase(T.ProducerTestBase):
         self.assertEqual(R.compose_card(route), R.compose_card(baseline))
 
 
+class ClassificationFreshnessTest(SourceBase):
+    def test_display_snapshot_does_not_freeze_selected_cycle_or_writer(self):
+        first = self.cycle()
+        module = sys.modules["artifact_producer"]
+        with R.compose_campaign_snapshot():
+            with mock.patch.object(module, "read_cycle_record", side_effect=AssertionError("summary cycle census")):
+                selection = R.compose_campaign_selection({"artifact_root": str(self.root), "campaign_key": "k163"})
+            self.assertEqual(selection["mode"], "join")
+            second = self.cycle()
+            self.assertNotEqual(first["cycle_id"], second["cycle_id"])
+            route = self.compose(campaign_key="k163")
+            sources = {s["cycle_id"] for node in route["nodes"]
+                       for s in (node.get("input_sources") or {}).values()}
+            self.assertEqual(sources, {second["cycle_id"]})
+            self.assertEqual(R.compose_campaign_selection(route)["mode"], "join")
+
+
 class NoSourceRegressionTest(SourceBase):
     def test_implicit_frame_filter_uses_catalog_names_and_borrowed_relocations(self):
         registry = TOPO.load_registry()

@@ -12,6 +12,9 @@ import subprocess
 import tempfile
 import time
 import unittest
+import json
+import sys
+import signal
 from unittest import mock
 
 
@@ -170,17 +173,19 @@ class WorktreeCleanupTests(unittest.TestCase):
 
     def test_read_only_status_passes_optional_lock_setting(self):
         path = self.fx.add_worktree("readonly-status")
-        original_run = CLEANUP.subprocess.run
-        observed = []
-
-        def capture_status(argv, **kwargs):
-            if argv[:3] == ["git", "-C", str(path)] and "status" in argv:
-                observed.append(kwargs.get("env", {}).get("GIT_OPTIONAL_LOCKS"))
-            return original_run(argv, **kwargs)
-
-        with mock.patch.object(CLEANUP.subprocess, "run", side_effect=capture_status):
+        real_git = shutil.which("git")
+        bindir = self.fx.root / "optional-lock-bin"
+        bindir.mkdir()
+        log = self.fx.root / "optional-lock-env"
+        shim = bindir / "git"
+        shim.write_text("#!/bin/sh\n"
+                        'for arg do if [ "$arg" = status ]; then\n'
+                        'printf "%s\\n" "$GIT_OPTIONAL_LOCKS" >> ' + shlex.quote(str(log)) + '\n'
+                        'fi; done\nexec ' + shlex.quote(real_git) + ' "$@"\n')
+        shim.chmod(0o755)
+        with mock.patch.dict(os.environ, {"PATH": str(bindir) + os.pathsep + os.environ["PATH"]}):
             CLEANUP.evaluate(path, self.fx.jobs, None)
-        self.assertEqual(observed, ["0"])
+        self.assertEqual(log.read_text().splitlines(), ["0"])
 
     def test_default_remote_accepts_merge_from_separate_clone_with_stale_main(self):
         path = self.fx.add_worktree("remote-merged", with_commit=True)
@@ -665,6 +670,221 @@ class WorktreeCleanupTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("status=no-candidates", result.stdout)
         self.assertTrue(registered.exists())
+
+
+class BatchCleanupTests(unittest.TestCase):
+    def setUp(self):
+        self.fx = CleanupFixture()
+        self.addCleanup(self.fx.close)
+
+    def register(self, paths):
+        self.fx.jobs.write_text("".join(
+            f"now\tdone\t{self.fx.repo}\t{p}\t{p.name}\t"
+            f"attempt_schema_version=2,attempt_id=att-{p.name},dispatch_depth=1,"
+            "transport=headless,execution_surface=registered-headless,registered_worker=1,"
+            "fallback_hop=same-harness-headless,capability=autopilot-code,harness=codex\n"
+            for p in paths))
+
+    def apply(self, *, check=False):
+        argv = [str(SCRIPT), "--check" if check else "--apply", "--all-eligible",
+                "--repo", str(self.fx.repo), "--jobs", str(self.fx.jobs), "--audit", str(self.fx.audit)]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = CLEANUP.main(argv)
+        return result, output.getvalue()
+
+    def test_three_removals_share_stable_census_fetch_registry_and_keep_branches(self):
+        paths = [self.fx.add_worktree(f"batch-{i}") for i in range(3)]
+        unrelated = self.fx.add_worktree("unregistered-keep")
+        self.register(paths)
+        import dispatch_registry_cache as registry
+        registry.clear_cache()
+        registry.reset_metrics()
+        with mock.patch.object(CLEANUP, "worktree_entries", wraps=CLEANUP.worktree_entries) as census, \
+                mock.patch.object(CLEANUP, "fetch_remote_commit", wraps=CLEANUP.fetch_remote_commit) as fetch, \
+                mock.patch.object(CLEANUP, "process_snapshot", wraps=CLEANUP.process_snapshot) as proc, \
+                mock.patch.object(CLEANUP, "run", wraps=CLEANUP.run) as commands:
+            code, output = self.apply()
+        self.assertEqual(code, 0, output)
+        self.assertEqual((census.call_count, fetch.call_count, proc.call_count), (1, 1, 4))
+        self.assertEqual(registry.metrics_snapshot()["content_reads"], 1)
+        self.assertEqual(sum(c.args[0][-2:] == ["worktree", "prune"] for c in commands.call_args_list), 1)
+        self.assertEqual(sum("merge-base" in c.args[0] for c in commands.call_args_list), 1)
+        self.assertEqual(sum("rev-list" in c.args[0] for c in commands.call_args_list), 1)
+        self.assertEqual(output.count("status=removed"), 3)
+        self.assertEqual(len(self.fx.audit.read_text().splitlines()), 3)
+        self.assertTrue(unrelated.exists())
+        for path in paths:
+            self.assertFalse(path.exists())
+            run(["git", "-C", str(self.fx.repo), "show-ref", "--verify", f"refs/heads/{path.name}"])
+        print("cleanup-batch-counts=" + json.dumps({"K": 3, "census": 1, "fetch": 1,
+              "registry_content_reads": 1, "stable_proc": 1, "mutable_proc_rechecks": 3,
+              "prune": 1, "private_worktrees_removed": 3, "branches_removed": 0}))
+
+    def test_mid_pass_mutable_changes_preserve_target(self):
+        for change in ("dirty", "untracked", "head", "branch", "index-lock", "operation",
+                       "registry", "paused", "retained", "tracking", "local-ref", "remote-url", "new-cwd", "unknown-proc"):
+            with self.subTest(change=change):
+                path = self.fx.add_worktree("mutable-" + change)
+                self.register([path])
+                owned = []
+                original = CLEANUP.CleanupPass.before_remove
+                gitdir = Path(run(["git", "-C", str(path), "rev-parse", "--absolute-git-dir"]).stdout.strip())
+
+                def mutate(context, target, *args):
+                    if change == "dirty":
+                        (path / "source.txt").write_text("changed\n")
+                    elif change == "untracked":
+                        (path / "new.txt").write_text("new\n")
+                    elif change == "head":
+                        run(["git", "-C", str(path), "commit", "--allow-empty", "-qm", "new head"])
+                    elif change == "branch":
+                        run(["git", "-C", str(path), "checkout", "-qb", "changed-branch"])
+                    elif change == "index-lock":
+                        (gitdir / "index.lock").write_text("preserve\n")
+                    elif change == "operation":
+                        (gitdir / "MERGE_HEAD").write_text(run(["git", "-C", str(path), "rev-parse", "HEAD"]).stdout)
+                    elif change == "registry":
+                        with self.fx.jobs.open("a") as stream:
+                            stream.write(f"now\topen\t{path}\t{path}\tnew\tpid={os.getpid()}\n")
+                    elif change == "paused":
+                        with self.fx.jobs.open("a") as stream:
+                            stream.write(f"now\tdone\t{path}\t{path}\tpaused\tnote=dead-worker-blocked,failure_class=blocked\n")
+                    elif change == "retained":
+                        import dispatch_owner_input as owner_input
+                        state = owner_input._path(self.fx.jobs, "att-" + path.name)
+                        state.parent.mkdir(parents=True, exist_ok=True)
+                        state.write_text(json.dumps({"schema_version": 1, "attempt_id": "att-" + path.name,
+                                                    "requests": [{"state": "retained"}]}))
+                    elif change == "tracking":
+                        run(["git", "-C", str(self.fx.repo), "update-ref", "-d", "refs/remotes/origin/main"])
+                    elif change == "local-ref":
+                        run(["git", "-C", str(self.fx.repo), "commit", "--allow-empty", "-qm", "unpushed"])
+                    elif change == "remote-url":
+                        run(["git", "-C", str(self.fx.repo), "remote", "set-url", "origin", str(self.fx.root / "unknown-remote")])
+                    elif change == "new-cwd":
+                        owned.append(subprocess.Popen(["sleep", "30"], cwd=path))
+                    if change == "unknown-proc":
+                        with mock.patch.object(CLEANUP, "process_cwds", return_value=("procfs-unknown", [])):
+                            return original(context, target, *args)
+                    return original(context, target, *args)
+
+                try:
+                    with mock.patch.object(CLEANUP.CleanupPass, "before_remove", mutate):
+                        code, output = self.apply()
+                    self.assertEqual(code, 3, output)
+                    self.assertTrue(path.exists(), output)
+                    self.assertNotIn("status=removed", output)
+                    self.assertFalse(self.fx.audit.exists())
+                finally:
+                    for child in owned:
+                        child.terminate()
+                        child.wait(timeout=5)
+                # Each subtest owns a new independent fixture, including refs.
+                self.fx.close()
+                self.fx = CleanupFixture()
+                self.addCleanup(self.fx.close)
+
+    def test_pass_interrupt_after_first_remove_audits_and_prunes_once(self):
+        paths = [self.fx.add_worktree(f"interrupt-{i}") for i in range(3)]
+        self.register(paths)
+        original = CLEANUP.CleanupPass.before_remove
+        calls = []
+        def interrupt(context, target, *args):
+            calls.append(target)
+            if len(calls) == 2:
+                raise KeyboardInterrupt("fixture pass cancelled")
+            return original(context, target, *args)
+        with mock.patch.object(CLEANUP.CleanupPass, "before_remove", interrupt), \
+                mock.patch.object(CLEANUP, "run", wraps=CLEANUP.run) as commands, \
+                self.assertRaises(KeyboardInterrupt):
+            self.apply()
+        self.assertFalse(paths[0].exists())
+        self.assertTrue(all(p.exists() for p in paths[1:]))
+        self.assertEqual(len(self.fx.audit.read_text().splitlines()), 1)
+        self.assertEqual(sum(c.args[0][-2:] == ["worktree", "prune"] for c in commands.call_args_list), 1)
+
+    def test_observation_timeout_drains_detached_owned_child(self):
+        pidfile = self.fx.root / "probe.pid"
+        program = ("import subprocess,sys,time; "
+                   "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],"
+                   "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                   "open(sys.argv[1],'w').write(str(p.pid)); time.sleep(30)")
+        with mock.patch.object(CLEANUP, "OBSERVATION_TIMEOUT", 0.1), self.assertRaisesRegex(RuntimeError, "timed out"):
+            CLEANUP.run([sys.executable, "-c", program, str(pidfile)])
+        self.assertFalse(Path("/proc", pidfile.read_text()).exists())
+
+    def test_observation_cancel_drains_owned_child_and_restores_handler(self):
+        pidfile = self.fx.root / "cancel.pid"
+        program = ("import os,sys,signal,time; open(sys.argv[1],'w').write(str(os.getpid())); "
+                   "time.sleep(.1); os.kill(os.getppid(),signal.SIGTERM); time.sleep(30)")
+        before = signal.getsignal(signal.SIGTERM)
+        # The immediate parent is the private observer. Its cancellation
+        # becomes an unavailable result after exact descendant teardown.
+        with self.assertRaisesRegex(RuntimeError, "observation unavailable"):
+            CLEANUP.run([sys.executable, "-c", program, str(pidfile)])
+        self.assertEqual(signal.getsignal(signal.SIGTERM), before)
+        self.assertFalse(Path("/proc", pidfile.read_text()).exists())
+
+    def test_observation_does_not_claim_callers_other_children(self):
+        sibling = subprocess.Popen(["sleep", "30"], cwd=self.fx.root)
+        try:
+            CLEANUP.run([sys.executable, "-c", "pass"])
+            self.assertIsNone(sibling.poll())
+            self.assertEqual(os.readlink(f"/proc/{sibling.pid}/cwd"), str(self.fx.root))
+        finally:
+            sibling.terminate()
+            sibling.wait(timeout=5)
+
+    def test_unsettled_observation_stops_later_removals_and_retains_partial_audit(self):
+        paths = [self.fx.add_worktree(f"unsettled-{i}") for i in range(3)]
+        self.register(paths)
+        original = CLEANUP.run
+        def unknown(argv, **kwargs):
+            if "status" in argv and str(paths[1]) in argv:
+                raise CLEANUP.UnsettledObservation("fixture unreadable owned descendant")
+            return original(argv, **kwargs)
+        with mock.patch.object(CLEANUP, "run", side_effect=unknown) as calls:
+            code, output = self.apply()
+        self.assertEqual(code, 3, output)
+        self.assertIn("observation-descendants-unresolved", output)
+        self.assertFalse(paths[0].exists())
+        self.assertTrue(all(p.exists() for p in paths[1:]))
+        self.assertEqual(len(self.fx.audit.read_text().splitlines()), 1)
+        self.assertFalse(any(c.args[0][-2:] == ["worktree", "prune"] for c in calls.call_args_list))
+
+    def test_owner_input_unknown_or_unfinished_state_is_not_deletion_authority(self):
+        import dispatch_owner_input as owner_input
+        path = self.fx.add_worktree("input-guard")
+        self.register([path])
+        rows = CLEANUP.registry_rows(self.fx.jobs)
+        state = owner_input._path(self.fx.jobs, "att-" + path.name)
+        state.parent.mkdir(parents=True, exist_ok=True)
+        for requests, protected in ((None, True), ([{}], True), ([{"state": "future-unknown"}], True),
+                ([{"state": "accepted"}], True), ([{"state": "sending"}], True),
+                ([{"state": "delivery-unknown"}], True), ([{"state": "retained"}], True),
+                ([{"state": "turn-completed"}], False)):
+            with self.subTest(requests=requests):
+                state.write_text(json.dumps({"schema_version": 1, "attempt_id": "att-" + path.name,
+                                             "requests": requests}))
+                self.assertEqual(CLEANUP.registry_duty(self.fx.jobs, path, rows), protected)
+
+    def test_proc_cwd_map_is_lexical_and_unreadable_same_uid_is_unknown(self):
+        entry = self.fx.root / "123456"
+        entry.mkdir()
+        native_iterdir = Path.iterdir
+        def entries(path):
+            return iter([entry]) if path == Path("/proc") else native_iterdir(path)
+        with mock.patch.object(Path, "iterdir", entries), \
+                mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
+                mock.patch.object(CLEANUP.os, "readlink", return_value=str(self.fx.repo / "sub")), \
+                mock.patch.object(CLEANUP, "normalize", side_effect=AssertionError("no NAS resolve")):
+            kind, rows = CLEANUP.process_snapshot()
+            self.assertEqual((kind, rows[0][2]), ("procfs", self.fx.repo / "sub"))
+        with mock.patch.object(Path, "iterdir", entries), \
+                mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
+                mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("unknown")):
+            self.assertEqual(CLEANUP.process_snapshot()[0], "procfs-unknown")
 
 
 if __name__ == "__main__":
