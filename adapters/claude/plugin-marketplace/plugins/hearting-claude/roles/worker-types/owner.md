@@ -61,6 +61,11 @@ HEAD cannot launch children; create a new branch at the existing HEAD with
 `git switch -c <new-branch>` before compiling or dispatching. Do not reset or
 discard the worktree to repair this state.
 
+A verified launched replacement owner may observe and consume the earlier
+supervised-resource result through shared owner-route lineage. The registry
+entry and receipt remain bound to the original attempt; ordinary start checks
+the current input lease and corrections before claiming the successor.
+
 Only a registered attempt mints a receipt. Unregistered background work — a shell
 job started with `&`, a detached helper, a cross-harness CLI launched in the
 background — mints none, and ending the turn ends the session together with every

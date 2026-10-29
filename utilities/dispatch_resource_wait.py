@@ -267,14 +267,29 @@ def current_responsibility(row, *, route, owner_attempt_id, session_id, jobs, hi
         row_route_id = owner.get("route_id") or holder.get("route_id")
         row_route_hash = owner.get("route_hash") or holder.get("route_hash")
         row_jobs = owner.get("jobs") or row.get("jobs")
-        if (owner.get("parent_attempt_id") != owner_attempt_id
-                or row.get("parent_attempt_id") != owner_attempt_id
-                or owner.get("session_id") != session_id
+        source_attempt_id = row.get("parent_attempt_id")
+        same_owner = source_attempt_id == owner_attempt_id
+        if (not source_attempt_id or owner.get("parent_attempt_id") != source_attempt_id
+                or not owner.get("session_id")
+                or (same_owner and owner.get("session_id") != session_id)
                 or row_route_id != route.get("route_id")
                 or row_route_hash != route.get("route_hash")
                 or (expected_jobs is not None
                     and (row_jobs or "") != expected_jobs)):
             return None
+        if not same_owner:
+            # Keep the origin row/session untouched. The existing replacement
+            # claim and verified owner-route lineage prove its current consumer.
+            import route_authority as AUTHORITY
+            if not AUTHORITY.resource_owner_consumer_matches(
+                    expected_jobs or row_jobs, source_attempt_id=source_attempt_id,
+                    consumer_attempt_id=owner_attempt_id,
+                    resource_route_file=holder["origin"].get("route_file"),
+                    resource_route_id=row_route_id, resource_route_hash=row_route_hash,
+                    resource_owner_pid=owner.get("owner_pid"),
+                    resource_owner_start=owner.get("owner_start"),
+                    require_live=not historical):
+                return None
         return holder
     import owner_route_binding as OWNER
     selected = expected_jobs or owner.get("jobs")
@@ -478,7 +493,11 @@ def context(args, control):
         proven = bool(holder.get("observed", True) and holder.get("inherited")
                       and (holder.get("route_id"), holder.get("route_hash"))
                       == (current_route["route_id"], current_route["route_hash"]))
-        if not proven and owner.get("parent_attempt_id") != args.parent_attempt_id:
+        responsibility = current_responsibility(
+            row, route=current_route, owner_attempt_id=args.parent_attempt_id,
+            session_id=control.thread_id, jobs=expected_jobs)
+        if (not proven and owner.get("parent_attempt_id") != args.parent_attempt_id
+                and responsibility is None):
             continue
         if not holder.get("observed", True):
             if str(holder.get("unobserved_reason")).startswith("route-identity-mismatch"):
@@ -491,9 +510,6 @@ def context(args, control):
             if (binding is None or binding.route_file != current_route["route_file"]
                     or binding.route_id != args.route_id or binding.route_hash != args.route_hash):
                 raise JOIN.JoinContractError("resource-owner-route-changed")
-        responsibility = current_responsibility(
-            row, route=current_route, owner_attempt_id=args.parent_attempt_id,
-            session_id=control.thread_id, jobs=expected_jobs)
         if responsibility is None:
             raise JOIN.JoinContractError("resource-owner-binding-invalid")
         origin = holder["origin"]
@@ -511,6 +527,14 @@ def context(args, control):
         if parent.status not in {"open", "running"}:
             raise JOIN.JoinContractError("resource-owner-not-open")
         OWNER._owner_row_proof(parent.raw.split("\t"), parent.metadata, route=route, environ={})
+        if (not holder.get("inherited")
+                and row.get("parent_attempt_id") != args.parent_attempt_id):
+            import dispatch_owner_input as INPUT
+            with INPUT._locked(jobs, args.parent_attempt_id) as (_, value):
+                _current_parent, target = INPUT._target(jobs, args.parent_attempt_id)
+                if (value is None or value.get("target") != target
+                        or value.get("thread_id") != control.thread_id):
+                    raise JOIN.JoinContractError("resource-owner-input-binding-changed")
         if (row.get("route") != origin.get("route_file")
                 or row.get("route_id") not in (None, origin.get("route_id"))
                 or row.get("node") != node
@@ -526,7 +550,8 @@ def context(args, control):
                 or armed.get("successor_external") is not True or armed.get("successor_command") is not None
                 or (not holder["inherited"]
                     and (row.get("route") != current_route["route_file"]
-                         or pinned_owner_identity not in DC.attempt_identity_lineage(parent.metadata)))):
+                         or (row.get("parent_attempt_id") == args.parent_attempt_id
+                             and pinned_owner_identity not in DC.attempt_identity_lineage(parent.metadata))))):
             raise JOIN.JoinContractError("resource-owner-binding-invalid")
         result.append((armed, row))
     return sup, route, ledger, result
