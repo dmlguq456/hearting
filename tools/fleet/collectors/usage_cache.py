@@ -1,24 +1,31 @@
 """Fleet-owned, non-blocking last-good usage cache and per-harness lease."""
+import fcntl
 import json
 import math
 import os
 import tempfile
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 
 SCHEMA_VERSION = 1
 FRESH_WINDOWS = {"claude": 180.0, "codex": 60.0, "opencode": 180.0}
 STALE_MAX = 900.0
 RETRY_AFTER = 60.0
 LEASE_MAX = 60.0
-_ERRORS = {"auth", "subscription-missing", "missing-credential", "unknown"}
+_ERRORS = {"auth", "subscription-missing", "missing-credential", "unknown",
+           "rate-limit", "timeout", "network", "response-invalid"}
 _REASONS = {"credential-not-found", "credential-expired", "authentication-rejected",
             "subscription-missing", "credential-store-unavailable",
-            "credential-store-read-failed", "credential-invalid"}
+            "credential-store-read-failed", "credential-invalid", "credential-changed",
+            "usage-rate-limited", "usage-timeout", "usage-unreachable",
+            "usage-response-invalid", "usage-http-error", "usage-unreadable"}
 
 FETCHERS = {}
 _LOCK = threading.RLock()
 _THREADS = {}
+_CLAUDE_LOCK = threading.RLock()
 
 
 def state_dir():
@@ -42,8 +49,7 @@ def _fetcher(harness):
         return FETCHERS[harness]
     try:
         if harness == "claude":
-            from . import usage_api
-            return usage_api.account_usage
+            return _fetch_claude
         if harness == "codex":
             from . import codex
             return codex.account_usage
@@ -65,6 +71,11 @@ def _valid_time(value, now):
             and math.isfinite(value) and value <= now)
 
 
+def _valid_retry(value):
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value >= 0)
+
+
 def _error_observation(item, now, stale_max):
     observation = item.get("error_observation") if isinstance(item, dict) else None
     if isinstance(observation, dict):
@@ -82,22 +93,51 @@ def _error_observation(item, now, stale_max):
         error = payload.get("error")
         reason = payload.get("reason")
         account_scope = payload.get("account_scope")
-    if (not _valid_time(observed_at, now) or now - observed_at > stale_max):
+    retry_at = observation.get("retry_at") if isinstance(observation, dict) else None
+    waiting = _valid_retry(retry_at) and now < retry_at
+    if (not _valid_time(observed_at, now)
+            or (now - observed_at > stale_max and not waiting)):
         return None
     if not isinstance(error, str) or error not in _ERRORS:
         return None
-    return {"error": error, "reason": reason if isinstance(reason, str)
+    result = {"error": error, "reason": reason if isinstance(reason, str)
             and reason in _REASONS else None,
             "observed_at": observed_at,
             "account_scope": account_scope}
+    if _valid_retry(retry_at):
+        result["retry_at"] = retry_at
+    return result
 
 
 def read(harness, now=None, stale_max=None):
+    if harness == "claude":
+        from . import usage_api
+        credential = usage_api._credential()
+        snapshot = _read(harness, now, stale_max, credential=credential)
+        current = usage_api._credential()
+        if current.generation != credential.generation:
+            return _credential_unknown(current, time.time() if now is None else float(now))
+        return snapshot
+    return _read(harness, now, stale_max)
+
+
+def _credential_unknown(credential, now):
+    snapshot = _unknown()
+    snapshot["error_observation"] = {
+        "error": "missing-credential" if credential.reason == "credential-not-found" else "unknown",
+        "reason": "credential-changed" if credential.generation else credential.reason,
+        "observed_at": now, "account_scope": "current-credential"}
+    return snapshot
+
+
+def _read(harness, now=None, stale_max=None, *, credential=None):
     """Last-good snapshot. `stale_max` widens the Fleet default (15 min) for a
     reader that prefers an older true reading over none, e.g. dispatch placement
     after a transient probe failure (2026-09-16: codex backend 503 at compose)."""
     now = time.time() if now is None else float(now)
     stale_max = STALE_MAX if stale_max is None else float(stale_max)
+    if harness == "claude" and not credential.generation:
+        return _credential_unknown(credential, now)
     try:
         with open(_path(harness), encoding="utf-8") as fh:
             item = json.load(fh)
@@ -106,6 +146,8 @@ def read(harness, now=None, stale_max=None):
     if not isinstance(item, dict) or item.get("schema_version") != SCHEMA_VERSION \
             or item.get("harness") != harness or not isinstance(item.get("payload"), dict):
         return _unknown()
+    if harness == "claude" and item.get("_credential_generation") != credential.generation:
+        return _credential_unknown(credential, now)
     error_observation = _error_observation(item, now, stale_max)
     fetched = item.get("fetched_at")
     attempted = item.get("attempted_at")
@@ -124,7 +166,8 @@ def read(harness, now=None, stale_max=None):
             "error_observation": error_observation}
 
 
-def _write(harness, payload, fetched_at, attempted_at, error_observation=None):
+def _write(harness, payload, fetched_at, attempted_at, error_observation=None,
+           *, credential_generation=None):
     directory = state_dir()
     os.makedirs(directory, exist_ok=True)
     providers = {}
@@ -141,6 +184,7 @@ def _write(harness, payload, fetched_at, attempted_at, error_observation=None):
                              ("error", "reason", "account_scope")}
         error_observation["observed_at"] = attempted_at
     if isinstance(error_observation, dict):
+        retry_at = error_observation.get("retry_at")
         error_observation = {
             "error": error_observation.get("error")
                      if isinstance(error_observation.get("error"), str)
@@ -152,9 +196,13 @@ def _write(harness, payload, fetched_at, attempted_at, error_observation=None):
             "account_scope": error_observation.get("account_scope"),
             "observed_at": error_observation.get("observed_at"),
         }
+        if _valid_retry(retry_at):
+            error_observation["retry_at"] = retry_at
     item = {"schema_version": SCHEMA_VERSION, "harness": harness,
             "fetched_at": fetched_at, "attempted_at": attempted_at,
             "payload": payload if isinstance(payload, dict) else {}, "providers": providers}
+    if harness == "claude" and credential_generation:
+        item["_credential_generation"] = credential_generation
     if isinstance(error_observation, dict):
         item["error_observation"] = error_observation
     fd, temp = tempfile.mkstemp(prefix=".%s." % harness, dir=directory, text=True)
@@ -174,7 +222,9 @@ def record(harness, payload, now=None):
     """Write-through from any successful ad-hoc probe (dispatch placement, a
     manual `harness-capacity.py --refresh`), so one reading serves every reader.
     Only a dict payload counts; anything else is a no-op."""
-    if not isinstance(payload, dict):
+    # An ad-hoc dict cannot prove which Claude credential made its HTTP request.
+    # Claude publication belongs to the owned fetch/lease path below.
+    if harness == "claude" or not isinstance(payload, dict):
         return False
     now = time.time() if now is None else float(now)
     try:
@@ -187,6 +237,8 @@ def record(harness, payload, now=None):
 def record_attempt(harness, now=None):
     """Note a failed probe without discarding the last-good payload; the file
     mtime moves so stale-driven refreshers back off instead of retrying every tick."""
+    if harness == "claude":
+        return False
     now = time.time() if now is None else float(now)
     previous = read(harness, now=now, stale_max=float("inf"))
     try:
@@ -307,7 +359,133 @@ def provider_records(harness, account_scopes=None):
     return sorted(rows, key=lambda row: (row["provider"], row["model"], row["observed_at"] or 0))[-32:]
 
 
+@contextmanager
+def _claude_mutex():
+    """Serialize only Claude lease/publication changes across threads/processes.
+
+    Keep the lock inode stable. HTTP and worker joins never run under this lock.
+    """
+    with _CLAUDE_LOCK:
+        os.makedirs(state_dir(), exist_ok=True)
+        fd = os.open(os.path.join(state_dir(), ".claude.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+
+
+def _claude_lease():
+    try:
+        with open(_lease_path("claude"), encoding="utf-8") as fh:
+            lease = json.load(fh)
+        return lease if isinstance(lease, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _owns_claude_lease(owner, credential):
+    lease = _claude_lease()
+    return lease.get("owner") == owner and lease.get("generation") == credential.generation
+
+
+def _request_claude_refresh(now=None):
+    from . import usage_api
+    now = time.time() if now is None else float(now)
+    try:
+        with _claude_mutex():
+            credential = usage_api._credential()
+            if not credential.generation:
+                return False
+            snapshot = _read("claude", now, credential=credential)
+            error = snapshot.get("error_observation") or {}
+            if _valid_retry(error.get("retry_at")) and now < error["retry_at"]:
+                return False
+            if snapshot.get("freshness") == "fresh" and not error:
+                return False
+            attempted = snapshot.get("attempted_at")
+            if (not _valid_retry(error.get("retry_at")) and _valid_time(attempted, now)
+                    and now - attempted < RETRY_AFTER):
+                return False
+            lease = _claude_lease()
+            if (lease.get("generation") == credential.generation
+                    and _valid_time(lease.get("started_at"), now)
+                    and now - lease["started_at"] < LEASE_MAX):
+                return False
+            owner = uuid.uuid4().hex
+            # All lease writers/read-modify-writers share the mutex. Replacement
+            # does not wait for an older account's HTTP request or thread.
+            with open(_lease_path("claude"), "w", encoding="utf-8",
+                      opener=lambda path, flags: os.open(path, flags, 0o600)) as fh:
+                json.dump({"owner": owner, "generation": credential.generation,
+                           "started_at": now}, fh)
+            thread = threading.Thread(target=_claude_worker, args=(credential, owner),
+                                      name="fleet-usage-claude", daemon=True)
+            with _LOCK:
+                _THREADS["claude"] = thread
+            try:
+                thread.start()
+            except Exception:
+                if _owns_claude_lease(owner, credential):
+                    os.unlink(_lease_path("claude"))
+                with _LOCK:
+                    if _THREADS.get("claude") is thread:
+                        _THREADS.pop("claude", None)
+                return False
+        return True
+    except OSError:
+        return False
+
+
+def _claude_worker(credential, owner):
+    from . import usage_api
+    try:
+        try:
+            fetcher = _fetcher("claude")
+            payload = fetcher(credential) if fetcher else None
+        except Exception:
+            payload = {"error": "unknown", "reason": "usage-unreadable"}
+        with _claude_mutex():
+            if (not _owns_claude_lease(owner, credential)
+                    or usage_api._credential().generation != credential.generation):
+                return
+            now = time.time()
+            if isinstance(payload, dict) and "error" not in payload:
+                _write("claude", payload, now, now,
+                       credential_generation=credential.generation)
+            else:
+                previous = _read("claude", now, stale_max=float("inf"), credential=credential)
+                error = payload if isinstance(payload, dict) else {}
+                retry_at = error.get("retry_at")
+                # Preserve the existing minimum retry interval as well as the
+                # server's deadline. This is the effective next allowed attempt.
+                retry_at = max(now + RETRY_AFTER, retry_at) if _valid_retry(retry_at) else now + RETRY_AFTER
+                diagnostic = {"error": error.get("error", "unknown"),
+                              "reason": error.get("reason", "usage-unreadable"),
+                              "account_scope": "current-credential", "observed_at": now,
+                              "retry_at": retry_at}
+                _write("claude", previous.get("payload") or {},
+                       previous.get("observed_at") or 0.0, now,
+                       error_observation=diagnostic, credential_generation=credential.generation)
+    except OSError:
+        pass
+    finally:
+        try:
+            with _claude_mutex():
+                if _owns_claude_lease(owner, credential):
+                    os.unlink(_lease_path("claude"))
+        except OSError:
+            pass
+        with _LOCK:
+            if _THREADS.get("claude") is threading.current_thread():
+                _THREADS.pop("claude", None)
+
+
 def _worker(harness):
+    # Claude's owned worker requires the captured HTTP credential and lease id.
+    # It must never fall through this legacy, unbound publication path.
+    if harness == "claude":
+        return
     try:
         fetcher = _fetcher(harness)
         payload = fetcher() if fetcher else None
@@ -368,6 +546,8 @@ def _worker(harness):
 
 
 def request_refresh(harness, now=None):
+    if harness == "claude":
+        return _request_claude_refresh(now)
     now = time.time() if now is None else float(now)
     snapshot = read(harness, now=now)
     if snapshot.get("freshness") == "fresh":
@@ -405,6 +585,13 @@ def request_refresh(harness, now=None):
 def refresh_in_flight(harness, now=None, max_age=LEASE_MAX):
     """Whether a live usage refresh still owns a non-expired harness lease."""
     now = time.time() if now is None else float(now)
+    if harness == "claude":
+        from . import usage_api
+        credential = usage_api._credential()
+        lease = _claude_lease()
+        return bool(credential.generation and lease.get("generation") == credential.generation
+                    and _valid_time(lease.get("started_at"), now)
+                    and now - lease["started_at"] < min(LEASE_MAX, float(max_age)))
     try:
         lease_age = now - os.stat(_lease_path(harness)).st_mtime
         return 0 <= lease_age < min(LEASE_MAX, float(max_age))
@@ -416,12 +603,14 @@ def account_usage(harness, usage="cache-only", now=None):
     snapshot = read(harness, now=now)
     if usage == "refresh":
         request_refresh(harness, now=now)
+        if harness == "claude":
+            return read(harness, now=now)
     return snapshot
 
 
-def _fetch_claude():
+def _fetch_claude(credential):
     from . import usage_api
-    return usage_api._fetch()
+    return usage_api._fetch(credential)
 
 
 def _fetch_codex():
