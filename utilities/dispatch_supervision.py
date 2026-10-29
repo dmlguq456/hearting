@@ -787,7 +787,7 @@ def _settlement_decision(status: str, meta: dict):
     return proof, decision
 
 
-def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None) -> bool:
+def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None, *, notice_context=None) -> bool:
     import route_parent_close
     attempts = [aid for aid in attempts if aid not in rows or not route_parent_close.row_requested(rows[aid][1], jobs)]
     if not attempts:
@@ -832,9 +832,18 @@ def _pending(rows: dict, attempts: list[str], jobs: Path, reason=None) -> bool:
         # because the workflow ledger is still flushing; closure-blocked remains
         # a distinct reason and does not take this branch.
         if meta.get("workflow_completion") == "runtime-v1":
-            from dispatch_terminal_commit import owner_completion_pending
-            if not route_closed and owner_completion_pending(jobs, status, meta):
-                return True
+            if not route_closed:
+                if notice_context is not None:
+                    notice_context.owner_completion(jobs, status, meta)
+                    completion = {"job_registry": str(jobs), "recipient_thread_id": meta.get("parent_sid"),
+                                  "monitored_attempt_ids": attempts}
+                    if _recorded_completion_result(completion, require_ack=False,
+                            notice_context=notice_context) is None:
+                        return True
+                else:
+                    from dispatch_terminal_commit import owner_completion_pending
+                    if owner_completion_pending(jobs, status, meta):
+                        return True
     return False
 
 
@@ -1025,9 +1034,11 @@ def gateway_delivery_id(receipt: dict) -> str:
     return "sn-dlv-" + receipt_digest(validate(receipt)).removeprefix("sha256:")
 
 
-def notice_is_current(record: dict) -> bool:
+def notice_is_current(record: dict, *, notice_context=None) -> bool:
     """Shared pre-delivery check for native prompt and async carriers."""
     receipt = validate(record.get("receipt"))
+    from dispatch_notice_state import NoticeReadContext
+    notice_context = notice_context or NoticeReadContext()
     if record.get("receipt_digest") != receipt_digest(receipt):
         raise SupervisionError("supervision-digest-mismatch")
     rows = _rows(Path(receipt["job_registry"]),
@@ -1040,7 +1051,8 @@ def notice_is_current(record: dict) -> bool:
         return False
     if _cleanup_only_result(receipt) is not None:
         return False  # Retire the model wake; the cleanup controller still owns its observation.
-    return _pending(rows, receipt["monitored_attempt_ids"], Path(receipt["job_registry"]), receipt["reason"])
+    return _pending(rows, receipt["monitored_attempt_ids"], Path(receipt["job_registry"]),
+                    receipt["reason"], notice_context=notice_context)
 
 
 def _residue_text(receipt: dict) -> str:
@@ -1083,9 +1095,15 @@ def _resume_text(receipt: dict) -> str:
 
 def _acknowledged_completion_result(receipt: dict) -> dict | None:
     """Return the exact all-child receipt when its current recipient ACKed it."""
+    return _recorded_completion_result(receipt, require_ack=True)
+
+
+def _recorded_completion_result(receipt: dict, *, require_ack: bool, notice_context=None) -> dict | None:
+    """Cover all monitored attempts using existing exact receipt projections."""
     try:
         import dispatch_pending_delivery as pending
-        from dispatch_completion_join import current_attempt_row, recover_acknowledged_batch_outcome
+        from dispatch_completion_join import (current_attempt_row, recover_acknowledged_batch_outcome,
+                                               current_batch_receipt_projection)
         from dispatch_seat_handover import effective_parent
         jobs = Path(receipt["job_registry"])
         monitored = set(receipt["monitored_attempt_ids"])
@@ -1108,15 +1126,48 @@ def _acknowledged_completion_result(receipt: dict) -> dict | None:
                            if isinstance(child, dict)}
             if not attempt_ids:
                 continue
-            recovered = recover_acknowledged_batch_outcome(
-                jobs, attempt_ids, recipient_sid=target,
-                parent_attempt_id=body.get("parent_attempt_id", ""),
-                parent_completion_delivery=meta.get("parent_completion_delivery", ""))
+            # A receipt can include siblings outside the notice's monitored
+            # subset. Their effective recipients remain fresh too, even when
+            # the unchanged receipt bytes below are reused.
+            if notice_context is not None:
+                for aid in sorted(attempt_ids):
+                    member = current_attempt_row(jobs, aid)
+                    if member is None or effective_parent(member.metadata, jobs) != target:
+                        return None
+            def project(observer):
+                observer("file", jobs)
+                # Include every batch member, not only this notice's subset.
+                from dispatch_notice_state import bound_route
+                for aid in sorted(attempt_ids):
+                    member = current_attempt_row(jobs, aid)
+                    if member is None:
+                        return None
+                    member_meta = member.metadata
+                    if member_meta.get("parent_sid") and member_meta.get("delivery_id"):
+                        observer("file", pending.record_path(jobs.resolve(strict=True).parent,
+                            member_meta["parent_sid"], member_meta["delivery_id"]))
+                    bound_route(member_meta, jobs, observer=observer)
+                projection = recover_acknowledged_batch_outcome if require_ack else current_batch_receipt_projection
+                return projection(jobs, attempt_ids, recipient_sid=target,
+                    parent_attempt_id=body.get("parent_attempt_id", ""),
+                    parent_completion_delivery=meta.get("parent_completion_delivery", ""))
+            # Effective recipient and current record are always read above.
+            # Only the stored receipt projection is reused, never that authority.
+            if notice_context is not None:
+                recovered = notice_context.read(("completion", str(jobs.resolve()),
+                    tuple(sorted(attempt_ids)), target, body.get("parent_attempt_id"),
+                    meta.get("parent_completion_delivery"), require_ack), project)
+            else:
+                projection = recover_acknowledged_batch_outcome if require_ack else current_batch_receipt_projection
+                recovered = projection(jobs, attempt_ids, recipient_sid=target,
+                    parent_attempt_id=body.get("parent_attempt_id", ""),
+                    parent_completion_delivery=meta.get("parent_completion_delivery", ""))
             if recovered is None:
                 continue
             children = recovered.get("children")
             if (isinstance(children, list) and children
                     and all(isinstance(child, dict) and child.get("status") == "done"
+                            and child.get("readiness") == "ready"
                             and child.get("required_action") == "advance-completed"
                             for child in children)):
                 covered.update({child["attempt_id"]: child for child in children})
@@ -1125,7 +1176,7 @@ def _acknowledged_completion_result(receipt: dict) -> dict | None:
         return None
 
 
-def _completion_refusal_notice(receipt: dict) -> str:
+def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
     """Render late-bound refusal details from this receipt's exact owner row."""
     try:
         utility = _printed("dispatch_terminal_commit.py")
@@ -1137,17 +1188,17 @@ def _completion_refusal_notice(receipt: dict) -> str:
                           "--attempt", clean(receipt["owner_attempt_id"])])
     try:
         from dispatch_completion_join import exact_attempt_row
-        import dispatch_terminal_commit
+        from dispatch_notice_state import NoticeReadContext
         row = exact_attempt_row(Path(receipt["job_registry"]), receipt["owner_attempt_id"])
-        diagnosis = dispatch_terminal_commit.inspect_owner_completion(
+        diagnosis = (notice_context or NoticeReadContext()).owner_completion(
             Path(receipt["job_registry"]), row.status, row.metadata)
     except Exception:  # noqa: BLE001 -- closure remains controller-owned if the exact row is unavailable
         diagnosis = {}
     refusal = diagnosis.get("last_refusal") if isinstance(diagnosis, dict) else None
     if not isinstance(refusal, dict):
         checkpoint = diagnosis.get("checkpoint") if isinstance(diagnosis, dict) else None
-        detail = f" The current checkpoint is {checkpoint}." if isinstance(checkpoint, str) else ""
-        return ("No current refusal record is available." + detail
+        detail = f" The last recorded checkpoint is {checkpoint}." if isinstance(checkpoint, str) else ""
+        return ("No recorded refusal is available." + detail
                 + " The existing controller retries closure automatically; read-only diagnosis: " + command)
     reason = refusal.get("reason")
     raw_detail = refusal.get("detail", "")
@@ -1155,7 +1206,7 @@ def _completion_refusal_notice(receipt: dict) -> str:
         and raw_detail.startswith("output-invalid:")
     if reason != "output-invalid" and not nested_output_invalid:
         safe_reason = reason if isinstance(reason, str) and re.fullmatch(r"[a-z0-9-]{1,80}", reason) else "closure-refused"
-        return (f"The latest closure refusal is {safe_reason}. The existing controller retries when possible; "
+        return (f"The last recorded closure refusal is {safe_reason}. The existing controller retries when possible; "
                 "read-only diagnosis: " + command)
     # Producer validation records a semicolon-separated list of code:locator
     # values. Keep only that known shape and strip control characters.
@@ -1172,7 +1223,7 @@ def _completion_refusal_notice(receipt: dict) -> str:
     safe_remediation = (remediation if isinstance(remediation, str) and "\n" not in remediation and "\r" not in remediation
                         else "Correct the locator, mark its exact payload directory for self-exclusion, or move it outside the cycle.")
     cause = "producer-finalize-failed (output-invalid)" if nested_output_invalid else "output-invalid"
-    return (f"The latest closure refusal is {cause}: {safe_detail}. Record: {safe_path}. "
+    return (f"The last recorded closure refusal is {cause}: {safe_detail}. Record: {safe_path}. "
             f"{safe_remediation} The existing controller retries closure automatically; read-only diagnosis: {command}")
 
 
@@ -1263,7 +1314,7 @@ def continue_for_parent(record: dict, *, session_id: str, recipient_kind: str,
         return None
 
 
-def render_text(receipt: dict, *, continued: dict | None = None) -> str:
+def render_text(receipt: dict, *, continued: dict | None = None, notice_context=None) -> str:
     receipt = validate(receipt)
     completed = _cleanup_only_result(receipt)
     if completed is not None:
@@ -1365,7 +1416,7 @@ def render_text(receipt: dict, *, continued: dict | None = None) -> str:
     if receipt["reason"] == "workflow-completion-pending":
         return ("The owner result remains PASS, but workflow/route/report closure is pending. "
                 "The completion controller owns closure; this is not a running model. "
-                "The notice authorizes no new execution. " + _completion_refusal_notice(receipt))
+                "The notice authorizes no new execution. " + _completion_refusal_notice(receipt, notice_context=notice_context))
     if receipt["reason"] == "closure-blocked":
         utility = _printed("dispatch_terminal_commit.py")
         command = (f"python3 {shlex.quote(str(utility))} inspect --jobs {shlex.quote(receipt['job_registry'])} "

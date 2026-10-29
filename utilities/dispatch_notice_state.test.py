@@ -20,6 +20,37 @@ from route_identity import route_hash
 from workflow_state import WorkflowLedger
 
 
+def recorded_owner_fixture(root, *, carrier="claude-parent-runtime", session="parent", checkpoint="owner-envelope-sealed"):
+    """Synthetic exact owner; no live route, controller or producer is needed."""
+    import dispatch_contract
+    import dispatch_terminal_commit as terminal
+    from route_identity import route_id_from_hash
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=True)
+    path, jobs = root / "route.json", root / "jobs.log"
+    route = {"artifact_root": str(root), "effective_intensity": "standard", "nodes": []}
+    route["route_hash"] = route_hash(route)
+    route["route_id"] = route_id_from_hash(route["route_hash"])
+    path.write_text(json.dumps(route))
+    meta = {"attempt_id": "att-owner", "attempt_schema_version": "2", "worker_type": "owner", "dispatch_depth": "1",
+            "registered_worker": "1", "harness": "claude", "workflow_completion": "runtime-v1",
+            "note": "completed-marker", "failure_class": "pass", "parent_sid": session, "parent_completion_delivery": carrier,
+            "owner_route_file": str(path), "owner_route_id": route["route_id"],
+            "owner_route_hash": route["route_hash"], "pid": "99999999", "pid_start": "1", "pgid": "99999999",
+            "pid_observer_ns": dispatch_contract.process_namespace_identity()}
+    jobs.write_text("2026-10-29T00:00:00Z\tdone\t/r\t/w\towner\t" +
+                    ",".join(f"{k}={v}" for k, v in meta.items()) + "\n")
+    request = terminal.TerminalCommitRequest(path, "att-owner", jobs, root)
+    state = {"schema_version": 1, "route_id": route["route_id"], "route_hash": route["route_hash"],
+             "owner_attempt_id": "att-owner", "terminal_marker_digest": "marker-digest",
+             "producer_binding_digest": "producer-digest", "state": checkpoint}
+    state["terminal_commit_id"] = terminal.terminal_commit_id(
+        route_id=route["route_id"], route_hash=route["route_hash"], owner_attempt_id="att-owner",
+        marker_digest=state["terminal_marker_digest"], producer_digest=state["producer_binding_digest"])
+    terminal._atomic_json(terminal._commit_state_path(request), state)
+    return jobs, meta, request
+
+
 class NoticeTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -455,6 +486,71 @@ class NoticeTest(unittest.TestCase):
         self.path.with_suffix(".outcome.json").write_text('{"route_id":"another"}')
         self.assertEqual(sweep.sweep_deliver(self.root, "claude-parent-runtime", "parent")[0], [])
         self.assertEqual(pending.read(self.root, "parent", "delivery-notice")["state"], "claimed")
+
+    def _stored_owner_completion(self, jobs, meta):
+        from dispatch_receipt_identity import receipt_digest
+        receipt = {"schema_version": 2, "state": "ready", "parent_attempt_id": "-",
+                   "job_registry": str(jobs), "delivery_classification": "success",
+                   "children": [{"attempt_id": "att-owner", "status": "done", "readiness": "ready",
+                                 "required_action": "advance-completed"}]}
+        record = pending.create(jobs.parent, delivery_id="delivery-owner-completed",
+            recipient_kind=meta["parent_completion_delivery"], recipient_key="parent",
+            session_generation="", session_generation_supported="0", attempt_ids=["att-owner"],
+            parent_attempt_id="-", route_id=meta["owner_route_id"], route_node="_owner",
+            receipt=receipt, receipt_digest=receipt_digest(receipt), row_revisions={"att-owner": "rev-1"})
+        jobs.write_text(jobs.read_text().rstrip() +
+            ",delivery_intent=1,delivery_id=delivery-owner-completed,delivery_row_revision=rev-1," +
+            "delivery_receipt_digest=" + receipt_digest(receipt) + "\n")
+        return record
+
+    def test_exact_unreceived_success_retires_closure_but_first_completion_still_delivers(self):
+        jobs, meta, request = recorded_owner_fixture(self.root / "stored")
+        closure = supervision.materialize(jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+        self.assertTrue(notice.notice_is_current(closure))  # sealed is not completed
+        completed = self._stored_owner_completion(jobs, meta)
+        before = pending.read(jobs.parent, "parent", completed["delivery_id"])
+        self.assertFalse(notice.notice_is_current(closure))
+        self.assertIsNone(supervision._acknowledged_completion_result(closure["receipt"]))
+        self.assertTrue(notice.notice_is_current(completed, jobs=jobs))
+        self.assertEqual(pending.read(jobs.parent, "parent", completed["delivery_id"]), before)
+        claimed, _ = sweep.sweep_deliver(jobs.parent, "claude-parent-runtime", "parent")
+        self.assertEqual([r["delivery_id"] for r in claimed], [completed["delivery_id"]])
+        self.assertEqual(pending.read(jobs.parent, "parent", closure["delivery_id"])["state"], "rejected")
+
+    def test_partial_foreign_conflicted_or_corrupt_completion_never_erases_closure(self):
+        for case in ("partial", "foreign", "conflict", "corrupt", "wrong-revision", "failed"):
+            with self.subTest(case=case):
+                jobs, meta, _ = recorded_owner_fixture(self.root / case)
+                closure = supervision.materialize(jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+                completed = self._stored_owner_completion(jobs, meta)
+                context = notice.NoticeReadContext()
+                self.assertFalse(notice.notice_is_current(closure, notice_context=context))
+                if case == "partial":
+                    closure = supervision.materialize(jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+                    receipt = {**closure["receipt"], "monitored_attempt_ids": ["att-owner", "att-missing"]}
+                    self.assertIsNone(supervision._recorded_completion_result(receipt, require_ack=False))
+                    continue
+                if case in {"foreign", "corrupt", "failed"}:
+                    path = pending.record_path(jobs.parent, "parent", completed["delivery_id"])
+                    changed = json.loads(path.read_text())
+                    if case == "foreign":
+                        changed["receipt"]["children"][0]["attempt_id"] = "att-other"
+                    elif case == "failed":
+                        changed["receipt"]["children"][0]["required_action"] = "inspect-done-failure"
+                    path.write_text("{" if case == "corrupt" else json.dumps(changed))
+                elif case == "wrong-revision":
+                    jobs.write_text(jobs.read_text().replace("delivery_row_revision=rev-1", "delivery_row_revision=rev-2"))
+                else:
+                    jobs.write_text(jobs.read_text().rstrip() + ",terminal_conflict=1\n")
+                self.assertTrue(notice.notice_is_current(closure, notice_context=context))
+
+    def test_closed_runtime_route_notice_uses_stored_receipts_without_full_observation(self):
+        self.meta["workflow_completion"] = "runtime-v1"
+        self.write_row()
+        record = self.seed()
+        self.close()
+        with mock.patch("dispatch_terminal_commit.owner_completion_pending", side_effect=AssertionError("heavy")):
+            self.assertTrue(notice.notice_is_current(record, jobs=self.jobs))
 
     def test_closed_route_retires_exited_supervisor_during_pending_settlement(self):
         from types import SimpleNamespace
