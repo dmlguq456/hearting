@@ -640,8 +640,8 @@ check_install_layout_opencode_projection() {
   [ -f INSTALL_LAYOUT.md ] || { fail_msg "INSTALL_LAYOUT.md is missing"; return; }
 
   if is_mechanized_install_layout; then
-    check_mechanized_install_projection opencode \
-      "opencode.symlink.hearting opencode.symlink.agent-agents.md opencode.symlink.hearting-readme.md opencode.symlink.agent-core opencode.symlink.agent-capabilities opencode.symlink.agent-roles opencode.symlink.agent-bin opencode.symlink.agent-tools opencode.symlink.agent-utilities opencode.symlink.agent-skills opencode.symlink.agent-agents opencode.symlink.agent-commands opencode.symlink.hearting-guards.js"
+    OPENCODE_RUNTIME_VERSION=2.0.32 check_mechanized_install_projection opencode \
+      "opencode.symlink.hearting opencode.symlink.agent-agents.md opencode.symlink.hearting-readme.md opencode.symlink.agent-core opencode.symlink.agent-capabilities opencode.symlink.agent-roles opencode.symlink.agent-bin opencode.symlink.agent-tools opencode.symlink.agent-utilities opencode.symlink.agent-skills opencode.symlink.agent-agents opencode.symlink.agent-commands opencode.render.index.ts"
     return
   fi
 

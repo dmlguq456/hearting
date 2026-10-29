@@ -149,11 +149,13 @@ def load_ownership_manifest(path, runtime, scope):
     return data, state
 
 
-def _write_manifest(path, data):
+def _write_manifest(path, data, *, transaction=None):
     path = Path(path)
     payload = json.dumps(
         data, sort_keys=True, ensure_ascii=False, indent=2
     ).encode("utf-8")
+    if transaction is not None:
+        return transaction.write_bytes("manifest", payload, 0o600)
     current = safe_fs.capture_state(path)
     auth = safe_fs.authority(
         path,
@@ -217,14 +219,23 @@ def _three_way_merge(ours, base, theirs):
     return (ok, merged_bytes, conflict_markers, False)
 
 
-def record(runtime, files, scope="global", version=None, integration_assets=None):
+def record(runtime, files, scope="global", version=None, integration_assets=None,
+           *, transaction=None):
     """Record each copied file's hash after installation.
 
     ``files`` contains projector ``copy_once`` actions. Create pristine
     snapshots only when absent; update them only after a verified reapply.
+    A generated render carries its expected state/digest and the transaction
+    that owns the render, manifest and pristine mutations.
     """
     manifest_path = _manifest_path(runtime, scope)
-    existing = _load_manifest(manifest_path) or {}
+    if transaction is not None:
+        existing, state = load_ownership_manifest(manifest_path, runtime, scope)
+        if state != transaction.preimages["manifest"]:
+            raise safe_fs.SafetyError("concurrent-successor", manifest_path)
+        existing = existing or {}
+    else:
+        existing = _load_manifest(manifest_path) or {}
     files_map = dict(existing.get("files", {}))
 
     for entry in files:
@@ -233,10 +244,20 @@ def record(runtime, files, scope="global", version=None, integration_assets=None
         dest_abs = Path(entry["dest_abs"])
 
         pristine_path = _pristine_path(runtime, scope, relpath)
-        if not pristine_path.exists():
-            _atomic_write_bytes(pristine_path, source_abs.read_bytes())
-
-        files_map[relpath] = _sha256(dest_abs)
+        if transaction is not None:
+            expected = entry["expected_state"]
+            current = safe_fs.capture_state(dest_abs, include_payload=True)
+            if (current != expected or current.kind != "file"
+                    or current.digest != entry["content_sha256"]):
+                raise safe_fs.SafetyError("concurrent-successor", dest_abs,
+                                          "render differs from expected postimage")
+            if transaction.preimages["pristine"].kind == "missing":
+                transaction.write_bytes("pristine", current.payload, 0o600)
+            files_map[relpath] = entry["content_sha256"]
+        else:
+            if not pristine_path.exists():
+                _atomic_write_bytes(pristine_path, source_abs.read_bytes())
+            files_map[relpath] = _sha256(dest_abs)
 
     if version is None:
         version = _git_head_or_unknown()
@@ -253,7 +274,14 @@ def record(runtime, files, scope="global", version=None, integration_assets=None
         manifest["integration_assets"] = integration_assets
     elif isinstance(existing.get("integration_assets"), dict):
         manifest["integration_assets"] = existing["integration_assets"]
-    _write_manifest(manifest_path, manifest)
+    if transaction is None:
+        _write_manifest(manifest_path, manifest)
+    else:
+        _write_manifest(manifest_path, manifest, transaction=transaction)
+        # A successor arriving during either receipt write must not be hidden
+        # by a successful publication or adopted by rollback.
+        for name, auth in transaction.authorities.items():
+            safe_fs.assert_expected(auth, transaction.postimages[name])
     return manifest
 
 
