@@ -27,6 +27,13 @@ containing `schema_version` (2), `config_ref`, `run_id`, `source_path`,
 the same inputs are idempotent. Case-insensitive filesystems are an explicit
 non-goal (Linux-only harness).
 
+When `autopilot-lab:smoke` is borrowed into another route, config sealing uses
+that sealed part's relocated `reviews/smoke/**` support scope, resolved from
+the part identity and its exact `part_io` output mapping. The sealed snapshot
+and manifest stay within the borrowed smoke node's declared write scope.
+Native lab routes keep their existing output selection. Repository, relative
+path, producer, and resolved write-scope checks still apply to the final path.
+
 Example:
 
 ```sh
