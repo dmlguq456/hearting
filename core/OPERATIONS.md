@@ -1655,6 +1655,11 @@ workflow journal as downstream consumption, preserving the original FAIL,
 exit, resource registry, artifacts and scientific result. Owner wording or
 downstream PASS alone is insufficient.
 
+A runtime receipt carries execution facts only. Its default wording does not
+create a user approval or prohibition: pending corrections and the original
+request remain the authority for any retry, while successful completed work is
+not repeated.
+
 When bindings are missing or differ, retry guidance follows the exact route
 and current owner receipt. A live owner, or an unanswered BLOCKED/FAIL owner,
 gets its existing `correction_command` with a same-route instruction for a new
