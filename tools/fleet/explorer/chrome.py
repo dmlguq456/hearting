@@ -402,14 +402,18 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
         x = 1
         grid.put(x, 1, "usage(week)", "label")
         x = 14
+        annotations = []
         for item in usage:
             text = item.get("text", "")
             key = item.get("key", "dim")
+            annotation = ""
+            if key == "hb_claude" and any(item.get("windows", ())):
+                text, _, annotation = str(text).partition(" ")
             week = next((window for window in item.get("windows", ())
                          if window and window[0] == "week"), None)
             if week is None:
-                if item.get("harness") == "claude":
-                    status = _clip(str(text), width - 12 - x)
+                if item.get("harness") == "claude" or annotation:
+                    status = _clip(str(item.get("text", "")), width - 12 - x)
                     x = grid.put(x, 1, status, key, limit=width - 12) + 4
                 continue
             label, percent, reset = week
@@ -425,7 +429,8 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             filled = max(1, min(10, round(10 * percent / 100))) if percent else 0
             gauge_key = "lvl_r_flat" if percent >= 80 else "lvl_y" if percent >= 50 else "lvl_g"
             x = grid.put(x, 1, "━" * filled, gauge_key, limit=width - 12)
-            x = grid.put(x, 1, "─" * (10 - filled), "dim", limit=width - 12)
+            track = "·" if annotation.startswith("stale") else "─"
+            x = grid.put(x, 1, track * (10 - filled), "dim", limit=width - 12)
             x = grid.put(x, 1, f" {percent:3d}%", gauge_key, limit=width - 12)
             x = grid.put(x, 1, " ↻ " + str(reset), "dim", limit=width - 12)
             if extras:
@@ -436,12 +441,19 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
                     x = grid.put(x, 1, f"{name} {value}%", "blocked", limit=width - 12)
             else:
                 x += 4
+            if annotation:
+                annotations.append(annotation)
+        if annotations:
+            grid.put(x, 1, _clip(" · ".join(annotations), width - 12 - x), "dim", limit=width - 12)
     else:
         for index, item in enumerate(usage[:3]):
             y = 1 + index
             usage_limit = width - 9 if y == 1 else width - 1
-            grid.put(1, y, str(item.get("text", "")), item.get("key", "dim"), limit=usage_limit)
             windows = list(item.get("windows", ()))
+            text, annotation = str(item.get("text", "")), ""
+            if item.get("key") == "hb_claude" and any(windows):
+                text, _, annotation = text.partition(" ")
+            grid.put(1, y, text, item.get("key", "dim"), limit=usage_limit)
 
             def window_end(slot, window):
                 return 14 + slot * 40 + 5 + 1 + 1 + 12 + 5 + 1 + (
@@ -456,11 +468,15 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
                 filled = max(1, min(12, round(12 * int(percent) / 100))) if int(percent) else 0
                 gauge_key = "lvl_r_flat" if int(percent) >= 80 else "lvl_y" if int(percent) >= 50 else "lvl_g"
                 x = grid.put(x, y, "━" * filled, gauge_key, limit=usage_limit)
-                x = grid.put(x, y, "─" * (12 - filled), "dim", limit=usage_limit)
+                track = "·" if annotation.startswith("stale") else "─"
+                x = grid.put(x, y, track * (12 - filled), "dim", limit=usage_limit)
                 x = grid.put(x, y, f"{int(percent):4d}%", gauge_key, limit=usage_limit)
                 x = grid.put(x, y, "]", "dim", limit=usage_limit)
                 if reset:
                     grid.put(x + 1, y, "↻ " + str(reset), "dim", limit=usage_limit)
+            if annotation:
+                end = max(window_end(slot, window) for slot, window in enumerate(windows) if window) + 2
+                grid.put(end, y, _clip(annotation, usage_limit - end), "dim", limit=usage_limit)
         grid.put(width - 9, 1, "u", "hearting", limit=width - 1)
         grid.put(width - 8, 1, " less ▾", "dim", limit=width - 1)
     if height >= 3:

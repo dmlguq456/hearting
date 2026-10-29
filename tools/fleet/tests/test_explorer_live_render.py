@@ -298,7 +298,7 @@ class ClaudeUsageStatus(unittest.TestCase):
         self.assertIn("stale", vm.usage[0]["text"])
         self.assertIn("3m ago", vm.usage[0]["text"])
         self.assertIn("wait", vm.usage[0]["text"])
-        self.assertFalse(any(vm.usage[0]["windows"]))
+        self.assertEqual(vm.usage[0]["windows"], (("5h", 0, None), ("week", 63, "1h 0m"), None))
 
     def test_error_details_and_account_scope_do_not_enter_display_or_persistence(self):
         marker = "private-fixture-value"
@@ -366,7 +366,7 @@ class ClaudeActualContract(unittest.TestCase):
                     self.assertEqual(row["windows"], (("5h", 27, None), ("week", 41, None), None))
                     continue
                 self.assertIn(status, row["text"])
-                self.assertFalse(any(row["windows"]))
+                self.assertEqual(any(row["windows"]), entry is self.STALE)
                 self.assertNotIn("exhaust", row["text"])
                 if entry is self.STALE:
                     self.assertIn("3m ago", row["text"])
@@ -447,7 +447,7 @@ class ClaudeActualContract(unittest.TestCase):
         for age, label in ((0, "claude"), (180, "claude"), (181, "stale"), (900, "stale"), (901, "unavailable")):
             row = self.vm({**self.SUCCESS, "attempted_at": 10000 + age}, 10000 + age).usage[0]
             self.assertIn(label, row["text"])
-            self.assertEqual(any(row["windows"]), age <= 180)
+            self.assertEqual(any(row["windows"]), age <= 900)
 
     def test_current_error_retry_remains_visible_while_last_good_quota_is_young(self):
         from tools.fleet import render
@@ -456,10 +456,104 @@ class ClaudeActualContract(unittest.TestCase):
                 "error": error, "reason": None, "observed_at": 10060, "retry_at": 13000}}
             vm = self.vm(entry, 10060)
             self.assertIn("wait", vm.usage[0]["text"])
+            self.assertIn("fresh", vm.usage[0]["text"])
+            self.assertIn("1m ago", vm.usage[0]["text"])
+            self.assertEqual(vm.usage[0]["windows"], (("5h", 27, None), ("week", 41, None), None))
             legacy = render._usage_header_rows([], now=10060, usage_snapshots={"claude": entry})
-            self.assertIn("wait", "".join(text for row in legacy for text, _key in row))
+            text = "".join(text for row in legacy for text, _key in row)
+            self.assertIn("wait", text)
+            self.assertIn("27%", text)
+            self.assertIn("41%", text)
             entry["error_observation"]["observed_at"] = 9999
             self.assertEqual(self.vm(entry, 10060).usage[0]["text"], "claude")
+
+    def test_last_good_zero_partial_windows_and_resets_survive_errors_until_expiry(self):
+        from tools.fleet import render
+        from tools.fleet.explorer.live import _clock
+        from tools.fleet.explorer.system import usage_text
+        from tools.fleet.explorer.view_model import persistable_view_model
+        for payload in ({"rl_5h": 0, "rl_7d": 0}, {"rl_7d": 0},
+                        {"rl_ms": [["opus", 0]]}, {"rl_5h": 27, "rl_7d": 41, "rl_ms": [["opus", 88]]}):
+            for error in (None, self.STALE["error_observation"],
+                          {"error": "timeout", "reason": "private-fixture-value", "observed_at": 10200}):
+                with self.subTest(payload=payload, error=error):
+                    entry = {**self.STALE, "payload": {**payload, "rs_5h": 13800, "rs_7d": 17400},
+                             "error_observation": error}
+                    row = self.vm(entry, 10200).usage[0]
+                    self.assertEqual([window[1] for window in row["windows"] if window],
+                                     [payload[key] for key in ("rl_5h", "rl_7d") if key in payload]
+                                     + [value for _label, value in payload.get("rl_ms", [])])
+                    self.assertIn("stale", row["text"])
+                    self.assertIn("3m ago", row["text"])
+                    if "rl_5h" in payload:
+                        self.assertEqual(row["windows"][0][2], "1h 0m")
+                    if "rl_7d" in payload:
+                        self.assertEqual(row["windows"][1][2], "2h 0m")
+                    legacy = render._usage_header_rows([], now=10200, usage_snapshots={"claude": entry})
+                    text = "".join(text for line in legacy for text, _key in line)
+                    self.assertIn("%", text)
+                    self.assertIn("stale", text)
+                    if error and error.get("retry_at"):
+                        self.assertIn("API wait " + _clock(13000), text)
+                    if error and error["error"] == "timeout":
+                        self.assertIn("timeout", row["text"])
+                    if "rl_5h" in payload or "rl_7d" in payload:
+                        with patch("time.time", return_value=10200):
+                            summary = usage_text({"usage_snapshots": {"claude": entry}})
+                        self.assertIn("%", summary)
+                        self.assertIn("stale", summary)
+                        self.assertIn("3m ago", summary)
+                    frame = draw(self.vm(entry, 10200), NavState(usage_open=True), 180, 45, beat=1)
+                    self.assertIn("0%" if 0 in payload.values() or payload.get("rl_ms") == [["opus", 0]] else "27%",
+                                  frame.text_rows()[1])
+                    self.assertIn("·", frame.text_rows()[1])
+                    self.assertNotIn("private-fixture-value", repr(persistable_view_model(self.vm(entry, 10200))))
+                    for unusable in ({**entry, "payload": None}, {**entry, "freshness": "unknown"}, entry):
+                        # 901 seconds: even a persisted fresh/stale flag cannot admit old numbers.
+                        now = 10901 if unusable is entry else 10200
+                        self.assertFalse(any(self.vm(unusable, now).usage[0]["windows"]))
+                        self.assertNotIn("%", "".join(t for line in render._usage_header_rows(
+                            [], now=now, usage_snapshots={"claude": unusable}) for t, _k in line))
+                        with patch("time.time", return_value=now):
+                            self.assertNotIn("%", usage_text({"usage_snapshots": {"claude": unusable}}))
+
+    def test_admitted_stale_and_young_retry_keep_numbers_and_header_geometry(self):
+        from tools.fleet.explorer.grid import cell_width
+        from tools.fleet.explorer.state import reduce
+        young = {**self.STALE, "freshness": "fresh", "observed_at": 10140}
+        for entry in (self.STALE, young):
+            vm = self.vm(entry, 10200)
+            for width in (40, 80, 140, 180):
+                for expanded in (False, True):
+                    with self.subTest(entry=entry, width=width, expanded=expanded):
+                        state = NavState(usage_open=expanded)
+                        frame = draw(vm, state, width, 45, beat=1)
+                        baseline = draw(self.vm(self.SUCCESS), state, width, 45, beat=1)
+                        self.assertEqual(frame.hits, baseline.hits)
+                        self.assertEqual(cell_width(frame.text_rows()[1]), width)
+                        self.assertIn("less" if expanded else "more", frame.text_rows()[1])
+                        if width >= 140:
+                            text = frame.text_rows()[1]
+                            self.assertIn("stale" if entry is self.STALE else "fresh", text)
+                            self.assertIn("3m ago" if entry is self.STALE else "1m ago", text)
+                            self.assertIn("API wait", text)
+                            self.assertIn("rate limit", text)
+                            self.assertIn("41%", text)
+                            if expanded:
+                                self.assertIn("27%", text)
+                                self.assertEqual(text.index("5h"), baseline.text_rows()[1].index("5h"))
+                                self.assertEqual(text.index("week"), baseline.text_rows()[1].index("week"))
+                            if entry is self.STALE:
+                                self.assertIn("·", text)
+                        hit = next(hit for hit in frame.hits if hit.action == ("usage",))
+                        changed, effects = reduce(state, {"type": "click", "action": hit.action}, frame)
+                        self.assertEqual(changed.usage_open, not expanded)
+                        self.assertFalse(effects)
+            with patch("time.time", return_value=10200):
+                summary = usage_text({"usage_snapshots": {"claude": entry}})
+            self.assertIn("27%", summary)
+            self.assertIn("3m ago" if entry is self.STALE else "1m ago", summary)
+            self.assertIn("API wait", summary)
 
     def test_fixed_statuses_and_known_zero_at_narrow_folded_and_expanded_widths(self):
         from tools.fleet.explorer.grid import cell_width
@@ -473,10 +567,14 @@ class ClaudeActualContract(unittest.TestCase):
                         self.assertEqual(cell_width(frame.text_rows()[1]), width)
                         self.assertIn("less" if expanded else "more", frame.text_rows()[1])
                         if entry is self.STALE:
-                            self.assertIn("wait", frame.text_rows()[1])
-                            if width >= 80:
+                            if width >= 140:
                                 self.assertIn("stale", frame.text_rows()[1])
-                        if entry in (self.STALE, self.EXPIRED, self.CHANGED):
+                                self.assertIn("3m ago", frame.text_rows()[1])
+                                self.assertIn("API wait", frame.text_rows()[1])
+                                self.assertIn("41%", frame.text_rows()[1])
+                                if expanded:
+                                    self.assertIn("27%", frame.text_rows()[1])
+                        if entry in (self.EXPIRED, self.CHANGED):
                             self.assertNotIn("%", frame.text_rows()[1])
                         if entry is zero and width >= 100:
                             self.assertIn("0%", frame.text_rows()[1])
@@ -484,7 +582,7 @@ class ClaudeActualContract(unittest.TestCase):
     def test_legacy_header_and_system_summary_use_the_admitted_snapshot_only(self):
         from tools.fleet import render
         from tools.fleet.explorer.system import usage_text
-        for entry, now, known in ((self.SUCCESS, 10000, True), (self.STALE, 10200, False),
+        for entry, now, known in ((self.SUCCESS, 10000, True), (self.STALE, 10200, True),
                                   (self.EXPIRED, 12000, False), (self.CHANGED, 12000, False)):
             rows = render._usage_header_rows([], now=now, usage_snapshots={"claude": entry})
             text = "".join(text for row in rows for text, _key in row)
@@ -495,6 +593,11 @@ class ClaudeActualContract(unittest.TestCase):
             if known:
                 self.assertIn("27%", text)
                 self.assertIn("41%", text)
+            if entry is self.STALE:
+                for value in (text, summary):
+                    self.assertIn("stale", value)
+                    self.assertIn("3m ago", value)
+                    self.assertIn("API wait", value)
 
     def test_precomputed_replay_and_pending_draw_do_not_resurrect_old_claude_numbers(self):
         from tools.fleet import render
@@ -522,8 +625,16 @@ class ClaudeActualContract(unittest.TestCase):
             self.assertNotIn("98", repr(vm.usage))
             self.assertNotIn("97", repr(vm.usage))
             self.assertIn("33", repr(vm.usage))
+        for entry in (self.STALE, {**self.STALE, "freshness": "fresh", "observed_at": 10140}):
+            for fields in ({"schema": 1, "sessions": [], "usage": old_rows}, {"values": base.to_mapping()}):
+                vm = build_view_model({**fields, "usage_snapshots": {"claude": entry}}, now=10200)
+                self.assertEqual(vm.usage[0]["windows"][1][1], 41)
+                self.assertNotIn("98", repr(vm.usage))
+                self.assertNotIn("97", repr(vm.usage))
+                self.assertIn("API wait", vm.usage[0]["text"])
         for loading in (True, False):
-            for entry in (self.CHANGED, self.SUCCESS):
+            young = {**self.STALE, "freshness": "fresh", "observed_at": 10140}
+            for entry in (self.CHANGED, self.SUCCESS, self.STALE, young):
                 with self.subTest(loading=loading, entry=entry), contextlib.ExitStack() as stack:
                     for name, value in {"_EXPLORER_ENABLED": True, "_EXPLORER_STATE": NavState(),
                                         "_EXPLORER_PUBLISHED_MODEL": base, "_EXPLORER_MODEL": base,
@@ -532,15 +643,19 @@ class ClaudeActualContract(unittest.TestCase):
                         stack.enter_context(patch.object(render, name, value))
                     stack.enter_context(patch.object(render, "_explorer_runtime", return_value=SimpleNamespace(publication_ready=lambda _r: False)))
                     stack.enter_context(patch.object(render, "_explorer_compose", return_value=None))
-                    stack.enter_context(patch.object(render.time, "time", return_value=12000 if entry is self.CHANGED else 10000))
+                    now = 12000 if entry is self.CHANGED else 10000 if entry is self.SUCCESS else 10200
+                    stack.enter_context(patch.object(render.time, "time", return_value=now))
                     painted = stack.enter_context(patch.object(render, "_draw_explorer"))
                     render._draw(_Screen(), [], [], "all", 0, loading=loading,
                                  snapshot={"usage_snapshots": {"claude": entry}})
                     text = painted.call_args.kwargs["frame"].text_rows()[1]
                     self.assertNotIn("98%", text)
                     self.assertNotIn("97%", text)
-                    self.assertIn("41%" if entry is self.SUCCESS else "unavailable", text)
-                    if entry is self.SUCCESS:
+                    self.assertIn("unavailable" if entry is self.CHANGED else "41%", text)
+                    if entry is self.STALE or entry is young:
+                        self.assertIn("stale" if entry is self.STALE else "fresh", text)
+                        self.assertIn("API wait", text)
+                    if entry is not self.CHANGED:
                         # Current usage may advance while the body stays the exact
                         # previous complete base, without completing publication.
                         self.assertEqual(render._EXPLORER_MODEL.usage[0]["windows"][1][1], 41)
@@ -553,7 +668,8 @@ class ClaudeActualContract(unittest.TestCase):
         cached = [[("  usage ", "head"), ("claude", "hb_claude"), (" 98%", "lvl_r_flat")],
                   [("codex 33%", "hb_codex")], [("old body", "dim")]]
         screen = SimpleNamespace(getmaxyx=lambda: (45, 140), erase=lambda: None, noutrefresh=lambda: None)
-        for entry, now, text in ((self.CHANGED, 12000, "unavailable"), (self.SUCCESS, 10000, "41%")):
+        for entry, now, text in ((self.CHANGED, 12000, "unavailable"), (self.SUCCESS, 10000, "41%"),
+                                 (self.STALE, 10200, "41%")):
             with self.subTest(entry=entry), contextlib.ExitStack() as stack:
                 values = {"_EXPLORER_ENABLED": False, "_PROCESS_VIEW": False, "_SELECT_MODE": False,
                           "_PROMPT": None, "_OFFSET": 0, "_RELOAD_FRAME": cached,
@@ -572,6 +688,9 @@ class ClaudeActualContract(unittest.TestCase):
                 render._draw(screen, [], [], "all", 0, loading=True, usage_snapshots={"claude": entry})
                 rows = [call.args[2] for call in painted.call_args_list]
                 self.assertIn(text, "".join(t for t, _k in rows[0]))
+                if entry is self.STALE:
+                    self.assertIn("stale", "".join(t for t, _k in rows[0]))
+                    self.assertIn("API wait", "".join(t for t, _k in rows[0]))
                 self.assertNotIn("98%", "".join(t for t, _k in rows[0]))
                 self.assertEqual(rows[1:3], cached[1:3])
                 self.assertEqual(cached[0][-1][0], " 98%")

@@ -8849,20 +8849,21 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
     hs = [h for h in ("claude", "codex", "opencode") if h in rl or h in live or h == "claude" and claude_present]
     rows = []
     now = now if now is not None else time.time()
+    claude_annotation = ""
     for idx, h in enumerate(hs):
         hn = _USAGE_BADGE_TEXT.get(h) or _BADGE_TEXT.get(h, h)
         row = [("  usage " if idx == 0 else "        ", "head"),
                (_pad(hn, 14), "hb_" + h if h in _BADGE_TEXT else "hb_other")]
         if h == "claude":
-            from .explorer.live import _claude_usage_payload, _claude_usage_unavailable, _claude_usage_pending
+            from .explorer.live import _claude_usage_payload, _claude_usage_unavailable, _claude_usage_annotation
             snapshot = (usage_snapshots or {}).get("claude")
             payload, freshness, observed = _claude_usage_payload(snapshot, now)
-            if payload is None or freshness != "fresh" or _claude_usage_pending(snapshot, now, observed):
-                status = _claude_usage_unavailable(snapshot, now,
-                    quota_observed=observed if freshness == "stale" else None)
+            if payload is None:
+                status = _claude_usage_unavailable(snapshot, now)
                 row.append((status["text"].removeprefix("claude "), "dim"))
                 rows.append((row, None))
                 continue
+            claude_annotation = _claude_usage_annotation(snapshot, now, freshness, observed)
             rl[h] = (payload["rl_5h"], payload["rl_7d"], payload["rl_ms"], observed,
                      (payload["rs_5h"], payload["rs_7d"]), None, freshness, None, None, None)
         if h not in rl:
@@ -8958,6 +8959,8 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
                 if slot < last:
                     used = sum(_dw(t) for t, _k in cell)
                     row.append((" " * (widths[slot] - used + 3), None))
+            if claude_annotation and any(key == "hb_claude" for _text, key in row):
+                row.append(("   " + claude_annotation, "dim"))
         # Only quota columns use the viewport fit; source-absence/error messages
         # keep their existing plain output (F-101 ledger-absent goldens).
         if cells is not None and term_width is not None:

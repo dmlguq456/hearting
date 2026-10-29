@@ -192,12 +192,11 @@ def usage_gauges(snapshot):
             continue
         entry = snapshots.get(harness)
         if harness == "claude":
-            from .live import _claude_usage_payload, _claude_usage_pending
+            from .live import _claude_usage_payload
             import time
             now = time.time()
-            payload, freshness, observed = _claude_usage_payload(entry, now)
-            pending = _claude_usage_pending(entry, now, observed)
-            entry = {"payload": payload} if freshness == "fresh" and pending is None else None
+            payload, _freshness, _observed = _claude_usage_payload(entry, now)
+            entry = {"payload": payload} if payload is not None else None
         window = next(((label, value) for label, value in _windows(entry)
                        if label in _WINDOW_LABEL and isinstance(value, (int, float)) and not isinstance(value, bool)),
                       None) if entry is not None else None
@@ -217,6 +216,15 @@ def usage_text(snapshot, spaced=False):
         else:
             gap = " " if spaced else ""
             parts.append(f"{abbr} {_WINDOW_LABEL[label]}{gap}{int(round(value))}%")
+            if abbr == "CL":
+                from .live import _claude_usage_payload, _claude_usage_annotation
+                import time
+                entry = (_get(snapshot, "usage_snapshots", {}) or {}).get("claude")
+                now = time.time()
+                payload, freshness, observed = _claude_usage_payload(entry, now)
+                annotation = _claude_usage_annotation(entry, now, freshness, observed) if payload is not None else ""
+                if annotation:
+                    parts[-1] += " (" + annotation + ")"
     return " · ".join(parts)
 
 

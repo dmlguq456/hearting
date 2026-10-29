@@ -1559,7 +1559,7 @@ def _claude_usage_payload(snapshot, now):
     return clean, "stale" if freshness == "stale" or now - observed > 180 else "fresh", observed
 
 
-def _claude_usage_unavailable(snapshot, now, *, quota_observed=None):
+def _claude_usage_unavailable(snapshot, now, *, quota_observed=None, quota_freshness="stale"):
     """Display only the backend's safe observation; never resolve credentials or an account here."""
     observation = _get(snapshot, "error_observation")
     observation = observation if isinstance(observation, Mapping) else {}
@@ -1588,22 +1588,25 @@ def _claude_usage_unavailable(snapshot, now, *, quota_observed=None):
     if reason:
         status += " · " + reason
     if quota_observed is not None:
-        # Keep quota age separate from the fetch/error time. The existing text row
-        # represents stale quota without passing old numbers off as current gauges.
-        stale = "stale · " + _since(quota_observed, now) + " ago"
-        status = status + " · " + stale if until else stale + (" · " + status if reason else "")
+        # Quota age belongs to the admitted payload, independently of fetch/retry time.
+        age = quota_freshness + " · " + _since(quota_observed, now) + " ago"
+        status = age + " · API " + status if until else age + (" · " + status if reason else "")
     elif observed is not None:
         status += " · " + _since(observed, now) + " ago"
     return {"harness": "claude", "text": "claude " + status, "key": "hb_claude",
             "windows": [None, None, None]}
 
 
-def _claude_usage_pending(snapshot, now, quota_observed):
-    """A newer valid retry remains visible even while last-good quota is young."""
+def _claude_usage_annotation(snapshot, now, freshness, quota_observed):
+    """Display status alongside admitted windows; it cannot admit quota itself."""
     status = _claude_usage_unavailable(snapshot, now)
     error_at = _num(_get(_get(snapshot, "error_observation"), "observed_at"))
-    return status if (quota_observed is not None and error_at is not None
-                      and error_at >= quota_observed and status["text"].startswith("claude wait ")) else None
+    if quota_observed is not None and (freshness == "stale" or (
+            error_at is not None and error_at >= quota_observed
+            and status["text"].startswith("claude wait "))):
+        return _claude_usage_unavailable(snapshot, now, quota_observed=quota_observed,
+                                        quota_freshness=freshness)["text"].removeprefix("claude ")
+    return ""
 
 
 def _usage_records(snapshot, session_rows, now):
@@ -1623,8 +1626,8 @@ def _usage_records(snapshot, session_rows, now):
     snapshots = snapshots if isinstance(snapshots, Mapping) else {}
     claude_snapshot = snapshots.get("claude")
     payload, freshness, observed = _claude_usage_payload(claude_snapshot, now)
-    pending = _claude_usage_pending(claude_snapshot, now, observed)
-    if payload is not None and freshness == "fresh" and pending is None:
+    annotation = _claude_usage_annotation(claude_snapshot, now, freshness, observed)
+    if payload is not None:
         best["claude"] = (observed, payload["rl_5h"], payload["rl_7d"], payload["rl_ms"],
                           (payload["rs_5h"], payload["rs_7d"]), None)
     claude_present = "claude" in snapshots or any(
@@ -1662,7 +1665,8 @@ def _usage_records(snapshot, session_rows, now):
             if shown[slot] is None:
                 shown[slot] = [unit, int(pct), reset_text]
         if any(shown):
-            usage.append({"text": harness, "key": "hb_" + harness, "windows": shown})
+            text = harness + (" " + annotation if harness == "claude" and annotation else "")
+            usage.append({"text": text, "key": "hb_" + harness, "windows": shown})
         elif harness == "claude" and claude_snapshot is not None:
             usage.append(_claude_usage_unavailable(claude_snapshot, now))
     return usage
