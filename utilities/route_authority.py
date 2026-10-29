@@ -3008,9 +3008,18 @@ def _admit_supervised_owner_resource_start(args, agent_home, jobs):
                 or owner_input.get("thread_id") == INPUT.PLACEHOLDER_THREAD):
             raise DispatchContractError("resource-owner-session-unavailable", owner.attempt_id)
         try:
-            supervisor.admit_owner_successor_start(
+            admission = supervisor.admit_owner_successor_start(
                 route, route_node, jobs, owner.attempt_id, owner_input["thread_id"],
             )
+            if (isinstance(admission, dict)
+                    and admission.get("type") == "saved-resource-output-admission"):
+                return admission
+            if not admission:
+                import resource_failure_resolution as FAILURE_RESOLUTION
+                saved = FAILURE_RESOLUTION.saved_output_admission(
+                    route, route_node, jobs, owner.attempt_id, owner_input["thread_id"])
+                if saved is not None:
+                    return {"type": "saved-resource-output-admission", "proof": saved}
         except supervisor.SupervisorError as error:
             raise DispatchContractError("resource-owner-stage-admission-blocked", str(error)) from error
     except (DispatchContractError, INPUT.InputError, OSError, subprocess.SubprocessError) as error:
@@ -3018,6 +3027,33 @@ def _admit_supervised_owner_resource_start(args, agent_home, jobs):
             raise
         raise _contract_error("resource-owner-start-authority-unavailable", str(error)) from error
     return True
+
+
+def _saved_resource_output_preview(args, jobs):
+    """Read-only counterpart to the owner start's saved-output admission."""
+    route_file = getattr(args, "route_file", None)
+    route_node = getattr(args, "route_node", None)
+    owner_attempt_id = getattr(args, "parent_attempt_id", None)
+    if not route_file or not route_node or not owner_attempt_id:
+        return None
+    try:
+        import dispatch_owner_input as INPUT
+        parent, target = INPUT._target(jobs, owner_attempt_id)
+        with INPUT._locked(jobs, owner_attempt_id) as (_, value):
+            parent, target = INPUT._target(jobs, owner_attempt_id)
+            session_id = value.get("thread_id") if isinstance(value, dict) else None
+            if (parent.status not in LIVE_ROW_STATUSES or value is None
+                    or value.get("target") != target
+                    or not session_id or session_id == INPUT.PLACEHOLDER_THREAD
+                    or not INPUT.supervisor_lease_is_held(jobs, parent.metadata)
+                    or any(item.get("state") == "queued" for item in value.get("requests", []))):
+                return None
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        import resource_failure_resolution as FAILURE_RESOLUTION
+        return FAILURE_RESOLUTION.saved_output_admission(
+            route, route_node, jobs, owner_attempt_id, session_id)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
 
 
 def completion_gate(args, action: str, agent_home, jobs, *, gate, before=()):
@@ -3032,10 +3068,22 @@ def completion_gate(args, action: str, agent_home, jobs, *, gate, before=()):
     try:
         for check in before:
             check()
+        saved_resource_admissions = None
         if action == "start":
-            _admit_supervised_owner_resource_start(args, agent_home, jobs)
-        gate(args.route_file, args.route_node, action, agent_home, jobs, attempt_id=args.attempt_id,
-             planned_revision_nodes=preview_request_nodes(args, jobs))
+            admission = _admit_supervised_owner_resource_start(args, agent_home, jobs)
+            if isinstance(admission, dict):
+                proof = admission.get("proof")
+                if isinstance(proof, dict) and proof.get("resource_node"):
+                    saved_resource_admissions = {proof["resource_node"]: proof}
+        elif action == "dry-run":
+            proof = _saved_resource_output_preview(args, jobs)
+            if isinstance(proof, dict) and proof.get("resource_node"):
+                saved_resource_admissions = {proof["resource_node"]: proof}
+        gate_args = {"attempt_id": args.attempt_id,
+                     "planned_revision_nodes": preview_request_nodes(args, jobs)}
+        if saved_resource_admissions is not None:
+            gate_args["saved_resource_admissions"] = saved_resource_admissions
+        gate(args.route_file, args.route_node, action, agent_home, jobs, **gate_args)
     except DispatchContractError as error:
         error.detail = recover_preview_gate_after_refusal(
             args.route_file, args.route_node, action, agent_home, jobs, error)

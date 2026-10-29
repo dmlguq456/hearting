@@ -989,6 +989,13 @@ evidence or a complete empty-group observation can establish execution end.
 Exact inspection reads the worker's result; requesting more failure detail is
 optional and cannot become a second completion gate.
 
+A retryable nonzero resource exit may still carry exact saved outputs for its
+declared non-resource verifier. The ordinary owner start can admit that
+saved-only input after checking the original run, sentinel, process-group
+quiescence, config receipt and output bytes. The resource remains failed until
+the normal downstream independent-PASS settlement records consumption; no
+resource-success marker is created to open the verifier.
+
 On the same OPEN route, the current owner may start a new supervised resource
 retry with `resource-runner start --compute-run <run-id>` after a completed
 `compute-hosts` execution. Before creating the retry row, the runtime checks

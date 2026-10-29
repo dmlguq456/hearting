@@ -173,6 +173,12 @@ The resource runner continues to enforce route verification, hash-bound smoke
 attestation, config provenance, the governor, and its `supervised` continuation.
 
 For a failed resource run, use `<manifest_run_id>__a<N>` (N starts at 1) on the same route; reusing the previous run ID with a new owner conflicts with its existing watch binding (`resource-watch-binding-conflict`). When a completed `compute-hosts` run is offered instead, pass its id once to the existing `resource-runner start --compute-run <run-id>` surface. The runtime accepts only same-route (or its verified owner-pin-handoff successor) and sealed-contract evidence, a zero exit, declared outputs, and a fresh remote quiescence observation. The handoff creates the next `__aN` resource row and preserves the failed row; it does not start a payload or replace independent `run-verify` judgment. A run id alone is not evidence.
+For a retryable nonzero exit, the existing declared verifier may start from the
+same run's saved outputs after the ordinary owner gate rechecks the failed row,
+sentinel, quiescence, run/config receipt and exact output bytes. This is
+saved-only input admission: the resource remains failed and no success marker
+is minted before the verifier finishes. The existing independent-PASS
+settlement records downstream consumption afterward.
 `compute-hosts run` resolves the selected devices to host GPU indices and sets `CUDA_VISIBLE_DEVICES` to those indices (for example `0`), so owner scaffolds must not require that value to be a GPU UUID. Explicit `CUDA_VISIBLE_DEVICES=` or `CUDA_VISIBLE_DEVICES=-1` selects CPU-only execution without GPU admission.
 
 This replaced a graph whose last node was the training process itself. On

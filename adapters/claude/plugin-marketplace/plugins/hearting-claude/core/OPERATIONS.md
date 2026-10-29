@@ -1597,6 +1597,12 @@ an unacknowledged success or failure remains recoverable from its original bindi
 next registration, with no lifetime receipt-count ceiling.
 The resource that supplies the declared stage outputs can complete the stage. Continuation retains that admitted resource identity and quiescence; it requires no model attempt sidecar for the resource prefix.
 
+For a retryable nonzero exit, the declared non-resource successor may start
+saved-only verification after the ordinary owner gate rechecks the exact failed
+run, sentinel, quiescence, run/config receipt and named output bytes. This
+proves input readiness only; the resource remains failed and receives no
+success marker until downstream independent-PASS settlement succeeds.
+
 Distinct operations selected by the normal owner within one route/node's
 approved scope may have separate live resource rows. Existing route/resource
 node, registered owner/lifecycle, live parent/controller thread and PID-start,
