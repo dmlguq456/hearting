@@ -9153,11 +9153,12 @@ def cmd_obligation_runner(args):
         try:
             accepted_notices = store.list(
                 kinds={"session-notice", "run-notice"}, fast_active_only=True)
-            _reconcile_obligations(
-                store, accepted_notices,
-                read_context=PeerReadContext(registry_append_only=True),
-                retry_state=duty_retry_state, notice_selection=notice_selection,
-                runner_incarnation=runner_incarnation)
+            if accepted_notices:
+                _reconcile_obligations(
+                    store, accepted_notices,
+                    read_context=PeerReadContext(registry_append_only=True),
+                    retry_state=duty_retry_state, notice_selection=notice_selection,
+                    runner_incarnation=runner_incarnation)
         finally:
             store.end_read_pass()
         accepted_notice_ids = {duty["id"] for duty in accepted_notices}
