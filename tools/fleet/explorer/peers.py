@@ -209,9 +209,10 @@ def _footer_start(box, clear):
 def _draw_side_lanes(grid, edges, boxes, right):
     """Stacked pairs join round their right side, one lane each way, labelled under the upper card.
 
-    Every card meets its lanes on its two first inner rows: the arriving head sits beside the
-    title row and the leaving tail leaves from the gauge row, so a lane never lands on a
-    corner, a divider or another card whatever height the cards have.
+    Every card meets its lanes on its two first inner rows: the arriving head replaces the
+    right border cell of the title row and the leaving tail leaves from the gauge row, so the
+    head and tail share the card's right edge and a lane never lands on a corner, a divider or
+    another card whatever height the cards have.
     """
     links = tuple(edges.get("links", ()))
     for lane in edges.get("side_lanes", ()):
@@ -235,16 +236,16 @@ def _draw_side_lanes(grid, edges, boxes, right):
         for yy in range(uy + 3, fy + 1):
             put(first, yy, "│")
         put(first, fy + 1, "┘")
-        put(edge + 2, fy + 1, "─")
-        put(edge + 1, fy + 1, LANE_HEAD_LEFT, "soft")
+        put(edge + 1, fy + 1, "──")
+        put(edge, fy + 1, LANE_HEAD_LEFT, "soft")
         put(edge, fy + 2, "├", tail[5])                # lower → upper
         put(edge + 1, fy + 2, "────")
         put(second, fy + 2, "┘")
         for yy in range(uy + 2, fy + 2):
             put(second, yy, "│")
         put(second, uy + 1, "┐")
-        put(edge + 2, uy + 1, "───")
-        put(edge + 1, uy + 1, LANE_HEAD_LEFT, "soft")
+        put(edge + 1, uy + 1, "────")
+        put(edge, uy + 1, LANE_HEAD_LEFT, "soft")
         label_right = min(right, top[2])
         for row, (src, dst) in enumerate(((upper, lower), (lower, upper))):
             sent = _link_when(links, src, dst)
