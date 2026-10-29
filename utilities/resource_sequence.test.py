@@ -1763,6 +1763,18 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                         WAIT.pending_prompt(state, 'att-parent', args, control)
                 self.assertIsNotNone(WAIT.JOIN.read_supervisor_phase_state(state, 'att-parent').resource['outbox'])
 
+    def test_runtime_failure_receipt_does_not_override_existing_retry_authority(self):
+        route, path, jobs, registry, output, ledger, args, control, state, context, prompt = \
+            self.receipt_fixture(failed=True)
+        resource = WAIT.JOIN.read_supervisor_phase_state(state, 'att-parent').resource
+        receipt = resource['outbox']['receipt']
+        self.assertEqual(receipt['exit_code'], 3)
+        self.assertIn('Runtime resource receipt (not a model child or verification PASS)', prompt)
+        self.assertNotIn('do not restart the resource', prompt)
+        self.assertIn('Follow existing user instructions and pending corrections', prompt)
+        self.assertIn('adds no retry authorization and no user prohibition', prompt)
+        self.assertEqual(WAIT.JOIN.read_supervisor_phase_state(state, 'att-parent').resource, resource)
+
     def test_close_between_reservation_arm_and_release_never_runs_payload(self):
         for controller_mode in (False, True):
             for close_at in ('reservation', 'arm', 'fence'):

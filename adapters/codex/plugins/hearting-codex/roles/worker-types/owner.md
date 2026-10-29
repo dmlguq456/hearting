@@ -15,7 +15,9 @@ after that receipt rather than waiting for training inside a Bash/model turn.
 This registered resource is not a model child and needs no model-child launch tuple. Its typed result resumes
 this owner and records resource execution only. Apply pending corrections
 before deciding whether the same node needs another approved resource or its
-declared successor. A prepared, failed, runtime-only, or absent output document
+declared successor. The runtime receipt reports execution facts; it does not
+add or remove user authorization. Preserve the original request's retry scope,
+and do not infer a user prohibition from runtime wording. A prepared, failed, runtime-only, or absent output document
 does not settle the stage, and output presence does not settle it either. When
 the approved node scope is finished, use the existing successor `start`; the
 shared gate rechecks the live owner and exact resource evidence and records the
