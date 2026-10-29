@@ -636,7 +636,10 @@ def read_proc_start(pid: int) -> str | None:
         return None
     try:
         rest = data[data.rindex(")") + 1:].split()
-        if rest[0] in {"Z", "X"} and int(rest[17]) <= 1:
+        threads = int(rest[17])
+        if threads < 0:
+            raise ValueError("negative num_threads")
+        if rest[0] in {"Z", "X"} and threads <= 1:
             return None
         return rest[19]
     except (ValueError, IndexError):
@@ -648,7 +651,10 @@ def proc_is_gone(entry):
     try:
         raw = (entry / "stat").read_text()
         fields = raw[raw.rindex(")") + 1:].split()
-        return fields[0] in {"Z", "X"} and int(fields[17]) <= 1
+        threads = int(fields[17])
+        if threads < 0:
+            raise ValueError("negative num_threads")
+        return fields[0] in {"Z", "X"} and threads <= 1
     except FileNotFoundError:
         return True
     except (OSError, ValueError, IndexError):

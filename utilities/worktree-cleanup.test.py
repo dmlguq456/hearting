@@ -1054,6 +1054,44 @@ class BatchCleanupTests(unittest.TestCase):
             self.assertEqual(CLEANUP.process_snapshot()[0], "procfs-unknown")
 
 
+class ProcStatTests(unittest.TestCase):
+    def test_terminal_state_requires_valid_thread_count(self):
+        # Synthetic malformed observations must retain the snapshot's unknown
+        # veto. This does not claim that the kernel emits negative counts.
+        with tempfile.TemporaryDirectory() as private:
+            entry = Path(private) / '999999999'
+            entry.mkdir()
+            native_open, native_entries = open, Path.iterdir
+
+            def opened(path, *args, **kwargs):
+                if str(path) == '/proc/999999999/stat':
+                    return io.StringIO(raw)
+                return native_open(path, *args, **kwargs)
+
+            def entries(path):
+                return iter([entry]) if path == Path('/proc') else native_entries(path)
+
+            cases = []
+            for state in ('Z', 'X'):
+                for count in ('0', '1', '2', '-1', '-2', 'bad', '1.5'):
+                    fields = [state] + ['0'] * 49
+                    fields[17], fields[19] = count, '123456'
+                    raw = '999999999 (test comm (with parens)) ' + ' '.join(fields)
+                    terminal = count in ('0', '1')
+                    start = '123456' if count == '2' else None
+                    cases.append((raw, start, terminal, 'procfs' if terminal else 'procfs-unknown'))
+            cases.extend((raw, None, False, 'procfs-unknown') for raw in
+                         ('malformed stat', '999999999 (short) Z'))
+            for raw, start, gone, kind in cases:
+                with self.subTest(stat=raw):
+                    (entry / 'stat').write_text(raw)
+                    with mock.patch('builtins.open', side_effect=opened), \
+                            mock.patch.object(Path, 'iterdir', entries):
+                        self.assertEqual(CLEANUP.read_proc_start(999999999), start)
+                        self.assertEqual(CLEANUP.proc_is_gone(entry), gone)
+                        self.assertEqual(CLEANUP.process_snapshot(), (kind, ()))
+
+
 class RawProcessTests(unittest.TestCase):
     """Actual kernel observations and unmodified CLI, outside the actor model."""
 
