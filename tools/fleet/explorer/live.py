@@ -518,22 +518,82 @@ def _chain_position(nodes, rid):
 
 
 def _chain_title(nodes, rid):
-    """The route's name: its own recorded outcome name, else that of the frame that opened it
-    (the nearest earlier ``route-frame`` node), else the nearest earlier named node."""
+    """Only this route's recorded name proves its subject, not a previous task's name."""
     index = _chain_position(nodes, rid)
     if index is None:
         return None
-    own = _text(_get(nodes[index].get("result"), "name"))
-    if own:
-        return own
-    before = nodes[:index]
-    for node in reversed(before):
-        if node.get("capability") == "route-frame" and _text(_get(node.get("result"), "name")):
-            return node["result"]["name"]
-    for node in reversed(before):
-        if _text(_get(node.get("result"), "name")):
-            return node["result"]["name"]
+    result = nodes[index].get("result")
+    return _text(_get(result, "name")) if _get(result, "route_id") in (None, rid) else None
+
+
+def _route_subject(rid, record, view, owner, result, chain_nodes):
+    """Consume existing route-bound subject sources; never generate or prettify a slug."""
+    from ..work_titles import readable
+    locators = {_text(_get(item, "slug")) for item in (record, view, owner)} - {None}
+    locators |= {readable(value) for value in locators}
+
+    def subject(value):
+        value = _text(value)
+        return value if value and value.strip() and value not in locators else None
+
+    recorded = subject(_get(result, "name")) if _get(result, "route_id") in (None, rid) else None
+    recorded = recorded or subject(_chain_title(chain_nodes, rid))
+    if recorded:
+        return recorded
+    # The record arrived through the existing verified projection. Do not use
+    # a session's evolving title to name its unrelated historical routes.
+    if record.get("route_id") != rid:
+        return None
+    named = subject(record.get("display_title")) or subject(record.get("title"))
+    if named:
+        return named
+    work = _work(owner)
+    attempt = _text(_get(owner, "attempt_id"))
+    expected = _text(record.get("owner_attempt_id"))
+    exact_owner = (
+        attempt and expected in (None, "-", attempt)
+        and _get(work, "source") == "route-exact" and _get(work, "route_id") == rid
+        and record.get("route_hash") and _get(work, "route_hash") == record["route_hash"]
+        and _get(owner, "_summary_sid") == "dispatch-" + attempt
+        and not _get(owner, "association_ambiguity")
+        and (not _get(owner, "_child_session_associated") or _get(owner, "_runtime_session_id"))
+    )
+    if exact_owner and subject(_get(owner, "title")):
+        return subject(_get(owner, "title"))
+    request = _get(record.get("work_request"), "text")
+    if isinstance(request, str):
+        # A sealed request's own first line is a literal fallback, not a model
+        # summary or an extraction from accumulated session conversation.
+        first = next((line.strip() for line in request.splitlines() if line.strip()), "")
+        return subject(re.sub(r"^#{1,6}\s+", "", first))
     return None
+
+
+def _selected_worker_job(node, jobs):
+    """Resolve the body row to one job in this observation, never by native SID alone."""
+    if not node or node.get("unit") == "_kernel/resource":
+        return None
+    anchor = node.get("job")
+    attempt = _text(_get(anchor, "attempt_id")) or _text(node.get("attempt_id"))
+    if not attempt:
+        return None
+    matches = [job for job in jobs if _get(job, "attempt_id") == attempt
+               and _get(job, "route_node") == node.get("id")]
+    if len(matches) != 1:
+        return None
+    job = matches[0]
+    if node.get("harness") and node["harness"] != _get(job, "harness"):
+        return None
+    if node.get("unit") and _get(job, "worker_mode") and node["unit"] != _get(job, "worker_mode"):
+        return None
+    if anchor is not None:
+        # Even a copied anchor must describe the same attempt, native session,
+        # role and process generation. Conflicting/unknown observations stay separate.
+        for field in ("route_id", "route_hash", "harness", "_runtime_session_id", "session_id",
+                      "worker_type", "worker_mode", "depth", "pid", "proc_start"):
+            if _get(anchor, field) != _get(job, field):
+                return None
+    return job
 
 
 def _chain_leg_name(node):
@@ -792,17 +852,15 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             match = next((node for node in chain_nodes if _get(node, "route_id") == rid), None)
             if match is not None and _get(match, "result") is not None:
                 result = _get(match, "result")
-        title = _text(_get(result, "name")) or _chain_title(chain_nodes, rid) or \
-            _text(view.get("slug")) or _text(record.get("slug")) or \
-            (_text(_get(owner, "slug")) if owner is not None else None)
-        if (owner is None or not jobs) and (session_row or {}).get("title"):
-            title = title or session_row["title"]
+        title = _route_subject(rid, record, view, owner, result, chain_nodes)
         worker_stage = _text(worker_node.get("id")) if worker_node else None
         worker_unit = _text(worker_node.get("unit")) if worker_node else None
         # Navigation ancestry never authorizes metrics from the parent session.
         # Each attempt uses the same applied-policy/native gauge as a session.
         owner_gauge = _context_gauge(owner) if owner is not None else (None, None)
         worker_contexts = []
+        selected_worker = _selected_worker_job(worker_node, jobs)
+        worker_context_index = None
         for job in jobs:
             node_id = _text(_get(job, "route_node"))
             if not node_id or _get(job, "liveness") not in ("working", "idle", "blocked"):
@@ -834,6 +892,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             # Multiple registered sub-sessions are individual rows, never one
             # latest/aggregate context value for the whole stage.
             pct, window = _context_gauge(job) if attempt else (None, None)
+            if job is selected_worker:
+                worker_context_index = len(worker_contexts)
             worker_contexts.append({"stage": node_id, "harness": _get(job, "harness"),
                                     "model": _model_pair(_get(job, "resolved_model", "model")),
                                     "context": pct, "window": window})
@@ -865,6 +925,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "worker_contexts": worker_contexts, "subworker": None,
             "current": current,
         }
+        if worker_context_index is not None:
+            route["worker_context_index"] = worker_context_index
         routes.append(route)
         nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status)
     return routes, nodes

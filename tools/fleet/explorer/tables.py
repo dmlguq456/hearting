@@ -852,6 +852,18 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _tint_row(grid, y, x - 1, right, 236)
             y += 1
             worker = route.get("worker") or ()
+            worker_contexts = tuple(route.get("worker_contexts") or ())
+            context_index = route.get("worker_context_index")
+            body_context = (worker_contexts[context_index]
+                            if worker and worker[0] != "resource" and type(context_index) is int
+                            and 0 <= context_index < len(worker_contexts) else None)
+            context_text = ("CTX ·" if body_context.get("context") is None else
+                            f"CTX {body_context['context']}%") if body_context is not None else ""
+            progress_end = x + use - (9 if link else 0)
+            context_x = progress_end - _seg_width(context_text)
+            inline_context = body_context is not None and (
+                not slim or context_x - (x + cols["prog"]) >= 10)
+            worker_progress_end = context_x - gap if inline_context and slim else progress_end
             label = str(worker[0]) if worker else "worker"
             unit = route.get("worker_unit")
             route_end = x + cols["kind"] - gap
@@ -897,9 +909,15 @@ def draw_routes(grid, vm, state, x=34, y=3):
                     style = route.get("worker_stage_key") or (hue, 1, 0)
                     if worker_running and not getattr(grid, "beat", 1):
                         style = (hue, 0, 1)
-                grid.put(cursor, y, text, style, limit=x + use - (9 if link else 0))
+                grid.put(cursor, y, text, style, limit=worker_progress_end)
                 from .grid import cell_width
                 cursor += sum(cell_width(char) for char in str(text))
+            if inline_context:
+                if slim:
+                    grid.put(context_x, y, context_text, "dim", limit=progress_end)
+                else:
+                    _draw_context_gauge(grid, x + cols["ctx"], y,
+                                        body_context.get("context"), body_context.get("window"))
             if link:
                 grid.put(x + use - 6, y, "open ▸", "accent")
             if history and not is_open:
@@ -910,8 +928,16 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _tint_row(grid, y - 1, x - 1, right, 236)
                 _tint_row(grid, y, x - 1, right, 236)
             y += 1
-            for index, worker_context in enumerate(route.get("worker_contexts") or ()):
+            for index, worker_context in enumerate(worker_contexts):
+                if body_context is not None and index == context_index and inline_context:
+                    continue
                 grid.add_hit(y, x, right, action)
+                if body_context is not None and index == context_index:
+                    # At the smallest widths keep the metric as a continuation,
+                    # without presenting the same worker's identity a second time.
+                    grid.put(route_start, y, context_text, "dim", limit=x + use)
+                    y += 1
+                    continue
                 label = str(worker_context.get("stage") or "worker")
                 grid.put(route_start, y, _clip(f"└ {label} · {index + 1}", route_end - route_start),
                          "title_dim", limit=route_end)
