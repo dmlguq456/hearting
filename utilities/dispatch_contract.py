@@ -5472,7 +5472,59 @@ def _launch_row_value(fields):
     return (*fields[:5], tuple(sorted(metadata.items())))
 
 
-def _launch_dependencies(lines, fields, callbacks=()):
+_LAUNCH_COMPLETION_READS = contextvars.ContextVar("launch_completion_reads", default=None)
+
+
+@contextmanager
+def _launch_completion_reads():
+    # Per preparation, including nested common readers; never shared between
+    # concurrent legs or replayed as callbacks under the registry lock.
+    reads = {"nodes": [], "attempts": set(), "groups": set(), "exact": False}
+    token = _LAUNCH_COMPLETION_READS.set(reads)
+    try:
+        yield reads
+    finally:
+        _LAUNCH_COMPLETION_READS.reset(token)
+
+
+def _launch_completion_marker_input(marker):
+    reads = _LAUNCH_COMPLETION_READS.get()
+    if reads is None or not marker:
+        return
+    if marker.get("attempt_id"):
+        reads["attempts"].add(marker["attempt_id"])
+    if marker.get("stage_authority") == "owner-chain" and marker.get("session_chain_id"):
+        reads["groups"].add(marker["session_chain_id"])
+
+
+def _launch_completion_input(route, node, marker=None):
+    reads = _LAUNCH_COMPLETION_READS.get()
+    if reads is None:
+        return
+    _launch_completion_marker_input(marker)
+    if not route.get("route_id") or not node.get("id"):
+        reads["exact"] = True
+        return
+    scope = (route["route_id"], dict(node))
+    if scope not in reads["nodes"]:
+        reads["nodes"].append(scope)
+    if marker:
+        if owner_closure_shape(marker) == "continuation":
+            # The existing closure reader consumes all review rounds in these
+            # source routes, including competitors absent from its old proof.
+            proof = marker.get("owner_closure_proof")
+            lineage = proof.get("lineage") if isinstance(proof, dict) else None
+            if not isinstance(lineage, list) or not lineage:
+                reads["exact"] = True
+            else:
+                for source in lineage:
+                    if not isinstance(source, dict) or not source.get("route_id"):
+                        reads["exact"] = True
+                    elif (source["route_id"], dict(node)) not in reads["nodes"]:
+                        reads["nodes"].append((source["route_id"], dict(node)))
+
+
+def _launch_dependencies(lines, fields, callbacks=(), reads=None):
     """Pin prepared row inputs, including absent competitors, without a TTL.
 
     Shared gates depend on their consumed nodes and exact attempt lineage. An opaque
@@ -5480,7 +5532,7 @@ def _launch_dependencies(lines, fields, callbacks=()):
     shared wrapper explicitly declares its repository/route-scoped gates.
     Unrelated projects can append or complete without invalidating native gates.
     """
-    if any(callback is not None and not getattr(callback, "_dispatch_registry_scoped", False)
+    if (reads and reads["exact"]) or any(callback is not None and not getattr(callback, "_dispatch_registry_scoped", False)
            for callback in callbacks):
         return tuple(lines)
     metadata = parse_registry_metadata(fields[5])
@@ -5492,6 +5544,9 @@ def _launch_dependencies(lines, fields, callbacks=()):
         "attempt_id", "automatic_retry_of", "prior_attempt_id", "replacement_original_attempt_id")
         if metadata.get(k)}
     groups = {metadata[k] for k in group_keys if metadata.get(k)}
+    if reads:
+        attempts.update(reads["attempts"])
+        groups.update(reads["groups"])
     nodes = {metadata.get("route_node")}
     for callback in callbacks:
         nodes.update(getattr(callback, "_dispatch_registry_nodes", ()))
@@ -5514,6 +5569,24 @@ def _launch_dependencies(lines, fields, callbacks=()):
             scoped = (bool(metadata.get("route_id") and metadata.get("route_node"))
                       and meta.get("route_id") == metadata.get("route_id")
                       and meta.get("route_node") in nodes)
+            for route_id, node in (reads or {}).get("nodes", ()):
+                try:
+                    row_route, _row_hash, row_node = registered_node_identity(meta, node)
+                except ValueError:
+                    # Conflicting aliases must not disappear from a consumed
+                    # scope, even when the old reader accepted their identity.
+                    # A node-less owner cannot stand for an ordinary stage:
+                    # it is only that stage's ancestor, not consumed execution.
+                    owner_node = (node.get("kind") == "capability-owner"
+                                  and node.get("unit") == "_kernel/owner"
+                                  and node.get("dispatch_depth") == 1 and node.get("terminal") is True)
+                    if ((meta.get("route_id") == route_id and meta.get("route_node") == node["id"])
+                            or (owner_node and meta.get("owner_route_id") == route_id)):
+                        scoped = True
+                    continue
+                if ((row_route == route_id and row_node == node["id"])
+                        or (meta.get("route") == route_id and meta.get("route_node") == node["id"])):
+                    scoped = True
             unknown = same_worktree and not all(
                 metadata.get(k) and meta.get(k) for k in ("route_id", "route_node"))
             child = meta.get("parent_attempt_id") in executions
@@ -5627,83 +5700,83 @@ def _launch_parent_observation(jobs, lines, child_fields, child_meta, binding):
 
 def _prepare_attempt_launch(jobs, attempt_id, *, parent_binding, respawn_of, preclaim,
                             expected_fields=None, published=False, phase="pre-release"):
-    lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
-    index, fields, metadata = _launch_row(lines, attempt_id)
-    validate_attempt_metadata(metadata)
-    import route_parent_close
-    if route_parent_close.row_requested(metadata, jobs):
-        raise DispatchContractError("cancelled-by-parent")
-    if expected_fields is not None and _launch_row_value(fields) != _launch_row_value(expected_fields):
-        raise DispatchContractError(f"attempt-{phase}-identity-changed", attempt_id)
-    if fields[1] not in {"open", "running"}:
-        raise DispatchContractError("attempt-not-open", attempt_id)
-    if not published:
-        if respawn_of is None:
-            if metadata.get("launch_claimed") == "1":
-                raise DispatchContractError("attempt-launch-already-claimed", attempt_id)
-            if metadata.get("launch_claimed") != "0":
-                raise DispatchContractError("attempt-launch-claim-invalid", attempt_id)
-        else:
-            if (parent_binding is not None or metadata.get("worker_type") != "owner"
-                    or metadata.get("dispatch_depth") != "1" or metadata.get("harness") != "codex"
-                    or metadata.get("launch_claimed") != "1" or metadata.get("launch_started") != "1"
-                    or (metadata.get("pid", ""), metadata.get("pid_start", ""))
-                    != tuple(map(str, respawn_of))):
-                raise DispatchContractError("attempt-respawn-identity-changed", attempt_id)
-            governed = attempt_governed_process_quiescence(metadata)
-            if governed.state != "quiescent":
-                reason = ("attempt-respawn-consumer-live" if governed.state == "live"
-                          else "attempt-respawn-consumer-unverifiable")
-                raise DispatchContractError(reason, governed.reason)
-            if supervisor_lease_is_held(jobs, metadata):
-                raise DispatchContractError("attempt-respawn-lease-held", attempt_id)
-    if respawn_of is None:
-        from dispatch_replacement import admission
-        from review_input import validate_launch
-        from review_source_subject import SourceSubjectError, validate_attempt
-        # Replacement admission applies before the launch claim. After identity
-        # publication this exact fenced launch already owns that admission;
-        # replaying new-launch eligibility would reject its own gated PID as
-        # work that had started. Row/lineage CAS and source/parent/current-input
-        # checks still run before final release, as they do for every launch.
+    with _launch_completion_reads() as reads:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        index, fields, metadata = _launch_row(lines, attempt_id)
+        validate_attempt_metadata(metadata)
+        import route_parent_close
+        if route_parent_close.row_requested(metadata, jobs):
+            raise DispatchContractError("cancelled-by-parent")
+        if expected_fields is not None and _launch_row_value(fields) != _launch_row_value(expected_fields):
+            raise DispatchContractError(f"attempt-{phase}-identity-changed", attempt_id)
+        if fields[1] not in {"open", "running"}:
+            raise DispatchContractError("attempt-not-open", attempt_id)
         if not published:
-            admission(jobs, lines, metadata)
-        validate_launch(jobs, metadata)
-        if preclaim is not None:
-            preclaim(lines)
-    # Canonical repository/foreign route observation can block on NAS; finish
-    # it before the last content observation, still with the payload fenced.
-    routes = _launch_cancellation_routes(jobs, lines, metadata)
-    try:
-        _launch_parent_observation(jobs, lines, fields, metadata, parent_binding)
+            if respawn_of is None:
+                if metadata.get("launch_claimed") == "1":
+                    raise DispatchContractError("attempt-launch-already-claimed", attempt_id)
+                if metadata.get("launch_claimed") != "0":
+                    raise DispatchContractError("attempt-launch-claim-invalid", attempt_id)
+            else:
+                if (parent_binding is not None or metadata.get("worker_type") != "owner"
+                        or metadata.get("dispatch_depth") != "1" or metadata.get("harness") != "codex"
+                        or metadata.get("launch_claimed") != "1" or metadata.get("launch_started") != "1"
+                        or (metadata.get("pid", ""), metadata.get("pid_start", ""))
+                        != tuple(map(str, respawn_of))):
+                    raise DispatchContractError("attempt-respawn-identity-changed", attempt_id)
+                governed = attempt_governed_process_quiescence(metadata)
+                if governed.state != "quiescent":
+                    reason = ("attempt-respawn-consumer-live" if governed.state == "live"
+                              else "attempt-respawn-consumer-unverifiable")
+                    raise DispatchContractError(reason, governed.reason)
+                if supervisor_lease_is_held(jobs, metadata):
+                    raise DispatchContractError("attempt-respawn-lease-held", attempt_id)
         if respawn_of is None:
-            try:
-                validate_attempt(jobs, fields, metadata)
-            except SourceSubjectError as exc:
-                raise DispatchContractError(exc.reason, exc.detail) from exc
-        # Source observation may take time. Recheck local process/declared
-        # supervisor-lease liveness afterward, without canonicalizing NAS paths
-        # or reloading foreign routes. The transaction pins that parent's row.
-        if parent_binding is not None:
-            _parent_index, _parent_fields, parent_meta = _launch_row(lines, parent_binding.attempt_id)
-            if not _parent_binding_is_live_from_metadata(jobs, parent_meta, parent_binding):
-                raise DispatchContractError("parent-attempt-not-live", parent_binding.attempt_id)
-    except DispatchContractError as exc:
-        if exc.reason == "parent-attempt-not-live" and (published or expected_fields is not None):
-            suffix = "after-post-claim" if published else "after-spawn"
-            raise DispatchContractError("parent-attempt-not-live-" + suffix, exc.detail) from exc
-        raise
-    return lines, index, fields, metadata, routes
+            from dispatch_replacement import admission, validate_owned_launch
+            from review_input import validate_launch
+            from review_source_subject import SourceSubjectError, validate_attempt
+            # Initial eligibility differs from validation of this already owned
+            # fenced identity. Both paths retain the current claim/input contract.
+            if published:
+                validate_owned_launch(jobs, lines, metadata)
+            else:
+                admission(jobs, lines, metadata)
+            validate_launch(jobs, metadata)
+            if preclaim is not None:
+                preclaim(lines)
+        # Canonical repository/foreign route observation can block on NAS; finish
+        # it before the last content observation, still with the payload fenced.
+        routes = _launch_cancellation_routes(jobs, lines, metadata)
+        try:
+            _launch_parent_observation(jobs, lines, fields, metadata, parent_binding)
+            if respawn_of is None:
+                try:
+                    validate_attempt(jobs, fields, metadata)
+                except SourceSubjectError as exc:
+                    raise DispatchContractError(exc.reason, exc.detail) from exc
+            # Source observation may take time. Recheck local process/declared
+            # supervisor-lease liveness afterward, without canonicalizing NAS paths
+            # or reloading foreign routes. The transaction pins that parent's row.
+            if parent_binding is not None:
+                _parent_index, _parent_fields, parent_meta = _launch_row(lines, parent_binding.attempt_id)
+                if not _parent_binding_is_live_from_metadata(jobs, parent_meta, parent_binding):
+                    raise DispatchContractError("parent-attempt-not-live", parent_binding.attempt_id)
+        except DispatchContractError as exc:
+            if exc.reason == "parent-attempt-not-live" and (published or expected_fields is not None):
+                suffix = "after-post-claim" if published else "after-spawn"
+                raise DispatchContractError("parent-attempt-not-live-" + suffix, exc.detail) from exc
+            raise
+        return lines, index, fields, metadata, routes, reads
 
 
 def _commit_launch_preparation(jobs, fresh, prepared, *, parent_binding, preclaim, phase):
-    lines, _index, fields, metadata, routes = prepared
+    lines, _index, fields, metadata, routes, reads = prepared
     index, current_fields, current_meta = _launch_row(
         fresh, metadata["attempt_id"], reason=f"attempt-{phase}-row-not-unique")
     _launch_local_fences(jobs, current_meta, routes)
     if (_launch_row_value(current_fields) != _launch_row_value(fields)
-            or _launch_dependencies(fresh, fields, (preclaim,))
-            != _launch_dependencies(lines, fields, (preclaim,))):
+            or _launch_dependencies(fresh, fields, (preclaim,), reads)
+            != _launch_dependencies(lines, fields, (preclaim,), reads)):
         raise DispatchContractError(f"attempt-{phase}-identity-changed", metadata["attempt_id"])
     if parent_binding is not None:
         # A parent can exit while we wait for jobs.lock even when its row is
@@ -7654,6 +7727,7 @@ def completion_marker_gate(
     node = next((row for row in route.get("nodes", []) if row.get("id") == route_node), None)
     if node is None:
         return
+    _launch_completion_input(route, node)
     missing = []
     markers = {}
     proceeding = []
@@ -8021,6 +8095,9 @@ def _marker_schema_identity_ok(
     """
     if not isinstance(marker, dict) or marker.get("schema_version") != 2:
         return False, None
+    # Recursive revision/source markers consume their own completion lineage,
+    # even when the outer marker has no registered worker of its own.
+    _launch_completion_input(route, node, marker)
     node_id = str(node["id"])
     sequence = int(marker.get("sequence", 0))
     if sequence < 1:
@@ -9277,6 +9354,7 @@ def completion_conflict_attempt(marker: Mapping[str, object], registry_lines: li
     Semantic history may outlive its process registry. Actual launch still
     requires completion_attempt_readiness and its current execution proof.
     """
+    _launch_completion_marker_input(marker)
     for line in registry_lines:
         fields = line.split("\t")
         if len(fields) != 6:
@@ -9326,6 +9404,7 @@ def completion_attempt_readiness(
     compatibility; it does not change launch or completion policy.
     """
 
+    _launch_completion_input(route, node, marker)
     if owner_closure_shape(marker) == "continuation":
         try:
             _route_module().validate_continuation_owner_closure(
@@ -11093,7 +11172,7 @@ def claim_attempt_row(
     if metadata.get("attempt_id") != attempt_id:
         raise DispatchContractError("attempt-row-identity-mismatch", attempt_id)
     ensure_global_registry_writable(jobs)
-    with _launch_serialization_lock(jobs, attempt_id):
+    with _launch_serialization_lock(jobs, attempt_id), _launch_completion_reads() as reads:
         lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
         from dispatch_replacement import replacement_row
         row, replacement = replacement_row(jobs, lines, row)
@@ -11120,7 +11199,7 @@ def claim_attempt_row(
         routes = _launch_cancellation_routes(jobs, lines, metadata)
         return _commit_attempt_row(
             jobs, attempt_id, "\t".join(fields), prepared_lines=lines,
-            prepared_replacement=replacement, cancellation_routes=routes, launch=launch,
+            prepared_replacement=replacement, prepared_reads=reads, cancellation_routes=routes, launch=launch,
             exclusive_metadata=exclusive_metadata, exclusive_live_metadata=exclusive_live_metadata,
             terminal_attempt_limit=terminal_attempt_limit, replacement_attempt_limit=replacement_attempt_limit,
             replacement_notes=replacement_notes, mutation_precheck=mutation_precheck, preclaim=preclaim)
@@ -11133,6 +11212,7 @@ def _commit_attempt_row(
     *,
     prepared_lines: list[str],
     prepared_replacement: bool,
+    prepared_reads: dict,
     cancellation_routes: tuple,
     launch: bool = False,
     exclusive_metadata: dict[str, str] | None = None,
@@ -11171,9 +11251,9 @@ def _commit_attempt_row(
                              or fields[1] != "open")):
                     return False
         def pin_preparation():
-            if (_launch_dependencies(lines, row_fields, (mutation_precheck, preclaim if launch else None))
+            if (_launch_dependencies(lines, row_fields, (mutation_precheck, preclaim if launch else None), prepared_reads)
                     != _launch_dependencies(prepared_lines, row_fields,
-                                            (mutation_precheck, preclaim if launch else None))):
+                                            (mutation_precheck, preclaim if launch else None), prepared_reads)):
                 raise DispatchContractError("attempt-registration-dependency-changed", attempt_id)
 
         automatic_replacement = prepared_replacement

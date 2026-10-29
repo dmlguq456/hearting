@@ -641,6 +641,141 @@ class NasDispatchIOTest(unittest.TestCase):
         self.assertFalse(payload.exists())
         self.assertIsNotNone(self.children[-1].poll())
 
+    def test_actual_completion_reader_pins_foreign_owner_alias_at_both_commits(self):
+        # The callback uses the real readiness reader, not a whole native wrapper.
+        # No declaration of direct DAG nodes describes this foreign input.
+        for phase in (1, 2):
+            for change in ("conflict", "competitor", "descendant", "annotation", "independent"):
+                with self.subTest(phase=phase, change=change):
+                    route = {"route_id": f"rt-alias-{phase}-{change}", "route_hash": "sha256:" + "d" * 64}
+                    node = {"id": "source-owner", "kind": "capability-owner", "unit": "_kernel/owner",
+                            "terminal": True, "dispatch_depth": 1}
+                    peer = (CURRENT.replace("dispatch_depth=2", "dispatch_depth=1")
+                            + ",harness=codex,attempt_id=att-source-owner,worker_type=owner,unit=_kernel/owner"
+                            + f",owner_route_id={route['route_id']},owner_route_hash={route['route_hash']}"
+                            + ",note=completed-marker,launch_outcome=reaped-before-publish")
+                    self.jobs.write_text("fixture\tdone\t/A/repo\t/A/foreign-wt\towner\t" + peer + "\n")
+                    self.register("att-alias-consumer", extra=",route_id=rt-continuation,route_node=consumer")
+                    marker = {"attempt_id": "att-source-owner"}
+                    def preclaim(lines):
+                        self.assert_global_locks_free()
+                        ready = DC.completion_attempt_readiness(route, node, marker, self.jobs, registry_lines=lines)
+                        self.assertEqual((ready.state, ready.reason), ("ready", "reaped-before-publish"))
+                    preclaim._dispatch_registry_scoped = True
+                    original = DC._launch_registry_transaction
+                    commits = []
+                    @contextmanager
+                    def mutate(jobs):
+                        with original(jobs) as lines:
+                            commits.append(True)
+                            if len(commits) == phase:
+                                index, fields, _ = DC._launch_row(lines, "att-source-owner")
+                                if change in {"conflict", "annotation"}:
+                                    fields[5] += (",terminal_conflict=1" if change == "conflict"
+                                                  else ",summary_sid=fresh,updated_at=now")
+                                    lines[index] = "\t".join(fields)
+                                elif change == "competitor":
+                                    lines.append("fixture\topen\t/A/repo\t/A/other-wt\tcompetitor\t"
+                                                 + peer.replace("att-source-owner", "att-competing-owner"))
+                                else:
+                                    lines.append(self.row("att-new-child", extra=",route_id=rt-other,route_node=peer"
+                                        + (",parent_attempt_id=att-source-owner" if change == "descendant" else "")))
+                                DC._atomic_registry_replace(jobs, lines)
+                            yield lines
+                    payload = self.base / f"alias-{phase}-{change}"
+                    with mock.patch.object(DC, "_launch_registry_transaction", side_effect=mutate):
+                        if change in {"annotation", "independent"}:
+                            proc, _ = DC.spawn_claimed_attempt(self.jobs, "att-alias-consumer", parent_binding=None,
+                                                              preclaim=preclaim, spawn=self.spawn(payload))
+                            proc.wait(timeout=5)
+                            self.assertTrue(payload.exists())
+                            self.assertIn("summary_sid=fresh" if change == "annotation" else "att-new-child",
+                                          self.jobs.read_text())
+                        else:
+                            with self.assertRaises(DC.DispatchContractError) as refused:
+                                DC.spawn_claimed_attempt(self.jobs, "att-alias-consumer", parent_binding=None,
+                                                         preclaim=preclaim, spawn=self.spawn(payload))
+                            self.assertEqual(refused.exception.reason,
+                                "attempt-" + ("pre-release" if phase == 1 else "post-claim") + "-identity-changed")
+                            self.assertFalse(payload.exists())
+                            self.assertIsNotNone(self.children[-1].poll())
+
+    def test_completion_scope_fallback_and_continuation_lineage_are_exact(self):
+        own = self.row("att-projection", extra=",route_id=rt-current,route_node=execute").split("\t")
+        foreign = self.row("att-foreign", extra=",route_id=rt-source,route_node=review")
+        unknown = self.row("att-unknown")
+        def scoped(_lines):
+            pass
+        scoped._dispatch_registry_scoped = True
+        def opaque(_lines):
+            pass
+        def differs(row, suffix, callbacks=(scoped,), reads=None):
+            return (DC._launch_dependencies([row], own, callbacks, reads)
+                    != DC._launch_dependencies([row + suffix], own, callbacks, reads))
+        self.assertFalse(differs(foreign, ",terminal_conflict=1"))
+        self.assertTrue(differs(unknown, ",future_authority=changed"))
+        self.assertTrue(differs(foreign, ",summary_sid=changed", (opaque,)))
+        with DC._launch_completion_reads() as reads:
+            DC._launch_completion_input({}, {})
+        self.assertTrue(differs(foreign, ",summary_sid=changed", reads=reads))
+        # The immutable closure proof names source routes; a later round there
+        # is consumed even though its attempt is absent from the saved proof.
+        marker = {"stage_authority": "owner-closure", "registered_worker": False,
+                  "review_independence": "owner-overridden", "review_gate_closure": "owner-closure",
+                  "owner_closure_proof": {"lineage": [{"route_id": "rt-source"}]}}
+        with DC._launch_completion_reads() as reads:
+            DC._launch_completion_input({"route_id": "rt-current"}, {"id": "review"}, marker)
+        for row in (foreign, foreign.replace("route_id=rt-source", "route=rt-source")):
+            self.assertTrue(differs(row, ",terminal_conflict=1", reads=reads))
+
+    def test_native_marker_gate_pins_its_actual_owner_alias_reader(self):
+        # Real marker gate + readiness; only stable marker currency/journaling
+        # are fixed. Neither commit, registry identity nor child is mocked.
+        for phase in (1, 2):
+            with self.subTest(phase=phase):
+                node = {"id": "owner", "kind": "capability-owner", "unit": "_kernel/owner",
+                        "terminal": True, "dispatch_depth": 1}
+                route = {"route_id": f"rt-marker-alias-{phase}", "route_hash": "sha256:" + "e"*64,
+                         "dispatch_contract_version": 3,
+                         "nodes": [node, {"id": "consumer", "depends_on": ["owner"]}]}
+                peer = (CURRENT.replace("dispatch_depth=2", "dispatch_depth=1")
+                        + ",harness=codex,attempt_id=att-marker-owner,worker_type=owner,unit=_kernel/owner"
+                        + f",owner_route_id={route['route_id']},owner_route_hash={route['route_hash']}"
+                        + ",note=completed-marker,launch_outcome=reaped-before-publish")
+                self.jobs.write_text("fixture\tdone\t/A/repo\t/A/foreign-wt\towner\t" + peer + "\n")
+                self.register("att-marker-consumer", extra=f",route_id={route['route_id']},route_node=consumer")
+                path = self.base / 'marker-route.json'; path.write_text(json.dumps(route))
+                directory = self.base / 'completion' / route['route_id']; directory.mkdir(parents=True)
+                (directory / 'owner.json').write_text(json.dumps({'attempt_id': 'att-marker-owner'}))
+                def preclaim(lines):
+                    self.assert_global_locks_free()
+                    DC.completion_marker_gate(str(path), 'consumer', 'start', self.base, self.jobs,
+                                              registry_lines=lines, attempt_id='att-marker-consumer')
+                preclaim._dispatch_registry_scoped = True
+                preclaim._dispatch_registry_nodes = frozenset({'owner'})
+                original = DC._launch_registry_transaction
+                commits = []
+                @contextmanager
+                def mutate(jobs):
+                    with original(jobs) as lines:
+                        commits.append(True)
+                        if len(commits) == phase:
+                            index, fields, _ = DC._launch_row(lines, 'att-marker-owner')
+                            fields[5] += ',terminal_conflict=1'; lines[index] = '\t'.join(fields)
+                            DC._atomic_registry_replace(jobs, lines)
+                        yield lines
+                payload = self.base / f'marker-payload-{phase}'
+                with mock.patch.object(DC, 'completion_marker_is_current', return_value=True), \
+                     mock.patch.object(DC, 'note_evidence_change'), \
+                     mock.patch.object(DC, '_launch_registry_transaction', side_effect=mutate):
+                    with self.assertRaises(DC.DispatchContractError) as refused:
+                        DC.spawn_claimed_attempt(self.jobs, 'att-marker-consumer', parent_binding=None,
+                                                 preclaim=preclaim, spawn=self.spawn(payload))
+                self.assertEqual(refused.exception.reason,
+                    'attempt-' + ('pre-release' if phase == 1 else 'post-claim') + '-identity-changed')
+                self.assertFalse(payload.exists())
+                self.assertIsNotNone(self.children[-1].poll())
+
     def test_fresh_commit_keeps_authority_and_unknown_fields_exact(self):
         for phase in (1, 2):
             for key in ("pid_start", "launch_claimed", "parent_attempt_id", "runtime_home", "review_input_digest",
