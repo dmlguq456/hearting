@@ -54,8 +54,68 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
     _resume_fixture = FIX.TestSupervisorAdvance._resume_fixture
     _settle_resource_owner = FIX.TestSupervisorAdvance._settle_resource_owner
 
-    def fixture(self):
-        route, path, jobs, registry, output = self._resume_fixture(ordinary=True)
+    def write_smoke_attestation(self, path, command, cwd, inputs=()):
+        smoke_spec = importlib.util.spec_from_file_location(
+            'resource_sequence_smoke_fixture', ROOT / 'tools' / 'smoke-attestation.py')
+        smoke_tool = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_tool)
+        data = smoke_tool.payload(inputs, command, cwd)
+        data.update(status='passed', exit_code=0)
+        data['attestation_hash'] = 'sha256:' + hashlib.sha256(json.dumps(
+            data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        Path(path).write_text(json.dumps(data, sort_keys=True))
+        return Path(path)
+
+    def fixture(self, *, multistage=False):
+        if multistage:
+            def compile_multistage(capability, capability_mode, cwd, signals):
+                router = SUP.route_module()
+                registry = router.TOPO.load_registry()
+                recipe = copy.deepcopy(router.TOPO.resolve_recipe(
+                    registry, capability, capability_mode))
+                resource = next(node for node in recipe['standard_plus']['nodes']
+                                if node['id'] == 'full-run')
+                verify = next(node for node in recipe['standard_plus']['nodes']
+                              if node['id'] == 'run-verify')
+                metrics = copy.deepcopy(next(node for node in router.TOPO.resolve_recipe(
+                    registry, capability, 'eval')['standard_plus']['nodes']
+                    if node['id'] == 'metrics'))
+                resource['depends_on'] = []
+                metrics.update(depends_on=['full-run'], inputs=['raw.json', 'run.json'],
+                    outputs=['summary.json', 'metrics.jsonl', 'correction.json'],
+                    write_scope=['summary.json', 'metrics.jsonl', 'correction.json'])
+                verify.update(id='verify', depends_on=['metrics'],
+                    inputs=['summary.json', 'metrics.jsonl', 'raw.json', 'run.json'],
+                    outputs=['reviews/verdict.json'], write_scope=['reviews/**'], terminal=True,
+                    terminal_gate=verify['completion_gate'])
+                verify.pop('continuation', None)
+                # Seal the fixture graph and its profiles together, including when
+                # its artifact-only cwd has no enclosing Git repository.
+                for node in (metrics, verify):
+                    node['profile_demand'] = {
+                        'schema_version': 1, 'judgment_requirement': 'predetermined',
+                        'execution_scope': 'short-local',
+                        'judgment_reason': 'Hash-check fixed saved CPU output.',
+                        'execution_reason': 'One bounded fixture consumer.',
+                        'evidence_refs': ['fixture:saved-output-settlement']}
+                recipe['standard_plus']['nodes'] = [resource, metrics, verify]
+                recipe['standard_plus'].pop('parallel_groups', None)
+                recipe.pop('conditional_extensions', None)
+                recipe.update(completion_gates=[node['completion_gate']
+                    for node in (resource, metrics, verify)], human_gates=[],
+                    human_gate_bindings=[], resume_retry_boundaries=['full-run', 'metrics', 'verify'])
+                route_doc = router.compile_composed_route(
+                    recipe, capability_mode, 'standard', cwd, cwd,
+                    predicates=[], signals=signals, transport='headless',
+                    transport_evidence='fixture', tracking='tracked',
+                    tracked_gate_evidence=copy.deepcopy(FIX.GATE),
+                    dispatch_evidence=FIX.dispatch_evidence(cwd))
+                router.verify_route(route_doc, expected_cwd=cwd)
+                return route_doc
+            with mock.patch.object(FIX, 'compile_fixture', side_effect=compile_multistage):
+                route, path, jobs, registry, output = self._resume_fixture(ordinary=True)
+        else:
+            route, path, jobs, registry, output = self._resume_fixture(ordinary=True)
         row = json.loads(registry.read_text())['runs']['fixture-run']
         row['parent_attempt_id'] = 'att-parent'
         registry.write_text(json.dumps({'schema_version': 1, 'runs': {row['run_id']: row}}))
@@ -67,6 +127,233 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         arm.write_text(json.dumps(armed))
         (output / 'run.json').unlink()
         return route, path, jobs, registry, output, ledger
+
+    def failed_saved_output_fixture(self, *, multistage=False):
+        route, path, jobs, registry, output, ledger = self.fixture(multistage=multistage)
+        owner_attempt, owner_input = self.live_owner(route, jobs, registry, harness='claude')
+        config_sha = 'a' * 64
+        body = self.next_body(registry, 'saved-output-run', output)
+        body.update(parent_attempt_id=owner_attempt, config_sha256=config_sha)
+        payload = (
+            "from pathlib import Path\nimport hashlib,json,sys\n"
+            "base=Path(sys.argv[1]); route_id=sys.argv[2]; config_sha=sys.argv[3]\n"
+            "raw=base/'raw.json'; data=b'{\\\"scientific_verdict\\\":\\\"FAIL\\\",\\\"scores\\\":[1,2,3]}\\n'; raw.write_bytes(data)\n"
+            "run={'route_id':route_id,'exit':1,'config_sha256':config_sha,'outputs':["
+            "{'path':'raw.json','sha256':hashlib.sha256(data).hexdigest()}]}\n"
+            "(base/'run.json').write_text(json.dumps(run))\nraise SystemExit(1)\n"
+        )
+        body['command'] = [sys.executable, '-c', payload, str(output), route['route_id'], config_sha]
+        data = json.loads(registry.read_text())
+        data['runs'].pop('fixture-run')
+        registry.write_text(json.dumps(data))
+        (ledger.root / 'armed' / 'full-run.json').unlink()
+        self.launch(route, path, jobs, registry, output, body, exit_code=1)
+        result = SUP.poll_once(route, ledger)
+        self.assertEqual(result[0]['action'], 'halt-failed')
+        current = json.loads(registry.read_text())['runs']['saved-output-run']
+        self.assertEqual((current['status'], current['exit_code']), ('failed', 1))
+        return (route, path, jobs, registry, output, ledger, owner_attempt, owner_input,
+                output / 'raw.json', output / 'run.json')
+
+    def test_saved_nonzero_outputs_enter_verification_before_any_pass_marker(self):
+        route, path, jobs, registry, output, ledger, owner_attempt, _owner_input, raw, receipt = \
+            self.failed_saved_output_fixture()
+        completion = SUP.route_module().completion_dir(route['route_id'], jobs=jobs)
+        self.assertFalse((completion / 'full-run.json').exists())
+        self.assertFalse((completion / 'run-verify.json').exists())
+        registry_before = registry.read_bytes()
+        raw_before = raw.read_bytes()
+        receipt_before = receipt.read_bytes()
+        start_args = SimpleNamespace(route_file=str(path), route_node='run-verify',
+            attempt_id='att-saved-verifier', jobs=str(jobs), agent_home=ROOT,
+            worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
+            parent_attempt_id=owner_attempt, parent_harness='claude',
+            parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
+        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+             mock.patch('subprocess.check_output', return_value=str(self.base)):
+            result = RA.completion_gate(start_args, 'start', ROOT, jobs,
+                                        gate=DC.completion_marker_gate)
+        self.assertIsNone(result, result)
+        verification = output / 'saved-output-verification.json'
+        verifier_code = (
+            "import hashlib,json,sys; from pathlib import Path; "
+            "raw=Path(sys.argv[1]).read_bytes(); receipt=json.loads(Path(sys.argv[2]).read_text()); "
+            "expected=receipt['outputs'][0]['sha256']; actual=hashlib.sha256(raw).hexdigest(); "
+            "assert actual==expected; Path(sys.argv[3]).write_text(json.dumps({"
+            "'verdict':'PASS','consumed_sha256':actual}))")
+        verified = subprocess.run([sys.executable, '-B', '-c', verifier_code,
+            str(raw), str(receipt), str(verification)], cwd=self.base,
+            text=True, capture_output=True, check=False)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertEqual(json.loads(verification.read_text())['consumed_sha256'],
+                         hashlib.sha256(raw_before).hexdigest())
+        self.assertEqual(ledger.state()['nodes']['full-run']['state'], 'FAILED_RETRYABLE')
+        self.assertEqual(ledger.state()['nodes']['full-run']['evidence']['exit_code'], 1)
+        self.assertFalse((completion / 'full-run.json').exists())
+        self.assertEqual(ledger.claims(), {})
+        self.assertEqual(registry.read_bytes(), registry_before)
+        self.assertEqual(raw.read_bytes(), raw_before)
+        self.assertEqual(receipt.read_bytes(), receipt_before)
+        journal_before = ledger.journal_path.read_bytes()
+        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+             mock.patch('subprocess.check_output', return_value=str(self.base)):
+            preview = RA.completion_gate(start_args, 'dry-run', ROOT, jobs,
+                                          gate=DC.completion_marker_gate)
+        self.assertIsNone(preview, preview)
+        self.assertEqual(ledger.journal_path.read_bytes(), journal_before)
+        self.assertEqual(ledger.claims(), {})
+        self.assertFalse((completion / 'full-run.json').exists())
+
+    def test_saved_output_start_refuses_changed_bytes_config_and_pending_correction(self):
+        for mutation in ('changed-output', 'changed-config', 'missing-output',
+                         'cancelled', 'pending-correction'):
+            with self.subTest(mutation=mutation), self.subfixture():
+                route, path, jobs, registry, _output, ledger, owner_attempt, owner_input, raw, receipt = \
+                    self.failed_saved_output_fixture()
+                if mutation == 'changed-output':
+                    raw.write_bytes(raw.read_bytes() + b'changed')
+                elif mutation == 'changed-config':
+                    data = json.loads(receipt.read_text())
+                    data['config_sha256'] = 'b' * 64
+                    receipt.write_text(json.dumps(data))
+                elif mutation == 'missing-output':
+                    raw.unlink()
+                elif mutation == 'cancelled':
+                    data = json.loads(registry.read_text())
+                    data['runs']['saved-output-run']['cancel_requested'] = True
+                    registry.write_text(json.dumps(data))
+                else:
+                    import dispatch_owner_input as INPUT
+                    with mock.patch.object(RA, 'correction_source_session',
+                                           return_value='fixture-user-session'):
+                        INPUT.submit(jobs, owner_attempt, 'preserve the new correction',
+                                     request_id='saved-output-correction')
+                start_args = SimpleNamespace(route_file=str(path), route_node='run-verify',
+                    attempt_id='att-saved-verifier', jobs=str(jobs), agent_home=ROOT,
+                    worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
+                    parent_attempt_id=owner_attempt, parent_harness='claude',
+                    parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
+                with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+                     mock.patch('subprocess.check_output', return_value=str(self.base)):
+                    refused = RA.completion_gate(start_args, 'start', ROOT, jobs,
+                                                 gate=DC.completion_marker_gate)
+                self.assertIsNotNone(refused)
+                self.assertEqual(refused[0], 'completion-marker-missing')
+                self.assertEqual(ledger.state()['nodes']['full-run']['state'], 'FAILED_RETRYABLE')
+                self.assertEqual(ledger.claims(), {})
+                self.assertFalse((SUP.route_module().completion_dir(route['route_id'], jobs=jobs)
+                                  / 'full-run.json').exists())
+
+    def test_saved_outputs_reach_first_verifier_then_existing_independent_pass_settlement(self):
+        import resource_failure_resolution as RESOLUTION
+
+        route, path, jobs, registry, output, ledger, owner_attempt, owner_input, raw, receipt = \
+            self.failed_saved_output_fixture(multistage=True)
+        raw_before = raw.read_bytes()
+        receipt_before = receipt.read_bytes()
+        completion = SUP.route_module().completion_dir(route['route_id'], jobs=jobs)
+        start_args = SimpleNamespace(route_file=str(path), route_node='metrics',
+            attempt_id='att-saved-metrics', jobs=str(jobs), agent_home=ROOT,
+            worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
+            parent_attempt_id=owner_attempt, parent_harness='claude',
+            parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
+        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()):
+            admitted = RA.completion_gate(start_args, 'start', ROOT, jobs,
+                                           gate=DC.completion_marker_gate)
+        self.assertIsNone(admitted, admitted)
+        self.assertFalse((completion / 'full-run.json').exists())
+        self.assertFalse((completion / 'metrics.json').exists())
+        self.assertFalse((completion / 'verify.json').exists())
+
+        metrics_path = output / 'metrics.jsonl'
+        summary_path = output / 'summary.json'
+        correction_path = output / 'correction.json'
+        metrics_code = (
+            "import hashlib,json,sys; from pathlib import Path; "
+            "raw=Path(sys.argv[1]); receipt=Path(sys.argv[2]); metrics=Path(sys.argv[3]); "
+            "summary=Path(sys.argv[4]); correction=Path(sys.argv[5]); route_id=sys.argv[6]; "
+            "data=raw.read_bytes(); run=receipt.read_bytes(); "
+            "record=json.loads(run); actual=hashlib.sha256(data).hexdigest(); "
+            "assert record['outputs'][0]['sha256']==actual; "
+            "metrics.write_text(json.dumps({'evidence_path':str(raw),'input_sha256':actual})+'\\n'); "
+            "summary.write_text(json.dumps({'run_sha256':hashlib.sha256(run).hexdigest(),"
+            "'metrics_sha256':hashlib.sha256(metrics.read_bytes()).hexdigest()})); "
+            "correction.write_text(json.dumps({'route_id':route_id,'node':'full-run',"
+            "'gate_evidence_verdict':'PASS','artifact_sha256':{'raw.json':actual}}))"
+        )
+        metrics_run = subprocess.run([sys.executable, '-B', '-c', metrics_code,
+            str(raw), str(receipt), str(metrics_path), str(summary_path),
+            str(correction_path), route['route_id']], cwd=self.base,
+            text=True, capture_output=True, check=False)
+        self.assertEqual(metrics_run.returncode, 0, metrics_run.stderr)
+        self.assertFalse((completion / 'full-run.json').exists(),
+                         'first verifier output must not mint a success marker')
+
+        verdict_path = output / 'reviews/verdict.json'
+        verdict_path.parent.mkdir()
+        transcript = output / 'reviews/independent-review.txt'
+        verify_code = (
+            "import hashlib,json,sys; from pathlib import Path; "
+            "raw=Path(sys.argv[1]).read_bytes(); receipt=Path(sys.argv[2]).read_bytes(); "
+            "summary_path=Path(sys.argv[3]); summary=json.loads(summary_path.read_text()); "
+            "metrics=Path(sys.argv[4]).read_text(); "
+            "expected=json.loads(metrics)['input_sha256']; actual=hashlib.sha256(raw).hexdigest(); "
+            "assert expected==actual; assert summary['run_sha256']==hashlib.sha256(receipt).hexdigest(); "
+            "Path(sys.argv[5]).write_text(json.dumps({'verdict':'PASS',"
+            "'summary':{'path':str(summary_path),"
+            "'sha256':hashlib.sha256(summary_path.read_bytes()).hexdigest()}})); "
+            "Path(sys.argv[6]).write_text('CPU verifier consumed exact saved output '+actual+'\\n')"
+        )
+        verify_run = subprocess.run([sys.executable, '-B', '-c', verify_code,
+            str(raw), str(receipt), str(summary_path), str(metrics_path), str(verdict_path),
+            str(transcript)], cwd=self.base, text=True, capture_output=True, check=False)
+        self.assertEqual(verify_run.returncode, 0, verify_run.stderr)
+        self.assertEqual(json.loads(verdict_path.read_text())['verdict'], 'PASS')
+        self.assertFalse((completion / 'full-run.json').exists())
+
+        module = SUP.route_module()
+        module.complete_node(route, WS.route_node(route, 'full-run'), 'full-run',
+                             correction_path, jobs=None)
+        inline_axes = {'attempt_schema_version': 2, 'dispatch_depth': 2,
+            'transport': 'interactive', 'execution_surface': 'inline',
+            'registered_worker': False, 'fallback_hop': 'inline'}
+        module.complete_node(route, WS.route_node(route, 'metrics'), 'metrics',
+            summary_path, jobs=None, attempt_id='att-saved-metrics',
+            explicit_attempt_metadata=inline_axes)
+        module.complete_node(route, WS.route_node(route, 'verify'), 'verify',
+            verdict_path, jobs=None, attempt_id='att-saved-verify',
+            explicit_attempt_metadata=inline_axes,
+            review_claim={'kind': 'native-subagent', 'transcript': str(transcript)})
+        for node_id in ('full-run', 'metrics', 'verify'):
+            node = WS.route_node(route, node_id)
+            marker_path = completion / f'{node_id}.json'
+            marker_data = json.loads(marker_path.read_text())
+            currency = module.evidence_currency(route, node, marker_path, marker_data, jobs=jobs)
+            self.assertEqual(currency.state, 'current', f'{node_id}: {currency}')
+            if node.get('kind') != 'resource-runner':
+                gate_currency = DC.gate_currency(route, node, marker_path, marker_data, jobs=jobs)
+                self.assertEqual(gate_currency.state, 'current', f'{node_id}: {gate_currency}')
+            proof = module._marker_identity_row(route, node, node_id,
+                node.get('terminal_gate') if node.get('terminal') else node.get('completion_gate'),
+                jobs=jobs, exact_terminal=node.get('kind') != 'resource-runner')
+            self.assertTrue(proof.get('passed'), f'{node_id}: {proof}')
+        gates = module.terminal_gate_observation(route, jobs=jobs)
+        self.assertIs(gates['verify']['passed'], True, gates)
+        journal_before = ledger.journal_path.read_bytes()
+        resolved = RESOLUTION.reconcile(route, ledger, gates, jobs, module)
+        self.assertEqual(resolved, ['full-run'])
+        state = ledger.state()
+        self.assertEqual(state['nodes']['full-run']['state'], 'STAGE_SUCCEEDED')
+        proof = state['nodes']['full-run']['evidence']['resolved_resource_failure']
+        self.assertEqual(proof['original_failure']['exit_code'], 1)
+        self.assertEqual(proof['independent_nodes'], ['verify'])
+        self.assertEqual(proof['consumed_artifacts'][0]['path'], str(raw.resolve()))
+        self.assertEqual(raw.read_bytes(), raw_before)
+        self.assertEqual(receipt.read_bytes(), receipt_before)
+        journal_after = ledger.journal_path.read_bytes()
+        self.assertTrue(journal_after.startswith(journal_before))
+        self.assertEqual(RESOLUTION.reconcile(route, ledger, gates, jobs, module), ['full-run'])
+        self.assertEqual(ledger.journal_path.read_bytes(), journal_after)
 
     def live_owner(self, route, jobs, registry, *, harness='codex'):
         import dispatch_owner_input as INPUT
@@ -118,6 +405,80 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         armed['resource_binding'] = WAIT.resource_body_digest(resource_row)
         armed_path.write_text(json.dumps(armed))
         return attempt, owner_input
+
+    def record_original_owner_exit(self, route, jobs, registry, original_attempt, *,
+                                   owner_pid=999999999):
+        data = json.loads(registry.read_text())
+        row = data['runs']['fixture-run']
+        row['owner_wait'].update(owner_pid=owner_pid, owner_start='1')
+        registry.write_text(json.dumps(data))
+        ledger = SUP.ledger_for(route, jobs)
+        armed_path = ledger.root / 'armed' / 'full-run.json'
+        armed = json.loads(armed_path.read_text())
+        armed['resource_binding'] = WAIT.resource_body_digest(row)
+        armed_path.write_text(json.dumps(armed))
+        lines = Path(jobs).read_text().splitlines()
+        for index, line in enumerate(lines):
+            fields = line.split('\t')
+            if len(fields) != 6:
+                continue
+            metadata = DC.parse_registry_metadata(fields[5])
+            if metadata.get('attempt_id') == original_attempt:
+                metadata['pid'], metadata['pid_start'] = '999999999', '1'
+                fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                lines[index] = '\t'.join(fields)
+                break
+        Path(jobs).write_text('\n'.join(lines) + '\n')
+
+    def launched_replacement_owner(self, route, jobs, original_attempt, *, session_id='replacement-native'):
+        import dispatch_replacement as DR
+        import dispatch_owner_input as INPUT
+
+        rows = DR._rows(Path(jobs).read_text().splitlines())
+        original_fields, original = rows[original_attempt]
+        logical = DR._logical_key(route, original)
+        family = DR._digest(logical)
+        replacement = 'att-' + hashlib.sha256(('replacement:' + family).encode()).hexdigest()[:48]
+        lease = DC.supervisor_lease_path(jobs, replacement)
+        record = {'schema': DR.SCHEMA, 'family_id': family, 'logical_node': logical,
+                  'original_attempt_id': original_attempt, 'replacement_attempt_id': replacement,
+                  'ordinal': 1}
+        DR._once(DR._record_path(jobs, family), record)
+        DR._reserve_source(jobs, original_attempt, family)
+        original.update(note='dead-exact-pid', failure_class='contract',
+                        replacement_family_id=family, replacement_claim_digest=DR._digest(record),
+                        replacement_attempt_id=replacement, replacement_ordinal='1')
+        source_fields = list(original_fields)
+        source_fields[1] = 'done'
+        source_fields[5] = ','.join(f'{key}={value}' for key, value in original.items())
+        candidate = {**original, 'attempt_id': replacement,
+                     'replacement_original_attempt_id': original_attempt,
+                     'automatic_retry_of': original_attempt, 'launch_claimed': '1',
+                     'launch_started': '1', 'supervisor_lease_file': str(lease),
+                     'supervisor_lease_nonce': 'e' * 64}
+        identity = SUP.RR.proc_identity(os.getpid())
+        candidate['pid'], candidate['pid_start'] = str(identity['pid']), identity['starttime']
+        candidate.pop('replacement_attempt_id', None)
+        target_fields = list(original_fields)
+        target_fields[1] = 'open'
+        target_fields[5] = ','.join(f'{key}={value}' for key, value in candidate.items())
+        current_lines = []
+        for line in Path(jobs).read_text().splitlines():
+            fields = line.split('\t')
+            metadata = DC.parse_registry_metadata(fields[5]) if len(fields) == 6 else {}
+            if metadata.get('attempt_id') == original_attempt:
+                fields = source_fields
+            current_lines.append('\t'.join(fields))
+        Path(jobs).write_text('\n'.join([*current_lines, '\t'.join(target_fields)]) + '\n')
+
+        lease_context = DC.hold_supervisor_lease(jobs, replacement, lease)
+        lease_context.__enter__()
+        self.addCleanup(lease_context.__exit__, None, None, None)
+        INPUT.initialize_owner_input(jobs, replacement, 'claude-session-resume')
+        owner_input = INPUT.OwnerInput(jobs, replacement, session_id,
+                                       'claude-session-resume', lambda _: None)
+        self.addCleanup(owner_input.close)
+        return replacement, owner_input
 
     def test_compute_adopted_row_passes_normal_owner_successor_admission_once(self):
         for harness in ('claude', 'codex', 'opencode'):
@@ -685,7 +1046,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                          request['resume_checkpoint_sha256'])
 
         smoke = self.base / 'fixed-public-smoke.json'
-        smoke.write_text('{"fixture": true}\n')
+        self.write_smoke_attestation(smoke, request['compute_argv'], self.base)
         smoke_hash = hashlib.sha256(smoke.read_bytes()).hexdigest()
         request.update(smoke_attestation=str(smoke), smoke_attestation_sha256=smoke_hash)
         request['provenance']['smoke_attestation_sha256'] = smoke_hash
@@ -883,16 +1244,16 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             f'legacy_fixture_smoke_attestation_{run_id}', ROOT / 'tools' / 'smoke-attestation.py')
         smoke_tool = importlib.util.module_from_spec(smoke_spec)
         smoke_spec.loader.exec_module(smoke_tool)
+        request_path = Path(body['command'][-1])
+        request = json.loads(request_path.read_text())
         smoke_inputs = [self.base / f'{run_id}-config.yaml',
                         self.base / f'{run_id}-data.lock',
                         self.base / f'{run_id}-smoke.json']
-        attestation = smoke_tool.payload(smoke_inputs, body['command'], body['cwd'])
+        attestation = smoke_tool.payload(smoke_inputs, request['compute_argv'], body['cwd'])
         attestation.update(exit_code=0, status='passed')
         attestation['attestation_hash'] = 'sha256:' + hashlib.sha256(json.dumps(
             attestation, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         attestation_path.write_text(json.dumps(attestation, sort_keys=True))
-        request_path = Path(body['command'][-1])
-        request = json.loads(request_path.read_text())
         attestation_hash = hashlib.sha256(attestation_path.read_bytes()).hexdigest()
         request['smoke_attestation'] = str(attestation_path)
         request['smoke_attestation_sha256'] = attestation_hash
@@ -944,7 +1305,10 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                close_at=None, exit_code=0, wait_for_exit=True):
         import artifact_producer
         runner = SUP.runner()
-        args = SimpleNamespace(jobs=str(jobs), run_id=body['run_id'], node=body['node'])
+        launch = body.get('launch_request') or {}
+        args = SimpleNamespace(jobs=str(jobs), run_id=body['run_id'], node=body['node'],
+            smoke_attestation=launch.get('smoke_attestation'),
+            config_manifest=launch.get('config_manifest'))
         payloads = []
         real_popen = subprocess.Popen
         def popen(*a, **kw):
@@ -1487,6 +1851,18 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                     with self.assertRaisesRegex((ValueError, WAIT.JOIN.JoinContractError), 'binding'):
                         WAIT.pending_prompt(state, 'att-parent', args, control)
                 self.assertIsNotNone(WAIT.JOIN.read_supervisor_phase_state(state, 'att-parent').resource['outbox'])
+
+    def test_runtime_failure_receipt_does_not_override_existing_retry_authority(self):
+        route, path, jobs, registry, output, ledger, args, control, state, context, prompt = \
+            self.receipt_fixture(failed=True)
+        resource = WAIT.JOIN.read_supervisor_phase_state(state, 'att-parent').resource
+        receipt = resource['outbox']['receipt']
+        self.assertEqual(receipt['exit_code'], 3)
+        self.assertIn('Runtime resource receipt (not a model child or verification PASS)', prompt)
+        self.assertNotIn('do not restart the resource', prompt)
+        self.assertIn('Follow existing user instructions and pending corrections', prompt)
+        self.assertIn('adds no retry authorization and no user prohibition', prompt)
+        self.assertEqual(WAIT.JOIN.read_supervisor_phase_state(state, 'att-parent').resource, resource)
 
     def test_close_between_reservation_arm_and_release_never_runs_payload(self):
         for controller_mode in (False, True):
@@ -2230,8 +2606,8 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         state_path = CONTRACT.dispatch_state_root(jobs) / 'supervisor-state' / f'{owner_attempt}.json'
         WAIT.JOIN.write_supervisor_state(state_path, owner_attempt, set(), phase='running-turn')
         smoke = self.base / 'public-smoke.json'
-        smoke.write_text('{"fixture":true}\n')
         command = [sys.executable, '-c', 'print("public current cpu launch")']
+        self.write_smoke_attestation(smoke, command, self.base)
         import artifact_producer
         runner = SUP.runner()
         payloads = []
@@ -2282,6 +2658,180 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             for proc in payloads:
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=5)
+
+    def test_replacement_owner_consumes_original_success_via_public_start(self):
+        for owner_pid in (999999999, '999999999'):
+            with self.subTest(owner_pid=owner_pid), self.subfixture():
+                self._check_replacement_owner_consumes_original_success(owner_pid)
+
+    def _check_replacement_owner_consumes_original_success(self, owner_pid):
+        route, path, jobs, registry, _output, ledger = self.fixture()
+        original_attempt, _original_input = self.live_owner(route, jobs, registry, harness='claude')
+        self.record_original_owner_exit(route, jobs, registry, original_attempt,
+                                       owner_pid=owner_pid)
+        observed = SUP.poll_once(route, ledger)
+        self.assertEqual(observed[0]['action'], 'wait-next-resource')
+        original_row = json.loads(registry.read_text())['runs']['fixture-run']
+        self.assertEqual(original_row['parent_attempt_id'], original_attempt)
+        self.assertEqual(original_row['status'], 'succeeded')
+
+        current_attempt, _current_input = self.launched_replacement_owner(
+            route, jobs, original_attempt)
+        import dispatch_replacement as DR
+        self.assertEqual(DR.effective_attempts(jobs, {original_attempt})[0], {current_attempt})
+        resource_bytes = registry.read_bytes()
+        state_path = DC.dispatch_state_root(jobs) / 'supervisor-state' / f'{current_attempt}.json'
+        WAIT.JOIN.write_supervisor_state(state_path, current_attempt, set(), phase='running-turn')
+        control = SimpleNamespace(thread_id='replacement-native', pending=lambda: False)
+        args = SimpleNamespace(parent_attempt_id=current_attempt, route_id=route['route_id'],
+            route_hash=route['route_hash'], route_file=str(path), jobs=str(jobs))
+        found = WAIT.context(args, control)
+        self.assertIsNotNone(found)
+        self.assertEqual([row['run_id'] for _, row in found[3]], ['fixture-run'])
+        self.assertEqual(found[3][0][1]['parent_attempt_id'], original_attempt)
+        prompt = WAIT.wait(args, state_path, control, set(), lambda _event: None,
+                           sleep=lambda _seconds: self.fail('settled original resource must not wait'))
+        self.assertIn('"parent_attempt_id":"' + current_attempt + '"', prompt)
+        self.assertIn('"run_id":"fixture-run"', prompt)
+        receipt_state = WAIT.JOIN.read_supervisor_phase_state(state_path, current_attempt).resource
+        receipt_id = receipt_state['outbox']['receipt_id']
+        self.assertTrue(WAIT.acknowledge(state_path, current_attempt, receipt_id))
+        self.assertFalse(WAIT.acknowledge(state_path, current_attempt, receipt_id))
+
+        start_args = SimpleNamespace(route_file=str(path), route_node='run-verify',
+            attempt_id='att-verifier', jobs=str(jobs), agent_home=ROOT,
+            worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
+            parent_attempt_id=current_attempt, parent_harness='claude',
+            parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
+        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+             mock.patch('subprocess.check_output', return_value=str(self.base)):
+            self.assertTrue(RA._admit_supervised_owner_resource_start(start_args, ROOT, jobs))
+            RA.completion_gate(start_args, 'start', ROOT, jobs, gate=DC.completion_marker_gate)
+            RA.completion_gate(start_args, 'start', ROOT, jobs, gate=DC.completion_marker_gate)
+        stage = ledger.state()['nodes']['full-run']
+        self.assertEqual(stage['state'], 'STAGE_SUCCEEDED')
+        marker_path = SUP.route_module().completion_dir(route['route_id'], jobs=jobs) / 'full-run.json'
+        marker = json.loads(marker_path.read_text())
+        self.assertTrue(marker.get('resource_execution_identity'))
+        self.assertEqual(stage['evidence']['owner_attempt_id'], current_attempt)
+        self.assertEqual(stage['evidence']['owner_session_id'], 'replacement-native')
+        self.assertEqual(len(ledger.claims()), 1)
+        self.assertEqual(registry.read_bytes(), resource_bytes)
+        self.assertEqual(json.loads(registry.read_text())['runs']['fixture-run']['parent_attempt_id'],
+                         original_attempt)
+
+    def test_owner_input_snapshot_keeps_pinned_owner_and_refuses_conflicting_source(self):
+        route, _path, jobs, registry, _output, ledger = self.fixture()
+        owner_attempt, _owner_input = self.live_owner(route, jobs, registry, harness='claude')
+        resource = json.loads(registry.read_text())['runs']['fixture-run']
+        armed = SUP.read_armed(ledger)['full-run']
+        del resource['parent_attempt_id']
+        self.assertTrue(SUP._owner_input_is_current(route, armed, resource, owner_attempt, 'same-native'))
+        for source in ('att-foreign', None, ''):
+            with self.subTest(source=source):
+                resource['parent_attempt_id'] = source
+                self.assertFalse(SUP._owner_input_is_current(
+                    route, armed, resource, owner_attempt, 'same-native'))
+        resource['parent_attempt_id'] = owner_attempt
+        resource['owner_wait']['parent_attempt_id'] = 'att-foreign'
+        self.assertFalse(SUP._owner_input_is_current(route, armed, resource, owner_attempt, 'same-native'))
+
+    def test_replacement_owner_rejects_invalid_resource_owner_pid_with_proven_lineage(self):
+        for owner_pid in (True, False, 0, -1, 999999999.0, 'invalid', '0', None):
+            with self.subTest(owner_pid=owner_pid), self.subfixture():
+                route, path, jobs, registry, _output, ledger = self.fixture()
+                original_attempt, _original_input = self.live_owner(
+                    route, jobs, registry, harness='claude')
+                self.record_original_owner_exit(route, jobs, registry, original_attempt)
+                self.assertEqual(SUP.poll_once(route, ledger)[0]['action'], 'wait-next-resource')
+                current_attempt, _current_input = self.launched_replacement_owner(
+                    route, jobs, original_attempt)
+                # Even identities that would match after bool/int coercion must
+                # not authorize consumption. Keep the real replacement proof.
+                lines = Path(jobs).read_text().splitlines()
+                for index, line in enumerate(lines):
+                    fields = line.split('\t')
+                    metadata = DC.parse_registry_metadata(fields[5])
+                    if metadata.get('attempt_id') == original_attempt:
+                        metadata['owner_identity_lineage'] = '1:1+0:1'
+                        fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                        lines[index] = '\t'.join(fields)
+                        break
+                Path(jobs).write_text('\n'.join(lines) + '\n')
+                proof = dict(source_attempt_id=original_attempt, consumer_attempt_id=current_attempt,
+                    resource_route_file=str(path), resource_route_id=route['route_id'],
+                    resource_route_hash=route['route_hash'], resource_owner_start='1')
+                self.assertTrue(RA.resource_owner_consumer_matches(
+                    jobs, resource_owner_pid=999999999, **proof))
+                self.assertFalse(RA.resource_owner_consumer_matches(
+                    jobs, resource_owner_pid=owner_pid, **proof))
+                data = json.loads(registry.read_text())
+                row = data['runs']['fixture-run']
+                row['owner_wait']['owner_pid'] = owner_pid
+                registry.write_text(json.dumps(data))
+                armed_path = ledger.root / 'armed/full-run.json'
+                armed = json.loads(armed_path.read_text())
+                armed['resource_binding'] = WAIT.resource_body_digest(row)
+                armed_path.write_text(json.dumps(armed))
+                before = registry.read_bytes(), ledger.journal_path.read_bytes()
+                with self.assertRaisesRegex(SUP.SupervisorError,
+                                            'resource-owner-successor-binding-conflict'):
+                    SUP.admit_owner_successor_start(
+                        route, 'run-verify', jobs, current_attempt, 'replacement-native')
+                self.assertEqual((registry.read_bytes(), ledger.journal_path.read_bytes()), before)
+                self.assertEqual(ledger.claims(), {})
+                self.assertFalse((SUP.route_module().completion_dir(
+                    route['route_id'], jobs=jobs) / 'full-run.json').exists())
+
+    def test_unlaunched_or_tampered_replacement_cannot_consume_original_resource(self):
+        for mutation in ('unlaunched', 'tampered-claim', 'foreign-owner-route',
+                         'pending-correction'):
+            with self.subTest(mutation=mutation), self.subfixture():
+                route, _path, jobs, registry, _output, ledger = self.fixture()
+                original_attempt, _original_input = self.live_owner(route, jobs, registry, harness='claude')
+                self.record_original_owner_exit(route, jobs, registry, original_attempt)
+                self.assertEqual(SUP.poll_once(route, ledger)[0]['action'], 'wait-next-resource')
+                current_attempt, _current_input = self.launched_replacement_owner(
+                    route, jobs, original_attempt)
+                if mutation == 'pending-correction':
+                    with mock.patch.object(RA, 'correction_source_session',
+                                           return_value='fixture-user-session'):
+                        import dispatch_owner_input as INPUT
+                        INPUT.submit(jobs, current_attempt, 'keep the current user correction',
+                                     request_id='replacement-correction')
+                else:
+                    lines = Path(jobs).read_text().splitlines()
+                    for index, line in enumerate(lines):
+                        fields = line.split('\t')
+                        if len(fields) != 6:
+                            continue
+                        metadata = DC.parse_registry_metadata(fields[5])
+                        if metadata.get('attempt_id') != current_attempt:
+                            continue
+                        if mutation == 'unlaunched':
+                            fields[1] = 'done'
+                            metadata.pop('launch_started', None)
+                            metadata.pop('pid', None)
+                            metadata.pop('pid_start', None)
+                            metadata['launch_outcome'] = 'never-launched'
+                        elif mutation == 'tampered-claim':
+                            metadata['replacement_claim_digest'] = 'f' * 64
+                        else:
+                            metadata['owner_route_hash'] = 'sha256:foreign'
+                            metadata['route_hash'] = 'sha256:foreign'
+                        fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                        lines[index] = '\t'.join(fields)
+                        break
+                    Path(jobs).write_text('\n'.join(lines) + '\n')
+                before = registry.read_bytes()
+                reason = ('resource-owner-input-unavailable' if mutation == 'pending-correction'
+                          else 'resource-owner-successor-binding-conflict')
+                with self.assertRaisesRegex(SUP.SupervisorError, reason):
+                    SUP.admit_owner_successor_start(
+                        route, 'run-verify', jobs, current_attempt, 'replacement-native')
+                self.assertEqual(ledger.claims(), {})
+                self.assertEqual(ledger.state()['nodes']['full-run']['state'], 'RUNNING')
+                self.assertEqual(registry.read_bytes(), before)
 
     def test_codex_public_intent_arms_without_tool_observation_and_controller_releases_once(self):
         """Exercise public intent, real arm/discovery/claim, and bounded refusals."""
@@ -2371,7 +2921,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                 'AGENT_DISPATCH_COMPLETION_STATE_FILE': str(state_path),
             })
             smoke = self.base / 'public-smoke.json'
-            smoke.write_text('{"fixture":true}\n')
+            self.write_smoke_attestation(smoke, [sys.executable, '-c', 'pass'], self.base)
             return SimpleNamespace(route=route, path=path, jobs=jobs, registry=registry,
                 output=output, ledger=ledger, owner_attempt=owner_attempt, owner_input=owner_input,
                 state_path=state_path, env=env, smoke=smoke, prior=copy.deepcopy(prior),

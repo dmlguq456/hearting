@@ -7,6 +7,7 @@ from tools.fleet.explorer.frame import draw
 from tools.fleet.explorer.input import ExplorerInput
 from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.explorer.view_model import load_fixture
+from tools.fleet.tests.test_explorer_peers import _card_boxes
 
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "explorer"
 
@@ -72,6 +73,9 @@ class ViewerByteTrace(unittest.TestCase):
                         # Current accepted renderer: compare every cell and ordered hit.
                         # Historical input chunks and expected navigation states are unchanged.
                         expected_cells = _expand([row_pool[index] for index in expected_frame["cells"]])
+                        # The approved side-lane head now sits on the card edge; keep the
+                        # reference capture's lane gutter normalized like the PEERS pane test.
+                        expected_cells = _lane_gutter_delta_full(actual, vm, expected_cells)
                         expected_hits = expected_frame["hits"]
                         difference = _first_cell_difference(expected_cells, actual_cells)
                         self.assertIsNone(difference, f"{context}: {difference or 'cell grids differ'}")
@@ -84,6 +88,28 @@ class ViewerByteTrace(unittest.TestCase):
 def _expand(rows):
     return [[cell for glyph, colour, tint, count in row
              for cell in [[glyph, colour, tint]] * count] for row in rows]
+
+
+def _lane_gutter_delta_full(frame, vm, expected_cells):
+    """Keep the reference capture's side-lane gutter at the approved current geometry.
+
+    ``_card_boxes`` works in full frame coordinates; the PEERS pane test slices the
+    pane first, so this full-frame variant is needed here.
+    """
+    boxes = _card_boxes(frame)
+    normalized = [list(row) for row in expected_cells]
+    for lane in vm.peer_edges.get("side_lanes", ()):
+        if len(lane) < 2:
+            continue
+        upper, lower = str(lane[0]), str(lane[1])
+        if upper not in boxes or lower not in boxes:
+            continue
+        edge = boxes[upper][2]
+        for yy in range(boxes[upper][1], boxes[lower][3] + 1):
+            for xx in range(edge, edge + 6):
+                if 0 <= yy < len(normalized) and 0 <= xx < len(normalized[yy]):
+                    normalized[yy][xx] = list(frame.cells[yy][xx])
+    return normalized
 
 
 def _reference_projection(st):

@@ -1,4 +1,4 @@
-import hashlib, importlib.util, io, json, os, subprocess, tarfile, tempfile, unittest, zipfile
+import hashlib, importlib.util, io, json, os, subprocess, sys, tarfile, tempfile, unittest, zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +57,155 @@ class TestProvenance(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "init"], check=True)
         return repo
+
+    def _borrowed_smoke_fixture(self, slug):
+        spec = importlib.util.spec_from_file_location(
+            "artifact_producer_fixture_for_borrowed_smoke", ROOT / "utilities/artifact_producer.test.py")
+        fixture_module = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture_module)
+        inherited = {key: value for key, value in os.environ.items()
+                     if key.startswith(("AGENT_ROUTE_", "AGENT_REVIEW_", "AGENT_DISPATCH_", "AGENT_ARTIFACT_"))}
+        for key in inherited:
+            os.environ.pop(key, None)
+        fixture = fixture_module.ProducerTestBase("runTest")
+        fixture.setUp()
+        try:
+            runtime_home = fixture._env.get("AGENT_HOME") or str(ROOT)
+            source = Path(fixture._tmp.name) / "execution-source"
+            source.mkdir()
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "fixture@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Fixture"], check=True)
+            (source / "configs").mkdir()
+            config = source / "configs" / "a.yaml"
+            config.write_text("borrowed smoke config\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-qm", "source head"], check=True)
+            source_head = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
+
+            fixture.activate()
+            dispatch_rows = []
+            for harness in ("codex", "claude", "opencode"):
+                dispatch_rows.append({
+                    "parent_harness": harness, "parent_transport": "headless",
+                    "parent_sandbox": fixture_module.R.WRAPPER_PARENT_SANDBOXES[harness][0],
+                    "child_harness": harness, "launch_authority": "conductor", "status": "supported",
+                    "probe_source": f"{harness}-fixture", "probe_time": "2026-07-16T00:00:00Z",
+                    "failure_class": "", "checked_worktree": str(source.resolve()),
+                    "failure_scope": "none", "codex_command": "ok" if harness == "codex" else "not-applicable",
+                    "retry_on_isolated_worktree": 0,
+                })
+            route = fixture_module.R.compose_route(
+                capability="autopilot-code", capability_mode="dev", shape="staged",
+                graph="execute,autopilot-lab:smoke,impl-review,test,report", slug=slug,
+                cwd=source, artifact_root=fixture.root, intensity="standard", unassigned=True,
+                spec_read="fixture", dispatch_evidence={"tuples": dispatch_rows, "native_subagent": []},
+                jobs=fixture.jobs, parent_harness="codex",
+            )
+            node = next(row for row in route["nodes"] if row.get("part") == "autopilot-lab:smoke")
+            route_file = Path(fixture_module.L.admit_runtime_route(fixture.root, route).route_file)
+            begun = fixture_module.P.begin(
+                fixture.root, route_file=route_file, capability=route["capability"],
+                intensity=route["effective_intensity"], require_cycle=True)
+            env = dict(CLEAN_ENV)
+            env.update({
+                "AGENT_HOME": runtime_home,
+                "AGENT_DISPATCH_JOBS": str(fixture.jobs),
+                "AGENT_ARTIFACT_ROOT": str(fixture.root),
+                "AGENT_ROUTE_FILE": str(route_file), "AGENT_ROUTE_ID": route["route_id"],
+                "AGENT_ROUTE_NODE": node["id"], "AGENT_DISPATCH_WORKTREE": str(source),
+                **begun["env"],
+            })
+            return {"fixture": fixture, "fixture_module": fixture_module, "inherited": inherited,
+                    "source": source, "config": config, "source_head": source_head,
+                    "route": route, "route_file": route_file, "node": node,
+                    "begun": begun, "env": env}
+        except Exception:
+            self._cleanup_borrowed_smoke_fixture(fixture, inherited)
+            raise
+
+    def _cleanup_borrowed_smoke_fixture(self, fixture, inherited):
+        fixture.doCleanups()
+        for key in tuple(os.environ):
+            if key.startswith(("AGENT_ROUTE_", "AGENT_REVIEW_", "AGENT_DISPATCH_", "AGENT_ARTIFACT_")):
+                os.environ.pop(key, None)
+        os.environ.update(inherited)
+
+    def test_borrowed_smoke_part_seals_config_inside_its_scope(self):
+        fixture = self._borrowed_smoke_fixture("scope89-borrowed-smoke")
+        try:
+            source, config = fixture["source"], fixture["config"]
+            route, node, begun, env = fixture["route"], fixture["node"], fixture["begun"], fixture["env"]
+            before_head = fixture["source_head"]
+            before_status = subprocess.check_output(
+                ["git", "-C", str(source), "status", "--porcelain=v1"], text=True)
+            sealed = run_cli("seal", "--config", "configs/a.yaml", "--slug", "demo", env=env, cwd=source)
+            self.assertEqual(sealed.returncode, 0, sealed.stderr)
+            manifest = json.loads(sealed.stdout)
+            output_dir = Path(begun["cycle_dir"]) / "artifacts"
+            mapped = node["part_io"]["reviews/smoke-attestation.json"]
+            part_root = mapped.removesuffix("reviews/smoke-attestation.json")
+            expected_dir = output_dir / part_root / "reviews/smoke/experiments/demo/_internal/configs"
+            self.assertEqual(Path(manifest["snapshot_path"]).parent, expected_dir)
+            self.assertEqual(Path(manifest["source_path"]), config.resolve())
+            self.assertEqual(manifest["source_commit"], before_head)
+            self.assertEqual(manifest["source_git_state"], "clean")
+            self.assertFalse(manifest["source_dirty"])
+            manifest_path = expected_dir / f"{manifest['run_id']}.manifest.json"
+            snapshot_path = Path(manifest["snapshot_path"])
+            manifest_before, snapshot_before = manifest_path.read_bytes(), snapshot_path.read_bytes()
+            manifest_mtime, snapshot_mtime = manifest_path.stat().st_mtime_ns, snapshot_path.stat().st_mtime_ns
+            verified = run_cli("verify", "--manifest", str(manifest_path), env=env, cwd=source)
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+
+            attestation = output_dir / mapped
+            attest = subprocess.run([
+                sys.executable, str(ROOT / "tools/smoke-attestation.py"), "attest",
+                "--input", "configs/a.yaml", "--config-manifest", str(manifest_path),
+                "--cwd", str(source), "--output", str(attestation), "--",
+                sys.executable, "-c", "print('cpu smoke')",
+            ], cwd=source, env=env, capture_output=True, text=True)
+            self.assertEqual(attest.returncode, 0, attest.stderr)
+            attest_verify = subprocess.run([
+                sys.executable, str(ROOT / "tools/smoke-attestation.py"), "verify",
+                "--attestation", str(attestation),
+            ], cwd=source, env=env, capture_output=True, text=True)
+            self.assertEqual(attest_verify.returncode, 0, attest_verify.stderr)
+
+            sealed_again = run_cli("seal", "--config", "configs/a.yaml", "--slug", "demo", env=env, cwd=source)
+            self.assertEqual(sealed_again.returncode, 0, sealed_again.stderr)
+            self.assertEqual(manifest_before, manifest_path.read_bytes())
+            self.assertEqual(snapshot_before, snapshot_path.read_bytes())
+            self.assertEqual(manifest_mtime, manifest_path.stat().st_mtime_ns)
+            self.assertEqual(snapshot_mtime, snapshot_path.stat().st_mtime_ns)
+            self.assertEqual(before_status, subprocess.check_output(
+                ["git", "-C", str(source), "status", "--porcelain=v1"], text=True))
+            self.assertEqual(before_head, subprocess.check_output(
+                ["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip())
+            self.assertFalse((output_dir / "reviews/smoke/experiments/demo/_internal/configs").exists())
+            self.assertFalse((output_dir / "_internal/parts/autopilot-lab/full-run/reviews/smoke/experiments/demo/_internal/configs").exists())
+        finally:
+            self._cleanup_borrowed_smoke_fixture(fixture["fixture"], fixture["inherited"])
+
+    def test_borrowed_smoke_part_keeps_repository_and_output_guards(self):
+        fixture = self._borrowed_smoke_fixture("scope89-borrowed-smoke-guards")
+        try:
+            source, env = fixture["source"], fixture["env"]
+            outside = Path(fixture["fixture"]._tmp.name) / "outside.yaml"
+            outside.write_text("outside repository\n", encoding="utf-8")
+            escaped = run_cli("seal", "--config", str(outside), "--slug", "demo", env=env, cwd=source)
+            self.assertEqual(escaped.returncode, 65, escaped.stderr)
+            self.assertIn("path escapes repository", escaped.stderr)
+
+            symlink = source / "configs" / "escape.yaml"
+            symlink.symlink_to(outside)
+            symlink_result = run_cli("seal", "--config", "configs/escape.yaml", "--slug", "demo",
+                                     env=env, cwd=source)
+            self.assertEqual(symlink_result.returncode, 65, symlink_result.stderr)
+            self.assertIn("repository", symlink_result.stderr)
+            output_dir = Path(fixture["begun"]["cycle_dir"]) / "artifacts"
+            self.assertFalse((output_dir / "_internal/parts/autopilot-lab/smoke/reviews/smoke/experiments/demo/_internal/configs").exists())
+        finally:
+            self._cleanup_borrowed_smoke_fixture(fixture["fixture"], fixture["inherited"])
 
     # ---- T1/base regression (unchanged behavior) ----
 

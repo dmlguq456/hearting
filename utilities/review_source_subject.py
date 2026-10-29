@@ -420,21 +420,21 @@ def _read_regular(path: Path) -> tuple[bytes, tuple[int, ...]]:
     return b"".join(chunks), _stat_key(after)
 
 
-def _snapshot_once(root: Path, scopes: tuple[str, ...], *, depth: int = 0) -> tuple[list[dict], dict]:
+def _snapshot_once(root: Path, scopes: tuple[str, ...], *, depth: int = 0,
+                   _snapshots: list | None = None) -> tuple[list[dict], dict]:
     if depth > 8:
         raise SourceSubjectError("review-source-submodule-depth")
+    snapshots = [] if _snapshots is None else _snapshots
     try:
         head_before = _git(root, "rev-parse", "--verify", "HEAD").decode().strip()
-        status_before = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
         staged, paths = _index_entries(root)
         index_before = _index_tree_digest(root, staged)
     except SourceSubjectError:
         raise
+    source_paths = {relative for relative in paths if _candidate(relative, scopes)}
     manifest: list[dict] = []
     observations: list[tuple[Path, tuple[int, ...] | None]] = []
-    for relative in sorted(paths, key=os.fsencode):
-        if not _candidate(relative, scopes):
-            continue
+    for relative in sorted(source_paths, key=os.fsencode):
         path = _safe_checkout_path(root, relative)
         index_mode, index_oid = staged.get(relative, (0, ""))
         try:
@@ -457,7 +457,8 @@ def _snapshot_once(root: Path, scopes: tuple[str, ...], *, depth: int = 0) -> tu
         elif index_mode == 0o160000 or stat.S_ISDIR(info.st_mode):
             if not stat.S_ISDIR(info.st_mode) or not (path / ".git").exists():
                 raise SourceSubjectError("review-source-submodule-unreadable", relative)
-            nested, provenance = _snapshot_once(path, ("source/**",), depth=depth + 1)
+            nested, provenance = _snapshot_once(
+                path, ("source/**",), depth=depth + 1, _snapshots=snapshots)
             nested_digest = _sha(_canonical(nested))
             manifest.append({"path": relative, "kind": "gitlink", "mode": mode,
                              "gitlink_oid": index_oid, "content_sha256": nested_digest})
@@ -469,21 +470,32 @@ def _snapshot_once(root: Path, scopes: tuple[str, ...], *, depth: int = 0) -> tu
             observations.append((path, observed))
         else:
             raise SourceSubjectError("review-source-file-kind-unsupported", relative)
-    for path, expected in observations:
-        try:
-            actual = _stat_key(path.lstat())
-        except FileNotFoundError:
-            actual = None
-        if actual != expected:
-            raise SourceSubjectError("review-source-file-changed", str(path))
-    head_after = _git(root, "rev-parse", "--verify", "HEAD").decode().strip()
-    staged_after, _paths_after = _index_entries(root)
-    index_after = _index_tree_digest(root, staged_after)
-    status_after = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    if (head_before, index_before, status_before) != (head_after, index_after, status_after):
-        raise SourceSubjectError("review-source-snapshot-raced")
-    provenance = {"head": head_after, "index_tree": index_after,
-                  "status_sha256": _sha(status_after)}
+    snapshots.append((root, scopes, head_before, index_before, source_paths, observations))
+    provenance = {"head": head_before, "index_tree": index_before,
+                  "source_paths_sha256": _sha(_canonical(sorted(source_paths, key=os.fsencode)))}
+    if _snapshots is not None:
+        return manifest, provenance
+    # Fence every repository after the entire tree is captured. A parent
+    # directory stat cannot detect edits to an existing submodule file.
+    # Reuse the inventories instead of adding global status walks that also
+    # visit unrelated artifacts outside the source subject.
+    for repo, repo_scopes, head, index_tree, expected_paths, _observations in snapshots:
+        head_after = _git(repo, "rev-parse", "--verify", "HEAD").decode().strip()
+        staged_after, paths_after = _index_entries(repo)
+        index_after = _index_tree_digest(repo, staged_after)
+        source_paths_after = {relative for relative in paths_after if _candidate(relative, repo_scopes)}
+        if (head, index_tree) != (head_after, index_after) or expected_paths != source_paths_after:
+            raise SourceSubjectError("review-source-snapshot-raced")
+    # These checks follow all final inventories, including submodules, so
+    # source edits made during those reads are detected as well.
+    for _repo, _scopes, _head, _index_tree, _paths, observed_files in snapshots:
+        for path, expected in observed_files:
+            try:
+                actual = _stat_key(path.lstat())
+            except FileNotFoundError:
+                actual = None
+            if actual != expected:
+                raise SourceSubjectError("review-source-file-changed", str(path))
     return manifest, provenance
 
 

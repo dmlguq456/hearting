@@ -131,6 +131,12 @@ class ArtifactContext:
         options = _ROLE_OUTPUTS.get(role)
         if options is None:
             raise ArtifactContextError("artifact-output-role-unknown", role)
+        borrowed_part_prefix = None
+        if role == "config-seal" and (self.node or {}).get("part"):
+            borrowed_part_prefix = _borrowed_part_prefix(self.node)
+            if borrowed_part_prefix is None:
+                raise ArtifactContextError("artifact-output-role-missing", f"{role}: {list(options)}")
+            options = tuple(f"{borrowed_part_prefix}/{expected}" for expected in options)
         if role == "run-record":
             part_io = (self.node or {}).get("part_io") or {}
             mapped = part_io.get("run.json") if isinstance(part_io, Mapping) else None
@@ -196,6 +202,14 @@ class ArtifactContext:
         if not scope_matches(relative, self.write_scope):
             raise ArtifactContextError("artifact-output-outside-node-scope", relative)
         path = self.output_dir / PurePosixPath(relative)
+        if borrowed_part_prefix is not None:
+            try:
+                resolved_relative = path.resolve(strict=False).relative_to(
+                    self.output_dir.resolve(strict=False))
+            except ValueError as exc:
+                raise ArtifactContextError("artifact-output-outside-node-scope", relative) from exc
+            if not scope_matches(resolved_relative.as_posix(), self.write_scope):
+                raise ArtifactContextError("artifact-output-outside-node-scope", relative)
         return OutputBinding(role, "artifact", declaration, path)
 
     def resolve_bucket(self, bucket: str) -> OutputBinding:
@@ -650,3 +664,42 @@ def _static_pattern_prefix(value: str) -> str:
             break
         parts.append(part)
     return "/".join(parts)
+
+
+def _borrowed_part_prefix(node: Mapping[str, Any]) -> str | None:
+    """Derive the relocated root of a borrowed lab smoke part from its sealed IO map."""
+    part = node.get("part")
+    if not isinstance(part, str) or part.count(":") != 1:
+        return None
+    capability, stage = part.split(":", 1)
+    try:
+        identity = _safe_relative(f"{capability}/{stage}")
+    except ArtifactContextError:
+        return None
+    identity_parts = PurePosixPath(identity).parts
+    if len(identity_parts) != 2:
+        return None
+
+    part_io = node.get("part_io")
+    if not isinstance(part_io, Mapping):
+        return None
+    origin = "reviews/smoke-attestation.json"
+    mapped = part_io.get(origin)
+    if not isinstance(mapped, str):
+        return None
+    try:
+        mapped = _safe_relative(mapped)
+    except ArtifactContextError:
+        return None
+
+    mapped_parts = PurePosixPath(mapped).parts
+    origin_parts = PurePosixPath(origin).parts
+    if len(mapped_parts) <= len(origin_parts) or mapped_parts[-len(origin_parts):] != origin_parts:
+        return None
+    root_parts = mapped_parts[:-len(origin_parts)]
+    identity_path = ("parts", *identity_parts)
+    positions = [index for index in range(len(root_parts) - len(identity_path) + 1)
+                 if root_parts[index:index + len(identity_path)] == identity_path]
+    if len(positions) != 1 or positions[0] + len(identity_path) != len(root_parts):
+        return None
+    return PurePosixPath(*root_parts).as_posix()
