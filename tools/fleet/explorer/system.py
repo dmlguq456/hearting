@@ -191,6 +191,13 @@ def usage_gauges(snapshot):
         if harness not in snapshots and harness not in live:
             continue
         entry = snapshots.get(harness)
+        if harness == "claude":
+            from .live import _claude_usage_payload, _claude_usage_pending
+            import time
+            now = time.time()
+            payload, freshness, observed = _claude_usage_payload(entry, now)
+            pending = _claude_usage_pending(entry, now, observed)
+            entry = {"payload": payload} if freshness == "fresh" and pending is None else None
         window = next(((label, value) for label, value in _windows(entry)
                        if label in _WINDOW_LABEL and isinstance(value, (int, float)) and not isinstance(value, bool)),
                       None) if entry is not None else None

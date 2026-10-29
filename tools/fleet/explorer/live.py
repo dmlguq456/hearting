@@ -1531,19 +1531,54 @@ def _session_gpu_lines(snapshot, session_index):
 _UNIT = {"5h": "5h", "7d": "week", "wk": "week", "mo": "month"}
 
 
-def _claude_usage_unavailable(snapshot, now):
+def _claude_usage_payload(snapshot, now):
+    """Consume the public admitted payload only, with its original quota age."""
+    payload = _get(snapshot, "payload")
+    freshness = _get(snapshot, "freshness")
+    observed = _num(_get(snapshot, "observed_at"))
+    now = _num(now)
+    if (not isinstance(payload, Mapping) or freshness not in ("fresh", "stale")
+            or observed is None or now is None or not 0 <= observed <= now
+            or now - observed > 900):
+        return None, "unknown", None
+
+    def percent(value):
+        return value if type(value) is int and 0 <= value <= 100 else None
+
+    clean = {key: percent(payload.get(key)) for key in ("rl_5h", "rl_7d")}
+    clean.update({key: value if (value := _num(payload.get(key))) is not None and value >= 0 else None
+                  for key in ("rs_5h", "rs_7d")})
+    models = payload.get("rl_ms")
+    clean["rl_ms"] = [(item[0], item[1]) for item in models
+                      if isinstance(item, (list, tuple)) and len(item) == 2
+                      and isinstance(item[0], str) and 0 < len(item[0]) <= 80
+                      and item[0].isprintable() and percent(item[1]) is not None
+                     ] if isinstance(models, (list, tuple)) else []
+    if not any(clean[key] is not None for key in ("rl_5h", "rl_7d")) and not clean["rl_ms"]:
+        return None, "unknown", None
+    return clean, "stale" if freshness == "stale" or now - observed > 180 else "fresh", observed
+
+
+def _claude_usage_unavailable(snapshot, now, *, quota_observed=None):
     """Display only the backend's safe observation; never resolve credentials or an account here."""
     observation = _get(snapshot, "error_observation")
     observation = observation if isinstance(observation, Mapping) else {}
     error = _text(observation.get("error"))
-    reasons = {"rate-limit": "rate limit", "auth": "auth", "missing-credential": "no credential",
-               "unknown": None}
-    reason = reasons.get(error) or reasons.get(_text(observation.get("reason")))
+    errors = {"rate-limit": "rate limit", "auth": "auth", "missing-credential": "no credential",
+              "timeout": "timeout", "network": "network", "response-invalid": "response invalid",
+              "unknown": None}
+    reasons = {"credential-not-found": "no credential", "credential-invalid": None,
+               "credential-store-read-failed": None, "credential-changed": None,
+               "authentication-rejected": "auth", "usage-rate-limited": "rate limit",
+               "usage-timeout": "timeout", "usage-unreachable": "network",
+               "usage-response-invalid": "response invalid", "usage-http-error": None,
+               "usage-unreadable": None}
+    reason = (errors.get(error) or reasons.get(_text(observation.get("reason")))) if error in errors else None
     observed = _num(observation.get("observed_at"))
     now = _num(now)
     observed = observed if observed is not None and now is not None and 0 <= observed <= now else None
     retry = _num(observation.get("retry_at"))
-    until = (_clock(retry) if error in reasons and observed is not None
+    until = (_clock(retry) if error in errors and observed is not None
              and retry is not None and retry > now else None)
     status = "unavailable"
     if until:
@@ -1552,17 +1587,30 @@ def _claude_usage_unavailable(snapshot, now):
         status = f"wait {remaining} ({until})" if retry - now >= 86400 else f"wait {until}"
     if reason:
         status += " · " + reason
-    if observed is not None:
+    if quota_observed is not None:
+        # Keep quota age separate from the fetch/error time. The existing text row
+        # represents stale quota without passing old numbers off as current gauges.
+        stale = "stale · " + _since(quota_observed, now) + " ago"
+        status = status + " · " + stale if until else stale + (" · " + status if reason else "")
+    elif observed is not None:
         status += " · " + _since(observed, now) + " ago"
     return {"harness": "claude", "text": "claude " + status, "key": "hb_claude",
             "windows": [None, None, None]}
+
+
+def _claude_usage_pending(snapshot, now, quota_observed):
+    """A newer valid retry remains visible even while last-good quota is young."""
+    status = _claude_usage_unavailable(snapshot, now)
+    error_at = _num(_get(_get(snapshot, "error_observation"), "observed_at"))
+    return status if (quota_observed is not None and error_at is not None
+                      and error_at >= quota_observed and status["text"].startswith("claude wait ")) else None
 
 
 def _usage_records(snapshot, session_rows, now):
     best = {}
     for session in _records(_get(snapshot, "sessions", default=())):
         harness = _text(_get(session, "harness"))
-        if harness not in HARNESSES:
+        if harness not in HARNESSES or harness == "claude":
             continue
         windows = _get(session, "rl_windows")
         r5, r7, rms = _get(session, "rl_5h"), _get(session, "rl_7d"), _get(session, "rl_ms")
@@ -1571,15 +1619,19 @@ def _usage_records(snapshot, session_rows, now):
             if harness not in best or mtime > best[harness][0]:
                 resets = _get(session, "rl_rs") or (None, None)
                 best[harness] = (mtime, r5, r7, rms, resets, windows)
-    claude_snapshot = None
-    for harness, snap in (_get(snapshot, "usage_snapshots", default={}) or {}).items():
+    snapshots = _get(snapshot, "usage_snapshots", default={})
+    snapshots = snapshots if isinstance(snapshots, Mapping) else {}
+    claude_snapshot = snapshots.get("claude")
+    payload, freshness, observed = _claude_usage_payload(claude_snapshot, now)
+    pending = _claude_usage_pending(claude_snapshot, now, observed)
+    if payload is not None and freshness == "fresh" and pending is None:
+        best["claude"] = (observed, payload["rl_5h"], payload["rl_7d"], payload["rl_ms"],
+                          (payload["rs_5h"], payload["rs_7d"]), None)
+    claude_present = "claude" in snapshots or any(
+        _get(session, "harness") == "claude" for session in _records(_get(snapshot, "sessions", default=())))
+    for harness, snap in snapshots.items():
         if harness == "claude":
-            # The credential-bound backend entry owns unknown/error too. A passive
-            # session reading may still belong to a previous credential generation.
-            best.pop(harness, None)
-            claude_snapshot = snap if isinstance(snap, Mapping) else {}
-            if claude_snapshot.get("freshness") == "unknown":
-                continue
+            continue
         payload = snap.get("payload") if isinstance(snap, Mapping) else None
         if isinstance(payload, Mapping) and harness in HARNESSES and (
                 payload.get("rl_windows") or payload.get("windows") or payload.get("rl_5h") is not None
@@ -1590,8 +1642,9 @@ def _usage_records(snapshot, session_rows, now):
     usage = []
     for harness in HARNESSES:
         if harness not in best:
-            if harness == "claude" and claude_snapshot is not None:
-                usage.append(_claude_usage_unavailable(claude_snapshot, now))
+            if harness == "claude" and claude_present:
+                usage.append(_claude_usage_unavailable(claude_snapshot, now,
+                             quota_observed=observed if freshness == "stale" else None))
             continue
         _mt, r5, r7, rms, resets, windows = best[harness]
         raw = list(windows) if windows else [("5h", r5, resets[0]), ("week", r7, resets[1])]
@@ -1613,6 +1666,35 @@ def _usage_records(snapshot, session_rows, now):
         elif harness == "claude" and claude_snapshot is not None:
             usage.append(_claude_usage_unavailable(claude_snapshot, now))
     return usage
+
+
+def current_claude_usage(model, snapshot, now):
+    """Rebind only Claude usage at precomputed/replay and pending-draw boundaries."""
+    from dataclasses import replace
+
+    def claude(row):
+        return (row.get("harness") == "claude" or row.get("key") == "hb_claude"
+                or str(row.get("text", "")).split(" ", 1)[0] == "claude")
+
+    snapshots = _get(snapshot, "usage_snapshots")
+    current = _usage_records({
+        "usage_snapshots": {"claude": snapshots["claude"]}
+        if isinstance(snapshots, Mapping) and "claude" in snapshots else {},
+        "sessions": [session for session in _records(_get(snapshot, "sessions", default=()))
+                     if _get(session, "harness") == "claude"],
+    }, (), now)
+    row = next((item for item in current if claude(item)), None)
+    usage, replaced = [], False
+    for old in model.usage:
+        if claude(old):
+            if not replaced:
+                usage.append(row or _claude_usage_unavailable(None, now))
+                replaced = True
+        else:
+            usage.append(old)
+    if row is not None and not replaced:
+        usage.insert(0, row)
+    return replace(model, usage=usage) if replaced or row is not None else model
 
 
 def _parse_clock(ts):
@@ -2453,12 +2535,12 @@ def _header_identity(snapshot):
 
 def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=None):
     """Project facts only; identity and liveness decisions stay with their source builders."""
+    clock = time.time() if now is None else now
     fixture_values = _get(snapshot, "values")
     if isinstance(fixture_values, Mapping):
-        return ExplorerViewModel.from_mapping(fixture_values)
+        return current_claude_usage(ExplorerViewModel.from_mapping(fixture_values), snapshot, clock)
     if isinstance(snapshot, Mapping) and "schema" in snapshot and "sessions" in snapshot:
-        return ExplorerViewModel.from_mapping(snapshot)
-    clock = time.time() if now is None else now
+        return current_claude_usage(ExplorerViewModel.from_mapping(snapshot), snapshot, clock)
     bindings = detail_bindings(snapshot)
     accepted_detail = detail_for_bindings(accepted_detail, bindings)
     snapshot = _peer_snapshot(snapshot, accepted_detail, bindings)

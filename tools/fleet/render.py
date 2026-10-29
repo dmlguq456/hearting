@@ -8792,11 +8792,14 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
 
     F-51c: `api_disabled` (user opted out via FLEET_DISABLE=usage-api / --no-usage-api) is
     "the user turned it off" — distinct from unknown provider/account availability. A
-    claude/codex harness with no passive-tap value while opted out
+    codex harness with no passive-tap value while opted out
     renders as an unknown gauge (blank track + `—`), never the source-absence sentence.
+    Claude quota always comes from its admitted current-credential snapshot.
     """
     rl = {}
     for s in sessions or ():
+        if s.harness == "claude":
+            continue
         freshness = getattr(s, "_usage_freshness", None)
         if (s.rl_5h is not None or s.rl_7d is not None or s.rl_ms
                 or getattr(s, "rl_windows", None) or freshness
@@ -8810,6 +8813,8 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
     # A quota snapshot is account-scoped.  It must remain visible when there is no current
     # process row for that harness (for example immediately after session cleanup).
     for harness, snapshot in (usage_snapshots or {}).items():
+        if harness == "claude":
+            continue
         if not isinstance(snapshot, dict):
             continue
         payload = snapshot.get("payload")
@@ -8837,15 +8842,29 @@ def _usage_header_rows(sessions, layout="wide", now=None, api_disabled=False,
             payload.get("reason") or (error_observation or {}).get("reason"),
         )
     live = live_harnesses(sessions)
-    if not rl and not live:
+    claude_present = "claude" in (usage_snapshots or {}) or any(
+        s.harness == "claude" for s in sessions or ())
+    if not rl and not live and not claude_present:
         return []
-    hs = [h for h in ("claude", "codex", "opencode") if h in rl or h in live]
+    hs = [h for h in ("claude", "codex", "opencode") if h in rl or h in live or h == "claude" and claude_present]
     rows = []
     now = now if now is not None else time.time()
     for idx, h in enumerate(hs):
         hn = _USAGE_BADGE_TEXT.get(h) or _BADGE_TEXT.get(h, h)
         row = [("  usage " if idx == 0 else "        ", "head"),
                (_pad(hn, 14), "hb_" + h if h in _BADGE_TEXT else "hb_other")]
+        if h == "claude":
+            from .explorer.live import _claude_usage_payload, _claude_usage_unavailable, _claude_usage_pending
+            snapshot = (usage_snapshots or {}).get("claude")
+            payload, freshness, observed = _claude_usage_payload(snapshot, now)
+            if payload is None or freshness != "fresh" or _claude_usage_pending(snapshot, now, observed):
+                status = _claude_usage_unavailable(snapshot, now,
+                    quota_observed=observed if freshness == "stale" else None)
+                row.append((status["text"].removeprefix("claude "), "dim"))
+                rows.append((row, None))
+                continue
+            rl[h] = (payload["rl_5h"], payload["rl_7d"], payload["rl_ms"], observed,
+                     (payload["rs_5h"], payload["rs_7d"]), None, freshness, None, None, None)
         if h not in rl:
             if api_disabled and h in ("claude", "codex"):
                 # F-51c: opt-out ("user turned it off"), not opencode's structural absence —
@@ -11664,7 +11683,8 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
     if h <= 0 or w <= 1:
         return
     if _EXPLORER_ENABLED:
-        current = snapshot or LiveSnapshot(sessions=sessions, jobs=jobs)
+        current = snapshot or LiveSnapshot(sessions=sessions, jobs=jobs,
+                                           usage_snapshots=usage_snapshots or {})
         state = _explorer_state_for(_EXPLORER_STATE, w)
         _EXPLORER_STATE = state
         runtime = _explorer_runtime()
@@ -11672,7 +11692,8 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
         # the loading frame) directly; later generations still compose first so
         # their readiness evidence is current before a publication decision.
         if loading and _EXPLORER_PUBLISHED_MODEL is not None:
-            _EXPLORER_MODEL = _EXPLORER_PUBLISHED_MODEL
+            from .explorer.live import current_claude_usage
+            _EXPLORER_MODEL = current_claude_usage(_EXPLORER_PUBLISHED_MODEL, current, time.time())
             frame = _explorer_frame_from_model(_EXPLORER_MODEL, state, w, h, beat=1)
             _EXPLORER_SHOWN = True
         elif loading:
@@ -11694,11 +11715,12 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
                     runtime.persist_complete_async(candidate_model, readiness,
                                                    _EXPLORER_DETAIL_CONTINUATION)
             elif _EXPLORER_PUBLISHED_MODEL is not None:
-                from .explorer.live import selected_detail
+                from .explorer.live import selected_detail, current_claude_usage
                 from dataclasses import replace as _replace_model
                 base = _EXPLORER_PUBLISHED_MODEL
                 # Replay lacks exact live bindings; it remains responsive without guessing them.
                 shown = selected_detail(base, _EXPLORER_RESULT, peer_model=candidate_model)
+                shown = current_claude_usage(shown, current, time.time())
                 _EXPLORER_MODEL = shown
                 live_model = shown if _EXPLORER_REPLAY_ACTIVE else _replace_model(shown, clock=time.time())
                 frame = _explorer_frame_from_model(live_model, state, w, h,
@@ -11723,7 +11745,17 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
     cached = bool(loading and _RELOAD_FRAME and replay_fresh and same_gpu_sample
                   and replay_geometry_ok)
     if cached:
-        lines = _RELOAD_FRAME
+        lines = list(_RELOAD_FRAME)
+        # Cached terminal segments have no quota admission either. Replace only
+        # the Claude usage row, preserving the cached body/geometry and hit policy.
+        priorities = frame_layout.get("fixed_priorities") or {}
+        for index, row in enumerate(lines):
+            if (priorities.get(index, priorities.get(str(index))) == 1 and row
+                    and any(key == "hb_claude" for _text, key in row)):
+                snapshots = usage_snapshots if usage_snapshots is not None else getattr(snapshot, "usage_snapshots", {})
+                fresh_row = _usage_header_rows([], now=time.time(),
+                    usage_snapshots={"claude": (snapshots or {}).get("claude")}, term_width=w)[0]
+                lines[index] = row[:1] + fresh_row[1:]
         _LAYOUT_META = {
             "fixed_end": frame_layout.get("fixed_end", 0),
             "body_start": frame_layout.get("body_start", 0),
