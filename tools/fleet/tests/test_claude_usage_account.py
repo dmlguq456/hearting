@@ -280,7 +280,7 @@ class ClaudeUsageAccountTests(unittest.TestCase):
             self.urlopen.side_effect = urllib.error.HTTPError(
                 "https://fixture.invalid", status, "private-body", {"Retry-After": "600"},
                 io.BytesIO(b'private-body'))
-            result = usage_api._fetch()
+            result = usage_api._fetch(usage_api._credential())
             self.assertEqual(result["error"], error)
             self.assertEqual(result["retry_at"], self.now + 600)
             self.assertNotIn("private-body", json.dumps(result))
@@ -290,13 +290,25 @@ class ClaudeUsageAccountTests(unittest.TestCase):
                                  (urllib.error.URLError("private-body"), "network"),
                                  (http.client.IncompleteRead(b"private-body"), "response-invalid")):
             self.urlopen.side_effect = exception
-            self.assertEqual(usage_api._fetch()["error"], error)
+            self.assertEqual(usage_api._fetch(usage_api._credential())["error"], error)
         self.urlopen.side_effect = None
         for body in (b'{}', b'[]', b'{', b'{"five_hour":{"utilization":false}}',
                      b'{"limits":"invalid","seven_day":5}',
                      b'{"five_hour":{"utilization":NaN}}'):
             self.urlopen.return_value = io.BytesIO(body)
-            self.assertEqual(usage_api._fetch()["error"], "response-invalid")
+            self.assertEqual(usage_api._fetch(usage_api._credential())["error"], "response-invalid")
+
+    def test_ad_hoc_probe_preserves_quota_dict_or_none_compatibility(self):
+        # tools/release/first-journey.py calls _fetch() without an owned binding.
+        self.urlopen.side_effect = None
+        self.urlopen.return_value = io.BytesIO(b'{"five_hour":{"utilization":16}}')
+        self.assertEqual(usage_api._fetch()["rl_5h"], 16)
+        self.urlopen.return_value = io.BytesIO(b'{}')
+        self.assertIsNone(usage_api._fetch())
+        self.urlopen.side_effect = urllib.error.HTTPError(
+            "https://fixture.invalid", 429, "private-body", {"Retry-After": "600"}, None)
+        self.assertIsNone(usage_api._fetch())
+        self.assertEqual(usage_api._fetch(usage_api._credential())["error"], "rate-limit")
 
     def test_Retry_After_seconds_date_invalid_and_absent(self):
         from email.utils import formatdate

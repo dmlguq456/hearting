@@ -127,7 +127,14 @@ def _quota(document):
 
 
 def _fetch(credential=None):
-    credential = _credential() if credential is None else credential
+    """Quota/None for ad-hoc probes; owned fetches also receive diagnostics."""
+    observation = _fetch_observation(_credential() if credential is None else credential)
+    if credential is None and observation.get("error"):
+        return None
+    return observation
+
+
+def _fetch_observation(credential):
     if not credential.token:
         return _error("missing-credential", credential.reason or "credential-not-found")
     # Use exactly the credential captured by the controller, not a second read
