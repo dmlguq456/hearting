@@ -20,6 +20,24 @@ from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.model import DispatchJob, Session, WorkProjection
 
 
+def assert_opencode_context_surface(case, sessions, expected):
+    """Check collected v2 values through the private serializer and actual frame."""
+    from tools.fleet.explorer.view_model import ExplorerViewModel, persistable_view_model
+
+    vm = build_view_model({"sessions": sessions, "jobs": [],
+                           "project_of": lambda _: "fixture"})
+    cached = json.loads(json.dumps(persistable_view_model(vm)))
+    replay = ExplorerViewModel.from_mapping(cached)
+    for displayed in (vm, replay):
+        actual = [(row.get("context"), row.get("window")) for row in displayed.sessions]
+        case.assertCountEqual(actual, expected)
+        text = "\n".join(draw(displayed, NavState(view="OVERVIEW"), 220, 60).text_rows())
+        for pct, _window in expected:
+            if pct is not None:
+                case.assertIn(f"{pct}%", text)
+    case.assertNotIn("context_policy", json.dumps(cached))
+
+
 def _load_native_fixture(case, name):
     """Scope standalone sibling imports (including lazy imports) to this case."""
     utilities = Path(__file__).resolve().parents[3] / "utilities"

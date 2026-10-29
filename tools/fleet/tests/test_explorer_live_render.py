@@ -121,13 +121,15 @@ class CutRule(unittest.TestCase):
         for cols in (80, 100, 140, 168):
             with self.subTest(cols=cols):
                 rows = _frame(_vm(), "ROUTES", cols=cols).text_rows()
-                header = next(row[34:] for row in rows if "HARNESS" in row and "PROGRESS" in row)
-                labels = ("ROUTE", "KIND", "HARNESS", "PROGRESS", "AGE")
+                header = next(row[34:] for row in rows if "REPO" in row and "ROUTE" in row)
+                labels = ("REPO", "ID", "ROUTE", "KIND", "HARNESS",
+                          *(("PROGRESS",) if "PROGRESS" in header else ()), "AGE")
                 positions = [header.index(label) for label in labels]
                 self.assertEqual(positions, sorted(positions))
                 for position, label in zip(positions, labels):
                     self.assertEqual(header[position:position + len(label)], label)
-                self.assertLess(positions[3] + len("PROGRESS"), positions[4])
+                for index in range(len(labels) - 1):
+                    self.assertLess(positions[index] + len(labels[index]), positions[index + 1])
 
     def test_route_kind_uses_the_cell_before_age_instead_of_dropping_its_last_glyph(self):
         route = _route(capability="lab", mode="eval", intensity="standard", age="22h 32m")
@@ -138,7 +140,9 @@ class CutRule(unittest.TestCase):
         self.assertEqual(line[kind:kind + 8], "lab(eval")
         self.assertLess(kind + 8, age)
         self.assertEqual(line[age:age + 7], "22h 32m")
-        self.assertIn(str(route.get("harness")), line)
+        # REPO now precedes ID; the 80-column pane shares the remaining cells.
+        owner = str(route.get("harness"))
+        self.assertIn(owner[:5], line)
 
     def test_system_field_lines_are_cut_at_the_pane_edge_without_an_ellipsis(self):
         system = dict(_mapping()["system"], install={"version": "v1.2.3", "managed": True, "pinned": True,

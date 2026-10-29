@@ -36,6 +36,69 @@ class GatedProvider:
 
 
 class SelectionPumpContracts(unittest.TestCase):
+    def test_selected_peers_use_list_worker_while_panes_and_global_sources_wait(self):
+        from unittest.mock import patch
+        from tools.fleet import render
+        from tools.fleet.collectors import peer_messages
+        from tools.fleet.explorer import focus, live
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.tests.explorer_fixture import demo_snapshot
+        snapshot, _hosts = demo_snapshot()
+        for session in snapshot.sessions:
+            session.proc_start = "peer-fixture-start"
+        snapshot.observations = {"remote-host": {"state": "pending"}}
+        entered, release = threading.Event(), threading.Event()
+        def panes():
+            entered.set()
+            release.wait(5)
+            return {}
+        by_session = {("claude", "demo-claude-1"): {"last_sent": {
+            "to_session_id": "demo-codex-1", "to_harness": "codex", "kind": "peer-worker-ready",
+            "age_min": 1}}}
+        feed = render._ExplorerFeed(focus.FocusReader(snapshot=lambda: snapshot), 0.1)
+        state = NavState(view="PEERS")
+        try:
+            with patch.object(focus, "read_pane_map", side_effect=panes), \
+                    patch.object(peer_messages, "collect", return_value=(
+                        {"records": [], "by_session": by_session}, {"state": "success"})), \
+                    patch.object(focus, "read_seat_history", side_effect=AssertionError("unrelated history")):
+                feed.update(state, 1, time.monotonic(), snapshot)
+                self.assertTrue(entered.wait(2))
+                def accepted():
+                    detail, _changed = feed.update(state, 2, time.monotonic(), snapshot)
+                    return detail if detail and "peers" in (detail.results.get("seats").source_records
+                        if detail.results.get("seats") else {}) else None
+                detail = wait_for(accepted)
+                self.assertIsNotNone(detail)
+                self.assertFalse(release.is_set())
+                model = live.build_view_model(snapshot, accepted_detail=detail)
+                self.assertIn("peer-worker-ready", repr(model.peer_edges))
+                mapping = {"sessions": [dict(vars(s)) for s in snapshot.sessions],
+                           "jobs": snapshot.jobs, "observations": snapshot.observations}
+                self.assertIn("peer-worker-ready", repr(live.build_view_model(
+                    mapping, accepted_detail=detail).peer_edges))
+                self.assertEqual(snapshot.observations, {"remote-host": {"state": "pending"}})
+                with patch.object(peer_messages, "collect", return_value=(
+                        {"records": [], "by_session": {}}, {"state": "failed"})):
+                    feed._pump("seats").request(force=True)
+                    def failed_observation():
+                        current, _changed = feed.update(state, 2, time.monotonic(), snapshot)
+                        peers = current.results["seats"].source_records["peers"]
+                        return current if peers.snapshot.observations["optional:peers"]["state"] == "failed" else None
+                    failed = wait_for(failed_observation)
+                    self.assertIsNotNone(failed)
+                    retained = live.build_view_model(snapshot, accepted_detail=failed)
+                    self.assertIn("peer-worker-ready", repr(retained.peer_edges))
+                    self.assertEqual(retained.system["peer_observation"]["state"], "failed")
+                    self.assertTrue(retained.system["peer_observation"]["last_good"])
+                # The captured request cannot supply detail to a new process incarnation.
+                next(s for s in snapshot.sessions if s.session_id == "demo-claude-1").proc_start = "new-process"
+                changed = live.build_view_model(snapshot, accepted_detail=detail)
+                self.assertNotIn("peer-worker-ready", repr(changed.peer_edges))
+        finally:
+            release.set()
+            feed.stop()
+
     def test_late_result_for_previous_selection_is_dropped(self):
         provider = GatedProvider()
         pump = SelectionPump(provider, interval=0.1)
@@ -221,7 +284,7 @@ class AuxReads(unittest.TestCase):
         focus.read_pane_map = lambda: {"sid-1": "w1:p1"}
         seen = []
 
-        def seat(session, harness, sid, *, cards=False, pane=None):
+        def seat(session, harness, sid, *, cards=False, pane=None, read_context=None):
             seen.append((harness, sid, cards, pane))
             return ({"sid": sid, "current": True, "cards": []},), pane or "", Health("success", 1.0)
         focus.read_seat_history = seat
@@ -260,7 +323,7 @@ class SessionPageDialogue(unittest.TestCase):
         entries = (entry(compacted, "startup", 1), entry(cleared, "compact", 2), entry(current, "clear"))
         seen, read = [], []
 
-        def seat(_session, harness, sid, *, cards=False, pane=None):
+        def seat(_session, harness, sid, *, cards=False, pane=None, read_context=None):
             seen.append((harness, sid, cards, pane))
             return entries, pane or "", Health("success", 1.0)
 
@@ -317,7 +380,8 @@ class ExplorerFeedRequests(unittest.TestCase):
 
     def test_a_session_page_reads_its_seat_pane_and_picked_generation(self):
         found = self.requests(scope="session:a7", folds=(("ui:gen:a7", "2"),))
-        self.assertEqual(found["session"][2], ("seat", "cards", "pane", "dialogue:2"))
+        self.assertEqual(found["session"][2], ("seat", "cards", "dialogue:2"))
+        self.assertEqual(found["panes"][2], ("aux:claude:demo-claude-1", "metadata", "pane"))
 
     def test_a_route_page_reads_its_owner_output_and_models_only_on_models(self):
         route = next(r for r in self.render._EXPLORER_MODEL.routes if r.get("session_tag"))
@@ -383,6 +447,111 @@ class ExplorerFeedRequests(unittest.TestCase):
             self.assertFalse(any(changes))                       # ... and found nothing new
         finally:
             feed.stop()
+
+    def test_new_snapshot_generations_keep_the_current_request_and_accept_its_result(self):
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.explorer.types import FocusResult
+        from unittest import mock
+        calls = []
+        def reader(request):
+            calls.append(request)
+            return FocusResult(request.key, request.epoch, request.snapshot_generation,
+                               source_records={"seat": ()} if request.key.harness != "*" else {})
+        feed = self.render._ExplorerFeed(reader, 60)
+        with mock.patch.dict(self.render._EXPLORER_INTERVALS, {"session": 60}):
+            try:
+                generation = 1
+                end = time.monotonic() + 3
+                while time.monotonic() < end:
+                    detail, _changed = feed.update(NavState(scope="session:a7"), generation,
+                                                   time.monotonic(), self.snapshot)
+                    generation += 1
+                    if detail is not None and detail.focus is not None:
+                        break
+                    time.sleep(0.01)
+                self.assertIsNotNone(detail.focus)
+                request = detail.focus.request
+                for generation in range(20, 25):
+                    feed.update(NavState(scope="session:a7"), generation, time.monotonic(), self.snapshot)
+                self.assertEqual([r for r in calls if r.key.harness != "*"], [request])
+            finally:
+                feed.stop()
+
+
+class HistoryDependencies(unittest.TestCase):
+    def test_later_pane_observation_fills_history_only_for_the_same_process_binding(self):
+        from unittest import mock
+        from dataclasses import replace
+        from types import SimpleNamespace
+        from tools.fleet.explorer import focus
+        from tools.fleet.explorer.types import FocusKey, FocusRequest
+        sid = "full-native-sid"
+        session = SimpleNamespace(harness="claude", session_id=sid, cwd="/fixture")
+        reader = focus.FocusReader(snapshot=SimpleNamespace(sessions=[session]), output_reader=False)
+        binding = (("claude:" + sid, ("claude", sid, "17", "start-a")),)
+        request = FocusRequest(FocusKey("claude", sid), 1, 1, (), ("seat",), binding)
+        with mock.patch.object(focus, "read_seat_history", return_value=((), "", Health("success"))) as seat, \
+                mock.patch.object(focus, "read_pane_map", return_value={sid: "w1:p7"}) as panes:
+            reader(request)
+            self.assertIsNone(seat.call_args.kwargs["pane"])
+            reader(FocusRequest(FocusKey("*", "panes"), 1, 1, bindings=binding))
+            reader(request)
+            self.assertEqual(seat.call_args.kwargs["pane"], "w1:p7")
+            reader(replace(request, bindings=(("claude:" + sid, ("claude", sid, "17", "start-b")),)))
+            self.assertIsNone(seat.call_args.kwargs["pane"])
+            panes.assert_called_once_with()
+
+    def test_history_request_never_reads_registry_routes_cycles_obligations_or_panes(self):
+        from unittest import mock
+        from types import SimpleNamespace
+        from tools.fleet.explorer import focus
+        from tools.fleet.explorer.types import FocusKey, FocusRequest
+        session = SimpleNamespace(harness="claude", session_id="full-native-sid", herdr_pane="w2:p7")
+        request = FocusRequest(FocusKey("claude", session.session_id), 7, 8, (),
+                               ("seat", "cards", "dialogue:last"))
+        import contextlib
+        with contextlib.ExitStack() as stack:
+            readers = [stack.enter_context(mock.patch.object(focus, name,
+                       side_effect=AssertionError("history dependency: " + name)))
+                       for name in ("session_entries", "read_attempts", "_load_routes", "_load_cycles",
+                                    "read_obligations", "read_pane_map", "read_pane_visible")]
+            history = stack.enter_context(mock.patch.object(focus, "read_seat_history",
+                return_value=((), "w2:p7", Health("success"))))
+            result = focus.collect_focus(request, snapshot=SimpleNamespace(sessions=[session]))
+        self.assertEqual(result.source_records["seat"], ())
+        self.assertEqual(result.health.state, "success")
+        self.assertIsNotNone(history.call_args.kwargs["read_context"])
+        for reader in readers:
+            reader.assert_not_called()
+
+    def test_a_b_a_never_returns_previous_epoch_while_new_read_is_waiting(self):
+        import threading
+        from tools.fleet.explorer.types import FocusKey, FocusResult
+        from tools.fleet.explorer.focus import SelectionPump
+        entered, release = threading.Event(), threading.Event()
+        blocked = [False]
+        def reader(request):
+            if blocked[0]:
+                entered.set()
+                release.wait(3)
+            return FocusResult(request.key, request.epoch, request.snapshot_generation)
+        pump = SelectionPump(reader, 0.05)
+        self.addCleanup(pump.stop)
+        self.addCleanup(release.set)
+        a, b = FocusKey("claude", "A"), FocusKey("claude", "B")
+        pump.select(a, 1)
+        pump.request()
+        wait_for(lambda: pump.poll() is not None)
+        blocked[0] = True
+        pump.select(b, 2)
+        pump.request()
+        self.assertTrue(entered.wait(2))
+        latest = pump.select(a, 3)
+        pump.request()
+        self.assertIsNone(pump.poll())
+        release.set()
+        wait_for(lambda: pump.poll() is not None)
+        self.assertEqual(pump.poll().epoch, latest.epoch)
 
 
 if __name__ == "__main__":

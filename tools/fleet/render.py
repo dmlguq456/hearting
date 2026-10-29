@@ -6880,6 +6880,11 @@ class _ExplorerView:
         self.__dict__["_base"] = base
         self.__dict__["_extras"] = extras
 
+    def __copy__(self):
+        value = object.__new__(type(self))
+        value.__dict__ = dict(self.__dict__, _extras=dict(self._extras))
+        return value
+
     def __getattr__(self, name):
         extras = self.__dict__["_extras"]
         if name in extras:
@@ -6889,7 +6894,6 @@ class _ExplorerView:
 
 def _explorer_view(snapshot):
     """What the explorer providers read: the snapshot, with no file/DB/git read behind any value."""
-    global _EXPLORER_ORDER
     from .explorer import nav
     extras = {}
     if getattr(snapshot, "compute_hosts", None) is None:
@@ -6908,7 +6912,6 @@ def _explorer_view(snapshot):
         present = {str(sid) for sid in mains if sid}
         order = [sid for sid in _EXPLORER_ORDER if sid in present]
         order += [str(sid) for sid in mains if sid and str(sid) not in set(order)]
-        _EXPLORER_ORDER = order
         extras["session_order"] = tuple(order)
     display = getattr(snapshot, "display_snapshot", None)
     if display is not None and getattr(snapshot, "project_of", None) is None:
@@ -7037,6 +7040,12 @@ def _explorer_requests(snapshot, state, model):
         info, tag_ref = index.get(tag), ref(tag)
         if tag_ref:
             requests["session"] = (FocusKey(info["harness"], info["sid"]), (tag_ref,), tuple(wants))
+            if any(w in ("seat", "cards") or w.startswith("dialogue:") for w in wants):
+                # Metadata/pane latency belongs to the existing auxiliary pump.
+                requests["session"] = (FocusKey(info["harness"], info["sid"]), (tag_ref,),
+                                       tuple(w for w in wants if w != "pane"))
+                requests["panes"] = (FocusKey("*", "panes"), (),
+                                     ("aux:" + tag_ref, "metadata", *(w for w in wants if w == "pane")))
 
     def generation_want(tag):
         picked = state.opened_for("ui:gen:" + tag)
@@ -7065,6 +7074,10 @@ def _explorer_requests(snapshot, state, model):
             session_request(opened, ("seat", "cards", generation_want(opened)))
     elif state.view == "MODELS":
         requests["models"] = (FocusKey("*", "models"), (), ())
+    if (state.view == "PEERS" and kind != "route") or kind == "session":
+        # Reuse the list selection worker; no global readiness or full optional pass.
+        refs = tuple(r for tag in index for r in (ref(tag),) if r)
+        requests["seats"] = (FocusKey("*", "peers"), refs, ("peers", state.scope))
     return requests
 
 
@@ -7089,8 +7102,11 @@ class _ExplorerFeed:
         return self.pumps[kind]
 
     def update(self, state, generation, now_mono, snapshot=None):
+        from dataclasses import replace
+        from .explorer import live
         from .explorer.types import ExplorerDetail
         requests = _explorer_requests(snapshot, state, _EXPLORER_MODEL) if snapshot is not None else {}
+        bindings = live.detail_bindings(snapshot) if snapshot is not None else {}
         for kind in _EXPLORER_INTERVALS:
             request = requests.get(kind)
             if request is None:
@@ -7099,15 +7115,39 @@ class _ExplorerFeed:
                     self.results["session"] = None
                 continue
             pump = self._pump(kind)
-            if self.selected.get(kind) != request:
-                self.selected[kind] = request
-                key, expanded, wants = request
-                pump.select(key, generation, expanded, wants)
+            key, expanded, wants = request
+            refs = expanded if kind != "panes" else tuple(bindings)
+            observed = tuple((ref, bindings[ref]) for ref in refs if ref in bindings)
+            selection = (*request, observed)
+            if self.selected.get(kind) != selection:
+                self.selected[kind] = selection
+                self.results.pop(kind, None)
+                pump.select(key, generation, expanded, wants, observed)
                 pump.request(force=True)
             else:
                 pump.request_due(now=now_mono)
             result = pump.poll()
             if result is not None:
+                previous = self.results.get(kind)
+                if (kind == "panes" and "session" in self.selected
+                        and result.source_records.get("panes")
+                        and (previous is None or previous.source_records.get("panes") !=
+                             result.source_records.get("panes"))):
+                    # Fill physical-seat history once the independent pane lookup finishes.
+                    self._pump("session").request(force=True)
+                if previous is not None and previous.request == result.request:
+                    # Missing/failed scopes retain their last good values for this binding.
+                    records = dict(previous.source_records)
+                    records.update({name: value for name, value in result.source_records.items()
+                                    if value is not None})
+                    for name in ("seats",):
+                        if name in previous.source_records and name in result.source_records:
+                            records[name] = dict(previous.source_records[name], **result.source_records[name])
+                    if "peers" in records and "peers" in previous.source_records:
+                        from .details import retain_optional_last_good
+                        records["peers"] = retain_optional_last_good(
+                            previous.source_records["peers"], records["peers"])
+                    result = replace(result, source_records=records)
                 self.results[kind] = result
         token = tuple(self._mark(kind) for kind in _EXPLORER_INTERVALS)
         changed = token != self.token
@@ -7119,7 +7159,8 @@ class _ExplorerFeed:
                 return default if value is None else value
             self.last = ExplorerDetail(
                 focus=self.results.get("session"), seats=records("seats", "seats", {}),
-                config=records("models", "models", None), panes=records("panes", "panes", {}))
+                config=records("models", "models", None), panes=records("panes", "panes", {}),
+                results=dict(self.results))
         return self.last, changed
 
     def _mark(self, kind):
@@ -7133,8 +7174,16 @@ class _ExplorerFeed:
             records = result.source_records or {}
             shown = {name: (dict(value, at=None) if name == "pane_read" and isinstance(value, dict) else value)
                      for name, value in records.items()
-                     if name in ("seat", "dialogue", "pane_read", "raw", "seats", "models", "panes")}
-            known = self.marks[kind] = (result, hash((result.key, repr(shown), repr(result.events),
+                     if name in ("seat", "dialogue", "pane_read", "raw", "seats", "models", "panes", "aux", "peers")}
+            peers = records.get("peers")
+            if peers is not None:
+                from .details import _PEER_FIELDS, identity
+                shown["peers"] = (peers.snapshot.observations.get("optional:peers"),
+                    tuple((identity(row), *(getattr(row, field, None) for field in _PEER_FIELDS))
+                          for row in peers.snapshot.sessions))
+            request = result.request
+            identity = (request.key, request.epoch, request.wants, request.expanded_sessions, request.bindings) if request else result.key
+            known = self.marks[kind] = (result, hash((identity, repr(shown), repr(result.events),
                                                       result.health.state)))
         return known[1]
 
@@ -7153,7 +7202,9 @@ def explorer_read_detail(snapshot, state):
     results = {}
     for kind, (key, expanded, wants) in _explorer_requests(snapshot, state, _EXPLORER_MODEL).items():
         try:
-            results[kind] = reader(FocusRequest(key, 1, 0, tuple(expanded), tuple(wants)))
+            from .explorer import live
+            bindings = tuple(sorted(live.detail_bindings(snapshot).items()))
+            results[kind] = reader(FocusRequest(key, 1, 0, tuple(expanded), tuple(wants), bindings))
         except Exception:
             results[kind] = None
 
@@ -7162,7 +7213,8 @@ def explorer_read_detail(snapshot, state):
         value = (result.source_records or {}).get(name) if result is not None else None
         return default if value is None else value
     return ExplorerDetail(focus=results.get("session"), seats=records("seats", "seats", {}),
-                          config=records("models", "models", None), panes=records("panes", "panes", {}))
+                          config=records("models", "models", None), panes=records("panes", "panes", {}),
+                          results=results)
 
 
 def _explorer_state_for(state, cols):
@@ -7170,17 +7222,11 @@ def _explorer_state_for(state, cols):
     return NavState.from_value(state)
 
 
-def _explorer_selected_models(model, focus_result):
-    """Overlay the accepted MODELS selection result on the last complete base VM."""
-    if model is None or focus_result is None:
-        return None
-    config = getattr(focus_result, "config", None)
-    if config is None and isinstance(focus_result, Mapping):
-        config = focus_result.get("config")
-    if config is None or config == getattr(model, "models", None):
-        return None
-    from dataclasses import replace
-    return replace(model, models=config)
+def _explorer_gesture_binding(model, tag):
+    ordering = getattr(model, "ordering", None) or {}
+    records = getattr(model, "source_records", None) or {}
+    ref = next((ref for ref, value in records.get("_detail_tags", {}).items() if value == tag), None)
+    return ordering.get("tag_keys", {}).get(tag), records.get("_detail_bindings", {}).get(ref)
 
 
 def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_good=None, now=None,
@@ -7210,33 +7256,7 @@ def _explorer_compose(snapshot, cols, rows, state=None, focus_result=None, last_
     _EXPLORER_COMPOSE_MODEL = model
     _EXPLORER_READINESS = readiness
     _EXPLORER_MODEL = model
-    drag = tuple(getattr(state, "drag", ()) or ())
-    if len(drag) >= 3 and drag[0] == "tree":
-        ordering = getattr(model, "ordering", {}) or {}
-        identities = (set(ordering.get("repo_keys", ())) if drag[1] == "repo" else
-                      set(ordering.get("repo_by_tag", {})))
-        dragged = drag[2]
-        if dragged not in identities:
-            from dataclasses import replace
-            state = replace(state, drag=())
-            _EXPLORER_STATE = state
-    from .explorer.runtime import tag_cycle
-    cycle = tag_cycle(getattr(model, "ordering", None))
-    if cycle:
-        _EXPLORER_ORDER = list(cycle)
-    _EXPLORER_STATE = state
     frame = explorer_frame.draw(model, state, cols, rows, beat=int(_BLINK_ON))
-    from dataclasses import replace
-    scrolls = dict(state.scroll)
-    for slot, layout in (("pane", frame.pane_scroll), ("tree", frame.tree_scroll)):
-        if len(layout) >= 5 and int(layout[4]):
-            scrolls[slot] = int(layout[4])
-        else:
-            scrolls.pop(slot, None)
-    normalized_scrolls = tuple(sorted(scrolls.items()))
-    if normalized_scrolls != state.scroll:
-        state = replace(state, scroll=normalized_scrolls)
-        _EXPLORER_STATE = state
     _EXPLORER_NAV_ROWS = _EXPLORER_ALL_ROWS = ()
     _SELECTABLE = []
     return frame
@@ -7330,6 +7350,8 @@ def _explorer_click_current(size, snapshot):
 def _explorer_apply_effects(effects, vm):
     """Run typed explorer effects and publish immediate action feedback."""
     from dataclasses import replace as _replace_state
+    global _EXPLORER_STATE, _EXPLORER_MODEL, _EXPLORER_PUBLISHED_MODEL
+    global _EXPLORER_COMPOSE_MODEL, _EXPLORER_RESULT
 
     effects = tuple(effects or ())
     question_effects = tuple(effect for effect in effects
@@ -7353,11 +7375,15 @@ def _explorer_apply_effects(effects, vm):
                       "message": "MODELS is read-only in replay", "models": None}
     else:
         result = _explorer_runtime().apply_effects(effects, vm)
+    reorders = tuple(effect[:5] for effect in effects if effect and effect[0] == "reorder" and len(effect) >= 5)
+    if reorders:
+        from .explorer.live import reorder_view_model
+        _EXPLORER_MODEL = reorder_view_model(_EXPLORER_MODEL, reorders)
+        _EXPLORER_PUBLISHED_MODEL = reorder_view_model(_EXPLORER_PUBLISHED_MODEL, reorders)
+        _EXPLORER_COMPOSE_MODEL = None
     if not isinstance(result, Mapping) or not result.get("model_action"):
         return result
 
-    global _EXPLORER_STATE, _EXPLORER_MODEL, _EXPLORER_PUBLISHED_MODEL
-    global _EXPLORER_COMPOSE_MODEL, _EXPLORER_RESULT
     state = _explorer_state_for(_EXPLORER_STATE, 0)
     _EXPLORER_STATE = _replace_state(state, status=str(result.get("message") or "model set finished"))
     refreshed = result.get("models")
@@ -7879,13 +7905,40 @@ def _draw_explorer(stdscr, snapshot, frame=None):
     if h <= 0 or w <= 0:
         return
     state = _explorer_state_for(_EXPLORER_STATE, w)
+    prior_state = state
     if _EXPLORER_SIZE is not None and _EXPLORER_SIZE != (h, w) and state.drag:
         from dataclasses import replace
         state = replace(state, drag=())
-        _EXPLORER_STATE = state
     _EXPLORER_SIZE = (h, w)
     if frame is None:
         frame = _explorer_compose(snapshot, w, h, state, _EXPLORER_RESULT)
+    # Only the VM actually being painted can cancel a gesture or change input ordering.
+    from dataclasses import replace
+    from .explorer.runtime import tag_cycle
+    global _EXPLORER_ORDER
+    model = _EXPLORER_MODEL
+    ordering = getattr(model, "ordering", {}) or {}
+    drag = state.drag
+    if len(drag) >= 3 and drag[0] == "tree":
+        identities = ordering.get("repo_keys", ()) if drag[1] == "repo" else ordering.get("repo_by_tag", {})
+        if drag[2] not in identities:
+            state = replace(state, drag=())
+        elif drag[1] == "session" and len(drag) > 9 and drag[9] != _explorer_gesture_binding(model, drag[2]):
+            state = replace(state, drag=())
+    if state != prior_state or (
+            _EXPLORER_SIZE != (getattr(frame, "rows", h), getattr(frame, "cols", w))):
+        if model is not None:
+            frame = _explorer_frame_from_model(model, state, w, h, beat=int(_BLINK_ON))
+    cycle = tag_cycle(ordering)
+    if cycle:
+        _EXPLORER_ORDER = list(cycle)
+    scrolls = dict(state.scroll)
+    for slot, layout in (("pane", frame.pane_scroll), ("tree", frame.tree_scroll)):
+        if len(layout) >= 5 and int(layout[4]):
+            scrolls[slot] = int(layout[4])
+        else:
+            scrolls.pop(slot, None)
+    _EXPLORER_STATE = replace(state, scroll=tuple(sorted(scrolls.items())))
     _draw_explorer_frame(stdscr, frame, snapshot, stale=_EXPLORER_REPLAY_ACTIVE)
 
 
@@ -11636,43 +11689,35 @@ def _draw(stdscr, sessions, jobs, section, malformed, memory=None, live_order=No
         elif loading:
             frame = runtime.loading_frame(w, h)
         else:
-            selected_model = (_explorer_selected_models(_EXPLORER_PUBLISHED_MODEL, _EXPLORER_RESULT)
-                              if state.view == "MODELS" else None)
-            if selected_model is not None:
-                # The selected local config read is independent of remote/basic
-                # readiness. It can repaint MODELS over the last complete base VM.
-                _EXPLORER_MODEL = selected_model
+            # Always advance the complete base, even while selected local data is available.
+            candidate_frame = _explorer_compose(current, w, h, state, _EXPLORER_RESULT)
+            candidate_model = _EXPLORER_MODEL
+            readiness = _EXPLORER_READINESS
+            complete = runtime.publication_ready(readiness)
+            if complete:
+                _EXPLORER_REPLAY_ACTIVE = False
+                _EXPLORER_PUBLISHED_MODEL = candidate_model
+                _EXPLORER_MODEL = candidate_model
                 _EXPLORER_SHOWN = True
-                frame = _explorer_frame_from_model(selected_model, state, w, h,
-                                                   beat=int(_BLINK_ON))
+                runtime.mark_published(readiness)
+                frame = candidate_frame
+                if runtime.all_new(readiness):
+                    runtime.persist_complete_async(candidate_model, readiness,
+                                                   _EXPLORER_DETAIL_CONTINUATION)
+            elif _EXPLORER_PUBLISHED_MODEL is not None:
+                from .explorer.live import selected_detail
+                from dataclasses import replace as _replace_model
+                base = _EXPLORER_PUBLISHED_MODEL
+                # Replay lacks exact live bindings; it remains responsive without guessing them.
+                shown = selected_detail(base, _EXPLORER_RESULT, peer_model=candidate_model)
+                _EXPLORER_MODEL = shown
+                live_model = shown if _EXPLORER_REPLAY_ACTIVE else _replace_model(shown, clock=time.time())
+                frame = _explorer_frame_from_model(live_model, state, w, h,
+                                                   beat=1 if _EXPLORER_REPLAY_ACTIVE else int(_BLINK_ON))
+                _EXPLORER_SHOWN = True
             else:
-                candidate_frame = _explorer_compose(current, w, h, state, _EXPLORER_RESULT)
-                candidate_model = _EXPLORER_MODEL
-                readiness = _EXPLORER_READINESS
-                complete = runtime.publication_ready(readiness)
-                # A partial basic/detail generation never replaces the last complete screen.
-                if complete:
-                    _EXPLORER_REPLAY_ACTIVE = False
-                    _EXPLORER_PUBLISHED_MODEL = candidate_model
-                    _EXPLORER_MODEL = candidate_model
-                    _EXPLORER_SHOWN = True
-                    runtime.mark_published(readiness)
-                    frame = candidate_frame
-                    if runtime.all_new(readiness):
-                        runtime.persist_complete_async(candidate_model, readiness,
-                                                       _EXPLORER_DETAIL_CONTINUATION)
-                elif _EXPLORER_PUBLISHED_MODEL is not None:
-                    _EXPLORER_MODEL = _EXPLORER_PUBLISHED_MODEL
-                    if _EXPLORER_REPLAY_ACTIVE:
-                        frame = _explorer_frame_from_model(_EXPLORER_MODEL, state, w, h, beat=1)
-                    else:
-                        from dataclasses import replace as _replace_model
-                        live_model = _replace_model(_EXPLORER_MODEL, clock=time.time())
-                        frame = _explorer_frame_from_model(live_model, state, w, h,
-                                                           beat=int(_BLINK_ON))
-                    _EXPLORER_SHOWN = True
-                else:
-                    frame = runtime.loading_frame(w, h)
+                _EXPLORER_MODEL = None
+                frame = runtime.loading_frame(w, h)
         _draw_explorer(stdscr, current, frame=frame)
         return
     stdscr.erase()
@@ -11974,6 +12019,11 @@ def _explorer_handle(ch, mouse_event=None, size=None, snapshot=None):
             for event in events:
                 state, effects = reduce(
                     state, {**event, "order": order, "ordering": ordering}, _EXPLORER_FRAME)
+                if (event.get("phase") == "press" and not event.get("motion")
+                        and state.drag[:2] == ("tree", "session")):
+                    from dataclasses import replace
+                    state = replace(state, drag=(*state.drag,
+                        _explorer_gesture_binding(_EXPLORER_MODEL, state.drag[2])))
                 _effects.extend(effects)
             _EXPLORER_STATE = state
             _explorer_apply_effects(_effects, _EXPLORER_MODEL)
@@ -12024,11 +12074,11 @@ def _explorer_detail_callback(collector, *, optional=False):
 
 
 def _explorer_optional_detail_key(identity, state):
-    """One optional detail read per base generation, plus each selected PEERS/MEMORY scope."""
+    """One optional pass per base generation, plus selected MEMORY scope."""
     if identity is None:
         return None
     state = _explorer_state_for(state, 0)
-    view = state.view if state.view in ("PEERS", "MEMORY") else None
+    view = state.view if state.view == "MEMORY" else None
     scope = state.scope if view is not None else "-"
     return identity, view, scope
 

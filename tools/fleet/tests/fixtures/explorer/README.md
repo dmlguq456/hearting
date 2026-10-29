@@ -6,6 +6,8 @@ transitions.json is compact unindented JSON: cases store each viewer-main input 
 
 Repository-only test runs compare the committed goldens. Running freeze_explorer.py --check with the external approved reference directory re-verifies provenance using the input hashes in manifest.json. The reference renderer and PNGs are intentionally external; no private absolute path is stored here. default-once.json is captured separately from the archived base CLI.
 
+The approved 2026-10-29 REPO-before-ID change updates the OVERVIEW/ROUTES tables and their repo/session page captures, including the compact route summary. Transition input chunks and navigation states stay unchanged; new table frames and rows are appended to the existing pools. PEERS captures and their transition frame payloads retain their exact prior contents. Cell and ordered-hit comparisons remain exact.
+
 The `attempts` record carries the route it belongs to (`route`: f5). The reference draws one owner's raw output, on that route's page; the live builder names the route of the owner output the selection reader returned, so a route page never shows another route's lines.
 
 A route record may carry `detail_title`, `detail_trailer` and `detail_after`: the words on the top band of an opened route and the note beside its stage band, which the reference words apart from the row's own title and age for some routes. A source without them gets the derived words.

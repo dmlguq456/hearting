@@ -1957,9 +1957,206 @@ def _detail_parts(detail):
     """``(focus result, seats by harness:sid, config, panes)`` of whatever the feed handed over."""
     if detail is None:
         return None, {}, None, {}
-    if hasattr(detail, "seats") and hasattr(detail, "focus"):
-        return detail.focus, dict(detail.seats or {}), detail.config, dict(getattr(detail, "panes", {}) or {})
+    if hasattr(detail, "config"):
+        return (_get(detail, "focus"), dict(_get(detail, "seats", default={}) or {}),
+                detail.config, dict(_get(detail, "panes", default={}) or {}))
     return detail, {}, None, {}
+
+
+def detail_bindings(snapshot):
+    """Live process and route incarnations, never short badges or cwd guesses."""
+    result = {}
+    jobs = _records(_get(snapshot, "jobs", default=()))
+    for session in _records(_get(snapshot, "sessions", default=())):
+        harness = _text(_get(session, "harness"))
+        sid = _text(_get(session, "session_id", "sid"))
+        pid, start = _get(session, "pid"), _get(session, "proc_start")
+        if not _is_main(session) or not harness or not sid or pid is None or start is None:
+            continue
+        routes = tuple(sorted((str(_get(job, "owner_route_id", "route_id") or ""),
+                               str(_get(job, "attempt_id") or ""))
+                              for job in jobs if _get(job, "parent_sid") == sid))
+        result[f"{harness}:{sid}"] = (harness, sid, str(pid), str(start), routes,
+            str(_get(session, "route_id") or ""), str(_get(session, "attempt_id") or ""))
+    return result
+
+
+def detail_for_bindings(detail, bindings, *, strict=False):
+    """Keep accepted reads only for the process incarnation they observed."""
+    from dataclasses import replace
+    from .types import ExplorerDetail
+    focus, seats, config, panes = _detail_parts(detail)
+    results = _get(detail, "results", default={}) or {}
+
+    def matches(result, ref):
+        request = _get(result, "request")
+        if request is None or not request.bindings:
+            return not strict
+        observed = dict(request.bindings)
+        return ref in bindings and observed.get(ref) == bindings[ref]
+
+    key = _get(focus, "key")
+    ref = f"{_get(key, 'harness')}:{_get(key, 'sid')}"
+    if focus is not None and not matches(focus, ref):
+        focus = None
+    seats = {ref: value for ref, value in seats.items() if matches(results.get("seats"), ref)}
+    panes = {sid: pane for sid, pane in panes.items()
+             if any(value[1] == sid and matches(results.get("panes"), ref)
+                    for ref, value in bindings.items())} if strict or results else panes
+    auxiliary = _get(results.get("panes"), "source_records", default={}) or {}
+    aux = auxiliary.get("aux")
+    key = _get(aux, "key")
+    if aux is not None and matches(aux, f"{_get(key, 'harness')}:{_get(key, 'sid')}"):
+        if focus is None:
+            focus = aux
+        elif aux.key == focus.key:
+            records = dict(aux.source_records)
+            records.update({name: value for name, value in focus.source_records.items()
+                            if name in ("seat", "dialogue", "lineage")})
+            focus = replace(focus, source_records=records, obligations=aux.obligations,
+                            events=aux.events, sources=aux.sources)
+    return ExplorerDetail(focus=focus, seats=seats, config=config, panes=panes, results=results)
+
+
+def _peer_snapshot(snapshot, detail, bindings):
+    """Join the list worker's peer-only observation to the exact captured roster."""
+    import copy
+    from ..details import _PEER_FIELDS
+    result = (_get(detail, "results", default={}) or {}).get("seats")
+    observed = (_get(result, "source_records", default={}) or {}).get("peers")
+    request = _get(result, "request")
+    if (observed is None or request is None or not bindings or dict(request.bindings) != bindings
+            or detail_bindings(observed.snapshot) != bindings):
+        return snapshot
+    fresh = (observed.snapshot.observations or {}).get("optional:peers", {})
+    current = (_get(snapshot, "observations", default={}) or {}).get("optional:peers", {})
+    if (fresh.get("observed_at") or 0) < (current.get("observed_at") or 0):
+        return snapshot
+    def process_key(session):
+        return (_get(session, "harness"), _get(session, "session_id", "sid"),
+                str(_get(session, "pid")), str(_get(session, "proc_start")))
+    old = {process_key(s): s for s in observed.snapshot.sessions}
+    value = copy.copy(snapshot)
+    sessions = []
+    for session in _get(snapshot, "sessions", default=()):
+        row = copy.copy(session)
+        prior = old.get(process_key(row))
+        if prior is not None:
+            for field in _PEER_FIELDS:
+                field_value = copy.deepcopy(getattr(prior, field, None))
+                if isinstance(row, dict):
+                    row[field] = field_value
+                else:
+                    setattr(row, field, field_value)
+        sessions.append(row)
+    observations = dict(_get(snapshot, "observations", default={}) or {})
+    observations["optional:peers"] = dict(fresh)
+    if isinstance(value, Mapping):
+        value = dict(value, sessions=sessions, observations=observations)
+    else:
+        value.sessions, value.observations = sessions, observations
+    return value
+
+
+def selected_detail(model, detail, *, peer_model=None):
+    """Apply local selected reads to a complete base, preserving its rows and ordering."""
+    if model is None:
+        return model
+    from dataclasses import replace
+    from .view_model import freeze
+    provenance = model.source_records or {}
+    bindings = dict(provenance.get("_detail_bindings", {}))
+    candidate_sources = _get(peer_model, "source_records", default={}) or {}
+    # Snapshot peers are independent of HISTORY's selected body. Only the observed
+    # graph may advance over a pending base; no rows, targets or readiness travel.
+    if (bindings and bindings == candidate_sources.get("_detail_bindings")
+            and provenance.get("_detail_tags") == candidate_sources.get("_detail_tags")
+            and {row["tag"]: row.get("repo_id", row.get("repo")) for row in model.sessions} ==
+                {row["tag"]: row.get("repo_id", row.get("repo")) for row in peer_model.sessions}
+            and (candidate_sources.get("_peer_observed_at") or 0) >=
+                (provenance.get("_peer_observed_at") or 0)):
+        observation = (_get(peer_model, "system", default={}) or {}).get("peer_observation", {})
+        if candidate_sources.get("_peer_observed_at") is not None:
+            changes = {}
+            if observation.get("state") == "success":
+                changes.update(peer_nodes=peer_model.peer_nodes, peer_edges=peer_model.peer_edges)
+            else:
+                prior = (model.system or {}).get("peer_observation", {})
+                observation = dict(observation, last_good=bool(observation.get("last_good") or
+                    prior.get("state") == "success" or prior.get("last_good")))
+            provenance = {**provenance, "_peer_observed_at": candidate_sources.get("_peer_observed_at")}
+            model = replace(model, **changes, system=freeze({**(model.system or {}),
+                            "peer_observation": observation}), source_records=provenance)
+    if detail is None:
+        return model
+    detail = detail_for_bindings(detail, bindings, strict=True)
+    focus, seats, config, panes = _detail_parts(detail)
+    sources = _get(focus, "source_records", default={}) or {}
+    tag_of = provenance.get("_detail_tags", {})
+    rows = [dict(row) for row in model.sessions]
+    index = {row["tag"]: {"sid": ref.partition(":")[2]}
+             for ref, tag in tag_of.items() for row in rows if row["tag"] == tag}
+    bound_rows = [row for row in rows if row["tag"] in index]
+    seat_rows, generations, cards, dialogue, pane_read, raw = _detail_sections(
+        bound_rows, index, detail, time.time())
+    touched = {tag_of[ref] for ref in seats if ref in tag_of}
+    key = _get(focus, "key")
+    ref = f"{_get(key, 'harness')}:{_get(key, 'sid')}"
+    tag = tag_of.get(ref)
+    if tag and "seat" in sources:
+        touched.add(tag)
+    old_seats = [seat for seat in model.seats if seat[0] not in touched]
+    new_generations = {key: value for key, value in (model.generations or {}).items() if key not in touched}
+    new_cards = {key: value for key, value in (model.cards or {}).items() if key not in touched}
+    new_generations.update(generations)
+    new_cards.update(cards)
+    old_dialogue = dict(model.dialogue or {})
+    logs = dict(old_dialogue.get("logs", {}))
+    if tag and "seat" in sources and not sources["seat"]:
+        logs = {key: value for key, value in logs.items() if not key.startswith(tag + ":")}
+    logs.update((dialogue or {}).get("logs", {}))
+    old_dialogue["logs"] = logs
+    by_tag = {row["tag"]: row for row in rows}
+    for current_tag in touched:
+        by_tag[current_tag]["generation"] = by_tag[current_tag]["last_clear"] = None
+    for ref, current_tag in tag_of.items():
+        if current_tag in by_tag and ref.partition(":")[2] in panes:
+            by_tag[current_tag]["pane"] = panes[ref.partition(":")[2]]
+    for seat in seat_rows:
+        by_tag[seat[0]]["generation"] = seat[2]
+        by_tag[seat[0]]["last_clear"] = None if seat[3] == "·" else seat[3].split(" · ")[0]
+    if pane_read:
+        current_tag, read = pane_read
+        by_tag[current_tag]["pane_lines"] = [[str(line), "soft"] for line in read.get("lines") or ()]
+        by_tag[current_tag]["pane_meta"] = "visible screen"
+    return replace(model, sessions=tuple(freeze(row) for row in rows),
+                   seats=tuple(freeze(row) for row in old_seats + seat_rows),
+                   generations=freeze(new_generations), cards=freeze(new_cards),
+                   dialogue=freeze(old_dialogue), attempts=freeze(raw) if raw is not None else model.attempts,
+                   models=freeze(config) if config is not None else model.models,
+                   source_records={**provenance, "_detail_health": {
+                       kind: {"state": result.health.state, "error": result.health.error}
+                       for kind, result in detail.results.items() if result is not None}})
+
+
+def reorder_view_model(model, effects):
+    """Reorder the displayed identities after their ordering effect succeeded."""
+    if model is None or not isinstance(model.ordering, Mapping):
+        return model
+    from dataclasses import replace
+    from . import order
+    ordering = dict(model.ordering)
+    saved = {"repos": list(ordering.get("repo_keys", ())),
+             "sessions": {repo: list(keys) for repo, keys in ordering.get("session_keys", {}).items()}}
+    for _name, kind, repo, source, target in effects:
+        saved = (order.move_repo(saved, source, target) if kind == "repo" else
+                 order.move_session(saved, repo, source, target))
+    rows = [dict(row, order_key=ordering.get("tag_keys", {}).get(row["tag"], ""))
+            for row in model.sessions]
+    ordered = order.reconcile_order(saved, model.repos, rows)
+    ordering.update(saved=saved, repo_keys=ordered["repo_order"], session_keys=ordered["session_order"],
+                    tag_cycle=["session:" + row["tag"] for row in ordered["sessions"]])
+    return replace(model, repos=tuple(ordered["repos"]), sessions=tuple(ordered["sessions"]), ordering=ordering)
 
 
 def _stamp(epoch, now):
@@ -2044,6 +2241,9 @@ def _detail_sections(rows, session_index, accepted_detail, now):
         ref = f"{row['harness']}:{session_index[row['tag']]['sid']}"
         entries = merged.get(ref)
         if entries is None:
+            continue
+        if not entries:
+            generations[row["tag"]] = []
             continue
         seat, gens, card_block = _seat_view(row["tag"], row["repo"], row["harness"],
                                             session_index[row["tag"]]["sid"], entries, now, row.get("now"))
@@ -2135,6 +2335,9 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     if isinstance(snapshot, Mapping) and "schema" in snapshot and "sessions" in snapshot:
         return ExplorerViewModel.from_mapping(snapshot)
     clock = time.time() if now is None else now
+    bindings = detail_bindings(snapshot)
+    accepted_detail = detail_for_bindings(accepted_detail, bindings)
+    snapshot = _peer_snapshot(snapshot, accepted_detail, bindings)
     resolver = _resolver(snapshot)
     session_rows, session_index = _session_records(snapshot, clock, resolver)
     order = _get(snapshot, "session_order")
@@ -2244,7 +2447,12 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         "config": cached_config,
         "system": system,
         "pane_graph": _records(_get(snapshot, "pane_graph", "pane_edges", default=())),
-        "source_records": explicit if isinstance(explicit, Mapping) else None,
+        "source_records": {**(explicit if isinstance(explicit, Mapping) else {}),
+                           "_detail_bindings": bindings,
+                           "_peer_observed_at": _get(peer_observation, "observed_at"),
+                           "_detail_tags": {f"{row['harness']}:{session_index[row['tag']]['sid']}": row["tag"]
+                                            for row in session_rows
+                                            if f"{row['harness']}:{session_index[row['tag']]['sid']}" in bindings}},
     }
     return ExplorerViewModel.from_mapping(data)
 

@@ -317,7 +317,7 @@ def _card_title(module, card):
     return _first_body_line(body)
 
 
-def read_lineage(session, harness, sid):
+def read_lineage(session, harness, sid, *, read_context=None):
     """``(entries, Health)``: the earlier generations of a main session's seat (read only).
 
     The seat is made the way ``session_tidy`` makes it (harness, sid, cwd and, when the session
@@ -334,7 +334,7 @@ def read_lineage(session, harness, sid):
     except Exception as exc:
         return None, Health("failed", None, f"seat 없음 · {type(exc).__name__}")
     try:
-        rows = module.seat_lineage(seat, sid=sid)
+        rows = module.seat_lineage(seat, sid=sid, read_context=read_context)
     except Exception as exc:
         return None, Health("failed", None, type(exc).__name__)
     entries = []
@@ -390,7 +390,7 @@ def _read_card(module, card, *, full):
     return entry
 
 
-def read_seat_history(session, harness, sid, *, cards=False, pane=None):
+def read_seat_history(session, harness, sid, *, cards=False, pane=None, read_context=None):
     """``(entries, pane, Health)``: every session of the seat, oldest first and the current one last.
 
     Each entry carries its start source, its handover relation, where its transcript is and its
@@ -413,7 +413,7 @@ def read_seat_history(session, harness, sid, *, cards=False, pane=None):
     except Exception as exc:
         return None, "", Health("failed", None, f"seat 없음 · {type(exc).__name__}")
     try:
-        rows = module.seat_lineage(seat, sid=sid)
+        rows = module.seat_lineage(seat, sid=sid, read_context=read_context)
     except Exception as exc:
         return None, "", Health("failed", None, type(exc).__name__)
     rows = [row for row in rows[:SEAT_SESSION_LIMIT + 1]]
@@ -603,27 +603,31 @@ def _as_mapping(value):
 
 def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=None, now=None,
                   live_jobs=None, snapshot=None, state_roots=None, cache=None, output_reader=None,
-                  earlier=False):
+                  earlier=False, pane_map=None):
     """Read only the focused session's bounded source facts and optional earlier transcript."""
     from .. import route as route_module
     route_loader = route_loader or route_module.load
     cache = cache or SourceCache()
     wall = time.time() if now is None else float(now)
-    if state_roots is None:
+    wants = tuple(getattr(request, "wants", ()) or ())
+    history_only = bool(wants) and all(w in ("seat", "cards") or w.startswith("dialogue:")
+                                       for w in wants)
+    read_context = utility("peer_read_context").PeerReadContext()
+    if state_roots is None and not history_only:
         try:
             state_roots = list(route_module._dispatch_state_roots())
         except Exception:
             state_roots = []
     live = _as_mapping(live_jobs)
     key = request.key
-    entries = session_entries(jobs_path, key.sid)
-    rows = read_attempts(jobs_path, key.sid, live, entries=entries)
+    entries = [] if history_only else session_entries(jobs_path, key.sid)
+    rows = [] if history_only else read_attempts(jobs_path, key.sid, live, entries=entries)
     if not artifact_root:
         artifact_root = derive_artifact_root(rows)
     errors = []
 
-    owner_routes = _load_routes(rows, artifact_root, route_loader)
-    cycles = _load_cycles(rows, owner_routes, artifact_root, cache)
+    owner_routes = {} if history_only else _load_routes(rows, artifact_root, route_loader)
+    cycles = {} if history_only else _load_cycles(rows, owner_routes, artifact_root, cache)
     records = dict(owner_routes)
     gates = {}
 
@@ -635,14 +639,15 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
         session = nav.find_session(snapshot, key.sid)
     focus_ref = f"{key.harness}:{key.sid}"
     from . import nav
-    wants = tuple(getattr(request, "wants", ()) or ())
     seat_entries, pane_id, extra = None, "", {}
-    panes = read_pane_map() if (session is not None and wants) else {}
+    panes = (pane_map if pane_map is not None else
+             read_pane_map() if (session is not None and "pane" in wants) else {})
     session_ids = (key.sid, *(_get(session, "session_aliases") or ())) if session is not None else ()
     pane_id = next((panes[i] for i in session_ids if i in panes), "")
     if session is not None and any(w in ("seat", "cards") or w.startswith("dialogue:") for w in wants):
         seat_entries, seat_pane, seat_health = read_seat_history(
-            session, key.harness, key.sid, cards="cards" in wants, pane=pane_id or None)
+            session, key.harness, key.sid, cards="cards" in wants, pane=pane_id or None,
+            read_context=read_context)
         pane_id = pane_id or seat_pane
         if seat_entries is None:
             errors.append("seat: " + str(seat_health.error))
@@ -659,9 +664,9 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
                     if lines is not None:
                         extra["dialogue"] = {"index": index, "harness": chain[index]["harness"],
                                              "sid": chain[index]["sid"], "lines": lines}
-    elif focus_ref in tuple(getattr(request, "expanded_sessions", ()) or ()) and session is not None:
+    elif not history_only and focus_ref in tuple(getattr(request, "expanded_sessions", ()) or ()) and session is not None:
         try:
-            earlier_sessions, health = read_lineage(session, key.harness, key.sid)
+            earlier_sessions, health = read_lineage(session, key.harness, key.sid, read_context=read_context)
         except Exception as exc:                 # a lineage fault is the entry row's ``?``, nothing else
             earlier_sessions, health = None, Health("failed", None, type(exc).__name__)
         lineage = {"lineage": earlier_sessions, "lineage_health": health}
@@ -682,8 +687,9 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
             sources.append(("output", Health("failed", None, type(exc).__name__)))
             output = {"output_title": title, "output_health": Health("failed", None, type(exc).__name__)}
     try:
-        obligations = read_obligations(state_roots, key.sid, wall, cache)
-        sources.append(("obligations", Health("success", wall)))
+        obligations = None if history_only else read_obligations(state_roots, key.sid, wall, cache)
+        if not history_only:
+            sources.append(("obligations", Health("success", wall)))
     except Exception as exc:
         obligations = None
         errors.append(f"obligations: {type(exc).__name__}")
@@ -728,7 +734,7 @@ def collect_focus(request, *, jobs_path=None, artifact_root=None, route_loader=N
         key=key, epoch=request.epoch, snapshot_generation=request.snapshot_generation,
         obligations=obligations, events=events, sources=tuple(sources),
         health=Health("partial" if errors else "success", wall, "; ".join(errors) or None),
-        **output, **lineage, source_records=source_records)
+        **output, **lineage, source_records=source_records, request=request)
     return result
 
 
@@ -958,7 +964,7 @@ def read_model_config():
             "token_units": dict(_TOKEN_UNITS), "allocation": allocation, "steward": steward}
 
 
-def collect_aux(request, *, snapshot=None, now=None):
+def collect_aux(request, *, snapshot=None, now=None, aux_reader=None):
     """The reads that belong to no single session: panes of every session, the seats of the list
     views, the model configuration. The request's key is ``FocusKey("*", <kind>)``."""
     from . import nav
@@ -967,15 +973,35 @@ def collect_aux(request, *, snapshot=None, now=None):
     records, errors = {}, []
     if kind == "panes":
         records["panes"] = read_pane_map()
+        selected = next((w[4:] for w in request.wants if w.startswith("aux:")), "")
+        if selected:
+            from dataclasses import replace
+            from .types import FocusKey
+            harness, _, sid = selected.partition(":")
+            aux_request = replace(request, key=FocusKey(harness, sid), expanded_sessions=(),
+                                  wants=tuple(w for w in request.wants if not w.startswith("aux:")))
+            records["aux"] = (aux_reader(aux_request) if aux_reader is not None else
+                              collect_focus(aux_request, snapshot=snapshot, now=now))
+    elif kind == "peers":
+        from .. import details
+        if snapshot is not None:
+            records["peers"] = details.observe_peers(snapshot)
+            state = records["peers"].snapshot.observations["optional:peers"]["state"]
+            if state != "success":
+                errors.append("peers: " + state)
+        else:
+            errors.append("peers: no snapshot")
     elif kind == "seats":
         seats, panes = {}, read_pane_map()
+        read_context = utility("peer_read_context").PeerReadContext()
         for ref in request.expanded_sessions:
             harness, _, sid = ref.partition(":")
             session = nav.find_session(snapshot, sid)
             if session is None:
                 continue
             pane = next((panes[i] for i in (sid, *(nav._get(session, "session_aliases") or ())) if i in panes), None)
-            entries, _pane, health = read_seat_history(session, harness, sid, cards=False, pane=pane)
+            entries, _pane, health = read_seat_history(session, harness, sid, cards=False, pane=pane,
+                                                      read_context=read_context)
             if entries is None:
                 errors.append(f"{ref}: {health.error}")
             else:
@@ -988,7 +1014,7 @@ def collect_aux(request, *, snapshot=None, now=None):
         records["models"] = config
     return FocusResult(request.key, request.epoch, request.snapshot_generation,
                        health=Health("partial" if errors else "success", wall, "; ".join(errors) or None),
-                       source_records=records)
+                       source_records=records, request=request)
 
 
 class FocusReader:
@@ -1007,6 +1033,7 @@ class FocusReader:
         self.output_reader = OutputReader() if output_reader is None else (output_reader or None)
         self._lock = threading.Lock()
         self._earlier = set()
+        self._panes, self._pane_bindings = {}, {}
 
     def load_earlier(self, key):
         """Ask for the records before the oldest one shown for ``key`` (read on the next pass)."""
@@ -1015,18 +1042,27 @@ class FocusReader:
 
     def __call__(self, request):
         if request.key.harness == "*":
-            return collect_aux(request, snapshot=self.snapshot() if callable(self.snapshot) else self.snapshot,
-                               now=self.now() if callable(self.now) else self.now)
+            result = collect_aux(request, snapshot=self.snapshot() if callable(self.snapshot) else self.snapshot,
+                                 now=self.now() if callable(self.now) else self.now, aux_reader=self)
+            if request.key.sid == "panes":
+                with self._lock:
+                    self._panes = dict(result.source_records.get("panes") or {})
+                    self._pane_bindings = dict(request.bindings)
+            return result
         with self._lock:
             earlier = request.key in self._earlier
             self._earlier.discard(request.key)
+            ref = f"{request.key.harness}:{request.key.sid}"
+            binding = dict(request.bindings).get(ref)
+            panes = (dict(self._panes) if binding is not None and
+                     self._pane_bindings.get(ref) == binding else None)
         return collect_focus(
             request, jobs_path=self.jobs_path, artifact_root=self.artifact_root,
             route_loader=self.route_loader, now=self.now() if callable(self.now) else self.now,
             live_jobs=self.live_jobs,
             snapshot=self.snapshot() if callable(self.snapshot) else self.snapshot,
             state_roots=self.state_roots, cache=self.cache, output_reader=self.output_reader,
-            earlier=earlier)
+            earlier=earlier, pane_map=panes)
 
 
 class SelectionReader:
@@ -1034,14 +1070,15 @@ class SelectionReader:
         self.providers = providers
 
     def read(self, request):
+        from dataclasses import replace
         result = self.providers(request)
         if isinstance(result, FocusResult):
-            return result
+            return replace(result, request=request)
         return FocusResult(request.key, request.epoch, request.snapshot_generation,
                            output=tuple(result.get("output", ())),
                            events=tuple(result.get("events", ())),
                            source_records=result.get("source_records", {}),
-                           health=Health("success", time.time()))
+                           health=Health("success", time.time()), request=request)
 
 
 def status_text(health, now=None):
@@ -1071,11 +1108,11 @@ class SelectionPump:
         self._good = OrderedDict()                 # key -> last result published for it
         self._pump = RefreshPump(self._produce, interval, clock=clock, name="fleet-selection")
 
-    def select(self, key, snapshot_generation=0, expanded_sessions=(), wants=()):
+    def select(self, key, snapshot_generation=0, expanded_sessions=(), wants=(), bindings=()):
         with self._lock:
             self._epoch += 1
             self._request = FocusRequest(key, self._epoch, snapshot_generation, tuple(expanded_sessions),
-                                         tuple(wants))
+                                         tuple(wants), tuple(bindings))
             return self._request
 
     def _produce(self):
@@ -1117,7 +1154,8 @@ class SelectionPump:
                     self._good.move_to_end(current.key)
                     while len(self._good) > self._GOOD_LIMIT:
                         self._good.popitem(last=False)
-            return self._good.get(current.key) if current is not None else None
+            good = self._good.get(current.key) if current is not None else None
+            return good if good is not None and good.request == current else None
 
     def health(self, now=None):
         status = self._pump.health(now)

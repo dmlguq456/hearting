@@ -40,6 +40,75 @@ def _envelope(event_type, part):
             "sessionID": "ses_test", "part": part}
 
 
+def assert_primary_context_pipeline(case, env, records):
+    """Consume the plugin fixture's files with live PID/start selection reads.
+
+    Only native DB observations are controlled; identity and policy use the
+    actual files written by the JS producer, then the normal cache/frame path.
+    """
+    from tools.fleet.tests.test_fleet_user_task_surface import assert_opencode_context_surface
+
+    db = Path(env["HOME"]) / "fixture.db"
+    with sqlite3.connect(db):
+        pass
+    runtime = mock.Mock()
+    runtime.credential_store_present.return_value = True
+    by_sid = {row["session_id"]: row for row in records}
+
+    def observation(sid, **_kwargs):
+        row = by_sid[sid]
+        provider, model = row["model"].split("/", 1)
+        updated = int((row["observed_at"] + 2) * 1000)
+        return {"state": "observed", "generation": "v2", "cursor": 1,
+                "session": {"directory": env["HOME"],
+                            "model": {"providerID": provider, "id": model},
+                            "time_updated": updated + 10000, "tokens_input": 9999999},
+                "messages": [{"type": "assistant", "model": {"providerID": provider, "id": model},
+                              "tokens": {"total": 450000 if sid == "ses_a" else 200000},
+                              "updated": updated, "completed": updated}]}
+
+    runtime.read_session_observation.side_effect = observation
+    with mock.patch.dict(os.environ, env), \
+            mock.patch.object(opencode, "_db", return_value=str(db)), \
+            mock.patch.object(opencode.session_registry, "read", return_value=None), \
+            mock.patch.object(opencode, "_opencode_v2_runtime", return_value=runtime), \
+            mock.patch.object(opencode, "_attach_v2_shell_tasks"), \
+            mock.patch.object(opencode.titles, "last_title", return_value=None), \
+            mock.patch.object(opencode.titles, "fresh_summary_with_ts", return_value=(None, None)):
+        sessions = []
+        for i, row in enumerate(records):
+            sess = Session(harness="opencode", pid=row["pid"], proc_start=row["proc_start"],
+                           cwd=env["HOME"], session_tag=f"o{i}", liveness="idle")
+            opencode.enrich(sess)
+            case.assertEqual(sess.session_id, row["session_id"])
+            case.assertEqual(sess.context_window_tokens, row["policy"]["effective_window_tokens"])
+            case.assertIsNone(sess.context_display_window_tokens)
+            case.assertIsNone(sess.ctx_pct, "an unknown v2 trigger must stay unknown")
+            case.assertEqual(sess.session_input_tokens, 9999999)
+            sessions.append(sess)
+        assert_opencode_context_surface(case, sessions, [(50, .9), (50, .9), (20, 1.0)])
+        # A completed zero is data. A pending zero retains the last completed
+        # request, whose own updated time still controls policy acceptance.
+        first = records[0]
+        for active, completed, late, expected in (
+                (0, True, False, (0, .9)), (None, True, False, (None, .9)),
+                (0, False, True, (None, None))):
+            observed = observation(first["session_id"])
+            if late:
+                observed["messages"][0]["updated"] = int((first["observed_at"] - 3) * 1000)
+            observed["messages"].append({"type": "assistant",
+                "tokens": {"total": active}, "updated": int((first["observed_at"] + 2) * 1000),
+                "completed": True if completed else None})
+            runtime.read_session_observation.side_effect = None
+            runtime.read_session_observation.return_value = observed
+            sess = sessions[0]
+            opencode.enrich(sess)
+            if late:
+                case.assertIsNone(sess.context_window_tokens,
+                                  "new session metadata cannot freshen an older assistant's policy")
+            assert_opencode_context_surface(case, [sess], [expected])
+
+
 _TEXT_LINE = _envelope("text", {
     "id": "prt_1", "messageID": "msg_1", "sessionID": "ses_test", "type": "text",
     "text": "Reading the precedent files before writing the parser."})

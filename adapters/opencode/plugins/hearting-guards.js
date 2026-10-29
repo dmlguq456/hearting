@@ -2,7 +2,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { AsyncLocalStorage } from "node:async_hooks"
 import { spawnSync, spawn } from "node:child_process"
-import { existsSync, mkdirSync, writeFileSync, renameSync, utimesSync, openSync, readSync, closeSync, realpathSync, readFileSync, readdirSync } from "node:fs"
+import { existsSync, mkdirSync, writeFileSync, renameSync, utimesSync, openSync, readSync, closeSync, realpathSync, readFileSync, readdirSync, constants, fstatSync, lstatSync } from "node:fs"
 import { createHash } from "node:crypto"
 
 if (!process.env.PYTHONPYCACHEPREFIX && !process.env.PYTHONDONTWRITEBYTECODE) {
@@ -938,8 +938,76 @@ async function responsePrefix(response, cap = 64 * 1024) {
   }
 }
 
+function v2ContextSelection(file, sid) {
+  let fd
+  try {
+    const match = path.basename(file).match(/^([1-9]\d*)-([1-9]\d*)\.json$/)
+    if (!match || typeof sid !== "string" || !sid || sid.length > 256
+        || /[\x00-\x1f\x7f]/.test(sid)) return null
+    const pid = Number(match[1]), start = match[2]
+    if (!Number.isSafeInteger(pid) || pid <= 1) return null
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const before = fstatSync(fd, { bigint: true })
+    if (!before.isFile() || before.uid !== BigInt(process.getuid()) || before.size > 1024n) return null
+    const bytes = Buffer.alloc(1025)
+    const length = readSync(fd, bytes, 0, bytes.length, 0)
+    const generation = info => [info.dev, info.ino, info.mode, info.uid, info.size,
+      info.mtimeNs, info.ctimeNs].join(":")
+    const stamp = generation(before)
+    if (BigInt(length) !== before.size || stamp !== generation(fstatSync(fd, { bigint: true }))
+        || stamp !== generation(lstatSync(file, { bigint: true }))) return null
+    const row = JSON.parse(bytes.subarray(0, length).toString("utf8"))
+    if (row?.schema !== "hearting-tui-selection-v1" || row.pid !== pid
+        || !(typeof row.start === "string" || Number.isSafeInteger(row.start))
+        || String(row.start) !== start || row.sessionID !== sid) return null
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8")
+    const close = stat.lastIndexOf(") ")
+    if (close < 0) return null
+    const fields = stat.slice(close + 2).trim().split(/\s+/)
+    if (["Z", "X", "x"].includes(fields[0]) || fields[19] !== start) return null
+    return { file, pid, start, generation: stamp }
+  } catch { return null }
+  finally { if (fd !== undefined) closeSync(fd) }
+}
+
+function v2ContextSelections(sid) {
+  try {
+    const env = process.env || {}
+    const base = env.XDG_STATE_HOME || (env.HOME ? path.join(env.HOME, ".local", "state") : "")
+    if (!base || !path.isAbsolute(base)) return []
+    const directory = path.join(base, "hearting", "tui-identity")
+    return readdirSync(directory).flatMap(name => {
+      const selected = v2ContextSelection(path.join(directory, name), sid)
+      return selected ? [selected] : []
+    })
+  } catch { return [] }
+}
+
+async function v2ContextModel(ctx, ref) {
+  let timer
+  try {
+    if (typeof ref.providerID !== "string" || !ref.providerID
+        || typeof ref.id !== "string" || !ref.id || typeof ctx.model?.list !== "function") return ref
+    const directory = realpathSync(ctx.location.directory)
+    const result = await Promise.race([ctx.model.list({ location: ctx.location }),
+      new Promise(resolve => { timer = setTimeout(() => resolve(null), 1000) })])
+    if (result?.error || realpathSync(result?.location?.directory) !== directory
+        || !Array.isArray(result?.data)) return ref
+    const matches = result.data.filter(row => row?.providerID === ref.providerID && row?.id === ref.id)
+    if (matches.length !== 1) return ref
+    const selected = matches[0], limit = selected.limit
+    if (typeof selected.modelID !== "string" || selected.enabled !== true
+        || !["active", "alpha", "beta", "deprecated"].includes(selected.status)
+        || !limit || ![limit.context, limit.output].every(value => Number.isSafeInteger(value) && value >= 0)
+        || limit.input != null && !(Number.isSafeInteger(limit.input) && limit.input >= 0)) return ref
+    return { ...ref, limit: { context: limit.context, input: limit.input, output: limit.output } }
+  } catch { return ref }
+  finally { clearTimeout(timer) }
+}
+
 async function setupOpenCodeV2(ctx) {
   const controller = new AbortController()
+  const contextObservations = new Map()
   const sessionInfo = async (sessionID) => {
     if (!sessionID || typeof ctx.session?.get !== "function") return null
     try {
@@ -1119,24 +1187,51 @@ async function setupOpenCodeV2(ctx) {
       { message: { id: event.messageID, sessionID: event.sessionID, agent: event.agent },
         parts: text ? [{ type: "text", text }] : [] })
   }))
-  await ctx.session.hook("context", async (event) => withSession(event.sessionID, async () => {
-    if (v2WorkerSessions.has(event.sessionID)) {
-      const contract = await sessionWorkerContract(ctx, event.sessionID)
-      if (contract && Array.isArray(event.system)
-          && !event.system.some((part) => part.type === "text" && part.text === contract)) {
-        event.system.push({ type: "text", text: contract })
+  await ctx.session.hook("context", async (event) => {
+    // Snapshot selection before any SDK await. A late lookup must not attach
+    // this request to a TUI that selected it only after the request began.
+    const sid = event.sessionID
+    const selections = v2ContextSelections(sid)
+    const observation = { sessionID: sid,
+      model: { providerID: event.model?.providerID, id: event.model?.id },
+      contextObservation: "v2-context" }
+    contextObservations.set(sid, observation)
+    return withSession(sid, async () => {
+      const worker = v2WorkerSessions.has(sid)
+      void (async () => {
+        if (!worker && !selections.length) return
+        if (typeof observation.model.providerID !== "string" || !observation.model.providerID
+            || typeof observation.model.id !== "string" || !observation.model.id) return
+        observation.model = await v2ContextModel(ctx, observation.model)
+        if (controller.signal.aborted || contextObservations.get(sid) !== observation) return
+        if (worker) {
+          writeContextPolicy(observation, {})
+          return
+        }
+        for (const selected of selections) {
+          const current = v2ContextSelection(selected.file, sid)
+          if (current?.generation !== selected.generation) continue
+          writeContextPolicy(observation, {}, { pid: selected.pid, start: selected.start })
+        }
+      })().catch(() => {})
+      if (v2WorkerSessions.has(event.sessionID)) {
+        const contract = await sessionWorkerContract(ctx, event.sessionID)
+        if (contract && Array.isArray(event.system)
+            && !event.system.some((part) => part.type === "text" && part.text === contract)) {
+          event.system.push({ type: "text", text: contract })
+        }
+        return
       }
-      return
-    }
-    const output = { system: [] }
-    await hooks["experimental.chat.system.transform"]?.(
-      { sessionID: event.sessionID }, output)
-    if (Array.isArray(event.system)) {
-      for (const text of output.system) {
-        if (typeof text === "string" && text) event.system.push({ type: "text", text })
+      const output = { system: [] }
+      await hooks["experimental.chat.system.transform"]?.(
+        { sessionID: event.sessionID }, output)
+      if (Array.isArray(event.system)) {
+        for (const text of output.system) {
+          if (typeof text === "string" && text) event.system.push({ type: "text", text })
+        }
       }
-    }
-  }))
+    })
+  })
   await ctx.session.hook("compaction", async (event) => withSession(event.sessionID, async () => {
     if (v2WorkerSessions.has(event.sessionID)) {
       const contract = await sessionWorkerContract(ctx, event.sessionID)
@@ -1155,9 +1250,8 @@ async function setupOpenCodeV2(ctx) {
     const model = event.model
     const status = event.response?.status
     if (!model?.providerID || !model?.id || !Number.isInteger(status)) return
-    // The V2 request's model is exact to this session. Retain only limits the
-    // callback actually supplies; V1's compaction formula is not a V2 policy.
-    writeContextPolicy({ sessionID: event.sessionID, model, contextObservation: "v2-http-response" }, {})
+    // Policy belongs to primary context observation. HTTP model refs have no
+    // limits and must not overwrite that observation (including title calls).
     // The runtime consumes the original body after this callback returns.
     // Reading/cancelling its clone must not hold that consumer behind telemetry.
     void (async () => {
@@ -1184,6 +1278,7 @@ async function setupOpenCodeV2(ctx) {
         const info = data.info || data.session || null
         const sessionID = data.sessionID || data.form?.sessionID || info?.id || native?.sessionID || ""
         if (!sessionID) continue
+        if (native.type === "session.deleted") contextObservations.delete(sessionID)
         if (native.type === "session.deleted" && v2WorkerSessions.has(sessionID)) {
           v2WorkerSessions.delete(sessionID)
           v2ContractSessions.delete(sessionID)
@@ -1216,6 +1311,7 @@ async function setupOpenCodeV2(ctx) {
 
   return () => {
     controller.abort()
+    contextObservations.clear()
     hooks.dispose?.({ silent: true })
     retirePaneContext(legacyContext)
     v2WorkerSessions.clear()
@@ -2471,9 +2567,9 @@ function contextPolicyFromChat(input, output) {
     attempt_id: process.env.AGENT_DISPATCH_ATTEMPT_ID || null,
     reason: "native-policy-input-unavailable",
   }
-  if (input?.contextObservation === "v2-http-response") {
-    policy.source = "opencode-native-v2-http-response"
-    policy.reason = context === null ? "native-model-window-not-observed" : "native-consumer-version-unverified"
+  if (input?.contextObservation === "v2-context") {
+    policy.source = "opencode-native-v2-context"
+    policy.reason = context === null ? "native-model-window-not-observed" : "native-v2-compaction-behavior-unverified"
     return policy
   }
   if (contextPolicyRuntimeVersion !== nativeContextPolicyVersion) {
@@ -2509,10 +2605,10 @@ function contextPolicyFromChat(input, output) {
     applied_trigger_tokens: trigger, compaction_reserve_tokens: effectiveReserve, reason: null }
 }
 
-function writeContextPolicy(input, output) {
+function writeContextPolicy(input, output, observationIdentity = null) {
   try {
     const sid = input?.sessionID
-    const own = contextPolicyProcess()
+    const own = observationIdentity || contextPolicyProcess()
     if (typeof sid !== "string" || !sid || !own) return
     const env = process.env || {}
     const stateRoot = env.FLEET_SESSION_REGISTRY_DIR
@@ -2521,12 +2617,12 @@ function writeContextPolicy(input, output) {
     if (!stateRoot || stateRoot === "." || !path.isAbsolute(stateRoot)) return
     const directory = path.join(stateRoot, "context-policy", "opencode")
     mkdirSync(directory, { recursive: true, mode: 0o700 })
-    const attemptID = env.AGENT_DISPATCH_ATTEMPT_ID || null
+    const attemptID = observationIdentity ? null : env.AGENT_DISPATCH_ATTEMPT_ID || null
     const name = attemptID ? `attempt-${attemptID}.json` : `${own.pid}-${own.start}.json`
     if (!/^[A-Za-z0-9._-]{1,180}\.json$/.test(name)) return
     const target = path.join(directory, name)
     const temporary = `${target}.tmp-${own.pid}`
-    const policy = contextPolicyFromChat(input, output)
+    const policy = { ...contextPolicyFromChat(input, output), attempt_id: attemptID }
     const payload = { schema: "hearting-context-policy-v1", harness: "opencode",
       session_id: sid, pid: own.pid, proc_start: own.start, attempt_id: attemptID,
       model: `${input?.model?.providerID || input?.provider?.info?.id || ""}/${input?.model?.id || ""}`,

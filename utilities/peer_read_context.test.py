@@ -132,6 +132,23 @@ class PeerReadContextTest(unittest.TestCase):
         self.assertEqual(PeerReadContext().lineage_graph(("b",), fresh), "next-pass")
         fresh.assert_called_once_with()
 
+    def test_history_summary_is_graph_bound_and_cleared_by_replacement_or_failure(self):
+        context = PeerReadContext()
+        graph_a, graph_b = object(), object()
+        first = mock.Mock(return_value={"ledger-a": "summary-a"})
+        context.lineage_graph(("generation-a",), lambda: graph_a)
+        self.assertIs(context.lineage_summary(graph_a, first), context.lineage_summary(graph_a, first))
+        first.assert_called_once_with()
+        context.lineage_graph(("generation-b",), lambda: graph_b)
+        second = mock.Mock(return_value={"ledger-b": "summary-b"})
+        self.assertEqual(context.lineage_summary(graph_b, second), {"ledger-b": "summary-b"})
+        context.invalidate_lineage_graph()
+        context.lineage_summary(graph_b, second)
+        self.assertEqual(second.call_count, 2)
+        context.lineage_graph(("generation-b",), lambda: graph_b)
+        context.lineage_summary(graph_b, second)
+        self.assertEqual(second.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()

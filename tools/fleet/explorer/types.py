@@ -67,6 +67,7 @@ class FocusRequest:
     snapshot_generation: int
     expanded_sessions: Tuple[str, ...] = ()
     wants: Tuple[str, ...] = ()        # extra bounded reads for what is open: seat, pane, cards, dialogue:<i>, raw:<route>
+    bindings: Tuple[Tuple[str, Tuple[Any, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class FocusResult:
     lineage: Optional[Tuple[Mapping[str, Any], ...]] = None
     lineage_health: Optional[Health] = None
     source_records: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    request: Optional[FocusRequest] = None
 
 
 class SelectionReader:
@@ -121,3 +123,4 @@ class ExplorerDetail:
     panes: Mapping[str, str] = field(default_factory=dict, compare=False)
     catalogs: Mapping[str, ModelCatalog] = field(default_factory=dict, compare=False)
     source_records: Mapping[str, Any] = field(default_factory=dict, compare=False)
+    results: Mapping[str, FocusResult] = field(default_factory=dict, compare=False)
