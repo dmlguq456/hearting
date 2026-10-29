@@ -628,7 +628,7 @@ def pid_is_live(pid: int, pid_start: str | None = None) -> bool:
 def read_proc_start(pid: int) -> str | None:
     """/proc/<pid>/stat field 22 (starttime) as str, else None. comm (field 2) is
     parenthesized and may contain spaces/parens, so split after the last ')';
-    zombies are terminal and count as gone."""
+    A zombie leader is terminal only when no other threads remain."""
     try:
         with open(f"/proc/{pid}/stat") as f:
             data = f.read()
@@ -636,7 +636,7 @@ def read_proc_start(pid: int) -> str | None:
         return None
     try:
         rest = data[data.rindex(")") + 1:].split()
-        if rest[0] == "Z":
+        if rest[0] in {"Z", "X"} and int(rest[17]) <= 1:
             return None
         return rest[19]
     except (ValueError, IndexError):
@@ -647,7 +647,8 @@ def proc_is_gone(entry):
     """Only positive disappearance/zombie evidence clears a raced cwd read."""
     try:
         raw = (entry / "stat").read_text()
-        return raw[raw.rindex(")") + 1:].split()[0] in {"Z", "X"}
+        fields = raw[raw.rindex(")") + 1:].split()
+        return fields[0] in {"Z", "X"} and int(fields[17]) <= 1
     except FileNotFoundError:
         return True
     except (OSError, ValueError, IndexError):
@@ -670,22 +671,16 @@ def process_snapshot():
                     continue
                 before = read_proc_start(pid)
                 if before is None:
-                    # A readable zombie has no cwd and is not live. An
-                    # unreadable live same-UID identity remains unknown.
-                    raw = (entry / "stat").read_text()
-                    if raw[raw.rindex(")") + 1:].split()[0] == "Z":
+                    # A dead leader can still have live threads. Missing cwd
+                    # alone never proves that the thread group has ended.
+                    if proc_is_gone(entry):
                         continue
                     unknown = True
                     continue
                 raw_cwd = os.readlink(entry / "cwd")
                 after = read_proc_start(pid)
-                if after is None:
-                    try:
-                        raw = (entry / "stat").read_text()
-                    except FileNotFoundError:
-                        continue
-                    if raw[raw.rindex(")") + 1:].split()[0] == "Z":
-                        continue
+                if after is None and proc_is_gone(entry):
+                    continue
                 if before != after:
                     unknown = True
                     continue

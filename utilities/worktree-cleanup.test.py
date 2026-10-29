@@ -26,6 +26,45 @@ CLEANUP = importlib.util.module_from_spec(_CLEANUP_SPEC)
 _CLEANUP_SPEC.loader.exec_module(CLEANUP)
 
 
+# Repository fixtures model their own spawned actors, not the host's complete
+# same-UID process namespace. Read real procfs for those actors, including
+# permission errors. RawProcessTests below deliberately bypass this model.
+# Actors are Popen children and Python descendants recorded by the private
+# hook; this is not isolation from external actors or a shell-grandchild census.
+# The private startup hook keeps the actual CLI and all three shell adapters;
+# neither the production observer nor the verification lease has a test flag.
+FIXTURE_PROCESS_VIEW = '''
+import os
+from pathlib import Path
+import subprocess
+
+def fixture_process_view(actors):
+    original_entries = Path.iterdir
+    original_start = subprocess.Popen.__init__
+    def record(pid):
+        fd = os.open(actors, os.O_WRONLY | os.O_APPEND)
+        try:
+            os.write(fd, (str(pid) + '\\n').encode())
+        finally:
+            os.close(fd)
+    def start(process, *args, **kwargs):
+        original_start(process, *args, **kwargs)
+        record(process.pid)
+    def entries(path):
+        if path == Path('/proc'):
+            return iter(Path('/proc') / pid for pid in
+                        sorted(set(Path(actors).read_text().splitlines())))
+        return original_entries(path)
+    record(os.getpid())
+    Path.iterdir = entries
+    subprocess.Popen.__init__ = start
+    def restore():
+        Path.iterdir = original_entries
+        subprocess.Popen.__init__ = original_start
+    return restore
+'''
+
+
 def run(
     argv: list[str],
     cwd: Path | None = None,
@@ -47,7 +86,7 @@ def run(
 
 
 class CleanupFixture:
-    def __init__(self):
+    def __init__(self, *, process_view=True):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.remote = self.root / "remote.git"
@@ -55,6 +94,7 @@ class CleanupFixture:
         self.wt_root = self.root / "project-wt"
         self.jobs = self.root / "jobs.log"
         self.audit = self.root / "cleanup.jsonl"
+        self.closed = False
         run(["git", "init", "--bare", "-q", str(self.remote)])
         run(["git", "clone", "-q", str(self.remote), str(self.repo)])
         run(["git", "-C", str(self.repo), "config", "user.name", "test"])
@@ -66,8 +106,38 @@ class CleanupFixture:
         run(["git", "-C", str(self.repo), "push", "-qu", "origin", "main"])
         run(["git", "--git-dir", str(self.remote), "symbolic-ref", "HEAD", "refs/heads/main"])
         run(["git", "-C", str(self.repo), "remote", "set-head", "origin", "--auto"])
+        self.restore_process_view = None
+        self.process_environment = None
+        if process_view:
+            self.actors = self.root / "process-actors"
+            self.actors.touch()
+            startup = self.root / "python-startup"
+            startup.mkdir()
+            (startup / "sitecustomize.py").write_text(
+                FIXTURE_PROCESS_VIEW + f"\nfixture_process_view({str(self.actors)!r})\n")
+            namespace = {}
+            exec(FIXTURE_PROCESS_VIEW, namespace)
+            self.restore_process_view = namespace["fixture_process_view"](str(self.actors))
+            # Keep the runner's usercustomize stderr hook and all other imports.
+            self.process_environment = mock.patch.dict(os.environ, {
+                "PYTHONPATH": str(startup) + os.pathsep + os.environ.get("PYTHONPATH", "")})
+            self.process_environment.start()
 
     def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        if self.restore_process_view is not None:
+            self.restore_process_view()
+            self.restore_process_view = None
+            self.process_environment.stop()
+            # Only this fixture's observed actors can retain its private files.
+            # The command's lease remains responsible for any live descendants.
+            for pid in set(self.actors.read_text().splitlines()) - {str(os.getpid())}:
+                if not CLEANUP.proc_is_gone(Path('/proc') / pid):
+                    self.temp._finalizer.detach()
+                    print(f"cleanup fixture retained: live/unknown actor={pid} root={self.root}", file=sys.stderr)
+                    return
         self.temp.cleanup()
 
     def add_worktree(self, name: str, with_commit: bool = False) -> Path:
@@ -187,6 +257,29 @@ class WorktreeCleanupTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"PATH": str(bindir) + os.pathsep + os.environ["PATH"]}):
             CLEANUP.evaluate(path, self.fx.jobs, None)
         self.assertEqual(log.read_text().splitlines(), ["0"])
+
+    def test_private_process_view_preserves_real_unreadable_actor(self):
+        path = self.fx.add_worktree('fixture-unreadable')
+        with RawProcessTests.actor(self, path, unreadable=True) as process:
+            self.assertIn(str(process.pid), self.fx.actors.read_text().splitlines())
+            self.assertFalse(CLEANUP.proc_is_gone(Path('/proc') / str(process.pid)))
+            self.assertEqual(CLEANUP.process_snapshot()[0], 'procfs-unknown')
+            result = self.fx.cleanup(path, apply=True)
+            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+            self.assertIn('process-scan-unavailable', result.stdout)
+            self.assertTrue(path.is_dir())
+            self.assertIsNone(process.poll())
+
+    def test_fixture_close_retains_live_actor_diagnostics_on_repeat(self):
+        root = self.fx.root
+        with RawProcessTests.actor(self, root) as process:
+            self.fx.close()
+            self.fx.close()
+            self.assertIsNone(process.poll())
+            self.assertTrue((root / 'process-actors').is_file())
+        # Only our retained scratch, after its exact actor has settled.
+        self.assertEqual(process.returncode, 0)
+        shutil.rmtree(root)
 
     def test_default_remote_accepts_merge_from_separate_clone_with_stale_main(self):
         path = self.fx.add_worktree("remote-merged", with_commit=True)
@@ -959,6 +1052,129 @@ class BatchCleanupTests(unittest.TestCase):
                 mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
                 mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("unknown")):
             self.assertEqual(CLEANUP.process_snapshot()[0], "procfs-unknown")
+
+
+class RawProcessTests(unittest.TestCase):
+    """Actual kernel observations and unmodified CLI, outside the actor model."""
+
+    def setUp(self):
+        self.fx = CleanupFixture(process_view=False)
+        self.addCleanup(self.fx.close)
+
+    @contextlib.contextmanager
+    def actor(self, path, *, unreadable=False, leader_exit=False):
+        program = "import ctypes,os,sys,threading\n"
+        if unreadable:
+            program += "assert ctypes.CDLL(None).prctl(4,0,0,0,0)==0\n"
+        if leader_exit:
+            program += ("def worker():\n"
+                        "    sys.stdin.buffer.read()\n"
+                        "    os._exit(0)\n"
+                        "threading.Thread(target=worker).start()\n"
+                        "ctypes.CDLL(None).pthread_exit(None)\n")
+        else:
+            program += "print('ready',flush=True)\nsys.stdin.buffer.read()\n"
+        process = subprocess.Popen([sys.executable, "-c", program], cwd=path,
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        try:
+            if leader_exit:
+                deadline = time.monotonic() + 3
+                while True:
+                    fields = (Path('/proc') / str(process.pid) / 'stat').read_text().rsplit(')', 1)[1].split()
+                    if fields[0] == 'Z' and int(fields[17]) > 1:
+                        break
+                    if time.monotonic() >= deadline:
+                        self.fail('owned leader did not exit while its worker remained alive')
+                    time.sleep(.005)
+            else:
+                self.assertEqual(process.stdout.readline(), b'ready\n')
+            yield process
+        finally:
+            if not process.stdin.closed:
+                process.stdin.close()
+            process.wait(timeout=5)
+            process.stdout.close()
+
+    def assert_kept(self, path, *, reason):
+        head = run(['git', '-C', str(path), 'rev-parse', 'HEAD']).stdout
+        result = self.fx.cleanup(path, apply=True)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn(reason, result.stdout)
+        self.assertTrue(path.is_dir())
+        self.assertEqual(run(['git', '-C', str(self.fx.repo), 'rev-parse', path.name]).stdout, head)
+
+    def test_raw_cli_keeps_real_live_cwd_holder(self):
+        path = self.fx.add_worktree('raw-live')
+        with self.actor(path) as process:
+            kind, rows = CLEANUP.process_snapshot()
+            self.assertIn((process.pid, CLEANUP.read_proc_start(process.pid), path), rows)
+            self.assert_kept(path, reason='active-process')
+            self.assertIsNone(process.poll())
+
+    def test_raw_cli_keeps_real_unreadable_live_holder(self):
+        path = self.fx.add_worktree('raw-unreadable')
+        with self.actor(path, unreadable=True) as process:
+            with self.assertRaises(PermissionError):
+                os.readlink(Path('/proc') / str(process.pid) / 'cwd')
+            self.assertFalse(CLEANUP.proc_is_gone(Path('/proc') / str(process.pid)))
+            self.assertEqual(CLEANUP.process_snapshot()[0], 'procfs-unknown')
+            self.assert_kept(path, reason='process-scan-unavailable')
+            self.assertIsNone(process.poll())
+
+    def test_raw_cli_keeps_live_thread_after_main_thread_exit(self):
+        path = self.fx.add_worktree('raw-thread')
+        with self.actor(path, leader_exit=True) as process:
+            entry = Path('/proc') / str(process.pid)
+            with self.assertRaises(FileNotFoundError):
+                os.readlink(entry / 'cwd')
+            self.assertIsNotNone(CLEANUP.read_proc_start(process.pid))
+            self.assertFalse(CLEANUP.proc_is_gone(entry))
+            self.assertEqual(CLEANUP.process_snapshot()[0], 'procfs-unknown')
+            self.assert_kept(path, reason='process-scan-unavailable')
+            self.assertIsNone(process.poll())
+
+    def test_real_exit_between_cwd_and_identity_read_is_positive_disappearance(self):
+        path = self.fx.add_worktree('raw-exit')
+        with self.actor(path) as process:
+            entry = Path('/proc') / str(process.pid)
+            native_readlink, native_entries = os.readlink, Path.iterdir
+            seen = []
+            def readlink(value, *args, **kwargs):
+                result = native_readlink(value, *args, **kwargs)
+                if value == entry / 'cwd':
+                    seen.append(result)
+                    process.stdin.close()
+                    process.wait(timeout=5)
+                return result
+            # A declared one-actor view tests a real, coordinated exit, not a
+            # fabricated empty universe or an assumption about ambient PIDs.
+            def entries(value):
+                return iter([entry]) if value == Path('/proc') else native_entries(value)
+            with mock.patch.object(Path, 'iterdir', entries), mock.patch.object(os, 'readlink', readlink):
+                self.assertEqual(CLEANUP.process_snapshot(), ('procfs', ()))
+            self.assertEqual(seen, [str(path)])
+            self.assertTrue(CLEANUP.proc_is_gone(entry))
+
+    def test_real_single_thread_zombie_is_positive_terminal_evidence(self):
+        with self.actor(self.fx.root) as process:
+            process.stdin.close()
+            entry = Path('/proc') / str(process.pid)
+            deadline = time.monotonic() + 3
+            while True:
+                fields = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+                if fields[0] == 'Z':
+                    break
+                if time.monotonic() >= deadline:
+                    self.fail('owned actor did not exit')
+                time.sleep(.005)
+            self.assertEqual(int(fields[17]), 1)
+            self.assertIsNone(CLEANUP.read_proc_start(process.pid))
+            self.assertTrue(CLEANUP.proc_is_gone(entry))
+            native_entries = Path.iterdir
+            def entries(value):
+                return iter([entry]) if value == Path('/proc') else native_entries(value)
+            with mock.patch.object(Path, 'iterdir', entries):
+                self.assertEqual(CLEANUP.process_snapshot(), ('procfs', ()))
 
 
 class ObservationBoundaryTests(unittest.TestCase):
