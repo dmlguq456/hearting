@@ -465,10 +465,23 @@ harness install opencode
 |---|---|---|
 | `AGENTS.md`/core/capabilities/roles/bin/tools/utilities | symlink using `agent-*` pointer names | Routes through generated projections under `opencode_setting/` |
 | OpenCode-native skills/agents/commands | symlink fan-out (`skills/*`, `agents/*.md`, `commands/*.md`; an agent is an activation-owned regular file when the selected `models.conf` differs) | Uses the current official plural discovery paths |
-| guard plugin | `opencode_setting/opencode-plugins/hearting-guards.js` | JS/TS plugin hook surface; OpenCode has no marketplace or bundle format, so installer symlinks are the only channel |
+| guard plugin | V1: `plugins/hearting-guards.js` link; V2: regular `plugins/hearting-guards/index.ts` | One active discovery carrier per generation; the V2 entry directly imports the active bundle's JS module by absolute path |
 | Herdr backend/TUI assets | regular copies at `plugins/herdr-agent-state.js`, `herdr-tui-session.js`, and `herdr-opencode/tui.js` | Herdr reinstall can replace its own files in the runtime home; Hearting update restores current pinned bytes |
 | `opencode.json`/`opencode.jsonc` `skills.paths` | non-destructive merge | Preserves user config; reports conflicts and stops instead of guessing an automatic merge |
 | `opencode.json`/`opencode.jsonc` `instructions[]` | conditional merge | Bootstrap carrier of last resort: added only when the config-home `AGENTS.md` auto-load is missing, and a previously installed entry is dropped once that link exists. User entries are never touched |
+
+The existing bounded version resolver distinguishes V1, V2, and unknown.
+V2 does not project a flat guard JS link into discovery. Each update renders
+the package import against the selected active root; verification checks both
+the regular entry and the imported module. Unknown preserves a valid existing
+carrier and binding, or restores a single prior carrier receipt; only a fresh
+unknown installation uses the legacy JS compatibility fallback. Ambiguous
+existing layouts remain intact and are diagnosed through normal verification.
+Explicit `.disabled`, `.disabled-*`, `.v1-disabled-*`, and `.dup-disabled-*`
+siblings prevent recreation of their absent active leaf and remain untouched,
+including dangling links. A disabled JS sibling does not disable a V2 package.
+Generation changes retire only exact recorded links or render hashes through
+the existing activation transaction; foreign and edited entries are preserved.
 
 The common `~/.local/bin/hearting` launcher may add one optional
 `prefix+shift+h` shell command to `~/.config/herdr/config.toml`. Hearting owns

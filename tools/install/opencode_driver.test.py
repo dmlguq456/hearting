@@ -10,6 +10,7 @@ carrier passes, zero and two both fail, and the merge never touches user entries
 from __future__ import annotations
 
 import importlib
+import hashlib
 import json
 import os
 import subprocess
@@ -264,6 +265,210 @@ class OpenCodeNativeLeafPreservationTest(unittest.TestCase):
                          self.commands / self.foreign_command):
                 self.assertEqual(by_dest[str(path)]["status"], "preserved", path)
         self._assert_user_entries_untouched()
+
+
+class OpenCodeGuardProjectionTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="opencode-guard-driver-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.source = self.root / "source"
+        files = {
+            "core/CORE.md": "# core\n", "capabilities/README.md": "# capabilities\n",
+            "roles/README.md": "# roles\n", "adapters/opencode/AGENTS.md": "# instructions\n",
+            "adapters/opencode/skills/demo/SKILL.md": "# demo\n",
+            "adapters/opencode/agents/memory-scout/memory-scout.md": "# scout\n",
+            "adapters/opencode/plugins/hearting-guards.js": 'export default { id: "hearting-guards" }\n',
+        }
+        for relative in ("adapters/opencode/plugins/hearting-guards/index.ts",
+                         "adapters/opencode/config/models.conf",
+                         "adapters/opencode/plugins/herdr-agent-state.js",
+                         "adapters/opencode/tui/herdr-tui-session.js",
+                         "adapters/opencode/tui/herdr-opencode/tui.js"):
+            files[relative] = (SOURCE_ROOT / relative).read_text()
+        for relative, content in files.items():
+            path = self.source / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        self.env = fixture_env.build_environment(self.root / "fixture", self.source)
+        self.env.update(OPENCODE_RUNTIME_VERSION="2.0.32", OPENCODE_BIN=str(self.root / "no-opencode"),
+                        HARNESS_NO_NODE_INSTALL="1")
+        fixture_env.prepare_environment(self.env)
+        environment = mock.patch.dict(os.environ, self.env, clear=True)
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.driver = _load_driver()
+        self.home = self.driver.paths.runtime_home("opencode")
+        self.package = self.home / "plugins/hearting-guards/index.ts"
+        self.js = self.home / "plugins/hearting-guards.js"
+
+    def manifest(self):
+        return json.loads((self.home / ".harness/manifest.json").read_text())
+
+    def uninstall(self):
+        proc = subprocess.run(["sh", str(SOURCE_ROOT / "tools/install/harness.sh"),
+                               "uninstall", "opencode", "--yes", "--json"],
+                              env=dict(os.environ), text=True, capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def test_legacy_v2_dry_run_render_update_noop_and_manifest_uninstall(self):
+        self.assertFalse(self.driver.install(dry_run=True)["blocked"])
+        self.assertFalse(self.package.exists())
+        self.assertFalse((self.home / ".harness/manifest.json").exists())
+        report = self.driver.install()
+        self.assertFalse(report["blocked"], report)
+        self.assertFalse(self.js.exists())
+        self.assertTrue(self.package.is_file() and not self.package.is_symlink())
+        self.assertIn(str(self.source / "adapters/opencode/plugins/hearting-guards.js"), self.package.read_text())
+        before = self.package.stat().st_mtime_ns
+        self.assertFalse(self.driver.install()["blocked"])
+        self.assertEqual(self.package.stat().st_mtime_ns, before)
+        relative = "plugins/hearting-guards/index.ts"
+        self.assertEqual(self.manifest()["files"][relative], hashlib.sha256(self.package.read_bytes()).hexdigest())
+        self.assertEqual((self.home / ".harness/pristine" / relative).read_bytes(), self.package.read_bytes())
+        template = self.source / "adapters/opencode/plugins/hearting-guards/index.ts"
+        template.write_text(template.read_text() + "// updated entry\n")
+        self.assertFalse(self.driver.install()["blocked"])
+        self.assertIn("updated entry", self.package.read_text())
+        self.assertTrue(self.driver._guard_check("global")["ok"])
+        self.uninstall()
+        self.assertFalse(self.package.exists())
+
+    def test_user_edited_render_is_preserved_and_never_reregistered(self):
+        self.assertFalse(self.driver.install()["blocked"])
+        recorded = self.manifest()["files"].copy()
+        self.package.write_text(self.package.read_text() + "// user bytes\n")
+        before = (self.package.read_bytes(), self.package.stat().st_mtime_ns)
+        for dry in (True, False):
+            report = self.driver.install(dry_run=dry)
+            self.assertTrue(report["blocked"], report)
+            self.assertEqual((self.package.read_bytes(), self.package.stat().st_mtime_ns), before)
+            self.assertEqual(self.manifest()["files"], recorded)
+        # The existing reapply consumer reports missing canonical render input,
+        # rather than treating a source template as rendered runtime bytes.
+        reapply = self.driver.manifest.reapply(["opencode"], sources={"opencode": {}}, dry_run=True)
+        self.assertTrue(reapply["verify_failed"], reapply)
+        self.assertEqual((self.package.read_bytes(), self.package.stat().st_mtime_ns), before)
+        self.uninstall()
+        self.assertEqual(self.package.read_bytes(), before[0])
+
+    def test_foreign_manifest_identity_cannot_authorize_render_replacement(self):
+        self.assertFalse(self.driver.install()["blocked"])
+        manifest_path = self.home / ".harness/manifest.json"
+        record = self.manifest()
+        record["runtime"] = "claude"
+        manifest_path.write_text(json.dumps(record))
+        before = self.package.stat().st_mtime_ns
+        report = self.driver.install(dry_run=True)
+        self.assertTrue(report["blocked"], report)
+        self.assertEqual(self.package.stat().st_mtime_ns, before)
+
+    def test_manifest_failure_rolls_back_render_and_receipt_for_normal_retry(self):
+        original = self.driver.manifest.record
+
+        def fail_after_record(*args, **kwargs):
+            original(*args, **kwargs)
+            raise OSError("guard-manifest-publication-failure")
+
+        with mock.patch.object(self.driver.manifest, "record", side_effect=fail_after_record):
+            report = self.driver.install()
+        self.assertTrue(report["blocked"], report)
+        self.assertFalse(self.package.exists())
+        self.assertFalse((self.home / ".harness/manifest.json").exists())
+        self.assertFalse((self.home / ".harness/pristine/plugins/hearting-guards/index.ts").exists())
+        self.assertFalse(self.driver.install()["blocked"])
+        self.assertTrue(self.package.is_file())
+
+    def test_other_install_conflict_does_not_leave_the_render_without_a_receipt(self):
+        self.home.mkdir(parents=True)
+        (self.home / "opencode.json").write_text('{"skills":"user-conflict"}')
+        report = self.driver.install()
+        self.assertTrue(report["blocked"], report)
+        self.assertTrue(self.package.is_file())
+        self.assertEqual(self.manifest()["files"]["plugins/hearting-guards/index.ts"],
+                         hashlib.sha256(self.package.read_bytes()).hexdigest())
+        (self.home / "opencode.json").write_text('{}')
+        self.assertFalse(self.driver.install()["blocked"])
+
+    def test_foreign_file_and_symlink_never_become_owned(self):
+        self.package.parent.mkdir(parents=True)
+        self.package.write_bytes(b"// foreign package\n")
+        for kind in ("file", "symlink"):
+            if kind == "symlink":
+                # destructive-ok: reason=replace a test-created foreign file with a foreign link; boundary=package leaf in this test's TemporaryDirectory
+                self.package.unlink()
+                self.package.symlink_to(self.source / "adapters/opencode/plugins/hearting-guards/index.ts")
+            before = self.package.lstat().st_mtime_ns
+            for dry in (True, False):
+                report = self.driver.install(dry_run=dry)
+                self.assertTrue(report["blocked"], report)
+                self.assertEqual(self.package.lstat().st_mtime_ns, before)
+                self.assertEqual(self.package.is_symlink(), kind == "symlink")
+            self.assertFalse((self.home / ".harness/manifest.json").exists())
+
+    def test_active_bundle_binding_and_old_js_migration_use_activation_transaction(self):
+        import runtime_activation
+        initial = runtime_activation.activate("opencode", "packaged", str(self.source))
+        self.assertFalse(self.driver.install()["blocked"])
+        self.assertIn(initial["active_root"], self.package.read_text())
+        self.js.symlink_to(Path(initial["active_root"]) / "adapters/opencode/plugins/hearting-guards.js")
+        state_path = runtime_activation._state_path("opencode")
+        state = json.loads(state_path.read_text())
+        state["owned_paths"].append(runtime_activation._entry(
+            Path(os.readlink(self.js)), self.js, "hook_config"))
+        runtime_activation._atomic_json(state_path, state)
+        self.assertFalse(self.driver.install(dry_run=True)["blocked"])
+        self.assertTrue(self.js.is_symlink())
+        applied = self.driver.install()
+        self.assertFalse(applied["blocked"], applied)
+        self.assertFalse(self.js.exists())
+        self.assertIn(initial["active_root"], self.package.read_text())
+        self.assertNotIn("plugins/hearting-guards/index.ts", self.manifest()["files"])
+
+    def test_disabled_unknown_and_v1_layouts_keep_explicit_intent(self):
+        self.js.parent.mkdir(parents=True)
+        disabled = self.js.with_name("hearting-guards.js.dup-disabled-20261029")
+        disabled.symlink_to(self.root / "gone.js")
+        before = (os.readlink(disabled), disabled.lstat().st_mtime_ns)
+        for version in ("invalid", "1.4.0", "2.0.32"):
+            os.environ["OPENCODE_RUNTIME_VERSION"] = version
+            report = self.driver.install()
+            self.assertFalse(report["blocked"], report)
+            self.assertFalse(self.js.exists() or self.js.is_symlink())
+            self.assertEqual((os.readlink(disabled), disabled.lstat().st_mtime_ns), before)
+        self.assertTrue(self.package.is_file())
+
+    def test_unknown_restores_single_legacy_receipt_without_inventing_a_binding(self):
+        self.assertFalse(self.driver.install()["blocked"])
+        # destructive-ok: reason=exercise missing legacy package recovery; boundary=exact package in this test's private runtime home
+        self.package.unlink()
+        os.environ["OPENCODE_RUNTIME_VERSION"] = "invalid"
+        report = self.driver.install()
+        self.assertFalse(report["blocked"], report)
+        self.assertTrue(self.package.is_file())
+        self.assertFalse(self.js.exists())
+        # A changed template cannot prove the binding of a missing prior file.
+        # destructive-ok: reason=exercise unresolved legacy receipt; boundary=exact package in this test's private runtime home
+        self.package.unlink()
+        template = self.source / "adapters/opencode/plugins/hearting-guards/index.ts"
+        template.write_text(template.read_text() + "// different template\n")
+        self.assertTrue(self.driver.install()["blocked"])
+        self.assertFalse(self.package.exists())
+        self.assertFalse(self.js.exists())
+
+    def test_public_install_v2_and_manifest_based_uninstall(self):
+        env = dict(os.environ, AGENT_HOME=str(SOURCE_ROOT))
+        proc = subprocess.run(["sh", str(SOURCE_ROOT / "tools/install/harness.sh"),
+                               "install", "opencode", "--yes", "--json"],
+                              env=env, text=True, capture_output=True, timeout=120)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(self.package.is_file() and not self.package.is_symlink())
+        self.assertFalse(self.js.exists())
+        self.assertIn(str(SOURCE_ROOT / "adapters/opencode/plugins/hearting-guards.js"), self.package.read_text())
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.uninstall()
+        self.assertFalse(self.package.exists())
 
 
 if __name__ == "__main__":

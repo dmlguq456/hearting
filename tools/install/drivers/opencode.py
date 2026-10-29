@@ -11,7 +11,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 import paths
@@ -23,6 +22,65 @@ import safe_fs
 import herdr_integration
 
 RUNTIME = "opencode"
+
+
+def _guard_check(scope):
+    import runtime_activation
+    home = paths.runtime_home(RUNTIME, scope)
+    state = projector.opencode_activation(home)
+    layout = projector.opencode_guard_layout(Path(state.get("active_root") or paths.agent_home()), home, scope)
+    issues = projector.opencode_guard_health(layout) + runtime_activation.duplicate_sources(RUNTIME, scope)
+    return {"id": "opencode.guard-discovery", "ok": not issues,
+            "detail": "; ".join([layout["detail"], *issues])}
+
+
+def _install_guard(entry, home, dry_run, scope="global"):
+    dest, source = Path(entry["dest"]), Path(entry["source"])
+    result = {"action": entry["action"], "dest": str(dest), "source": str(source),
+              "detail": entry.get("detail", "guard projection")}
+    if entry.get("preserve"):
+        return dict(result, status="preserved")
+    current = safe_fs.capture_state(dest)
+    owned = projector.opencode_guard_owned(entry, home, scope)
+    same_link = entry["action"] == "symlink" and current.kind == "symlink" and os.readlink(dest) == str(source)
+    if current.kind != "missing" and not owned and not same_link:
+        return dict(result, status="blocked", detail=f"foreign or user-changed guard preserved: {dest}")
+    if (not entry.get("source_present") or not source.is_file()
+            or any(not Path(value).is_file() for value in entry.get("dependencies", []))):
+        return dict(result, status="blocked", detail=f"required guard source missing: {source}")
+    if dry_run:
+        return dict(result, status="planned")
+    try:
+        auth = safe_fs.authority(dest, owner="opencode-driver:guard-projection",
+                                 allowed_paths=(dest,), allow_leaf_symlink=True, expected=current)
+        if entry["action"] == "render":
+            content = entry["content"].encode("utf-8")
+            unchanged = current.kind == "file" and dest.read_bytes() == content
+            relative = dest.relative_to(home).as_posix()
+            receipt_paths = {"entry": auth}
+            for name, path in (("manifest", manifest._manifest_path(RUNTIME, scope)),
+                               ("pristine", manifest._pristine_path(RUNTIME, scope, relative))):
+                receipt_paths[name] = safe_fs.authority(path, owner="opencode-driver:guard-receipt",
+                                                       allowed_paths=(path,), allow_leaf_symlink=False)
+            with safe_fs.transaction(receipt_paths) as transaction:
+                try:
+                    if not unchanged:
+                        safe_fs.atomic_write_bytes(auth, content, 0o644, expected=current, create_parents=True)
+                    # Persist authority even when an unrelated install action
+                    # fails later. Never register user-modified bytes.
+                    manifest.record(RUNTIME, [{"relpath": relative, "source_abs": str(dest),
+                                               "dest_abs": str(dest)}], scope=scope)
+                except Exception:
+                    transaction.seal()
+                    transaction.restore()
+                    raise
+        else:
+            unchanged = same_link
+            if not unchanged:
+                safe_fs.atomic_write_symlink(auth, str(source), create_parents=True)
+        return dict(result, status="unchanged" if unchanged else "created")
+    except (OSError, ValueError, safe_fs.SafetyError) as exc:
+        return dict(result, status="blocked", detail=str(exc))
 
 
 def _config_path(scope):
@@ -174,20 +232,43 @@ def install(scope="global", plugin=False, dry_run=False):
     """
     entries = projector.plan(["opencode"], scope=scope)["opencode"]
 
-    utilities = Path(__file__).resolve().parents[3] / "utilities"
-    if str(utilities) not in sys.path:
-        sys.path.insert(0, str(utilities))
-    try:
-        import opencode_runtime
-        v2 = opencode_runtime.is_v2()
-    except Exception:
-        v2 = False
-
     actions = []
     blocked = False
+    home = paths.runtime_home(RUNTIME, scope)
+    state = projector.opencode_activation(home)
+    layout = projector.opencode_guard_layout(Path(state.get("active_root") or paths.agent_home()), home, scope)
+    v2 = layout["generation"] == "v2"
+    if layout["issues"]:
+        actions.append({"action": "guard-check", "status": "blocked", "detail": "; ".join(layout["issues"])})
+        blocked = True
+    if state:
+        # Keep the active immutable binding and let its existing transaction
+        # retire old carriers. The legacy writer never unlinks an obsolete JS.
+        guard_entries = [entry for entry in entries if entry.get("guard")]
+        prior = {item.get("dest") for item in state.get("owned_paths", [])
+                 if projector.opencode_guard_leaf(Path(item.get("dest", "")), home)}
+        wanted = {entry["dest"] for entry in guard_entries}
+        needs_refresh = prior != wanted or not _guard_check(scope)["ok"]
+        if needs_refresh:
+            if dry_run:
+                actions.append({"action": "guard-refresh", "status": "planned",
+                                "detail": "refresh through the existing activation transaction"})
+            else:
+                import runtime_activation
+                try:
+                    runtime_activation.activate(RUNTIME, state["mode"], state["source_root"], scope)
+                    actions.append({"action": "guard-refresh", "status": "refreshed"})
+                except (OSError, ValueError, runtime_activation.ActivationError) as exc:
+                    actions.append({"action": "guard-refresh", "status": "blocked", "detail": str(exc)})
+                    blocked = True
 
     for entry in entries:
         action = entry["action"]
+
+        if entry.get("guard"):
+            if not state:
+                actions.append(_install_guard(entry, home, dry_run, scope))
+            continue
 
         if action == "skip":
             actions.append(
@@ -356,7 +437,10 @@ def install(scope="global", plugin=False, dry_run=False):
                     existing = json.load(f)
 
             merged, changed, conflict, detail = _merge_config(
-                existing, our_instructions, our_skills_path, v2=v2
+                existing, our_instructions, our_skills_path,
+                # Unknown keeps an already observed config shape; a list is
+                # not evidence that the current runtime generation is V2.
+                v2=v2 or (layout["generation"] == "unknown" and isinstance(existing.get("skills"), list)),
             )
 
             if conflict:
@@ -383,6 +467,11 @@ def install(scope="global", plugin=False, dry_run=False):
         paths.runtime_home(RUNTIME, scope), paths.agent_home(), dry_run=dry_run)
     actions.extend(registration["actions"])
     blocked = blocked or any(a.get("status") == "blocked" for a in actions)
+    if not dry_run:
+        guard_check = _guard_check(scope)
+        if not guard_check["ok"]:
+            actions.append({"action": "guard-check", "status": "blocked", "detail": guard_check["detail"]})
+            blocked = True
 
     manifest_result = None
     integration_assets = herdr_integration.manifest_assets(
@@ -407,8 +496,11 @@ def checks(scope="global"):
     check_list = []
 
     check_list.append(verifier.check_herdr_integration(RUNTIME, agent_home))
+    check_list.append(_guard_check(scope))
 
     for entry in entries:
+        if entry.get("guard"):
+            continue
         action = entry["action"]
         if action == "symlink":
             dest = entry["dest"]

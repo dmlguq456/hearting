@@ -617,10 +617,10 @@ def _opencode_v2_plugin_entry(entrypoint: Path, server: Path, dest: Path,
     """
     if not entrypoint.is_file():
         return _entry(entrypoint, dest, "hook_config")
-    text = entrypoint.read_text(encoding="utf-8")
-    if marker not in text:
-        raise ActivationError(f"{entrypoint} lacks {marker}")
-    content = text.replace(marker, f"from {json.dumps(str(server))}", 1)
+    try:
+        content = projector.render_opencode_plugin(entrypoint, server, marker)
+    except ValueError as exc:
+        raise ActivationError(str(exc)) from exc
     entry = _entry(entrypoint, dest, "hook_config", kind="render")
     entry["content"] = content
     entry["content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -900,11 +900,13 @@ def _linked_entries(
                 "*.md",
             )
         )
-        plugin = source_root / "adapters/opencode/plugins/hearting-guards.js"
-        entries.append(_entry(plugin, home / "plugins/hearting-guards.js", "hook_config"))
-        v2_plugin = source_root / "adapters/opencode/plugins/hearting-guards/index.ts"
-        entries.append(_opencode_v2_plugin_entry(
-            v2_plugin, plugin, home / "plugins/hearting-guards/index.ts"))
+        guard = projector.opencode_guard_layout(source_root, home, scope)
+        if guard["issues"] and guard["generation"] != "unknown":
+            raise ActivationError("; ".join(guard["issues"]))
+        for planned in guard["entries"]:
+            entry = dict(planned, kind=planned["action"], surface="hook_config")
+            entry.pop("action")
+            entries.append(entry)
         herdr_plugin = source_root / "adapters/opencode/plugins/herdr-agent-state.js"
         entries.append(_entry(herdr_plugin, home / "plugins/herdr-agent-state.js", "hook_config", kind="copy"))
         tui_entry = source_root / "adapters/opencode/tui/hearting-tui-identity.ts"
@@ -927,7 +929,7 @@ def _linked_entries(
     else:
         raise ActivationError(f"unsupported runtime: {runtime}")
 
-    existing = [entry for entry in entries if Path(entry["source"]).exists()]
+    existing = [entry for entry in entries if entry.get("guard") or Path(entry["source"]).exists()]
     if runtime == "claude" and not (
         source_root / "adapters/claude/statusline.sh"
     ).is_file():
@@ -1171,6 +1173,12 @@ def _native_present(runtime: str, scope: str = "global") -> bool:
         candidates.extend((home / "skills").glob("*"))
         candidates.append(home / "plugins/hearting-guards.js")
         candidates.append(home / "plugins/hearting-guards/index.ts")
+        layout = projector.opencode_guard_layout(paths.agent_home(), home, scope)
+        if not projector.opencode_guard_health(layout) and any(
+            entry["action"] == "render" and Path(entry["dest"]).is_file()
+            for entry in layout["entries"]
+        ):
+            return True
     for candidate in candidates:
         if not candidate.is_symlink():
             continue
@@ -1190,8 +1198,7 @@ def _discovered_harness_links(runtime: str, scope: str = "global") -> set[Path]:
     patterns = {
         "codex": ("skills/*", "agents/*.toml", "agent-modes/*/*.md"),
         "claude": ("skills/*", "agents/*.md", "agent-modes/*/*.md"),
-        "opencode": ("skills/*", "agents/*.md", "commands/*.md",
-                     "plugins/hearting-guards/index.ts"),
+        "opencode": ("skills/*", "agents/*.md", "commands/*.md"),
     }[runtime]
     found: set[Path] = set()
     for pattern in patterns:
@@ -2722,8 +2729,19 @@ def duplicate_sources(runtime: str, scope: str = "global") -> List[str]:
         return ["native+plugin"] if native and _codex_plugin_active(scope) else []
     if runtime == "claude":
         return ["native+plugin"] if native and _claude_plugin_active(scope) else []
-    local_plugin = (paths.runtime_home(runtime, scope) / "plugins/hearting-guards.js").exists()
-    return ["local+npm"] if local_plugin and _opencode_npm_present(scope) else []
+    home = paths.runtime_home(runtime, scope)
+    generation = projector.opencode_generation()
+    local_file = (home / projector.OPENCODE_GUARD_LEAVES[0]).is_file()
+    local_package = generation != "v1" and (home / projector.OPENCODE_GUARD_LEAVES[1]).is_file()
+    duplicates = []
+    if local_file and local_package:
+        duplicates.append("local-file+package" if generation == "v2"
+                          else "observed-local-file+package:generation-unknown")
+    if generation != "v1" and (home / projector.OPENCODE_GUARD_LEAVES[0]).is_symlink() and not local_file:
+        duplicates.append("unresolved-local-file")
+    if (local_file or local_package) and _opencode_npm_present(scope):
+        duplicates.append("local+npm")
+    return duplicates
 
 
 def _remove_path(path: Path) -> None:
@@ -2766,6 +2784,12 @@ def _safe_existing_dest(
         return
     if str(dest) in owned:
         return
+    if dest.as_posix().endswith(tuple("/" + leaf for leaf in projector.OPENCODE_GUARD_LEAVES)):
+        # Guard ownership is exact. A link elsewhere under the same source root
+        # cannot authorize replacement or retirement of this plugin ID.
+        if kind == "symlink" and dest.is_symlink() and source is not None and os.readlink(dest) == str(source):
+            return
+        raise ActivationError(f"foreign guard destination collision: {dest}")
     # herdr overwrites its own integration file on reinstall; hearting now ships the
     # same integration, so adopt that file (the caller snapshots it first).
     if (source is not None and kind != "copytree" and not dest.is_symlink() and dest.is_file()
@@ -3060,9 +3084,14 @@ def _trusted_owned(
     # Profile activation adopts only links that resolve to a canonical harness
     # manifest. This lets a refresh remove stale native links left by the
     # legacy all-skills installer without touching user-owned entries.
+    home = paths.runtime_home(runtime, scope)
     trusted = {
         str(path) for path in _discovered_harness_links(runtime, scope)
+        if runtime != "opencode" or not projector.opencode_guard_leaf(path, home)
     }
+    if runtime == "opencode":
+        trusted.update(item["dest"] for item in desired if item.get("guard")
+                       and projector.opencode_guard_owned(item, home, scope))
     if not state:
         return trusted, {}
     allowed = {item["dest"] for item in desired}
@@ -3097,7 +3126,8 @@ def _trusted_owned(
             try:
                 current_target = os.readlink(dest)
                 matches = current_target == item.get("source")
-                if not matches and _journal_dest_allowed(runtime, dest, scope):
+                if (not matches and _journal_dest_allowed(runtime, dest, scope)
+                        and not (runtime == "opencode" and projector.opencode_guard_leaf(dest, home))):
                     raw_target = Path(current_target)
                     target = raw_target if raw_target.is_absolute() else dest.parent / raw_target
                     resolved_target = target.resolve(strict=False)
@@ -3142,7 +3172,8 @@ def _trusted_owned(
             trusted.discard(value)
             # Keep the renderer's existing collision behavior when a user-edited
             # regular definition would be replaced by a shipped symlink.
-            if item.get("kind") == "render" and desired_kind.get(value) == "symlink":
+            if (item.get("kind") == "render" and desired_kind.get(value) == "symlink"
+                    and not (runtime == "opencode" and projector.opencode_guard_leaf(dest, home))):
                 continue
             user_changed[value] = item
     return trusted, user_changed
@@ -3198,6 +3229,12 @@ def _apply_transaction(
             seen.add(key)
             _ensure_owned_destination(runtime, dest, scope)
             prior = user_changed.get(key)
+            if desired_by_dest.get(key, {}).get("preserve"):
+                prior = next((item for item in (previous or {}).get("owned_paths", [])
+                              if item.get("dest") == key), None)
+                if prior is not None:
+                    preserved.append(dict(prior))
+                continue  # preserving an unowned carrier does not adopt it
             if prior is not None:
                 # _trusted_owned already proved this is an in-scope recorded
                 # path whose current state differs from its prior receipt.
@@ -3244,7 +3281,7 @@ def _apply_transaction(
         for item in desired:
             source = Path(item["source"])
             dest = Path(item["dest"])
-            if any(entry.get("dest") == str(dest) for entry in preserved):
+            if item.get("preserve") or any(entry.get("dest") == str(dest) for entry in preserved):
                 continue
             for record in snapshots:
                 if record["dest"] == str(dest):
@@ -3347,7 +3384,8 @@ def _apply_transaction(
 
 
 def _projection_digest(entries: List[dict]) -> str:
-    base = _digest_paths(Path(item["source"]) for item in entries)
+    base = _digest_paths(Path(value) for item in entries
+                         for value in [item["source"], *item.get("dependencies", [])])
     rendered = sorted(
         (item["dest"], item["content_sha256"]) for item in entries if item.get("kind") == "render"
     )
@@ -3687,6 +3725,12 @@ def _entries_healthy(entries: List[dict]) -> tuple[bool, bool]:
     for item in entries:
         source = Path(item["source"])
         dest = Path(item["dest"])
+        if any(not Path(value).is_file() for value in item.get("dependencies", [])):
+            missing = True
+        if item.get("preserve"):
+            continue
+        if not source.exists():
+            missing = True
         if not (dest.exists() or dest.is_symlink()):
             missing = True
             continue
@@ -3806,6 +3850,8 @@ def activate(
     desired = _desired_entries(runtime, mode, source_root, active_root, revision, scope)
     agent_report_lines = _native_agent_entries(
         runtime, active_root, paths.runtime_home(runtime, scope))[1]
+    agent_report_lines.extend(dict.fromkeys(item["detail"] for item in desired
+                                            if item.get("guard") and item.get("detail")))
     agent_report_lines.extend(_edited_render_lines(runtime, previous, desired))
     digest = _projection_digest(desired)
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
@@ -4060,6 +4106,12 @@ def status(runtime: str, scope: str = "global") -> dict:
         user_changed_items = {}
 
     config_conflicts: List[str] = []
+    guard_lines = []
+    if runtime == "opencode":
+        layout = projector.opencode_guard_layout(active_root, paths.runtime_home(runtime, scope), scope)
+        guard_lines = [layout["detail"], *layout["issues"]]
+        if projector.opencode_guard_health(layout):
+            missing = True
     if runtime == "claude":
         config_missing, config_conflicts = _claude_settings_health(active_root, scope)
         if config_missing:
@@ -4158,7 +4210,7 @@ def status(runtime: str, scope: str = "global") -> dict:
         "duplicate_sources": duplicates,
         "user_changed": user_changed,
         "preserved": user_changed,
-        "report_lines": [f"preserved user-changed: {value}" for value in user_changed],
+        "report_lines": guard_lines + [f"preserved user-changed: {value}" for value in user_changed],
         "config_conflicts": config_conflicts,
         "model_config_path": str(model_config_path),
         "model_config_present": model_config_present,

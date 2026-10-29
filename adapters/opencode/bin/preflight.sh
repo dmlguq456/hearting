@@ -247,12 +247,33 @@ opencode_runtime_projection_check() {
     printf 'check=failed\nreason=opencode-native-commands-missing\nopencode_home=%s\nexpected=%s|%s\n' "$opencode_home" "$opencode_home/commands/autopilot-code.md" "$opencode_home/command/autopilot-code.md"
     return 69
   fi
-  if [ ! -f "$opencode_home/plugins/hearting-guards.js" ]; then
-    printf 'check=failed\nreason=opencode-native-plugin-missing\nopencode_home=%s\nexpected=%s\n' "$opencode_home" "$opencode_home/plugins/hearting-guards.js"
-    return 69
-  fi
-  if [ ! -f "$opencode_home/plugins/hearting-guards/index.ts" ]; then
-    printf 'check=failed\nreason=opencode-v2-plugin-entrypoint-missing\nopencode_home=%s\nexpected=%s\n' "$opencode_home" "$opencode_home/plugins/hearting-guards/index.ts"
+  if ! python3 - "$ROOT" "$harness" "$opencode_home" <<'PY'
+import pathlib, re, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "tools/install"))
+import projector, runtime_activation
+home = pathlib.Path(sys.argv[3])
+state = projector.opencode_activation(home)
+root = pathlib.Path(state.get("active_root") or sys.argv[2]).resolve()
+layout = projector.opencode_guard_layout(root, home)
+issues = projector.opencode_guard_health(layout) + runtime_activation.duplicate_sources("opencode")
+scan = set()
+for entry in layout["entries"]:
+    scan.add(entry["dest"])
+    scan.update(entry.get("dependencies", []))
+pattern = re.compile(r'adapters/claude|claude_setting|settings\.json|statusline\.sh|CLAUDE\.md|agent-modes|allowedTools|/\.claude/')
+for filename in scan:
+    try:
+        if pattern.search(pathlib.Path(filename).read_text()):
+            issues.append(f"opencode-runtime-projection-exposes-claude-surface: {filename}")
+    except (OSError, UnicodeError):
+        issues.append(f"guard dependency unreadable: {filename}")
+print(f"guard_layout={layout['detail']}")
+if issues:
+    print("check=failed\nreason=opencode-guard-projection-invalid")
+    print("detail=" + "; ".join(issues))
+    sys.exit(1)
+PY
+  then
     return 69
   fi
   if [ ! -d "$opencode_home/skills" ] && [ ! -d "$opencode_home/agent-skills" ] && ! opencode_config_content_has_opencode_skills "${OPENCODE_CONFIG_CONTENT:-}"; then
@@ -260,8 +281,7 @@ opencode_runtime_projection_check() {
     return 69
   fi
   if rg -q 'adapters/claude|claude_setting|settings\.json|statusline\.sh|CLAUDE\.md|agent-modes|allowedTools|/\.claude/' \
-    "$native_agent" "$native_command" "$opencode_home/plugins/hearting-guards.js" \
-    "$opencode_home/plugins/hearting-guards/index.ts" 2>/dev/null; then
+    "$native_agent" "$native_command" 2>/dev/null; then
     printf 'check=failed\nreason=opencode-runtime-projection-exposes-claude-surface\nopencode_home=%s\n' "$opencode_home"
     return 69
   fi
