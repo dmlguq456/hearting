@@ -740,9 +740,8 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
     preclaim = None
     if args.action == "start":
         def preclaim(lines):
-            # This is the last existing safety fence before spawn. Reobserve
-            # Git here so a state transition after registration cannot launch
-            # with native settings that no longer match the current decision.
+            # Preparation runs outside the jobs lock while the payload is
+            # fenced. The final transaction pins these route/repository rows.
             commit_policy.assert_launch_permission_projection(args)
             if args.route_file:
                 marker_gate(
@@ -754,10 +753,17 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
                     registry_lines=lines,
                     attempt_id=args.attempt_id,
                 )
+        preclaim._dispatch_registry_scoped = True
+        if args.route_file and args.route_node and args.attempt_id:
+            # The marker gate consumes these predecessors and this node's
+            # prior attempts, not the other independently launched batch legs.
+            preclaim._dispatch_registry_nodes = frozenset(
+                (node or {}).get("depends_on", ()))
     args.launch_preclaim = preclaim
     mutation_precheck = lambda lines: ensure_terminal_claim_absent(
         jobs, args.route_id, args.parent_attempt_id or args.attempt_id
     )
+    mutation_precheck._dispatch_registry_scoped = True
     return claim(
         jobs, args.attempt_id, row, launch=False,
         exclusive_metadata=exclusive,

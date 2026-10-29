@@ -269,6 +269,56 @@ class CampaignTest(F.ProducerTestBase):
         _, view = C.locator.scan_index(self.root)
         self.assertEqual(view[self.campaign]["status"], "satisfied")
 
+    def test_shallow_census_avoids_n_times_m_cycle_reads_and_keeps_rich_result(self):
+        for i in range(3):
+            for j in range(4):
+                self._begin(key=f"census-{i}", slug=f"census-{i}-{j}")
+        with mock.patch.object(P, "read_cycle_record", wraps=P.read_cycle_record) as reads:
+            rich = P.list_campaign_summaries(self.root, active_only=False)
+        count = sum(row["cycle_count"] for row in rich)
+        self.assertEqual(reads.call_count, count)
+        self.assertEqual(count, 13)
+        with mock.patch.object(P, "read_cycle_record", side_effect=AssertionError("shallow cycle census")), \
+                mock.patch.object(P.artifact_campaign, "campaign_state", wraps=P.artifact_campaign.campaign_state) as folds:
+            shallow = P.list_campaign_summaries(self.root, active_only=False, include_dispositions=False)
+        self.assertEqual(folds.call_count, 4)
+        self.assertEqual(shallow, rich)
+        with mock.patch.object(P, "read_cycle_record", return_value={"disposition": {"kind": "discarded"}}):
+            marked = P.list_campaign_summaries(self.root, active_only=False)
+        self.assertTrue(all(row["all_set_aside"] and row["dispositions"] == {"discarded": row["cycle_count"]}
+                            for row in marked))
+        print("campaign-census-counts=" + json.dumps({"campaigns": 4, "cycles": count,
+              "rich_cycle_reads": count, "shallow_cycle_reads": 0, "validated_folds": 4}))
+
+    def test_shallow_input_scope_is_not_writer_admission_authority(self):
+        with P.campaign_summary_scope():
+            rows = P.list_campaign_summaries(self.root, active_only=False, include_dispositions=False)
+            self.assertEqual(rows[0]["state"], "active")
+            self._close()
+            # A display input keeps its original choice. begin still reads
+            # current state under admission and appends the required reopen.
+            self.assertEqual(P.list_campaign_summaries(self.root, active_only=False,
+                                                       include_dispositions=False), rows)
+            begun = self._begin(key="campaign-closure")
+            self.assertTrue(begun["campaign_reopened"])
+        rows = P.list_campaign_summaries(self.root, active_only=False, include_dispositions=False)
+        self.assertEqual(rows[0]["state"], "active")
+        self.assertEqual(C.campaign_state(self.root, self.path).last_sequence, 2)
+
+    def test_shallow_keeps_invalid_and_pending_projection_classification(self):
+        with mock.patch.object(C, "_materialize", side_effect=OSError("projection interrupted")):
+            with self.assertRaisesRegex(C.CampaignError, "committed-recovery-required"):
+                self._close()
+        rich = P.list_campaign_summaries(self.root, active_only=False)
+        shallow = P.list_campaign_summaries(self.root, active_only=False, include_dispositions=False)
+        self.assertEqual(shallow, rich)
+        self.assertTrue(shallow[0]["projection_pending"])
+        event, = (self.path.parent / C.EVENTS_DIR).glob("*.json")
+        event.write_text("{}")
+        rows = P.list_campaign_summaries(self.root, active_only=False, include_dispositions=False)
+        self.assertEqual(rows[0]["state"], "invalid")
+        self.assertTrue(rows[0]["state_error"])
+
     def test_a24_8_abandoned_campaign_is_not_reopened(self):
         record = json.loads(self.path.read_text())
         for state in ("abandoned", "superseded"):

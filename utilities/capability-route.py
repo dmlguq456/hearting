@@ -4729,20 +4729,22 @@ def compose_campaign_summaries(artifact_root):
     "unavailable" rather than mislabelling a join as a creation."""
     try:
         import artifact_producer
-        return artifact_producer.list_campaign_summaries(Path(artifact_root), active_only=False)
+        return artifact_producer.list_campaign_summaries(
+            Path(artifact_root), active_only=False, include_dispositions=False)
     except (OSError, ImportError, ValueError):
         return None
 
 
 CWD_CAMPAIGN_SCAN_ROUTES = 100
 CWD_CAMPAIGN_KEYS_SHOWN = 3
+_CAMPAIGN_ROWS_UNSET = object()
 
 
-def cwd_campaign_keys(artifact_root, cwd, rows=None):
+def cwd_campaign_keys(artifact_root, cwd, rows=_CAMPAIGN_ROWS_UNSET):
     """The active work streams of this folder, newest first: the campaign keys of the newest
     routes under the artifact root that were sealed for `cwd` (at most `CWD_CAMPAIGN_SCAN_ROUTES`
     route files are read, and the scan stops at `CWD_CAMPAIGN_KEYS_SHOWN` keys)."""
-    rows = compose_campaign_summaries(artifact_root) if rows is None else rows
+    rows = compose_campaign_summaries(artifact_root) if rows is _CAMPAIGN_ROWS_UNSET else rows
     active = {r.get("key") for r in rows or [] if r.get("state") == "active"} - {None, "_unassigned"}
     here, keys = os.path.realpath(str(cwd)), []
     try:
@@ -11440,6 +11442,17 @@ def _worktree_git(cwd, *args):
 
 def _primary_worktree(cwd, common):
     """Find the primary worktree belonging to this common Git directory."""
+    # The ordinary common directory identifies the primary directly. Do not
+    # inspect every unrelated linked checkout just to rediscover that identity.
+    common = Path(os.path.realpath(common))
+    if common.name == ".git":
+        configured = _worktree_git(cwd, "config", "--get", "core.worktree")
+        bare = _worktree_git(cwd, "config", "--bool", "--get", "core.bare")
+        if configured.returncode == 1 and bare.returncode == 0 and bare.stdout.strip() == "false":
+            candidate = str(common.parent)
+            actual = _git_common_dir(candidate)
+            if actual and os.path.realpath(actual) == str(common):
+                return candidate
     current = _git(cwd, "rev-parse", "--show-toplevel")
     if not current:
         return None
@@ -11499,6 +11512,15 @@ def _prepared_record_worktree(record, common, relative):
     path = Path(record.get("path") or "")
     if not path.is_dir():
         return None
+    if record.get("state") == "reserved":
+        gitdir = _git(path, "rev-parse", "--git-dir")
+        if not gitdir:
+            return None
+        gitdir = Path(gitdir) if os.path.isabs(gitdir) else path / gitdir
+        # A partial add can already have HEAD and a branch but is not a ready
+        # checkout. In particular Git's initializing lock must survive resume.
+        if os.path.lexists(gitdir / "locked") or not (gitdir / "index").is_file():
+            return None
     actual_common = _git_common_dir(path)
     symbolic = _git(path, "symbolic-ref", "-q", "HEAD")
     head = _git(path, "rev-parse", "HEAD")
@@ -11558,6 +11580,17 @@ def _remote_default_base(top):
     valid = _worktree_git(top, "check-ref-format", "--branch", default)
     if valid.returncode != 0:
         return None, "remote-default-ref-invalid", (valid.stderr or default).strip()
+    tip = re.search(r"^([0-9a-f]{40}|[0-9a-f]{64})\s+HEAD$", advertised.stdout, re.MULTILINE)
+    tracking = f"refs/remotes/origin/{default}"
+    if match and tip and _git(top, "rev-parse", "--verify", f"{tracking}^{{commit}}") == tip.group(1):
+        # --missing=print reports absent objects rather than lazily fetching
+        # promised objects. Traverse this exact tip, not every worktree/ref as
+        # fetch's connectivity census can do. A ref alone proves no availability.
+        objects = _worktree_git(top, "rev-list", "--objects", "--no-object-names",
+                                "--missing=print", tip.group(1))
+        if objects.returncode == 0 and objects.stdout.strip() and not any(
+                line.startswith("?") for line in objects.stdout.splitlines()):
+            return {"branch": default, "sha": tip.group(1)}, None, None
     fetched = _worktree_git(top, "fetch", "-q", "origin",
                             f"+refs/heads/{default}:refs/remotes/origin/{default}")
     if fetched.returncode != 0:
@@ -11616,22 +11649,22 @@ def _branch_checked_out(top, branch):
 
 
 
-def _ref_namespace_conflict(top, branch, *, allow_local_branch=False):
+def _ref_namespace_conflict(top, branch, *, allow_local_branch=False, observation=None):
     """Fail closed on every ref spelling that can make Git's short name ambiguous."""
     valid = _worktree_git(top, "check-ref-format", "--branch", branch)
     if valid.returncode != 0:
         return True
-    common = _git_common_dir(top)
+    common = observation["common"] if observation is not None else _git_common_dir(top)
     if not common:
         return True
     # Git's revision DWIM checks these namespaces, while pseudo-ref files live
     # directly in the common directory and are not returned by for-each-ref.
     if os.path.lexists(Path(common) / branch):
         return True
-    refs = _worktree_git(top, "for-each-ref", "--format=%(refname)")
-    if refs.returncode != 0:
+    refs = observation["refs"] if observation is not None else _branch_namespaces(top)
+    if refs is None:
         return True
-    names = {line.strip() for line in refs.stdout.splitlines() if line.strip()}
+    names = set(refs)
     aliases = {
         f"refs/{branch}", f"refs/tags/{branch}", f"refs/heads/{branch}",
         f"refs/remotes/{branch}", f"refs/remotes/{branch}/HEAD",
@@ -11649,7 +11682,8 @@ def _ref_namespace_conflict(top, branch, *, allow_local_branch=False):
             return True
         if ref.startswith(target + "/") or target.startswith(ref + "/"):
             return True
-    worktrees = _worktree_git(top, "worktree", "list", "--porcelain")
+    worktrees = (observation["worktrees"] if observation is not None else
+                 _worktree_git(top, "worktree", "list", "--porcelain"))
     if worktrees.returncode != 0:
         return True
     if any(line == f"branch {target}" for line in worktrees.stdout.splitlines()):
@@ -11891,27 +11925,32 @@ def prepare_isolated_worktree(cwd, slug, *, artifact_root=None, preparation_key=
                 reason = detail = None
             if reason:
                 return {"state": "failed", "reason": reason, "detail": detail, "cwd": original}
-        candidates = []
         observed_branch = _git(primary, "symbolic-ref", "-q", "--short", "HEAD")
         protected = {"HEAD", "main", "master", "develop", "trunk", "origin"}
         protected.update(value for value in (observed_branch, base.get("branch"),
                            (record or {}).get("remote_default")) if value)
         refs = _branch_namespaces(primary)
-        if reserved:
-            candidates.append((reserved[0], reserved[1], reserved[2], True))
-        if record and record.get("primary_top") == primary and not reserved:
-            recorded_branch = record.get("branch")
-            recorded_path = Path(record.get("path") or "")
-            if (recorded_branch and recorded_path.parent.resolve() == worktree_root.resolve()
-                    and recorded_branch == recorded_path.name):
-                candidates.append((recorded_branch, recorded_path, base["sha"],
-                                   _existing_local_branch(primary, recorded_branch)))
-        for suffix in range(1, 65):
-            candidate = slug if suffix == 1 else f"{slug}-{suffix}"
-            if (_branch_candidate_available(primary, candidate, protected, refs)
-                    and not any(row[0] == candidate for row in candidates)):
-                candidates.append((candidate, worktree_root / candidate, base["sha"], False))
-        for branch, path, base_sha, resume_branch in candidates:
+        observation = {"common": common, "refs": refs,
+                       "worktrees": _worktree_git(primary, "worktree", "list", "--porcelain")}
+
+        def candidates():
+            seen = set()
+            if reserved:
+                seen.add(reserved[0])
+                yield reserved[0], reserved[1], reserved[2], True
+            if record and record.get("primary_top") == primary and not reserved:
+                branch = record.get("branch")
+                path = Path(record.get("path") or "")
+                if (branch and path.parent.resolve() == worktree_root.resolve()
+                        and branch == path.name):
+                    seen.add(branch)
+                    yield branch, path, base["sha"], _existing_local_branch(primary, branch)
+            for suffix in range(1, 65):
+                branch = slug if suffix == 1 else f"{slug}-{suffix}"
+                if branch not in seen and _branch_candidate_available(primary, branch, protected, refs):
+                    yield branch, worktree_root / branch, base["sha"], False
+
+        for branch, path, base_sha, resume_branch in candidates():
             if _worktree_git(primary, "check-ref-format", "--branch", branch).returncode != 0:
                 continue
             if os.path.lexists(path):
@@ -11929,7 +11968,8 @@ def prepare_isolated_worktree(cwd, slug, *, artifact_root=None, preparation_key=
                                     "detail": str(exc)}
                         return {"state": "reused", **reused, "preparation_key": key}
                 continue
-            if _ref_namespace_conflict(primary, branch, allow_local_branch=resume_branch):
+            if _ref_namespace_conflict(primary, branch, allow_local_branch=resume_branch,
+                                       observation=observation):
                 continue
             if not resume_branch and _existing_local_branch(primary, branch):
                 continue
@@ -11944,8 +11984,7 @@ def prepare_isolated_worktree(cwd, slug, *, artifact_root=None, preparation_key=
                 return {"state": "failed", "reason": "preparation-state-write-failed", "detail": str(exc)}
             branch_created = False
             if not resume_branch:
-                if not _branch_candidate_available(primary, branch, protected,
-                                                   _branch_namespaces(primary)):
+                if not _branch_candidate_available(primary, branch, protected, refs):
                     continue
                 branch_created, ref_error = _allocate_branch_ref(primary, branch, base_sha)
                 if not branch_created:
@@ -12513,6 +12552,24 @@ def _route_autoclose(artifact_root, trigger, route=None):
     except Exception as exc:  # noqa: BLE001
         print(f"route_autoclose error={type(exc).__name__}",file=sys.stderr)
 
+@contextlib.contextmanager
+def compose_campaign_snapshot():
+    import artifact_producer
+    with artifact_producer.campaign_summary_scope():
+        yield
+
+
+def compose_command_snapshot(function):
+    @functools.wraps(function)
+    def invoke(*args, **kwargs):
+        if sys.argv[1:2] == ["compose"]:
+            with compose_campaign_snapshot():
+                return function(*args, **kwargs)
+        return function(*args, **kwargs)
+    return invoke
+
+
+@compose_command_snapshot
 def main():
     from dispatch_parent_completion import default_parent_harness
     p=argparse.ArgumentParser(allow_abbrev=False)

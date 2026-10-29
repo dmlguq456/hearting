@@ -2792,13 +2792,13 @@ class DispatchContractTest(unittest.TestCase):
        "--parent-pid",str(os.getpid()),"--gate-fd",str(gate_fd),"--",
        sys.executable,"-c",f"from pathlib import Path;Path({str(marker)!r}).write_text('bad')"],
       pass_fds=(gate_fd,),start_new_session=True)
-     child.append(proc);return proc
-    with mock.patch.object(
-        D,"process_identity_is_live",side_effect=(True,False)):
-     with self.assertRaises(D.DispatchContractError) as caught:
-      D.spawn_claimed_attempt(
-       jobs,attempt,parent_binding=binding,spawn=spawn,
-       launch_metadata={"launch_lifecycle":"detached"})
+     child.append(proc)
+     parent.terminate();parent.wait(timeout=5)
+     return proc
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(
+      jobs,attempt,parent_binding=binding,spawn=spawn,
+      launch_metadata={"launch_lifecycle":"detached"})
     self.assertEqual(caught.exception.reason,"parent-attempt-not-live-after-spawn")
     self.assertFalse(marker.exists())
     self.assertIsNotNone(child[0].poll())
@@ -3021,7 +3021,7 @@ class DispatchContractTest(unittest.TestCase):
    self.assertFalse(D.claim_attempt_row(jobs,attempt,exact,launch=True))
    self.assertIn("launch_claimed=1",jobs.read_text())
    self.assertEqual(len(jobs.read_text().splitlines()),2)
- def test_preclaim_gate_and_launch_claim_share_registry_lock(self):
+ def test_preclaim_runs_unlocked_and_refusal_preserves_launch_claim(self):
   with tempfile.TemporaryDirectory() as td:
    jobs=Path(td)/"jobs.log"; attempt="att-preclaim00001"
    row=f"2026-07-16T00:00:00Z\topen\t/repo\t/wt\tstage\t{CURRENT},capability=code-plan,attempt_id={attempt}"
@@ -3029,6 +3029,8 @@ class DispatchContractTest(unittest.TestCase):
    before=jobs.read_bytes()
    observed=[]
    def reject(lines):
+    with Path(f"{jobs}.lock").open("a") as contender:
+     fcntl.flock(contender.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
     observed.extend(lines)
     raise D.DispatchContractError("predecessor-process-draining","fixture")
    with self.assertRaises(D.DispatchContractError) as caught:
@@ -3131,7 +3133,9 @@ class DispatchContractTest(unittest.TestCase):
    row=f"2026-07-16T00:00:00Z\topen\t/repo\t/wt\tstage\t{CURRENT},capability=code-plan,attempt_id={attempt}"
    procs=[subprocess.Popen([sys.executable,"-c",code,str(P.parent),str(jobs),attempt,row],text=True,stdout=subprocess.PIPE) for _ in range(8)]
    winners=[p.communicate(timeout=10)[0].strip() for p in procs]
+   self.assertTrue(all(p.returncode == 0 for p in procs), winners)
    self.assertEqual(winners.count("1"),1,winners)
+   self.assertEqual(winners.count("0"),7,winners)
    self.assertEqual(len(jobs.read_text().splitlines()),1)
  def test_terminal_claim_fence_blocks_mutation_inside_existing_jobs_lock(self):
   with tempfile.TemporaryDirectory() as td:

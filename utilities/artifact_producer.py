@@ -2053,7 +2053,8 @@ def input_source_cycle(root: Path, *, parent_cycle_id: Optional[str] = None,
         return parent_cycle_id
     if not campaign_key or campaign_key == UNASSIGNED_KEY:
         return None
-    decision = classify_campaign_key(list_campaign_summaries(root, active_only=False), campaign_key)
+    decision = classify_campaign_key(list_campaign_summaries(
+        root, active_only=False, include_dispositions=False), campaign_key)
     if decision.get("mode") not in ("join", "reopen"):
         return None
     return (same_flow_source_cycle(root, decision["campaign_id"], capability=capability,
@@ -2550,7 +2551,50 @@ def backfill_cycle_bindings(root: Path, *, apply: bool = False) -> Dict[str, Any
             artifact_admission._release_lock(root, lock_fd)
 
 
-def list_campaign_summaries(root: Path, *, active_only: bool = True) -> List[Dict[str, Any]]:
+_CAMPAIGN_SUMMARY_INPUT = contextvars.ContextVar("campaign_summary_input", default=None)
+
+
+@contextlib.contextmanager
+def campaign_summary_scope():
+    """Share validated shallow classifications for one input, never admission."""
+    if _CAMPAIGN_SUMMARY_INPUT.get() is not None:
+        yield
+        return
+    token = _CAMPAIGN_SUMMARY_INPUT.set({})
+    try:
+        yield
+    finally:
+        _CAMPAIGN_SUMMARY_INPUT.reset(token)
+
+
+def list_campaign_summaries(root: Path, *, active_only: bool = True,
+                            include_dispositions: bool = True) -> List[Dict[str, Any]]:
+    """Rich CLI listing by default; internal classification can omit cycle census.
+
+    Only the shallow path shares one input's fold. Writers keep their own fresh
+    campaign reads and admission lock; the scope never changes their authority.
+    """
+    cache = None if include_dispositions else _CAMPAIGN_SUMMARY_INPUT.get()
+    key = (os.path.abspath(root), active_only)
+    if cache is not None and key in cache:
+        value = cache[key]
+        if isinstance(value, Exception):
+            raise value
+        return value
+    try:
+        rows = _list_campaign_summaries(root, active_only=active_only,
+                                        include_dispositions=include_dispositions)
+    except Exception as exc:
+        if cache is not None:
+            cache[key] = exc
+        raise
+    if cache is not None:
+        cache[key] = rows
+    return rows
+
+
+def _list_campaign_summaries(root: Path, *, active_only: bool,
+                             include_dispositions: bool) -> List[Dict[str, Any]]:
     """Pure read-only listing of the root's campaigns for callers that
     must show the agent which work streams already exist (compose).
 
@@ -2579,7 +2623,7 @@ def list_campaign_summaries(root: Path, *, active_only: bool = True) -> List[Dic
             continue
         cycles = record.get("cycles")
         marks: Dict[str, int] = {}
-        for cycle_id in cycles if isinstance(cycles, list) else []:
+        for cycle_id in cycles if include_dispositions and isinstance(cycles, list) else []:
             mark = cycle_disposition(read_cycle_record(root, cycle_id) or {})
             if mark is not None:
                 marks[mark["kind"]] = marks.get(mark["kind"], 0) + 1

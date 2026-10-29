@@ -1438,7 +1438,7 @@ def recovery_delivery_state(jobs, aid):
 
 
 def _identity_refusal_reentry(jobs, lines, aid, record=None, *, allow_registered=False,
-                              allow_launch_claimed=False):
+                              allow_launch_claimed=False, owned_launch=None):
     """Whether the same exact replacement duty may be re-entered after an
     identity-only refusal. This proves lineage and source eligibility; it does
     not grant launch authority or replace the current parent check.
@@ -1482,6 +1482,14 @@ def _identity_refusal_reentry(jobs, lines, aid, record=None, *, allow_registered
                 and target_meta.get('launch_started') != '1'
                 and not target_meta.get('pid')
                 and (allow_launch_claimed or target_meta.get('launch_claimed') != '1'))
+            if owned_launch is not None:
+                # This is the same published PID behind the still-closed gate,
+                # not eligibility for a second launch of an identified row.
+                successor_unstarted = exact_successor and (
+                    target_meta == owned_launch and target_fields[1] in {'open', 'running'}
+                    and target_meta.get('launch_claimed') == '1'
+                    and target_meta.get('launch_started') != '1'
+                    and bool(target_meta.get('pid') and target_meta.get('pid_start')))
         if not exact_successor:
             return False
         _no_competing_successor(rows, aid, record['replacement_attempt_id'])
@@ -1911,8 +1919,8 @@ def _source_fences(jobs, source, route_id, aid):
         DC.ensure_terminal_claim_absent(jobs, rid, owner)
 
 
-def validate_claim_source(jobs, lines, record):
-    """Shared lock-held source proof for admission and partial-batch reservation."""
+def validate_claim_source(jobs, lines, record, *, owned_launch=None):
+    """Current source proof for admission and partial-batch reservation."""
     family = record.get('family_id', '')
     _check_record(record, family)
     canonical = _read(_record_path(jobs, family))
@@ -1921,7 +1929,7 @@ def validate_claim_source(jobs, lines, record):
     rows = _rows(lines); prior = record['original_attempt_id']
     if (recovery_delivery_state(jobs, prior) == 'settled'
             and not _identity_refusal_reentry(jobs, lines, prior, record, allow_registered=True,
-                                              allow_launch_claimed=True)):
+                                              allow_launch_claimed=True, owned_launch=owned_launch)):
         raise DC.DispatchContractError('replacement-duty-settled')
     if prior not in rows:
         raise DC.DispatchContractError('replacement-source-missing')
@@ -2037,7 +2045,28 @@ def parent_resume_eligibility(jobs, aid, *, route_id=None, environ=None, require
 
 
 def admission(jobs, lines, metadata):
-    """Called with the jobs lock at both registration and actual spawn."""
+    """New-launch eligibility and current replacement inputs, prepared unlocked."""
+    return _validate_launch(jobs, lines, metadata)
+
+
+def validate_owned_launch(jobs, lines, metadata):
+    """Revalidate current inputs of the exact once-only published launch.
+
+    The caller still owns its closed launch fence. Only new-launch eligibility
+    for that identity differs; claim, source, reuse, work and permissions remain
+    current and use the same validators as initial admission.
+    """
+    matches = [(fields, meta) for fields, meta in _rows(lines).values()
+               if meta.get('attempt_id') == metadata.get('attempt_id')]
+    if (len(matches) != 1 or matches[0][1] != metadata
+            or matches[0][0][1] not in {'open', 'running'}
+            or metadata.get('launch_claimed') != '1' or metadata.get('launch_started') == '1'
+            or not metadata.get('pid') or not metadata.get('pid_start')):
+        raise DC.DispatchContractError('attempt-launch-claim-invalid')
+    return _validate_launch(jobs, lines, metadata, owned_launch=metadata)
+
+
+def _validate_launch(jobs, lines, metadata, *, owned_launch=None):
     prior = metadata.get('automatic_retry_of') or metadata.get('prior_attempt_id')
     if not prior:
         return None
@@ -2073,7 +2102,7 @@ def admission(jobs, lines, metadata):
             or record.get('replacement_attempt_id') != metadata.get('attempt_id')):
         raise DC.DispatchContractError('automatic-replacement-exhausted', prior)
     route_authority.require_recovery_binding(record, source, metadata, jobs)
-    _, source, replay = validate_claim_source(jobs, lines, record)
+    _, source, replay = validate_claim_source(jobs, lines, record, owned_launch=owned_launch)
     candidate = launch_input(jobs, metadata['attempt_id'], metadata)
     parent_values = {}
     if source.get('dispatch_depth') == '1' and metadata.get('parent_sid') != source.get('parent_sid'):

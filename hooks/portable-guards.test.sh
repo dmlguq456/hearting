@@ -43,6 +43,13 @@ fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+# Each Git display assertion consumes a completed private projection. Cold
+# snapshots are unknown; a timing race is not a meaningful risk assertion.
+GIT_DISPLAY_STATE_ROOT="$TMP/display-state"
+export GIT_CEILING_DIRECTORIES="$TMP"
+refresh_git_display() {
+  HARNESS_STATE_ROOT="$GIT_DISPLAY_STATE_ROOT" python3 "$ROOT/tools/fleet/gitinfo.py" --display refresh "$1" >/dev/null
+}
 export AGENT_HOME="$TMP/agent_home"
 export AGENT_MODEL_GOVERNOR_ROOT="$TMP/repo/.agent_reports/.runtime/model-worker-governor"
 export MEM_RECALL_RECEIPTS="$TMP/recall-opportunities"
@@ -57,7 +64,8 @@ recall_opportunity() {
 unset AGENT_DISPATCH_PARENT_SESSION_ID AGENT_DISPATCH_OWNER_HARNESS CODEX_THREAD_ID
 # D-42 hermeticity: a live main or worker session must not leak session identity
 # or worker markers into fixtures — every case sets its own markers inline.
-unset CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
+unset AGENT_DISPATCH_ATTEMPT_ID AGENT_DISPATCH_PARENT_ATTEMPT_ID \
+  CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID \
   AGENT_SESSION_ROLE AGENT_DISPATCH_CHILD AGENT_DISPATCH_DEPTH \
   AGENT_DISPATCH_JOBS \
   AGENT_ARTIFACT_ROOT AGENT_ARTIFACT_CYCLE_DIR AGENT_ROUTE_FILE AGENT_ROUTE_ID AGENT_ROUTE_NODE \
@@ -286,7 +294,7 @@ echo "== workflow lifecycle CLI =="
 mkdir -p "$TMP/flowproj/.agent_reports"
 mkdir -p "$TMP/codex-artifact/.agent_reports/spec"
 
-if "$CODEX" memory "$TMP/flowproj" >"$TMP/mem_inject.out" 2>"$TMP/mem_inject.err"; then
+if XDG_STATE_HOME="$TMP/lifecycle-memory-state" MEM_STORE="$TMP/lifecycle-memory" "$CODEX" memory "$TMP/flowproj" >"$TMP/mem_inject.out" 2>"$TMP/mem_inject.err"; then
   ok "codex memory wrapper exits cleanly"
 else
   bad "codex memory wrapper should exit cleanly"
@@ -306,7 +314,7 @@ if MEM_PY="$ROOT/tools/memory/mem.py" MEM_STORE="$TMP/empty-recall-store" \
 else
   bad "candidate bridge should keep zero-hit output silent while publishing opportunity"
 fi
-if "$CODEX" recall "전에 결정한 내용 뭐였지" "$TMP/flowproj" >"$TMP/recall.out" 2>"$TMP/recall.err"; then
+if XDG_STATE_HOME="$TMP/lifecycle-memory-state" MEM_STORE="$TMP/lifecycle-memory" "$CODEX" recall "전에 결정한 내용 뭐였지" "$TMP/flowproj" >"$TMP/recall.out" 2>"$TMP/recall.err"; then
   ok "codex recall wrapper exits cleanly"
 else
   bad "codex recall wrapper should exit cleanly"
@@ -346,9 +354,10 @@ if env -u AGENT_NOTES_ROOT -u WORKLOG_NOTES_ROOT -u CAIRN_APP -u CAIRN_WT -u WOR
 else
   bad "codex worklog wrapper should not default to Claude runtime paths"
 fi
+refresh_git_display "$TMP/flowproj"
 printf 'T\topen\t/r\t/r-wt/a\tjob-a\tcap\nT\tdone\t/r\t/r-wt/b\tjob-b\tcap\n' > "$TMP/status_jobs.log"
 if AGENT_NOTES_ROOT="$TMP/notes" CAIRN_APP="$TMP/board" CAIRN_WT="$TMP/board-wt" AGENT_DISPATCH_JOBS="$TMP/status_jobs.log" \
-  "$CODEX" status "$TMP/flowproj" testsid >"$TMP/codex_status.out" 2>"$TMP/codex_status.err" \
+  HARNESS_STATE_ROOT="$GIT_DISPLAY_STATE_ROOT" "$CODEX" status "$TMP/flowproj" testsid >"$TMP/codex_status.out" 2>"$TMP/codex_status.err" \
   && grep -q '^adapter=codex$' "$TMP/codex_status.out" \
   && grep -q '^headless_open_jobs=1$' "$TMP/codex_status.out" \
   && grep -q '^headless_open_slugs=job-a$' "$TMP/codex_status.out" \
@@ -369,7 +378,8 @@ git -C "$TMP/donebranch" checkout -q -b main
 echo x > "$TMP/donebranch/f"; git -C "$TMP/donebranch" add f; git -C "$TMP/donebranch" commit -q -m x
 git -C "$TMP/donebranch" checkout -q -b topic
 git -C "$TMP/donebranch" branch -q --set-upstream-to=main topic 2>/dev/null
-if "$CODEX" status "$TMP/donebranch" testsid >"$TMP/codex_done.out" 2>"$TMP/codex_done.err" \
+refresh_git_display "$TMP/donebranch"
+if HARNESS_STATE_ROOT="$GIT_DISPLAY_STATE_ROOT" "$CODEX" status "$TMP/donebranch" testsid >"$TMP/codex_done.out" 2>"$TMP/codex_done.err" \
   && grep -q '^git_upstream=main$' "$TMP/codex_done.out" \
   && grep -q '^git_ahead=0$' "$TMP/codex_done.out" \
   && grep -q '^git_branch_done=1$' "$TMP/codex_done.out"; then
@@ -388,7 +398,8 @@ git -C "$TMP/dirtyrepo" commit -q -m clean
 git -C "$TMP/dirtyrepo" worktree add -q -b wtbranch "$TMP/dirtyrepo-wt/extra"
 echo changed > "$TMP/dirtyrepo/f"
 echo new > "$TMP/dirtyrepo/newfile"
-if "$CODEX" status "$TMP/dirtyrepo" testsid >"$TMP/codex_dirty_status.out" 2>"$TMP/codex_dirty_status.err" \
+refresh_git_display "$TMP/dirtyrepo"
+if HARNESS_STATE_ROOT="$GIT_DISPLAY_STATE_ROOT" "$CODEX" status "$TMP/dirtyrepo" testsid >"$TMP/codex_dirty_status.out" 2>"$TMP/codex_dirty_status.err" \
   && grep -q '^git_dirty=1$' "$TMP/codex_dirty_status.out" \
   && grep -q '^git_dirty_tracked=1$' "$TMP/codex_dirty_status.out" \
   && grep -q '^git_untracked=1$' "$TMP/codex_dirty_status.out" \
@@ -399,7 +410,7 @@ if "$CODEX" status "$TMP/dirtyrepo" testsid >"$TMP/codex_dirty_status.out" 2>"$T
 else
   bad "codex status should distinguish tracked dirty, untracked files, and sibling worktrees"
 fi
-if "$CODEX" prompt-signal "$TMP/flowproj" testsid >"$TMP/codex_prompt_signal_tracked.out" 2>"$TMP/codex_prompt_signal_tracked.err" \
+if HARNESS_STATE_ROOT="$GIT_DISPLAY_STATE_ROOT" "$CODEX" prompt-signal "$TMP/flowproj" testsid >"$TMP/codex_prompt_signal_tracked.out" 2>"$TMP/codex_prompt_signal_tracked.err" \
   && grep -q '^autopilot_route=autopilot-required-for-spec-and-nontrivial-work$' "$TMP/codex_prompt_signal_tracked.out" \
   && grep -q '^routing_contract=core/WORKFLOW.md$' "$TMP/codex_prompt_signal_tracked.out" \
   && grep -q '^routing_action=read-workflow-and-select-codex-skill$' "$TMP/codex_prompt_signal_tracked.out" \
@@ -411,11 +422,11 @@ if "$CODEX" prompt-signal "$TMP/flowproj" testsid >"$TMP/codex_prompt_signal_tra
 else
   bad "codex prompt signal should carry the autopilot routing contract"
 fi
-if "$CODEX" prompt-signal "$TMP/dirtyrepo" testsid >"$TMP/codex_prompt_signal_dirty.out" 2>"$TMP/codex_prompt_signal_dirty.err" \
+if HARNESS_STATE_ROOT="$GIT_DISPLAY_STATE_ROOT" "$CODEX" prompt-signal "$TMP/dirtyrepo" testsid >"$TMP/codex_prompt_signal_dirty.out" 2>"$TMP/codex_prompt_signal_dirty.err" \
   && grep -q '^git_dirty_tracked=1$' "$TMP/codex_prompt_signal_dirty.out" \
   && grep -q '^git_untracked=1$' "$TMP/codex_prompt_signal_dirty.out" \
   && grep -q '^git_extra_worktrees=1$' "$TMP/codex_prompt_signal_dirty.out" \
-  && "$CODEX" prompt-signal "$TMP/donebranch" testsid >"$TMP/codex_prompt_signal_done.out" 2>"$TMP/codex_prompt_signal_done.err" \
+  && HARNESS_STATE_ROOT="$GIT_DISPLAY_STATE_ROOT" "$CODEX" prompt-signal "$TMP/donebranch" testsid >"$TMP/codex_prompt_signal_done.out" 2>"$TMP/codex_prompt_signal_done.err" \
   && grep -q '^git_branch_done=1$' "$TMP/codex_prompt_signal_done.out"; then
   ok "codex prompt signal carries git dirty, worktree, and dead-branch risks"
 else
@@ -2505,7 +2516,7 @@ fi
 echo "== opencode workflow lifecycle CLI =="
 mkdir -p "$TMP/opencode-artifact/.agent_reports/spec"
 
-if "$OPENCODE" memory "$TMP/flowproj" >"$TMP/opencode_mem.out" 2>"$TMP/opencode_mem.err"; then
+if XDG_STATE_HOME="$TMP/lifecycle-memory-state" MEM_STORE="$TMP/lifecycle-memory" "$OPENCODE" memory "$TMP/flowproj" >"$TMP/opencode_mem.out" 2>"$TMP/opencode_mem.err"; then
   ok "opencode memory wrapper exits cleanly"
 else
   bad "opencode memory wrapper should exit cleanly"
@@ -2516,7 +2527,7 @@ if MEM_STORE="$TMP/opencode_launcher_store" "$ROOT/adapters/opencode/tools/memor
 else
   bad "opencode memory launcher should fall back from invalid AGENT_HOME"
 fi
-if "$OPENCODE" recall "전에 결정한 내용 뭐였지" "$TMP/flowproj" >"$TMP/opencode_recall.out" 2>"$TMP/opencode_recall.err"; then
+if XDG_STATE_HOME="$TMP/lifecycle-memory-state" MEM_STORE="$TMP/lifecycle-memory" "$OPENCODE" recall "전에 결정한 내용 뭐였지" "$TMP/flowproj" >"$TMP/opencode_recall.out" 2>"$TMP/opencode_recall.err"; then
   ok "opencode recall wrapper exits cleanly"
 else
   bad "opencode recall wrapper should exit cleanly"
@@ -2543,7 +2554,7 @@ else
   bad "opencode worklog wrapper should not default to Claude runtime paths"
 fi
 if AGENT_NOTES_ROOT="$TMP/notes" CAIRN_APP="$TMP/board" CAIRN_WT="$TMP/board-wt" \
-  "$OPENCODE" status "$TMP/flowproj" opencodesid >"$TMP/opencode_status.out" 2>"$TMP/opencode_status.err" \
+  HARNESS_STATE_ROOT="$GIT_DISPLAY_STATE_ROOT" "$OPENCODE" status "$TMP/flowproj" opencodesid >"$TMP/opencode_status.out" 2>"$TMP/opencode_status.err" \
   && grep -q '^adapter=opencode$' "$TMP/opencode_status.out" \
   && grep -q '^runtime_surface=adapter-owned-harness-status$' "$TMP/opencode_status.out" \
   && grep -q '^artifact_root_exists=1$' "$TMP/opencode_status.out" \
@@ -3799,7 +3810,7 @@ dispatch_scan_prod=$(cd "$ROOT" && grep -rnE \
 # collector's explicit legacy discovery, and the wrappers'/docs' description
 # of where a registry lives.
 dispatch_scan_allowed='
-tools/install/distribution.py 5
+tools/install/distribution.py 3
 tools/migration-manifest.py 2
 tools/fleet/collectors/dispatch.py 6
 tools/fleet/collectors/__init__.py 1
@@ -3807,6 +3818,10 @@ tools/render-landing.py 1
 adapters/codex/AGENTS.md 1
 adapters/codex/bin/preflight.sh 1
 adapters/opencode/bin/preflight.sh 1
+adapters/claude/plugin-marketplace/plugins/hearting-claude/core/ADAPTATION_INVENTORY.md 1
+adapters/claude/plugin-marketplace/plugins/hearting-claude/core/OPERATIONS.md 1
+adapters/codex/plugins/hearting-codex/core/ADAPTATION_INVENTORY.md 1
+adapters/codex/plugins/hearting-codex/core/OPERATIONS.md 1
 '
 dispatch_scan_unallowed=$(printf '%s\n' "$dispatch_scan_prod" \
   | while IFS= read -r line; do
@@ -3897,14 +3912,12 @@ else
   for kind in watch steer handoff gate-relay notice; do
     printf '%s' "$sec5_14" | grep -q "$kind" || s_missing="$s_missing $kind"
   done
-  # The v51 rewrite replaced the two-column sketch with one column per side of
-  # the relation (`| Runtime | Watched side ... |`). Assert the header the
-  # document actually carries; the old `| Runtime | Realization |` string had
-  # been unsatisfiable since f5f3a467.
-  if printf '%s' "$sec5_14" | grep -q '| Runtime | Watched side (wait target) |'; then
-    ok "§5.14 carries the per-adapter realization table"
+  # 0f2208f32 replaced the wait/wake table with shared native delivery.
+  # Check its safety meaning; do not restore the retired adapter parity table.
+  if printf '%s' "$sec5_14" | grep -qF 'Queue acceptance never means delivery or consumption.'; then
+    ok "§5.14 separates transport acceptance from native receipt"
   else
-    bad "§5.14 is missing the per-adapter realization table"
+    bad "§5.14 must separate acceptance from receipt"
   fi
   if printf '%s' "$sec5_14" | grep -q 'peer-session-probe/P-<n>.md'; then
     ok "§5.14 names the probe-first receipt path"
@@ -3923,14 +3936,11 @@ else
   else
     bad "§5.14 is missing probe reference(s):$p_missing"
   fi
-  # Codex was measured on 2026-09-02, so demanding "unknown" of its row now
-  # asks the document to be wrong. What the invariant is actually for is the
-  # row whose probe has *not* run: OpenCode, still pending P-6. (A50-6 below
-  # keeps the no-premature-claim half of the rule for the Codex row.)
-  if printf '%s' "$sec5_14" | grep -q 'OpenCode | .*unknown (pending P-6)'; then
-    ok "§5.14 OpenCode row stays unknown pending its probe"
+  if printf '%s' "$sec5_14" | grep 'OpenCode |' | grep -q 'parentID.*same SID' \
+    && printf '%s' "$sec5_14" | grep 'OpenCode |' | grep -q 'Busy, question, permission, child, ambiguous history or SID change cannot consume'; then
+    ok "§5.14 OpenCode receipt keeps exact parent and busy/unknown safeguards"
   else
-    bad "§5.14 OpenCode row should read unknown pending its probe"
+    bad "§5.14 OpenCode receipt must preserve exact identity and uncertain activity"
   fi
   if printf '%s' "$sec5_14" | grep -A2 'Codex |' | grep -qi 'supported'; then
     bad "§5.14 Codex row asserts a capability ('supported') ahead of its probe (A50-6)"

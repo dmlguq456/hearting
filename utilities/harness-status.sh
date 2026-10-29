@@ -23,128 +23,29 @@ sid=${2:-agent-status}
 adapter=${AGENT_ADAPTER:-portable}
 self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
-if [ -d "$cwd" ]; then
-  cwd=$(CDPATH= cd -- "$cwd" && pwd -P)
-fi
-
+# Lexical native cwd only. All Git/path discovery belongs to the finite
+# shared refresh, never to the status/prompt renderer.
 printf 'adapter=%s\n' "$adapter"
 printf 'runtime_surface=adapter-owned-harness-status\n'
 printf 'status=ok\n'
 printf 'cwd=%s\n' "$cwd"
 
-project_root=""
-if command -v git >/dev/null 2>&1 && git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  project_root=$(git -C "$cwd" rev-parse --show-toplevel 2>/dev/null || true)
-fi
-
-search_root=${project_root:-$cwd}
-# The resolver refuses to name a writable root inside an immutable installed
-# source tree. This is a read-only status snapshot under `set -e`, so report the
-# unresolved root instead of aborting the whole surface on that typed refusal.
-if artifact_root=$("$self_dir/artifact-root.sh" "$search_root" 2>/dev/null); then
-  artifact_kind=$(basename "$artifact_root")
-else
-  artifact_root=""
-  artifact_kind=""
-fi
-
-if [ -d "$artifact_root" ]; then
-  printf 'artifact_root=%s\n' "$artifact_root"
-  printf 'artifact_root_kind=%s\n' "$artifact_kind"
-  printf 'artifact_root_exists=1\n'
-else
-  printf 'artifact_root=%s\n' "$artifact_root"
-  printf 'artifact_root_kind=%s\n' "$artifact_kind"
-  printf 'artifact_root_exists=0\n'
-fi
-
-if [ -n "${AGENT_ARTIFACT_ROOT:-}" ]; then
-  artifact_scope=explicit
-elif [ -n "$project_root" ] && [ "$(dirname "$artifact_root")" != "$project_root" ]; then
-  artifact_scope=primary-worktree
-else
-  artifact_scope=project-local
-fi
-printf 'artifact_root_scope=%s\n' "$artifact_scope"
+git_repo=unknown; git_root=unknown
+git_dirty_tracked=unknown; git_untracked=unknown; git_extra_worktrees=unknown
+git_artifact_root=unknown; git_artifact_root_kind=unknown
+git_artifact_root_exists=unknown; git_artifact_root_scope=unknown
+observation=$(python3 "$self_dir/../tools/fleet/gitinfo.py" --display shell "$cwd" 2>/dev/null) || observation=""
+# Values are shell-quoted by the shared reader, including untrusted path names.
+eval "$observation"
+for key in repo root gitdir common branch detached operation dirty dirty_tracked untracked dirty_total worktree_count extra_worktrees upstream ahead behind default_branch branch_done merged observed_at completed_at observation; do
+  eval 'value=${git_'"$key"':-unknown}'
+  printf 'git_%s=%s\n' "$key" "$value"
+done
+printf 'artifact_root=%s\n' "$git_artifact_root"
+printf 'artifact_root_kind=%s\n' "$git_artifact_root_kind"
+printf 'artifact_root_exists=%s\n' "$git_artifact_root_exists"
+printf 'artifact_root_scope=%s\n' "$git_artifact_root_scope"
 printf 'artifact_write_target=canonical-only\n'
-
-if [ -n "$project_root" ]; then
-  printf 'git_repo=1\n'
-  printf 'git_root=%s\n' "$project_root"
-  branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null || true)
-  if [ -n "$branch" ]; then
-    printf 'git_branch=%s\n' "$branch"
-    printf 'git_detached=0\n'
-  else
-    printf 'git_branch=DETACHED\n'
-    printf 'git_detached=1\n'
-  fi
-  porcelain=$(git -C "$cwd" status --porcelain 2>/dev/null || true)
-  git_dirty_tracked=$(printf '%s\n' "$porcelain" | awk 'NF && $1!="??"{c++} END{print c+0}')
-  git_untracked=$(printf '%s\n' "$porcelain" | awk '$1=="??"{c++} END{print c+0}')
-  git_dirty_total=$((git_dirty_tracked + git_untracked))
-  if [ "$git_dirty_total" -gt 0 ]; then
-    printf 'git_dirty=1\n'
-  else
-    printf 'git_dirty=0\n'
-  fi
-  printf 'git_dirty_tracked=%s\n' "$git_dirty_tracked"
-  printf 'git_untracked=%s\n' "$git_untracked"
-  printf 'git_dirty_total=%s\n' "$git_dirty_total"
-
-  worktree_count=$(git -C "$cwd" worktree list --porcelain 2>/dev/null | awk '$1=="worktree"{c++} END{print c+0}')
-  printf 'git_worktree_count=%s\n' "${worktree_count:-0}"
-  if [ "${worktree_count:-0}" -gt 1 ] 2>/dev/null; then
-    printf 'git_extra_worktrees=%s\n' $((worktree_count - 1))
-  else
-    printf 'git_extra_worktrees=0\n'
-  fi
-
-  gitdir=$(git -C "$cwd" rev-parse --absolute-git-dir 2>/dev/null || git -C "$cwd" rev-parse --git-dir 2>/dev/null || true)
-  case "$gitdir" in
-    /*) ;;
-    "") ;;
-    *) gitdir="$project_root/$gitdir" ;;
-  esac
-  git_operation=none
-  if [ -n "$gitdir" ]; then
-    [ -f "$gitdir/MERGE_HEAD" ] && git_operation=merge
-    if [ -d "$gitdir/rebase-merge" ] || [ -d "$gitdir/rebase-apply" ]; then
-      git_operation=rebase
-    fi
-    [ -f "$gitdir/CHERRY_PICK_HEAD" ] && git_operation=cherry-pick
-  fi
-  printf 'git_operation=%s\n' "$git_operation"
-
-  # Upstream divergence + dead-branch risk: a branch with an upstream and zero
-  # commits ahead is fully merged/up-to-date — editing on it directly is the
-  # DONE-BRANCH hazard (branch first). Reported so adapters can warn before edits.
-  upstream=$(git -C "$cwd" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)
-  if [ -n "$upstream" ]; then
-    printf 'git_upstream=%s\n' "$upstream"
-    counts=$(git -C "$cwd" rev-list --left-right --count "$upstream...HEAD" 2>/dev/null || true)
-    git_behind=$(printf '%s' "$counts" | awk '{print $1+0}')
-    git_ahead=$(printf '%s' "$counts" | awk '{print $2+0}')
-    printf 'git_ahead=%s\n' "${git_ahead:-0}"
-    printf 'git_behind=%s\n' "${git_behind:-0}"
-    # DONE-BRANCH risk: a non-default topic branch fully merged (0 ahead) is dead —
-    # branch first before editing. Default branches up-to-date are not "done".
-    case "$branch" in
-      main|master|develop|trunk|"") is_default_branch=1 ;;
-      *) is_default_branch=0 ;;
-    esac
-    if [ "${git_ahead:-0}" = "0" ] && [ "$git_operation" = "none" ] && [ "$is_default_branch" = "0" ]; then
-      printf 'git_branch_done=1\n'
-    else
-      printf 'git_branch_done=0\n'
-    fi
-  else
-    printf 'git_upstream=none\n'
-    printf 'git_branch_done=0\n'
-  fi
-else
-  printf 'git_repo=0\n'
-fi
 
 sibling_worktree=0
 sibling_slug=""
