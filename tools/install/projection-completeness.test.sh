@@ -47,6 +47,7 @@ mkdir -p "$PACKAGED_SOURCE"
 git -C "$ROOT" archive --format=tar HEAD > "$TMP/packaged-source.tar"
 tar -xf "$TMP/packaged-source.tar" -C "$PACKAGED_SOURCE"
 for changed_file in \
+  tools/install/installer.py \
   tools/install/runtime_activation.py \
   tools/install/projector.py \
   tools/install/drivers/opencode.py \

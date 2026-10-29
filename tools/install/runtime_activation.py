@@ -2911,11 +2911,30 @@ def _restore(records: List[dict]) -> None:
         except safe_fs.SafetyError as exc:
             raise ActivationError(str(exc)) from exc
         if current == preimage:
+            record["postimage"] = current.public()
             continue
         if current != postimage:
             raise ActivationError(
                 f"concurrent-successor: rollback preserves changed target: {dest}"
             )
+        if state == "copied" and Path(record["backup"]).is_file():
+            # Keep the restoration's own identity for an enclosing invocation.
+            # Re-reading dest after copying could instead adopt a successor.
+            backup = Path(record["backup"])
+            try:
+                auth = safe_fs.authority(
+                    dest, owner="runtime-activation:journal-file-restore",
+                    allowed_paths=(dest,), allow_leaf_symlink=True,
+                    expected=current,
+                )
+                restored = safe_fs.atomic_write_bytes(
+                    auth, backup.read_bytes(), backup.stat().st_mode & 0o777,
+                    create_parents=True,
+                )
+            except safe_fs.SafetyError as exc:
+                raise ActivationError(str(exc)) from exc
+            record["postimage"] = restored.public()
+            continue
         if state == "moved" and not Path(record["backup"]).exists():
             # Journal was flushed before the move and the process died between
             # those two operations.  The original destination is still intact.
@@ -3214,6 +3233,7 @@ def _apply_transaction(
     source_roots: Sequence[Path] = (),
     protected_paths: Sequence[Path] = (),
     commit_callback=None,
+    transaction_snapshot: Optional[dict] = None,
 ) -> List[dict]:
     state_dir = paths.harness_state_dir(runtime, scope)
     tx_root = state_dir / "transactions" / uuid.uuid4().hex
@@ -3245,6 +3265,14 @@ def _apply_transaction(
         for dest in protected_paths:
             _ensure_owned_destination(runtime, dest, scope)
             record = _copy_snapshot(dest, backup_root, len(snapshots))
+            outer = next((item for item in (transaction_snapshot or {}).get("records", [])
+                          if item["dest"] == str(dest) and "_postimage" in item), None)
+            if outer is not None and (
+                safe_fs.PathState.from_public(record["preimage"]) != outer["_postimage"]
+            ):
+                # A journal preimage observed after invocation capture is not
+                # a mutation this invocation owns. Do not admit or hand it back.
+                raise ActivationError(f"concurrent-successor: invocation target changed: {dest}")
             record["postimage"] = record["preimage"]
             snapshots.append(record)
             _write_journal(journal_path, runtime, "preparing", snapshots)
@@ -3431,6 +3459,19 @@ def _apply_transaction(
         _restore(snapshots)
         shutil.rmtree(tx_root, ignore_errors=True)
         raise
+    finally:
+        # Mutation-tracked invocation leaves consume the journal's authority,
+        # including a restoration's postimage or a refused successor. Other
+        # leaves retain the existing invocation sealing contract.
+        for outer in (transaction_snapshot or {}).get("records", []):
+            if "_postimage" not in outer:
+                continue
+            record = next((item for item in snapshots
+                           if item["dest"] == outer["dest"]), None)
+            if record is not None:
+                postimage = safe_fs.PathState.from_public(record["postimage"])
+                outer["_postimage"] = postimage
+                outer["postimage"] = postimage.public()
 
     shutil.rmtree(tx_root, ignore_errors=True)
     return changed
@@ -3677,6 +3718,11 @@ def capture_runtime_state(
             record["_preimage"] = safe_fs.capture_state(
                 dest
             )
+            if runtime == "opencode" and dest == manifest._manifest_path(runtime, scope):
+                # Only the handover journal may advance this receipt's state.
+                # In particular, failure sealing must not adopt live user bytes.
+                record["_postimage"] = record["_preimage"]
+                record["postimage"] = record["_preimage"].public()
             records.append(record)
         for dest in full_copy_paths:
             key = str(dest)
@@ -3712,11 +3758,13 @@ def capture_runtime_state(
 
 
 def seal_runtime_state(snapshot: dict) -> None:
-    """Seal exact postimages while the invocation locks remain held."""
+    """Seal untracked leaves under invocation locks; retain mutation postimages."""
 
     if snapshot.get("_sealed"):
         return
     for record in snapshot["records"]:
+        if "_postimage" in record:
+            continue
         postimage = safe_fs.capture_state(
             Path(record["dest"]),
             exclude_names=record.get("preserve_names") or (),
@@ -3735,29 +3783,36 @@ def restore_runtime_state(snapshot: dict) -> None:
     if not snapshot.get("_sealed"):
         raise ActivationError("ownership-unproved: runtime snapshot postimage is not sealed")
     restore_records = []
-    for record in snapshot["records"]:
-        dest = Path(record["dest"])
-        _ensure_owned_destination(runtime, dest, scope)
-        current = safe_fs.capture_state(
-            dest, exclude_names=record.get("preserve_names") or ()
-        )
-        preimage = record.get("_preimage")
-        postimage = record.get("_postimage")
-        if not isinstance(preimage, safe_fs.PathState) or not isinstance(
-            postimage, safe_fs.PathState
-        ):
-            raise ActivationError(
-                f"ownership-unproved: runtime snapshot state is incomplete: {dest}"
-            )
-        if current == preimage:
-            continue
-        if current != postimage:
-            raise ActivationError(
-                f"concurrent-successor: runtime rollback preserves changed target: {dest}"
-            )
-        restore_records.append(record)
+    successors = []
     try:
+        for record in snapshot["records"]:
+            dest = Path(record["dest"])
+            _ensure_owned_destination(runtime, dest, scope)
+            current = safe_fs.capture_state(
+                dest, exclude_names=record.get("preserve_names") or ()
+            )
+            preimage = record.get("_preimage")
+            postimage = record.get("_postimage")
+            if not isinstance(preimage, safe_fs.PathState) or not isinstance(
+                postimage, safe_fs.PathState
+            ):
+                raise ActivationError(
+                    f"ownership-unproved: runtime snapshot state is incomplete: {dest}"
+                )
+            if current == preimage:
+                continue
+            if current != postimage:
+                successors.append(str(dest))
+                continue
+            restore_records.append(record)
+        # A changed leaf remains untouched without stranding independently
+        # proved rollback records, including the invocation's transaction tree.
         _restore(restore_records)
+        if successors:
+            raise ActivationError(
+                "concurrent-successor: runtime rollback preserves changed target: "
+                + "; ".join(successors)
+            )
     finally:
         locks = snapshot.get("_locks")
         if isinstance(locks, safe_fs.TargetLocks):
@@ -3871,6 +3926,8 @@ def activate(
     mode: str,
     source: Optional[str] = None,
     scope: str = "global",
+    *,
+    transaction_snapshot: Optional[dict] = None,
 ) -> dict:
     if runtime not in RUNTIMES:
         raise ActivationError(f"unsupported runtime: {runtime}")
@@ -4057,6 +4114,7 @@ def activate(
         source_roots=(source_root, active_root),
         protected_paths=_activation_protected_paths(runtime, scope),
         commit_callback=commit_state,
+        transaction_snapshot=transaction_snapshot,
     )
     retired_memory_state.retire()  # distiller-era state files, once; silent
     report = status(runtime, scope)
@@ -4325,12 +4383,15 @@ def reconnect_resource_observers(active_root: str | Path) -> bool:
         return False
 
 
-def refresh(runtime: str, scope: str = "global") -> dict:
+def refresh(
+    runtime: str, scope: str = "global", *, transaction_snapshot: Optional[dict] = None
+) -> dict:
     _validate_scope(runtime, scope)
     state = _load_json(_state_path(runtime, scope))
     if state is None:
         raise ActivationError(f"{runtime} has no activation state")
-    return activate(runtime, state["mode"], state["source_root"], scope)
+    return activate(runtime, state["mode"], state["source_root"], scope,
+                    transaction_snapshot=transaction_snapshot)
 
 
 def _unmerge_claude_settings(

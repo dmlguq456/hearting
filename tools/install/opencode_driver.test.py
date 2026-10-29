@@ -577,7 +577,8 @@ class OpenCodeGuardProjectionTest(unittest.TestCase):
                 self.assertEqual({key: path.read_bytes() for key, path in case.receipt_paths().items()}, before)
                 snapshot = runtime_activation.capture_runtime_state("opencode", str(case.source))
                 try:
-                    runtime_activation.activate("opencode", mode, str(case.source))
+                    runtime_activation.activate("opencode", mode, str(case.source),
+                                                transaction_snapshot=snapshot)
                     runtime_activation.seal_runtime_state(snapshot)
                     runtime_activation.restore_runtime_state(snapshot)
                     self.assertEqual({key: path.read_bytes() for key, path in case.receipt_paths().items()}, before)
@@ -606,6 +607,151 @@ class OpenCodeGuardProjectionTest(unittest.TestCase):
                 runtime_activation.activate("opencode", "packaged", str(self.source))
         self.assertEqual(manifest_path.read_bytes(), successor[0])
         self.assertNotEqual(self.manifest()["files"], old_files)
+
+    def public_runtime_args(self, command, mode):
+        import installer
+        argv = ["runtime", command, "--runtime", "opencode", "--json"]
+        if command == "activate":
+            argv.extend(["--mode", mode, "--source", str(self.source)])
+        return installer.build_parser().parse_args(argv)
+
+    def prepare_public_handover(self, command, mode):
+        import runtime_activation
+        self.assertFalse(self.driver.install()["blocked"])
+        if command == "refresh":
+            runtime_activation.activate("opencode", mode, str(self.source))
+            # An exact legacy receipt alongside an existing activation: refresh
+            # must retire this authority in the same transaction as activate.
+            data = self.manifest()
+            data["files"]["plugins/hearting-guards/index.ts"] = hashlib.sha256(
+                self.package.read_bytes()).hexdigest()
+            self.receipt_paths()["manifest"].write_text(json.dumps(data))
+
+    def test_public_handover_failure_preserves_manifest_successors(self):
+        import installer
+        import runtime_activation
+        for command, mode, boundary in (
+            (command, mode, boundary)
+            for command in ("activate", "refresh")
+            for mode in ("linked", "packaged")
+            for boundary in ("captured-snapshot", "state-write", "restored-file")
+        ):
+            with self.subTest(command=command, mode=mode, boundary=boundary), self.receipt_scenario("first") as case:
+                case.prepare_public_handover(command, mode)
+                manifest_path = case.receipt_paths()["manifest"]
+                original = runtime_activation._atomic_json
+                write = runtime_activation.safe_fs.atomic_write_bytes
+                successors = []
+                captured = []
+                capture = runtime_activation.capture_runtime_state
+
+                def capture_snapshot(*args, **kwargs):
+                    snapshot = capture(*args, **kwargs)
+                    captured.append(snapshot)
+                    if boundary == "captured-snapshot":
+                        successors.append(case.write_successor("manifest"))
+                    return snapshot
+
+                def fail_state(path, data):
+                    if path == runtime_activation._state_path("opencode"):
+                        self.assertNotIn("plugins/hearting-guards/index.ts", case.manifest()["files"])
+                        if boundary == "state-write":
+                            successors.append(case.write_successor("manifest"))
+                        raise OSError("state failure after user manifest successor")
+                    return original(path, data)
+
+                def write_then_successor(auth, *args, **kwargs):
+                    postimage = write(auth, *args, **kwargs)
+                    if (boundary == "restored-file" and auth.target == manifest_path
+                            and auth.owner == "runtime-activation:journal-file-restore"):
+                        successors.append(case.write_successor("manifest"))
+                    return postimage
+
+                with mock.patch.object(runtime_activation, "_atomic_json", side_effect=fail_state), \
+                     mock.patch.object(runtime_activation, "capture_runtime_state", side_effect=capture_snapshot), \
+                     mock.patch.object(runtime_activation.safe_fs, "atomic_write_bytes", side_effect=write_then_successor):
+                    result = installer.cmd_runtime(case.public_runtime_args(command, mode))
+                self.assertEqual(result["exit"], installer.EXIT_BLOCKED, result)
+                self.assertEqual(len(successors), 1)
+                self.assertEqual(manifest_path.read_bytes(), successors[0])
+                self.assertIn("concurrent-successor", "\n".join(result["lines"]))
+                self.assertTrue(captured)
+                for snapshot in captured:
+                    self.assertIsNone(snapshot["_locks"])
+                    self.assertFalse(Path(snapshot["root"]).exists())
+                self.assertFalse(list((case.home / ".harness/transactions").glob("*")))
+                if command == "refresh":
+                    with mock.patch.object(runtime_activation, "reconnect_peer_obligations"), \
+                         mock.patch.object(runtime_activation, "reconnect_resource_observers"), \
+                         mock.patch.object(installer.bootstrap, "restore_memory", return_value={"action": "skipped", "detail": "fixture"}):
+                        retry = installer.cmd_runtime(case.public_runtime_args(command, mode))
+                    self.assertEqual(retry["exit"], 0, retry)
+                    self.assertEqual(manifest_path.read_bytes(), successors[0])
+
+    def test_public_handover_state_failure_restores_receipts_and_retries(self):
+        import installer
+        import runtime_activation
+        for command in ("activate", "refresh"):
+            for mode in ("linked", "packaged"):
+                with self.subTest(command=command, mode=mode), self.receipt_scenario("first") as case:
+                    case.prepare_public_handover(command, mode)
+                    before = {key: path.read_bytes() for key, path in case.receipt_paths().items()}
+                    state_path = runtime_activation._state_path("opencode")
+                    old_state = state_path.read_bytes() if state_path.exists() else None
+                    original = runtime_activation._atomic_json
+                    captured = []
+                    capture = runtime_activation.capture_runtime_state
+
+                    def capture_snapshot(*args, **kwargs):
+                        snapshot = capture(*args, **kwargs)
+                        captured.append(snapshot)
+                        return snapshot
+
+                    def fail_state(path, data):
+                        if path == state_path:
+                            raise OSError("public handover state failure")
+                        return original(path, data)
+
+                    with mock.patch.object(runtime_activation, "_atomic_json", side_effect=fail_state), \
+                         mock.patch.object(runtime_activation, "capture_runtime_state", side_effect=capture_snapshot):
+                        with self.assertRaisesRegex(OSError, "public handover state failure"):
+                            installer.cmd_runtime(case.public_runtime_args(command, mode))
+                    self.assertEqual({key: path.read_bytes() for key, path in case.receipt_paths().items()}, before)
+                    self.assertEqual(state_path.read_bytes() if state_path.exists() else None, old_state)
+                    self.assertFalse(list((case.home / ".harness/transactions").glob("*")))
+                    for snapshot in captured:
+                        self.assertIsNone(snapshot["_locks"])
+                        self.assertFalse(Path(snapshot["root"]).exists())
+                    # All projection and post-activation work use the real public
+                    # path; reconnect/memory are independent best-effort duties.
+                    with mock.patch.object(runtime_activation, "reconnect_peer_obligations"), \
+                         mock.patch.object(runtime_activation, "reconnect_resource_observers"), \
+                         mock.patch.object(installer.bootstrap, "restore_memory", return_value={"action": "skipped", "detail": "fixture"}):
+                        retry = installer.cmd_runtime(case.public_runtime_args(command, mode))
+                    self.assertEqual(retry["exit"], 0, retry)
+                    self.assertNotIn("plugins/hearting-guards/index.ts", case.manifest()["files"])
+                    self.assertFalse(case.js.exists())
+
+    def test_public_multi_runtime_failure_restores_completed_handover(self):
+        import installer
+        import runtime_activation
+        for mode in ("linked", "packaged"):
+            with self.subTest(mode=mode), self.receipt_scenario("unchanged") as case:
+                before = {key: path.read_bytes() for key, path in case.receipt_paths().items()}
+                args = case.public_runtime_args("activate", mode)
+                # This source intentionally has no Claude adapter. The public
+                # invocation commits OpenCode, then fails the second runtime.
+                args.runtime.append("claude")
+                result = installer.cmd_runtime(args)
+                self.assertEqual(result["exit"], installer.EXIT_BLOCKED, result)
+                self.assertEqual(result["runtimes"][0]["runtime"], "opencode")
+                self.assertTrue(result["runtimes"][0]["rolled_back"])
+                self.assertFalse(any("rollback errors:" in line for line in result["lines"]), result)
+                self.assertEqual({key: path.read_bytes() for key, path in case.receipt_paths().items()}, before)
+                for runtime in ("opencode", "claude"):
+                    self.assertFalse(runtime_activation._state_path(runtime).exists())
+                    transactions = runtime_activation.paths.harness_state_dir(runtime) / "transactions"
+                    self.assertFalse(list(transactions.glob("*")))
 
     def test_legacy_handover_clean_deactivate_and_uninstall(self):
         import runtime_activation
