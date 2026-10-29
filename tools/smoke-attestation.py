@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Create and verify content-bound smoke attestations before expensive lab runs."""
-import argparse, hashlib, json, re, subprocess, sys
+import argparse, hashlib, json, os, re, subprocess, sys
 from pathlib import Path
+
+UTILITIES = Path(__file__).resolve().parents[1] / "utilities"
+if str(UTILITIES) not in sys.path:
+    sys.path.insert(0, str(UTILITIES))
+import resource_execution_environment as RESOURCE_ENV
 
 def digest(path):
     path=Path(path)
@@ -18,7 +23,11 @@ def _verify_config_manifest(path):
         raise ValueError("config manifest failed verification: " + result.stderr.strip())
 
 def payload(paths, command, cwd, config_manifest=None):
-    data = {"schema_version":1,"cwd":str(Path(cwd).resolve(strict=True)),"command":command}
+    execution_environment = RESOURCE_ENV.execution_identity(command, cwd, environ=os.environ)
+    if not RESOURCE_ENV.valid_execution_identity(execution_environment):
+        raise ValueError("smoke execution environment is not parseable")
+    data = {"schema_version":1,"cwd":str(Path(cwd).resolve(strict=True)),"command":command,
+            "execution_environment":execution_environment}
     input_rows = [{"path":str(Path(p).resolve(strict=True)),"sha256":digest(p)} for p in paths]
     if config_manifest:
         # Full rule 1-8 contract first (schema, hashes, in-situ location); this
@@ -54,6 +63,9 @@ def verify(data):
     bare={k:v for k,v in data.items() if k!="attestation_hash"}
     actual="sha256:"+hashlib.sha256(json.dumps(bare,sort_keys=True,separators=(",",":")).encode()).hexdigest()
     if claimed!=actual: raise ValueError("attestation hash mismatch")
+    if ("execution_environment" in data
+            and not RESOURCE_ENV.valid_execution_identity(data["execution_environment"])):
+        raise ValueError("smoke execution environment is invalid")
     for row in data["inputs"]:
         if not Path(row["path"]).exists() or digest(row["path"])!=row["sha256"]: raise ValueError("stale smoke input: "+row["path"])
     present = [k for k in CONFIG_KEYS if k in data]
@@ -91,6 +103,17 @@ def verify(data):
                 "distinct input row carrying the config hash beside the "
                 "source row")
     if data.get("status")!="passed" or data.get("exit_code")!=0: raise ValueError("smoke did not pass")
+    return True
+
+
+def verify_execution_environment(data, command, cwd, *, environ=None, remote=None):
+    """Require a new launch to use the environment identity captured by smoke."""
+    recorded = data.get("execution_environment") if isinstance(data, dict) else None
+    if not RESOURCE_ENV.valid_execution_identity(recorded):
+        raise ValueError("smoke execution environment is unbound")
+    current = RESOURCE_ENV.execution_identity(command, cwd, environ=environ, remote=remote)
+    if not RESOURCE_ENV.valid_execution_identity(current) or current != recorded:
+        raise ValueError("smoke execution environment mismatch")
     return True
 
 def _route_defaults(argv):

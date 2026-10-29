@@ -4,6 +4,7 @@ import argparse, contextlib, fcntl, hashlib, importlib.util, json, os, re, selec
 from pathlib import Path
 import resource_resume as RESOURCE_RESUME
 import resource_run_evidence as RUN_EVIDENCE
+import resource_execution_environment as RESOURCE_ENV
 from resource_progress import environment as progress_environment
 import gpu_leases
 import route_authority
@@ -161,56 +162,8 @@ def launch_request(args):
 
 
 def _resource_payload_env(argv):
-    """Return explicit env assignments carried by the launched argv."""
-    import shlex
-
-    tokens = list(argv)
-    has_env = False
-    if tokens and Path(tokens[0]).name == "env":
-        tokens = tokens[1:]
-        has_env = True
-    elif len(tokens) >= 3 and Path(tokens[0]).name in {"bash", "sh"} and tokens[1] == "-c":
-        try:
-            tokens = shlex.split(tokens[2])
-        except ValueError:
-            return None
-        if tokens and tokens[0] == "exec":
-            tokens = tokens[1:]
-        if tokens and Path(tokens[0]).name == "env":
-            tokens = tokens[1:]
-            has_env = True
-    environment = {"inherit": True, "unset": [], "set": {}}
-    if not has_env:
-        return environment
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token == "--":
-            break
-        if token in {"-i", "--ignore-environment"}:
-            environment["inherit"] = False
-            index += 1
-            continue
-        if token in {"-u", "--unset"}:
-            if index + 1 >= len(tokens):
-                return None
-            environment["unset"].append(tokens[index + 1])
-            index += 2
-            continue
-        if isinstance(token, str) and token.startswith("--unset="):
-            environment["unset"].append(token.split("=", 1)[1])
-            index += 1
-            continue
-        if not isinstance(token, str) or "=" not in token:
-            break
-        name, value = token.split("=", 1)
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-            if token.startswith("-"):
-                return None
-            break
-        environment["set"][name] = value
-        index += 1
-    return environment
+    """Portable wrapper for the shared payload env parser."""
+    return RESOURCE_ENV.payload_environment(argv)
 
 
 def _resource_payload_tokens(argv):
@@ -497,6 +450,8 @@ def resource_operation_binding(route, route_file, node, run_id, command, cwd,
     if compute_hosts is not None:
         payload_argv = list(compute_hosts.command)
         payload_cwd = compute_hosts.cwd
+        remote_environment = {"host": compute_hosts.host, "env": compute_hosts.env,
+                             "cwd": compute_hosts.cwd, "command": payload_argv}
         shell_environment = _resource_payload_env(payload_argv)
         if shell_environment is None:
             return None
@@ -521,9 +476,14 @@ def resource_operation_binding(route, route_file, node, run_id, command, cwd,
             return None
         payload_argv = compute_argv
         payload_cwd = str(Path(cwd).resolve(strict=True))
+        remote_environment = None
         payload_environment = _resource_payload_env(payload_argv)
         if payload_environment is None:
             return None
+    execution_environment = RESOURCE_ENV.execution_identity(
+        payload_argv, payload_cwd, environ=os.environ, remote=remote_environment)
+    if not RESOURCE_ENV.valid_execution_identity(execution_environment):
+        return None
 
     command_record = None
     command_record_path = None
@@ -670,7 +630,9 @@ def resource_operation_binding(route, route_file, node, run_id, command, cwd,
                              for name in ("smoke_attestation", "config_manifest")}
     resolved_cwd = str(Path(cwd).resolve(strict=True))
     payload_binding = {"argv": stable_argv, "cwd": payload_cwd,
-                       "environment": payload_environment, "input_hashes": input_hashes}
+                       "environment": payload_environment,
+                       "execution_environment": execution_environment,
+                       "input_hashes": input_hashes}
     operation_body = {"route_id": route["route_id"], "route_hash": route["route_hash"],
         "node": node, "command": stable_command,
         "cwd": resolved_cwd,
@@ -691,6 +653,7 @@ def resource_operation_binding(route, route_file, node, run_id, command, cwd,
                 "environment_sha256": hashlib.sha256(json.dumps(
                     payload_environment, sort_keys=True, separators=(",", ":"),
                     ensure_ascii=False).encode("utf-8")).hexdigest(),
+                "execution_environment": execution_environment,
                 "input_hashes": input_hashes},
             "input": {**input_binding, "state": "turn-completed"},
             "route_plan_digest": plan_digest,
@@ -933,6 +896,15 @@ def start_verified(registry, args, route, route_file, placeholder, *, controller
                 registry_path=registry, log_path=placeholder.get("log"))
             if current_operation != placeholder["resource_operation"]:
                 raise ValueError("resource-operation-authorization-changed")
+        launch_inputs = placeholder.get("launch_request") or launch_request(args)
+        if launch_inputs.get("smoke_attestation"):
+            operation = placeholder.get("resource_operation") or {}
+            expected_environment = (operation.get("payload") or {}).get("execution_environment")
+            if expected_environment is None:
+                expected_environment = RESOURCE_ENV.execution_identity(
+                    placeholder["command"], placeholder["cwd"], environ=os.environ)
+            verify_smoke_execution_environment(launch_inputs["smoke_attestation"],
+                                               expected_environment)
         if ledger and sup.resource_continuation_cancelled(route, ledger):
             raise ValueError("resource-parent-close-requested")
         history_pairs = sup.resource_predecessors(ledger, args.node) if ledger else []
@@ -1823,6 +1795,22 @@ def verify_launch_input(command, **kwargs):
         print(result.stderr, file=sys.stderr, end="")
 
 
+def verify_smoke_execution_environment(attestation_path, expected_environment):
+    """Bind smoke inputs to the environment the controller will actually run."""
+    if not attestation_path:
+        return
+    try:
+        data = json.loads(Path(attestation_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError) as error:
+        raise ValueError("smoke-execution-environment-unreadable") from error
+    recorded = data.get("execution_environment") if isinstance(data, dict) else None
+    if not RESOURCE_ENV.valid_execution_identity(recorded):
+        raise ValueError("smoke-execution-environment-unbound")
+    if (not RESOURCE_ENV.valid_execution_identity(expected_environment)
+            or recorded != expected_environment):
+        raise ValueError("smoke-execution-environment-mismatch")
+
+
 def settle_queued_validation_failure(controller, error):
     """Only this leased launcher's unchanged pre-claim request proves no payload ran."""
     expected = controller.expected
@@ -2192,6 +2180,16 @@ def _main(argv=None, *, controller=None):
                     operation = None
                 if operation is not None:
                     placeholder["resource_operation"] = operation
+        if args.smoke_attestation:
+            operation = placeholder.get("resource_operation") or {}
+            expected_environment = (operation.get("payload") or {}).get("execution_environment")
+            if expected_environment is None:
+                expected_environment = RESOURCE_ENV.execution_identity(command, cwd, environ=os.environ)
+            try:
+                verify_smoke_execution_environment(args.smoke_attestation,
+                                                   expected_environment)
+            except ValueError as error:
+                fail(str(error))
         if controller is not None and (not owner_wait or owner_wait.get("launch_scope") != "codex-owner-controller"):
             fail("resource-controller-scope-invalid")
         if resume or owner_wait:

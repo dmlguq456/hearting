@@ -54,6 +54,18 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
     _resume_fixture = FIX.TestSupervisorAdvance._resume_fixture
     _settle_resource_owner = FIX.TestSupervisorAdvance._settle_resource_owner
 
+    def write_smoke_attestation(self, path, command, cwd, inputs=()):
+        smoke_spec = importlib.util.spec_from_file_location(
+            'resource_sequence_smoke_fixture', ROOT / 'tools' / 'smoke-attestation.py')
+        smoke_tool = importlib.util.module_from_spec(smoke_spec)
+        smoke_spec.loader.exec_module(smoke_tool)
+        data = smoke_tool.payload(inputs, command, cwd)
+        data.update(status='passed', exit_code=0)
+        data['attestation_hash'] = 'sha256:' + hashlib.sha256(json.dumps(
+            data, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        Path(path).write_text(json.dumps(data, sort_keys=True))
+        return Path(path)
+
     def fixture(self, *, multistage=False):
         if multistage:
             def compile_multistage(capability, capability_mode, cwd, signals):
@@ -1034,7 +1046,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                          request['resume_checkpoint_sha256'])
 
         smoke = self.base / 'fixed-public-smoke.json'
-        smoke.write_text('{"fixture": true}\n')
+        self.write_smoke_attestation(smoke, request['compute_argv'], self.base)
         smoke_hash = hashlib.sha256(smoke.read_bytes()).hexdigest()
         request.update(smoke_attestation=str(smoke), smoke_attestation_sha256=smoke_hash)
         request['provenance']['smoke_attestation_sha256'] = smoke_hash
@@ -1232,16 +1244,16 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             f'legacy_fixture_smoke_attestation_{run_id}', ROOT / 'tools' / 'smoke-attestation.py')
         smoke_tool = importlib.util.module_from_spec(smoke_spec)
         smoke_spec.loader.exec_module(smoke_tool)
+        request_path = Path(body['command'][-1])
+        request = json.loads(request_path.read_text())
         smoke_inputs = [self.base / f'{run_id}-config.yaml',
                         self.base / f'{run_id}-data.lock',
                         self.base / f'{run_id}-smoke.json']
-        attestation = smoke_tool.payload(smoke_inputs, body['command'], body['cwd'])
+        attestation = smoke_tool.payload(smoke_inputs, request['compute_argv'], body['cwd'])
         attestation.update(exit_code=0, status='passed')
         attestation['attestation_hash'] = 'sha256:' + hashlib.sha256(json.dumps(
             attestation, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         attestation_path.write_text(json.dumps(attestation, sort_keys=True))
-        request_path = Path(body['command'][-1])
-        request = json.loads(request_path.read_text())
         attestation_hash = hashlib.sha256(attestation_path.read_bytes()).hexdigest()
         request['smoke_attestation'] = str(attestation_path)
         request['smoke_attestation_sha256'] = attestation_hash
@@ -1293,7 +1305,10 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                close_at=None, exit_code=0, wait_for_exit=True):
         import artifact_producer
         runner = SUP.runner()
-        args = SimpleNamespace(jobs=str(jobs), run_id=body['run_id'], node=body['node'])
+        launch = body.get('launch_request') or {}
+        args = SimpleNamespace(jobs=str(jobs), run_id=body['run_id'], node=body['node'],
+            smoke_attestation=launch.get('smoke_attestation'),
+            config_manifest=launch.get('config_manifest'))
         payloads = []
         real_popen = subprocess.Popen
         def popen(*a, **kw):
@@ -2591,8 +2606,8 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         state_path = CONTRACT.dispatch_state_root(jobs) / 'supervisor-state' / f'{owner_attempt}.json'
         WAIT.JOIN.write_supervisor_state(state_path, owner_attempt, set(), phase='running-turn')
         smoke = self.base / 'public-smoke.json'
-        smoke.write_text('{"fixture":true}\n')
         command = [sys.executable, '-c', 'print("public current cpu launch")']
+        self.write_smoke_attestation(smoke, command, self.base)
         import artifact_producer
         runner = SUP.runner()
         payloads = []
@@ -2906,7 +2921,7 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                 'AGENT_DISPATCH_COMPLETION_STATE_FILE': str(state_path),
             })
             smoke = self.base / 'public-smoke.json'
-            smoke.write_text('{"fixture":true}\n')
+            self.write_smoke_attestation(smoke, [sys.executable, '-c', 'pass'], self.base)
             return SimpleNamespace(route=route, path=path, jobs=jobs, registry=registry,
                 output=output, ledger=ledger, owner_attempt=owner_attempt, owner_input=owner_input,
                 state_path=state_path, env=env, smoke=smoke, prior=copy.deepcopy(prior),

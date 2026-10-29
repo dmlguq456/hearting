@@ -1753,6 +1753,13 @@ provenance, uses the same failure judgment. The leased launcher settles its
 unchanged pre-claim request through the existing owner result path, preserving
 input binding and diagnostic. Changed inputs use ordinary smoke verification
 and a distinct retry without locking another session's edits.
+The smoke attestation and the resource launch share a normalized execution
+identity for the selected cwd, interpreter, local environment selectors, and
+compute-host/environment plus explicit remote payload selectors. The launcher
+rechecks that identity before reservation and again at queued controller
+release; a changed or unbound record cannot authorize a new payload. Only the
+small selected environment set is recorded, not ambient secrets. Legacy
+attestations remain readable for observation but cannot authorize a new launch.
 The runner's failure before its private payload fence is released is a finished
 failure, including legacy direct-launch `resource-launch-incomplete` rows with
 no process identity, controller claim or sentinel. One shared judgment settles
