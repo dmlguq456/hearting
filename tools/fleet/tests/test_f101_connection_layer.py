@@ -366,6 +366,8 @@ class LedgerAbsentByteIdenticalTest(unittest.TestCase):
     one approved failure reason; provider matrices remain in JSON. At each captured width only the
     OpenCode usage row changes; all other bytes are kept."""
 
+    # 2026-10-29: the approved Claude account-status header replaces the obsolete
+    # console-only message with `unavailable`; all connection/body bytes stay fixed.
     def _render(self, width):
         with mock.patch("time.time", return_value=1700000000.0):
             # Fixed successful subjects keep this connection-layer golden

@@ -55,8 +55,9 @@ class F51GaugeTest(unittest.TestCase):
 
     def test_context_now_anchor_and_widths(self):
         session = Session(harness="claude", pid=1, cwd="/x", liveness="working",
-                          context=ContextProjection(50, "normal", "x"), summary="NOW",
-                          rl_5h=50, rl_7d=50)
+                          context=ContextProjection(50, "normal", "x"), summary="NOW")
+        snapshots = {"claude": {"payload": {"rl_5h": 50, "rl_7d": 50, "rl_ms": []},
+                                "freshness": "fresh", "observed_at": 1000}}
         for width, layout in ((168, "wide"), (138, "wide"), (100, "narrow"),
                               (60, "stack")):
             with self.subTest(width=width, layout=layout):
@@ -64,10 +65,11 @@ class F51GaugeTest(unittest.TestCase):
                 visible = "".join(value for value, _key in row[0])
                 self.assertEqual(render._dw(visible[:re.search(r"(?:\d+%|—) +(\S)", visible).start(1)]), render._NAME_COL)
                 self.assertLessEqual(render._dw(visible), width)
-                headers = render._usage_header_rows([session], layout=layout)
-                if headers:
-                    self.assertTrue(any(FULL in value or EMPTY in value or "·" in value
-                                        for value, _key in headers[0]))
+                headers = render._usage_header_rows([session], layout=layout, now=1000,
+                                                    usage_snapshots=snapshots)
+                self.assertTrue(headers)
+                self.assertTrue(any(FULL in value or EMPTY in value
+                                    for value, _key in headers[0]))
 
     def test_header_row_is_layout_independent_and_keeps_the_meter_shape(self):
         """Without an explicit viewport, layouts share the same aligned header.
@@ -75,15 +77,18 @@ class F51GaugeTest(unittest.TestCase):
         Normalizing 7d to week adds two cells to the historical 69-cell row;
         the twelve-cell gauge and its quantization remain unchanged.
         """
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=92, rl_7d=30, mtime=1000)
+        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle")
+        snapshots = {"claude": {"payload": {"rl_5h": 92, "rl_7d": 30, "rl_ms": []},
+                                "freshness": "fresh", "observed_at": 1000}}
         texts = set()
         for layout in ("wide", "narrow", "stack"):
-            rows = render._usage_header_rows([session], layout=layout)
+            rows = render._usage_header_rows([session], layout=layout, now=1000,
+                                             usage_snapshots=snapshots)
             self.assertTrue(rows)
             texts.add("".join(v for row in rows for v, _k in row))
         # plain (--once) path: no term_width constraint and no layout at all — same row.
-        texts.add("".join(v for row in render._usage_header_rows([session]) for v, _k in row))
+        texts.add("".join(v for row in render._usage_header_rows(
+            [session], now=1000, usage_snapshots=snapshots) for v, _k in row))
         self.assertEqual(len(texts), 1, "usage header must not vary by layout")
         text = texts.pop()
         n_meters = text.count("[")
@@ -95,9 +100,9 @@ class F51GaugeTest(unittest.TestCase):
         now = 1000
         snapshots = {
             "claude": {"payload": {
-                "windows": [["5h", 12, now + 175 * 60],
-                            ["7d", 59, now + 8639 * 60]],
-                "rl_ms": [["fable", 0]]}},
+                "rl_5h": 12, "rl_7d": 59, "rs_5h": now + 175 * 60,
+                "rs_7d": now + 8639 * 60, "rl_ms": [["fable", 0]]},
+                "freshness": "fresh", "observed_at": now},
             "codex": {"payload": {
                 "windows": [["7d", 12, now + 9738 * 60]]}},
             "opencode": {"payload": {
@@ -153,13 +158,13 @@ class F51GaugeTest(unittest.TestCase):
         F-61 renders the header's red without the alarm bold, so the key is `lvl_r_flat`; the
         threshold that chose red is unchanged and every non-header surface still gets `lvl_r`.
         """
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=92, rl_7d=30, mtime=1000)
-        session._usage_freshness = "stale"
-        row = render._usage_header_rows([session], layout="wide")[0]
+        snapshots = {"claude": {"payload": {"rl_5h": 92, "rl_7d": 30, "rl_ms": []},
+                                "freshness": "stale", "observed_at": 1000}}
+        row = render._usage_header_rows([], layout="wide", now=1200,
+                                       usage_snapshots=snapshots)[0]
         visible = "".join(v for v, _k in row)
-        self.assertTrue(all(len(track) == render._GAUGE_W
-                            for track in re.findall(r"[%s·]+" % re.escape(FULL), visible)))
+        tracks = re.findall(r"\[([%s·]+)" % re.escape(FULL), visible)
+        self.assertEqual([len(track) for track in tracks], [render._GAUGE_W] * 2)
         fill_keys = {k for v, k in row if render._BAR_FULL in v}
         self.assertIn("lvl_r_flat", fill_keys)
         self.assertIn("lvl_g", fill_keys)
@@ -171,16 +176,19 @@ class F51GaugeTest(unittest.TestCase):
         self.assertIn("lvl_r_flat", pct_keys)
         self.assertIn("lvl_g", pct_keys)
 
-    def test_unknown_window_is_dotted_track_and_em_dash(self):
-        """A5: an unknown usage window (no cached value at all) shows `·`×6 track plus a bare
-        `—`, distinct from both the stale window above and the 0% filled-track case."""
+    def test_unknown_window_is_status_without_an_invented_gauge(self):
+        """Unknown account quota stays distinct from an admitted, measured zero."""
         session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=None, rl_7d=None, mtime=1000)
-        session._usage_freshness = "unknown"
-        row = render._usage_header_rows([session], layout="wide")[0]
+                          rl_5h=92, rl_7d=30, mtime=1000)
+        snapshots = {"claude": {"payload": None, "freshness": "unknown",
+                                "observed_at": None, "error_observation": None}}
+        row = render._usage_header_rows([session], layout="wide", now=1000,
+                                       usage_snapshots=snapshots)[0]
         joined = "".join(v for v, _k in row)
-        self.assertIn("·" * render._GAUGE_W, joined)
-        self.assertIn("—", joined)
+        self.assertIn("claude code", joined)
+        self.assertIn("unavailable", joined)
+        self.assertNotIn("[", joined)
+        self.assertNotIn("%", joined)
         self.assertNotIn(render._BAR_FULL, joined)
 
     def test_account_cache_renders_without_a_session_row(self):
@@ -198,15 +206,17 @@ class F51GaugeTest(unittest.TestCase):
         self.assertIn("81%", visible)
         self.assertNotIn("no usage api", visible)
 
-    def test_empty_account_cache_does_not_invent_a_usage_row(self):
+    def test_empty_account_cache_shows_status_without_inventing_quota(self):
         snapshots = {
             "claude": {
-                "payload": {},
+                "payload": {"rl_5h": None, "rl_7d": None, "rl_ms": []},
                 "freshness": "unknown",
                 "observed_at": None,
             },
         }
-        self.assertEqual([], render._usage_header_rows([], usage_snapshots=snapshots))
+        rows = render._usage_header_rows([], now=1000, usage_snapshots=snapshots)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual("".join(v for v, _key in rows[0]), "  usage claude code   unavailable")
 
     def test_codex_week_label_keeps_its_runtime_window_and_blank_5h_slot(self):
         snapshots = {
@@ -281,9 +291,10 @@ class F61UsageBoldTest(unittest.TestCase):
     """F-61: the usage header drops the alarm bold; no other `lvl_r` surface does."""
 
     def _header(self, pct):
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=pct, rl_7d=pct, mtime=1000)
-        return render._usage_header_rows([session], layout="wide")[0]
+        snapshots = {"claude": {"payload": {"rl_5h": pct, "rl_7d": pct, "rl_ms": []},
+                                "freshness": "fresh", "observed_at": 1000}}
+        return render._usage_header_rows([], layout="wide", now=1000,
+                                        usage_snapshots=snapshots)[0]
 
     def test_header_never_emits_the_bold_level_key(self):
         for pct in (0, 30, 49, 50, 79, 80, 92, 100):

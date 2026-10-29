@@ -30,6 +30,25 @@ def model():
 
 
 class RepoColumnTests(unittest.TestCase):
+    def test_compact_repo_route_keeps_open_link_clear_of_worker_identity(self):
+        from tools.fleet.tests.test_explorer_demo import NamelessRepos
+        from unittest import mock
+        with mock.patch("time.time", return_value=1700000000.0):
+            NamelessRepos.setUpClass()
+            models = (ef.demo_model(), NamelessRepos.vm)
+        for vm in models:
+            route = next(r for r in vm.routes if r.get("repo") == "lab-project")
+            state = NavState(scope="repo:lab-project",
+                             folds=(("ropen:repo:lab-project", route["id"]),))
+            frame, trace = ef.trace_draw(draw, vm, state, 80, 45)
+            self.assertEqual(ef.frame_violations(frame, trace, 80, 45), [])
+            link = next(h for h in frame.hits if h.action == ("route", route["id"]))
+            line = frame.text_rows()[link.y]
+            self.assertEqual(line[link.x0:link.x1].strip(), "open ▸")
+            self.assertTrue(line[link.x0].isspace())  # the hit includes the link's leading gap
+            self.assertTrue(any(h.action == ("fold", "ropen:repo:lab-project", route["id"])
+                                for h in frame.hits))
+
     def test_columns_share_width_without_overwrite_and_hits_still_fold(self):
         vm = model()
         for cols in (80, 100, 140, 180, 240, 320):

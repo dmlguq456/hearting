@@ -254,7 +254,7 @@ class ClaudeUsageStatus(unittest.TestCase):
                                   cached_config={}, now=self.NOW)
             self.assertEqual(len(vm.usage), 3)
             for row in vm.usage:
-                if row.get("harness") == "claude":
+                if row.get("key") == "hb_claude":
                     self.assertFalse(any(row["windows"]))
                     continue
                 self.assertEqual(row["windows"][0], ("5h", 0, None))

@@ -412,7 +412,7 @@ def draw_chrome(grid: CellGrid, vm, state, beat=1):
             week = next((window for window in item.get("windows", ())
                          if window and window[0] == "week"), None)
             if week is None:
-                if item.get("harness") == "claude" or annotation:
+                if key == "hb_claude" or item.get("harness") == "claude" or annotation:
                     status = _clip(str(item.get("text", "")), width - 12 - x)
                     x = grid.put(x, 1, status, key, limit=width - 12) + 4
                 continue

@@ -860,6 +860,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
             context_text = ("CTX ·" if body_context.get("context") is None else
                             f"CTX {body_context['context']}%") if body_context is not None else ""
             progress_end = x + use - (9 if link else 0)
+            worker_owner_limit = min(owner_limit, x + use - 6 - gap) if link else owner_limit
             context_x = progress_end - _seg_width(context_text)
             inline_context = body_context is not None and (
                 not slim or context_x - (x + cols["prog"]) >= 10)
@@ -900,12 +901,17 @@ def draw_routes(grid, vm, state, x=34, y=3):
                              "hb_opencode": "version_release"}.get(style, style)
                 elif style == "eff_medium":
                     style = "branch_s"
-                grid.put(cursor, y, text, style, limit=owner_limit)
+                if link and worker_owner_limit < owner_limit:
+                    text = _clip(text, max(0, worker_owner_limit - cursor))
+                grid.put(cursor, y, text, style, limit=worker_owner_limit)
                 from .grid import cell_width
                 cursor += sum(cell_width(char) for char in str(text))
             cursor = x + cols["prog"]
             for text, style in (worker[2] if len(worker) > 2 else ()):
                 if "running" in str(text):
+                    # A clipped initial is neither a readable state nor a blink target.
+                    if worker_progress_end - cursor < len("running"):
+                        break
                     style = route.get("worker_stage_key") or (hue, 1, 0)
                     if worker_running and not getattr(grid, "beat", 1):
                         style = (hue, 0, 1)

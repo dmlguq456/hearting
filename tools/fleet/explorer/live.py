@@ -1593,7 +1593,7 @@ def _claude_usage_unavailable(snapshot, now, *, quota_observed=None, quota_fresh
         status = age + " · API " + status if until else age + (" · " + status if reason else "")
     elif observed is not None:
         status += " · " + _since(observed, now) + " ago"
-    return {"harness": "claude", "text": "claude " + status, "key": "hb_claude",
+    return {"text": "claude " + status, "key": "hb_claude",
             "windows": [None, None, None]}
 
 
@@ -2546,6 +2546,8 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
     if isinstance(snapshot, Mapping) and "schema" in snapshot and "sessions" in snapshot:
         return current_claude_usage(ExplorerViewModel.from_mapping(snapshot), snapshot, clock)
     bindings = detail_bindings(snapshot)
+    # Global view-only memory is independent of the selected session's incarnation.
+    memory = _memory_records(snapshot, accepted_detail)
     accepted_detail = detail_for_bindings(accepted_detail, bindings)
     snapshot = _peer_snapshot(snapshot, accepted_detail, bindings)
     resolver = _resolver(snapshot)
@@ -2652,7 +2654,7 @@ def build_view_model(snapshot, accepted_detail=None, cached_config=None, now=Non
         "peer_nodes": peer_nodes, "peer_edges": peer_edges,
         "events": [event for _epoch, event in feed],
         "compute": compute,
-        "memory": _memory_records(snapshot, accepted_detail),
+        "memory": memory,
         "models": detail_config if detail_config is not None else _get(cached_config, "models", "model_config"),
         "config": cached_config,
         "system": system,
