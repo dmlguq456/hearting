@@ -10,6 +10,7 @@ A_DIM palette rungs. A live route's failed stage ✕ (`g_dead`) and every blocke
 marker (`g_blocked`) stay exactly as strong as before.
 """
 import os
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -28,8 +29,9 @@ FIXTURES = Path(__file__).parent / "fixtures" / "explorer"
 TABLE_X = 34                     # every list page starts its table at x=34 (sidebar is 33 wide)
 
 # The fixture's ended routes: two failures waiting for their owner's next run and
-# three completions. `resume full`/`resume sm` are the clipped texts at 168 columns.
-HISTORY_MARKERS = ("resume full", "resume sm", "[b6]", "[a9]", "[2c]")
+# three completions. Match the ended glyph and exact fixture badge in either
+# repo-before-ID tables or compact repo summaries, independently of title clipping.
+HISTORY_MARKERS = re.compile(r"✕[^\[\]]*\[(?:e4|f5)\]|✓[^\[\]]*\[(?:b6|a9|2c)\]")
 PEER_HISTORY = ("✕ lab", "✓ session-tidy")
 
 SURFACES = (
@@ -70,7 +72,7 @@ def _row_regions(grid, surface):
                     if left >= 0 and right > left:
                         spans.append((y, left + 1, right))
                     start = x + len(marker)
-        elif any(marker in line for marker in HISTORY_MARKERS):
+        elif HISTORY_MARKERS.search(line[TABLE_X:]):
             spans.append((y, TABLE_X, None))
             if surface != "OVERVIEW":              # the ROUTES table is a two-row route+worker block
                 spans.append((y + 1, TABLE_X, None))

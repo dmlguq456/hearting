@@ -28,8 +28,11 @@ class F52aGlyphTest(unittest.TestCase):
 
     def test_both_surfaces_still_share_one_producer(self):
         session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=75, rl_7d=30, mtime=1000)
-        header = "".join(v for row in render._usage_header_rows([session]) for v, _k in row)
+                          ctx_pct=75, context_window_tokens=1000000)
+        snapshots = {"claude": {"payload": {"rl_5h": 75, "rl_7d": 30, "rl_ms": []},
+                                "freshness": "fresh", "observed_at": 1000}}
+        header = "".join(v for row in render._usage_header_rows(
+            [session], now=1000, usage_snapshots=snapshots) for v, _k in row)
         detail = "".join(v for v, _k in render._context_detail_row(session)[0])
         self.assertIn(FULL, header)
         self.assertNotIn("█", header + detail)   # no battery block anywhere
@@ -102,9 +105,11 @@ class F52bTrackLengthTest(unittest.TestCase):
         for window in (None, 256000, 1000000):
             with self.subTest(window=window):
                 session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                                  rl_5h=75, rl_7d=30, mtime=1000,
                                   context_window_tokens=window)
-                joined = "".join(v for row in render._usage_header_rows([session])
+                snapshots = {"claude": {"payload": {"rl_5h": 75, "rl_7d": 30, "rl_ms": []},
+                                        "freshness": "fresh", "observed_at": 1000}}
+                joined = "".join(v for row in render._usage_header_rows(
+                    [session], now=1000, usage_snapshots=snapshots)
                                  for v, _k in row)
                 self.assertIn("[" + FULL * 9 + EMPTY, joined)   # 75% → half_up(9.0) = 9/12
                 for chunk in joined.split("[")[1:]:

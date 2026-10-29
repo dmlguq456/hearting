@@ -1276,7 +1276,21 @@ def _lineage_transcript(harness: str, sid: str, hint: str) -> dict:
         return {"path": None, "status": "unreadable"}
 
 
-def seat_lineage(seat: Seat, *, harness=None, sid=None) -> list[dict]:
+def _lineage_history_index(ledgers):
+    """Summarize a readable ledger generation once, before narrowing to a seat."""
+    rows, sessions, session_ledgers, summaries = [], {}, {}, {}
+    for ledger_key, ledger_rows in ledgers.items():
+        rows.extend(ledger_rows)
+        summaries[ledger_key] = _summarize_sessions(ledger_rows)
+        for key, summary in summaries[ledger_key].items():
+            current = sessions.get(key)
+            if current is None or float(summary.get("last_seen", 0) or 0) >= float(
+                    current.get("last_seen", 0) or 0):
+                sessions[key], session_ledgers[key] = summary, ledger_key
+    return rows, sessions, session_ledgers, summaries
+
+
+def seat_lineage(seat: Seat, *, harness=None, sid=None, read_context=None) -> list[dict]:
     """Project this seat's history and confirmed relatives from the shared graph."""
     physical = physical_seat(seat)
     logical_harness, logical_sid = session_identity(seat)
@@ -1287,33 +1301,36 @@ def seat_lineage(seat: Seat, *, harness=None, sid=None) -> list[dict]:
     graph = None
     try:
         import dispatch_seat_handover
-        graph = dispatch_seat_handover.lineage_graph()
+        graph = dispatch_seat_handover._pass_lineage_graph(read_context)
     except Exception:  # noqa: BLE001 - keep the requested seat's local history
         pass
     ledgers = dict(graph.ledger_rows) if graph is not None else {}
+    index = (read_context.lineage_summary(graph, lambda: _lineage_history_index(ledgers))
+             if graph is not None and read_context is not None else _lineage_history_index(ledgers))
+    rows, sessions, session_ledgers, summaries = index
+    # Missing/legacy local ledgers supplement this query without altering the shared index.
+    ledgers, summaries = dict(ledgers), dict(summaries)
     own_rows = ledgers.get(physical.key)
     if own_rows is None:
         own_rows = _read_ledger_lines(physical)
-    if all(wanted) and wanted not in _summarize_sessions(own_rows):
+        ledgers[physical.key] = own_rows
+        summaries[physical.key] = _summarize_sessions(own_rows)
+    if all(wanted) and wanted not in summaries[physical.key]:
         legacy = _legacy_pane_seat(physical)
         if legacy is not None:
             legacy_rows = ledgers.get(legacy.key)
             if legacy_rows is None:
                 legacy_rows = _read_ledger_lines(legacy)
-            if wanted in _summarize_sessions(legacy_rows):
+                ledgers[legacy.key] = legacy_rows
+                summaries[legacy.key] = _summarize_sessions(legacy_rows)
+            if wanted in summaries[legacy.key]:
                 physical, own_rows = legacy, legacy_rows
-    ledgers.setdefault(physical.key, own_rows)
-    rows, sessions, session_seats = [], {}, {}
-    own_sessions = _summarize_sessions(ledgers[physical.key])
-    for ledger_key, ledger_rows in ledgers.items():
-        ledger_seat = physical if ledger_key == physical.key else Seat("pane", ledger_key)
-        rows.extend(ledger_rows)
-        for session_key, summary in _summarize_sessions(ledger_rows).items():
-            current = sessions.get(session_key)
-            if current is None or float(summary.get("last_seen", 0) or 0) >= float(
-                    current.get("last_seen", 0) or 0):
-                sessions[session_key] = summary
-                session_seats[session_key] = ledger_seat
+    if graph is None or set(ledgers) != set(graph.ledger_rows):
+        # Only the uncommon local fallback needs an augmented index.
+        rows, sessions, session_ledgers, _ = _lineage_history_index(ledgers)
+    own_sessions = summaries[physical.key]
+    session_seats = {key: (physical if ledger_key == physical.key else Seat("pane", ledger_key))
+                     for key, ledger_key in session_ledgers.items()}
     related = {key for key in own_sessions if not harness or key[0] == harness}
     current_sid = sid
     if not current_sid:

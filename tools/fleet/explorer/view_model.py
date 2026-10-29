@@ -210,7 +210,11 @@ def restore_persisted_view_model(value):
     clean = persistable_view_model(value)
     if clean != dict(value):
         raise ValueError("persisted view model is not in the allowlisted form")
-    return ExplorerViewModel.from_mapping(clean)
+    # Saved display rows carry no current credential admission. Validate the old
+    # allowlist first, then replace only Claude usage; the rest remains a stale view.
+    from .live import current_claude_usage
+    import time
+    return current_claude_usage(ExplorerViewModel.from_mapping(clean), {}, time.time())
 
 
 def decode_fixture_values(value):

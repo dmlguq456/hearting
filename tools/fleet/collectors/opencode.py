@@ -615,9 +615,12 @@ def _enrich_v2(sess, tick, db):
     messages = observed.get("messages") or []
     sess.active_context_tokens = None
     latest = None
+    newest_assistant = None
     for row in reversed(messages):
         if row.get("type") != "assistant":
             continue
+        if newest_assistant is None:
+            newest_assistant = row
         last_ctx = _context_tokens_from_payload({"tokens": row.get("tokens")})
         if last_ctx == 0 and not (row.get("finish") or row.get("completed")):
             continue
@@ -627,19 +630,37 @@ def _enrich_v2(sess, tick, db):
         break
     from ..token_budget import context_policy_snapshot, context_policy_used_pct
     from ..context_policy import read_policy
-    request_model = latest.get("model") if latest and isinstance(latest.get("model"), dict) else model
+    request_model = latest.get("model") if latest and isinstance(latest.get("model"), dict) else {}
     model_ref = f"{request_model.get('providerID') or ''}/{request_model.get('id') or ''}"
     policy_record = read_policy(harness="opencode", session_id=sid, pid=sess.pid,
                                 proc_start=sess.proc_start, model=model_ref)
     policy_data = policy_record.get("policy") if isinstance(policy_record, dict) else None
-    updated = latest.get("updated") if latest else None
-    if type(updated) not in (int, float):
-        updated = native.get("time_updated")
+    request = policy_record.get("request") if isinstance(policy_record, dict) else None
+    request = request if isinstance(request, dict) else {}
+    started = latest.get("started") if latest else None
+    context_at, returned_at = request.get("context_at_ms"), request.get("context_returned_at_ms")
+    # PID/start/SID/model are necessary, but cannot identify a native request.
+    # Retries can reuse both assistant id and millisecond start. The producer's
+    # contiguous step interval must end at the independently read native cursor
+    # in the same DB snapshot as this message. Missing cursor means unknown;
+    # neither message insertion seq nor integer presence proves currentness.
+    observed_seq = request.get("observed_event_seq")
+    native_seq = observed.get("event_seq")
     policy_current = bool(
-        policy_record and type(updated) in (int, float)
+        policy_record and latest is newest_assistant and latest is not None
+        and request.get("kind") == "opencode-v2-primary"
+        and type(request.get("event_seq")) is int and request["event_seq"] >= 0
+        and type(observed_seq) is int and observed_seq >= request["event_seq"]
+        and type(native_seq) is int and observed_seq == native_seq
+        and isinstance(latest.get("id"), str) and latest["id"]
+        and request.get("assistant_message_id") == latest["id"]
+        and type(started) is int and started > 0
+        and type(request.get("started_at_ms")) is int and request["started_at_ms"] == started
+        and type(context_at) is int and type(returned_at) is int
+        and 0 < context_at <= returned_at < started
         and type(policy_record.get("observed_at")) in (int, float)
         and math.isfinite(policy_record["observed_at"])
-        and policy_record["observed_at"] <= updated / 1000.0 + 1.0)
+        and policy_record["observed_at"] * 1000 >= context_at)
     if isinstance(policy_data, dict) and policy_current:
         sess.context_policy = context_policy_snapshot(
             source=policy_data.get("source") or "opencode-native-chat-params",

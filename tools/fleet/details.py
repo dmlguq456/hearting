@@ -23,6 +23,8 @@ _METADATA = ("campaign_label", "location_kind", "location_wt", "location_repo",
 # The steward relation lists travel with the scalar flag from the same optional
 # pass. They are display-only and never enter the scalar continuation payload.
 _STEWARD_RELATIONS = ("steward_targets", "steward_parents")
+_PEER_FIELDS = ("peer_last_recv", "peer_last_sent", "peer_sent_1h",
+                "peer_recv_1h", "peer_obligations")
 
 
 def identity(row):
@@ -603,8 +605,7 @@ def _apply_peer_observation(collect, sessions):
         if state != "success":
             return state
 
-        fields = ("peer_last_recv", "peer_last_sent", "peer_sent_1h",
-                  "peer_recv_1h", "peer_obligations")
+        fields = _PEER_FIELDS
         before = [{field: copy.deepcopy(getattr(session, field, None)) for field in fields}
                   for session in sessions]
         try:
@@ -624,6 +625,20 @@ def _apply_peer_observation(collect, sessions):
         return "success"
     except Exception:
         return "failed"
+
+
+def observe_peers(snapshot):
+    """Read only peer detail on copied rows, independently of optional metadata work."""
+    from .collectors import peer_messages
+    value = copy.copy(snapshot)
+    value.sessions = [copy.copy(row) for row in snapshot.sessions]
+    state = _apply_peer_observation(peer_messages.collect, value.sessions)
+    value.observations = dict(snapshot.observations or {})
+    value.observations["optional:peers"] = {
+        "state": state, "observed_at": time.time(),
+        "roster": tuple((identity(row), binding(row)) for row in value.sessions),
+    }
+    return DetailSnapshot(state_key(snapshot), value)
 
 
 def _enrich(snapshot, *, include_report_verification=True, required=True,
