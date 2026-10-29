@@ -1992,8 +1992,9 @@ class CompletionMarkerTest(unittest.TestCase):
         "launch_outcome=governed-process-group-drained"
     )
 
-    def review_blocking_row(self, attempt_id, round_no, *, note=None, artifact=True, directory=None):
-        """One finished plan-check review round: exact log + readable in-root artifact."""
+    def review_blocking_row(self, attempt_id, round_no, *, note=None, artifact=True, directory=None,
+                            node_id="plan-check", source_bound=False):
+        """One finished blocking review round: exact log + readable in-root artifact."""
         review = (directory or self.artifact) / "_internal" / "plan_reviews" / f"round_{round_no}.md"
         review.parent.mkdir(parents=True, exist_ok=True)
         if artifact:
@@ -2009,13 +2010,18 @@ class CompletionMarkerTest(unittest.TestCase):
             }) + "\n",
             encoding="utf-8",
         )
-        extra = self._REVIEW_ROW
+        node = next(row for row in self.current_route["nodes"] if row["id"] == node_id)
+        extra = self._REVIEW_ROW.replace("unit=qa/plan-review", f"unit={node.get('unit', 'qa/plan-review')}")
         if note is not None:
             extra = extra.replace("note=completed-review-blocking", f"note={note}")
         review_artifact = base64.urlsafe_b64encode(str(review.resolve()).encode()).decode().rstrip("=")
         extra += f",review_artifact_b64={review_artifact}"
         extra += f",log_file={log},artifact_root={self.artifact}"
-        self.write_row("done", f"plan-check-r{round_no}", attempt_id, extra, node_id="plan-check")
+        if source_bound:
+            binding = SUBJECT.seal_attempt(self.jobs, self.current_route, node, attempt_id,
+                                           worktree=self.repo)
+            extra += "," + ",".join(f"{key}={value}" for key, value in binding.items())
+        self.write_row("done", f"{node_id}-r{round_no}", attempt_id, extra, node_id=node_id)
         self._reap_real_process(attempt_id)
         return review
 
@@ -2085,6 +2091,181 @@ class CompletionMarkerTest(unittest.TestCase):
                     },
                 )
         return route, continuation, continuation_path, node, memo, (r1, r2)
+
+    def _scope89_workspace(self, name):
+        case = self.base / f"scope89-{name}"
+        self.repo = case / "repo"
+        self.repo.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.email", "fixture@example.com"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config", "user.name", "Fixture"], check=True)
+        (self.repo / "x").write_text("x", encoding="utf-8")
+        (self.repo / "source").mkdir()
+        (self.repo / "source" / "api.py").write_text("def api(): return 1\n", encoding="utf-8")
+        subprocess.run(["git", "-C", str(self.repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "source fixture"], check=True)
+
+        self.artifact = case / ".agent_reports"
+        self.artifact.mkdir()
+        self.agent_home = case / "agent-home"
+        (self.agent_home / "core").mkdir(parents=True)
+        (self.agent_home / "core" / "CORE.md").write_text("fixture\n", encoding="utf-8")
+        self.logs = case / "logs"
+        self.stable_home = case / "home"
+        self.stable_home.mkdir()
+        self.stable_dispatch = self.stable_home / ".local" / "state" / "hearting" / "dispatch"
+
+    def _scope89_impl_review_closure_fixture(self, name):
+        import artifact_producer as P
+
+        self._scope89_workspace(name)
+        node_id = "impl-review"
+        source_route, _first_node, source_output, _owner = self.sd161_input_fixture(
+            slug=f"scope89-{name}", graph="execute,impl-review,test,report",
+        )
+        source_node = next(item for item in source_route["nodes"] if item["id"] == node_id)
+        source_path = self.current_route_file
+        source_index = source_route["nodes"].index(source_node)
+        with mock.patch.dict(os.environ, self.base_env(), clear=True):
+            for predecessor in source_route["nodes"][:source_index]:
+                evidence = source_output / f"{predecessor['id']}.md"
+                evidence.write_text("fixture predecessor result\n", encoding="utf-8")
+                ROUTE._publish_completion_locked(
+                    source_route, predecessor, predecessor["id"], evidence, jobs=self.jobs,
+                    attempt_id=f"att-inline-source-{predecessor['id']}", attempt_metadata={
+                        "attempt_schema_version": 2, "dispatch_depth": predecessor["dispatch_depth"],
+                        "transport": "interactive", "execution_surface": "inline",
+                        "registered_worker": False, "fallback_hop": "inline",
+                    },
+                )
+        attempts = (f"att-scope89-{name}-r1", f"att-scope89-{name}-r2")
+        reviews = tuple(self.review_blocking_row(
+            attempt, round_no, directory=source_output, node_id=node_id, source_bound=True,
+        ) for round_no, attempt in enumerate(attempts, 1))
+
+        with mock.patch.dict(os.environ, self.base_env(), clear=True):
+            route = ROUTE.build_continuation_route(
+                source_route, resume_from_node=node_id, requested_boundary=node_id,
+                reason=f"scope89 owner closure fixture {name}", artifact_root=self.artifact,
+            )
+        if "route_id" not in route:
+            raise AssertionError(
+                f"continuation fixture blocked: {route}; jobs={self.jobs}; "
+                f"sealed_jobs={(source_route.get('launch_compatibility_tuple') or {}).get('jobs_path')}; "
+                f"marker={ROUTE.completion_dir(source_route['route_id'], jobs=self.jobs) / 'execute.json'}"
+            )
+        route_path = ROUTE.canonical_route_path(self.artifact, route["route_id"])
+        route_path.parent.mkdir(parents=True, exist_ok=True)
+        route_path.write_text(json.dumps(route), encoding="utf-8")
+        with mock.patch.dict(os.environ, self.base_env(), clear=True):
+            issued = P.begin(self.artifact, route_file=route_path, capability=route["capability"],
+                             intensity=route["effective_intensity"], require_cycle=True)
+        output = Path(issued["cycle_dir"]) / "artifacts"
+        node = next(item for item in route["nodes"] if item["id"] == node_id)
+        with mock.patch.dict(os.environ, self.base_env(), clear=True):
+            for dependency in node.get("depends_on", []):
+                predecessor = next(item for item in route["nodes"] if item["id"] == dependency)
+                evidence = output / f"{dependency}.md"
+                evidence.write_text("fixture predecessor result\n", encoding="utf-8")
+                ROUTE._publish_completion_locked(
+                    route, predecessor, dependency, evidence, jobs=self.jobs,
+                    attempt_id=f"att-inline-child-{dependency}", attempt_metadata={
+                        "attempt_schema_version": 2, "dispatch_depth": predecessor["dispatch_depth"],
+                        "transport": "interactive", "execution_surface": "inline",
+                        "registered_worker": False, "fallback_hop": "inline",
+                    },
+                )
+        memo = self.owner_closure(
+            route, name=f"{name}.owner-closure.md", attempts=attempts,
+            artifacts=tuple(path.name for path in reviews), node=node_id,
+            directory=output / "_internal" / "plan_reviews",
+        )
+        P.require_cycle_output(self.artifact, memo, route_id=route["route_id"])
+        self.current_route = route
+        return source_route, route, node, route_path, source_path, memo, attempts, reviews
+
+    def _scope89_complete(self, route_path, node, memo, attempt_id, *, action, jobs_mode):
+        command = [sys.executable, str(ROOT / "utilities/capability-route.py"), "complete",
+                   "--route", str(route_path), "--node", node["id"], "--evidence", str(memo),
+                   "--attempt-id", attempt_id]
+        env = self.base_env()
+        if jobs_mode == "explicit":
+            command += ["--jobs", str(self.jobs)]
+        else:
+            env["AGENT_DISPATCH_JOBS"] = str(self.jobs)
+        if action == "check":
+            command.append("--check")
+        return subprocess.run(command, text=True, capture_output=True, env=env)
+
+    def _scope89_file_snapshot(self):
+        return {
+            str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+            for path in self.base.rglob("*") if path.is_file()
+        }
+
+    def test_impl_review_owner_closure_check_and_complete_use_bound_jobs(self):
+        cases = (("explicit", "check"), ("explicit", "writer"),
+                 ("inherited", "check"), ("inherited", "writer"))
+        for index, (jobs_mode, action) in enumerate(cases):
+            with self.subTest(jobs=jobs_mode, action=action):
+                source_route, route, node, route_path, _source_path, memo, attempts, reviews = \
+                    self._scope89_impl_review_closure_fixture(f"jobs-{index}")
+                before = self._scope89_file_snapshot()
+                result = self._scope89_complete(
+                    route_path, node, memo, attempts[-1], action=action, jobs_mode=jobs_mode,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                payload = json.loads(result.stdout.splitlines()[0])
+                proof = payload["owner_closure_proof"]
+                expected_reviews = [
+                    {"attempt_id": attempt, "route_id": source_route["route_id"],
+                     "route_hash": source_route["route_hash"], "artifact": str(review.resolve()),
+                     "sha256": hashlib.sha256(review.read_bytes()).hexdigest()}
+                    for attempt, review in zip(attempts, reviews)
+                ]
+                self.assertEqual(proof["reviews"], expected_reviews)
+                self.assertEqual(proof["rounds"], 2)
+                self.assertEqual(proof["source_attempt_id"], attempts[-1])
+
+                marker_path = ROUTE.completion_dir(route["route_id"], jobs=self.jobs) / f"{node['id']}.json"
+                if action == "check":
+                    self.assertEqual(payload["result"], "ready")
+                    self.assertEqual(before, self._scope89_file_snapshot())
+                    self.assertFalse(marker_path.exists())
+                else:
+                    self.assertEqual(payload["review_independence"], "owner-overridden")
+                    self.assertEqual(payload["review_gate_closure"], "owner-closure")
+                    self.assertEqual(payload["stage_authority"], "owner-closure")
+                    self.assertFalse(payload["registered_worker"])
+                    marker_bytes = marker_path.read_bytes()
+                    status, metadata = self.read_row(attempts[-1])
+                    self.assertEqual(status, "done")
+                    self.assertEqual(metadata.get("note"), "completed-review-blocking")
+                    replay = self._scope89_complete(
+                        route_path, node, memo, attempts[-1], action="writer", jobs_mode=jobs_mode,
+                    )
+                    self.assertEqual(replay.returncode, 0, replay.stdout + replay.stderr)
+                    self.assertEqual(json.loads(replay.stdout.splitlines()[0]), payload)
+                    self.assertEqual(marker_path.read_bytes(), marker_bytes)
+                    self.assertFalse(marker_path.with_name(f"{node['id']}.2.json").exists())
+
+    def test_impl_review_owner_closure_keeps_stale_subject_refusal(self):
+        _source_route, route, node, route_path, _source_path, memo, attempts, _reviews = \
+            self._scope89_impl_review_closure_fixture("stale-subject")
+        source = self.repo / "source" / "api.py"
+        source.write_text("def api(): return 2\n", encoding="utf-8")
+        before_jobs = (self.jobs.read_bytes(), self.jobs.stat().st_mtime_ns)
+        before_memo = (memo.read_bytes(), memo.stat().st_mtime_ns)
+        for action in ("check", "writer"):
+            result = self._scope89_complete(
+                route_path, node, memo, attempts[-1], action=action, jobs_mode="explicit",
+            )
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("owner-closure-source-subject-stale", result.stderr)
+        self.assertEqual(before_jobs, (self.jobs.read_bytes(), self.jobs.stat().st_mtime_ns))
+        self.assertEqual(before_memo, (memo.read_bytes(), memo.stat().st_mtime_ns))
+        marker = ROUTE.completion_dir(route["route_id"], jobs=self.jobs) / f"{node['id']}.json"
+        self.assertFalse(marker.exists())
 
     def test_continuation_closure_preserves_source_and_unblocks_consumer(self):
         source, route, path, node, memo, reviews = self.continuation_closure_fixture()
@@ -2697,7 +2878,8 @@ class CompletionMarkerTest(unittest.TestCase):
             self.assertEqual(len(receipt["blocking_attempts"]), 3)
             self.assertEqual(marker["round_census"]["verdict_rounds"], 3)
 
-    def sd161_input_fixture(self):
+    def sd161_input_fixture(self, slug="sd161-input",
+                            graph="plan-check,execute,impl-review,test,report"):
         import artifact_producer as P
         self.jobs = self.stable_dispatch / "jobs.log"
         self.jobs.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -2706,7 +2888,7 @@ class CompletionMarkerTest(unittest.TestCase):
         with mock.patch.dict(os.environ, self.base_env(), clear=True):
             route = ROUTE.compose_route(
                 capability="autopilot-code", capability_mode="dev", shape="staged",
-                graph="plan-check,execute,impl-review,test,report", slug="sd161-input",
+                graph=graph, slug=slug,
                 cwd=self.repo, artifact_root=self.artifact, intensity="standard", unassigned=True,
                 spec_read="fixture", dispatch_evidence=base["dispatch_evidence"], jobs=self.jobs,
             )
@@ -2716,12 +2898,14 @@ class CompletionMarkerTest(unittest.TestCase):
             issued = P.begin(self.artifact, route_file=path, capability=route["capability"],
                              intensity=route["effective_intensity"], require_cycle=True)
         self.current_route = route
+        self.current_route_file = path
         owner = "att-sd161-owner"
         with self.jobs.open("a") as stream:
             stream.write(f"2026-09-28T00:00:00Z\topen\t{self.repo}\t{self.repo}\towner\t"
                          f"attempt_id={owner},worker_type=owner,dispatch_depth=1,registered_worker=1,"
                          f"owner_route_file={path},owner_route_id={route['route_id']},owner_route_hash={route['route_hash']}\n")
-        return route, next(n for n in route["nodes"] if n["id"] == "plan-check"), Path(issued["cycle_dir"]) / "artifacts", owner
+        preferred = next((n for n in route["nodes"] if n["id"] == "plan-check"), route["nodes"][0])
+        return route, preferred, Path(issued["cycle_dir"]) / "artifacts", owner
 
     def sd161_bind_row(self, route, attempt, evidence):
         import review_input
