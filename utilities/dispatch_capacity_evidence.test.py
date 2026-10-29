@@ -401,6 +401,71 @@ class QuotaEvidenceTests(unittest.TestCase):
         self.assertEqual(self.state(self.OBSERVED + 60), "ok")
 
 
+class LegacyQuotaReasonTests(unittest.TestCase):
+    """Historical text markers describe quota, not context/config discovery."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.now = 1793262000
+        self.env = {"HOME": self.tmp.name}
+        self.gauge = mock.patch.object(Q, "gauge_limits", return_value={})
+        self.gauge.start()
+        self.addCleanup(self.gauge.stop)
+
+    def row(self, harness, note, *, reset="-", failure_class=None):
+        stamp = datetime.fromtimestamp(self.now, timezone.utc).isoformat().replace("+00:00", "Z")
+        meta = f"harness={harness},attempt_id=att-legacy,note={note},reset={reset}"
+        if failure_class is not None:
+            meta += f",failure_class={failure_class}"
+        self.jobs.write_text(f"{stamp}\tdone\t/repo\t/work\tx\t{meta}\n")
+
+    def test_unavailable_and_prefix_matches_are_not_quota_holds(self):
+        for harness in Q.HARNESSES:
+            for note in ("dead-opencode-context-limit-unavailable", "dead-config-unavailable",
+                         "dead-context-limit-unavailable", "dead-model-info-timeout",
+                         "dead-usage-limit-unavailable", "dead-session-limit-config-unavailable"):
+                with self.subTest(harness=harness, note=note):
+                    self.row(harness, note)
+                    self.assertEqual(Q.usage_states(self.jobs, now=self.now, env=self.env)[harness], "ok")
+                    self.assertIsNone(Q.harness_hold(self.jobs, harness, now=self.now, env=self.env))
+
+    def test_exact_quota_reasons_keep_unknown_reset_hold_and_expiry(self):
+        for harness in Q.HARNESSES:
+            for note in ("dead-limit", "dead-session-limit", "dead-usage-limit",
+                         "dead-rate-limit", "dead-quota-limit", "dead-capacity"):
+                with self.subTest(harness=harness, note=note):
+                    self.row(harness, note)
+                    held = Q.harness_hold(self.jobs, harness, now=self.now, env=self.env)
+                    self.assertEqual(held, {"until_epoch": self.now + 3600, "label": "unknown-reset"})
+                    self.assertIsNone(Q.harness_hold(self.jobs, harness, now=self.now + 3600, env=self.env))
+
+    def test_explicit_reset_and_pass_capacity_meaning_are_preserved(self):
+        reset = datetime.fromtimestamp(self.now + 120, timezone.utc).isoformat().replace("+00:00", "Z")
+        self.row("opencode", "dead-usage-limit", reset=reset)
+        self.assertEqual(Q.harness_hold(self.jobs, "opencode", now=self.now, env=self.env)["until_epoch"], self.now + 120)
+        self.assertIsNone(Q.harness_hold(self.jobs, "opencode", now=self.now + 120, env=self.env))
+        self.row("opencode", "dead-capacity", failure_class="pass")
+        self.assertIsNone(Q.harness_hold(self.jobs, "opencode", now=self.now, env=self.env))
+
+    def test_old_persisted_false_hold_is_rebuilt_without_rewriting_registry(self):
+        note = "dead-opencode-context-limit-unavailable"
+        self.row("opencode", note)
+        original = self.jobs.read_bytes()
+        with mock.patch.object(Q, "_settled", return_value=True), \
+             mock.patch.object(Q, "CACHE_SCHEMA", 1), \
+             mock.patch.object(Q, "_LEGACY_QUOTA_NOTES", Q._LEGACY_QUOTA_NOTES | {note}):
+            old = Q._snapshot(self.jobs, self.now)
+            self.assertEqual(old["legacy"][0]["n"], note)
+            Q._persist(old)
+        self.assertEqual(json.loads(Q._cache_path(self.jobs).read_text())["schema"], 1)
+        with mock.patch.object(Q, "_build_snapshot", wraps=Q._build_snapshot) as rebuild:
+            self.assertIsNone(Q.harness_hold(self.jobs, "opencode", now=self.now, env=self.env))
+            self.assertEqual(rebuild.call_count, 1)
+        self.assertEqual(self.jobs.read_bytes(), original)
+
+
 class EvidenceCacheTests(unittest.TestCase):
     """The disk cache must never change an answer: every check compares it with a direct computation."""
 
