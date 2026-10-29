@@ -21,6 +21,51 @@ _BATCH_ROUTE_SNAPSHOTS = {}
 DEFAULT_RECORD_GRACE_SECONDS = 900
 
 
+class NoticeReadContext:
+    """One invocation's recorded projections, never claim/recipient authority."""
+
+    def __init__(self):
+        self._observations = {}
+
+    @staticmethod
+    def _signature(path):
+        try:
+            info = Path(path).lstat()
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns)
+        except FileNotFoundError:
+            return None
+
+    def read(self, key, loader):
+        cached = self._observations.get(key)
+        if cached is not None:
+            value, dependencies = cached
+            if all(self._signature(path) == signature for path, signature in dependencies.items()):
+                return value
+        dependencies = {}
+        def observe(_kind, path):
+            path = Path(path).absolute()
+            signature = self._signature(path)
+            if path in dependencies and dependencies[path] != signature:
+                raise OSError("notice-input-generation-changed")
+            dependencies[path] = signature
+        value = loader(observe)
+        if not all(self._signature(path) == signature for path, signature in dependencies.items()):
+            self._observations.pop(key, None)
+            raise OSError("notice-input-generation-changed")
+        self._observations[key] = (value, dependencies)
+        return value
+
+    def owner_completion(self, jobs, status, metadata):
+        from dispatch_terminal_commit import recorded_owner_completion_notice
+        jobs = Path(jobs).resolve(strict=True)
+        # Row identity includes its exact route binding and current generation.
+        key = ("owner", str(jobs), status,
+               json.dumps({k: v for k, v in metadata.items() if not k.startswith("_")}, sort_keys=True))
+        return self.read(key, lambda observer: recorded_owner_completion_notice(
+            jobs, status, metadata, observer=observer))
+
+
 def delivery_batch_key(*, registry_id: str, parent_sid: str, attempt_id: str,
                        route_id: str = "", route_hash_value: str = "",
                        route_node: str = "", parent_cycle_id: str = "",
@@ -532,11 +577,12 @@ def exact_completion_already_received(record: dict, metadata: dict, jobs: Path) 
         return False
 
 
-def notice_is_current(record: dict, *, jobs: Path | None = None) -> bool:
+def notice_is_current(record: dict, *, jobs: Path | None = None, notice_context=None) -> bool:
+    notice_context = notice_context or NoticeReadContext()
     receipt = record.get("receipt") or {}
     if receipt.get("kind") == "supervision":
         from dispatch_supervision import notice_is_current as current
-        return current(record)
+        return current(record, notice_context=notice_context)
     if receipt.get("kind") == "notice":
         from session_notice import notice_is_current as current
         return current(record)
@@ -591,8 +637,11 @@ def notice_is_current(record: dict, *, jobs: Path | None = None) -> bool:
             current = True
         elif route_obligation_closed(meta, jobs):
             if meta.get("workflow_completion") == "runtime-v1":
-                from dispatch_terminal_commit import owner_completion_pending
-                if owner_completion_pending(jobs, status, meta):
+                from dispatch_supervision import _recorded_completion_result
+                completion = {"job_registry": str(jobs), "recipient_thread_id": meta.get("parent_sid"),
+                              "monitored_attempt_ids": [meta.get("attempt_id")]}
+                if _recorded_completion_result(completion, require_ack=False,
+                        notice_context=notice_context) is None:
                     current = True
                     continue  # Closure alone does not prove cycle settlement.
             continue
@@ -634,13 +683,14 @@ def project_parent_close(root, record, *, jobs=None) -> None:
                 for c in children) else "success"))
 
 
-def keep_claim(root, recipient, delivery_id, record, claim_owner, *, jobs=None) -> bool:
+def keep_claim(root, recipient, delivery_id, record, claim_owner, *, jobs=None, notice_context=None) -> bool:
     """Retire only proven obsolete notices; unknown evidence stays recoverable."""
     import dispatch_pending_delivery as pending
     from dispatch_completion_join import CompletionDeferred
     jobs = Path((record.get("receipt") or {}).get("job_registry") or jobs or Path(root) / "jobs.log")
     try:
-        if notice_is_current(record, jobs=jobs):
+        if notice_is_current(record, jobs=jobs,
+                **({"notice_context": notice_context} if notice_context is not None else {})):
             project_parent_close(root, record, jobs=jobs)
             return True
         pending.reject_claimed(root, recipient, delivery_id, claim_owner=claim_owner,

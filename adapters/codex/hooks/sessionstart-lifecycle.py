@@ -221,9 +221,11 @@ def main() -> int:
                     sys.path.insert(0, str(utilities))
                 from dispatch_contract import dispatch_state_roots, resolve_agent_home
                 from dispatch_session_sweep import activate, delivery_context
+                from dispatch_notice_state import NoticeReadContext
+                notice_context = NoticeReadContext()
                 if sid:
                     batches = [(root, activate(root, "codex-native-queue", sid,
-                                                request_recovery=False))
+                                                request_recovery=False, notice_context=notice_context))
                                for root in dict.fromkeys(dispatch_state_roots(resolve_agent_home()))
                                if root.is_dir()]
                     parts.append(delivery_context(batches))
