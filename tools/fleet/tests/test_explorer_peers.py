@@ -349,19 +349,19 @@ class PeerWrappedLayout(unittest.TestCase):
                         self.assertEqual(edge, lower_edge)
                         glyph = lambda xx, yy: frame.cells[yy][xx][0]
                         for top, bottom in ((uy, ub), (fy, fb)):
-                            self.assertEqual(glyph(edge + 1, top + 1), LANE_HEAD_LEFT)
+                            self.assertEqual(glyph(edge, top + 1), LANE_HEAD_LEFT)
                             self.assertEqual(glyph(edge, top + 2), "├")
                             self.assertEqual(glyph(edge, bottom), "┘", "the corner stays whole")
                         self.assertEqual([glyph(xx, uy + 2) for xx in range(edge, edge + 4)],
                                          list("├──┐"))
                         self.assertTrue(all(glyph(edge + 3, yy) == "│" for yy in range(uy + 3, fy + 1)))
-                        self.assertEqual([glyph(xx, fy + 1) for xx in range(edge + 1, edge + 4)],
-                                         [LANE_HEAD_LEFT, "─", "┘"])
+                        self.assertEqual([glyph(xx, fy + 1) for xx in range(edge, edge + 4)],
+                                         [LANE_HEAD_LEFT, "─", "─", "┘"])
                         self.assertEqual([glyph(xx, fy + 2) for xx in range(edge, edge + 6)],
                                          list("├────┘"))
                         self.assertTrue(all(glyph(edge + 5, yy) == "│" for yy in range(uy + 2, fy + 2)))
-                        self.assertEqual([glyph(xx, uy + 1) for xx in range(edge + 1, edge + 6)],
-                                         [LANE_HEAD_LEFT, "─", "─", "─", "┐"])
+                        self.assertEqual([glyph(xx, uy + 1) for xx in range(edge, edge + 6)],
+                                         [LANE_HEAD_LEFT, "─", "─", "─", "─", "┐"])
                         if owners:
                             self.assertEqual(glyph(edge, fy + 3), "┤", "the owner divider stays whole")
                         # The gutter column right of the lanes belongs to the next card's left gap.
