@@ -394,6 +394,80 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         armed_path.write_text(json.dumps(armed))
         return attempt, owner_input
 
+    def record_original_owner_exit(self, route, jobs, registry, original_attempt, *,
+                                   owner_pid=999999999):
+        data = json.loads(registry.read_text())
+        row = data['runs']['fixture-run']
+        row['owner_wait'].update(owner_pid=owner_pid, owner_start='1')
+        registry.write_text(json.dumps(data))
+        ledger = SUP.ledger_for(route, jobs)
+        armed_path = ledger.root / 'armed' / 'full-run.json'
+        armed = json.loads(armed_path.read_text())
+        armed['resource_binding'] = WAIT.resource_body_digest(row)
+        armed_path.write_text(json.dumps(armed))
+        lines = Path(jobs).read_text().splitlines()
+        for index, line in enumerate(lines):
+            fields = line.split('\t')
+            if len(fields) != 6:
+                continue
+            metadata = DC.parse_registry_metadata(fields[5])
+            if metadata.get('attempt_id') == original_attempt:
+                metadata['pid'], metadata['pid_start'] = '999999999', '1'
+                fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                lines[index] = '\t'.join(fields)
+                break
+        Path(jobs).write_text('\n'.join(lines) + '\n')
+
+    def launched_replacement_owner(self, route, jobs, original_attempt, *, session_id='replacement-native'):
+        import dispatch_replacement as DR
+        import dispatch_owner_input as INPUT
+
+        rows = DR._rows(Path(jobs).read_text().splitlines())
+        original_fields, original = rows[original_attempt]
+        logical = DR._logical_key(route, original)
+        family = DR._digest(logical)
+        replacement = 'att-' + hashlib.sha256(('replacement:' + family).encode()).hexdigest()[:48]
+        lease = DC.supervisor_lease_path(jobs, replacement)
+        record = {'schema': DR.SCHEMA, 'family_id': family, 'logical_node': logical,
+                  'original_attempt_id': original_attempt, 'replacement_attempt_id': replacement,
+                  'ordinal': 1}
+        DR._once(DR._record_path(jobs, family), record)
+        DR._reserve_source(jobs, original_attempt, family)
+        original.update(note='dead-exact-pid', failure_class='contract',
+                        replacement_family_id=family, replacement_claim_digest=DR._digest(record),
+                        replacement_attempt_id=replacement, replacement_ordinal='1')
+        source_fields = list(original_fields)
+        source_fields[1] = 'done'
+        source_fields[5] = ','.join(f'{key}={value}' for key, value in original.items())
+        candidate = {**original, 'attempt_id': replacement,
+                     'replacement_original_attempt_id': original_attempt,
+                     'automatic_retry_of': original_attempt, 'launch_claimed': '1',
+                     'launch_started': '1', 'supervisor_lease_file': str(lease),
+                     'supervisor_lease_nonce': 'e' * 64}
+        identity = SUP.RR.proc_identity(os.getpid())
+        candidate['pid'], candidate['pid_start'] = str(identity['pid']), identity['starttime']
+        candidate.pop('replacement_attempt_id', None)
+        target_fields = list(original_fields)
+        target_fields[1] = 'open'
+        target_fields[5] = ','.join(f'{key}={value}' for key, value in candidate.items())
+        current_lines = []
+        for line in Path(jobs).read_text().splitlines():
+            fields = line.split('\t')
+            metadata = DC.parse_registry_metadata(fields[5]) if len(fields) == 6 else {}
+            if metadata.get('attempt_id') == original_attempt:
+                fields = source_fields
+            current_lines.append('\t'.join(fields))
+        Path(jobs).write_text('\n'.join([*current_lines, '\t'.join(target_fields)]) + '\n')
+
+        lease_context = DC.hold_supervisor_lease(jobs, replacement, lease)
+        lease_context.__enter__()
+        self.addCleanup(lease_context.__exit__, None, None, None)
+        INPUT.initialize_owner_input(jobs, replacement, 'claude-session-resume')
+        owner_input = INPUT.OwnerInput(jobs, replacement, session_id,
+                                       'claude-session-resume', lambda _: None)
+        self.addCleanup(owner_input.close)
+        return replacement, owner_input
+
     def test_compute_adopted_row_passes_normal_owner_successor_admission_once(self):
         for harness in ('claude', 'codex', 'opencode'):
             with self.subTest(owner_harness=harness), self.subfixture():
@@ -2569,6 +2643,180 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
             for proc in payloads:
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=5)
+
+    def test_replacement_owner_consumes_original_success_via_public_start(self):
+        for owner_pid in (999999999, '999999999'):
+            with self.subTest(owner_pid=owner_pid), self.subfixture():
+                self._check_replacement_owner_consumes_original_success(owner_pid)
+
+    def _check_replacement_owner_consumes_original_success(self, owner_pid):
+        route, path, jobs, registry, _output, ledger = self.fixture()
+        original_attempt, _original_input = self.live_owner(route, jobs, registry, harness='claude')
+        self.record_original_owner_exit(route, jobs, registry, original_attempt,
+                                       owner_pid=owner_pid)
+        observed = SUP.poll_once(route, ledger)
+        self.assertEqual(observed[0]['action'], 'wait-next-resource')
+        original_row = json.loads(registry.read_text())['runs']['fixture-run']
+        self.assertEqual(original_row['parent_attempt_id'], original_attempt)
+        self.assertEqual(original_row['status'], 'succeeded')
+
+        current_attempt, _current_input = self.launched_replacement_owner(
+            route, jobs, original_attempt)
+        import dispatch_replacement as DR
+        self.assertEqual(DR.effective_attempts(jobs, {original_attempt})[0], {current_attempt})
+        resource_bytes = registry.read_bytes()
+        state_path = DC.dispatch_state_root(jobs) / 'supervisor-state' / f'{current_attempt}.json'
+        WAIT.JOIN.write_supervisor_state(state_path, current_attempt, set(), phase='running-turn')
+        control = SimpleNamespace(thread_id='replacement-native', pending=lambda: False)
+        args = SimpleNamespace(parent_attempt_id=current_attempt, route_id=route['route_id'],
+            route_hash=route['route_hash'], route_file=str(path), jobs=str(jobs))
+        found = WAIT.context(args, control)
+        self.assertIsNotNone(found)
+        self.assertEqual([row['run_id'] for _, row in found[3]], ['fixture-run'])
+        self.assertEqual(found[3][0][1]['parent_attempt_id'], original_attempt)
+        prompt = WAIT.wait(args, state_path, control, set(), lambda _event: None,
+                           sleep=lambda _seconds: self.fail('settled original resource must not wait'))
+        self.assertIn('"parent_attempt_id":"' + current_attempt + '"', prompt)
+        self.assertIn('"run_id":"fixture-run"', prompt)
+        receipt_state = WAIT.JOIN.read_supervisor_phase_state(state_path, current_attempt).resource
+        receipt_id = receipt_state['outbox']['receipt_id']
+        self.assertTrue(WAIT.acknowledge(state_path, current_attempt, receipt_id))
+        self.assertFalse(WAIT.acknowledge(state_path, current_attempt, receipt_id))
+
+        start_args = SimpleNamespace(route_file=str(path), route_node='run-verify',
+            attempt_id='att-verifier', jobs=str(jobs), agent_home=ROOT,
+            worktree=str(self.base), dispatch_depth=2, parent_slug='fixture-owner',
+            parent_attempt_id=current_attempt, parent_harness='claude',
+            parent_transport='headless', parent_sandbox='workspace-write', subsession_id=None)
+        with mock.patch('review_input.preview_request_nodes', return_value=frozenset()), \
+             mock.patch('subprocess.check_output', return_value=str(self.base)):
+            self.assertTrue(RA._admit_supervised_owner_resource_start(start_args, ROOT, jobs))
+            RA.completion_gate(start_args, 'start', ROOT, jobs, gate=DC.completion_marker_gate)
+            RA.completion_gate(start_args, 'start', ROOT, jobs, gate=DC.completion_marker_gate)
+        stage = ledger.state()['nodes']['full-run']
+        self.assertEqual(stage['state'], 'STAGE_SUCCEEDED')
+        marker_path = SUP.route_module().completion_dir(route['route_id'], jobs=jobs) / 'full-run.json'
+        marker = json.loads(marker_path.read_text())
+        self.assertTrue(marker.get('resource_execution_identity'))
+        self.assertEqual(stage['evidence']['owner_attempt_id'], current_attempt)
+        self.assertEqual(stage['evidence']['owner_session_id'], 'replacement-native')
+        self.assertEqual(len(ledger.claims()), 1)
+        self.assertEqual(registry.read_bytes(), resource_bytes)
+        self.assertEqual(json.loads(registry.read_text())['runs']['fixture-run']['parent_attempt_id'],
+                         original_attempt)
+
+    def test_owner_input_snapshot_keeps_pinned_owner_and_refuses_conflicting_source(self):
+        route, _path, jobs, registry, _output, ledger = self.fixture()
+        owner_attempt, _owner_input = self.live_owner(route, jobs, registry, harness='claude')
+        resource = json.loads(registry.read_text())['runs']['fixture-run']
+        armed = SUP.read_armed(ledger)['full-run']
+        del resource['parent_attempt_id']
+        self.assertTrue(SUP._owner_input_is_current(route, armed, resource, owner_attempt, 'same-native'))
+        for source in ('att-foreign', None, ''):
+            with self.subTest(source=source):
+                resource['parent_attempt_id'] = source
+                self.assertFalse(SUP._owner_input_is_current(
+                    route, armed, resource, owner_attempt, 'same-native'))
+        resource['parent_attempt_id'] = owner_attempt
+        resource['owner_wait']['parent_attempt_id'] = 'att-foreign'
+        self.assertFalse(SUP._owner_input_is_current(route, armed, resource, owner_attempt, 'same-native'))
+
+    def test_replacement_owner_rejects_invalid_resource_owner_pid_with_proven_lineage(self):
+        for owner_pid in (True, False, 0, -1, 999999999.0, 'invalid', '0', None):
+            with self.subTest(owner_pid=owner_pid), self.subfixture():
+                route, path, jobs, registry, _output, ledger = self.fixture()
+                original_attempt, _original_input = self.live_owner(
+                    route, jobs, registry, harness='claude')
+                self.record_original_owner_exit(route, jobs, registry, original_attempt)
+                self.assertEqual(SUP.poll_once(route, ledger)[0]['action'], 'wait-next-resource')
+                current_attempt, _current_input = self.launched_replacement_owner(
+                    route, jobs, original_attempt)
+                # Even identities that would match after bool/int coercion must
+                # not authorize consumption. Keep the real replacement proof.
+                lines = Path(jobs).read_text().splitlines()
+                for index, line in enumerate(lines):
+                    fields = line.split('\t')
+                    metadata = DC.parse_registry_metadata(fields[5])
+                    if metadata.get('attempt_id') == original_attempt:
+                        metadata['owner_identity_lineage'] = '1:1+0:1'
+                        fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                        lines[index] = '\t'.join(fields)
+                        break
+                Path(jobs).write_text('\n'.join(lines) + '\n')
+                proof = dict(source_attempt_id=original_attempt, consumer_attempt_id=current_attempt,
+                    resource_route_file=str(path), resource_route_id=route['route_id'],
+                    resource_route_hash=route['route_hash'], resource_owner_start='1')
+                self.assertTrue(RA.resource_owner_consumer_matches(
+                    jobs, resource_owner_pid=999999999, **proof))
+                self.assertFalse(RA.resource_owner_consumer_matches(
+                    jobs, resource_owner_pid=owner_pid, **proof))
+                data = json.loads(registry.read_text())
+                row = data['runs']['fixture-run']
+                row['owner_wait']['owner_pid'] = owner_pid
+                registry.write_text(json.dumps(data))
+                armed_path = ledger.root / 'armed/full-run.json'
+                armed = json.loads(armed_path.read_text())
+                armed['resource_binding'] = WAIT.resource_body_digest(row)
+                armed_path.write_text(json.dumps(armed))
+                before = registry.read_bytes(), ledger.journal_path.read_bytes()
+                with self.assertRaisesRegex(SUP.SupervisorError,
+                                            'resource-owner-successor-binding-conflict'):
+                    SUP.admit_owner_successor_start(
+                        route, 'run-verify', jobs, current_attempt, 'replacement-native')
+                self.assertEqual((registry.read_bytes(), ledger.journal_path.read_bytes()), before)
+                self.assertEqual(ledger.claims(), {})
+                self.assertFalse((SUP.route_module().completion_dir(
+                    route['route_id'], jobs=jobs) / 'full-run.json').exists())
+
+    def test_unlaunched_or_tampered_replacement_cannot_consume_original_resource(self):
+        for mutation in ('unlaunched', 'tampered-claim', 'foreign-owner-route',
+                         'pending-correction'):
+            with self.subTest(mutation=mutation), self.subfixture():
+                route, _path, jobs, registry, _output, ledger = self.fixture()
+                original_attempt, _original_input = self.live_owner(route, jobs, registry, harness='claude')
+                self.record_original_owner_exit(route, jobs, registry, original_attempt)
+                self.assertEqual(SUP.poll_once(route, ledger)[0]['action'], 'wait-next-resource')
+                current_attempt, _current_input = self.launched_replacement_owner(
+                    route, jobs, original_attempt)
+                if mutation == 'pending-correction':
+                    with mock.patch.object(RA, 'correction_source_session',
+                                           return_value='fixture-user-session'):
+                        import dispatch_owner_input as INPUT
+                        INPUT.submit(jobs, current_attempt, 'keep the current user correction',
+                                     request_id='replacement-correction')
+                else:
+                    lines = Path(jobs).read_text().splitlines()
+                    for index, line in enumerate(lines):
+                        fields = line.split('\t')
+                        if len(fields) != 6:
+                            continue
+                        metadata = DC.parse_registry_metadata(fields[5])
+                        if metadata.get('attempt_id') != current_attempt:
+                            continue
+                        if mutation == 'unlaunched':
+                            fields[1] = 'done'
+                            metadata.pop('launch_started', None)
+                            metadata.pop('pid', None)
+                            metadata.pop('pid_start', None)
+                            metadata['launch_outcome'] = 'never-launched'
+                        elif mutation == 'tampered-claim':
+                            metadata['replacement_claim_digest'] = 'f' * 64
+                        else:
+                            metadata['owner_route_hash'] = 'sha256:foreign'
+                            metadata['route_hash'] = 'sha256:foreign'
+                        fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                        lines[index] = '\t'.join(fields)
+                        break
+                    Path(jobs).write_text('\n'.join(lines) + '\n')
+                before = registry.read_bytes()
+                reason = ('resource-owner-input-unavailable' if mutation == 'pending-correction'
+                          else 'resource-owner-successor-binding-conflict')
+                with self.assertRaisesRegex(SUP.SupervisorError, reason):
+                    SUP.admit_owner_successor_start(
+                        route, 'run-verify', jobs, current_attempt, 'replacement-native')
+                self.assertEqual(ledger.claims(), {})
+                self.assertEqual(ledger.state()['nodes']['full-run']['state'], 'RUNNING')
+                self.assertEqual(registry.read_bytes(), before)
 
     def test_codex_public_intent_arms_without_tool_observation_and_controller_releases_once(self):
         """Exercise public intent, real arm/discovery/claim, and bounded refusals."""

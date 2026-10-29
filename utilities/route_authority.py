@@ -962,6 +962,102 @@ def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> boo
     return False
 
 
+def resource_owner_consumer_matches(jobs, *, source_attempt_id, consumer_attempt_id,
+                                    resource_route_file, resource_route_id,
+                                    resource_route_hash, resource_owner_pid,
+                                    resource_owner_start, require_live=True):
+    """Prove the current owner can consume a resource bound to its predecessor.
+
+    The resource record remains attached to its original owner. Only that exact
+    attempt's launched replacement, with a current owner-route binding that
+    descends from the resource route, may act as its consumer.
+    """
+    if not all(isinstance(value, str) and value for value in (
+            source_attempt_id, consumer_attempt_id, resource_route_file,
+            resource_route_id, resource_route_hash, resource_owner_start)):
+        return False
+    # Resource-runner JSON stores an integer PID; historical waits used text.
+    # Reject bools and coercible non-PIDs before comparing the exact lineage.
+    if isinstance(resource_owner_pid, bool) or not isinstance(resource_owner_pid, (int, str)):
+        return False
+    owner_pid = str(resource_owner_pid)
+    if not owner_pid.isascii() or not owner_pid.isdigit() or not owner_pid.strip("0"):
+        return False
+    try:
+        import dispatch_replacement as DR
+        import owner_route_binding as ORB
+        import route_lineage
+        from dispatch_contract import attempt_identity_lineage, parse_registry_metadata
+        from dispatch_registry_cache import registry_snapshot
+
+        jobs_path = Path(jobs).expanduser()
+        snapshot = registry_snapshot(jobs_path)
+        if not snapshot.complete:
+            return False
+        rows = []
+        for line in snapshot.lines:
+            fields = line.split("\t")
+            if len(fields) != 6:
+                return False
+            rows.append((fields, parse_registry_metadata(fields[5])))
+        indexed = DR._rows(snapshot.lines)
+        if source_attempt_id not in indexed or consumer_attempt_id not in indexed:
+            return False
+        source_fields, source = indexed[source_attempt_id]
+        consumer_fields, consumer = indexed[consumer_attempt_id]
+        if (source.get("worker_type") != "owner" or source.get("dispatch_depth") != "1"
+                or source.get("registered_worker") != "1"
+                or consumer.get("worker_type") != "owner" or consumer.get("dispatch_depth") != "1"
+                or consumer.get("registered_worker") != "1"
+                or consumer.get("attempt_id") != consumer_attempt_id
+                or consumer_fields[1] not in (LIVE_ROW_STATUSES if require_live
+                                               else LIVE_ROW_STATUSES | {"done"})):
+            return False
+        try:
+            resource_route_path = str(Path(resource_route_file).resolve(strict=True))
+            resource_route_record = json.loads(Path(resource_route_path).read_text(encoding="utf-8"))
+            resource_route_record = ORB.ROUTE.verify_route(resource_route_record)
+            source_owner_route = str(Path(source.get("owner_route_file", "")).resolve(strict=True))
+            source_route_record = json.loads(Path(source_owner_route).read_text(encoding="utf-8"))
+            source_route_record = ORB.ROUTE.verify_route(source_route_record)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            return False
+        if ((resource_route_record.get("route_id"), resource_route_record.get("route_hash")) !=
+                (resource_route_id, resource_route_hash)
+                or (source_route_record.get("route_id"), source_route_record.get("route_hash")) !=
+                (source.get("owner_route_id"), source.get("owner_route_hash"))
+                or (owner_pid, resource_owner_start)
+                    not in attempt_identity_lineage(source)):
+            return False
+
+        effective, _lineage = DR.effective_attempts(jobs_path, {source_attempt_id})
+        if effective != {consumer_attempt_id}:
+            return False
+        if (consumer_attempt_id != source_attempt_id
+                and (source_fields[1] in LIVE_ROW_STATUSES or consumer.get("launch_started") != "1")):
+            return False
+
+        binding, status = ORB.resolve_owner_route_lifecycle(
+            jobs_path, owner_attempt_id=consumer_attempt_id, registry_rows=rows)
+        if (binding is None or status not in {
+                "owner-route-launch-binding", "owner-route-post-launch-attachment",
+                "owner-route-advance-current"}):
+            return False
+        active_raw = json.loads(Path(binding.route_file).read_text(encoding="utf-8"))
+        active = ORB.ROUTE.verify_route(active_raw)
+        if (active.get("route_id"), active.get("route_hash")) != (binding.route_id, binding.route_hash):
+            return False
+        ancestry = route_lineage.verified_route_lineage(active_raw, observe=True)
+        ancestry_identities = {(item.get("route_id"), item.get("route_hash")) for item in ancestry}
+        if ({(resource_route_id, resource_route_hash),
+             (source.get("owner_route_id"), source.get("owner_route_hash"))}
+                - ancestry_identities):
+            return False
+        return snapshot.matches_jobs(jobs_path)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return False
+
+
 def lineage_parent_matches(metadata, *, thread_id, parent_attempt_id) -> bool:
     """A replacement lineage row belongs to this receipt's parent: the exact
     registered session at depth 1, the exact parent attempt below it."""

@@ -1261,17 +1261,21 @@ def _owner_input_matches_locked(route, armed, resource_row, owner_attempt_id, ow
     import dispatch_resource_wait as OWNER_RESOURCE
     parent, target = input_module._target(armed["jobs"], owner_attempt_id)
     owner = resource_row.get("owner_wait") or {}
+    # Older input readers accepted an absent top-level parent, but never a
+    # conflicting one. Normalize only this read; do not rewrite the resource.
+    responsibility_row = {"parent_attempt_id": owner.get("parent_attempt_id"), **resource_row}
     pinned_owner_identity = (str(owner.get("owner_pid", "")),
                              str(owner.get("owner_start", "")))
     holder = OWNER_RESOURCE.resource_holder(resource_row)
     responsibility = OWNER_RESOURCE.current_responsibility(
-        resource_row, route=route, owner_attempt_id=owner_attempt_id,
+        responsibility_row, route=route, owner_attempt_id=owner_attempt_id,
         session_id=owner_session_id, jobs=str(Path(armed["jobs"]).resolve()))
     return not (
         value is None or value.get("target") != target
         or value.get("thread_id") != owner_session_id
         or responsibility is None
         or (not holder.get("inherited")
+            and responsibility_row.get("parent_attempt_id") == owner_attempt_id
             and pinned_owner_identity not in DC.attempt_identity_lineage(parent.metadata))
         or parent.status not in {"open", "running"}
         or parent.metadata.get("attempt_id") != owner_attempt_id
@@ -1344,7 +1348,8 @@ def _owner_settlement_snapshot(route, ledger, armed, row=None):
     holder = OWNER_RESOURCE.resource_holder(row)
     origin = holder.get("origin") or {}
     owner_attempt_id = evidence.get("owner_attempt_id")
-    if holder.get("inherited"):
+    same_owner = owner_attempt_id == row_owner_id
+    if holder.get("inherited") or not same_owner:
         settling_session = evidence.get("owner_session_id")
     else:
         settling_session = owner.get("session_id")
@@ -1356,8 +1361,8 @@ def _owner_settlement_snapshot(route, ledger, armed, row=None):
             or not (owner_successor_start or owner_terminal_settlement)
             or not row_owner_id or owner.get("parent_attempt_id") != row_owner_id
             or not owner_attempt_id
-            or (not holder.get("inherited") and owner_attempt_id != row_owner_id)
-            or (not holder.get("inherited")
+            or (not holder.get("inherited") and not same_owner and not settling_session)
+            or (not holder.get("inherited") and same_owner
                 and evidence.get("owner_session_id") is not None
                 and evidence.get("owner_session_id") != owner.get("session_id"))
             or row.get("run_id") != armed.get("predecessor_id")
@@ -1854,6 +1859,12 @@ def reconcile_resource_artifacts(route, ledger, owner_attempt_id, jobs, *, termi
                     "runs"][armed["predecessor_id"]]
             except (OSError, ValueError, KeyError, TypeError) as error:
                 raise WS.WorkflowStateError(f"resource-operation-unsettled:{node}:{armed.get('predecessor_id')}") from error
+            owner = row.get("owner_wait") or {}
+            if OWNER_RESOURCE.current_responsibility(
+                    row, route=route, owner_attempt_id=owner_attempt_id,
+                    session_id=owner.get("session_id"), jobs=str(jobs),
+                    historical=True) is None:
+                raise WS.WorkflowStateError(f"resource-operation-owner-unsettled:{node}:{row.get('run_id')}")
             execution = row.get("execution") if isinstance(row, dict) else None
             if isinstance(execution, dict) and execution.get("kind") == "compute-hosts":
                 if (not isinstance(captured, dict) or captured.get("armed") != armed
@@ -2133,6 +2144,7 @@ def _admit_owner_resource_aggregate(route, ledger, successor, jobs, owner_attemp
                                     owner_session_id, node, initial_watches):
     """Check every current operation before the node's one existing successor claim."""
     import dispatch_owner_input as INPUT
+    import route_authority as AUTHORITY
     expected = {resource_watch_key(row): row for row in initial_watches}
     preobserved = {}
     for armed in initial_watches:

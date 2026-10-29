@@ -1003,6 +1003,14 @@ the sealed command, inputs and provenance, exit evidence, output receipts, and
 fresh remote process-group quiescence; it preserves the prior failure row and
 sentinel. The owner's normal start admits verification separately; compute
 exit is execution evidence only.
+
+When an owner is replaced on the same route, its launched replacement may
+observe and consume the predecessor's supervised-resource result through the
+shared replacement and owner-route lineage. The resource record and receipt
+stay attached to the owner that launched it. The current owner's input lease,
+pending corrections, exact resource evidence and the existing once-only
+successor claim are rechecked at ordinary start; an unlaunched claim does not
+transfer consumption authority.
 The runtime acknowledges a delivered notification after its receiving turn
 finishes. Claude PostToolUse events with a nonempty `agent_id` belong to a
 subagent or teammate even when `session_id` names the parent conversation; they
