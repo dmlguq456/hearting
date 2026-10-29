@@ -8,11 +8,20 @@ import threading
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
-from fleet.collectors import usage_cache
+from fleet.collectors import usage_cache, usage_api
 
 
 class F51UsageCacheTest(unittest.TestCase):
     def setUp(self):
+        # Usage fixtures have no native pane source; do not start a live Herdr
+        # observation transport while testing account-cache/opt-out behavior.
+        pane_patch = mock.patch("fleet.collectors.herdr.enrich", return_value=None)
+        pane_patch.start()
+        self.addCleanup(pane_patch.stop)
+        self.credential_patch = mock.patch.object(
+            usage_api, "_credential", return_value=usage_api._Credential("fixture", "fixture-generation"))
+        self.credential_patch.start()
+        self.addCleanup(self.credential_patch.stop)
         self.tmp = tempfile.TemporaryDirectory()
         self.dispatch_tmp = tempfile.TemporaryDirectory()
         self.old = os.environ.get("FLEET_USAGE_STATE_DIR")
@@ -202,13 +211,13 @@ class F51UsageCacheTest(unittest.TestCase):
 
     def test_cache_only_never_calls_fetcher(self):
         calls = []
-        usage_cache.FETCHERS["claude"] = lambda: calls.append(1)
+        usage_cache.FETCHERS["claude"] = lambda _credential: calls.append(1)
         self.assertEqual(usage_cache.account_usage("claude")["freshness"], "unknown")
         self.assertEqual(calls, [])
 
     def test_refresh_is_single_flight_and_atomic(self):
         calls = []
-        usage_cache.FETCHERS["claude"] = lambda: (calls.append(1) or {"rl_5h": 12})
+        usage_cache.FETCHERS["claude"] = lambda _credential: (calls.append(1) or {"rl_5h": 12})
         self.assertTrue(usage_cache.request_refresh("claude"))
         thread = usage_cache._THREADS.get("claude")
         self.assertIsNotNone(thread, "request_refresh did not register its worker thread")
@@ -219,7 +228,7 @@ class F51UsageCacheTest(unittest.TestCase):
 
     def test_fresh_cache_suppresses_refresh_until_harness_window_expires(self):
         calls = []
-        usage_cache.FETCHERS["claude"] = lambda: calls.append(1)
+        usage_cache.FETCHERS["claude"] = lambda _credential: calls.append(1)
         self._write_cache("claude", 1000)
         self.assertFalse(usage_cache.request_refresh("claude", now=1179))
         self.assertEqual(calls, [])
@@ -229,6 +238,8 @@ class F51UsageCacheTest(unittest.TestCase):
         item = {"schema_version": usage_cache.SCHEMA_VERSION, "harness": harness,
                 "fetched_at": fetched_at, "attempted_at": fetched_at,
                 "payload": payload or {"rl_5h": 42}}
+        if harness == "claude":
+            item["_credential_generation"] = "fixture-generation"
         item.update(extra)
         with open(os.path.join(self.tmp.name, harness + ".json"), "w") as fh:
             json.dump(item, fh)
@@ -259,7 +270,8 @@ class F51UsageCacheTest(unittest.TestCase):
                 seen.append(usage_cache.read("claude", now=1000)["freshness"])
         thread = threading.Thread(target=reader); thread.start()
         for value in (1, 2, 3, 4):
-            usage_cache._write("claude", {"value": value}, 1000, 1000)
+            usage_cache._write("claude", {"value": value}, 1000, 1000,
+                               credential_generation="fixture-generation")
         stop.set(); thread.join()
         self.assertTrue(seen)
         self.assertNotIn("unknown", seen)
@@ -270,7 +282,7 @@ class F51UsageCacheTest(unittest.TestCase):
         release_fetch = threading.Event()
         results = []
 
-        def fetch():
+        def fetch(_credential):
             calls.append(1)
             fetch_started.set()
             if not release_fetch.wait(timeout=5):
@@ -306,7 +318,7 @@ class F51UsageCacheTest(unittest.TestCase):
         clears itself — the NEXT `request_refresh` call must reclaim it once `LEASE_MAX`
         (60s) has elapsed, rather than backing off forever."""
         calls = []
-        usage_cache.FETCHERS["claude"] = lambda: (calls.append(1) or {"rl_5h": 5})
+        usage_cache.FETCHERS["claude"] = lambda _credential: (calls.append(1) or {"rl_5h": 5})
         lease = os.path.join(self.tmp.name, ".claude.lease")
         fd = os.open(lease, os.O_CREAT | os.O_WRONLY, 0o600)
         os.close(fd)
@@ -331,7 +343,7 @@ class F51UsageCacheTest(unittest.TestCase):
             try:
                 self.assertEqual(titles.state_root(), title_root)
                 before = len(os.listdir(title_root))
-                usage_cache.FETCHERS["claude"] = lambda: {"rl_5h": 1}
+                usage_cache.FETCHERS["claude"] = lambda _credential: {"rl_5h": 1}
                 self.assertTrue(usage_cache.request_refresh("claude"))
                 thread = usage_cache._THREADS.get("claude")
                 if thread is not None:
@@ -516,7 +528,7 @@ class F51UsageCacheTest(unittest.TestCase):
 
     def test_refresh_returns_before_permanently_blocked_fetcher_and_then_reads_new_cache(self):
         gate = threading.Event()
-        usage_cache.FETCHERS["claude"] = lambda: (gate.wait(), {"rl_5h": 77})[1]
+        usage_cache.FETCHERS["claude"] = lambda _credential: (gate.wait(), {"rl_5h": 77})[1]
         result = usage_cache.account_usage("claude", usage="refresh", now=1000)
         self.assertEqual(result["freshness"], "unknown")
         worker = usage_cache._THREADS.get("claude")
