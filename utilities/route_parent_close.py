@@ -707,6 +707,25 @@ def _signal(pid, start, signum):
         pass
 
 
+def _non_resource_targets(meta, identity, candidates):
+    targets = []
+    for pid, start in candidates:
+        if not start.isdigit() or int(start) < int(identity.expected_start):
+            continue
+        try:
+            env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        if (f"{DC.ATTEMPT_DESCENDANT_ENV}={meta['attempt_id']}".encode() not in env
+                or any(item.startswith((b"HEARTING_RESOURCE_RUN_ID=", b"HEARTING_RESOURCE_REGISTRY=",
+                                        b"HEARTING_COMPUTE_RUN_ID=")) for item in env)):
+            continue
+        targets.append((pid, start))
+    return targets
+
+
 def reap_terminal_descendants(jobs, fields, *, grace=0.3, kill_wait=0.5):
     """Drain exact post-exit leftovers, retaining the parent-close resource policy.
 
@@ -748,29 +767,68 @@ def reap_terminal_descendants(jobs, fields, *, grace=0.3, kill_wait=0.5):
         if not observed:
             return
         owned = set(agents)
-        targets = []
-        for pid, start, state in tagged.members:
-            if (state == "Z" or pid == identity.pid or (pid, start) not in owned
-                    or not start.isdigit() or int(start) < int(identity.expected_start)):
-                continue
-            try:
-                env = Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
-            except FileNotFoundError:
-                continue
-            except OSError:
-                return
-            if f"{DC.ATTEMPT_DESCENDANT_ENV}={meta['attempt_id']}".encode() not in env:
-                continue
-            # Resource tags protect also a reparented/re-setsid branch whose
-            # registry or observer namespace is temporarily unavailable.
-            if any(item.startswith((b"HEARTING_RESOURCE_RUN_ID=", b"HEARTING_RESOURCE_REGISTRY=",
-                                    b"HEARTING_COMPUTE_RUN_ID=")) for item in env):
-                continue
-            targets.append((pid, start))
+        targets = _non_resource_targets(meta, identity, [
+            (pid, start) for pid, start, state in tagged.members
+            if state != "Z" and pid != identity.pid and (pid, start) in owned])
         if not targets:
             return
         escalated = time.monotonic() >= deadline - kill_wait
         for pid, start in targets:
+            if escalated or (pid, start) not in sent:
+                _signal(pid, start, signal.SIGKILL if escalated else signal.SIGTERM)
+                sent.add((pid, start))
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(0.05)
+
+
+def stop_failed_launch(jobs, fields, *, grace=0.3, kill_wait=0.5):
+    """Stop only the exact launch whose failure the wrapper just committed.
+
+    Preserve resource branches and keep their governor alive. The ordinary
+    post-exit resolver remains responsible for descendant receipts.
+    """
+    import resource_run_registry as RR
+    meta = DC.parse_registry_metadata(fields[5])
+    identities = DC.authoritative_process_identities(meta)
+    if fields[1] != "done" or not identities or not DC.attempt_scan_namespace_authority(meta):
+        return
+    identity = identities[0]
+    route = {"route_id": meta.get("owner_route_id") or meta.get("route_id") or meta["attempt_id"],
+             "route_hash": meta.get("owner_route_hash") or meta.get("route_hash", "")}
+    path = Path(meta.get("owner_route_file") or meta.get("route_file") or fields[3])
+    deadline, sent = time.monotonic() + grace + kill_wait, set()
+    while True:
+        current = _rows(jobs, {meta["attempt_id"]}).get(meta["attempt_id"])
+        if (current is None or current[0] != fields or not DC.attempt_scan_namespace_authority(meta)
+                or DC.exact_process_group_signal_authority(identity.pid, identity.expected_start) != "authoritative"):
+            return
+        # Reuse the registry's existing typed diagnostics. An incomplete
+        # inventory is not permission to turn a hidden resource into an agent.
+        _, diagnostics = RR.scan()
+        if any(item.get("blocking", True) for item in diagnostics):
+            return "cleanup-resource-unverifiable"
+        resources = known_resources(route, path, jobs, {meta["attempt_id"]})
+        group = DC.process_group_observation(identity.pid)
+        agents, observed = _agent_processes(meta, resources)
+        if not observed or group.state == "unverifiable":
+            return
+        targets = _non_resource_targets(meta, identity, agents)
+        if targets is None:
+            return
+        descendants = [pair for pair in targets if pair[0] != identity.pid]
+        group_pairs = {(p, s) for p, s, state in group.members if state != "Z"}
+        # Stop descendants first so the governor can reap/release normally.
+        # A protected or unowned group member keeps its witness holder alive.
+        targets = descendants or (targets if group_pairs <= set(targets) else [])
+        if not targets:
+            return
+        escalated = time.monotonic() >= deadline - kill_wait
+        for pid, start in targets:
+            current = _rows(jobs, {meta["attempt_id"]}).get(meta["attempt_id"])
+            if (current is None or current[0] != fields or not DC.attempt_scan_namespace_authority(meta)
+                    or DC.exact_process_group_signal_authority(identity.pid, identity.expected_start) != "authoritative"):
+                return
             if escalated or (pid, start) not in sent:
                 _signal(pid, start, signal.SIGKILL if escalated else signal.SIGTERM)
                 sent.add((pid, start))

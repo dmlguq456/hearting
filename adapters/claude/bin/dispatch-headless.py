@@ -2206,15 +2206,14 @@ def main(argv: list[str]) -> int:
             try:
                 watcher_pid = launch_orphan_watch(
                     jobs, agent_home, args.attempt_id, proc.pid, start_ticks or "")
-            except DispatchContractError as exc:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                close_job_row(
-                    jobs, args.slug, args.worktree,
-                    "orphan-watch-launch-error", "", args.attempt_id)
-                return fail(exc.reason, 70, detail=exc.detail, child_spawned="0")
+            except (DispatchContractError, OSError) as exc:
+                return WRAPPER_COMMON.watcher_launch_failure(
+                    jobs, args.attempt_id, proc, launch_metadata,
+                    "orphan-watch-launch-error",
+                    getattr(exc, "reason", "orphan-watch-launch-failed"),
+                    getattr(exc, "detail", str(exc)),
+                    materialize=materialize_after_terminal_close, fail=fail,
+                )
             annotate_job_row(
                 jobs, args.slug, args.worktree,
                 f"orphan_watch=post-exit,orphan_watch_pid={watcher_pid}",
@@ -2229,18 +2228,15 @@ def main(argv: list[str]) -> int:
                     start_ticks or "",
                     int(launch_metadata.get("pgid", "0")),
                 )
-            except (DispatchContractError, ValueError) as exc:
-                reason = getattr(exc, "reason", "reap-watch-identity-invalid")
-                detail = getattr(exc, "detail", str(exc))
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                close_job_row(
-                    jobs, args.slug, args.worktree,
-                    "reap-watch-launch-error", "", args.attempt_id,
+            except (DispatchContractError, ValueError, OSError) as exc:
+                return WRAPPER_COMMON.watcher_launch_failure(
+                    jobs, args.attempt_id, proc, launch_metadata,
+                    "reap-watch-launch-error",
+                    getattr(exc, "reason", "reap-watch-launch-failed" if isinstance(exc, OSError)
+                            else "reap-watch-identity-invalid"),
+                    getattr(exc, "detail", str(exc)),
+                    materialize=materialize_after_terminal_close, fail=fail,
                 )
-                return fail(reason, 70, detail=detail, child_spawned="0")
             annotate_attempt_row(
                 jobs,
                 args.attempt_id,
@@ -2283,20 +2279,29 @@ def main(argv: list[str]) -> int:
                     failure=outcome.failure,
                     group_empty=outcome.group_empty,
                 )
+            except (DispatchContractError, ValueError) as exc:
+                return WRAPPER_COMMON.watcher_launch_failure(
+                    jobs, args.attempt_id, proc, launch_metadata,
+                    getattr(exc, "reason", "foreground-outcome-seal-error"),
+                    getattr(exc, "reason", "foreground-outcome-seal-error"),
+                    getattr(exc, "detail", str(exc)),
+                    materialize=materialize_after_terminal_close, fail=fail,
+                )
+            try:
                 reap_watch_pid = launch_reap_watch(
                     jobs, args.attempt_id, proc.pid, start_ticks or "",
                     int(launch_metadata.get("pgid", "0")),
                     foreground_seal=foreground_seal,
                 )
-            except (DispatchContractError, ValueError) as exc:
-                reason = getattr(exc, "reason", "foreground-outcome-seal-error")
-                detail = getattr(exc, "detail", str(exc))
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
-                close_job_row(jobs, args.slug, args.worktree, reason, "", args.attempt_id)
-                return fail(reason, 70, detail=detail, child_spawned="0")
+            except (DispatchContractError, ValueError, OSError) as exc:
+                return WRAPPER_COMMON.watcher_launch_failure(
+                    jobs, args.attempt_id, proc, launch_metadata,
+                    "reap-watch-launch-error",
+                    getattr(exc, "reason", "reap-watch-launch-failed" if isinstance(exc, OSError)
+                            else "foreground-outcome-seal-error"),
+                    getattr(exc, "detail", str(exc)),
+                    materialize=materialize_after_terminal_close, fail=fail,
+                )
             annotate_attempt_row(
                 jobs, args.attempt_id,
                 {"reap_watch": "post-exit", "reap_watch_pid": str(reap_watch_pid)},

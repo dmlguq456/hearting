@@ -906,6 +906,15 @@ execution.
 **Dispatch responsibility:** execution, semantic outcome, and notification are
 separate facts.
 
+Watcher attachment failure after the launch fence does not undo a launch.
+The execution boundary retains the published PID/start/group and actual child
+start, performs bounded exact cleanup, and hands unresolved cleanup to the
+existing resolver and supervision controller. A terminal result may coexist
+with an unsettled cleanup obligation; neither permits a second launch.
+After its direct native child returns, a governor may drain only its exact
+non-resource descendants. Protected resources and unknown observations retain
+their ownership, and the witness and lease remain held until actual settlement.
+
 | Decision | Accountable component | Required follow-through |
 |---|---|---|
 | Start and execution lifetime | Claimed execution boundary | Publish the actual runner identity, enforce its finite budget, and account for governed descendants before releasing resources. |
