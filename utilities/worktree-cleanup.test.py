@@ -15,6 +15,7 @@ import unittest
 import json
 import sys
 import signal
+import textwrap
 from unittest import mock
 
 
@@ -785,6 +786,79 @@ class BatchCleanupTests(unittest.TestCase):
                 self.fx = CleanupFixture()
                 self.addCleanup(self.fx.close)
 
+    def test_changes_during_final_evaluation_keep_worktree_and_branches(self):
+        for change in ("status-head", "head", "branch", "local-integration", "tracking",
+                       "registration", "backlink", "registry", "remote-url", "unknown-head"):
+            with self.subTest(change=change):
+                path = self.fx.add_worktree("final-" + change)
+                self.register([path])
+                gitdir = Path(run(["git", "-C", str(path), "rev-parse", "--absolute-git-dir"]).stdout.strip())
+                original_before = CLEANUP.CleanupPass.before_remove
+                original_run = CLEANUP.run
+                original_proc = CLEANUP.process_cwds
+                in_final, changed = [], []
+                def mutate():
+                    if changed:
+                        return
+                    changed.append(change)
+                    if change in ("status-head", "head"):
+                        run(["git", "-C", str(path), "commit", "--allow-empty", "-qm", "unmerged during final evaluate"])
+                    elif change == "branch":
+                        run(["git", "-C", str(path), "switch", "-qc", "switched-during-final"])
+                    elif change == "local-integration":
+                        run(["git", "-C", str(self.fx.repo), "commit", "--allow-empty", "-qm", "new unpushed integration"])
+                    elif change == "tracking":
+                        run(["git", "-C", str(self.fx.repo), "update-ref", "-d", "refs/remotes/origin/main"])
+                    elif change == "registration":
+                        replacement = path / ".replacement"
+                        replacement.write_bytes((path / ".git").read_bytes())
+                        replacement.replace(path / ".git")
+                    elif change == "backlink":
+                        (gitdir / "gitdir").write_text(str(path / "other") + "\n")
+                    elif change == "registry":
+                        with self.fx.jobs.open("a") as stream:
+                            stream.write(f"now\topen\t{path}\t{path}\tnew\tpid={os.getpid()}\n")
+                    elif change == "remote-url":
+                        run(["git", "-C", str(self.fx.repo), "remote", "set-url", "origin", str(self.fx.root / "other")])
+                def final(context, *args):
+                    in_final.append(True)
+                    try:
+                        return original_before(context, *args)
+                    finally:
+                        in_final.pop()
+                def command(argv, **kwargs):
+                    if in_final and change == "status-head" and "status" in argv:
+                        mutate()
+                    if changed and change == "unknown-head" and "HEAD^{commit}" in argv and str(path) in argv:
+                        raise RuntimeError("fixture final HEAD unreadable")
+                    return original_run(argv, **kwargs)
+                def processes(target, **kwargs):
+                    result = original_proc(target, **kwargs)
+                    if in_final and not kwargs and change != "status-head":
+                        mutate()
+                    return result
+                with mock.patch.object(CLEANUP.CleanupPass, "before_remove", final), \
+                        mock.patch.object(CLEANUP, "run", side_effect=command), \
+                        mock.patch.object(CLEANUP, "process_cwds", side_effect=processes):
+                    code, output = self.apply()
+                self.assertEqual(code, 3, output)
+                self.assertEqual(changed, [change])
+                self.assertTrue(path.exists(), output)
+                self.assertNotIn("status=removed", output)
+                self.assertFalse(self.fx.audit.exists(), "a kept target must not receive a removal audit")
+                run(["git", "-C", str(self.fx.repo), "show-ref", "--verify", "refs/heads/" + path.name])
+                if change == "branch":
+                    run(["git", "-C", str(self.fx.repo), "show-ref", "--verify", "refs/heads/switched-during-final"])
+                if change in ("status-head", "head"):
+                    head = run(["git", "-C", str(path), "rev-parse", "HEAD"]).stdout.strip()
+                    self.assertEqual(run(["git", "-C", str(self.fx.repo), "merge-base", "--is-ancestor",
+                                          head, "origin/main"], check=False).returncode, 1)
+                    self.assertIn("head=" + head, output)
+                print(f"cleanup-final-evaluate change={change} removed=false branch-retained=true audit=none")
+                self.fx.close()
+                self.fx = CleanupFixture()
+                self.addCleanup(self.fx.close)
+
     def test_pass_interrupt_after_first_remove_audits_and_prunes_once(self):
         paths = [self.fx.add_worktree(f"interrupt-{i}") for i in range(3)]
         self.register(paths)
@@ -885,6 +959,147 @@ class BatchCleanupTests(unittest.TestCase):
                 mock.patch.object(CLEANUP, "read_proc_start", return_value="100"), \
                 mock.patch.object(CLEANUP.os, "readlink", side_effect=PermissionError("unknown")):
             self.assertEqual(CLEANUP.process_snapshot()[0], "procfs-unknown")
+
+
+class ObservationBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="cleanup-boundary-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def driver(self, body, mode, *, env=None, stdin=None):
+        code = textwrap.dedent("""
+            import importlib.util,json,os,sys,threading
+            from pathlib import Path
+            spec=importlib.util.spec_from_file_location('boundary_cleanup',sys.argv[1])
+            C=importlib.util.module_from_spec(spec);spec.loader.exec_module(C)
+            event=threading.Event()
+            if sys.argv[2]=='exec':
+                thread=threading.Thread(target=event.wait);thread.start()
+            try:
+        """) + textwrap.indent(textwrap.dedent(body), "    ") + textwrap.dedent("""
+            finally:
+                event.set()
+                if sys.argv[2]=='exec': thread.join(5)
+        """)
+        return subprocess.run([sys.executable, "-c", code, str(SCRIPT), mode, str(self.root)],
+                              text=True, capture_output=True, input=stdin,
+                              env={**os.environ, **(env or {})}, timeout=25)
+
+    def test_empty_children_skip_underlying_proc_census_in_fork_and_exec(self):
+        # sitecustomize observes the actual OS/Path operations in the driver,
+        # fork observer, exec fallback and payload, not just lifecycle wrappers.
+        (self.root / "sitecustomize.py").write_text(textwrap.dedent("""
+            import os,re
+            from pathlib import Path
+            def record(kind,path):
+                value=str(path)
+                if value=='/proc' or re.fullmatch(r'/proc/[0-9]+/stat',value):
+                    with open(os.environ['CENSUS_LOG'],'a') as out: out.write(kind+' '+value+'\\n')
+            original_listdir=os.listdir
+            def listdir(path='.'):
+                record('listdir',path);return original_listdir(path)
+            os.listdir=listdir
+            original_stat=os.stat
+            def stat(path,*args,**kwargs):
+                record('stat',path);return original_stat(path,*args,**kwargs)
+            os.stat=stat
+            original_bytes=Path.read_bytes
+            def read_bytes(path,*args,**kwargs):
+                record('read-stat',path);return original_bytes(path,*args,**kwargs)
+            Path.read_bytes=read_bytes
+            original_text=Path.read_text
+            def read_text(path,*args,**kwargs):
+                record('read-stat',path);return original_text(path,*args,**kwargs)
+            Path.read_text=read_text
+        """))
+        for mode in ("fork", "exec"):
+            with self.subTest(mode=mode):
+                log = self.root / (mode + ".census")
+                result = self.driver("""
+                    for _ in range(3):
+                        result=C.run([sys.executable,'-c','pass'])
+                        assert result.returncode==0,result
+                    print('commands=3')
+                """, mode, env={"PYTHONPATH": str(self.root), "CENSUS_LOG": str(log)})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                rows = log.read_text().splitlines() if log.exists() else []
+                self.assertEqual(rows, [], rows)
+                print(f"cleanup-no-child mode={mode} commands=3 proc-listdir=0 proc-stat=0")
+
+    def test_stdin_is_eof_and_caller_fixture_bytes_are_unread(self):
+        for mode in ("fork", "exec"):
+            with self.subTest(mode=mode):
+                result = self.driver("""
+                    probe=C.run([sys.executable,'-c','import sys; print(repr(sys.stdin.read()))'])
+                    print(json.dumps({'probe':probe.stdout.strip(),'remaining':sys.stdin.read()}))
+                """, mode, stdin="fixture-" + mode + "-private-input")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout), {
+                    "probe": "''", "remaining": "fixture-" + mode + "-private-input"})
+
+    def test_closed_fd_setsid_descendants_are_settled_in_both_branches(self):
+        for mode in ("fork", "exec"):
+            with self.subTest(mode=mode):
+                result = self.driver('''
+                    root=Path(sys.argv[3]);pidfile=root/'detached.pid'
+                    descendant="import os,time; os.close(0); os.close(1); os.close(2); time.sleep(30)"
+                    payload="import subprocess,sys; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c',sys.argv[2]],start_new_session=True); Path(sys.argv[1]).write_text(str(p.pid))"
+                    C.run([sys.executable,'-c',payload,str(pidfile),descendant])
+                    assert not Path('/proc',pidfile.read_text()).exists()
+                    print('setsid-closed-fds-descendant=settled')
+                ''', mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("setsid-closed-fds-descendant=settled", result.stdout)
+
+    def test_unreadable_children_retain_diagnostics_in_both_branches(self):
+        (self.root / "sitecustomize.py").write_text(textwrap.dedent("""
+            from pathlib import Path
+            original=Path.read_text
+            def read_text(path,*args,**kwargs):
+                if str(path).startswith('/proc/self/task/') and path.name=='children':
+                    raise PermissionError('fixture children unreadable')
+                return original(path,*args,**kwargs)
+            Path.read_text=read_text
+        """))
+        for mode in ("fork", "exec"):
+            with self.subTest(mode=mode):
+                result = self.driver("""
+                    try:
+                        C.run([sys.executable,'-c','pass'])
+                    except C.UnsettledObservation as error:
+                        diagnostics=Path(str(error).split('diagnostics=',1)[1])
+                        assert diagnostics.is_dir()
+                        assert 'observation descendants unresolved' in (diagnostics/'stderr').read_text()
+                        print('unknown-children=kept; diagnostics=retained')
+                    else:
+                        raise AssertionError('unreadable children became an empty success')
+                """, mode, env={"PYTHONPATH": str(self.root), "TMPDIR": str(self.root)})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("unknown-children=kept; diagnostics=retained", result.stdout)
+
+    def test_observer_and_descendant_do_not_extend_fixture_fd0_flock(self):
+        for mode in ("fork", "exec"):
+            with self.subTest(mode=mode):
+                # Only the driver opens/locks this file description. Its own
+                # handler closes fd0 after the observer and payload are live.
+                result = self.driver('''
+                    import fcntl,signal
+                    root=Path(sys.argv[3]);locked=root/'fixture.lock';pidfile=root/'payload.pid'
+                    fd=os.open(locked,os.O_CREAT|os.O_RDWR,0o600)
+                    os.dup2(fd,0);os.close(fd);fcntl.flock(0,fcntl.LOCK_EX)
+                    def close_input(_sig,_frame):
+                        os.close(0)
+                        os.kill(int(pidfile.read_text()),signal.SIGUSR2)
+                    signal.signal(signal.SIGUSR1,close_input)
+                    descendant="import fcntl,sys; f=open(sys.argv[1],'r+'); fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB); print(repr(sys.stdin.read()))"
+                    payload="import os,signal,subprocess,sys; from pathlib import Path; signal.pthread_sigmask(signal.SIG_BLOCK,{signal.SIGUSR2}); Path(sys.argv[2]).write_text(str(os.getpid())); os.kill(int(sys.argv[1]),signal.SIGUSR1); signal.sigwait({signal.SIGUSR2}); result=subprocess.run([sys.executable,'-c',sys.argv[4],sys.argv[3]],start_new_session=True,capture_output=True,text=True); print(result.stdout.strip()); print(result.stderr,file=sys.stderr); raise SystemExit(result.returncode)"
+                    probe=C.run([sys.executable,'-c',payload,str(os.getpid()),str(pidfile),str(locked),descendant])
+                    assert probe.stdout.strip()=="''",probe
+                    print('fd0-flock-released; descendant-stdin-eof')
+                ''', mode)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("fd0-flock-released; descendant-stdin-eof", result.stdout)
 
 
 if __name__ == "__main__":

@@ -2792,13 +2792,13 @@ class DispatchContractTest(unittest.TestCase):
        "--parent-pid",str(os.getpid()),"--gate-fd",str(gate_fd),"--",
        sys.executable,"-c",f"from pathlib import Path;Path({str(marker)!r}).write_text('bad')"],
       pass_fds=(gate_fd,),start_new_session=True)
-     child.append(proc);return proc
-    with mock.patch.object(
-        D,"process_identity_is_live",side_effect=(True,False)):
-     with self.assertRaises(D.DispatchContractError) as caught:
-      D.spawn_claimed_attempt(
-       jobs,attempt,parent_binding=binding,spawn=spawn,
-       launch_metadata={"launch_lifecycle":"detached"})
+     child.append(proc)
+     parent.terminate();parent.wait(timeout=5)
+     return proc
+    with self.assertRaises(D.DispatchContractError) as caught:
+     D.spawn_claimed_attempt(
+      jobs,attempt,parent_binding=binding,spawn=spawn,
+      launch_metadata={"launch_lifecycle":"detached"})
     self.assertEqual(caught.exception.reason,"parent-attempt-not-live-after-spawn")
     self.assertFalse(marker.exists())
     self.assertIsNotNone(child[0].poll())

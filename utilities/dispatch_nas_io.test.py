@@ -183,6 +183,106 @@ class NasDispatchIOTest(unittest.TestCase):
         winners[0][0].wait(timeout=5)
         self.assertTrue(marker.exists())
 
+    def test_parent_liveness_is_fresh_after_both_registry_lock_waits(self):
+        spec = importlib.util.spec_from_file_location(
+            "nas_parent_fixture", Path(__file__).with_name("dispatch_contract.test.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        case = module.DispatchContractTest()
+        for commit in (1, 2):
+            for change in ("death", "pid-reuse", "unknown", "lease-return"):
+                with self.subTest(commit=commit, change=change), tempfile.TemporaryDirectory() as td:
+                    suffix = f"lock-wait-{commit}-{change}"
+                    parent, jobs, binding = case._fenced_spawn(td, suffix)
+                    self.children.append(parent)
+                    holder = None
+                    namespace = mock.patch.object(DC, "process_namespace_identity", wraps=DC.process_namespace_identity)
+                    if change == "lease-return":
+                        attempt = f"att-parent-{suffix}"
+                        lease = DC.supervisor_lease_path(jobs, attempt)
+                        lease.parent.mkdir(parents=True, exist_ok=True)
+                        holder = lease.open("w+")
+                        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        nonce = "c" * 64
+                        holder.write(f"kind={DC.SUPERVISOR_LEASE_KIND}\nattempt_id={attempt}\nnonce={nonce}\n")
+                        holder.flush()
+                        lines = jobs.read_text().splitlines()
+                        extra = (",harness=codex,runtime_sandbox=workspace-write,"
+                                 "completion_delivery=app-server-supervised,"
+                                 f"supervisor_lease={DC.SUPERVISOR_LEASE_KIND},"
+                                 f"supervisor_lease_file={lease},supervisor_lease_nonce={nonce},"
+                                 "pid_scope=namespace-local,pid_observer_ns=pid:[outer],pid_ns=pid:[outer]")
+                        lines[0] = case.owner_row(attempt, parent.pid, DC.process_start_ticks(parent.pid), extra=extra)
+                        jobs.write_text("\n".join(lines) + "\n")
+                        namespace = mock.patch.object(DC, "process_namespace_identity", return_value="pid:[inner]")
+                    entered, holding, release = threading.Event(), threading.Event(), threading.Event()
+                    self.release_events.append(release)
+                    rounds, invalid = [], []
+                    original_transaction = DC._launch_registry_transaction
+                    original_observation = DC._proc_observation
+                    def observe(pid):
+                        if pid == parent.pid and invalid:
+                            return (("present", "different-start", "S") if change == "pid-reuse"
+                                    else ("inaccessible", "", ""))
+                        return original_observation(pid)
+                    @contextmanager
+                    def wait_gap(path):
+                        rounds.append(True)
+                        if len(rounds) == commit:
+                            def hold_writer():
+                                with Path(f"{path}.lock").open("a") as lock:
+                                    fcntl.flock(lock, fcntl.LOCK_EX)
+                                    holding.set()
+                                    release.wait(10)
+                            writer = threading.Thread(target=hold_writer)
+                            self.threads.append(writer)
+                            writer.start()
+                            self.assertTrue(holding.wait(5))
+                            entered.set()
+                        with original_transaction(path) as lines:
+                            yield lines
+                    marker = Path(td) / "must-not-run"
+                    try:
+                        with namespace, mock.patch.object(DC, "_proc_observation", side_effect=observe):
+                            if holder is not None:
+                                binding = DC.resolve_live_parent_attempt(
+                                    jobs, parent_slug="owner", repo="/repo", worktree="/wt",
+                                    expected_attempt_id=f"att-parent-{suffix}")
+                                self.assertEqual(binding.liveness_source, "supervisor-lease")
+                            with mock.patch.object(DC, "_launch_registry_transaction", side_effect=wait_gap):
+                                done, result = self.async_call(lambda: DC.spawn_claimed_attempt(
+                                    jobs, f"att-child-{suffix}", parent_binding=binding, spawn=self.spawn(marker)))
+                                self.assertTrue(entered.wait(5))
+                                self.assertFalse(done.is_set())
+                                if change == "death":
+                                    parent.terminate(); parent.wait(timeout=5)
+                                elif holder is not None:
+                                    fcntl.flock(holder, fcntl.LOCK_UN); holder.close()
+                                else:
+                                    invalid.append(True)
+                                # Registry stays open and byte-identical while the
+                                # exact local authority changes behind the lock.
+                                self.assertEqual(jobs.read_text().splitlines()[0].split("\t")[1], "open")
+                                release.set()
+                                self.assertTrue(done.wait(10))
+                        error = result.get("error")
+                        self.assertIsInstance(error, DC.DispatchContractError, result)
+                        self.assertEqual(error.reason, "parent-attempt-not-live-" +
+                                         ("after-spawn" if commit == 1 else "after-post-claim"))
+                        self.assertEqual(len(rounds), commit)
+                        self.assertFalse(marker.exists())
+                        meta = DC.parse_registry_metadata(jobs.read_text().splitlines()[1].split("\t")[5])
+                        self.assertEqual(meta["launch_claimed"], "0" if commit == 1 else "1")
+                        self.assertIsNotNone(self.children[-1].poll())
+                        print(f"parent-lock-wait commit={commit} change={change} released=false row=open")
+                    finally:
+                        release.set()
+                        if holder is not None and not holder.closed:
+                            holder.close()
+                        if parent.poll() is None:
+                            parent.terminate()
+                        parent.wait(timeout=5)
+
     def test_legacy_global_launcher_fresh_identity_wins_only_one_release(self):
         self.register("att-legacy")
         legacy_marker, new_marker = self.base / "legacy", self.base / "new"

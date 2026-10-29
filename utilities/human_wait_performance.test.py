@@ -46,10 +46,6 @@ class HumanWaitPerformanceTests(unittest.TestCase):
             git("switch", "-qc", "topic")
             git("update-ref", "refs/remotes/origin/main", "HEAD")
             git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
-            before = root / "before.sh"
-            before.write_bytes(subprocess.check_output(
-                ["git", "-C", str(ROOT), "show", "HEAD:adapters/claude/statusline.sh"],
-                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}))
             bindir = root / "bin"
             bindir.mkdir()
             real_git = subprocess.check_output(["sh", "-c", "command -v git"], text=True).strip()
@@ -85,7 +81,9 @@ class HumanWaitPerformanceTests(unittest.TestCase):
                     self.assertEqual(done.returncode, 0, done.stderr)
                     times[phase].append(time.perf_counter() - started)
                 return done.stdout
-            render(before, "before", 5)
+            # Standing regression uses current source and a new private cache.
+            # Historical paired timings belong to their pinned evidence, not
+            # a moving HEAD that changes meaning as soon as we commit.
             statusline = ROOT / "adapters/claude/statusline.sh"
             cold = render(statusline, "cold", 1)
             self.assertIn("unknown", cold)
@@ -109,8 +107,6 @@ class HumanWaitPerformanceTests(unittest.TestCase):
             self.assertIn("💀merged", warm)
             rows = calls.read_text().splitlines()
             count = lambda phase, tool: rows.count(phase + " " + tool)
-            self.assertEqual(count("before", "git"), 30)
-            self.assertEqual(count("before", "ps"), 5)
             self.assertEqual(count("warm", "git"), 0)
             self.assertEqual(count("warm", "ps"), 0)
             self.assertEqual(count("cold", "ps"), 1)

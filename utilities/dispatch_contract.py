@@ -5540,8 +5540,8 @@ def _launch_local_fences(jobs, metadata, cancellation_routes, *, registration=Fa
     """Fresh local terminal claims and close journals, never route/source readers.
 
     These existing records live beside jobs, and their writers serialize with
-    this same jobs lock. Process, Git, route and foreign-parent observations
-    have already completed outside it; their exact rows are pinned separately.
+    this same jobs lock. Git, route and foreign-parent observations complete
+    outside it. The commit also rechecks exact local PID/start or lease liveness.
     """
     import route_parent_close
     if route_parent_close.requested(metadata):
@@ -5647,13 +5647,14 @@ def _prepare_attempt_launch(jobs, attempt_id, *, parent_binding, respawn_of, pre
             if not _parent_binding_is_live_from_metadata(jobs, parent_meta, parent_binding):
                 raise DispatchContractError("parent-attempt-not-live", parent_binding.attempt_id)
     except DispatchContractError as exc:
-        if exc.reason == "parent-attempt-not-live" and published:
-            raise DispatchContractError("parent-attempt-not-live-after-post-claim", exc.detail) from exc
+        if exc.reason == "parent-attempt-not-live" and (published or expected_fields is not None):
+            suffix = "after-post-claim" if published else "after-spawn"
+            raise DispatchContractError("parent-attempt-not-live-" + suffix, exc.detail) from exc
         raise
     return lines, index, fields, metadata, routes
 
 
-def _commit_launch_preparation(jobs, fresh, prepared, *, preclaim, phase):
+def _commit_launch_preparation(jobs, fresh, prepared, *, parent_binding, preclaim, phase):
     lines, _index, fields, metadata, routes = prepared
     index, current_fields, current_meta = _launch_row(
         fresh, metadata["attempt_id"], reason=f"attempt-{phase}-row-not-unique")
@@ -5662,6 +5663,20 @@ def _commit_launch_preparation(jobs, fresh, prepared, *, preclaim, phase):
             or _launch_dependencies(fresh, fields, (preclaim,))
             != _launch_dependencies(lines, fields, (preclaim,))):
         raise DispatchContractError(f"attempt-{phase}-identity-changed", metadata["attempt_id"])
+    if parent_binding is not None:
+        # A parent can exit while we wait for jobs.lock even when its row is
+        # unchanged. Only exact local PID/start or the already resolved local
+        # supervisor lease belongs here; NAS/foreign observations stay outside.
+        _parent_index, parent_fields, parent_meta = _launch_row(fresh, parent_binding.attempt_id)
+        live = False
+        if parent_fields[1] in {"open", "running"} and _parent_metadata_matches_binding(parent_meta, parent_binding):
+            if parent_binding.observed_pid is not None:
+                live = process_identity_is_live(parent_binding.observed_pid, parent_binding.observed_pid_start)
+            elif parent_binding.liveness_source == "supervisor-lease":
+                live = supervisor_lease_is_held(jobs, parent_meta)
+        if not live:
+            suffix = "after-post-claim" if phase == "post-claim" else "after-spawn"
+            raise DispatchContractError("parent-attempt-not-live-" + suffix, parent_binding.attempt_id)
     return index, current_fields, current_meta
 
 
@@ -5784,7 +5799,8 @@ def spawn_claimed_attempt(
             try:
                 with _launch_registry_transaction(jobs) as fresh:
                     index, fields, _meta = _commit_launch_preparation(
-                        jobs, fresh, prepared, preclaim=preclaim, phase="pre-release")
+                        jobs, fresh, prepared, parent_binding=parent_binding,
+                        preclaim=preclaim, phase="pre-release")
                     parts = [part for part in fields[5].split(",")
                              if part.split("=", 1)[0] not in {*identity, "launch_claimed"}]
                     parts.extend(f"{key}={value}" for key, value in sorted(identity.items()))
@@ -5825,7 +5841,8 @@ def spawn_claimed_attempt(
                 preclaim=preclaim, expected_fields=published_fields, published=True, phase="post-claim")
             with _launch_registry_transaction(jobs) as fresh:
                 index, fields, meta = _commit_launch_preparation(
-                    jobs, fresh, prepared, preclaim=preclaim, phase="post-claim")
+                    jobs, fresh, prepared, parent_binding=parent_binding,
+                    preclaim=preclaim, phase="post-claim")
                 collisions = sorted(key for key, value in post_metadata.items()
                                     if meta.get(key) not in (None, value))
                 if collisions:

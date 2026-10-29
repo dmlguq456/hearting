@@ -87,6 +87,8 @@ class Verdict:
         self.process_scan = process_scan
         self.repository_mode = repository_mode
         self.local_integration_commit = ""
+        self.integration_refs = {}
+        self.integration_symbols = {}
 
 
 _OBSERVATION_LIFECYCLE = None
@@ -124,7 +126,8 @@ def observe_command(argv):
         signal.signal(signum, interrupted)
     observed = {}
     try:
-        result = subprocess.run(argv, env={**os.environ, lifecycle.SCOPE_ENV: scope},
+        result = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                env={**os.environ, lifecycle.SCOPE_ENV: scope},
                                 timeout=OBSERVATION_TIMEOUT, check=False)
         status = result.returncode
     except subprocess.TimeoutExpired:
@@ -147,7 +150,7 @@ def observe_command(argv):
             if live or unknown or children is None:
                 print(f"observation descendants unresolved: live={sorted(live)} unknown={unknown}", file=sys.stderr)
                 status = 125
-        lifecycle.reap_zombies()
+            lifecycle.reap_zombies()
     return status
 
 
@@ -177,6 +180,8 @@ def run(
                 if pid == 0:
                     try:
                         os.setsid()
+                        with open(os.devnull, "rb") as input_null:
+                            os.dup2(input_null.fileno(), 0)
                         os.dup2(output.fileno(), 1)
                         os.dup2(errors.fileno(), 2)
                         # Do not retain caller locks or registry descriptors.
@@ -196,7 +201,8 @@ def run(
             else:
                 process = subprocess.Popen(
                     [sys.executable, str(Path(__file__).resolve()), "_observe", str(OBSERVATION_TIMEOUT),
-                     json.dumps(argv)], cwd=str(cwd) if cwd else None, stdout=output, stderr=errors,
+                     json.dumps(argv)], cwd=str(cwd) if cwd else None, stdin=subprocess.DEVNULL,
+                    stdout=output, stderr=errors,
                     start_new_session=True, env=child_env)
                 pid = process.pid
             if threading.current_thread() is threading.main_thread():
@@ -328,8 +334,12 @@ class CleanupPass:
         backlink = Path((gitdir / "gitdir").read_text().strip())
         if lexical(backlink) != lexical(target / ".git"):
             raise RuntimeError("worktree registration changed")
+        registration = self.registration_identity(target, gitdir)
         head = run(["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"]).stdout.strip()
-        branch = run(["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], check=False).stdout.strip()
+        branch_result = run(["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], check=False)
+        if branch_result.returncode not in (0, 1):
+            raise RuntimeError("cannot verify current worktree branch")
+        branch = branch_result.stdout.strip()
         fresh = WorktreeEntry(target, head, branch, os.path.lexists(gitdir / "locked"))
         entries = [fresh if entry.path == target else entry for entry in self.entries]
         rows = registry_rows(jobs)
@@ -344,8 +354,59 @@ class CleanupPass:
             if getattr(previous, field) != getattr(checked, field):
                 checked.reasons.append("worktree-or-integration-changed")
                 break
+        # evaluate includes slow graph, registry and proc observations. Its
+        # input entry is not current authority after those observations.
+        for ref, expected in checked.integration_refs.items():
+            if expected:
+                result = run(["git", "-C", str(self.primary), "rev-parse", "--verify", ref + "^{commit}"],
+                             check=False)
+                same = result.returncode == 0 and result.stdout.strip() == expected
+            else:
+                result = run(["git", "-C", str(self.primary), "show-ref", "--verify", "--quiet", ref],
+                             check=False)
+                same = result.returncode == 1  # Positive absence, not an unreadable ref.
+            if not same:
+                checked.reasons.append("worktree-or-integration-changed")
+        for ref, expected in checked.integration_symbols.items():
+            result = run(["git", "-C", str(self.primary), "rev-parse", "--symbolic-full-name", ref],
+                         check=False)
+            if result.returncode or result.stdout.strip() != expected:
+                checked.reasons.append("worktree-or-integration-changed")
+        for remote, expected in self.remote_urls.items():
+            if run(["git", "-C", str(self.primary), "remote", "get-url", "--all", remote]).stdout != expected:
+                checked.reasons.append("worktree-or-integration-changed")
+        head = run(["git", "-C", str(target), "rev-parse", "--verify", "HEAD^{commit}"]).stdout.strip()
+        branch_result = run(["git", "-C", str(target), "symbolic-ref", "-q", "HEAD"], check=False)
+        if branch_result.returncode not in (0, 1):
+            raise RuntimeError("cannot verify current worktree branch")
+        branch = branch_result.stdout.strip().removeprefix("refs/heads/") or "detached"
+        if (head, branch) != (checked.head, checked.branch):
+            checked.reasons.append("worktree-or-integration-changed")
+        checked.head, checked.branch = head, branch
+        if self.registration_identity(target, gitdir) != registration:
+            checked.reasons.append("worktree-registration-changed")
+        latest_rows = registry_rows(jobs)
+        if tuple(fields for fields, _meta in latest_rows if lexical(fields[3]) == target) != new_rows:
+            checked.reasons.append("registry-changed")
+        if any(known_exists(path) for path in (
+                gitdir / "locked", gitdir / "index.lock", gitdir / "HEAD.lock",
+                self.common / "packed-refs.lock", self.common / ("refs/heads/" + branch + ".lock"))):
+            checked.reasons.append("locked")
         checked.eligible = not checked.reasons
         return checked
+
+    @staticmethod
+    def registration_identity(target, gitdir):
+        """Exact linked-checkout registration, without another worktree census."""
+        paths = (target, gitdir, target / ".git", gitdir / "gitdir", gitdir / "commondir")
+        identity = []
+        for path in paths:
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                raise RuntimeError("worktree registration symlink")
+            identity.append((info.st_dev, info.st_ino, info.st_mode,
+                             path.read_bytes() if stat.S_ISREG(info.st_mode) else None))
+        return tuple(identity)
 
 
 def resolve_agent_home() -> Path:
@@ -755,6 +816,7 @@ def evaluate(
             verdict.reasons.append("integration-ref-missing")
         else:
             verdict.integration_commit = ref_check.stdout.strip()
+            verdict.integration_refs[chosen_ref] = verdict.integration_commit
             merged = graph("merge-base", "--is-ancestor", entry.head, verdict.integration_commit)
             if merged.returncode == 1:
                 verdict.reasons.append("unmerged")
@@ -781,6 +843,7 @@ def evaluate(
             if symbolic_ref.returncode != 0 or not full_ref:
                 verdict.reasons.append("integration-ref-missing")
             else:
+                verdict.integration_symbols[integration_ref] = full_ref
                 identity = remote_ref_identity(primary, full_ref)
                 if identity is not None:
                     remote, branch = identity
@@ -797,6 +860,8 @@ def evaluate(
                         check=False,
                     )
                     upstream_ref = upstream_result.stdout.strip()
+                    if upstream_result.returncode == 0:
+                        verdict.integration_symbols[f"{local_branch}@{{upstream}}"] = upstream_ref
                     identity = remote_ref_identity(primary, upstream_ref)
                     if upstream_result.returncode != 0 or identity is None:
                         verdict.reasons.append("no-upstream-configured")
@@ -814,6 +879,7 @@ def evaluate(
                     verdict.reasons.append("integration-ref-changed")
             verdict.integration_ref = display_ref
             verdict.integration_commit = remote_commit
+            verdict.integration_refs[f"refs/remotes/{remote}/{branch}"] = remote_commit
             verdict.upstream = f"{remote}/{branch}"
 
             merged = graph("merge-base", "--is-ancestor", entry.head, remote_commit)
@@ -829,6 +895,7 @@ def evaluate(
             if local_result is not None and local_result.returncode == 0:
                 local_commit = local_result.stdout.strip()
                 verdict.local_integration_commit = local_commit
+                verdict.integration_refs[local_ref] = local_commit
                 if not local_commit:
                     raise RuntimeError("cannot resolve local integration commit")
                 if require_local_inclusion:
@@ -861,6 +928,7 @@ def evaluate(
                     raise RuntimeError("cannot resolve local integration ref")
                 if local_ref_exists.returncode != 1:
                     raise RuntimeError("cannot verify local integration ref existence")
+                verdict.integration_refs[local_ref] = ""
 
     if fresh_processes:
         # Do the volatile registry/process observation after Git checks so a
