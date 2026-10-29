@@ -2401,8 +2401,14 @@ Claude, the Stop at the end of the granting turn) or a watcher's completion, so 
 runner running a Codex or OpenCode watch/start grant can wait for the next lifecycle
 event. When the configured
 interval (`steward.check_interval_seconds`, default 7200, range 600..86400) has
-elapsed since the last check or delivery, the runner sends one request through the
-`session_notice` carrier without waiting for input or a Stop event. Only a session that
+elapsed since the last check or delivery, the runner creates one request through the
+existing `session_notice` carrier without waiting for input or a Stop event. At pass
+entry, already accepted notices, including ACK settlement, advance before legacy
+notice discovery, role recovery and unrelated duties. The active-marker read does
+not replace the subsequent full recovery pass. The courier still checks the exact
+current recipient and supported idle transport before submission; creation is not
+native receipt or execution. This ordering does not preempt an I/O call already in
+progress or turn unavailable observations into readiness. Only a session that
 Fleet flags as steward (`role_flag`) receives it; marker evidence for a target in another
 repository is communication and yields no request. While that request
 is undelivered no second one is made, a long gap still yields one request and no
@@ -2810,7 +2816,7 @@ acceptance and actual receipt are separate facts:
 
 | Runtime | Transport and acceptance | Exact native receipt | Wake and limits |
 |---|---|---|---|
-| Claude | `peer-steward.py prompt` stores/reuses a ref bound to sender, recipient session and body digest; existing hook context carries the sealed message. | The exact receiving callback acknowledges the bound ref. Context output alone is not receipt. | Plain interactive TUI has no supported wake; its pending ref remains for the next native callback. |
+| Claude | `peer-steward.py prompt` stores/reuses a ref bound to sender, recipient session and body digest; existing hook context carries the sealed message. | The exact receiving callback acknowledges the bound ref. Context output alone is not receipt. | An already armed exact owner/watch `asyncRewake` hook wakes on exit 2. Ordinary notices use the existing guarded PTY courier only after exact SID/PID/start/namespace, idle state and an empty composer are proven. Draft, question, approval, busy or unknown stays pending for the next supported opportunity or native callback. |
 | Codex | The freshly proven exact thread/client queue accepts one sealed ref and returns its `client_message_id`; a legitimate TUI process restart may continue the same exact thread. | The exact message in the bound thread history confirms consumption. | Uses the existing queue and hook path; no transcript inference. |
 | OpenCode | The plugin saves one `noReply` user message through its current client at the exact selected root SID. Its native ID marks it queued. | Only an error-free completed assistant message whose `parentID` is that ID in the same SID marks it received. | On a verified idle root, `promptAsync` continues the persisted message by ID. Busy, question, permission, child, ambiguous history or SID change cannot consume it. |
 
@@ -2819,6 +2825,15 @@ sender/recipient/body reuses its ref; a changed body or recipient session gets a
 separate transfer. Lost responses reconcile against exact native history before a
 resume. Ambiguity never submits the body again. Native callbacks preserve pending
 refs when the runtime has no supported wake.
+
+Claude's [command hook fields](https://code.claude.com/docs/en/hooks#command-hook-fields)
+and [async limitations](https://code.claude.com/docs/en/hooks#limitations) distinguish
+ordinary async output on the next turn from `asyncRewake` exit 2, which wakes even
+an idle session and supplies stderr (or stdout when stderr is empty) as a system
+reminder. The latter still has a timeout. This official armed-hook behavior does
+not grant an arbitrary external wake API. The local guarded PTY courier and the
+next-callback fallback are separate realizations; queue acceptance, exact receipt
+and an actual steward check remain separate observations.
 
 For SID-bound native Codex delivery, a new foreground PID/start remains the same
 recipient when a fresh current-native observation proves the same exact thread SID
