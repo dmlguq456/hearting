@@ -60,11 +60,16 @@ LEGACY_HEADS = {"◀": LANE_HEAD_LEFT, "▶": LANE_HEAD_RIGHT}
 
 
 def _arrow_glyph_delta(expected_cells):
-    """The approved head change: the pane's old wide triangles are now the smaller ◂ ▸."""
+    """Normalize line heads to ASCII, preserving the LINKS text's direction markers."""
+    line_glyphs = frozenset("─━┬┴┼├┤╫╪╬")
     for row in expected_cells:
-        for cell in row:
+        for index, cell in enumerate(row):
             if cell[0] in LEGACY_HEADS:
                 cell[0] = LEGACY_HEADS[cell[0]]
+            elif cell[0] == "▸" and index and row[index - 1][0] in line_glyphs:
+                cell[0] = LANE_HEAD_RIGHT
+            elif cell[0] == "◂" and index + 1 < len(row) and row[index + 1][0] in line_glyphs:
+                cell[0] = LANE_HEAD_LEFT
     return expected_cells
 
 

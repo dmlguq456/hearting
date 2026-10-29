@@ -8,7 +8,7 @@ from .tables import _clip, repo_rule_label
 from .style import steward_flag_key
 
 STAGE_HUES = ("l", "c", "g", "y", "m")          # blue · cyan · green · yellow · magenta
-LANE_HEAD_LEFT, LANE_HEAD_RIGHT = "◂", "▸"
+LANE_HEAD_LEFT, LANE_HEAD_RIGHT = "<", ">"
 STATE_MARKS = {"working": ("⠏", "spin"), "active": ("⠏", "spin"), "idle": ("●", "idle"),
                "blocked": ("●", "blocked"), "failed": ("✕", "dead"), "done": ("✓", "done"),
                "dead": ("✕", "dead")}

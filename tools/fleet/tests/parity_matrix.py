@@ -63,7 +63,7 @@ def detect_reference_defects(frame, width, *, pane_x=34):
 # over a section line). A vertical border, corner, junction or arrow is not: whatever reaches one
 # has left its box. Two different text glyphs on one cell are never intended either.
 _RULES = frozenset("─━═┈┄┅┉╌╍█▌▐░▒▓")
-_BORDERS = frozenset("│┃║┌┐└┘├┤┬┴┼╔╗╚╝╧╤╟╢╪╫╬┏┓┗┛┣┫┳┻╋╭╮╯╰▶◀▸◂▼▲")
+_BORDERS = frozenset("│┃║┌┐└┘├┤┬┴┼╔╗╚╝╧╤╟╢╪╫╬┏┓┗┛┣┫┳┻╋╭╮╯╰▶◀▸◂▼▲<>")
 
 
 def _glyph_class(char):
