@@ -989,6 +989,13 @@ evidence or a complete empty-group observation can establish execution end.
 Exact inspection reads the worker's result; requesting more failure detail is
 optional and cannot become a second completion gate.
 
+A retryable nonzero resource exit may still carry exact saved outputs for its
+declared non-resource verifier. The ordinary owner start can admit that
+saved-only input after checking the original run, sentinel, process-group
+quiescence, config receipt and output bytes. The resource remains failed until
+the normal downstream independent-PASS settlement records consumption; no
+resource-success marker is created to open the verifier.
+
 On the same OPEN route, the current owner may start a new supervised resource
 retry with `resource-runner start --compute-run <run-id>` after a completed
 `compute-hosts` execution. Before creating the retry row, the runtime checks
@@ -996,6 +1003,14 @@ the sealed command, inputs and provenance, exit evidence, output receipts, and
 fresh remote process-group quiescence; it preserves the prior failure row and
 sentinel. The owner's normal start admits verification separately; compute
 exit is execution evidence only.
+
+When an owner is replaced on the same route, its launched replacement may
+observe and consume the predecessor's supervised-resource result through the
+shared replacement and owner-route lineage. The resource record and receipt
+stay attached to the owner that launched it. The current owner's input lease,
+pending corrections, exact resource evidence and the existing once-only
+successor claim are rechecked at ordinary start; an unlaunched claim does not
+transfer consumption authority.
 The runtime acknowledges a delivered notification after its receiving turn
 finishes. Claude PostToolUse events with a nonempty `agent_id` belong to a
 subagent or teammate even when `session_id` names the parent conversation; they

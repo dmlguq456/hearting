@@ -421,6 +421,13 @@ harness install codex
   `codex_setting/bin/preflight.sh tui-config` updates only
   `[tui].status_line` and `[tui].status_line_use_colors`.
 
+- **User-owned leaves:** `harness install codex|opencode` writes a per-leaf
+  native link (`skills/*`, `agents/*.toml`, OpenCode `agent/*.md` and
+  `command/*.md`) only when the slot is absent, already ours, or a dangling
+  link. A real file/directory, or a link resolving outside the harness's
+  generated tree, is reported as `preserved` (a successful, non-blocking
+  outcome; `--dry-run` says the same) and left untouched.
+
 For a project-scoped install, `harness install codex --scope project` symlinks
 the generated TOML files into the project's `.codex/agents/` directory instead
 of `$HOME/.codex/agents/`.

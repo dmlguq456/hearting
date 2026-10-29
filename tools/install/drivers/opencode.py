@@ -212,6 +212,22 @@ def install(scope="global", plugin=False, dry_run=False):
             source = Path(entry["source"])
             dest = Path(entry["dest"])
 
+            preserved = (
+                projector.native_leaf_preservation(RUNTIME, source, dest)
+                if entry.get("native_leaf") else None
+            )
+            if preserved:
+                actions.append(
+                    {
+                        "action": "symlink",
+                        "source": str(source),
+                        "dest": str(dest),
+                        "status": "preserved",
+                        "detail": preserved,
+                    }
+                )
+                continue
+
             if dry_run:
                 actions.append(
                     {

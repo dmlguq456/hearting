@@ -276,6 +276,108 @@ class ModelCatalogTests(unittest.TestCase):
             self.assertEqual(catalog.source, os.path.join(cache, "opencode", "models.json"))
             self.assertEqual(codex.models, ("listed",))
 
+    def _claude_cache(self, name, document, mtime=None):
+        directory = self.root / "claude" / "cache" / "model-catalog"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        path.write_text(document if isinstance(document, str) else json.dumps(document), encoding="utf-8")
+        if mtime is not None:
+            os.utime(path, ns=(mtime, mtime))
+        return path
+
+    @staticmethod
+    def _claude_v2(records, aliases=None):
+        """The runtime's current cache: records nest under catalog.config beside alias targets."""
+        return {"version": 2, "fetchedAt": 1, "staleAt": 2, "catalog": {
+            "surface": "fixture",
+            "config": {"id": "fixture", "models": [
+                {"id": model_id, "name": model_id, "section": section, "runtime": {"family": family}}
+                for model_id, family, section in records],
+                "provider_alias_targets": aliases or {},
+                "settings_vocabulary": {"effort_level": {"high": 3}}},
+            "state": {"id": "fixture", "model": "selected-elsewhere", "selection_source": "fixture"}}}
+
+    def _models_config(self):
+        from tools.fleet.explorer import focus
+
+        class ModelConfig:
+            @staticmethod
+            def resolve_config(adapter):
+                if adapter != "claude":
+                    raise LookupError(adapter)
+                return {"CFG_MODEL_PROFILE_DEEP": "opus:xhigh", "CFG_TIER_OPUS_MODEL": "opus",
+                        "CFG_MODEL_PROFILE_BALANCED": "sonnet:high", "CFG_TIER_SONNET_MODEL": "sonnet"}, {}
+
+        with mock.patch.object(focus, "utility", return_value=ModelConfig):
+            return focus.read_model_config()
+
+    def test_current_claude_cache_feeds_models_choices_with_its_aliases(self):
+        self._claude_cache("cache-cc.json", self._claude_v2(
+            [("claude-opus-5-5", "opus", "main"), ("claude-sonnet-5-5", "sonnet", "main"),
+             ("claude-opus-4-6", "opus", "overflow")],
+            {"opus": {"default": "claude-opus-5-5", "per_provider": {"gateway": "claude-opus-4-6"}},
+             "sonnet": {"default": "claude-sonnet-5-5"},
+             "unlisted": {"default": "not-in-this-catalog"}}))
+        catalog = model_catalog.read_catalog("claude")
+        self.assertEqual((catalog.state, catalog.models), ("available", (
+            "opus", "sonnet", "claude-opus-5-5", "claude-sonnet-5-5", "claude-opus-4-6")))
+        self.assertTrue(catalog.source.endswith("cache-cc.json"))
+
+        config = self._models_config()
+        self.assertEqual(config["catalog_sources"]["claude"]["state"], "available")
+        self.assertEqual(config["model_choices"]["claude"], list(catalog.models))
+        # the saved alias stays the profile value; the catalog never rewrites it to an id
+        self.assertEqual(config["profile_map"]["claude"]["deep"], ["opus", "xhigh"])
+
+        from tools.fleet.explorer.frame import draw
+        from tools.fleet.explorer.state import NavState
+        from tools.fleet.explorer.view_model import ExplorerViewModel, load_fixture
+        values = load_fixture(Path(__file__).parent / "fixtures" / "explorer" / "view_model.json").to_mapping()
+        values["models"] = config
+        state = NavState(view="MODELS", title="MODELS", folds=(("ui:sel", "deep/claude"),))
+        frame = draw(ExplorerViewModel.from_mapping(values), state, 160, 70, beat=1)
+        self.assertNotIn("not in catalog", "\n".join(frame.text_rows()))
+        picks = [hit.action[2] for hit in frame.hits if hit.action[:2] == ("ui", "model")]
+        self.assertEqual(picks, list(catalog.models))
+
+    def test_claude_reads_only_the_most_recently_written_cache(self):
+        old = self._claude_v2([("old-model", "fixture", "main")])
+        new = self._claude_v2([("new-model", "fixture", "main")])
+        self._claude_cache("a-account.json", old, mtime=100_000_000_000)
+        newest = self._claude_cache("z-account.json", new, mtime=200_000_000_000)
+        catalog = model_catalog.read_catalog("claude")
+        self.assertEqual((catalog.state, catalog.models, catalog.source),
+                         ("available", ("new-model",), str(newest)))
+        # equal write times fall back to the file name, so the choice stays stable
+        self._claude_cache("z-account.json", new, mtime=100_000_000_000)
+        self.assertEqual(model_catalog.read_catalog("claude").models, ("old-model",))
+        # an unreadable newest snapshot is unknown; another account's older file never stands in
+        for broken in ("{", {"version": 3, "catalog": {"items": [{"id": "future-model"}]}}):
+            self._claude_cache("z-account.json", broken, mtime=300_000_000_000)
+            catalog = model_catalog.read_catalog("claude")
+            self.assertEqual((catalog.state, catalog.models, catalog.source), ("unknown", (), None))
+
+    def test_claude_empty_catalog_is_empty_but_unrecognized_cache_keeps_profile_choices(self):
+        empty_shapes = (self._claude_v2([]), {"models": []})
+        unknown_shapes = (
+            {"version": 3, "catalog": {"items": [{"id": "future-model"}]}},
+            {"version": 2, "catalog": {"config": {"models": {"claude-x": {}}}}},
+            {"version": 2, "catalog": {"config": {"models": [{"name": "Display only"}]}}},
+            {"models": [{}]},
+            42,
+        )
+        for document in empty_shapes + unknown_shapes:
+            with self.subTest(document=document):
+                self._claude_cache("catalog.json", document)
+                catalog = model_catalog.read_catalog("claude")
+                config = self._models_config()
+                if document in empty_shapes:
+                    self.assertEqual((catalog.state, catalog.models), ("empty", ()))
+                    self.assertEqual(config["model_choices"]["claude"], [])
+                else:
+                    self.assertEqual((catalog.state, catalog.models), ("unknown", ()))
+                    self.assertEqual(config["model_choices"]["claude"], ["opus", "sonnet"])
+
     def test_opencode_keeps_provider_identity_and_uses_local_connection_evidence(self):
         with tempfile.TemporaryDirectory() as root:
             root = os.path.abspath(root)

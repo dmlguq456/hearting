@@ -2,6 +2,9 @@
 """The Codex driver no longer installs the interactive managed launcher."""
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -11,7 +14,10 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import fixture_env  # noqa: E402
 from drivers import codex as codex_driver  # noqa: E402
+
+SOURCE_ROOT = HERE.parent.parent
 
 
 def _no_plan_entries(_runtimes, scope="global"):
@@ -121,6 +127,105 @@ class CodexDriverLauncherRetirementTest(unittest.TestCase):
         self.assertEqual(config.read_text(encoding="utf-8"), original)
         action = next(item for item in result["actions"] if item["action"] == "codex-tui-statusline")
         self.assertEqual(action["status"], "skipped")
+
+
+class CodexNativeLeafPreservationTest(unittest.TestCase):
+    """Per-leaf native projections keep user entries; real projector, no mocks."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="codex-native-leaf-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.env = fixture_env.build_environment(self.root, SOURCE_ROOT)
+        fixture_env.prepare_environment(self.env)
+        self.home = Path(self.env["CODEX_HOME"])
+        agents = sorted(p.name for p in (SOURCE_ROOT / "codex_setting/codex-agents").glob("*.toml"))
+        skills = sorted(p.name for p in (SOURCE_ROOT / "codex_setting/codex-skills").iterdir())
+        self.foreign_agent, self.real_agent, self.dangling_agent, self.owned_agent, self.absent_agent = agents[:5]
+        self.foreign_skill, self.real_skill = skills[:2]
+        self.agents = self.home / "agents"
+        self.skills = self.home / "skills"
+        self.agents.mkdir(parents=True)
+        self.skills.mkdir(parents=True)
+        self.user_target = self.root / "user-owned.toml"
+        self.user_target.write_bytes(b"USER TOML\n")
+        (self.agents / self.foreign_agent).symlink_to(self.user_target)
+        (self.agents / self.real_agent).write_bytes(b"REAL AGENT\n")
+        (self.agents / self.dangling_agent).symlink_to(self.root / "gone" / "agent.toml")
+        # A stale link into the harness's own generated tree is still ours.
+        (self.agents / self.owned_agent).symlink_to(
+            SOURCE_ROOT / "codex_setting/codex-agents" / self.owned_agent)
+        self.user_skill_dir = self.root / "user-skill"
+        self.user_skill_dir.mkdir()
+        (self.skills / self.foreign_skill).symlink_to(self.user_skill_dir)
+        (self.skills / self.real_skill).mkdir()
+        (self.skills / self.real_skill / "SKILL.md").write_bytes(b"MY SKILL\n")
+
+    def _cli(self, *flags: str) -> tuple[int, dict]:
+        proc = subprocess.run(
+            ["sh", str(SOURCE_ROOT / "tools/install/harness.sh"), "install", "codex",
+             "--json", "--yes", *flags],
+            env=self.env, capture_output=True, text=True, timeout=300)
+        return proc.returncode, json.loads(proc.stdout)
+
+    def _checks(self, report: dict) -> dict[str, dict]:
+        return {c["id"]: c for c in report["checks"]}
+
+    def _assert_user_entries_untouched(self) -> None:
+        self.assertEqual(os.readlink(self.agents / self.foreign_agent), str(self.user_target))
+        self.assertEqual(self.user_target.read_bytes(), b"USER TOML\n")
+        self.assertFalse((self.agents / self.real_agent).is_symlink())
+        self.assertEqual((self.agents / self.real_agent).read_bytes(), b"REAL AGENT\n")
+        self.assertEqual(os.readlink(self.skills / self.foreign_skill), str(self.user_skill_dir))
+        self.assertEqual(list(self.user_skill_dir.iterdir()), [])
+        self.assertFalse((self.skills / self.real_skill).is_symlink())
+        self.assertEqual(os.listdir(self.skills / self.real_skill), ["SKILL.md"])
+        self.assertEqual((self.skills / self.real_skill / "SKILL.md").read_bytes(), b"MY SKILL\n")
+
+    def test_public_install_preserves_user_entries_and_refreshes_ours(self):
+        code, report = self._cli()
+        self.assertEqual(code, 0, report["lines"])
+        self._assert_user_entries_untouched()
+        source_agents = SOURCE_ROOT / "codex_setting/codex-agents"
+        for name in (self.dangling_agent, self.owned_agent, self.absent_agent):
+            self.assertEqual(os.readlink(self.agents / name), str(source_agents / name))
+        checks = self._checks(report)
+        for leaf in (self.foreign_agent, self.real_agent, self.foreign_skill, self.real_skill):
+            check = checks[f"codex.symlink.{leaf}"]
+            self.assertTrue(check["ok"], check)
+            self.assertIn("preserved", check["detail"])
+
+    def test_public_dry_run_reports_the_same_preservation_without_writing(self):
+        def leaves():
+            return sorted((p.relative_to(self.home), p.is_symlink())
+                          for d in (self.agents, self.skills) for p in d.rglob("*"))
+        before = leaves()
+        code, dry = self._cli("--dry-run")
+        self.assertEqual(code, 0, dry["lines"])
+        self.assertEqual(before, leaves())
+        self._assert_user_entries_untouched()
+        code, applied = self._cli()
+        self.assertEqual(code, 0)
+        dry_checks, applied_checks = self._checks(dry), self._checks(applied)
+        for leaf in (self.foreign_agent, self.real_agent, self.foreign_skill, self.real_skill):
+            key = f"codex.symlink.{leaf}"
+            self.assertEqual(dry_checks[key]["detail"], applied_checks[key]["detail"])
+        for leaf in (self.dangling_agent, self.owned_agent, self.absent_agent):
+            self.assertNotIn("preserved", dry_checks[f"codex.symlink.{leaf}"]["detail"])
+
+    def test_driver_install_matches_dry_run_and_never_blocks_on_user_entries(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            dry = codex_driver.install(dry_run=True, plugin=False)
+            applied = codex_driver.install(dry_run=False, plugin=False)
+        for result in (dry, applied):
+            self.assertFalse(result["blocked"])
+            by_dest = {a["dest"]: a for a in result["actions"] if a.get("dest")}
+            for path in (self.agents / self.foreign_agent, self.agents / self.real_agent,
+                         self.skills / self.foreign_skill, self.skills / self.real_skill):
+                self.assertEqual(by_dest[str(path)]["status"], "preserved", path)
+            self.assertEqual(by_dest[str(self.agents / self.absent_agent)]["status"],
+                             "planned" if result is dry else "created")
+        self._assert_user_entries_untouched()
 
 
 if __name__ == "__main__":

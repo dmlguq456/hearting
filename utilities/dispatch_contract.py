@@ -7753,6 +7753,7 @@ def completion_marker_gate(
     registry_lines: list[str] | None = None,
     attempt_id: str | None = None,
     planned_revision_nodes: set[str] | frozenset[str] = frozenset(),
+    saved_resource_admissions: dict | None = None,
     _raising_frame_gate: bool = False,
 ) -> None:
     """SD-56 decision gate for start and its read-only dry-run preview.
@@ -7801,6 +7802,15 @@ def completion_marker_gate(
             None,
         )
         if marker_path is None:
+            saved = (saved_resource_admissions or {}).get(dep)
+            if isinstance(saved, dict):
+                import resource_failure_resolution as FAILURE_RESOLUTION
+                current = FAILURE_RESOLUTION.saved_output_admission(
+                    route, route_node, saved.get("jobs"),
+                    saved.get("owner_attempt_id"), saved.get("owner_session_id"))
+                if current != saved:
+                    raise DispatchContractError("saved-resource-output-changed", dep)
+                continue
             missing.append(dep)
             continue
         try:

@@ -15,7 +15,9 @@ after that receipt rather than waiting for training inside a Bash/model turn.
 This registered resource is not a model child and needs no model-child launch tuple. Its typed result resumes
 this owner and records resource execution only. Apply pending corrections
 before deciding whether the same node needs another approved resource or its
-declared successor. A prepared, failed, runtime-only, or absent output document
+declared successor. The runtime receipt reports execution facts; it does not
+add or remove user authorization. Preserve the original request's retry scope,
+and do not infer a user prohibition from runtime wording. A prepared, failed, runtime-only, or absent output document
 does not settle the stage, and output presence does not settle it either. When
 the approved node scope is finished, use the existing successor `start`; the
 shared gate rechecks the live owner and exact resource evidence and records the
@@ -58,6 +60,11 @@ Use a branch-backed route worktree, including for spec-only work. A detached
 HEAD cannot launch children; create a new branch at the existing HEAD with
 `git switch -c <new-branch>` before compiling or dispatching. Do not reset or
 discard the worktree to repair this state.
+
+A verified launched replacement owner may observe and consume the earlier
+supervised-resource result through shared owner-route lineage. The registry
+entry and receipt remain bound to the original attempt; ordinary start checks
+the current input lease and corrections before claiming the successor.
 
 Only a registered attempt mints a receipt. Unregistered background work — a shell
 job started with `&`, a detached helper, a cross-harness CLI launched in the

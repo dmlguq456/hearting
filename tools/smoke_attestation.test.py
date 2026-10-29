@@ -24,6 +24,58 @@ def _with_hash(data):
     return data
 
 class TestSmoke(unittest.TestCase):
+ def test_execution_environment_identity_binds_selection_without_ambient_secrets(self):
+  import resource_execution_environment as ENV
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); overlay=root/'overlay'; overlay.mkdir()
+   inherited={"PATH":os.environ["PATH"],"PYTHONPATH":str(overlay),
+              "OPENAI_API_KEY":"secret-a"}
+   smoke=ENV.execution_identity([sys.executable,"-c","pass"],td,environ=inherited)
+   payload=ENV.execution_identity(["env","-i","PATH="+os.environ["PATH"],
+                                  sys.executable,"-c","pass"],td,environ=inherited)
+   self.assertTrue(ENV.valid_execution_identity(smoke))
+   self.assertNotEqual(smoke,payload)
+   changed_secret=ENV.execution_identity([sys.executable,"-c","pass"],td,
+       environ={**inherited,"OPENAI_API_KEY":"secret-b"})
+   self.assertEqual(smoke,changed_secret)
+   wrapper=ENV.execution_identity(["bash","-p","-c",
+       "exec env -u PYTHONPATH "+sys.executable+" -c pass"],td,environ=inherited)
+   unset=ENV.execution_identity(["env","-u","PYTHONPATH",sys.executable,"-c","pass"],
+       td,environ=inherited)
+   self.assertEqual(wrapper,unset)
+   remote=["compute-hosts","run","fixture-host","--env","train-a",
+           "--cwd","/remote/lab","--", "env", "-u", "PYTHONPATH", "python", "train.py"]
+   remote_a=ENV.execution_identity(remote,td,environ=inherited)
+   remote_b=ENV.execution_identity(remote,td,environ={**inherited,"PYTHONPATH":"other-overlay"})
+   self.assertEqual(remote_a,remote_b)
+   self.assertEqual(remote_a["kind"],"compute-hosts")
+   changed_remote=ENV.execution_identity(
+       [*remote[:4],"train-b",*remote[5:]],td,environ=inherited)
+   self.assertNotEqual(remote_a,changed_remote)
+
+ def test_smoke_attestation_binds_execution_environment(self):
+  with tempfile.TemporaryDirectory() as td:
+   root=Path(td); config=root/'config'; config.write_text('cpu fixture\n')
+   overlay=root/'overlay'; overlay.mkdir()
+   previous=os.environ.get('PYTHONPATH')
+   os.environ['PYTHONPATH']=str(overlay)
+   try:
+    data=M.payload([config],[sys.executable,'-c','pass'],td)
+   finally:
+    if previous is None: os.environ.pop('PYTHONPATH',None)
+    else: os.environ['PYTHONPATH']=previous
+   data.update(status='passed',exit_code=0); data=_with_hash(data)
+   self.assertTrue(M.verify(data))
+   self.assertTrue(M.verify_execution_environment(
+       data,[sys.executable,'-c','pass'],td,environ={**CLEAN_ENV,'PYTHONPATH':str(overlay)}))
+   legacy=dict(data); legacy.pop('execution_environment'); legacy.pop('attestation_hash')
+   legacy['attestation_hash']='sha256:'+hashlib.sha256(json.dumps(
+       legacy,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+   self.assertTrue(M.verify(legacy))
+   self.assertRaisesRegex(ValueError,'environment mismatch',M.verify_execution_environment,
+       data,["env","-i","PATH="+CLEAN_ENV["PATH"],sys.executable,"-c","pass"],td,
+       environ=CLEAN_ENV)
+
  def _sealed_repo(self, td):
   root=Path(td); repo=root/"repo"; (repo/"configs").mkdir(parents=True)
   (repo/"configs/a.yaml").write_text("config")

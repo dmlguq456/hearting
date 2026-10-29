@@ -10357,7 +10357,7 @@ def continuation_owner_closure_plan(route, node, evidence, jobs, attempt_id, *,
         if (identity in blocking_attempts and row_status == "done"
                 and meta.get("note") == REVIEW_BLOCKING_NOTE):
             reviewed = _owner_closure_eligibility(parent, node, node["id"], evidence, meta, lines,
-                                                 rounds=rounds, check_canonical=False)
+                                                 rounds=rounds, check_canonical=False, jobs=jobs)
             encoded = reviewed["review_artifact_b64"]
             artifact = Path(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode("utf-8"))
             reviews.append({"attempt_id": identity, "route_id": parent["route_id"],
