@@ -5458,16 +5458,24 @@ def _launch_row(lines, attempt_id, *, reason="attempt-row-not-unique"):
 
 
 def _launch_row_value(fields):
-    # Model resolution is a benign existing annotation during observer startup.
+    # These existing observer/provenance annotations grant no launch authority.
+    # Keep status, process identity, claims, cancellation, terminal evidence and
+    # every unknown key exact, including the sealed source/review bindings.
     metadata = parse_registry_metadata(fields[5])
-    metadata.pop("resolved_model", None)
+    for key in ("resolved_model", "updated_at",
+                "caller_sid", "caller_harness", "caller_pane", "caller_cwd",
+                "summary_owner", "summary_sid", "summary_state_file",
+                "summary_owner_pid", "summary_owner_pid_start", "summary_owner_pid_scope",
+                "summary_owner_pid_host", "summary_owner_pid_host_start", "summary_owner_pid_host_ns",
+                "summary_owner_pid_observer_ns", "summary_owner_pid_host_proof"):
+        metadata.pop(key, None)
     return (*fields[:5], tuple(sorted(metadata.items())))
 
 
 def _launch_dependencies(lines, fields, callbacks=()):
     """Pin prepared row inputs, including absent competitors, without a TTL.
 
-    Shared gates depend on the worktree and route/attempt lineage. An opaque
+    Shared gates depend on their consumed nodes and exact attempt lineage. An opaque
     callback can depend on any registry row, so its whole input is pinned. The
     shared wrapper explicitly declares its repository/route-scoped gates.
     Unrelated projects can append or complete without invalidating native gates.
@@ -5478,9 +5486,15 @@ def _launch_dependencies(lines, fields, callbacks=()):
     metadata = parse_registry_metadata(fields[5])
     relation_keys = ("attempt_id", "parent_attempt_id", "automatic_retry_of", "prior_attempt_id",
                      "replacement_original_attempt_id", "replacement_attempt_id")
-    group_keys = ("route_id", "owner_route_id", "session_chain_id", "replacement_family_id")
+    group_keys = ("session_chain_id", "replacement_family_id")
     attempts = {metadata[k] for k in relation_keys if metadata.get(k)}
+    executions = {metadata[k] for k in (
+        "attempt_id", "automatic_retry_of", "prior_attempt_id", "replacement_original_attempt_id")
+        if metadata.get(k)}
     groups = {metadata[k] for k in group_keys if metadata.get(k)}
+    nodes = {metadata.get("route_node")}
+    for callback in callbacks:
+        nodes.update(getattr(callback, "_dispatch_registry_nodes", ()))
     rows = [(line, line.split("\t")) for line in lines]
     selected = set()
     # Include ancestors and successors even when an adopted parent has moved
@@ -5489,17 +5503,39 @@ def _launch_dependencies(lines, fields, callbacks=()):
     while changed:
         changed = False
         for index, (_line, candidate) in enumerate(rows):
-            if len(candidate) != 6 or index in selected:
+            if len(candidate) != 6:
                 continue
             meta = parse_registry_metadata(candidate[5])
-            linked = (candidate[2:4] == fields[2:4]
-                      or any(meta.get(k) in attempts for k in relation_keys)
+            same_worktree = candidate[2:4] == fields[2:4]
+            # A different node's ordinary registration/start/completion does
+            # not change this admission. In particular, parallel batch legs
+            # must be able to reach their own launch fences concurrently.
+            # Missing route identity stays conservatively in the read set.
+            scoped = (bool(metadata.get("route_id") and metadata.get("route_node"))
+                      and meta.get("route_id") == metadata.get("route_id")
+                      and meta.get("route_node") in nodes)
+            unknown = same_worktree and not all(
+                metadata.get(k) and meta.get(k) for k in ("route_id", "route_node"))
+            child = meta.get("parent_attempt_id") in executions
+            successor = any(meta.get(k) in attempts for k in (
+                "automatic_retry_of", "prior_attempt_id", "replacement_original_attempt_id"))
+            linked = (scoped or unknown or child or successor or meta.get("attempt_id") in attempts
                       or any(meta.get(k) in groups for k in group_keys))
             if linked:
-                selected.add(index)
-                attempts.update(meta[k] for k in relation_keys if meta.get(k))
-                groups.update(meta[k] for k in group_keys if meta.get(k))
-                changed = True
+                if index not in selected:
+                    selected.add(index)
+                    attempts.update(meta[k] for k in relation_keys if meta.get(k))
+                    groups.update(meta[k] for k in group_keys if meta.get(k))
+                    changed = True
+                # Quiescence of consumed work includes its descendants. A
+                # common live parent is pinned, but its independent children
+                # are not all dependencies of this launch.
+                execution_successor = any(meta.get(k) in executions for k in (
+                    "automatic_retry_of", "prior_attempt_id", "replacement_original_attempt_id"))
+                if scoped or child or execution_successor:
+                    if meta.get("attempt_id") and meta["attempt_id"] not in executions:
+                        executions.add(meta["attempt_id"])
+                        changed = True
     return tuple(_launch_row_value(candidate) for index, (_line, candidate) in enumerate(rows)
                  if index in selected)
 
@@ -5625,7 +5661,13 @@ def _prepare_attempt_launch(jobs, attempt_id, *, parent_binding, respawn_of, pre
         from dispatch_replacement import admission
         from review_input import validate_launch
         from review_source_subject import SourceSubjectError, validate_attempt
-        admission(jobs, lines, metadata)
+        # Replacement admission applies before the launch claim. After identity
+        # publication this exact fenced launch already owns that admission;
+        # replaying new-launch eligibility would reject its own gated PID as
+        # work that had started. Row/lineage CAS and source/parent/current-input
+        # checks still run before final release, as they do for every launch.
+        if not published:
+            admission(jobs, lines, metadata)
         validate_launch(jobs, metadata)
         if preclaim is not None:
             preclaim(lines)
@@ -11060,7 +11102,6 @@ def claim_attempt_row(
         existing = [line.split("\t") for line in lines
                     if len(line.split("\t")) == 6 and row_has_attempt(line.split("\t")[5], attempt_id)]
         from review_input import validate_launch
-        validate_launch(jobs, metadata)
         if mutation_precheck is not None:
             mutation_precheck(lines)
         eligible = not existing or (len(existing) == 1 and existing[0][1] == "open"
@@ -11073,6 +11114,9 @@ def claim_attempt_row(
         # adding another full inventory to registration.
         fields, metadata = _review_source_registration_fence(
             jobs, fields, metadata, new_attempt=not existing)
+        # Revision admission consumes the sealed subject (including document
+        # identity across checklist progress), as it did before unlocked prep.
+        validate_launch(jobs, metadata)
         routes = _launch_cancellation_routes(jobs, lines, metadata)
         return _commit_attempt_row(
             jobs, attempt_id, "\t".join(fields), prepared_lines=lines,

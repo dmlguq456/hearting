@@ -754,6 +754,11 @@ def append_job(jobs: Path, args: argparse.Namespace, *, harness: str, runtime_sa
                     attempt_id=args.attempt_id,
                 )
         preclaim._dispatch_registry_scoped = True
+        if args.route_file and args.route_node and args.attempt_id:
+            # The marker gate consumes these predecessors and this node's
+            # prior attempts, not the other independently launched batch legs.
+            preclaim._dispatch_registry_nodes = frozenset(
+                (node or {}).get("depends_on", ()))
     args.launch_preclaim = preclaim
     mutation_precheck = lambda lines: ensure_terminal_claim_absent(
         jobs, args.route_id, args.parent_attempt_id or args.attempt_id

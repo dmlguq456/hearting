@@ -566,6 +566,138 @@ class NasDispatchIOTest(unittest.TestCase):
         self.assertFalse(payload.exists())
         self.assertIsNotNone(self.children[-1].poll())
 
+    def test_parallel_nodes_register_and_launch_while_a_peer_prepares(self):
+        route = ",route_id=rt-nas-parallel,route_hash=sha256:" + "a" * 64
+        # A parent's recorded replacement remains a parent dependency; its
+        # other children do not become consumed work of this peer.
+        self.jobs.write_text(self.row("att-old-parent") + "\n" + self.row(
+            "att-current-parent", extra=",automatic_retry_of=att-old-parent") + "\n")
+        route += ",parent_attempt_id=att-current-parent"
+        entered, release, callback = self.paused_source(
+            "att-peer-A", DC._review_source_registration_fence)
+        with mock.patch.object(DC, "_review_source_registration_fence", side_effect=callback):
+            done_a, result_a = self.async_call(lambda: DC.claim_attempt_row(
+                self.jobs, "att-peer-A", self.row("att-peer-A", extra=route + ",route_node=review-A")))
+            try:
+                self.assertTrue(entered.wait(5))
+                self.register("att-peer-B", extra=route + ",route_node=review-B")
+                proc, _ = DC.spawn_claimed_attempt(self.jobs, "att-peer-B", parent_binding=None,
+                                                  spawn=self.spawn(self.base / "peer-B"))
+                proc.wait(timeout=5)
+                self.assertTrue((self.base / "peer-B").exists())
+                self.assertFalse(done_a.is_set())
+            finally:
+                release.set()
+            self.assertTrue(done_a.wait(5))
+            self.assertNotIn("error", result_a, result_a)
+            self.assertTrue(result_a["value"])
+        proc, _ = DC.spawn_claimed_attempt(self.jobs, "att-peer-A", parent_binding=None,
+                                          spawn=self.spawn(self.base / "peer-A"))
+        proc.wait(timeout=5)
+        self.assertTrue((self.base / "peer-A").exists())
+
+    def test_observer_annotations_survive_both_launch_commits(self):
+        self.register("att-annotations")
+        rounds = []
+        def observer(_identity):
+            self.assert_global_locks_free()
+            rounds.append(True)
+            self.assertTrue(DC.annotate_attempt_row(self.jobs, "att-annotations", {
+                "summary_sid": "summary-" + str(len(rounds)),
+                "summary_owner_pid": str(os.getpid()), "resolved_model": "fixture-model"}))
+        proc, _ = DC.spawn_claimed_attempt(self.jobs, "att-annotations", parent_binding=None,
+            spawn=self.spawn(self.base / "annotated-payload"), pre_release=observer, post_claim=observer)
+        proc.wait(timeout=5)
+        self.assertTrue((self.base / "annotated-payload").exists())
+        _, _, meta = DC._launch_row(self.jobs.read_text().splitlines(), "att-annotations")
+        self.assertEqual(meta["summary_sid"], "summary-2")
+
+    def test_consumed_predecessor_remains_in_the_final_cas(self):
+        route = ",route_id=rt-nas-dependency,route_hash=sha256:" + "b" * 64
+        self.register("att-consumed", extra=route + ",route_node=plan-check")
+        self.register("att-dependent", extra=route + ",route_node=execute")
+        def permission(_lines):
+            self.assert_global_locks_free()
+        permission._dispatch_registry_scoped = True
+        permission._dispatch_registry_nodes = frozenset({"plan-check"})
+        original = DC._launch_registry_transaction
+        rounds = []
+        @contextmanager
+        def change_predecessor(jobs):
+            with original(jobs) as lines:
+                rounds.append(True)
+                if len(rounds) == 2:
+                    index, fields, _ = DC._launch_row(lines, "att-consumed")
+                    fields[1] = "done"
+                    lines[index] = "\t".join(fields)
+                    DC._atomic_registry_replace(jobs, lines)
+                yield lines
+        payload = self.base / "must-not-use-changed-predecessor"
+        with mock.patch.object(DC, "_launch_registry_transaction", side_effect=change_predecessor):
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                DC.spawn_claimed_attempt(self.jobs, "att-dependent", parent_binding=None,
+                                         preclaim=permission, spawn=self.spawn(payload))
+        self.assertEqual(refused.exception.reason, "attempt-post-claim-identity-changed")
+        self.assertFalse(payload.exists())
+        self.assertIsNotNone(self.children[-1].poll())
+
+    def test_fresh_commit_keeps_authority_and_unknown_fields_exact(self):
+        for phase in (1, 2):
+            for key in ("pid_start", "launch_claimed", "parent_attempt_id", "runtime_home", "review_input_digest",
+                        "review_subject_digest", "future_unknown_authority"):
+                with self.subTest(phase=phase, key=key):
+                    attempt = f"att-cas-{phase}-{key}"
+                    self.register(attempt)
+                    payload = self.base / (attempt + ".payload")
+                    original = DC._launch_registry_transaction
+                    rounds = []
+                    @contextmanager
+                    def mutate(jobs):
+                        with original(jobs) as lines:
+                            rounds.append(True)
+                            if len(rounds) == phase:
+                                index, fields, _ = DC._launch_row(lines, attempt)
+                                fields[5] += f",{key}=changed"
+                                lines[index] = "\t".join(fields)
+                                DC._atomic_registry_replace(jobs, lines)
+                            yield lines
+                    with mock.patch.object(DC, "_launch_registry_transaction", side_effect=mutate):
+                        with self.assertRaises(DC.DispatchContractError) as refused:
+                            DC.spawn_claimed_attempt(self.jobs, attempt, parent_binding=None,
+                                                     spawn=self.spawn(payload))
+                    self.assertEqual(refused.exception.reason,
+                        "attempt-" + ("pre-release" if phase == 1 else "post-claim") + "-identity-changed")
+                    self.assertFalse(payload.exists())
+                    self.assertIsNotNone(self.children[-1].poll())
+
+    def test_late_descendant_of_consumed_work_refuses_release(self):
+        route = ",route_id=rt-nas-descendant,route_hash=sha256:" + "c" * 64
+        self.register("att-consumed-work", extra=route + ",route_node=plan-check")
+        self.register("att-after-work", extra=route + ",route_node=execute")
+        def permission(_lines):
+            self.assert_global_locks_free()
+        permission._dispatch_registry_scoped = True
+        permission._dispatch_registry_nodes = frozenset({"plan-check"})
+        original = DC._launch_registry_transaction
+        rounds = []
+        @contextmanager
+        def new_child(jobs):
+            with original(jobs) as lines:
+                rounds.append(True)
+                if len(rounds) == 2:
+                    lines.append(self.row("att-late-child", extra=route
+                        + ",route_node=independent,parent_attempt_id=att-consumed-work"))
+                    DC._atomic_registry_replace(jobs, lines)
+                yield lines
+        payload = self.base / "must-not-overtake-descendant"
+        with mock.patch.object(DC, "_launch_registry_transaction", side_effect=new_child):
+            with self.assertRaises(DC.DispatchContractError) as refused:
+                DC.spawn_claimed_attempt(self.jobs, "att-after-work", parent_binding=None,
+                                         preclaim=permission, spawn=self.spawn(payload))
+        self.assertEqual(refused.exception.reason, "attempt-post-claim-identity-changed")
+        self.assertFalse(payload.exists())
+        self.assertIsNotNone(self.children[-1].poll())
+
 
 if __name__ == "__main__":
     unittest.main()

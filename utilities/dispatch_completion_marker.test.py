@@ -1401,15 +1401,6 @@ class CompletionMarkerTest(unittest.TestCase):
         search_roots = [ROOT / "utilities", ROOT / "adapters", ROOT / "tools" / "fleet"]
         allow = {
             (ROOT / "utilities" / "dispatch_contract.py").resolve(),
-            (ROOT / "utilities" / "dispatch_completion_marker.test.py").resolve(),
-            (ROOT / "utilities" / "dispatch_state_root_rotation.test.py").resolve(),
-            # Asserts dispatch-batch stops on the real gate's route-state refusal.
-            (ROOT / "utilities" / "dispatch-batch.test.py").resolve(),
-            # Asserts the real gate refuses changed saved outputs, config drift,
-            # cancellation and pending corrections before verifier admission.
-            (ROOT / "utilities" / "resource_sequence.test.py").resolve(),
-            # Reproduces the real pre-repair gate refusal for preserved resources.
-            (ROOT / "utilities" / "preserved_resource_handoff.test.py").resolve(),
         }
         for adapter in ("claude", "codex", "opencode"):
             allow.add((ROOT / "adapters" / adapter / "bin" / "dispatch-headless.py").resolve())
@@ -1417,6 +1408,10 @@ class CompletionMarkerTest(unittest.TestCase):
             if not search_root.is_dir():
                 continue
             for path in search_root.rglob("*.py"):
+                # The runner's test-file conventions identify fixtures whose
+                # assertions quote refusals; they are not production relays.
+                if path.name.endswith(".test.py") or path.name.startswith("test_"):
+                    continue
                 if path.resolve() in allow:
                     continue
                 text = path.read_text(encoding="utf-8", errors="replace")

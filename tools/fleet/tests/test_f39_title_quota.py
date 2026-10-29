@@ -5,6 +5,7 @@ import importlib.util
 import sqlite3
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -316,7 +317,11 @@ class QuotaTest(unittest.TestCase):
             failed = titles.read("existing-now", "claude")
             self.assertIn("_StartBudgetReached", failed["summary_error"])
             shell = (Path(__file__).resolve().parents[3] / "adapters/claude/statusline.sh").read_text()
-            block = shell[shell.index("          priority_arg="):shell.index("          FLEET_TITLE_REFRESH=1")]
+            lines = shell.splitlines()
+            start = next(i for i, line in enumerate(lines) if line.strip() == "priority_arg=")
+            end = next(i for i in range(start + 1, len(lines))
+                       if lines[i].lstrip().startswith("FLEET_TITLE_REFRESH=1 "))
+            block = textwrap.dedent("\n".join(lines[start:end]))
             result = rt.subprocess.run(
                 ["sh", "-c", block + '\nprintf "%s\\n%s\\n" "$priority_arg" "$quota_arg"'],
                 capture_output=True, text=True, check=True,
