@@ -1861,6 +1861,10 @@ def _reuse_preserved(previous, current):
     for node, old in previous_invalidated.items():
         new = invalidated.get(node)
         if new:
+            # Unchanged since claim: _reuse_snapshot has already re-admitted
+            # its currency (including a gates-off descendant of a stale result).
+            if new == old:
+                continue
             if (new.get('marker_digest') != old.get('marker_digest')
                     or new.get('attempt_id', '') != old.get('attempt_id', '')
                     or new.get('currency') not in {'current', 'superseded',
