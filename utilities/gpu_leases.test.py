@@ -703,6 +703,19 @@ class LeasesTest(unittest.TestCase):
             "nodes": [{"id": "full-run", "kind": "resource-runner", "resource_class": "long-running",
                        "resource_transport": "detached-process"}]}))
         registry, log = self.root / "runs.json", self.root / "resource.log"
+        # Smoke runs on CPU before the synthetic GPU lease assigns visibility.
+        # The assertions below still require the launched payload to receive GPU 0.
+        command = [sys.executable, "-c", "import os; print(os.environ.get('CUDA_VISIBLE_DEVICES', ''))"]
+        attestation = self.root / "smoke.json"
+        subprocess.run([sys.executable, str(Path(G.__file__).parents[1] / "tools" / "smoke-attestation.py"),
+                        "attest", "--input", str(route), "--cwd", str(self.root),
+                        "--output", str(attestation), "--", *command],
+                       check=True, stdout=subprocess.DEVNULL, timeout=5)
+        real_verify_launch_input = runner.verify_launch_input
+        def verify_input(command, **kwargs):
+            # This minimal private route is not a compiled route fixture.
+            if Path(command[1]).name != "capability-route.py":
+                return real_verify_launch_input(command, **kwargs)
         output, children = io.StringIO(), []
         real_popen = subprocess.Popen
         def spawn(*args, **kwargs):
@@ -711,12 +724,14 @@ class LeasesTest(unittest.TestCase):
             return proc
         with mock.patch.dict(os.environ, {"AGENT_DISPATCH_JOBS": str(self.state.parent / "jobs.log")}), \
              mock.patch.object(G, "local_observation", return_value=OBS), \
-             mock.patch.object(runner.subprocess, "run"), mock.patch.object(runner, "register_registry"), \
+             mock.patch.object(runner, "verify_launch_input", side_effect=verify_input), \
+             mock.patch.object(runner, "register_registry"), \
              mock.patch.object(runner.subprocess, "Popen", side_effect=spawn), mock.patch("sys.stdout", output):
             runner.main(["--registry", str(registry), "start", "--run-id", "local", "--cwd", str(self.root),
-                         "--log", str(log), "--route", str(route), "--node", "full-run", "--smoke-attestation", "unused",
-                         "--", sys.executable, "-c", "import os; print(os.environ['CUDA_VISIBLE_DEVICES'])"])
-            children[0].wait(timeout=5)
+                         "--log", str(log), "--route", str(route), "--node", "full-run",
+                         "--smoke-attestation", str(attestation), "--", *command])
+            for child in children:
+                child.wait(timeout=5)
         row = json.loads(output.getvalue())
         self.assertEqual(row["gpus"], "0")
         self.assertEqual(log.read_text().strip(), "0")

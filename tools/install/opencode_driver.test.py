@@ -12,15 +12,19 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 SOURCE_ROOT = HERE.parent.parent
+
+import fixture_env  # noqa: E402
 
 
 def _load_driver():
@@ -159,6 +163,107 @@ class BootstrapLoadPathCheckTest(unittest.TestCase):
         result = self._check(lambda directory: None)
         self.assertFalse(result["ok"])
         self.assertIn("no bootstrap load path", result["detail"])
+
+
+class OpenCodeNativeLeafPreservationTest(unittest.TestCase):
+    """Per-leaf agent/command projections keep user entries; real projector."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="opencode-native-leaf-")
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.env = fixture_env.build_environment(self.root, SOURCE_ROOT)
+        fixture_env.prepare_environment(self.env)
+        config = Path(self.env["XDG_CONFIG_HOME"]) / "opencode"
+        self.agents, self.commands = config / "agent", config / "command"
+        self.agents.mkdir(parents=True)
+        self.commands.mkdir(parents=True)
+        agent_names = sorted(
+            p.name for p in (SOURCE_ROOT / "opencode_setting/opencode-agents").glob("*/*.md"))
+        command_names = sorted(
+            p.name for p in (SOURCE_ROOT / "opencode_setting/opencode-commands").glob("*.md"))
+        (self.foreign_agent, self.real_agent, self.dangling_agent,
+         self.owned_agent, self.absent_agent) = agent_names[:5]
+        self.real_command_dir, self.foreign_command = command_names[:2]
+        self.user_target = self.root / "user-owned.md"
+        self.user_target.write_bytes(b"USER AGENT\n")
+        (self.agents / self.foreign_agent).symlink_to(self.user_target)
+        (self.agents / self.real_agent).write_bytes(b"REAL AGENT\n")
+        (self.agents / self.dangling_agent).symlink_to(self.root / "gone" / "agent.md")
+        stale = next((SOURCE_ROOT / "opencode_setting/opencode-agents").glob(
+            f"*/{self.owned_agent}"))
+        (self.agents / self.owned_agent).symlink_to(stale)
+        (self.commands / self.real_command_dir).mkdir()
+        (self.commands / self.real_command_dir / "mine.txt").write_bytes(b"MY COMMAND\n")
+        self.user_command = self.root / "user-command.md"
+        self.user_command.write_bytes(b"USER COMMAND\n")
+        (self.commands / self.foreign_command).symlink_to(self.user_command)
+
+    def _cli(self, *flags):
+        proc = subprocess.run(
+            ["sh", str(SOURCE_ROOT / "tools/install/harness.sh"), "install", "opencode",
+             "--json", "--yes", *flags],
+            env=self.env, capture_output=True, text=True, timeout=300)
+        return proc.returncode, json.loads(proc.stdout)
+
+    def _assert_user_entries_untouched(self):
+        self.assertEqual(os.readlink(self.agents / self.foreign_agent), str(self.user_target))
+        self.assertEqual(self.user_target.read_bytes(), b"USER AGENT\n")
+        self.assertFalse((self.agents / self.real_agent).is_symlink())
+        self.assertEqual((self.agents / self.real_agent).read_bytes(), b"REAL AGENT\n")
+        self.assertFalse((self.commands / self.real_command_dir).is_symlink())
+        self.assertEqual(os.listdir(self.commands / self.real_command_dir), ["mine.txt"])
+        self.assertEqual(os.readlink(self.commands / self.foreign_command), str(self.user_command))
+        self.assertEqual(self.user_command.read_bytes(), b"USER COMMAND\n")
+
+    def test_public_install_preserves_user_entries_and_refreshes_ours(self):
+        code, report = self._cli()
+        self.assertEqual(code, 0, report["lines"])
+        self._assert_user_entries_untouched()
+        for name in (self.dangling_agent, self.owned_agent, self.absent_agent):
+            link = self.agents / name
+            self.assertTrue(link.is_symlink() and link.exists(), name)
+            self.assertTrue(
+                os.readlink(link).startswith(str(SOURCE_ROOT / "opencode_setting")), name)
+        checks = {c["id"]: c for c in report["checks"]}
+        for leaf in (self.foreign_agent, self.real_agent, self.real_command_dir,
+                     self.foreign_command):
+            check = checks[f"opencode.symlink.{leaf}"]
+            self.assertTrue(check["ok"], check)
+            self.assertIn("preserved", check["detail"])
+
+    def test_public_dry_run_reports_the_same_preservation_without_writing(self):
+        def leaves():
+            return sorted((p.relative_to(self.root), p.is_symlink())
+                          for d in (self.agents, self.commands) for p in d.rglob("*"))
+        before = leaves()
+        code, dry = self._cli("--dry-run")
+        self.assertEqual(code, 0, dry["lines"])
+        self.assertEqual(before, leaves())
+        code, applied = self._cli()
+        self.assertEqual(code, 0)
+        dry_checks = {c["id"]: c for c in dry["checks"]}
+        applied_checks = {c["id"]: c for c in applied["checks"]}
+        for leaf in (self.foreign_agent, self.real_agent, self.real_command_dir,
+                     self.foreign_command):
+            key = f"opencode.symlink.{leaf}"
+            self.assertEqual(dry_checks[key]["detail"], applied_checks[key]["detail"])
+        for leaf in (self.dangling_agent, self.owned_agent, self.absent_agent):
+            self.assertNotIn("preserved", dry_checks[f"opencode.symlink.{leaf}"]["detail"])
+
+    def test_driver_install_matches_dry_run_and_never_blocks_on_user_entries(self):
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            driver = _load_driver()
+            dry = driver.install(dry_run=True, plugin=False)
+            applied = driver.install(dry_run=False, plugin=False)
+        for result in (dry, applied):
+            self.assertFalse(result["blocked"])
+            by_dest = {a["dest"]: a for a in result["actions"] if a.get("dest")}
+            for path in (self.agents / self.foreign_agent, self.agents / self.real_agent,
+                         self.commands / self.real_command_dir,
+                         self.commands / self.foreign_command):
+                self.assertEqual(by_dest[str(path)]["status"], "preserved", path)
+        self._assert_user_entries_untouched()
 
 
 if __name__ == "__main__":

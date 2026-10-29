@@ -1064,6 +1064,61 @@ class DispatchContractTest(unittest.TestCase):
    self.assertTrue(result.advanced)
    self.assertEqual((result.status,result.verdict),("done","PASS"))
 
+   # A publication timeout first delivered attention, then the same attempt
+   # published the complete marker chain. Keep that old receipt and row bytes;
+   # consumers must advance the recovered result without rerunning the worker.
+   fields=jobs.read_text().strip().split("\t")
+   recovered=D.parse_registry_metadata(fields[5])
+   recovered.update({
+    "note":D.DEFERRED_COMPLETION_NOTE,"failure_class":"infrastructure",
+    "classifier_source":D.DEFERRED_COMPLETION_SOURCE,
+    "reconcile_reason":"completion-transient:TimeoutExpired",
+    "parent_sid":"thread-parent","parent_completion_delivery":"codex-native-queue",
+   })
+   old=dict(recovered);old.pop("completion_marker",None)
+   recovered.update(D._delivery_intent_values(fields,old))
+   recovered["note"]="completed-marker"
+   self.assertFalse(D._delivery_commit_proven(recovered))
+   fields[5]=",".join(f"{k}={v}" for k,v in recovered.items())
+   settled="\t".join(fields)+"\n";jobs.write_text(settled)
+   def observed(observation=None):
+    return D.marker_bound_delivery_transaction(
+     jobs,attempt,parent_attempt_id=attempt,
+     expected_row_revision=hashlib.sha256(settled.strip().encode()).hexdigest(),
+     expected_process_identity=D.marker_bound_process_identity(recovered),
+     process_observation=observation or D.ProcessQuiescence("quiescent","fixture"),
+     advance=False)
+   from dispatch_completion_join import CurrentDeliveryState,delivery_classification
+   def classification(value):
+    return delivery_classification(CurrentDeliveryState(
+     value.marker,value.marker_digest,value.row_revision,value.row_digest,
+     value.status,value.verdict,value.quiescent,value.owned_children,value.advanced,
+     completion_proven=value.completion_proven,terminal_conflict=value.terminal_conflict))
+   recovered_result=observed()
+   self.assertTrue(recovered_result.completion_proven)
+   self.assertEqual(classification(recovered_result),"success")
+   self.assertEqual(jobs.read_text(),settled)
+   self.assertEqual(classification(observed(D.ProcessQuiescence("unverifiable","fixture"))),"attention")
+   for verdict in ("fail","blocked"):
+    with self.subTest(worker_verdict=verdict):
+     failed={**recovered,"note":"dead-worker-"+verdict,
+             "failure_class":verdict,"classifier_source":"worker-terminal-envelope-v1"}
+     changed=fields[:];changed[5]=",".join(f"{k}={v}" for k,v in failed.items())
+     jobs.write_text("\t".join(changed)+"\n")
+     self.assertEqual(classification(observed()),"attention")
+   conflicted={**recovered,"terminal_conflict":"1",
+               "conflicting_terminal_note":"dead-worker-fail",
+               "conflicting_failure_class":"fail"}
+   changed=fields[:];changed[5]=",".join(f"{k}={v}" for k,v in conflicted.items())
+   jobs.write_text("\t".join(changed)+"\n")
+   self.assertEqual(classification(observed()),"attention")
+   jobs.write_text(settled)
+   marker_path.write_text(json.dumps({**marker,"attempt_id":"att-foreign"}))
+   invalid=observed()
+   self.assertFalse(invalid.completion_proven)
+   self.assertEqual(classification(invalid),"attention")
+   self.assertEqual(jobs.read_text(),settled)
+
  def test_marker_bound_delivery_revision_drift_refuses_false_pass(self):
   with tempfile.TemporaryDirectory() as td:
    base=Path(td);jobs=base/"jobs.log";attempt="att-marker-drift"

@@ -3922,6 +3922,21 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
                 self.snapshot(states)
         self.assertEqual(refused.exception.reason, "replacement-completion-unproven")
 
+    def test_unchanged_gates_off_descendant_of_a_stale_result_keeps_claim_reuse(self):
+        states = {node["id"]: ("current", "completion-marker-verified")
+                  for node in self.route["nodes"]}
+        states["impl-review"] = ("superseded", "completion-review-source-stale")
+        states["test"] = ("revised-unrecorded", "completion-evidence-revised-unrecorded")
+        with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}, clear=False):
+            claim_reuse = self.snapshot(states)
+            launch_reuse = self.snapshot(states)
+        invalid = {row["node"]: row for row in launch_reuse["invalidated"]}
+        self.assertEqual(invalid["test"]["currency"], "revised-unrecorded")
+        self.assertTrue(R._reuse_preserved(claim_reuse, launch_reuse))
+        changed = copy.deepcopy(launch_reuse)
+        next(row for row in changed["invalidated"] if row["node"] == "test")["attempt_id"] = "att-retried"
+        self.assertFalse(R._reuse_preserved(claim_reuse, changed))
+
     def test_restored_tombstone_transition_preserves_claim_reuse(self):
         tombstone_digest = "digest-of-prior-tombstone"
         old = {"cycle_id": "cyc-reuse", "producer_id": "prod-reuse", "gates": [],

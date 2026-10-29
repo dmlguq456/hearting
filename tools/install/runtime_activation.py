@@ -1181,43 +1181,7 @@ def _native_present(runtime: str, scope: str = "global") -> bool:
 
 def _native_harness_target(runtime: str, candidate: Path) -> bool:
     """Recognize only a canonical harness projection, never a path substring."""
-    try:
-        target = candidate.resolve(strict=False)
-    except RuntimeError:
-        return False
-    for root in (target, *target.parents):
-        if not (root / "harness-manifest.json").is_file():
-            continue
-        try:
-            relative = target.relative_to(root).parts
-        except ValueError:
-            continue
-        allowed = {
-            "codex": (
-                ("adapters", "codex", "skills"),
-                ("adapters", "codex", "agents"),
-                ("adapters", "codex", "modes"),
-                ("codex_setting", "codex-skills"),
-                ("codex_setting", "codex-agents"),
-                ("codex_setting", "codex-modes"),
-            ),
-            "claude": (
-                ("adapters", "claude", "skills"),
-                ("adapters", "claude", "agents"),
-                ("adapters", "claude", "agent-modes"),
-                ("claude_setting", "skills"),
-                ("claude_setting", "agents"),
-            ),
-            "opencode": (
-                ("adapters", "opencode", "skills"),
-                ("adapters", "opencode", "agents"),
-                ("adapters", "opencode", "commands"),
-                ("adapters", "opencode", "plugins"),
-            ),
-        }[runtime]
-        if any(relative[: len(prefix)] == prefix for prefix in allowed):
-            return True
-    return False
+    return projector.native_harness_target(runtime, candidate)
 
 
 def _discovered_harness_links(runtime: str, scope: str = "global") -> set[Path]:
