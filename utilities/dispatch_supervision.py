@@ -1122,6 +1122,10 @@ def _recorded_completion_result(receipt: dict, *, require_ack: bool, notice_cont
             body = (record or {}).get("receipt")
             if not isinstance(body, dict):
                 continue
+            # Per-child terminal receipts keep scope in the pending identity,
+            # leaving parent_attempt_id empty in the immutable body. The shared
+            # projection verifies that identity before projecting legacy scope.
+            parent_attempt = body.get("parent_attempt_id") or record.get("parent_attempt_id", "")
             attempt_ids = {child.get("attempt_id") for child in body.get("children", [])
                            if isinstance(child, dict)}
             if not attempt_ids:
@@ -1149,18 +1153,18 @@ def _recorded_completion_result(receipt: dict, *, require_ack: bool, notice_cont
                     bound_route(member_meta, jobs, observer=observer)
                 projection = recover_acknowledged_batch_outcome if require_ack else current_batch_receipt_projection
                 return projection(jobs, attempt_ids, recipient_sid=target,
-                    parent_attempt_id=body.get("parent_attempt_id", ""),
+                    parent_attempt_id=parent_attempt,
                     parent_completion_delivery=meta.get("parent_completion_delivery", ""))
             # Effective recipient and current record are always read above.
             # Only the stored receipt projection is reused, never that authority.
             if notice_context is not None:
                 recovered = notice_context.read(("completion", str(jobs.resolve()),
-                    tuple(sorted(attempt_ids)), target, body.get("parent_attempt_id"),
+                    tuple(sorted(attempt_ids)), target, parent_attempt,
                     meta.get("parent_completion_delivery"), require_ack), project)
             else:
                 projection = recover_acknowledged_batch_outcome if require_ack else current_batch_receipt_projection
                 recovered = projection(jobs, attempt_ids, recipient_sid=target,
-                    parent_attempt_id=body.get("parent_attempt_id", ""),
+                    parent_attempt_id=parent_attempt,
                     parent_completion_delivery=meta.get("parent_completion_delivery", ""))
             if recovered is None:
                 continue

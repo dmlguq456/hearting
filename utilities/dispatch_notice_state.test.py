@@ -487,21 +487,52 @@ class NoticeTest(unittest.TestCase):
         self.assertEqual(sweep.sweep_deliver(self.root, "claude-parent-runtime", "parent")[0], [])
         self.assertEqual(pending.read(self.root, "parent", "delivery-notice")["state"], "claimed")
 
-    def _stored_owner_completion(self, jobs, meta):
+    def _stored_owner_completion(self, jobs, meta, *, legacy=False, parent_attempt="-"):
         from dispatch_receipt_identity import receipt_digest
         receipt = {"schema_version": 2, "state": "ready", "parent_attempt_id": "-",
                    "job_registry": str(jobs), "delivery_classification": "success",
                    "children": [{"attempt_id": "att-owner", "status": "done", "readiness": "ready",
                                  "required_action": "advance-completed"}]}
+        if legacy:
+            from dispatch_contract import _terminal_delivery_receipt
+            receipt = _terminal_delivery_receipt(meta)
         record = pending.create(jobs.parent, delivery_id="delivery-owner-completed",
             recipient_kind=meta["parent_completion_delivery"], recipient_key="parent",
             session_generation="", session_generation_supported="0", attempt_ids=["att-owner"],
-            parent_attempt_id="-", route_id=meta["owner_route_id"], route_node="_owner",
+            parent_attempt_id=parent_attempt, route_id=meta["owner_route_id"], route_node="_owner",
             receipt=receipt, receipt_digest=receipt_digest(receipt), row_revisions={"att-owner": "rev-1"})
         jobs.write_text(jobs.read_text().rstrip() +
             ",delivery_intent=1,delivery_id=delivery-owner-completed,delivery_row_revision=rev-1," +
             "delivery_receipt_digest=" + receipt_digest(receipt) + "\n")
         return record
+
+    def test_legacy_terminal_receipt_requires_exact_stored_parent_without_heavy_observation(self):
+        for parent_attempt in ("-", "att-foreign-parent"):
+            with self.subTest(parent_attempt=parent_attempt):
+                jobs, meta, _ = recorded_owner_fixture(self.root / parent_attempt)
+                closure = supervision.materialize(jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+                context = notice.NoticeReadContext()
+                with mock.patch("dispatch_terminal_commit.owner_completion_state", side_effect=AssertionError("heavy")), \
+                     mock.patch("dispatch_terminal_commit.owner_completion_pending", side_effect=AssertionError("heavy")), \
+                     mock.patch("dispatch_terminal_commit.inspect_owner_completion", side_effect=AssertionError("heavy")), \
+                     mock.patch("artifact_producer.completed_spec_publication", side_effect=AssertionError("heavy")):
+                    self.assertTrue(notice.notice_is_current(closure, notice_context=context))
+                    completed = self._stored_owner_completion(jobs, meta, legacy=True, parent_attempt=parent_attempt)
+                    self.assertEqual(completed["receipt"]["parent_attempt_id"], "")
+                    self.assertEqual(completed["receipt"]["state"], "delivered")
+                    # Even the foreign-parent case has a valid sealed body/digest;
+                    # it must fail the exact storage-to-row identity check.
+                    pending.received_ack_identity(completed, "parent", completed["delivery_id"])
+                    self.assertEqual(notice.notice_is_current(closure, notice_context=context), parent_attempt != "-")
+                    self.assertIsNone(supervision._acknowledged_completion_result(closure["receipt"]))
+                    self.assertEqual(pending.read(jobs.parent, "parent", completed["delivery_id"]), completed)
+                    if parent_attempt == "-":
+                        self.assertTrue(notice.notice_is_current(completed, jobs=jobs))
+                        pending.claim(jobs.parent, "parent", completed["delivery_id"],
+                                      claim_owner="fixture-carrier", lease_seconds=30)
+                        pending.ack(jobs.parent, "parent", completed["delivery_id"],
+                                    acked_by="fixture-parent-received")
+                        self.assertIsNotNone(supervision._acknowledged_completion_result(closure["receipt"]))
 
     def test_exact_unreceived_success_retires_closure_but_first_completion_still_delivers(self):
         jobs, meta, request = recorded_owner_fixture(self.root / "stored")
