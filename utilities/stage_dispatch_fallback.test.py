@@ -1466,6 +1466,60 @@ class FallbackTest(unittest.TestCase):
                                                                 "automatic_retry_of":"att-verdict"})
    self.assertEqual(caught.exception.reason,"retry-predecessor-not-retryable")
 
+ def test_capped_test_after_unstarted_parent_cascade_uses_normal_admission(self):
+  import dispatch_contract as DC
+  import dispatch_replacement as REPLACEMENT
+  with self.dispatch_env():
+   path=self.route(same_status="supported",intensity="standard")
+   route=json.loads(path.read_text());node=next(n for n in route["nodes"] if n["id"]=="test")
+   self.seed_predecessor_markers(path,"test")
+   self.seed_parent()
+   old={"attempt_schema_version":"2","dispatch_depth":"2","worker_type":"stage",
+    "attempt_id":"att-old-never-launched","route_id":route["route_id"],
+    "route_hash":route["route_hash"],"route_node":"test","harness":"codex",
+    "parent_attempt_id":"att-fallback-parent","launch_claimed":"0",
+    "launch_outcome":"never-launched","note":"dead-parent-exited",
+    "failure_class":"cancelled","reconcile_reason":"post-exit-child-cascade"}
+   with self.jobs.open("a") as handle:
+    handle.write(f"now\tdone\t{self.repo}\t{self.repo}\tfallback-test\t"+
+                 ",".join(f"{k}={v}" for k,v in old.items())+"\n")
+   original=self.jobs.read_bytes()
+   prior=F.registry_rows(self.jobs,route["route_id"],"test")[-1]
+   self.assertTrue(prior["_terminal_never_started"])
+   budget=F.DISPATCH_NODE.admit_round(route,node,self.jobs,
+      owner_attempt_id="att-fallback-parent",record_auto_revisions=False).budget
+   self.assertEqual(budget.next_round,1)
+   commands=[];claims=[]
+   def wrapper(_args,command,**_policy):
+    commands.append(command);aid=self.arg(command,"--attempt-id")
+    meta={"attempt_schema_version":"2","dispatch_depth":"2","worker_type":"stage",
+     "transport":"headless","execution_surface":"registered-headless","registered_worker":"1",
+     "fallback_hop":"same-harness-headless","unit":"qa/test",
+     "attempt_id":aid,"route_id":route["route_id"],"route_hash":route["route_hash"],
+     "route_node":"test","parent_attempt_id":"att-fallback-parent","harness":"codex",
+     "parent_sid":"fixture-native-parent","launch_head":subprocess.check_output(
+       ["git","-C",str(self.repo),"rev-parse","HEAD"],text=True).strip()}
+    retry=self.arg(command,"--automatic-retry-of")
+    if retry:meta["automatic_retry_of"]=retry
+    try:REPLACEMENT.admission(self.jobs,self.jobs.read_text().splitlines(),meta)
+    except DC.DispatchContractError as exc:
+     return SimpleNamespace(returncode=73,stdout=f"check=failed\nreason={exc.reason}\nchild_spawned=0\n",stderr="")
+    if "--dry-run" in command:return SimpleNamespace(returncode=0,stdout="check=ok\n",stderr="")
+    row=f"now\topen\t{self.repo}\t{self.repo}\tfallback-test\t"+",".join(f"{k}={v}" for k,v in meta.items())
+    started="--start" in command
+    claimed=DC.claim_attempt_row(self.jobs,aid,row,launch=started)
+    if started and claimed:claims.append(aid)
+    return SimpleNamespace(returncode=0,stdout=f"check=ok\nregistered=1\nstarted={int(started)}\nchild_spawned={int(started and claimed)}\n",stderr="")
+   code,output=self.closure_action(path,"start",patches=(mock.patch.object(F,"run_wrapper",side_effect=wrapper),))
+   self.assertEqual(code,0,output)
+   self.assertTrue(commands)
+   self.assertTrue(all("--automatic-retry-of" not in command for command in commands))
+   expected=F.attempt_identity(SimpleNamespace(slug="fallback-test",parent="owner",parent_attempt_id="att-fallback-parent"),
+                             route,node,{"child_harness":"codex"},1,1)
+   self.assertEqual(claims,[expected])
+   self.assertTrue(self.jobs.read_bytes().startswith(original))
+   self.assertFalse(DC.decide_attempt("done",old,process_state="quiescent").retry_allowed)
+
  def test_a_readable_result_never_links_a_retry_but_a_transport_death_does(self):
   # RA-4: a worker's own FAIL or BLOCKED is its result on any node, capped or
   # not (BC rt-8a569384 execute FAIL -> linked -> exhausted -> inline).

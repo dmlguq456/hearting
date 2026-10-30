@@ -2621,11 +2621,16 @@ def retry_predecessor(prior_rows, *, jobs=None, task=None):
     an uncapped stage is also new work once the old execution is quiescent.
     Callers keep capped rounds on their existing admission path. No original
     row or automatic replacement allowance is changed.
+    A terminal registration proven never started is not an execution to retry;
+    its next authorized launch still uses the ordinary round and launch fences.
     """
     if not prior_rows:
         return ""
     latest = prior_rows[-1]
     status = latest["_status"]
+    from dispatch_contract import terminal_attempt_never_started
+    if terminal_attempt_never_started(status, latest):
+        return ""
     if committed_outcome(status, latest) == "failed":
         if readable_result(latest):
             return ""
