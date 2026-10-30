@@ -28,11 +28,18 @@ class ExplorerDragPtyTests(unittest.TestCase):
         effects_path = evidence / "effects.jsonl"
         effects = ([json.loads(line) for line in effects_path.read_text(encoding="utf-8").splitlines()]
                    if effects_path.exists() else [])
-        failed = [(item.get("label"), item.get("detail")) for item in report.get("assertions", [])
+        failed = [(item.get("label"), str(item.get("detail"))[:800]) for item in report.get("assertions", [])
                   if not item.get("passed")]
         diagnostics = {"failed": failed,
-                       "mouse_dispatch": [row for row in events if row.get("kind") == "explorer-mouse-dispatch"],
-                       "recent_reductions": effects[-8:]}
+                       "peer_selection": [row for row in events if row.get("kind") == "peer-selection-accepted"][-3:],
+                       "peer_paint": json.loads((evidence / "state.json").read_text()).get("explorer", {}).get("peer_text")
+                       if (evidence / "state.json").exists() else None,
+                       "painted_pane": json.loads((evidence / "state.json").read_text()).get("explorer", {}).get("pane_lines")
+                       if (evidence / "state.json").exists() else None,
+                       "mouse_dispatch": [row for row in events if row.get("kind") == "explorer-mouse-dispatch"][-8:],
+                       "recent_reductions": effects[-8:],
+                       "transcript_tail": (evidence / "transcript.raw").read_bytes()[-300:].decode(errors="replace")
+                       if (evidence / "transcript.raw").exists() else ""}
         self.assertEqual(result.returncode, 0,
                          result.stdout + result.stderr + json.dumps(diagnostics))
         self.assertTrue(report["passed"], report["assertions"])
@@ -166,6 +173,39 @@ class ExplorerDragPtyTests(unittest.TestCase):
                     self.assertEqual((row["press_not_current"], row["release_not_current"],
                                       row["release_lost"], row["lost_with_all_current"]),
                                      (0, 0, 0, 0), row)
+
+
+class ExplorerPublicationPtyTests(unittest.TestCase):
+    run_viewer = ExplorerDragPtyTests.run_viewer
+
+    def test_pending_publication_preserves_input_and_paints_selected_history(self):
+        with tempfile.TemporaryDirectory(prefix="fleet-publication-") as directory:
+            root = Path(directory)
+            env = dict(os.environ, XDG_STATE_HOME=str(root / "state"),
+                       HOME=str(root / "home"), XDG_CACHE_HOME=str(root / "cache"),
+                       XDG_CONFIG_HOME=str(root / "config"), TMPDIR=directory,
+                       PYTHONDONTWRITEBYTECODE="1", TERM="xterm-256color", FLEET_PTY_PUBLICATION="1")
+            env.pop("FLEET_MOUSE", None)
+            env.pop("FLEET_PTY_DRAG", None)
+            _first, report = self.run_viewer(root / "first", env,
+                ("--cols", "140", "--rows", "45", "--refresh-interval", "0.08"), timeout=90)
+            self.assertTrue(any(item["label"] == "history detail paints while remote remains pending"
+                                for item in report["assertions"]))
+            self.assertTrue(any(item["label"] == "peer detail paints while remote remains pending"
+                                for item in report["assertions"]))
+            print(json.dumps({"publication_pty": {
+                "assertions": len(report["assertions"]), "size": report["initial_size"],
+                "elapsed_seconds": report["elapsed_seconds"], "history": next(
+                    item["detail"] for item in report["assertions"]
+                    if item["label"] == "history detail paints while remote remains pending"), "peers": next(
+                    item["detail"] for item in report["assertions"]
+                    if item["label"] == "peer detail paints while remote remains pending")}}), flush=True)
+            saved = json.loads((root / "state" / "hearting" / "fleet2-order.json").read_text())
+            env["FLEET_PTY_PUBLICATION_REPLAY"] = "1"
+            second, _report = self.run_viewer(root / "second", env,
+                ("--cols", "140", "--rows", "45", "--refresh-interval", "0.08"))
+            self.assertEqual(second["explorer"]["order"]["repos"], saved["repos"])
+            self.assertEqual(second["explorer"]["order"]["session_keys"], saved["sessions"])
 
 
 if __name__ == "__main__":

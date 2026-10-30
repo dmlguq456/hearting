@@ -478,8 +478,12 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         expected_active_ids = (set(registered_ids)
                                | {duty_id for duty_id, _ref, _target in self.message_duties}
                                | set(self.completed_retire_ids))
-        expected_cold_active_ids = (expected_active_ids if recurring_negative else
-                                    expected_active_ids - set(self.completed_retire_ids))
+        # The accepted-notice read sees the original active set before legacy
+        # recovery can settle successful retire followups. Final membership
+        # still proves the same case-specific recovery below.
+        expected_cold_active_ids = expected_active_ids
+        expected_recovered_active_ids = (expected_active_ids if recurring_negative else
+                                         expected_active_ids - set(self.completed_retire_ids))
         # The active row carries this host's pid, start tick and namespace, so
         # only the ~23 MB padding is fixed; the exact byte count varies by host.
         self.assertEqual(self.jobs.stat().st_size, 23_499_871)
@@ -715,7 +719,8 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         def checked_store_list(store, *args, **kwargs):
             assert_fixture_path(store.root, "obligation listing root")
             is_main_unfiltered_list = not args and not kwargs
-            if not runner_store and is_main_unfiltered_list:
+            is_main_notice_list = kwargs.get("kinds") == {"session-notice", "run-notice"}
+            if not runner_store and (is_main_unfiltered_list or is_main_notice_list):
                 runner_store.append(store)
             is_runner_store = bool(runner_store and store is runner_store[0])
             if (is_runner_store and monitoring[0] and phase[0] == "runner"):
@@ -725,11 +730,16 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
             try:
                 result = original_store_list(store, *args, **kwargs)
                 after_metrics = store.discovery_metrics() if is_runner_store else None
-                if (is_runner_store and is_main_unfiltered_list
+                if (is_runner_store and (is_main_unfiltered_list or is_main_notice_list)
                         and not main_active_discovery_ids
                         and after_metrics["json_reads"] > before_metrics["json_reads"]):
+                    # The accepted-notice phase can perform the cold active
+                    # scan before the public unfiltered list. Observe its real
+                    # snapshot before kind filtering; retain all I/O budgets.
+                    snapshot = (store._active_list_context or {}).get("records")
+                    rows = snapshot.values() if snapshot is not None else result
                     main_active_discovery_ids.append(
-                        tuple(row.get("id") for row in result if isinstance(row, dict)))
+                        tuple(row.get("id") for row in rows if isinstance(row, dict)))
                 return result
             finally:
                 if (is_runner_store and monitoring[0] and phase[0] == "runner"):
@@ -1336,7 +1346,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
             self.assertEqual(counts["handover_authority_calls"], 2)
         self.assertTrue(all(self.store.get(duty_id)["state"] == "unknown"
                             for duty_id, _ref, _target in self.message_duties))
-        expected_final_active_ids = expected_cold_active_ids | {event["duty_id"]}
+        expected_final_active_ids = expected_recovered_active_ids | {event["duty_id"]}
         for index, duty_id in enumerate(self.completed_retire_ids):
             completed_followup = not recurring_negative or index == 0
             retire_observation = self.store.get(duty_id)["observation"]

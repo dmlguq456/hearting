@@ -92,6 +92,7 @@ def _retry_context(recipient_kind: str, session_id: str,
 
 
 HUMAN_GATE_PREFIX = "human-gate:"
+NOTICE_CONTEXT_KEY = "_notice_read_context"
 
 
 def is_human_gate_record(record: object) -> bool:
@@ -126,7 +127,10 @@ def _bounded_receipt_text(record: dict) -> str:
     receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
     if receipt.get("kind") == "supervision":
         from dispatch_supervision import CONTINUED_KEY, render_text
-        return render_text(receipt, continued=record.get(CONTINUED_KEY)) + _timestamp_note(record)
+        from dispatch_notice_state import NoticeReadContext
+        context = record.get(NOTICE_CONTEXT_KEY)
+        return render_text(receipt, continued=record.get(CONTINUED_KEY),
+            notice_context=context if isinstance(context, NoticeReadContext) else None) + _timestamp_note(record)
     if receipt.get("kind") == "human-gate":
         return (f"delivery_id={record.get('delivery_id', '-')} route_id={receipt.get('route_id', '-')} "
                 f"route_file={receipt.get('route_file', '-')} attempt_id={receipt.get('owner_attempt_id', '-')} "
@@ -215,7 +219,7 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
 
 
 def activate(root: Path, recipient_kind: str, session_id: str, *,
-             request_recovery: bool = True) -> list[dict]:
+             request_recovery: bool = True, notice_context=None) -> list[dict]:
     """Retain this session's duties and request maintenance from its existing runner."""
     records, _ = addressed_records(root, recipient_kind, session_id)
     from peer_obligations import retain_ordinary_notice, retain_registered_completion
@@ -236,10 +240,20 @@ def activate(root: Path, recipient_kind: str, session_id: str, *,
                 continue
     if request_recovery:
         _reconcile_canonical_dispatch_state(root)
-    return records
+    from dispatch_notice_state import NoticeReadContext, notice_is_current
+    notice_context = notice_context or NoticeReadContext()
+    visible = []
+    for record in records:
+        try:
+            if not notice_is_current(record, jobs=record_jobs(root, record), notice_context=notice_context):
+                continue
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            pass  # Unknown is still pending; activation never claims/rejects/ACKs.
+        visible.append({**record, NOTICE_CONTEXT_KEY: notice_context})
+    return visible
 
 
-def carrier_view(root: Path, record: dict, storage_key: str, identity: dict) -> dict:
+def carrier_view(root: Path, record: dict, storage_key: str, identity: dict, *, notice_context=None) -> dict:
     """The bound in-memory copy a carrier renders for one stored record.
 
     The same parent-close projection as the original claim applies, so a
@@ -247,7 +261,9 @@ def carrier_view(root: Path, record: dict, storage_key: str, identity: dict) -> 
     unreadable registry keeps the stored view; a pending close still raises.
     """
     from dispatch_notice_state import project_parent_close
-    view = {**record, STORAGE_KEY: storage_key, IDENTITY_KEY: identity}
+    from dispatch_notice_state import NoticeReadContext
+    view = {**record, STORAGE_KEY: storage_key, IDENTITY_KEY: identity,
+            NOTICE_CONTEXT_KEY: notice_context or NoticeReadContext()}
     try:
         project_parent_close(root, view, jobs=record_jobs(root, record))
     except (OSError, ValueError):
@@ -351,6 +367,7 @@ def retain_receiving_turn(batches: list[tuple[Path, list[dict]]], session_id: st
 def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
+    notice_context=None,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -370,8 +387,11 @@ def sweep_deliver(
 
     now = time.monotonic_ns() if now_ns is None else now_ns
     start_ns = time.monotonic_ns()
+    from dispatch_notice_state import NoticeReadContext
+    notice_context = notice_context or NoticeReadContext()
     claimed: list[dict] = []
     addressed, entry_count = addressed_records(root, recipient_kind, session_id)
+    addressed = [{**record, NOTICE_CONTEXT_KEY: notice_context} for record in addressed]
     from dispatch_recipient_receipt import settle_native_receipt
     harness = ("claude" if recipient_kind.startswith("claude") else
                "codex" if recipient_kind.startswith("codex") else
@@ -526,7 +546,8 @@ def sweep_deliver(
                         storage_key=storage_key, jobs=jobs, read_context=effect_context):
                     group_ok = False
                     break
-                if not keep_claim(root, storage_key, member_id, record, claim_owner, jobs=jobs):
+                if not keep_claim(root, storage_key, member_id, record, claim_owner, jobs=jobs,
+                                  notice_context=notice_context):
                     group_ok = False
                     break
             except OSError:
@@ -553,6 +574,7 @@ def sweep_deliver(
             continued = continue_for_parent(record, session_id=session_id,
                                             recipient_kind=recipient_kind)
             group_output.append({**record, STORAGE_KEY: storage_key, IDENTITY_KEY: expected_identity,
+                                 NOTICE_CONTEXT_KEY: notice_context,
                                  **({CONTINUED_KEY: continued} if continued else {})})
         # A later native snapshot can contain an earlier member's exact receipt,
         # even when its claim/recipient changed or the ACK write must be retried.
@@ -922,6 +944,8 @@ def _opencode_native_user_texts(messages, session_id: str) -> list[str]:
 
 def _opencode_historical_attempts(native_text: str, record: dict) -> int | None:
     """Read a displayed historical claim count only when it could belong to this record."""
+    if (record.get("receipt") or {}).get("kind") in {"supervision", "human-gate", "notice"}:
+        return record.get("attempts")
     delivery_id = record.get("delivery_id")
     display = _bounded_receipt_text(record).split()
     if (not isinstance(delivery_id, str) or len(display) < 4
@@ -955,7 +979,7 @@ def _opencode_historical_attempts(native_text: str, record: dict) -> int | None:
 
 
 def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
-                                    session_id: str, messages=None) -> list[dict]:
+                                    session_id: str, messages=None, *, notice_context=None) -> list[dict]:
     """Rebuild only batches named by native markers and verify their exact body.
 
     Markers select candidate records; the rendered body and each current immutable
@@ -967,6 +991,8 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
     from dispatch_seat_handover import record_for_session, storage_recipients
     from peer_read_context import PeerReadContext
     read_context = PeerReadContext()
+    from dispatch_notice_state import NoticeReadContext
+    notice_context = notice_context or NoticeReadContext()
 
     by_id: dict[str, list[tuple[Path, dict]]] = {}
     candidate_ids = set()
@@ -1031,7 +1057,7 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
             try:
                 rendered_record = carrier_view(
                     root, {**record, "attempts": historical_attempts},
-                    record.get(STORAGE_KEY) or session_id, identity)
+                    record.get(STORAGE_KEY) or session_id, identity, notice_context=notice_context)
             except (OSError, ValueError, RuntimeError):
                 valid = False
                 break
@@ -1047,7 +1073,16 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
         legacy_rendered = _legacy_opencode_completion_body(
             rendered, [root for root, _record in selected],
             [record for _root, record in selected]) if rendered else ""
-        if not rendered or native_text not in {rendered, previous_rendered, legacy_rendered}:
+        variants = {rendered, previous_rendered, legacy_rendered}
+        if any((record.get("receipt") or {}).get("reason") == "workflow-completion-pending"
+               for _root, record in selected):
+            # Recover the previous wording from the same stored diagnosis.
+            # Receipt markers alone never authorize an arbitrary native body.
+            variants.update(text.replace("The last recorded closure refusal is ", "The latest closure refusal is ")
+                .replace("No recorded refusal is available.", "No current refusal record is available.")
+                .replace("The last recorded checkpoint is ", "The current checkpoint is ")
+                for text in tuple(variants))
+        if not rendered or native_text not in variants:
             continue
         candidate = _opencode_expected_message(native_text, identities)
         key = (candidate["text"], tuple(candidate["bindings"]))
@@ -1198,6 +1233,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--session is required")
     if args.recipient_kind not in pending_delivery.RECIPIENT_KINDS:
         parser.error(f"unknown recipient kind {args.recipient_kind}")
+    from dispatch_notice_state import NoticeReadContext
+    notice_context = NoticeReadContext()
     if args.action == "recipients":
         if args.recipient_kind != "opencode-turn":
             parser.error("recipients is an internal OpenCode carrier action")
@@ -1269,7 +1306,7 @@ def main(argv: list[str] | None = None) -> int:
                 if expected["bindings"]:
                     expected_messages.append(expected)
             expected_messages.extend(_opencode_delivery_expectations(
-                roots, args.recipient_kind, args.session, handed.get("messages")))
+                roots, args.recipient_kind, args.session, handed.get("messages"), notice_context=notice_context))
         else:
             supplied = handed.get("expected_native_messages")
             if isinstance(supplied, list):
@@ -1345,7 +1382,7 @@ def main(argv: list[str] | None = None) -> int:
                         unknown_ids.add(delivery_id)
                         continue
                     try:
-                        view = carrier_view(root, fresh, storage, original_identity)
+                        view = carrier_view(root, fresh, storage, original_identity, notice_context=notice_context)
                     except (OSError, ValueError, RuntimeError):
                         unknown_ids.add(delivery_id)
                         continue
@@ -1389,33 +1426,35 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, TypeError):
             handed = {}
         from dispatch_recipient_receipt import opencode_messages_evidence
-        roots = _state_roots()
-        native_evidence = (opencode_messages_evidence(
-            handed.get("messages"), args.session,
-            _opencode_delivery_expectations(roots, args.recipient_kind, args.session,
-                                            handed.get("messages")))
-                           if args.action == "deliver" else None)
-        for root in roots:
+        try:
+            roots = _state_roots()
+            native_evidence = (opencode_messages_evidence(
+                handed.get("messages"), args.session,
+                _opencode_delivery_expectations(roots, args.recipient_kind, args.session,
+                                                handed.get("messages"), notice_context=notice_context))
+                               if args.action == "deliver" else None)
+            for root in roots:
+                if args.action == "activate":
+                    records = activate(root, args.recipient_kind, args.session,
+                                       request_recovery=False, notice_context=notice_context)
+                else:
+                    records, _entries = sweep_deliver(
+                        root, args.recipient_kind, args.session,
+                        native_evidence=native_evidence, notice_context=notice_context)
+                if records:
+                    batches.append((root, records))
+            print(json.dumps({
+                "text": delivery_context(batches),
+                "records": [{"root": str(root), "storage_key": record.get(STORAGE_KEY) or args.session,
+                             "delivery_id": record["delivery_id"], "claim_owner": record.get("claim_owner"),
+                             "immutable_identity": record.get(IDENTITY_KEY)
+                             or pending_delivery.received_ack_identity(
+                                 record, record.get(STORAGE_KEY) or args.session, record["delivery_id"])}
+                            for root, records in batches for record in records],
+            }, ensure_ascii=False), flush=True)
+        finally:
             if args.action == "activate":
-                records = activate(root, args.recipient_kind, args.session,
-                                   request_recovery=False)
-            else:
-                records, _entries = sweep_deliver(
-                    root, args.recipient_kind, args.session,
-                    native_evidence=native_evidence)
-            if records:
-                batches.append((root, records))
-        print(json.dumps({
-            "text": delivery_context(batches),
-            "records": [{"root": str(root), "storage_key": record.get(STORAGE_KEY) or args.session,
-                         "delivery_id": record["delivery_id"], "claim_owner": record.get("claim_owner"),
-                         "immutable_identity": record.get(IDENTITY_KEY)
-                         or pending_delivery.received_ack_identity(
-                             record, record.get(STORAGE_KEY) or args.session, record["delivery_id"])}
-                        for root, records in batches for record in records],
-        }, ensure_ascii=False), flush=True)
-        if args.action == "activate":
-            request_obligation_reconciliation(lifecycle_root=Path(__file__).resolve().parents[1])
+                request_obligation_reconciliation(lifecycle_root=Path(__file__).resolve().parents[1])
         return 0
     try:
         handed = json.load(sys.stdin).get("records") or []

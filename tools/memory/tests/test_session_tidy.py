@@ -9,6 +9,8 @@ markers unless a test sets one on purpose).
 from __future__ import annotations
 
 import contextlib
+import copy
+import hashlib
 import io
 import json
 import os
@@ -5955,6 +5957,87 @@ class SeatHandoverTest(TidyCase):
             self.assertEqual(len(self.handover.resolved_steward_relations(
                 "claude", "sid-B", seat_key=self.seat().key)), 1)
 
+    @mock.patch("peer_obligations.request_obligation_recovery", return_value=True)
+    def test_release_under_seat_lock_wins_over_waiting_snapshot_adoption(self, _recovery):
+        import threading
+        pm = self.handover._peer_message()
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), mock.patch("steward_check._ensure_runner"):
+            self.assertTrue(pm.mark_steward("claude", "sid-A",
+                {"harness": "unknown", "name": "-"}, "explicit", "1", source="explicit"))
+            self.assertEqual(self.snapshot(), 0)
+            seat = self.seat()
+            role = self.handover.read_snapshot(seat.key)["steward"]["roles"][0]
+            real_lock = st.seat_lock
+            waiting = threading.Event()
+            failures = []
+
+            def wait_for_seat(key, **kwargs):
+                if key == seat.key:
+                    waiting.set()
+                return real_lock(key, **kwargs)
+
+            def adopt():
+                try:
+                    st.run_hook("claude", "start", "sid-B", source="clear",
+                                cwd=str(self.cwd), env=os.environ, emit=lambda _line: None)
+                except BaseException as exc:
+                    failures.append(exc)
+
+            thread = threading.Thread(target=adopt)
+            try:
+                with real_lock(seat.key), mock.patch.object(st, "seat_lock", side_effect=wait_for_seat):
+                    thread.start()
+                    self.assertTrue(waiting.wait(5))
+                    self.assertTrue(self.handover.record_steward_release(
+                        seat, "claude", "sid-A", role["generation"], relation=role))
+            finally:
+                # Leave the lock before joining its waiting writer.
+                if thread.ident is not None:
+                    thread.join(10)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
+            self.assertTrue(all(not row.get("steward") for row in self.handover.handover_rows(seat)))
+            self.assertEqual(self.handover.resolved_steward_relations("claude", "sid-B", seat_key=seat.key), [])
+
+    @mock.patch("peer_obligations.request_obligation_recovery", return_value=True)
+    def test_record_adoption_matches_snapshot_evidence_when_generations_collide(self, _recovery):
+        pm = self.handover._peer_message()
+        for reverse in (False, True):
+            pane = "test:role-collision-" + str(reverse)
+            with self.subTest(reverse=reverse), self.iso.patched_environ({"HERDR_PANE_ID": pane}), \
+                 mock.patch("steward_check._ensure_runner"):
+                self.assertTrue(pm.mark_steward("claude", "sid-A",
+                    {"harness": "unknown", "name": "-"}, "explicit", "1", source="explicit"))
+                self.assertEqual(self.snapshot(pane=pane), 0)
+                seat = self.seat(pane)
+                role = self.handover.read_snapshot(seat.key)["steward"]["roles"][0]
+                other = copy.deepcopy(role)
+                other["targets"][0]["name"] = "unrelated"
+                current = [role, other] if reverse else [other, role]
+                with mock.patch.object(self.handover, "resolved_steward_relations", return_value=current):
+                    _out, rows = self.start("sid-B", pane=pane)
+                adopted = rows[-1]["steward"]["roles"]
+                self.assertEqual(len(adopted), 1)
+                self.assertEqual(adopted[0]["targets"], role["targets"])
+                self.assertEqual(adopted[0]["holder"], {"harness": "claude", "sid": "sid-B"})
+
+    @mock.patch("peer_obligations.request_obligation_recovery", return_value=True)
+    def test_own_marker_release_survives_unrelated_global_discovery_failure(self, _recovery):
+        pm = self.handover._peer_message()
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), mock.patch("steward_check._ensure_runner"):
+            self.assertTrue(pm.mark_steward("claude", "sid-A",
+                {"harness": "unknown", "name": "-"}, "explicit", "1", source="explicit"))
+            self.assertEqual(self.snapshot(), 0)
+            seat = self.seat()
+            with mock.patch.object(self.handover, "_all_snapshots", side_effect=OSError("unrelated global snapshot")), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pm.cmd_release(SimpleNamespace(harness="claude", session_id="sid-A")), 0)
+            self.assertFalse(pm.steward_marker_path("claude", "sid-A").exists())
+        _out, rows = self.start("sid-B")
+        self.assertTrue(all(not row.get("steward") for row in rows))
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            self.assertEqual(self.handover.resolved_steward_relations("claude", "sid-B", seat_key=seat.key), [])
+
     def test_clear_and_compact_snapshot_callers_preserve_role_only_payload(self):
         pm = self.handover._peer_message()
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
@@ -6370,6 +6453,249 @@ class SeatHandoverTest(TidyCase):
             self.assertTrue(any(row.get("event") == "steward-release"
                                 for _key, row in self.handover._transition_rows(seat.key)))
             self.assertEqual(st.session_summary(seat)[("claude", "sid-A")]["last_seen"], 100)
+
+
+class StewardMirrorTest(TidyCase):
+    """Reconstruct the e0 diagnostic rows in private storage; never read its live paths."""
+
+    def setUp(self):
+        super().setUp()
+        import dispatch_seat_handover as handover
+        self.handover = handover
+        self.pm = handover._peer_message()
+        peer_reader = mock.patch.object(handover, "_peer_message", return_value=self.pm)
+        peer_reader.start()
+        self.addCleanup(peer_reader.stop)
+        self.physical = "8ab8e633a26a786454f8"
+        self.origin = "380d69d1-7eac-44a4-9fe9-486ffcf6336d"
+        self.holder = "bdae4343-0565-45eb-bda1-488767caf45e"
+        self.logical = st._native_session_key("claude", self.holder)
+        self.role = {
+            "seat_key": self.physical, "generation": "b4bb143c5bc92d9c4d1d54b841a0c509",
+            "marker_digest": "e453aeef7c66cc8de13764cb64467daa88c47d7105886f4350d5da6a1b08c1f7",
+            "origin": {"harness": "claude", "sid": self.origin},
+            "holder": {"harness": "claude", "sid": self.holder},
+            "targets": [{"harness": "unknown", "name": "-", "session_id": None,
+                         "source": "explicit", "kind": "explicit", "ts": "fixture"}],
+            "lineage": [{"from": self.origin, "to": self.holder,
+                         "snapshot_id": "3b8ea7a1e6efccf8b4230a3f9b01d0e2"}],
+        }
+        self.row = {"event": "handover", "ts": 1793224108.457673, "harness": "claude",
+                    "sid": self.holder, "from": self.origin, "source": "clear",
+                    "seat_key": self.physical, "bindings": [],
+                    "snapshot_id": "3b8ea7a1e6efccf8b4230a3f9b01d0e2",
+                    "steward": {"schema": 1, "roles": [self.role], "watches": []}}
+        self.release = {"event": "steward-release", "ts": 1793246841.9498513,
+                        "harness": "claude", "sid": self.holder,
+                        "generation": self.role["generation"], "seat_key": self.physical}
+
+    def write_rows(self, key, rows):
+        path = st.state_root() / "sessions" / (key + ".jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def discovery(self, keys):
+        return mock.patch.object(self.handover, "_all_snapshots",
+                                 return_value=[{"seat": {"key": key}} for key in keys])
+
+    def test_historical_physical_release_collapses_only_exact_mirrors(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet.collectors import steward
+        import steward_check
+        for marker_present in (False, True):
+            for keys in ((self.physical, self.logical), (self.logical, self.physical), (self.physical,)):
+                with self.subTest(marker=marker_present, keys=keys), self.iso.patched_environ():
+                    marker = {"harness": "claude", "session_id": self.origin,
+                              "generation": self.role["generation"], "seat_key": self.physical,
+                              "targets": {"-": self.role["targets"][0]}}
+                    if marker_present:
+                        self.role["marker_digest"] = hashlib.sha256(json.dumps(
+                            marker, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                    self.write_rows(self.physical, [self.row, self.release])
+                    self.write_rows(self.logical, [self.row])
+                    with self.discovery(keys), mock.patch.object(self.pm, "read_steward_markers",
+                            return_value={("claude", self.origin): marker} if marker_present else {}):
+                        relations = self.handover.resolved_steward_relations(include_released=True)
+                        self.assertEqual(len(relations), 1)
+                        self.assertTrue(relations[0]["released"])
+                        self.assertEqual(self.handover.resolved_steward_relations(), [])
+                        self.assertFalse(steward_check._role_held("claude", self.holder)["held"])
+                        self.assertFalse(steward.role_flag("claude", self.holder, markers={},
+                                                          sessions=[], _relations=relations, _targets=[]))
+                        # Physical/logical file enumeration cannot change release identity.
+                        rows = [entry for key in keys for entry in self.handover._transition_rows(key)]
+                        states, releases = self.handover._role_states(rows=rows)
+                        self.assertEqual(len(states), 1)
+                        self.assertEqual(set(states), releases)
+
+    def test_each_identity_mismatch_survives_the_other_relations_release(self):
+        for field in ("generation", "seat_key", "origin", "origin-harness", "holder", "holder-harness",
+                      "marker_digest", "targets", "lineage", "row-snapshot", "row-from", "row-harness", "row-seat"):
+            with self.subTest(field=field), self.iso.patched_environ():
+                other = copy.deepcopy(self.row)
+                role = other["steward"]["roles"][0]
+                if field in {"origin", "holder"}:
+                    role[field]["sid"] += "-other"
+                elif field.endswith("-harness") and not field.startswith("row-"):
+                    role[field.split("-")[0]]["harness"] = "opencode"
+                elif field == "targets":
+                    role[field][0]["name"] = "other"
+                elif field == "lineage":
+                    role[field][0]["snapshot_id"] = "other"
+                    other["snapshot_id"] = "other"
+                elif field.startswith("row-"):
+                    other[{"row-snapshot": "snapshot_id", "row-from": "from", "row-harness": "harness", "row-seat": "seat_key"}[field]] = "other"
+                else:
+                    role[field] += "-other"
+                self.write_rows(self.physical, [self.row, self.release])
+                self.write_rows(self.logical, [other])
+                for keys in ((self.physical, self.logical), (self.logical, self.physical)):
+                    with self.discovery(keys):
+                        relations = self.handover.resolved_steward_relations(include_released=True)
+                        self.assertEqual(len(relations), 2)
+                        self.assertEqual(sorted(row["released"] for row in relations), [False, True])
+                        self.assertEqual(len(self.handover.resolved_steward_relations()), 1)
+
+    def test_current_marker_cannot_rebind_a_historical_release_to_different_evidence(self):
+        with self.iso.patched_environ():
+            marker = {"harness": "claude", "session_id": self.origin,
+                      "generation": self.role["generation"], "seat_key": self.physical,
+                      "targets": {"other": {"harness": "unknown", "name": "other",
+                                             "source": "explicit", "kind": "explicit"}}}
+            self.write_rows(self.physical, [self.row, self.release])
+            self.write_rows(self.logical, [self.row])
+            with self.discovery((self.physical, self.logical)), mock.patch.object(
+                    self.pm, "read_steward_markers", return_value={("claude", self.origin): marker}):
+                relations = self.handover.resolved_steward_relations(include_released=True)
+                self.assertEqual(len(relations), 2)
+                original = next(row for row in relations if row["holder"]["sid"] == self.holder)
+                self.assertTrue(original["released"])
+                self.assertEqual([row["holder"]["sid"] for row in self.handover.resolved_steward_relations()], [self.origin])
+
+    def test_ambiguous_canonical_release_and_snapshot_do_not_pick_a_generation_winner(self):
+        with self.iso.patched_environ():
+            other = copy.deepcopy(self.row)
+            other_role = other["steward"]["roles"][0]
+            other_role["targets"][0]["name"] = "other"
+            self.write_rows(self.physical, [self.row, other, self.release])
+            self.write_rows(self.logical, [self.row])
+            seat = st.Seat("pane", self.physical)
+            for roles in ([self.role, other_role], [other_role, self.role]):
+                self.write_rows(self.physical, [dict(self.row, steward={"roles": roles}), self.release])
+                with self.discovery((self.physical, self.logical)):
+                    self.assertEqual(len(self.handover.resolved_steward_relations()), 2)
+                    payload = self.handover._revalidate_snapshot_steward(
+                        seat, "claude", self.holder, {"schema": 1, "roles": [self.role]})
+                    self.assertEqual(payload["roles"][0]["targets"], self.role["targets"])
+                    changed = copy.deepcopy(self.role); changed["marker_digest"] = "foreign"
+                    with self.assertRaisesRegex(RuntimeError, "role-unresolved"):
+                        self.handover._revalidate_snapshot_steward(
+                            seat, "claude", self.holder, {"schema": 1, "roles": [changed]})
+                    with st.seat_lock(seat.key):
+                        self.assertFalse(self.handover.record_steward_release(
+                            seat, "claude", self.holder, self.role["generation"], relation=self.role))
+                    before = (st.state_root() / "sessions" / (self.physical + ".jsonl")).read_bytes()
+                    with mock.patch.object(self.handover, "pane_seat", return_value=seat), \
+                         contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(self.pm.cmd_release(SimpleNamespace(harness="claude", session_id=self.holder)), 1)
+                    self.assertEqual((st.state_root() / "sessions" / (self.physical + ".jsonl")).read_bytes(), before)
+
+    def test_current_chain_holder_wins_over_old_alias_and_stale_predecessor_off(self):
+        with self.iso.patched_environ():
+            successor = copy.deepcopy(self.row)
+            successor.update(ts=self.row["ts"] + 1, sid="holder-C", snapshot_id="snapshot-BC", **{"from": self.holder})
+            role = successor["steward"]["roles"][0]
+            role["holder"]["sid"] = "holder-C"
+            role["lineage"].append({"from": self.holder, "to": "holder-C", "snapshot_id": "snapshot-BC"})
+            self.write_rows(self.physical, [self.row, successor])
+            self.write_rows(self.logical, [self.row])
+            with self.discovery((self.logical, self.physical)), \
+                 mock.patch.object(self.handover, "pane_seat", return_value=st.Seat("pane", self.physical)), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                current = self.handover.resolved_steward_relations()
+                self.assertEqual([row["holder"]["sid"] for row in current], ["holder-C"])
+                self.assertEqual(self.pm.cmd_release(SimpleNamespace(harness="claude", session_id=self.holder)), 0)
+                self.assertEqual(self.handover.resolved_steward_relations(), current)
+                self.assertEqual(self.pm.cmd_release(SimpleNamespace(harness="claude", session_id="holder-C")), 0)
+                self.assertEqual(self.handover.resolved_steward_relations(), [])
+
+    def test_origin_release_revalidates_a_confirmed_hop_after_collection(self):
+        with self.iso.patched_environ():
+            successor = copy.deepcopy(self.row)
+            successor.update(ts=self.row["ts"] + 1, sid="holder-C", snapshot_id="snapshot-BC", **{"from": self.holder})
+            role = successor["steward"]["roles"][0]
+            role["holder"]["sid"] = "holder-C"
+            role["lineage"].append({"from": self.holder, "to": "holder-C", "snapshot_id": "snapshot-BC"})
+            self.write_rows(self.physical, [self.row, successor])
+            self.write_rows(self.logical, [self.row])
+            seat = st.Seat("pane", self.physical)
+            with self.discovery((self.logical, self.physical)), st.seat_lock(seat.key):
+                self.assertFalse(self.handover.record_steward_release(
+                    seat, "claude", self.holder, self.role["generation"], relation=self.role))
+                self.assertTrue(self.handover.record_steward_release(
+                    seat, "claude", self.origin, self.role["generation"], relation=self.role))
+                self.assertEqual(self.handover.resolved_steward_relations(), [])
+
+    def test_off_from_holder_or_origin_is_idempotent_with_both_storage_copies(self):
+        for actor in (self.holder, self.origin):
+            with self.subTest(actor=actor), self.iso.patched_environ():
+                self.write_rows(self.physical, [self.row])
+                self.write_rows(self.logical, [self.row])
+                seat = st.Seat("pane", self.physical)
+                with self.discovery((self.physical, self.logical)), \
+                     mock.patch.object(self.handover, "pane_seat", return_value=seat), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    args = SimpleNamespace(harness="claude", session_id=actor)
+                    self.assertEqual(self.pm.cmd_release(args), 0)
+                    self.assertEqual(self.pm.cmd_release(args), 0)
+                    self.assertEqual(self.handover.resolved_steward_relations(), [])
+                    releases = [row for _key, row in self.handover._transition_rows(self.physical)
+                                if row["event"] == "steward-release"]
+                    self.assertEqual(len(releases), 1)
+                    self.assertEqual([row for _key, row in self.handover._transition_rows(self.logical)], [self.row])
+
+    def test_role_off_preserves_accepted_watch_receipt_duty_and_holder_continuation(self):
+        import peer_obligations
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness), self.iso.patched_environ():
+                seat = st.Seat("pane", self.physical)
+                root = self.pm.peer_state_root()
+                watch_id = "watch-mirror-" + harness
+                arm = {"schema_version": 1, "watch_id": watch_id, "server": "private",
+                       "target": "target", "until": ["done"], "armed_ts": "fixture",
+                       "deadline": {"wall": 9999999999}, "agent": {"harness": "codex", "session_id": "target"},
+                       "steward": {"harness": harness, "session_id": self.origin},
+                       "steward_seat": seat.as_dict()}
+                paths = root / "peer-watches"
+                paths.mkdir(parents=True, exist_ok=True)
+                arm_path = paths / (watch_id + ".json")
+                arm_path.write_text(json.dumps(arm))
+                receipt_path = paths / (watch_id + ".receipt.json")
+                receipt_path.write_text(json.dumps({"watch_id": watch_id, "status": "done", "matched": True}))
+                watch = self.handover._watch_reference_from_arm(watch_id, root, arm)
+                watch["holder"] = {"harness": harness, "sid": self.holder}
+                watch["lineage"] = copy.deepcopy(self.role["lineage"])
+                row = copy.deepcopy(self.row)
+                row["harness"] = harness
+                for field in ("origin", "holder"):
+                    row["steward"]["roles"][0][field]["harness"] = harness
+                row["steward"]["watches"] = [watch]
+                self.write_rows(self.physical, [row])
+                self.write_rows(self.logical, [row])
+                store = peer_obligations.ObligationStore(root)
+                duty = store.create(watch_id, "watch", {"watch_id": watch_id}, {"arm": arm})
+                before = (arm_path.read_bytes(), receipt_path.read_bytes(), copy.deepcopy(duty))
+                with self.discovery((self.physical, self.logical)), \
+                     mock.patch.object(self.handover, "pane_seat", return_value=seat), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.pm.cmd_release(SimpleNamespace(harness=harness, session_id=self.holder)), 0)
+                    self.assertEqual(self.handover.resolved_steward_relations(), [])
+                    current = self.handover.resolve_watch(watch_id, seat_key=seat.key)
+                    self.assertEqual(current["holder"], {"harness": harness, "sid": self.holder})
+                    self.assertEqual(current["origin"], {"harness": harness, "sid": self.origin})
+                    self.assertEqual(current["deadline"], arm["deadline"])
+                    self.assertFalse((paths / (watch_id + ".ack.json")).exists())
+                    self.assertEqual((arm_path.read_bytes(), receipt_path.read_bytes(), store.get(watch_id)), before)
 
 
 class CardExactIdentityTest(TidyCase):

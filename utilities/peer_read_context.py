@@ -18,6 +18,7 @@ class PeerReadContext:
         self._handover_snapshots = None
         self._handover_ledgers = {}
         self._lineage_graphs = {}
+        self._lineage_summary = None
         self._recipient_censuses = {}
         self._transfer_roots = None
         self._peer_notice_records = None
@@ -100,8 +101,16 @@ class PeerReadContext:
         key = tuple(signature)
         if key not in self._lineage_graphs:
             self._lineage_graphs = {key: loader()}
+            self._lineage_summary = None
         return self._lineage_graphs[key]
+
+    def lineage_summary(self, graph, loader):
+        """Derived history index belongs to the exact readable graph, only for this pass."""
+        if self._lineage_summary is None or self._lineage_summary[0] is not graph:
+            self._lineage_summary = (graph, loader())
+        return self._lineage_summary[1]
 
     def invalidate_lineage_graph(self):
         """An unavailable current dependency cannot leave authority cached."""
         self._lineage_graphs.clear()
+        self._lineage_summary = None

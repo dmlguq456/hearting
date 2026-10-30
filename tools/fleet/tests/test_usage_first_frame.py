@@ -1,5 +1,6 @@
 """First explorer frame waits briefly for usage, then publishes known or unknown data."""
 import unittest
+import time
 from types import SimpleNamespace
 
 from tools.fleet.collectors import FIRST_FRAME_USAGE_WAIT
@@ -27,7 +28,7 @@ class UsageFirstFrameTests(unittest.TestCase):
             vm=self.vm, generation=0, now=1.0)
         self.assertTrue(readiness["ready"])
         snapshot = SimpleNamespace(usage_snapshots={"claude": {
-            "payload": {"rl_5h": 63}, "freshness": "fresh"}}, sessions=())
+            "payload": {"rl_5h": 63}, "freshness": "fresh", "observed_at": time.time()}}, sessions=())
         self.assertEqual(usage_text(snapshot), "CL 5h63%")
 
     def test_wait_is_capped_and_timeout_completes_with_unknown_usage(self):

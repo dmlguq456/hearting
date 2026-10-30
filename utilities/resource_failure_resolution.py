@@ -89,6 +89,149 @@ class Snapshot:
             raise ValueError("artifact-changed-before-resolution")
 
 
+def saved_output_admission(route, successor, jobs, owner_attempt_id, owner_session_id):
+    """Prove exact failed-run inputs for the first declared verifier start.
+
+    This is input readiness only. It creates no marker, PASS, stage transition,
+    or resolution record; the ordinary successor gate rechecks the returned
+    snapshot before it skips only this missing resource marker.
+    """
+    from dispatch_owner_input import _locked
+    import resource_run_evidence as RUN_EVIDENCE
+
+    if not owner_attempt_id or not owner_session_id or not jobs:
+        return None
+    jobs_path = Path(jobs).expanduser().resolve()
+    node = WS.route_node(route, successor)
+    if (node is None or node.get("kind") not in {"pipeline-stage", "review-worker"}
+            or len(node.get("depends_on") or []) < 1):
+        return None
+    sup = OWNER_RESOURCE.supervisor()
+    ledger = sup.ledger_for(route, str(jobs_path))
+    armed_rows = sup.read_armed(ledger)
+    candidates = []
+    for predecessor in node.get("depends_on") or []:
+        armed = armed_rows.get(predecessor)
+        predecessor_node = WS.route_node(route, predecessor)
+        if (not armed or not predecessor_node
+                or predecessor_node.get("kind") != "resource-runner"
+                or (predecessor_node.get("continuation") or {}).get("kind") != "supervised"
+                or armed.get("predecessor_kind") != "resource"
+                or successor not in (armed.get("successors") or [])):
+            continue
+        try:
+            registry = json.loads(Path(armed["resource_registry"]).read_text(encoding="utf-8"))
+            row = registry["runs"][armed["predecessor_id"]]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if row.get("resource_policy") == "supervised-owner":
+            candidates.append((predecessor, armed, row))
+    if len(candidates) != 1:
+        return None
+
+    predecessor, armed, row = candidates[0]
+    stage = ledger.state().get("nodes", {}).get(predecessor, {})
+    failure = stage.get("evidence") or {}
+    if (stage.get("state") != "FAILED_RETRYABLE"
+            or not isinstance(row, dict) or row.get("status") != "failed"
+            or type(row.get("exit_code")) is not int or row["exit_code"] == 0
+            or row.get("cancel_requested") or row.get("parent_close_requested")
+            or row.get("parent_attempt_id") != (row.get("owner_wait") or {}).get("parent_attempt_id")
+            or armed.get("route_id") != route.get("route_id")
+            or armed.get("route_hash") != route.get("route_hash")
+            or armed.get("jobs") != str(jobs_path)
+            or row.get("route") != armed.get("route_file")
+            or row.get("node") != predecessor or row.get("jobs") != str(jobs_path)
+            or armed.get("resource_binding") != OWNER_RESOURCE.resource_body_digest(row)
+            or failure.get("exit_code") != row.get("exit_code")
+            or failure.get("resource_sha256") != resource_resume.row_digest(row)):
+        return None
+    evidence = sup.resource_evidence(armed)
+    checked = sup._checked_resource_row(armed, evidence, require_success=False)
+    if (checked != row or evidence.get("terminal") is not True
+            or evidence.get("liveness") != "exited" or evidence.get("quiescent") is not True
+            or evidence.get("exit_code") != row.get("exit_code")
+            or evidence.get("resource_sha256") != resource_resume.row_digest(row)):
+        return None
+
+    owner = row.get("owner_wait") or {}
+    input_module = __import__("dispatch_owner_input")
+    with _locked(jobs_path, owner_attempt_id) as (_, value):
+        if not sup._owner_input_matches_locked(
+                route, armed, row, owner_attempt_id, owner_session_id, value, input_module):
+            return None
+
+    snapshot = Snapshot()
+    armed_path = ledger.root / "armed" / f"{predecessor}.json"
+    try:
+        observed_armed, armed_sha = snapshot.document(armed_path)
+        registry, registry_sha = snapshot.document(armed["resource_registry"])
+        current_row = registry["runs"][armed["predecessor_id"]]
+        sentinel_path = Path(current_row["sentinel"])
+        sentinel_raw, sentinel_sha = snapshot.read(sentinel_path)
+        if current_row != row or sentinel_raw.decode("utf-8", errors="strict").strip() != str(row["exit_code"]):
+            return None
+        if observed_armed != armed:
+            return None
+        if armed.get("resource_binding") != OWNER_RESOURCE.resource_body_digest(current_row):
+            return None
+        runtime_output = Path(RUN_EVIDENCE.paths(armed)["runtime_output"]).resolve(strict=True)
+        artifact_base = Path(armed["artifact_base"]).resolve(strict=True)
+        if not runtime_output.is_relative_to(artifact_base):
+            return None
+        receipt, receipt_sha = snapshot.document(runtime_output)
+        config_sha = row.get("config_sha256")
+        if (receipt.get("route_id") != route.get("route_id")
+                or receipt.get("exit") != row.get("exit_code")
+                or not isinstance(config_sha, str) or not config_sha
+                or receipt.get("config_sha256") != config_sha
+                or not isinstance(receipt.get("outputs"), list) or not receipt["outputs"]):
+            return None
+        launch_request = row.get("launch_request") or {}
+        config_ref = row.get("config_ref") or launch_request.get("config_manifest")
+        if config_ref:
+            config_path = Path(config_ref).expanduser()
+            if not config_path.is_absolute():
+                config_path = artifact_base / config_path
+            config_path = config_path.resolve(strict=True)
+            config_digest = (launch_request.get("config_manifest_sha256")
+                             or row.get("config_sha256"))
+            match = SHA.fullmatch(config_digest) if isinstance(config_digest, str) else None
+            if match is None:
+                return None
+            snapshot.read(config_path, match.group(1))
+        outputs = []
+        for item in receipt["outputs"]:
+            if (not isinstance(item, dict) or not isinstance(item.get("path"), str)
+                    or not isinstance(item.get("sha256"), str)
+                    or not SHA.fullmatch(item["sha256"])):
+                return None
+            path = contained(artifact_base, item["path"])
+            _raw, output_sha = snapshot.read(path, SHA.fullmatch(item["sha256"]).group(1))
+            outputs.append({"path": str(path), "sha256": output_sha})
+        snapshot.verify()
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
+    return {
+        "schema": "saved-resource-output-admission-v1",
+        "route_id": route.get("route_id"), "route_hash": route.get("route_hash"),
+        "resource_node": predecessor, "successor": successor,
+        "jobs": str(jobs_path), "owner_attempt_id": owner_attempt_id,
+        "owner_session_id": owner_session_id,
+        "source_attempt_id": row.get("parent_attempt_id"),
+        "run_id": row.get("run_id"), "exit_code": row.get("exit_code"),
+        "identity": evidence.get("identity"),
+        "resource_sha256": resource_resume.row_digest(row),
+        "resource_binding": armed.get("resource_binding"),
+        "armed_sha256": armed_sha, "registry_sha256": registry_sha,
+        "sentinel": {"path": str(sentinel_path.resolve()), "sha256": sentinel_sha},
+        "receipt": {"path": str(runtime_output), "sha256": receipt_sha},
+        "outputs": sorted(outputs, key=lambda item: item["path"]),
+        "checked_artifacts": [{"path": str(path), "sha256": sha}
+                              for path, sha in sorted(snapshot.digests.items(), key=lambda pair: str(pair[0]))],
+    }
+
+
 def hashes(value):
     """Read structured SHA fields, excluding prose and unrelated identifiers."""
     result = set()

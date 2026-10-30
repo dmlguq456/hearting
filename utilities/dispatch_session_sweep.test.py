@@ -170,12 +170,8 @@ class _SlowRecoveryBarrier:
                             self._entered = True
                             self._condition.notify_all()
                             released = self._condition.wait_for(
-                                lambda: self._release_requested, timeout=self.timeout
+                                lambda: self._release_requested
                             )
-                            if not released:
-                                self._error = "test did not release the entered probe before timeout"
-                                self._release_requested = True
-                                self._condition.notify_all()
                         connection.sendall(b"R" if released else b"T")
                         with self._condition:
                             self._released = released
@@ -308,6 +304,7 @@ def _slow_recovery_probe(base: Path, record_path: Path, snapshot_path: Path,
         "                barrier.settimeout(float(os.environ['R1_RECOVERY_BARRIER_TIMEOUT']))\n"
         "                barrier.connect(barrier_path)\n"
         "                barrier.sendall(b'E')\n"
+        "                barrier.settimeout(None)  # held until the test's finally releases it\n"
         "                if barrier.recv(1) != b'R':\n"
         "                    raise RuntimeError('recovery barrier was not released normally')\n"
         "        except Exception as exc:\n"
@@ -434,6 +431,88 @@ def _project_settled_close(root, record, *, jobs=None):
 
 
 class SweepTest(IsolatedRootMixin, unittest.TestCase):
+    def test_recorded_publication_pending_delivery_is_light_for_all_carriers(self):
+        import dispatch_terminal_commit as terminal
+        import dispatch_supervision as supervision
+        import artifact_producer
+        fixture = _load("sweep_recorded_notice_fixture", HERE / "dispatch_notice_state.test.py")
+        for carrier in ("claude-parent-runtime", "codex-native-queue", "opencode-turn"):
+            with self.subTest(carrier=carrier):
+                jobs, meta, request = fixture.recorded_owner_fixture(self.root / carrier, carrier=carrier)
+                terminal._record_attempt(request, "producer-finalize-failed", "output-invalid: locator-invalid-component:artifacts/bad|name")
+                notice = supervision.materialize(jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+                with contextlib.ExitStack() as stack:
+                    heavy = []
+                    for module, names in ((terminal, ("owner_completion_state", "owner_completion_pending", "inspect_owner_completion",
+                        "_completion_request", "_observe_settled_transaction", "_publication_observation")),
+                        (artifact_producer, ("completed_spec_publication", "_code_spec_tree_changed", "_spec_bytes")),
+                        (terminal._route_module(), ("terminal_gate_observation",))):
+                        for name in names:
+                            heavy.append(stack.enter_context(mock.patch.object(module, name, side_effect=AssertionError(name))))
+                    reader = stack.enter_context(mock.patch.object(terminal, "recorded_owner_completion_notice", wraps=terminal.recorded_owner_completion_notice))
+                    begin = time.monotonic()
+                    started = SWEEP.activate(jobs.parent, carrier, "parent", request_recovery=False)
+                    startup_text = SWEEP.delivery_context([(jobs.parent, started)])
+                    self.assertIn("output-invalid", startup_text)
+                    self.assertEqual(PD.read(jobs.parent, "parent", notice["delivery_id"])["state"], "pending")
+                    reader.reset_mock()
+                    records, _ = SWEEP.sweep_deliver(jobs.parent, carrier, "parent")
+                    self.assertEqual(len(records), 1)
+                    text = SWEEP.delivery_context([(jobs.parent, records)])
+                    self.assertIn("artifacts/bad|name", text)
+                    self.assertIn("HEARTING_RECEIPT_V1", text)
+                    self.assertEqual(reader.call_count, 1)
+                    self.assertEqual(SWEEP.ack_delivered(jobs.parent, "parent", records, acked_by="fixture-parent"), 1)
+                    self.assertEqual(PD.read(jobs.parent, "parent", notice["delivery_id"])["state"], "acked")
+                    for check in heavy:
+                        check.assert_not_called()
+                    print(f"recorded pending {carrier}: {time.monotonic() - begin:.4f}s; heavy=0; select/render=1")
+
+    def test_activation_filters_stale_without_claiming_or_rejecting_and_retains_duties(self):
+        self._seed()
+        did = "delivery-" + "a" * 32
+        before = PD.read(self.root, "sess-owner", did)
+        with mock.patch("dispatch_notice_state.notice_is_current", return_value=False), \
+             mock.patch("peer_obligations.retain_registered_completion") as retain, \
+             mock.patch.object(SWEEP, "_reconcile_canonical_dispatch_state") as recover:
+            self.assertEqual(SWEEP.activate(self.root, "claude-parent-runtime", "sess-owner"), [])
+            retain.assert_called_once()
+            recover.assert_called_once_with(self.root)
+        self.assertEqual(PD.read(self.root, "sess-owner", did), before)
+
+    def test_claude_hook_renders_recorded_pending_then_flushes_before_ack(self):
+        import dispatch_terminal_commit as terminal
+        import dispatch_supervision as supervision
+        fixture = _load("claude_recorded_notice_fixture", HERE / "dispatch_notice_state.test.py")
+        jobs, meta, request = fixture.recorded_owner_fixture(self.root)
+        terminal._record_attempt(request, "output-invalid", "locator-invalid-component:artifacts/first|bad")
+        notice = supervision.materialize(jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+        class Output(io.StringIO):
+            flushed = False
+            def flush(self):
+                self.flushed = True
+        for event, expected_state in (("SessionStart", "pending"), ("UserPromptSubmit", "acked")):
+            output = Output()
+            observed = []
+            def recovery(*, lifecycle_root=None):
+                observed.append((output.flushed, PD.read(self.root, "parent", notice["delivery_id"])["state"]))
+            begin = time.monotonic()
+            with mock.patch.object(HOOK, "resolve_agent_home", return_value=ROOT), \
+                 mock.patch.object(HOOK, "dispatch_state_roots", return_value=(self.root, self.root)), \
+                 mock.patch.object(HOOK, "request_obligation_reconciliation", side_effect=recovery), \
+                 mock.patch.object(terminal, "owner_completion_pending", side_effect=AssertionError("heavy selection")) as full, \
+                 mock.patch.object(terminal, "inspect_owner_completion", side_effect=AssertionError("heavy render")) as inspect, \
+                 mock.patch.object(sys, "stdin", io.StringIO(json.dumps({"session_id": "parent", "hook_event_name": event}))), \
+                 mock.patch.object(sys, "stdout", output):
+                self.assertEqual(HOOK.main(), 0)
+            body = json.loads(output.getvalue())["hookSpecificOutput"]
+            self.assertEqual(body["hookEventName"], event)
+            self.assertIn("first|bad", body["additionalContext"])
+            self.assertEqual(observed, [(True, expected_state)])
+            full.assert_not_called()
+            inspect.assert_not_called()
+            print(f"Claude {event} recorded pending hook: {time.monotonic() - begin:.4f}s; state={expected_state}; heavy=0")
+
     def test_worker_hook_flushes_and_acks_before_requesting_global_recovery(self):
         self._seed()
         hook = _load("worker_sweep_latency_fixture", ROOT / "hooks/dispatch-session-sweep.py")
@@ -531,9 +610,16 @@ class SweepTest(IsolatedRootMixin, unittest.TestCase):
              }))), contextlib.redirect_stdout(io.StringIO()) as output:
             self.assertEqual(HOOK.main(), 0)
         activate.assert_called_once_with(self.root, HOOK.RECIPIENT_KIND, "sess-owner",
-                                         request_recovery=False)
+                                         request_recovery=False, notice_context=mock.ANY)
         request.assert_called_once_with(lifecycle_root=ROOT)
         self.assertEqual(output.getvalue(), "")
+
+    def test_cli_activation_root_failure_still_requests_detached_recovery(self):
+        with mock.patch.object(SWEEP, "_state_roots", side_effect=OSError("fixture-roots-unreadable")), \
+             mock.patch.object(SWEEP, "request_obligation_reconciliation") as request:
+            with self.assertRaisesRegex(OSError, "fixture-roots-unreadable"):
+                SWEEP.main(["activate", "--recipient-kind", "opencode-turn", "--session", "parent"])
+        request.assert_called_once_with(lifecycle_root=ROOT)
 
     def test_claude_native_feedback_settles_exact_receipt_without_reexposure(self):
         import dispatch_recipient_receipt as recipient_receipt
@@ -2913,6 +2999,54 @@ console.log(JSON.stringify({prompts, logs}));
         self.assertEqual(result["text"], "")
         self.assertEqual(PD.read(self.root, self.SID, did)["state"], "acked")
         self.assertEqual(PD.read(self.root, self.SID, did)["attempts"], 2)
+
+    def test_completion_notice_original_body_survives_refusal_changes_ack_retry_and_reclaim(self):
+        import dispatch_supervision as supervision
+        import dispatch_terminal_commit as terminal
+        fixture = _load("opencode_recorded_notice_fixture", HERE / "dispatch_notice_state.test.py")
+        jobs, meta, request = fixture.recorded_owner_fixture(self.root, carrier="opencode-turn", session=self.SID)
+        terminal._record_attempt(request, "producer-finalize-failed", "output-invalid: locator-invalid-component:artifacts/first|bad")
+        notice = supervision.materialize(jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+        handed = self.deliver_in_process()
+        did = notice["delivery_id"]
+        self.assertIn("first|bad", handed["text"])
+        self.assertNotIn(SWEEP.NOTICE_CONTEXT_KEY, json.dumps(handed))
+        # The native carrier still has its exact handed body after diagnosis changes.
+        terminal._record_attempt(request, "output-invalid", "locator-invalid-component:artifacts/second|bad")
+        path = terminal._commit_state_path(request)
+        state = json.loads(path.read_text())
+        state["state"] = "route-closed"
+        path.write_text(json.dumps(state))
+        self._expire_ambiguous([did])
+        PD.claim(self.root, self.SID, did, claim_owner="second-carrier", lease_seconds=30, require_generation_proof=False)
+        native = [{"info": {"sessionID": self.SID, "role": "user"},
+                   "parts": [{"type": "text", "text": handed["text"]}]}]
+        with mock.patch.object(PD, "ack_received", side_effect=PD.PendingDeliveryError("fixture-ack-failed")):
+            failed_ack = self.settle_at(handed, time.monotonic_ns(), messages=native)
+        self.assertEqual(failed_ack["received_ids"], [did])
+        self.assertEqual(failed_ack["records"], [])
+        self.assertEqual(PD.read(self.root, self.SID, did)["state"], "claimed")
+        retried = self.settle_at(handed, time.monotonic_ns(), messages=native)
+        self.assertEqual(retried["received_ids"], [did])
+        self.assertEqual(retried["records"], [])
+        self.assertEqual((PD.read(self.root, self.SID, did)["state"], PD.read(self.root, self.SID, did)["attempts"]), ("acked", 2))
+
+    def test_previous_completion_notice_wording_requires_the_exact_historical_body(self):
+        import dispatch_supervision as supervision
+        import dispatch_terminal_commit as terminal
+        fixture = _load("opencode_previous_notice_fixture", HERE / "dispatch_notice_state.test.py")
+        jobs, meta, request = fixture.recorded_owner_fixture(self.root, carrier="opencode-turn", session=self.SID)
+        terminal._record_attempt(request, "output-invalid", "locator-invalid-component:artifacts/first|bad")
+        notice = supervision.materialize(jobs, {"att-owner"}, reason="workflow-completion-pending")[0]
+        handed = self.deliver_in_process()
+        previous = _previous_native_body(handed["text"]).replace("The last recorded closure refusal is ", "The latest closure refusal is ")
+        native = [{"info": {"sessionID": self.SID, "role": "user"},
+                   "parts": [{"type": "text", "text": previous + " forged"}]}]
+        self.assertEqual(SWEEP._opencode_delivery_expectations([self.root], "opencode-turn", self.SID, native), [])
+        native[0]["parts"][0]["text"] = previous
+        result = self.deliver_in_process(messages=native)
+        self.assertEqual(result["records"], [])
+        self.assertEqual(PD.read(self.root, self.SID, notice["delivery_id"])["state"], "acked")
 
     def deliver_in_process(self, messages=None):
         output = io.StringIO()

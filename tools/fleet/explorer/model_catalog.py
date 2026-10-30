@@ -74,12 +74,55 @@ def _ids(value):
     return tuple(found)
 
 
+def _claude_ids(document):
+    """Claude's choices, or None when the cache is not a shape this reader knows.
+
+    The current cache nests model records under ``catalog.config.models`` and names the
+    aliases the runtime accepts in ``provider_alias_targets``. An alias stays a choice of
+    its own (the runtime resolves it per provider) when one of its targets is a listed
+    model. Only an explicitly empty model list is an empty catalog.
+    """
+    catalog = document.get("catalog") if isinstance(document, dict) else None
+    config = catalog.get("config") if isinstance(catalog, dict) else None
+    if not (isinstance(config, dict) and "models" in config):
+        models = _ids(document)
+        direct = document.get("models") if isinstance(document, dict) else document
+        return models or (() if isinstance(direct, (list, dict)) and not direct else None)
+    records = config["models"]
+    if not isinstance(records, list):
+        return None
+    listed = tuple(dict.fromkeys(item["id"].strip() for item in records if isinstance(item, dict)
+                                 and isinstance(item.get("id"), str) and item["id"].strip()))
+    if records and not listed:
+        return None
+    aliases = []
+    targets = config.get("provider_alias_targets")
+    for alias, target in (targets.items() if isinstance(targets, dict) else ()):
+        if isinstance(target, dict):
+            per_provider = target.get("per_provider")
+            target = (target.get("default"), *(per_provider.values() if isinstance(per_provider, dict) else ()))
+        else:
+            target = (target,)
+        if isinstance(alias, str) and alias.strip() and any(
+                isinstance(model, str) and model in listed for model in target):
+            aliases.append(alias.strip())
+    return tuple(dict.fromkeys((*aliases, *listed)))
+
+
 def _candidates(harness):
     home = Path.home()
     if harness == "claude":
         config = Path(os.environ.get("HEARTING_MODEL_CONFIG_HOME") or
                       os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude")
-        return tuple(sorted((config / "cache" / "model-catalog").glob("*.json")))
+        # One cache per account; the names carry no order, so the most recently written
+        # snapshot is the runtime's latest observation. An older one never stands in.
+        written = []
+        for path in (config / "cache" / "model-catalog").glob("*.json"):
+            try:
+                written.append((-path.stat().st_mtime_ns, path.name, path))
+            except OSError:
+                continue
+        return tuple(path for _mtime, _name, path in sorted(written)[:1])
     if harness == "codex":
         root = Path(os.environ.get("CODEX_HOME") or home / ".codex")
         return (root / "models_cache.json",)
@@ -102,8 +145,12 @@ def read_catalog(harness):
         document = _json(path)
         if document is None:
             continue
-        if harness == "opencode" and not (isinstance(document, dict)
-                                             and isinstance(document.get("models"), list)):
+        if harness == "claude":
+            models = _claude_ids(document)
+            if models is None:
+                continue
+        elif harness == "opencode" and not (isinstance(document, dict)
+                                               and isinstance(document.get("models"), list)):
             models = _opencode_ids(document)
         else:
             models = _ids(document)

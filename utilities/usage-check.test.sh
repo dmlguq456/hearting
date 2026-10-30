@@ -121,6 +121,21 @@ record_usage codex "{\"windows\": [[\"7d\", 100, $gauge_reset]]}"
 out=$(AGENT_HOME="$AH" bash "$UC" --harness codex 2>&1 | grep -v "^bias ")
 [ "$out" = "codex limited($gauge_iso)" ] && ok "gauge: codex 7d 100% + future reset → limited(reset)" || bad "expected 'codex limited($gauge_iso)', got [$out]"
 
+# Credits affect the hard gauge hold only; exercise the real CLI/cache reader.
+for credit_case in credit unlimited no-credit spend; do
+  expected="codex limited($gauge_iso)"
+  case "$credit_case" in
+    credit) metadata='"credits":{"has_credits":true,"unlimited":false,"balance":"56446.1701575000"},"spend_control_reached":null'; expected="codex ok" ;;
+    unlimited) metadata='"credits":{"has_credits":false,"unlimited":true},"spend_control_reached":false'; expected="codex ok" ;;
+    no-credit) metadata='"credits":{"has_credits":false,"unlimited":false}' ;;
+    spend) metadata='"credits":{"has_credits":true},"spend_control_reached":true' ;;
+  esac
+  clear_usage; : > "$jobs"
+  record_usage codex "{\"windows\":[[\"7d\",100,$gauge_reset]],$metadata}"
+  out=$(AGENT_HOME="$AH" bash "$UC" --harness codex 2>&1 | grep -v "^bias ")
+  [ "$out" = "$expected" ] && ok "gauge: $credit_case → $expected" || bad "expected '$expected' ($credit_case), got [$out]"
+done
+
 clear_usage; : > "$jobs"
 record_usage codex "{\"windows\": [[\"7d\", 99, $gauge_reset]]}"
 out=$(AGENT_HOME="$AH" bash "$UC" --harness codex 2>&1 | grep -v "^bias ")

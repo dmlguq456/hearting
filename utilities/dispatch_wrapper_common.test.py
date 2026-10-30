@@ -280,7 +280,9 @@ class WrapperCommonTest(unittest.TestCase):
         self.assertEqual(limited["profile"], "balanced-deep")
 
     def test_runtime_root_preparation_is_optional_and_marker_is_private(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        # A valid explicit override must be outside native HOME. The worker's
+        # inherited TMPDIR may legitimately live under its local state home.
+        with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
             base = Path(tmp)
             artifact = base / "project" / ".agent_reports"
             artifact.mkdir(parents=True)
@@ -526,7 +528,7 @@ class WrapperCommonTest(unittest.TestCase):
                         self.assertEqual(ledger.claim_history(), admitted_claims)
 
                         # This is the same read-only completion callback the
-                        # wrapper's jobs-lock preclaim uses.
+                        # wrapper's prepared preclaim uses.
                         with Path(str(jobs) + ".lock").open("a", encoding="utf-8") as lock:
                             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                             lines = jobs.read_text(encoding="utf-8").splitlines()

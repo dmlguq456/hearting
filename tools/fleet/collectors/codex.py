@@ -38,13 +38,14 @@ import socket
 import urllib.error
 import urllib.request
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Optional
 from urllib.parse import urlsplit
 
-from fleet import session_registry
-from fleet.model import ContextEvidence, SESSION_WORK_SEC, SubAgent
-from fleet.token_budget import parse_codex_token_count
+from .. import session_registry
+from ..model import ContextEvidence, SESSION_WORK_SEC, SubAgent
+from ..token_budget import parse_codex_token_count
 from . import shell_jobs
 
 # rollout filename tail: rollout-<ISO-ts>-<uuid>.jsonl
@@ -2303,6 +2304,32 @@ def _rates_from_payload(p):
 _ACCT = {"ts": 0.0, "data": None}
 
 
+def _credit_metadata(source):
+    """Project optional credit fields from one API root or rollout rate_limits."""
+    if not isinstance(source, Mapping):
+        return {}
+    metadata = {}
+    if "credits" in source:
+        credits = source["credits"]
+        metadata["credits"] = ({key: credits[key] for key in
+                               ("has_credits", "unlimited", "balance") if key in credits}
+                              if isinstance(credits, Mapping) else credits)
+    if "spend_control_reached" in source:
+        metadata["spend_control_reached"] = source["spend_control_reached"]
+    return metadata
+
+
+def credits_usable(payload):
+    """Whether this account snapshot explicitly permits spending credits (no I/O)."""
+    if not isinstance(payload, Mapping):
+        return False
+    credits = payload.get("credits")
+    spend = payload.get("spend_control_reached")
+    return (isinstance(credits, Mapping)
+            and (credits.get("has_credits") is True or credits.get("unlimited") is True)
+            and (spend is None or spend is False))
+
+
 def _api_usage():
     """LIVE account usage via the same endpoint the codex TUI itself uses (`/wham/usage`,
     bundle: account/usage/read) — read-only GET with the user's own OAuth token from auth.json.
@@ -2359,7 +2386,8 @@ def _api_usage_detail():
             p5, rs5 = pct, reset
         elif label == "7d":
             p7, rs7 = pct, reset
-    return {"rl_5h": p5, "rl_7d": p7, "rs_5h": rs5, "rs_7d": rs7, "windows": windows}, "live"
+    return {"rl_5h": p5, "rl_7d": p7, "rs_5h": rs5, "rs_7d": rs7, "windows": windows,
+            **_credit_metadata(d)}, "live"
 
 
 def account_usage():
@@ -2395,7 +2423,8 @@ def account_usage():
             if windows:
                 windows = [[lbl, pct, rs] for lbl, pct, rs in (windows or [])]
                 _ACCT["data"] = {"rl_5h": p5, "rl_7d": p7, "rs_5h": None, "rs_7d": None,
-                                  "windows": windows}   # rollout fallback: no reliable reset time
+                                  "windows": windows,
+                                  **_credit_metadata(payload["rate_limits"])}
                 break
     return _ACCT["data"]
 

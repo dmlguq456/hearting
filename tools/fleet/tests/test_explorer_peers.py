@@ -60,11 +60,16 @@ LEGACY_HEADS = {"◀": LANE_HEAD_LEFT, "▶": LANE_HEAD_RIGHT}
 
 
 def _arrow_glyph_delta(expected_cells):
-    """The approved head change: the pane's old wide triangles are now the smaller ◂ ▸."""
+    """Normalize line heads to ASCII, preserving the LINKS text's direction markers."""
+    line_glyphs = frozenset("─━┬┴┼├┤╫╪╬")
     for row in expected_cells:
-        for cell in row:
+        for index, cell in enumerate(row):
             if cell[0] in LEGACY_HEADS:
                 cell[0] = LEGACY_HEADS[cell[0]]
+            elif cell[0] == "▸" and index and row[index - 1][0] in line_glyphs:
+                cell[0] = LANE_HEAD_RIGHT
+            elif cell[0] == "◂" and index + 1 < len(row) and row[index + 1][0] in line_glyphs:
+                cell[0] = LANE_HEAD_LEFT
     return expected_cells
 
 
@@ -348,25 +353,19 @@ class PeerWrappedLayout(unittest.TestCase):
                         _lx0, fy, lower_edge, fb = boxes["x1"]
                         self.assertEqual(edge, lower_edge)
                         glyph = lambda xx, yy: frame.cells[yy][xx][0]
-                        for top, bottom in ((uy, ub), (fy, fb)):
-                            self.assertEqual(glyph(edge + 1, top + 1), LANE_HEAD_LEFT)
-                            self.assertEqual(glyph(edge, top + 2), "├")
+                        for top, bottom, corner in ((uy, ub, "┐"), (fy, fb, "┘")):
+                            # Head, line and trunk corner all share the title row.
+                            self.assertEqual(glyph(edge, top + 1), LANE_HEAD_LEFT)
+                            self.assertEqual([glyph(xx, top + 1) for xx in range(edge + 1, edge + 4)],
+                                             ["─", "─", corner])
                             self.assertEqual(glyph(edge, bottom), "┘", "the corner stays whole")
-                        self.assertEqual([glyph(xx, uy + 2) for xx in range(edge, edge + 4)],
-                                         list("├──┐"))
-                        self.assertTrue(all(glyph(edge + 3, yy) == "│" for yy in range(uy + 3, fy + 1)))
-                        self.assertEqual([glyph(xx, fy + 1) for xx in range(edge + 1, edge + 4)],
-                                         [LANE_HEAD_LEFT, "─", "┘"])
-                        self.assertEqual([glyph(xx, fy + 2) for xx in range(edge, edge + 6)],
-                                         list("├────┘"))
-                        self.assertTrue(all(glyph(edge + 5, yy) == "│" for yy in range(uy + 2, fy + 2)))
-                        self.assertEqual([glyph(xx, uy + 1) for xx in range(edge + 1, edge + 6)],
-                                         [LANE_HEAD_LEFT, "─", "─", "─", "┐"])
+                        self.assertTrue(all(glyph(edge + 3, yy) == "│"
+                                            for yy in range(uy + 2, fy + 1)))
                         if owners:
                             self.assertEqual(glyph(edge, fy + 3), "┤", "the owner divider stays whole")
-                        # The gutter column right of the lanes belongs to the next card's left gap.
+                        # The trunk column right of the cards belongs to their gap.
                         others = [box for tag, box in boxes.items() if tag not in ("x0", "x1")]
-                        self.assertTrue(all(not (box[0] <= edge + 5 <= box[2] and
+                        self.assertTrue(all(not (box[0] <= edge + 3 <= box[2] and
                                                  box[1] <= fy <= box[3]) for box in others))
 
     def test_cross_link_tail_line_and_head_share_one_row(self):

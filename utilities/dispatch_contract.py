@@ -5375,9 +5375,15 @@ def _parent_binding_is_live_from_metadata(
 
 
 @contextmanager
-def _launch_serialization_lock(jobs: Path):
-    """Keep same-registry launch claims exclusive while the jobs lock is dropped."""
-    path = Path(f"{jobs}.launch.lock")
+def _launch_serialization_lock(jobs: Path, attempt_id: str):
+    """Serialize only one exact attempt; unrelated preparation never queues here.
+
+    Old launchers may still use the registry-wide launch lock. The fresh row
+    commit, rather than this preparation lock, arbitrates against those writers.
+    Keep the same no-follow, owner and single-link file checks.
+    """
+    key = hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()
+    path = Path(f"{jobs}.launch.{key}.lock")
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         info = os.fstat(fd)
@@ -5429,6 +5435,366 @@ def parent_attempt_binding_is_live(
         return False
 
 
+@contextmanager
+def _launch_registry_transaction(jobs: Path):
+    """Only local registry/fence reads and exact row writes belong here."""
+    with Path(f"{jobs}.lock").open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def _launch_row(lines, attempt_id, *, reason="attempt-row-not-unique"):
+    matches = []
+    for index, line in enumerate(lines):
+        fields = line.split("\t")
+        if len(fields) == 6 and row_has_attempt(fields[5], attempt_id):
+            matches.append((index, fields, parse_registry_metadata(fields[5])))
+    if len(matches) != 1:
+        raise DispatchContractError(reason, attempt_id)
+    return matches[0]
+
+
+def _launch_row_value(fields):
+    # These existing observer/provenance annotations grant no launch authority.
+    # Keep status, process identity, claims, cancellation, terminal evidence and
+    # every unknown key exact, including the sealed source/review bindings.
+    metadata = parse_registry_metadata(fields[5])
+    for key in ("resolved_model", "updated_at",
+                "caller_sid", "caller_harness", "caller_pane", "caller_cwd",
+                "summary_owner", "summary_sid", "summary_state_file",
+                "summary_owner_pid", "summary_owner_pid_start", "summary_owner_pid_scope",
+                "summary_owner_pid_host", "summary_owner_pid_host_start", "summary_owner_pid_host_ns",
+                "summary_owner_pid_observer_ns", "summary_owner_pid_host_proof"):
+        metadata.pop(key, None)
+    return (*fields[:5], tuple(sorted(metadata.items())))
+
+
+_LAUNCH_COMPLETION_READS = contextvars.ContextVar("launch_completion_reads", default=None)
+
+
+@contextmanager
+def _launch_completion_reads():
+    # Per preparation, including nested common readers; never shared between
+    # concurrent legs or replayed as callbacks under the registry lock.
+    reads = {"nodes": [], "attempts": set(), "groups": set(), "exact": False}
+    token = _LAUNCH_COMPLETION_READS.set(reads)
+    try:
+        yield reads
+    finally:
+        _LAUNCH_COMPLETION_READS.reset(token)
+
+
+def _launch_completion_marker_input(marker):
+    reads = _LAUNCH_COMPLETION_READS.get()
+    if reads is None or not marker:
+        return
+    if marker.get("attempt_id"):
+        reads["attempts"].add(marker["attempt_id"])
+    if marker.get("stage_authority") == "owner-chain" and marker.get("session_chain_id"):
+        reads["groups"].add(marker["session_chain_id"])
+
+
+def _launch_completion_input(route, node, marker=None):
+    reads = _LAUNCH_COMPLETION_READS.get()
+    if reads is None:
+        return
+    _launch_completion_marker_input(marker)
+    if not route.get("route_id") or not node.get("id"):
+        reads["exact"] = True
+        return
+    scope = (route["route_id"], dict(node))
+    if scope not in reads["nodes"]:
+        reads["nodes"].append(scope)
+    if marker:
+        if owner_closure_shape(marker) == "continuation":
+            # The existing closure reader consumes all review rounds in these
+            # source routes, including competitors absent from its old proof.
+            proof = marker.get("owner_closure_proof")
+            lineage = proof.get("lineage") if isinstance(proof, dict) else None
+            if not isinstance(lineage, list) or not lineage:
+                reads["exact"] = True
+            else:
+                for source in lineage:
+                    if not isinstance(source, dict) or not source.get("route_id"):
+                        reads["exact"] = True
+                    elif (source["route_id"], dict(node)) not in reads["nodes"]:
+                        reads["nodes"].append((source["route_id"], dict(node)))
+
+
+def _launch_dependencies(lines, fields, callbacks=(), reads=None):
+    """Pin prepared row inputs, including absent competitors, without a TTL.
+
+    Shared gates depend on their consumed nodes and exact attempt lineage. An opaque
+    callback can depend on any registry row, so its whole input is pinned. The
+    shared wrapper explicitly declares its repository/route-scoped gates.
+    Unrelated projects can append or complete without invalidating native gates.
+    """
+    if (reads and reads["exact"]) or any(callback is not None and not getattr(callback, "_dispatch_registry_scoped", False)
+           for callback in callbacks):
+        return tuple(lines)
+    metadata = parse_registry_metadata(fields[5])
+    relation_keys = ("attempt_id", "parent_attempt_id", "automatic_retry_of", "prior_attempt_id",
+                     "replacement_original_attempt_id", "replacement_attempt_id")
+    group_keys = ("session_chain_id", "replacement_family_id")
+    attempts = {metadata[k] for k in relation_keys if metadata.get(k)}
+    executions = {metadata[k] for k in (
+        "attempt_id", "automatic_retry_of", "prior_attempt_id", "replacement_original_attempt_id")
+        if metadata.get(k)}
+    groups = {metadata[k] for k in group_keys if metadata.get(k)}
+    if reads:
+        attempts.update(reads["attempts"])
+        groups.update(reads["groups"])
+    nodes = {metadata.get("route_node")}
+    for callback in callbacks:
+        nodes.update(getattr(callback, "_dispatch_registry_nodes", ()))
+    rows = [(line, line.split("\t")) for line in lines]
+    selected = set()
+    # Include ancestors and successors even when an adopted parent has moved
+    # to a different route or worktree. This is an in-memory closure only.
+    changed = True
+    while changed:
+        changed = False
+        for index, (_line, candidate) in enumerate(rows):
+            if len(candidate) != 6:
+                continue
+            meta = parse_registry_metadata(candidate[5])
+            same_worktree = candidate[2:4] == fields[2:4]
+            # A different node's ordinary registration/start/completion does
+            # not change this admission. In particular, parallel batch legs
+            # must be able to reach their own launch fences concurrently.
+            # Missing route identity stays conservatively in the read set.
+            scoped = (bool(metadata.get("route_id") and metadata.get("route_node"))
+                      and meta.get("route_id") == metadata.get("route_id")
+                      and meta.get("route_node") in nodes)
+            for route_id, node in (reads or {}).get("nodes", ()):
+                try:
+                    row_route, _row_hash, row_node = registered_node_identity(meta, node)
+                except ValueError:
+                    # Conflicting aliases must not disappear from a consumed
+                    # scope, even when the old reader accepted their identity.
+                    # A node-less owner cannot stand for an ordinary stage:
+                    # it is only that stage's ancestor, not consumed execution.
+                    owner_node = (node.get("kind") == "capability-owner"
+                                  and node.get("unit") == "_kernel/owner"
+                                  and node.get("dispatch_depth") == 1 and node.get("terminal") is True)
+                    if ((meta.get("route_id") == route_id and meta.get("route_node") == node["id"])
+                            or (owner_node and meta.get("owner_route_id") == route_id)):
+                        scoped = True
+                    continue
+                if ((row_route == route_id and row_node == node["id"])
+                        or (meta.get("route") == route_id and meta.get("route_node") == node["id"])):
+                    scoped = True
+            unknown = same_worktree and not all(
+                metadata.get(k) and meta.get(k) for k in ("route_id", "route_node"))
+            child = meta.get("parent_attempt_id") in executions
+            successor = any(meta.get(k) in attempts for k in (
+                "automatic_retry_of", "prior_attempt_id", "replacement_original_attempt_id"))
+            linked = (scoped or unknown or child or successor or meta.get("attempt_id") in attempts
+                      or any(meta.get(k) in groups for k in group_keys))
+            if linked:
+                if index not in selected:
+                    selected.add(index)
+                    attempts.update(meta[k] for k in relation_keys if meta.get(k))
+                    groups.update(meta[k] for k in group_keys if meta.get(k))
+                    changed = True
+                # Quiescence of consumed work includes its descendants. A
+                # common live parent is pinned, but its independent children
+                # are not all dependencies of this launch.
+                execution_successor = any(meta.get(k) in executions for k in (
+                    "automatic_retry_of", "prior_attempt_id", "replacement_original_attempt_id"))
+                if scoped or child or execution_successor:
+                    if meta.get("attempt_id") and meta["attempt_id"] not in executions:
+                        executions.add(meta["attempt_id"])
+                        changed = True
+    return tuple(_launch_row_value(candidate) for index, (_line, candidate) in enumerate(rows)
+                 if index in selected)
+
+
+def _launch_cancellation_routes(jobs, lines, metadata):
+    """Resolve foreign/adopted owner routes outside every global lock."""
+    routes = {}
+    related = [metadata]
+    from owner_route_binding import OwnerRouteBindingError, resolve_owner_route_lifecycle
+    rows = [(line.split("\t"), parse_registry_metadata(line.split("\t")[5]))
+            for line in lines if len(line.split("\t")) == 6]
+    by_id = {meta.get("attempt_id"): meta for _fields, meta in rows}
+    current, seen = metadata, set()
+    while current.get("attempt_id") not in seen:
+        seen.add(current.get("attempt_id"))
+        if current.get("worker_type") == "owner":
+            try:
+                binding, _ = resolve_owner_route_lifecycle(
+                    jobs, owner_attempt_id=current.get("attempt_id"), registry_rows=rows)
+                if binding is not None:
+                    routes[binding.route_id] = binding.route_hash
+            except OwnerRouteBindingError:
+                pass  # Same unknown-owner compatibility as row_requested.
+            break
+        current = by_id.get(current.get("parent_attempt_id"))
+        if current is None:
+            break
+        related.append(current)
+    for meta in related:
+        for id_key, hash_key in (("route_id", "route_hash"), ("owner_route_id", "owner_route_hash"),
+                                 ("parent_close_route_id", "parent_close_route_hash")):
+            if meta.get(id_key) and meta.get(hash_key):
+                routes[meta[id_key]] = meta[hash_key]
+    return tuple(sorted(routes.items()))
+
+
+def _launch_local_fences(jobs, metadata, cancellation_routes, *, registration=False):
+    """Fresh local terminal claims and close journals, never route/source readers.
+
+    These existing records live beside jobs, and their writers serialize with
+    this same jobs lock. Git, route and foreign-parent observations complete
+    outside it. The commit also rechecks exact local PID/start or lease liveness.
+    """
+    import route_parent_close
+    if route_parent_close.requested(metadata):
+        raise DispatchContractError("cancelled-by-parent")
+    owner = metadata.get("parent_attempt_id") or metadata.get("attempt_id")
+    route_ids = {metadata.get("route_id"), metadata.get("owner_route_id")}
+    for route_id in sorted(value for value in route_ids if value and value != "-"):
+        ensure_terminal_claim_absent(jobs, route_id, owner)
+    for route_id, route_hash in cancellation_routes:
+        intent = route_parent_close.intent({"route_id": route_id, "route_hash": route_hash}, jobs)
+        # A closed route cannot admit a new successor that was never in its
+        # old attempt census. Spawn only tests its already registered child.
+        if intent and (registration or metadata.get("attempt_id") in intent["attempts"]):
+            raise DispatchContractError("cancelled-by-parent")
+
+
+def _launch_parent_observation(jobs, lines, child_fields, child_meta, binding):
+    if binding is None:
+        return
+    parents = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) == 6 and fields[1] in {"open", "running"}:
+            metadata = parse_registry_metadata(fields[5])
+            if metadata.get("attempt_id") == binding.attempt_id:
+                parents.append((fields, metadata))
+    if len(parents) != 1:
+        raise DispatchContractError("parent-attempt-not-live", binding.attempt_id)
+    fields, metadata = parents[0]
+    try:
+        validate_attempt_metadata(metadata)
+    except DispatchContractError as exc:
+        raise DispatchContractError("parent-attempt-not-live", binding.attempt_id) from exc
+    same = (metadata.get("dispatch_depth") == "1" and metadata.get("worker_type") == "owner"
+            and canonical_repository_identity(fields[2]) == binding.repository_identity
+            and canonical_repository_identity(child_fields[2]) == binding.repository_identity
+            and (fields[3] == child_fields[3] or is_linked_worktree_slice(child_meta))
+            and fields[4] == child_meta.get("parent")
+            and child_meta.get("parent_attempt_id") == binding.attempt_id
+            and fields[3] == binding.worktree and fields[4] == binding.slug
+            and _parent_metadata_matches_binding(metadata, binding))
+    if not same:
+        raise DispatchContractError("parent-attempt-identity-changed", binding.attempt_id)
+    if not _parent_binding_is_live_from_metadata(jobs, metadata, binding):
+        raise DispatchContractError("parent-attempt-not-live", binding.attempt_id)
+
+
+def _prepare_attempt_launch(jobs, attempt_id, *, parent_binding, respawn_of, preclaim,
+                            expected_fields=None, published=False, phase="pre-release"):
+    with _launch_completion_reads() as reads:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        index, fields, metadata = _launch_row(lines, attempt_id)
+        validate_attempt_metadata(metadata)
+        import route_parent_close
+        if route_parent_close.row_requested(metadata, jobs):
+            raise DispatchContractError("cancelled-by-parent")
+        if expected_fields is not None and _launch_row_value(fields) != _launch_row_value(expected_fields):
+            raise DispatchContractError(f"attempt-{phase}-identity-changed", attempt_id)
+        if fields[1] not in {"open", "running"}:
+            raise DispatchContractError("attempt-not-open", attempt_id)
+        if not published:
+            if respawn_of is None:
+                if metadata.get("launch_claimed") == "1":
+                    raise DispatchContractError("attempt-launch-already-claimed", attempt_id)
+                if metadata.get("launch_claimed") != "0":
+                    raise DispatchContractError("attempt-launch-claim-invalid", attempt_id)
+            else:
+                if (parent_binding is not None or metadata.get("worker_type") != "owner"
+                        or metadata.get("dispatch_depth") != "1" or metadata.get("harness") != "codex"
+                        or metadata.get("launch_claimed") != "1" or metadata.get("launch_started") != "1"
+                        or (metadata.get("pid", ""), metadata.get("pid_start", ""))
+                        != tuple(map(str, respawn_of))):
+                    raise DispatchContractError("attempt-respawn-identity-changed", attempt_id)
+                governed = attempt_governed_process_quiescence(metadata)
+                if governed.state != "quiescent":
+                    reason = ("attempt-respawn-consumer-live" if governed.state == "live"
+                              else "attempt-respawn-consumer-unverifiable")
+                    raise DispatchContractError(reason, governed.reason)
+                if supervisor_lease_is_held(jobs, metadata):
+                    raise DispatchContractError("attempt-respawn-lease-held", attempt_id)
+        if respawn_of is None:
+            from dispatch_replacement import admission, validate_owned_launch
+            from review_input import validate_launch
+            from review_source_subject import SourceSubjectError, validate_attempt
+            # Initial eligibility differs from validation of this already owned
+            # fenced identity. Both paths retain the current claim/input contract.
+            if published:
+                validate_owned_launch(jobs, lines, metadata)
+            else:
+                admission(jobs, lines, metadata)
+            validate_launch(jobs, metadata)
+            if preclaim is not None:
+                preclaim(lines)
+        # Canonical repository/foreign route observation can block on NAS; finish
+        # it before the last content observation, still with the payload fenced.
+        routes = _launch_cancellation_routes(jobs, lines, metadata)
+        try:
+            _launch_parent_observation(jobs, lines, fields, metadata, parent_binding)
+            if respawn_of is None:
+                try:
+                    validate_attempt(jobs, fields, metadata)
+                except SourceSubjectError as exc:
+                    raise DispatchContractError(exc.reason, exc.detail) from exc
+            # Source observation may take time. Recheck local process/declared
+            # supervisor-lease liveness afterward, without canonicalizing NAS paths
+            # or reloading foreign routes. The transaction pins that parent's row.
+            if parent_binding is not None:
+                _parent_index, _parent_fields, parent_meta = _launch_row(lines, parent_binding.attempt_id)
+                if not _parent_binding_is_live_from_metadata(jobs, parent_meta, parent_binding):
+                    raise DispatchContractError("parent-attempt-not-live", parent_binding.attempt_id)
+        except DispatchContractError as exc:
+            if exc.reason == "parent-attempt-not-live" and (published or expected_fields is not None):
+                suffix = "after-post-claim" if published else "after-spawn"
+                raise DispatchContractError("parent-attempt-not-live-" + suffix, exc.detail) from exc
+            raise
+        return lines, index, fields, metadata, routes, reads
+
+
+def _commit_launch_preparation(jobs, fresh, prepared, *, parent_binding, preclaim, phase):
+    lines, _index, fields, metadata, routes, reads = prepared
+    index, current_fields, current_meta = _launch_row(
+        fresh, metadata["attempt_id"], reason=f"attempt-{phase}-row-not-unique")
+    _launch_local_fences(jobs, current_meta, routes)
+    if (_launch_row_value(current_fields) != _launch_row_value(fields)
+            or _launch_dependencies(fresh, fields, (preclaim,), reads)
+            != _launch_dependencies(lines, fields, (preclaim,), reads)):
+        raise DispatchContractError(f"attempt-{phase}-identity-changed", metadata["attempt_id"])
+    if parent_binding is not None:
+        # A parent can exit while we wait for jobs.lock even when its row is
+        # unchanged. Only exact local PID/start or the already resolved local
+        # supervisor lease belongs here; NAS/foreign observations stay outside.
+        _parent_index, parent_fields, parent_meta = _launch_row(fresh, parent_binding.attempt_id)
+        live = False
+        if parent_fields[1] in {"open", "running"} and _parent_metadata_matches_binding(parent_meta, parent_binding):
+            if parent_binding.observed_pid is not None:
+                live = process_identity_is_live(parent_binding.observed_pid, parent_binding.observed_pid_start)
+            elif parent_binding.liveness_source == "supervisor-lease":
+                live = supervisor_lease_is_held(jobs, parent_meta)
+        if not live:
+            suffix = "after-post-claim" if phase == "post-claim" else "after-spawn"
+            raise DispatchContractError("parent-attempt-not-live-" + suffix, parent_binding.attempt_id)
+    return index, current_fields, current_meta
+
+
 def spawn_claimed_attempt(
     jobs: Path,
     attempt_id: str,
@@ -5441,614 +5807,190 @@ def spawn_claimed_attempt(
     post_claim: Callable[[dict[str, str]], dict[str, str] | PostClaimAdmission | None] | None = None,
     respawn_of: tuple[str, str] | None = None,
 ) -> tuple[subprocess.Popen, dict[str, str]]:
-    """Claim one registered attempt while publishing its fenced process.
+    """Prepare externally, publish an exact fenced identity, then release once.
 
-    A new row stays ``launch_claimed=0`` until a complete fenced PID identity is
-    ready. A same-attempt Codex respawn instead requires the exact prior identity,
-    a quiescent governed process and a free supervisor lease, then atomically
-    republishes the identity with its predecessor lineage. ``pre_release`` may attach a
-    bounded observer to that exact identity; its metadata is committed in the
-    same replacement and any failure aborts the still-fenced worker.
-    ``post_claim`` is the narrow jobs-unlocked producer-admission seam. Its
-    bounded receipt is committed only after the exact row, identity, status,
-    and parent are revalidated under the jobs lock.
+    Source/route/process observers and all callbacks run with neither global
+    jobs nor legacy global launch lock held. Per-attempt serialization spans
+    preparation and cleanup. Fresh registry transactions arbitrate against both
+    current and legacy launchers, cancellation and parent/lineage mutations.
     """
-
     if not attempt_id:
         raise DispatchContractError("attempt-id-required")
     ensure_global_registry_writable(jobs)
-    lock_path = Path(f"{jobs}.lock")
-    with _launch_serialization_lock(jobs), lock_path.open("a", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
-        matches = []
-        for index, line in enumerate(lines):
-            fields = line.split("\t")
-            if len(fields) == 6 and row_has_attempt(fields[5], attempt_id):
-                matches.append((index, fields, parse_registry_metadata(fields[5])))
-        if len(matches) != 1:
-            raise DispatchContractError(
-                "attempt-row-not-unique", f"attempt_id={attempt_id} rows={len(matches)}"
-            )
-        child_index, child_fields, child_meta = matches[0]
-        validate_attempt_metadata(child_meta)
-        import route_parent_close
-        if route_parent_close.row_requested(child_meta, jobs):
-            raise DispatchContractError("cancelled-by-parent")
-        if child_fields[1] not in {"open", "running"}:
-            raise DispatchContractError("attempt-not-open", attempt_id)
-        if respawn_of is None:
-            if child_meta.get("launch_claimed") == "1":
-                raise DispatchContractError("attempt-launch-already-claimed", attempt_id)
-            if child_meta.get("launch_claimed") != "0":
-                raise DispatchContractError("attempt-launch-claim-invalid", attempt_id)
-        else:
-            expected_identity = (str(respawn_of[0]), str(respawn_of[1]))
-            if (parent_binding is not None or child_meta.get("worker_type") != "owner"
-                    or child_meta.get("dispatch_depth") != "1"
-                    or child_meta.get("harness") != "codex"
-                    or child_meta.get("launch_claimed") != "1"
-                    or child_meta.get("launch_started") != "1"
-                    or (child_meta.get("pid", ""), child_meta.get("pid_start", ""))
-                       != expected_identity):
-                raise DispatchContractError("attempt-respawn-identity-changed", attempt_id)
-            governed = attempt_governed_process_quiescence(child_meta)
-            if governed.state != "quiescent":
-                reason = ("attempt-respawn-consumer-live" if governed.state == "live"
-                          else "attempt-respawn-consumer-unverifiable")
-                raise DispatchContractError(reason, governed.reason)
-            if supervisor_lease_is_held(jobs, child_meta):
-                raise DispatchContractError("attempt-respawn-lease-held", attempt_id)
-
-        if parent_binding is not None:
-            parent_matches = []
-            for line in lines:
-                fields = line.split("\t")
-                if len(fields) != 6 or fields[1] not in {"open", "running"}:
-                    continue
-                meta = parse_registry_metadata(fields[5])
-                if meta.get("attempt_id") == parent_binding.attempt_id:
-                    parent_matches.append((fields, meta))
-            if len(parent_matches) != 1:
-                raise DispatchContractError(
-                    "parent-attempt-not-live", parent_binding.attempt_id
-                )
-            parent_fields, parent_meta = parent_matches[0]
-            try:
-                validate_attempt_metadata(parent_meta)
-            except DispatchContractError as exc:
-                raise DispatchContractError(
-                    "parent-attempt-not-live", parent_binding.attempt_id
-                ) from exc
-            same_identity = (
-                parent_meta.get("dispatch_depth") == "1"
-                and parent_meta.get("worker_type") == "owner"
-                and canonical_repository_identity(parent_fields[2])
-                == parent_binding.repository_identity
-                and canonical_repository_identity(child_fields[2])
-                == parent_binding.repository_identity
-                and (parent_fields[3] == child_fields[3] or is_linked_worktree_slice(child_meta))
-                and parent_fields[4] == child_meta.get("parent")
-                and child_meta.get("parent_attempt_id") == parent_binding.attempt_id
-                and parent_fields[3] == parent_binding.worktree
-                and parent_fields[4] == parent_binding.slug
-                and _parent_metadata_matches_binding(parent_meta, parent_binding)
-            )
-            if not same_identity:
-                raise DispatchContractError(
-                    "parent-attempt-identity-changed", parent_binding.attempt_id
-                )
-            if not _parent_binding_is_live_from_metadata(
-                jobs, parent_meta, parent_binding
-            ):
-                raise DispatchContractError(
-                    "parent-attempt-not-live", parent_binding.attempt_id
-                )
-
-        if respawn_of is None:
-            from dispatch_replacement import admission as replacement_admission
-            replacement_admission(jobs, lines, child_meta)
-            from review_input import validate_launch as validate_review_input
-            validate_review_input(jobs, child_meta)
-            from review_source_subject import SourceSubjectError, validate_attempt as validate_review_subject
-            try:
-                validate_review_subject(jobs, child_fields, child_meta)
-            except SourceSubjectError as exc:
-                raise DispatchContractError(exc.reason, exc.detail) from exc
-            if preclaim is not None:
-                preclaim(lines)
-
+    with _launch_serialization_lock(jobs, attempt_id):
+        initial = _prepare_attempt_launch(jobs, attempt_id, parent_binding=parent_binding,
+                                          respawn_of=respawn_of, preclaim=preclaim)
         gate_read, gate_write = os.pipe()
         try:
             proc = spawn(gate_read)
         except BaseException:
-            os.close(gate_read)
             os.close(gate_write)
             raise
-        os.close(gate_read)
-        identity = process_launch_identity(proc.pid)
-        identity.update(process_launch_cgroup(proc.pid))
-        provided_metadata = {
-            key: str(value)
-            for key, value in (launch_metadata or {}).items()
-            if value not in (None, "")
-        }
-        conflicting_identity = sorted(
-            (_PROCESS_IDENTITY_METADATA_KEYS | set(LAUNCH_CGROUP_METADATA_KEYS))
-            .intersection(provided_metadata)
-        )
-        if conflicting_identity:
-            cleanup_verified = _abort_fenced_launch(
-                proc, gate_write, identity.get("pid_start", "")
-            )
-            raise DispatchContractError(
-                (
-                    "attempt-launch-identity-metadata-conflict"
-                    if cleanup_verified
-                    else "attempt-launch-cleanup-unverified"
-                ),
-                ",".join(conflicting_identity),
-            )
-        if not _launch_identity_complete(proc.pid, identity):
-            cleanup_verified = _abort_fenced_launch(
-                proc, gate_write, identity.get("pid_start", "")
-            )
-            raise DispatchContractError(
-                (
-                    "attempt-launch-identity-incomplete"
-                    if cleanup_verified
-                    else "attempt-launch-cleanup-unverified"
-                ),
-                f"pid={proc.pid}",
-            )
-        observer_metadata: dict[str, str] = {}
-        if pre_release is not None:
-            callback_error: BaseException | None = None
-            registry_reacquire_error: OSError | None = None
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            try:
-                observer_metadata = {
-                    key: str(value)
-                    for key, value in (pre_release(dict(identity)) or {}).items()
-                    if value not in (None, "")
-                }
-            except BaseException as exc:
-                callback_error = exc
-            finally:
+        finally:
+            os.close(gate_read)
+        identity = {}
+        admission = None
+        admission_cleanup = None
+        released = False
+        failure_context = "launch-preparation-failed"
+
+        def cleanup_failure(reason):
+            nonlocal admission_cleanup
+            watchdog_owned = admission is not None and bool(admission.metadata.get("review_fence_pid"))
+            returned = None
+            if watchdog_owned:
+                if not released:
+                    try:
+                        os.close(gate_write)
+                    except OSError:
+                        pass
                 try:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                except OSError as exc:
-                    registry_reacquire_error = exc
-            if registry_reacquire_error is not None:
-                cleanup_verified = _abort_fenced_launch(
-                    proc, gate_write, identity.get("pid_start", "")
-                )
-                raise DispatchContractError(
-                    "attempt-launch-registry-reacquire-failed"
-                    if cleanup_verified else "attempt-launch-cleanup-unverified",
-                    str(registry_reacquire_error),
-                ) from registry_reacquire_error
-            if callback_error is not None:
-                cleanup_verified = _abort_fenced_launch(
-                    proc, gate_write, identity.get("pid_start", "")
-                )
-                raise DispatchContractError(
-                    (
-                        "attempt-pre-release-callback-failed"
-                        if cleanup_verified
-                        else "attempt-launch-cleanup-unverified"
-                    ),
-                    str(callback_error),
-                ) from callback_error
+                    returned = admission.abort(reason)
+                except BaseException:
+                    returned = _unverified_review_admission_cleanup()
+                if returned is None:
+                    returned = _unverified_review_admission_cleanup()
+                group_empty = (attempt_scan_namespace_authority(identity) and proc.poll() is not None
+                               and process_group_observation(int(identity["pgid"])).state == "empty")
+            else:
+                group_empty = _abort_fenced_launch(proc, -1 if released else gate_write,
+                                                   identity.get("pid_start", ""))
+                if admission is not None:
+                    try:
+                        returned = admission.abort(reason)
+                    except BaseException:
+                        returned = _unverified_review_admission_cleanup()
+                    if returned is None:
+                        returned = _unverified_review_admission_cleanup()
+            if returned is not None:
+                admission_cleanup = returned
+            admission_cleanup = _merge_review_cleanup_group_proof(admission_cleanup, group_empty)
+            annotated = True
+            if admission is not None or admission_cleanup is not None:
+                annotated = _record_review_admission_failure(
+                    jobs, attempt_id, admission_cleanup, post_release=released)
+            return (bool(group_empty) and bool(annotated)
+                    and (admission_cleanup is None
+                         or _review_admission_cleanup_token(admission_cleanup) != "unverified"))
 
-            # The observer activation wait runs outside the registry lock, so
-            # reload the exact claim before committing its metadata. The child
-            # remains fenced and the launch serialization lock prevents a
-            # second wrapper from claiming another row in this registry.
-            fresh_lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
-            fresh_matches = []
-            for index, line in enumerate(fresh_lines):
-                fields = line.split("\t")
-                if len(fields) == 6 and row_has_attempt(fields[5], attempt_id):
-                    fresh_matches.append((index, fields, parse_registry_metadata(fields[5])))
-            changed_reason = "attempt-pre-release-row-not-unique"
-            changed_detail = attempt_id
-            claim_verified = False
-            if len(fresh_matches) == 1:
-                fresh_index, fresh_fields, fresh_meta = fresh_matches[0]
-                old_meta = {key: value for key, value in child_meta.items()
-                            if key != "resolved_model"}
-                new_meta = {key: value for key, value in fresh_meta.items()
-                            if key != "resolved_model"}
-                expected_claim = "0" if respawn_of is None else "1"
-                identity_matches = (fresh_meta.get("pid", ""), fresh_meta.get("pid_start", "")) == (
-                    str(respawn_of[0]), str(respawn_of[1])) if respawn_of is not None else True
-                if (fresh_fields[1] not in {"open", "running"}
-                        or fresh_fields[2:5] != child_fields[2:5]
-                        or fresh_meta.get("attempt_id") != attempt_id
-                        or fresh_meta.get("launch_claimed") != expected_claim
-                        or not identity_matches or new_meta != old_meta):
-                    changed_reason = "attempt-pre-release-identity-changed"
-                else:
-                    import route_parent_close
-                    if route_parent_close.row_requested(fresh_meta, jobs):
-                        changed_reason = "cancelled-by-parent"
-                    else:
-                        if respawn_of is not None:
-                            governed = attempt_governed_process_quiescence(fresh_meta)
-                            if governed.state != "quiescent":
-                                changed_reason = ("attempt-respawn-consumer-live" if governed.state == "live"
-                                                  else "attempt-respawn-consumer-unverifiable")
-                                changed_detail = governed.reason
-                            elif supervisor_lease_is_held(jobs, fresh_meta):
-                                changed_reason = "attempt-respawn-lease-held"
-                        else:
-                            try:
-                                replacement_admission(jobs, fresh_lines, fresh_meta)
-                                validate_review_input(jobs, fresh_meta)
-                                validate_review_subject(jobs, fresh_fields, fresh_meta)
-                            except SourceSubjectError as exc:
-                                changed_reason, changed_detail = exc.reason, exc.detail
-                            except DispatchContractError as exc:
-                                changed_reason, changed_detail = exc.reason, exc.detail
-                        if changed_reason == "attempt-pre-release-row-not-unique":
-                            if parent_binding is not None:
-                                parent_matches = []
-                                for line in fresh_lines:
-                                    fields = line.split("\t")
-                                    if len(fields) != 6 or fields[1] not in {"open", "running"}:
-                                        continue
-                                    metadata = parse_registry_metadata(fields[5])
-                                    if metadata.get("attempt_id") == parent_binding.attempt_id:
-                                        parent_matches.append((fields, metadata))
-                                if len(parent_matches) != 1:
-                                    changed_reason = "parent-attempt-not-live"
-                                    changed_detail = parent_binding.attempt_id
-                                else:
-                                    parent_fields_now, parent_meta_now = parent_matches[0]
-                                    same_parent = (
-                                        parent_meta_now.get("dispatch_depth") == "1"
-                                        and parent_meta_now.get("worker_type") == "owner"
-                                        and canonical_repository_identity(parent_fields_now[2])
-                                        == parent_binding.repository_identity
-                                        and canonical_repository_identity(fresh_fields[2])
-                                        == parent_binding.repository_identity
-                                        and (parent_fields_now[3] == fresh_fields[3]
-                                             or is_linked_worktree_slice(fresh_meta))
-                                        and parent_fields_now[4] == fresh_meta.get("parent")
-                                        and fresh_meta.get("parent_attempt_id") == parent_binding.attempt_id
-                                        and parent_fields_now[3] == parent_binding.worktree
-                                        and parent_fields_now[4] == parent_binding.slug
-                                        and _parent_metadata_matches_binding(parent_meta_now, parent_binding)
-                                        and _parent_binding_is_live_from_metadata(
-                                            jobs, parent_meta_now, parent_binding)
-                                    )
-                                    if not same_parent:
-                                        changed_reason = "parent-attempt-not-live"
-                                        changed_detail = parent_binding.attempt_id
-                            if changed_reason == "attempt-pre-release-row-not-unique":
-                                child_index, child_fields, child_meta = (
-                                    fresh_index, fresh_fields, fresh_meta)
-                                lines = fresh_lines
-                                claim_verified = True
-            if not claim_verified:
-                cleanup_verified = _abort_fenced_launch(
-                    proc, gate_write, identity.get("pid_start", "")
-                )
-                raise DispatchContractError(
-                    changed_reason if cleanup_verified else "attempt-launch-cleanup-unverified",
-                    changed_detail,
-                )
-        callback_conflicts = sorted(
-            ({*_PROCESS_IDENTITY_METADATA_KEYS, *LAUNCH_CGROUP_METADATA_KEYS, "launch_claimed"})
-            .intersection(observer_metadata)
-        )
-        if callback_conflicts:
-            cleanup_verified = _abort_fenced_launch(
-                proc, gate_write, identity.get("pid_start", "")
-            )
-            raise DispatchContractError(
-                (
-                    "attempt-pre-release-metadata-conflict"
-                    if cleanup_verified
-                    else "attempt-launch-cleanup-unverified"
-                ),
-                ",".join(callback_conflicts),
-            )
-        identity.update(provided_metadata)
-        identity.update(observer_metadata)
-        if respawn_of is not None:
-            lineage: list[str] = []
-            raw_lineage = child_meta.get("owner_identity_lineage", "")
-            for entry in raw_lineage.split("+") if isinstance(raw_lineage, str) else ():
-                pid, separator, start = entry.partition(":")
-                if separator and pid.isdigit() and start.isdigit():
-                    value = f"{pid}:{start}"
-                    if value not in lineage:
-                        lineage.append(value)
-            previous_pid, previous_start = str(respawn_of[0]), str(respawn_of[1])
-            previous = f"{previous_pid}:{previous_start}"
-            if previous not in lineage:
-                lineage.append(previous)
-            identity["owner_identity_lineage"] = "+".join(lineage)
         try:
-            replace_keys = {*identity, "launch_claimed"}
-            parts = [
-                part
-                for part in child_fields[5].split(",")
-                if part.split("=", 1)[0] not in replace_keys
-            ]
-            parts.extend(f"{key}={value}" for key, value in sorted(identity.items()))
-            parts.append("launch_claimed=1")
-            child_fields[5] = ",".join(parts)
-            lines[child_index] = "\t".join(child_fields)
-            _atomic_registry_replace(jobs, lines)
-        except OSError as exc:
-            cleanup_verified = _abort_fenced_launch(
-                proc, gate_write, identity.get("pid_start", "")
-            )
-            raise DispatchContractError(
-                (
-                    "attempt-launch-identity-record-failed"
-                    if cleanup_verified
-                    else "attempt-launch-cleanup-unverified"
-                ),
-                str(exc),
-            ) from exc
-        if parent_binding is not None and not _parent_binding_is_live_from_metadata(
-            jobs, parent_meta, parent_binding
-        ):
-            cleanup_verified = _abort_fenced_launch(
-                proc, gate_write, identity["pid_start"]
-            )
-            raise DispatchContractError(
-                (
-                    "parent-attempt-not-live-after-spawn"
-                    if cleanup_verified
-                    else "attempt-launch-cleanup-unverified"
-                ),
-                parent_binding.attempt_id,
-            )
-        admission: PostClaimAdmission | None = None
-        admission_cleanup: ReviewAdmissionCleanup | None = None
-
-        def abort_admission(reason: str) -> ReviewAdmissionCleanup | None:
-            nonlocal admission_cleanup
-            if admission is None:
-                return None
+            identity = process_launch_identity(proc.pid)
+            identity.update(process_launch_cgroup(proc.pid))
+            provided = {key: str(value) for key, value in (launch_metadata or {}).items()
+                        if value not in (None, "")}
+            conflicts = sorted((_PROCESS_IDENTITY_METADATA_KEYS | set(LAUNCH_CGROUP_METADATA_KEYS))
+                               .intersection(provided))
+            if conflicts:
+                raise DispatchContractError("attempt-launch-identity-metadata-conflict", ",".join(conflicts))
+            if not _launch_identity_complete(proc.pid, identity):
+                raise DispatchContractError("attempt-launch-identity-incomplete", f"pid={proc.pid}")
+            observer = {}
+            if pre_release is not None:
+                try:
+                    observer = {key: str(value) for key, value in (pre_release(dict(identity)) or {}).items()
+                                if value not in (None, "")}
+                except BaseException as exc:
+                    raise DispatchContractError("attempt-pre-release-callback-failed", str(exc)) from exc
+            conflicts = sorted(({*_PROCESS_IDENTITY_METADATA_KEYS, *LAUNCH_CGROUP_METADATA_KEYS,
+                                 "launch_claimed"}).intersection(observer))
+            if conflicts:
+                raise DispatchContractError("attempt-pre-release-metadata-conflict", ",".join(conflicts))
+            identity.update(provided)
+            identity.update(observer)
+            if respawn_of is not None:
+                lineage = []
+                for entry in initial[3].get("owner_identity_lineage", "").split("+"):
+                    pid, sep, start = entry.partition(":")
+                    if sep and pid.isdigit() and start.isdigit() and entry not in lineage:
+                        lineage.append(entry)
+                previous = ":".join(map(str, respawn_of))
+                if previous not in lineage:
+                    lineage.append(previous)
+                identity["owner_identity_lineage"] = "+".join(lineage)
+            prepared = _prepare_attempt_launch(
+                jobs, attempt_id, parent_binding=parent_binding, respawn_of=respawn_of,
+                preclaim=preclaim, expected_fields=initial[2])
+            failure_context = "launch-identity-record-failed"
             try:
-                admission_cleanup = admission.abort(reason)
-            except BaseException:
-                admission_cleanup = _unverified_review_admission_cleanup()
-            if admission_cleanup is None:
-                admission_cleanup = _unverified_review_admission_cleanup()
-            return admission_cleanup
-
-        def record_admission_failure(*, post_release: bool = False) -> bool:
-            if admission is None and admission_cleanup is None:
-                return True
-            # The external annotator intentionally opens the same lock path
-            # independently.  Drop this fd first so fault injection cannot
-            # turn cleanup into a self-deadlock, then resume the caller's
-            # critical section for the surrounding context manager.
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            try:
-                return _record_review_admission_failure(
-                    jobs, attempt_id, admission_cleanup, post_release=post_release
-                )
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-
-        def finalize_admission_failure(
-            reason: str, *, post_release: bool = False
-        ) -> bool:
-            """Run every external cleanup effect before deriving the verdict."""
-
-            nonlocal admission_cleanup
-            watchdog_owned = admission is not None and bool(
-                admission.metadata.get("review_fence_pid")
-            )
-            # A watchdog owns the fenced child and setsid descendants. Give
-            # that authority the teardown request before observing its death;
-            # killing it first destroys the only complete cleanup owner.
-            # Its outcome seal needs this same registry lock.
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            try:
-                if watchdog_owned:
-                    if not post_release:
-                        try:
-                            os.close(gate_write)
-                        except OSError:
-                            pass
-                    returned_cleanup = abort_admission(reason)
-                    registered_group_empty = (
-                        attempt_scan_namespace_authority(identity)
-                        and proc.poll() is not None
-                        and process_group_observation(int(identity["pgid"])).state == "empty"
-                    )
-                else:
-                    registered_group_empty = _abort_fenced_launch(
-                        proc, -1 if post_release else gate_write, identity["pid_start"],
-                    )
-                    returned_cleanup = abort_admission(reason)
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            if returned_cleanup is not None:
-                admission_cleanup = returned_cleanup
-            admission_cleanup = _merge_review_cleanup_group_proof(
-                admission_cleanup, registered_group_empty
-            )
-            annotation_verified = record_admission_failure(post_release=post_release)
-            cleanup_proof_verified = (
-                admission_cleanup is None
-                or _review_admission_cleanup_token(admission_cleanup) != "unverified"
-            )
-            return (
-                bool(registered_group_empty)
-                and bool(cleanup_proof_verified)
-                and bool(annotation_verified)
-            )
-
-        if post_claim is not None:
-            # Drop the jobs lock only for launches that actually need producer
-            # admission. Ordinary launches retain their historical lock/fence
-            # boundary unchanged.
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-            try:
-                raw_post = post_claim(dict(identity))
-                if isinstance(raw_post, PostClaimAdmission):
-                    admission = raw_post
-                    raw_post = raw_post.metadata
-                if raw_post is not None and not isinstance(raw_post, Mapping):
-                    raise DispatchContractError(
-                        "attempt-post-claim-result-invalid", type(raw_post).__name__
-                    )
-                post_metadata = {
-                    key: str(value)
-                    for key, value in (raw_post or {}).items()
-                    if value not in (None, "")
-                }
-            except BaseException as exc:
-                if isinstance(getattr(exc, "cleanup", None), ReviewAdmissionCleanup):
-                    admission_cleanup = exc.cleanup
-                cleanup_verified = finalize_admission_failure(
-                    "post-claim-callback-failed"
-                )
-                raise DispatchContractError(
-                    "attempt-post-claim-callback-failed"
-                    if cleanup_verified else "attempt-launch-cleanup-unverified",
-                    str(exc),
-                ) from exc
-            invalid_keys = sorted(
-                set(post_metadata) - REVIEW_POST_CLAIM_METADATA_KEYS
-            )
-            invalid_values = sorted(
-                key for key, value in post_metadata.items()
-                if any(char in value for char in ",\t\r\n")
-            )
-            if invalid_keys or invalid_values:
-                cleanup_verified = finalize_admission_failure(
-                    "post-claim-metadata-invalid"
-                )
-                raise DispatchContractError(
-                    "attempt-post-claim-metadata-invalid"
-                    if cleanup_verified else "attempt-launch-cleanup-unverified",
-                    ",".join(invalid_keys or invalid_values),
-                )
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                fresh_lines = jobs.read_text(
-                    encoding="utf-8", errors="replace"
-                ).splitlines()
-                fresh_matches: list[tuple[int, list[str], dict[str, str]]] = []
-                for index, line in enumerate(fresh_lines):
-                    fields = line.split("\t")
-                    if len(fields) != 6 or not row_has_attempt(fields[5], attempt_id):
-                        continue
-                    fresh_matches.append(
-                        (index, fields, parse_registry_metadata(fields[5]))
-                    )
-                if len(fresh_matches) != 1:
-                    raise DispatchContractError(
-                        "attempt-post-claim-row-not-unique", attempt_id
-                    )
-                fresh_index, fresh_fields, fresh_meta = fresh_matches[0]
-                validate_attempt_metadata(fresh_meta)
-                if route_parent_close.row_requested(fresh_meta, jobs):
-                    raise DispatchContractError("cancelled-by-parent")
-                if (
-                    fresh_fields[1] not in {"open", "running"}
-                    or fresh_fields[2:5] != child_fields[2:5]
-                    or fresh_meta.get("launch_claimed") != "1"
-                    or any(
-                        fresh_meta.get(key) != str(value)
-                        for key, value in identity.items()
-                    )
-                ):
-                    raise DispatchContractError(
-                        "attempt-post-claim-identity-changed", attempt_id
-                    )
-                if parent_binding is not None:
-                    fresh_parents: list[dict[str, str]] = []
-                    for line in fresh_lines:
-                        fields = line.split("\t")
-                        if len(fields) != 6 or fields[1] not in {"open", "running"}:
-                            continue
-                        metadata = parse_registry_metadata(fields[5])
-                        if metadata.get("attempt_id") == parent_binding.attempt_id:
-                            fresh_parents.append(metadata)
-                    if (
-                        len(fresh_parents) != 1
-                        or not _parent_binding_is_live_from_metadata(
-                            jobs, fresh_parents[0], parent_binding
-                        )
-                    ):
-                        raise DispatchContractError(
-                            "parent-attempt-not-live-after-post-claim",
-                            parent_binding.attempt_id,
-                        )
-                collisions = sorted(
-                    key for key, value in post_metadata.items()
-                    if fresh_meta.get(key) not in (None, value)
-                )
+                with _launch_registry_transaction(jobs) as fresh:
+                    index, fields, _meta = _commit_launch_preparation(
+                        jobs, fresh, prepared, parent_binding=parent_binding,
+                        preclaim=preclaim, phase="pre-release")
+                    parts = [part for part in fields[5].split(",")
+                             if part.split("=", 1)[0] not in {*identity, "launch_claimed"}]
+                    parts.extend(f"{key}={value}" for key, value in sorted(identity.items()))
+                    parts.append("launch_claimed=1")
+                    fields[5] = ",".join(parts)
+                    fresh[index] = "\t".join(fields)
+                    _atomic_registry_replace(jobs, fresh)
+                    published_fields = list(fields)
+            except OSError as exc:
+                raise DispatchContractError("attempt-launch-identity-record-failed", str(exc)) from exc
+            post_metadata = {}
+            if post_claim is not None:
+                failure_context = "post-claim-callback-failed"
+                try:
+                    raw = post_claim(dict(identity))
+                    if isinstance(raw, PostClaimAdmission):
+                        admission, raw = raw, raw.metadata
+                    if raw is not None and not isinstance(raw, Mapping):
+                        raise DispatchContractError("attempt-post-claim-result-invalid", type(raw).__name__)
+                    post_metadata = {key: str(value) for key, value in (raw or {}).items()
+                                     if value not in (None, "")}
+                except BaseException as exc:
+                    if isinstance(getattr(exc, "cleanup", None), ReviewAdmissionCleanup):
+                        admission_cleanup = exc.cleanup
+                    raise DispatchContractError("attempt-post-claim-callback-failed", str(exc)) from exc
+                invalid = sorted(set(post_metadata) - REVIEW_POST_CLAIM_METADATA_KEYS)
+                invalid_values = sorted(key for key, value in post_metadata.items()
+                                        if any(char in value for char in ",\t\r\n"))
+                if invalid or invalid_values:
+                    failure_context = "post-claim-metadata-invalid"
+                    raise DispatchContractError("attempt-post-claim-metadata-invalid",
+                                                ",".join(invalid or invalid_values))
+            failure_context = "post-claim-record-failed"
+            # Every launch, including one with no observer/admission callback,
+            # observes full content immediately before the final fresh commit.
+            prepared = _prepare_attempt_launch(
+                jobs, attempt_id, parent_binding=parent_binding, respawn_of=respawn_of,
+                preclaim=preclaim, expected_fields=published_fields, published=True, phase="post-claim")
+            with _launch_registry_transaction(jobs) as fresh:
+                index, fields, meta = _commit_launch_preparation(
+                    jobs, fresh, prepared, parent_binding=parent_binding,
+                    preclaim=preclaim, phase="post-claim")
+                collisions = sorted(key for key, value in post_metadata.items()
+                                    if meta.get(key) not in (None, value))
                 if collisions:
-                    raise DispatchContractError(
-                        "attempt-post-claim-metadata-conflict",
-                        ",".join(collisions),
-                    )
-                parts = [
-                    part for part in fresh_fields[5].split(",")
-                    if part.split("=", 1)[0] not in post_metadata
-                ]
-                parts.extend(
-                    f"{key}={value}" for key, value in sorted(post_metadata.items())
-                )
-                fresh_fields[5] = ",".join(parts)
-                fresh_lines[fresh_index] = "\t".join(fresh_fields)
-                _atomic_registry_replace(jobs, fresh_lines)
-                identity.update(post_metadata)
-            except (DispatchContractError, OSError) as exc:
-                # Abort owns only external resources; this row annotation is
-                # deliberately performed here after cleanup and under one
-                # fresh lock acquisition to avoid the jobs-lock cycle.
-                cleanup_verified = finalize_admission_failure(
-                    "post-claim-record-failed"
-                )
-                if isinstance(exc, DispatchContractError):
-                    reason, detail = exc.reason, exc.detail
-                else:
-                    reason, detail = "attempt-post-claim-record-failed", str(exc)
-                raise DispatchContractError(
-                    reason if cleanup_verified else "attempt-launch-cleanup-unverified",
-                    detail,
-                ) from exc
-        try:
-            os.write(gate_write, b"1")
-        except OSError as exc:
-            cleanup_verified = finalize_admission_failure("gate-write-failed")
-            raise DispatchContractError(
-                (
-                    "attempt-launch-fence-release-failed"
-                    if cleanup_verified
-                    else "attempt-launch-cleanup-unverified"
-                ),
-                str(exc),
-            ) from exc
-        else:
-            os.close(gate_write)
-        if admission is not None:
-            try:
-                admission.commit()
-            except BaseException as exc:
-                cleanup_verified = finalize_admission_failure(
-                    "post-release-commit-failed", post_release=True
-                )
-                raise DispatchContractError(
-                    "attempt-post-claim-commit-failed"
-                    if cleanup_verified else "attempt-launch-cleanup-unverified",
-                    str(exc),
-                ) from exc
-        return proc, identity
+                    raise DispatchContractError("attempt-post-claim-metadata-conflict", ",".join(collisions))
+                if post_metadata:
+                    parts = [part for part in fields[5].split(",")
+                             if part.split("=", 1)[0] not in post_metadata]
+                    parts.extend(f"{key}={value}" for key, value in sorted(post_metadata.items()))
+                    fields[5] = ",".join(parts)
+                    fresh[index] = "\t".join(fields)
+                    _atomic_registry_replace(jobs, fresh)
+                    identity.update(post_metadata)
+                failure_context = "gate-write-failed"
+                try:
+                    os.write(gate_write, b"1")
+                except OSError as exc:
+                    raise DispatchContractError("attempt-launch-fence-release-failed", str(exc)) from exc
+                released = True
+                os.close(gate_write)
+            if admission is not None:
+                failure_context = "post-release-commit-failed"
+                try:
+                    admission.commit()
+                except BaseException as exc:
+                    raise DispatchContractError("attempt-post-claim-commit-failed", str(exc)) from exc
+            return proc, identity
+        except BaseException as exc:
+            verified = cleanup_failure(failure_context)
+            if not verified:
+                raise DispatchContractError("attempt-launch-cleanup-unverified", str(exc)) from exc
+            if isinstance(exc, OSError):
+                raise DispatchContractError("attempt-post-claim-record-failed", str(exc)) from exc
+            raise
 
 
 def parent_lookup_worktree(
@@ -7753,6 +7695,7 @@ def completion_marker_gate(
     registry_lines: list[str] | None = None,
     attempt_id: str | None = None,
     planned_revision_nodes: set[str] | frozenset[str] = frozenset(),
+    saved_resource_admissions: dict | None = None,
     _raising_frame_gate: bool = False,
 ) -> None:
     """SD-56 decision gate for start and its read-only dry-run preview.
@@ -7784,6 +7727,7 @@ def completion_marker_gate(
     node = next((row for row in route.get("nodes", []) if row.get("id") == route_node), None)
     if node is None:
         return
+    _launch_completion_input(route, node)
     missing = []
     markers = {}
     proceeding = []
@@ -7801,6 +7745,15 @@ def completion_marker_gate(
             None,
         )
         if marker_path is None:
+            saved = (saved_resource_admissions or {}).get(dep)
+            if isinstance(saved, dict):
+                import resource_failure_resolution as FAILURE_RESOLUTION
+                current = FAILURE_RESOLUTION.saved_output_admission(
+                    route, route_node, saved.get("jobs"),
+                    saved.get("owner_attempt_id"), saved.get("owner_session_id"))
+                if current != saved:
+                    raise DispatchContractError("saved-resource-output-changed", dep)
+                continue
             missing.append(dep)
             continue
         try:
@@ -8142,6 +8095,9 @@ def _marker_schema_identity_ok(
     """
     if not isinstance(marker, dict) or marker.get("schema_version") != 2:
         return False, None
+    # Recursive revision/source markers consume their own completion lineage,
+    # even when the outer marker has no registered worker of its own.
+    _launch_completion_input(route, node, marker)
     node_id = str(node["id"])
     sequence = int(marker.get("sequence", 0))
     if sequence < 1:
@@ -9398,6 +9354,7 @@ def completion_conflict_attempt(marker: Mapping[str, object], registry_lines: li
     Semantic history may outlive its process registry. Actual launch still
     requires completion_attempt_readiness and its current execution proof.
     """
+    _launch_completion_marker_input(marker)
     for line in registry_lines:
         fields = line.split("\t")
         if len(fields) != 6:
@@ -9447,6 +9404,7 @@ def completion_attempt_readiness(
     compatibility; it does not change launch or completion policy.
     """
 
+    _launch_completion_input(route, node, marker)
     if owner_closure_shape(marker) == "continuation":
         try:
             _route_module().validate_continuation_owner_closure(
@@ -10832,6 +10790,11 @@ def marker_bound_delivery_transaction(
             advanced=advanced,
             completion_proven=(
                 _delivery_commit_proven(refreshed_metadata)
+                # A transient publication closes with an attention receipt.
+                # Recovery retains that receipt, but the verified marker now
+                # proves the completed publication independently of delivery.
+                or (deferred_completion(refreshed_metadata) == "completed"
+                    and bool(refreshed_marker is not None and refreshed_marker_digest))
                 if refreshed_metadata.get("delivery_intent") else
                 # Read compatibility for rows predating the one-time receipt.
                 # New terminal kinds use the common committed receipt, not
@@ -10997,8 +10960,8 @@ def recover_unstarted_attempt(jobs: Path, attempt_id: str) -> bool:
 def _retry_parent_matches(source, candidate, jobs, lines) -> bool:
     """An existing owner replacement may continue its predecessor's child.
 
-    Called under the registry lock. These existing lineage and route readers
-    take no locks and preserve the original owner/child rows.
+    Launch admission prepares these lineage and route observations outside
+    the registry lock, then pins their exact dependency rows at commit.
     """
     previous, current = source.get("parent_attempt_id"), candidate.get("parent_attempt_id")
     if previous == current:
@@ -11028,6 +10991,29 @@ def _retry_parent_matches(source, candidate, jobs, lines) -> bool:
     except (OSError, OwnerRouteBindingError):
         return False
     return effective == {current} and bool(lineage)
+
+
+def _retry_registration_census(lines, metadata):
+    """Fresh row-only retry/competing-claim check; process proof is prepared."""
+    prior = metadata.get("automatic_retry_of")
+    if not prior:
+        return
+    predecessors = []
+    for line in lines:
+        fields = line.split("\t")
+        if len(fields) != 6:
+            continue
+        candidate = parse_registry_metadata(fields[5])
+        if (candidate.get("automatic_retry_of") == prior
+                and candidate.get("attempt_id") != metadata.get("attempt_id")
+                and (candidate.get("launch_claimed") == "1" or fields[1] not in {"open", "running"})):
+            raise DispatchContractError("retry-already-claimed",
+                                        f"responsible_attempt={candidate.get('attempt_id')}")
+        if candidate.get("attempt_id") == prior:
+            predecessors.append(candidate)
+    if len(predecessors) != 1:
+        raise DispatchContractError("retry-predecessor-ambiguous" if predecessors
+                                    else "retry-predecessor-missing", prior)
 
 
 def _automatic_retry_admission(lines: list[str], metadata: dict[str, str], *, jobs: Path | None = None) -> None:
@@ -11171,13 +11157,72 @@ def claim_attempt_row(
     mutation_precheck: Callable[[list[str]], None] | None = None,
     preclaim: Callable[[list[str]], None] | None = None,
 ) -> bool:
-    """Atomically register ``attempt_id`` and claim its launch at most once.
+    """Prepare external admission, then commit one fresh local registry transition.
 
-    A prior ``--register`` row may transition from ``launch_claimed=0`` to 1 on
-    the first ``--start``. Concurrent starts serialize on the same lock; callers
-    must not spawn a child when this returns ``False``.
+    Same-attempt preparation is serialized; unrelated jobs never wait for its
+    source, route, marker, process or arbitrary callback observations.
     """
+    if not attempt_id:
+        raise DispatchContractError("attempt-id-required", "registered dispatches require an attempt id")
+    fields = row.rstrip("\n").split("\t")
+    if len(fields) != 6:
+        raise DispatchContractError("invalid-registry-row", "expected six tab-separated fields")
+    metadata = parse_registry_metadata(fields[5])
+    validate_attempt_metadata(metadata)
+    if metadata.get("attempt_id") != attempt_id:
+        raise DispatchContractError("attempt-row-identity-mismatch", attempt_id)
+    ensure_global_registry_writable(jobs)
+    with _launch_serialization_lock(jobs, attempt_id), _launch_completion_reads() as reads:
+        lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
+        from dispatch_replacement import replacement_row
+        row, replacement = replacement_row(jobs, lines, row)
+        fields = row.split("\t")
+        metadata = parse_registry_metadata(fields[5])
+        existing = [line.split("\t") for line in lines
+                    if len(line.split("\t")) == 6 and row_has_attempt(line.split("\t")[5], attempt_id)]
+        from review_input import validate_launch
+        if mutation_precheck is not None:
+            mutation_precheck(lines)
+        eligible = not existing or (len(existing) == 1 and existing[0][1] == "open"
+                     and parse_registry_metadata(existing[0][5]).get("launch_claimed") != "1")
+        if launch and eligible:
+            _automatic_retry_admission(lines, metadata, jobs=jobs)
+            if preclaim is not None:
+                preclaim(lines)
+        # Seal/observe source after permission and mutation callbacks, without
+        # adding another full inventory to registration.
+        fields, metadata = _review_source_registration_fence(
+            jobs, fields, metadata, new_attempt=not existing)
+        # Revision admission consumes the sealed subject (including document
+        # identity across checklist progress), as it did before unlocked prep.
+        validate_launch(jobs, metadata)
+        routes = _launch_cancellation_routes(jobs, lines, metadata)
+        return _commit_attempt_row(
+            jobs, attempt_id, "\t".join(fields), prepared_lines=lines,
+            prepared_replacement=replacement, prepared_reads=reads, cancellation_routes=routes, launch=launch,
+            exclusive_metadata=exclusive_metadata, exclusive_live_metadata=exclusive_live_metadata,
+            terminal_attempt_limit=terminal_attempt_limit, replacement_attempt_limit=replacement_attempt_limit,
+            replacement_notes=replacement_notes, mutation_precheck=mutation_precheck, preclaim=preclaim)
 
+
+def _commit_attempt_row(
+    jobs: Path,
+    attempt_id: str,
+    row: str,
+    *,
+    prepared_lines: list[str],
+    prepared_replacement: bool,
+    prepared_reads: dict,
+    cancellation_routes: tuple,
+    launch: bool = False,
+    exclusive_metadata: dict[str, str] | None = None,
+    exclusive_live_metadata: dict[str, str] | None = None,
+    terminal_attempt_limit: int | None = None,
+    replacement_attempt_limit: int = 0,
+    replacement_notes: frozenset[str] = frozenset(),
+    mutation_precheck: Callable[[list[str]], None] | None = None,
+    preclaim: Callable[[list[str]], None] | None = None,
+) -> bool:
     if not attempt_id:
         raise DispatchContractError("attempt-id-required", "registered dispatches require an attempt id")
     row_fields = row.rstrip("\n").split("\t")
@@ -11192,42 +11237,26 @@ def claim_attempt_row(
     with lock_path.open("a", encoding="utf-8") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         lines = jobs.read_text(encoding="utf-8", errors="replace").splitlines()
-        # Fence the portable admission boundary itself. Adapters and direct
-        # callers must not be able to omit the terminal check callback.
-        terminal_route_ids = {
-            value for key in ("route_id", "owner_route_id")
-            if (value := row_metadata.get(key)) not in (None, "", "-")
-        }
-        terminal_owner = row_metadata.get("parent_attempt_id")
-        if terminal_owner in (None, "", "-"):
-            terminal_owner = attempt_id
-        for terminal_route_id in sorted(terminal_route_ids):
-            ensure_terminal_claim_absent(jobs, terminal_route_id,
-                terminal_owner)
-            import route_parent_close
-            terminal_hash = (row_metadata.get("owner_route_hash")
-                             if terminal_route_id == row_metadata.get("owner_route_id")
-                             else row_metadata.get("route_hash"))
-            if terminal_hash and route_parent_close.intent(
-                    {"route_id": terminal_route_id, "route_hash": terminal_hash}, jobs):
-                raise DispatchContractError("cancelled-by-parent")
-        from dispatch_replacement import replacement_row
-        row, automatic_replacement = replacement_row(jobs, lines, row)
-        row_fields = row.split("\t")
-        row_metadata = parse_registry_metadata(row_fields[5])
-        existing_attempt = any(
-            len(existing.split("\t")) == 6
-            and row_has_attempt(existing.split("\t")[5], attempt_id)
-            for existing in lines
-        )
-        row_fields, row_metadata = _review_source_registration_fence(
-            jobs, row_fields, row_metadata, new_attempt=not existing_attempt,
-        )
-        row = "\t".join(row_fields)
-        from review_input import validate_launch as validate_review_input
-        validate_review_input(jobs, row_metadata)
-        if mutation_precheck is not None:
-            mutation_precheck(lines)
+        # Arbitrary external callbacks have already run. Pin their input and
+        # the prepared lineage, then run only fresh local census/fence checks.
+        _launch_local_fences(jobs, row_metadata, cancellation_routes, registration=True)
+        # A terminal writer or a legacy launcher may win during preparation.
+        # Preserve idempotent False for that exact work, including close races.
+        for existing in lines:
+            fields = existing.split("\t")
+            if len(fields) == 6 and row_has_attempt(fields[5], attempt_id):
+                metadata = parse_registry_metadata(fields[5])
+                if (_immutable_attempt_identity(fields) == _immutable_attempt_identity(row_fields)
+                        and (not launch or metadata.get("launch_claimed") == "1"
+                             or fields[1] != "open")):
+                    return False
+        def pin_preparation():
+            if (_launch_dependencies(lines, row_fields, (mutation_precheck, preclaim if launch else None), prepared_reads)
+                    != _launch_dependencies(prepared_lines, row_fields,
+                                            (mutation_precheck, preclaim if launch else None), prepared_reads)):
+                raise DispatchContractError("attempt-registration-dependency-changed", attempt_id)
+
+        automatic_replacement = prepared_replacement
         # A serial successor consumes its predecessors just as a DAG edge
         # consumes markers. Recheck the same conflict policy at actual claim,
         # including an observation arriving after the coordinator's preview.
@@ -11256,14 +11285,14 @@ def claim_attempt_row(
                     # runtime) takes its place.
                     fields = list(row_fields)
                     if not launch:
+                        pin_preparation()
                         lines[index] = "\t".join(fields) + ",launch_claimed=0"
                         _atomic_registry_replace(jobs, lines)
                         return False
                 if not launch or metadata.get("launch_claimed") == "1" or fields[1] != "open":
                     return False
-                _automatic_retry_admission(lines, row_metadata, jobs=jobs)
-                if preclaim is not None:
-                    preclaim(lines)
+                _retry_registration_census(lines, row_metadata)
+                pin_preparation()
                 pipe = ",".join(part for part in fields[5].split(",") if not part.startswith("launch_claimed="))
                 fields[5] = pipe + ",launch_claimed=1"
                 lines[index] = "\t".join(fields)
@@ -11319,9 +11348,8 @@ def claim_attempt_row(
                     f"replacement_attempts={len(replacement_attempts)} limit={replacement_attempt_limit}",
                 )
         if launch:
-            _automatic_retry_admission(lines, row_metadata, jobs=jobs)
-        if launch and preclaim is not None:
-            preclaim(lines)
+            _retry_registration_census(lines, row_metadata)
+        pin_preparation()
         row_fields[5] += f",launch_claimed={1 if launch else 0}"
         with jobs.open("a", encoding="utf-8") as registry:
             registry.write("\t".join(row_fields) + "\n")

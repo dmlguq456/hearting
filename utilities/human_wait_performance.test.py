@@ -29,6 +29,94 @@ import session_tidy
 class HumanWaitPerformanceTests(unittest.TestCase):
     """One-size 32 MiB fixture: real projection and cache-only surface timings."""
 
+    def test_git_display_same_fixture_before_cold_warm(self):
+        from fleet import gitinfo
+        with tempfile.TemporaryDirectory(prefix="display-performance-") as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            repo.mkdir()
+            def git(*args):
+                return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.DEVNULL)
+            git("init", "-q", "-b", "main")
+            git("config", "user.email", "fixture@example.invalid")
+            git("config", "user.name", "Fixture")
+            (repo / "f").write_text("fixture")
+            git("add", "f")
+            git("commit", "-qm", "fixture")
+            git("switch", "-qc", "topic")
+            git("update-ref", "refs/remotes/origin/main", "HEAD")
+            git("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+            bindir = root / "bin"
+            bindir.mkdir()
+            real_git = subprocess.check_output(["sh", "-c", "command -v git"], text=True).strip()
+            for name in ("git", "ps"):
+                shim = bindir / name
+                shim.write_text("#!" + sys.executable + "\n" +
+                    "import os,sys\nwith open(os.environ['DISPLAY_CALLS'],'a') as out: "
+                    "out.write(os.environ['DISPLAY_PHASE']+' '+os.path.basename(sys.argv[0])+'\\n')\n" +
+                    ("os.execv(" + repr(real_git) + ",[" + repr(real_git) + ",*sys.argv[1:]])\n"
+                     if name == "git" else ""))
+                shim.chmod(0o700)
+            config = root / "config"
+            config.mkdir()
+            calls = root / "calls"
+            calls.touch()
+            env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"],
+                AGENT_HOME=str(ROOT), HARNESS_STATE_ROOT=str(root / "state"),
+                XDG_STATE_HOME=str(root / "xdg"), CLAUDE_CONFIG_DIR=str(config),
+                AGENT_ARTIFACT_ROOT=str(root / "artifacts"), AGENT_DISPATCH_JOBS=str(root / "jobs.log"),
+                GIT_CEILING_DIRECTORIES=str(root), PYTHONDONTWRITEBYTECODE="1",
+                HARNESS_CAPACITY_REFRESH_DISABLE="1", FLEET_TITLE_DISABLE="1",
+                DISPLAY_CALLS=str(calls))
+            (root / "artifacts").mkdir()
+            (root / "jobs.log").touch()
+            payload = json.dumps({"cwd": str(repo), "model": {"id": "fixture"}})
+            times = {}
+            def render(script, phase, n):
+                times[phase] = []
+                for _ in range(n):
+                    started = time.perf_counter()
+                    done = subprocess.run(["bash", str(script)], input=payload, text=True,
+                        capture_output=True, env=dict(env, DISPLAY_PHASE=phase), timeout=10)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+                    times[phase].append(time.perf_counter() - started)
+                return done.stdout
+            # Standing regression uses current source and a new private cache.
+            # Historical paired timings belong to their pinned evidence, not
+            # a moving HEAD that changes meaning as soon as we commit.
+            statusline = ROOT / "adapters/claude/statusline.sh"
+            cold = render(statusline, "cold", 1)
+            self.assertIn("unknown", cold)
+            with mock.patch.dict(os.environ, env):
+                request = gitinfo._display_request(str(repo))
+                deadline = time.monotonic() + 10
+                while gitinfo.cached_display(str(repo), request=False) is None:
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                # Publication precedes final descriptor close by a few instructions.
+                while True:
+                    try:
+                        fd = gitinfo._display_claim(request)
+                        os.close(fd)
+                        break
+                    except BlockingIOError:
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+            warm = render(statusline, "warm", 10)
+            self.assertIn("topic", warm)
+            self.assertIn("💀merged", warm)
+            rows = calls.read_text().splitlines()
+            count = lambda phase, tool: rows.count(phase + " " + tool)
+            self.assertEqual(count("warm", "git"), 0)
+            self.assertEqual(count("warm", "ps"), 0)
+            self.assertEqual(count("cold", "ps"), 1)
+            print("git-display-fixture\tphase\tcalls\tgit_calls\tlegacy_ps\tp50_s\tmax_s")
+            for phase in times:
+                print("git-display-fixture\t%s\t%d\t%d\t%d\t%.6f\t%.6f" % (
+                    phase, len(times[phase]), count(phase, "git"), count(phase, "ps"),
+                    statistics.median(times[phase]), max(times[phase])))
+            print("git-display-fixture\tNAS bytes/rchar not measured; local identical fixture only")
+
     def test_real_size_cache_and_warm_projection(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temp:
             root = Path(temp)
@@ -249,6 +337,9 @@ class HumanWaitPerformanceTests(unittest.TestCase):
             config.mkdir()
             concurrent_env = dict(os.environ, HOME=str(concurrent / "home"),
                 XDG_STATE_HOME=str(concurrent_state), CLAUDE_CONFIG_DIR=str(config),
+                HARNESS_STATE_ROOT=str(concurrent_state / "hearting"),
+                AGENT_ARTIFACT_ROOT=str(root), GIT_CEILING_DIRECTORIES=str(root),
+                HARNESS_CAPACITY_REFRESH_DISABLE="1", FLEET_TITLE_DISABLE="1",
                 AGENT_DISPATCH_JOBS=str(jobs), PYTHONDONTWRITEBYTECODE="1")
             for key in ("AGENT_HOME", "CLAUDE_HOME", "AGENT_SESSION_ROLE", "AGENT_DISPATCH_CHILD",
                         "AGENT_DISPATCH_DEPTH", "FLEET_TITLE_REFRESH", "MEM_DISTILL"):
@@ -257,6 +348,12 @@ class HumanWaitPerformanceTests(unittest.TestCase):
                 if key.startswith("OPENCODE_DISPATCH"):
                     concurrent_env.pop(key, None)
             statusline = ROOT / "adapters/claude/statusline.sh"
+            # This fixture isolates answer-wait cold start. The separate display
+            # tests cover cold Git requests. Settle that independent finite
+            # observation here so it cannot race TemporaryDirectory teardown.
+            subprocess.run([sys.executable, str(ROOT / "tools/fleet/gitinfo.py"),
+                            "--display", "refresh", str(root)], env=concurrent_env,
+                           check=True, capture_output=True, timeout=10)
             payload = json.dumps({"cwd": str(root), "session_id": "sid-concurrent",
                                   "model": {"id": "fixture-model"}})
             barrier = threading.Barrier(16)

@@ -42,6 +42,7 @@ import safe_fs
 import user_model_config
 import codex_tui_config
 import herdr_integration
+import manifest
 
 
 RUNTIMES = ("claude", "codex", "opencode")
@@ -617,10 +618,10 @@ def _opencode_v2_plugin_entry(entrypoint: Path, server: Path, dest: Path,
     """
     if not entrypoint.is_file():
         return _entry(entrypoint, dest, "hook_config")
-    text = entrypoint.read_text(encoding="utf-8")
-    if marker not in text:
-        raise ActivationError(f"{entrypoint} lacks {marker}")
-    content = text.replace(marker, f"from {json.dumps(str(server))}", 1)
+    try:
+        content = projector.render_opencode_plugin(entrypoint, server, marker)
+    except ValueError as exc:
+        raise ActivationError(str(exc)) from exc
     entry = _entry(entrypoint, dest, "hook_config", kind="render")
     entry["content"] = content
     entry["content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -900,11 +901,13 @@ def _linked_entries(
                 "*.md",
             )
         )
-        plugin = source_root / "adapters/opencode/plugins/hearting-guards.js"
-        entries.append(_entry(plugin, home / "plugins/hearting-guards.js", "hook_config"))
-        v2_plugin = source_root / "adapters/opencode/plugins/hearting-guards/index.ts"
-        entries.append(_opencode_v2_plugin_entry(
-            v2_plugin, plugin, home / "plugins/hearting-guards/index.ts"))
+        guard = projector.opencode_guard_layout(source_root, home, scope)
+        if guard["issues"] and guard["generation"] != "unknown":
+            raise ActivationError("; ".join(guard["issues"]))
+        for planned in guard["entries"]:
+            entry = dict(planned, kind=planned["action"], surface="hook_config")
+            entry.pop("action")
+            entries.append(entry)
         herdr_plugin = source_root / "adapters/opencode/plugins/herdr-agent-state.js"
         entries.append(_entry(herdr_plugin, home / "plugins/herdr-agent-state.js", "hook_config", kind="copy"))
         tui_entry = source_root / "adapters/opencode/tui/hearting-tui-identity.ts"
@@ -927,7 +930,7 @@ def _linked_entries(
     else:
         raise ActivationError(f"unsupported runtime: {runtime}")
 
-    existing = [entry for entry in entries if Path(entry["source"]).exists()]
+    existing = [entry for entry in entries if entry.get("guard") or Path(entry["source"]).exists()]
     if runtime == "claude" and not (
         source_root / "adapters/claude/statusline.sh"
     ).is_file():
@@ -1171,6 +1174,12 @@ def _native_present(runtime: str, scope: str = "global") -> bool:
         candidates.extend((home / "skills").glob("*"))
         candidates.append(home / "plugins/hearting-guards.js")
         candidates.append(home / "plugins/hearting-guards/index.ts")
+        layout = projector.opencode_guard_layout(paths.agent_home(), home, scope)
+        if not projector.opencode_guard_health(layout) and any(
+            entry["action"] == "render" and Path(entry["dest"]).is_file()
+            for entry in layout["entries"]
+        ):
+            return True
     for candidate in candidates:
         if not candidate.is_symlink():
             continue
@@ -1181,43 +1190,7 @@ def _native_present(runtime: str, scope: str = "global") -> bool:
 
 def _native_harness_target(runtime: str, candidate: Path) -> bool:
     """Recognize only a canonical harness projection, never a path substring."""
-    try:
-        target = candidate.resolve(strict=False)
-    except RuntimeError:
-        return False
-    for root in (target, *target.parents):
-        if not (root / "harness-manifest.json").is_file():
-            continue
-        try:
-            relative = target.relative_to(root).parts
-        except ValueError:
-            continue
-        allowed = {
-            "codex": (
-                ("adapters", "codex", "skills"),
-                ("adapters", "codex", "agents"),
-                ("adapters", "codex", "modes"),
-                ("codex_setting", "codex-skills"),
-                ("codex_setting", "codex-agents"),
-                ("codex_setting", "codex-modes"),
-            ),
-            "claude": (
-                ("adapters", "claude", "skills"),
-                ("adapters", "claude", "agents"),
-                ("adapters", "claude", "agent-modes"),
-                ("claude_setting", "skills"),
-                ("claude_setting", "agents"),
-            ),
-            "opencode": (
-                ("adapters", "opencode", "skills"),
-                ("adapters", "opencode", "agents"),
-                ("adapters", "opencode", "commands"),
-                ("adapters", "opencode", "plugins"),
-            ),
-        }[runtime]
-        if any(relative[: len(prefix)] == prefix for prefix in allowed):
-            return True
-    return False
+    return projector.native_harness_target(runtime, candidate)
 
 
 def _discovered_harness_links(runtime: str, scope: str = "global") -> set[Path]:
@@ -1226,8 +1199,7 @@ def _discovered_harness_links(runtime: str, scope: str = "global") -> set[Path]:
     patterns = {
         "codex": ("skills/*", "agents/*.toml", "agent-modes/*/*.md"),
         "claude": ("skills/*", "agents/*.md", "agent-modes/*/*.md"),
-        "opencode": ("skills/*", "agents/*.md", "commands/*.md",
-                     "plugins/hearting-guards/index.ts"),
+        "opencode": ("skills/*", "agents/*.md", "commands/*.md"),
     }[runtime]
     found: set[Path] = set()
     for pattern in patterns:
@@ -2645,6 +2617,7 @@ def _activation_protected_paths(runtime: str, scope: str = "global") -> List[Pat
         paths_owned.append(_config_path(runtime, scope, CODEX_IDENTITY_BACKUP))
     elif runtime == "opencode":
         home = paths.runtime_home(runtime, scope)
+        paths_owned.append(manifest._manifest_path(runtime, scope))
         paths_owned.extend(home / name for name in (
             "tui.json", "tui.jsonc", "cli.json", "cli.jsonc",
         ))
@@ -2758,8 +2731,19 @@ def duplicate_sources(runtime: str, scope: str = "global") -> List[str]:
         return ["native+plugin"] if native and _codex_plugin_active(scope) else []
     if runtime == "claude":
         return ["native+plugin"] if native and _claude_plugin_active(scope) else []
-    local_plugin = (paths.runtime_home(runtime, scope) / "plugins/hearting-guards.js").exists()
-    return ["local+npm"] if local_plugin and _opencode_npm_present(scope) else []
+    home = paths.runtime_home(runtime, scope)
+    generation = projector.opencode_generation()
+    local_file = (home / projector.OPENCODE_GUARD_LEAVES[0]).is_file()
+    local_package = generation != "v1" and (home / projector.OPENCODE_GUARD_LEAVES[1]).is_file()
+    duplicates = []
+    if local_file and local_package:
+        duplicates.append("local-file+package" if generation == "v2"
+                          else "observed-local-file+package:generation-unknown")
+    if generation != "v1" and (home / projector.OPENCODE_GUARD_LEAVES[0]).is_symlink() and not local_file:
+        duplicates.append("unresolved-local-file")
+    if (local_file or local_package) and _opencode_npm_present(scope):
+        duplicates.append("local+npm")
+    return duplicates
 
 
 def _remove_path(path: Path) -> None:
@@ -2802,6 +2786,12 @@ def _safe_existing_dest(
         return
     if str(dest) in owned:
         return
+    if dest.as_posix().endswith(tuple("/" + leaf for leaf in projector.OPENCODE_GUARD_LEAVES)):
+        # Guard ownership is exact. A link elsewhere under the same source root
+        # cannot authorize replacement or retirement of this plugin ID.
+        if kind == "symlink" and dest.is_symlink() and source is not None and os.readlink(dest) == str(source):
+            return
+        raise ActivationError(f"foreign guard destination collision: {dest}")
     # herdr overwrites its own integration file on reinstall; hearting now ships the
     # same integration, so adopt that file (the caller snapshots it first).
     if (source is not None and kind != "copytree" and not dest.is_symlink() and dest.is_file()
@@ -2921,11 +2911,30 @@ def _restore(records: List[dict]) -> None:
         except safe_fs.SafetyError as exc:
             raise ActivationError(str(exc)) from exc
         if current == preimage:
+            record["postimage"] = current.public()
             continue
         if current != postimage:
             raise ActivationError(
                 f"concurrent-successor: rollback preserves changed target: {dest}"
             )
+        if state == "copied" and Path(record["backup"]).is_file():
+            # Keep the restoration's own identity for an enclosing invocation.
+            # Re-reading dest after copying could instead adopt a successor.
+            backup = Path(record["backup"])
+            try:
+                auth = safe_fs.authority(
+                    dest, owner="runtime-activation:journal-file-restore",
+                    allowed_paths=(dest,), allow_leaf_symlink=True,
+                    expected=current,
+                )
+                restored = safe_fs.atomic_write_bytes(
+                    auth, backup.read_bytes(), backup.stat().st_mode & 0o777,
+                    create_parents=True,
+                )
+            except safe_fs.SafetyError as exc:
+                raise ActivationError(str(exc)) from exc
+            record["postimage"] = restored.public()
+            continue
         if state == "moved" and not Path(record["backup"]).exists():
             # Journal was flushed before the move and the process died between
             # those two operations.  The original destination is still intact.
@@ -3096,9 +3105,14 @@ def _trusted_owned(
     # Profile activation adopts only links that resolve to a canonical harness
     # manifest. This lets a refresh remove stale native links left by the
     # legacy all-skills installer without touching user-owned entries.
+    home = paths.runtime_home(runtime, scope)
     trusted = {
         str(path) for path in _discovered_harness_links(runtime, scope)
+        if runtime != "opencode" or not projector.opencode_guard_leaf(path, home)
     }
+    if runtime == "opencode":
+        trusted.update(item["dest"] for item in desired if item.get("guard")
+                       and projector.opencode_guard_owned(item, home, scope))
     if not state:
         return trusted, {}
     allowed = {item["dest"] for item in desired}
@@ -3133,7 +3147,8 @@ def _trusted_owned(
             try:
                 current_target = os.readlink(dest)
                 matches = current_target == item.get("source")
-                if not matches and _journal_dest_allowed(runtime, dest, scope):
+                if (not matches and _journal_dest_allowed(runtime, dest, scope)
+                        and not (runtime == "opencode" and projector.opencode_guard_leaf(dest, home))):
                     raw_target = Path(current_target)
                     target = raw_target if raw_target.is_absolute() else dest.parent / raw_target
                     resolved_target = target.resolve(strict=False)
@@ -3178,10 +3193,34 @@ def _trusted_owned(
             trusted.discard(value)
             # Keep the renderer's existing collision behavior when a user-edited
             # regular definition would be replaced by a shipped symlink.
-            if item.get("kind") == "render" and desired_kind.get(value) == "symlink":
+            if (item.get("kind") == "render" and desired_kind.get(value) == "symlink"
+                    and not (runtime == "opencode" and projector.opencode_guard_leaf(dest, home))):
                 continue
             user_changed[value] = item
     return trusted, user_changed
+
+
+def _opencode_legacy_guard_transfer(desired: List[dict], owned: set, scope: str):
+    """Retire only exact legacy hashes for guards this activation adopts."""
+    home = paths.runtime_home("opencode", scope)
+    path = manifest._manifest_path("opencode", scope)
+    try:
+        data, state = manifest.load_ownership_manifest(path, "opencode", scope)
+    except ValueError:
+        return None
+    if data is None:
+        return None
+    guards = {}
+    for item in desired:
+        if not item.get("guard") or item.get("preserve") or item["dest"] not in owned:
+            continue
+        dest = Path(item["dest"])
+        relative = dest.relative_to(home).as_posix()
+        current = safe_fs.capture_state(dest)
+        if current.kind == "file" and current.digest == data["files"].get(relative):
+            guards[item["dest"]] = current
+            del data["files"][relative]
+    return (path, data, state, guards) if guards else None
 
 
 # destructive-ok: reason=discard the active runtime transaction after commit or exact rollback; boundary=one UUID transaction root created below runtime harness state
@@ -3194,11 +3233,14 @@ def _apply_transaction(
     source_roots: Sequence[Path] = (),
     protected_paths: Sequence[Path] = (),
     commit_callback=None,
+    transaction_snapshot: Optional[dict] = None,
 ) -> List[dict]:
     state_dir = paths.harness_state_dir(runtime, scope)
     tx_root = state_dir / "transactions" / uuid.uuid4().hex
     backup_root = tx_root / "backup"
     owned, user_changed = _trusted_owned(runtime, previous, desired, scope)
+    legacy_transfer = (_opencode_legacy_guard_transfer(desired, owned, scope)
+                       if runtime == "opencode" else None)
     desired_by_dest = {entry["dest"]: entry for entry in desired}
     removal = [Path(item) for item in owned if item not in desired_by_dest]
     removal.extend(Path(item) for item in user_changed if item not in desired_by_dest)
@@ -3223,9 +3265,22 @@ def _apply_transaction(
         for dest in protected_paths:
             _ensure_owned_destination(runtime, dest, scope)
             record = _copy_snapshot(dest, backup_root, len(snapshots))
+            outer = next((item for item in (transaction_snapshot or {}).get("records", [])
+                          if item["dest"] == str(dest) and "_postimage" in item), None)
+            if outer is not None and (
+                safe_fs.PathState.from_public(record["preimage"]) != outer["_postimage"]
+            ):
+                # A journal preimage observed after invocation capture is not
+                # a mutation this invocation owns. Do not admit or hand it back.
+                raise ActivationError(f"concurrent-successor: invocation target changed: {dest}")
             record["postimage"] = record["preimage"]
             snapshots.append(record)
             _write_journal(journal_path, runtime, "preparing", snapshots)
+        if legacy_transfer:
+            manifest_path, _, expected_manifest, _ = legacy_transfer
+            record = next(item for item in snapshots if item["dest"] == str(manifest_path))
+            if safe_fs.PathState.from_public(record["preimage"]) != expected_manifest:
+                raise ActivationError(f"concurrent-successor: legacy manifest changed: {manifest_path}")
 
         for dest in removal + [Path(item["dest"]) for item in desired]:
             key = str(dest)
@@ -3234,6 +3289,12 @@ def _apply_transaction(
             seen.add(key)
             _ensure_owned_destination(runtime, dest, scope)
             prior = user_changed.get(key)
+            if desired_by_dest.get(key, {}).get("preserve"):
+                prior = next((item for item in (previous or {}).get("owned_paths", [])
+                              if item.get("dest") == key), None)
+                if prior is not None:
+                    preserved.append(dict(prior))
+                continue  # preserving an unowned carrier does not adopt it
             if prior is not None:
                 # _trusted_owned already proved this is an in-scope recorded
                 # path whose current state differs from its prior receipt.
@@ -3246,6 +3307,9 @@ def _apply_transaction(
             _safe_existing_dest(dest, kind, owned, allowed_link_roots,
                                 Path(source) if source else None)
             record = _snapshot_record(dest, backup_root, len(snapshots))
+            if legacy_transfer and key in legacy_transfer[3]:
+                if safe_fs.PathState.from_public(record["preimage"]) != legacy_transfer[3][key]:
+                    raise ActivationError(f"concurrent-successor: legacy guard changed: {dest}")
             record["postimage"] = (
                 safe_fs.PathState("missing").public()
                 if record["state"] == "moved"
@@ -3280,7 +3344,7 @@ def _apply_transaction(
         for item in desired:
             source = Path(item["source"])
             dest = Path(item["dest"])
-            if any(entry.get("dest") == str(dest) for entry in preserved):
+            if item.get("preserve") or any(entry.get("dest") == str(dest) for entry in preserved):
                 continue
             for record in snapshots:
                 if record["dest"] == str(dest):
@@ -3354,11 +3418,29 @@ def _apply_transaction(
                 raise ActivationError(f"injected failure after operation {operation_count}")
 
         owned_entries = changed + preserved
+        if legacy_transfer:
+            manifest_path, transferred, expected_manifest, _ = legacy_transfer
+            auth = safe_fs.authority(
+                manifest_path, owner="runtime-activation:legacy-guard-handover",
+                allowed_paths=(manifest_path,), allow_leaf_symlink=False,
+                expected=expected_manifest,
+            )
+            postimage = safe_fs.atomic_write_bytes(
+                auth, json.dumps(transferred, sort_keys=True, ensure_ascii=False,
+                                 indent=2).encode("utf-8"), 0o600,
+            )
+            record = next(item for item in snapshots if item["dest"] == str(manifest_path))
+            record["postimage"] = postimage.public()
+            _write_journal(journal_path, runtime, "applying", snapshots)
         if commit_callback is not None:
             try:
                 commit_callback(owned_entries)
             finally:
                 protected = {str(path) for path in protected_paths}
+                if runtime == "opencode":
+                    # This receipt has its own mutation postimage. A current
+                    # successor is never the handover's rollback authority.
+                    protected.discard(str(manifest._manifest_path(runtime, scope)))
                 for record in snapshots:
                     if record["dest"] in protected:
                         record["postimage"] = safe_fs.capture_state(
@@ -3377,13 +3459,27 @@ def _apply_transaction(
         _restore(snapshots)
         shutil.rmtree(tx_root, ignore_errors=True)
         raise
+    finally:
+        # Mutation-tracked invocation leaves consume the journal's authority,
+        # including a restoration's postimage or a refused successor. Other
+        # leaves retain the existing invocation sealing contract.
+        for outer in (transaction_snapshot or {}).get("records", []):
+            if "_postimage" not in outer:
+                continue
+            record = next((item for item in snapshots
+                           if item["dest"] == outer["dest"]), None)
+            if record is not None:
+                postimage = safe_fs.PathState.from_public(record["postimage"])
+                outer["_postimage"] = postimage
+                outer["postimage"] = postimage.public()
 
     shutil.rmtree(tx_root, ignore_errors=True)
     return changed
 
 
 def _projection_digest(entries: List[dict]) -> str:
-    base = _digest_paths(Path(item["source"]) for item in entries)
+    base = _digest_paths(Path(value) for item in entries
+                         for value in [item["source"], *item.get("dependencies", [])])
     rendered = sorted(
         (item["dest"], item["content_sha256"]) for item in entries if item.get("kind") == "render"
     )
@@ -3429,6 +3525,8 @@ def _activation_owned_paths(
         destinations.append(_config_path(runtime, scope, "settings.json"))
     elif runtime == "codex":
         destinations.extend(_activation_protected_paths(runtime, scope)[1:])
+    elif runtime == "opencode":
+        destinations.append(manifest._manifest_path(runtime, scope))
 
     discovery: set[Path] = set()
     for root in roots:
@@ -3620,6 +3718,11 @@ def capture_runtime_state(
             record["_preimage"] = safe_fs.capture_state(
                 dest
             )
+            if runtime == "opencode" and dest == manifest._manifest_path(runtime, scope):
+                # Only the handover journal may advance this receipt's state.
+                # In particular, failure sealing must not adopt live user bytes.
+                record["_postimage"] = record["_preimage"]
+                record["postimage"] = record["_preimage"].public()
             records.append(record)
         for dest in full_copy_paths:
             key = str(dest)
@@ -3655,11 +3758,13 @@ def capture_runtime_state(
 
 
 def seal_runtime_state(snapshot: dict) -> None:
-    """Seal exact postimages while the invocation locks remain held."""
+    """Seal untracked leaves under invocation locks; retain mutation postimages."""
 
     if snapshot.get("_sealed"):
         return
     for record in snapshot["records"]:
+        if "_postimage" in record:
+            continue
         postimage = safe_fs.capture_state(
             Path(record["dest"]),
             exclude_names=record.get("preserve_names") or (),
@@ -3678,29 +3783,36 @@ def restore_runtime_state(snapshot: dict) -> None:
     if not snapshot.get("_sealed"):
         raise ActivationError("ownership-unproved: runtime snapshot postimage is not sealed")
     restore_records = []
-    for record in snapshot["records"]:
-        dest = Path(record["dest"])
-        _ensure_owned_destination(runtime, dest, scope)
-        current = safe_fs.capture_state(
-            dest, exclude_names=record.get("preserve_names") or ()
-        )
-        preimage = record.get("_preimage")
-        postimage = record.get("_postimage")
-        if not isinstance(preimage, safe_fs.PathState) or not isinstance(
-            postimage, safe_fs.PathState
-        ):
-            raise ActivationError(
-                f"ownership-unproved: runtime snapshot state is incomplete: {dest}"
-            )
-        if current == preimage:
-            continue
-        if current != postimage:
-            raise ActivationError(
-                f"concurrent-successor: runtime rollback preserves changed target: {dest}"
-            )
-        restore_records.append(record)
+    successors = []
     try:
+        for record in snapshot["records"]:
+            dest = Path(record["dest"])
+            _ensure_owned_destination(runtime, dest, scope)
+            current = safe_fs.capture_state(
+                dest, exclude_names=record.get("preserve_names") or ()
+            )
+            preimage = record.get("_preimage")
+            postimage = record.get("_postimage")
+            if not isinstance(preimage, safe_fs.PathState) or not isinstance(
+                postimage, safe_fs.PathState
+            ):
+                raise ActivationError(
+                    f"ownership-unproved: runtime snapshot state is incomplete: {dest}"
+                )
+            if current == preimage:
+                continue
+            if current != postimage:
+                successors.append(str(dest))
+                continue
+            restore_records.append(record)
+        # A changed leaf remains untouched without stranding independently
+        # proved rollback records, including the invocation's transaction tree.
         _restore(restore_records)
+        if successors:
+            raise ActivationError(
+                "concurrent-successor: runtime rollback preserves changed target: "
+                + "; ".join(successors)
+            )
     finally:
         locks = snapshot.get("_locks")
         if isinstance(locks, safe_fs.TargetLocks):
@@ -3723,6 +3835,12 @@ def _entries_healthy(entries: List[dict]) -> tuple[bool, bool]:
     for item in entries:
         source = Path(item["source"])
         dest = Path(item["dest"])
+        if any(not Path(value).is_file() for value in item.get("dependencies", [])):
+            missing = True
+        if item.get("preserve"):
+            continue
+        if not source.exists():
+            missing = True
         if not (dest.exists() or dest.is_symlink()):
             missing = True
             continue
@@ -3808,6 +3926,8 @@ def activate(
     mode: str,
     source: Optional[str] = None,
     scope: str = "global",
+    *,
+    transaction_snapshot: Optional[dict] = None,
 ) -> dict:
     if runtime not in RUNTIMES:
         raise ActivationError(f"unsupported runtime: {runtime}")
@@ -3842,6 +3962,8 @@ def activate(
     desired = _desired_entries(runtime, mode, source_root, active_root, revision, scope)
     agent_report_lines = _native_agent_entries(
         runtime, active_root, paths.runtime_home(runtime, scope))[1]
+    agent_report_lines.extend(dict.fromkeys(item["detail"] for item in desired
+                                            if item.get("guard") and item.get("detail")))
     agent_report_lines.extend(_edited_render_lines(runtime, previous, desired))
     digest = _projection_digest(desired)
     packaged_checksum = _bundle_checksum(active_root) if mode == "packaged" else None
@@ -3992,6 +4114,7 @@ def activate(
         source_roots=(source_root, active_root),
         protected_paths=_activation_protected_paths(runtime, scope),
         commit_callback=commit_state,
+        transaction_snapshot=transaction_snapshot,
     )
     retired_memory_state.retire()  # distiller-era state files, once; silent
     report = status(runtime, scope)
@@ -4096,6 +4219,12 @@ def status(runtime: str, scope: str = "global") -> dict:
         user_changed_items = {}
 
     config_conflicts: List[str] = []
+    guard_lines = []
+    if runtime == "opencode":
+        layout = projector.opencode_guard_layout(active_root, paths.runtime_home(runtime, scope), scope)
+        guard_lines = [layout["detail"], *layout["issues"]]
+        if projector.opencode_guard_health(layout):
+            missing = True
     if runtime == "claude":
         config_missing, config_conflicts = _claude_settings_health(active_root, scope)
         if config_missing:
@@ -4194,7 +4323,7 @@ def status(runtime: str, scope: str = "global") -> dict:
         "duplicate_sources": duplicates,
         "user_changed": user_changed,
         "preserved": user_changed,
-        "report_lines": [f"preserved user-changed: {value}" for value in user_changed],
+        "report_lines": guard_lines + [f"preserved user-changed: {value}" for value in user_changed],
         "config_conflicts": config_conflicts,
         "model_config_path": str(model_config_path),
         "model_config_present": model_config_present,
@@ -4254,12 +4383,15 @@ def reconnect_resource_observers(active_root: str | Path) -> bool:
         return False
 
 
-def refresh(runtime: str, scope: str = "global") -> dict:
+def refresh(
+    runtime: str, scope: str = "global", *, transaction_snapshot: Optional[dict] = None
+) -> dict:
     _validate_scope(runtime, scope)
     state = _load_json(_state_path(runtime, scope))
     if state is None:
         raise ActivationError(f"{runtime} has no activation state")
-    return activate(runtime, state["mode"], state["source_root"], scope)
+    return activate(runtime, state["mode"], state["source_root"], scope,
+                    transaction_snapshot=transaction_snapshot)
 
 
 def _unmerge_claude_settings(

@@ -9,6 +9,8 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT HUP INT TERM
 
 eval "$(python3 "$ROOT/tools/install/fixture_env.py" shell "$TMP" "$ROOT")"
+export OPENCODE_RUNTIME_VERSION=2.0.32
+export OPENCODE_BIN="$TMP/no-opencode-probe"
 SENTINEL_LOG="$TMP/external-calls.log"
 SRC="$TMP/source-main"
 SRC2="$TMP/source-worktree"
@@ -374,14 +376,14 @@ CHECK
 test -L "$HOME/.config/opencode/skills/demo" || fail "OpenCode plural skills projection missing"
 test -L "$HOME/.config/opencode/agents/demo.md" || fail "OpenCode plural agents projection missing"
 test -L "$HOME/.config/opencode/commands/demo.md" || fail "OpenCode plural commands projection missing"
-test -L "$HOME/.config/opencode/plugins/hearting-guards.js" \
-  || fail "OpenCode local plugin projection missing"
+test ! -e "$HOME/.config/opencode/plugins/hearting-guards.js" \
+  || fail "OpenCode V2 must have only the package guard carrier"
 # OpenCode 2 skips a package whose entry resolves outside the package
 # directory, so the V2 entry is a rendered file importing the active bundle.
 v2_entry="$HOME/.config/opencode/plugins/hearting-guards/index.ts"
 { test -f "$v2_entry" && test ! -L "$v2_entry"; } \
   || fail "OpenCode V2 package plugin entry must be a regular file"
-grep -Fq "from \"$(readlink "$HOME/.config/opencode/plugins/hearting-guards.js")\"" "$v2_entry" \
+grep -Fq "from \"$SRC/adapters/opencode/plugins/hearting-guards.js\"" "$v2_entry" \
   || fail "OpenCode V2 package plugin entry must import the activated server export"
 # OpenCode 2 skips a tui.json/cli.json entry that names a plain file; the TUI
 # identity plugin loads as the discovered package's rendered `tui` entry.
@@ -405,6 +407,52 @@ assert data["autoMemoryEnabled"] is False
 assert data["env"]["USER_FLAG"] == "keep"
 PY
 ok "offline linked activation/status/doctor for all runtimes"
+
+# Reproduce the old dual-carrier receipt without touching disabled copies.
+python3 - "$HOME/.config/opencode" "$TMP/guard-before.json" <<'PY'
+import json, os, pathlib, sys
+home = pathlib.Path(sys.argv[1])
+record = home / ".harness/activation.json"
+state = json.loads(record.read_text())
+module = pathlib.Path(state["active_root"]) / "adapters/opencode/plugins/hearting-guards.js"
+js = home / "plugins/hearting-guards.js"
+js.symlink_to(module)
+state["owned_paths"].append({"source": str(module), "dest": str(js), "kind": "symlink", "surface": "hook_config"})
+record.write_text(json.dumps(state))
+disabled = []
+for suffix, target in ((".v1-disabled-20261026", "/missing/prior-bundle.js"),
+                       (".dup-disabled-20261029", str(module))):
+    sibling = js.with_name(js.name + suffix)
+    sibling.symlink_to(target)
+    stat = sibling.lstat()
+    disabled.append([str(sibling), os.readlink(sibling), stat.st_mode, stat.st_mtime_ns])
+pathlib.Path(sys.argv[2]).write_text(json.dumps({"state": record.read_text(), "disabled": disabled,
+    "target": os.readlink(js), "wrapper": (home / "plugins/hearting-guards/index.ts").read_text()}))
+PY
+if HARNESS_RUNTIME_FAIL_AFTER=1 harness runtime refresh --runtime opencode --json > "$TMP/guard-rollback.json" 2>&1; then
+  fail "guard migration failure injection unexpectedly succeeded"
+fi
+python3 - "$HOME/.config/opencode" "$TMP/guard-before.json" <<'PY'
+import json, os, pathlib, sys
+home = pathlib.Path(sys.argv[1]); before = json.load(open(sys.argv[2]))
+assert os.readlink(home / "plugins/hearting-guards.js") == before["target"]
+assert (home / "plugins/hearting-guards/index.ts").read_text() == before["wrapper"]
+assert (home / ".harness/activation.json").read_text() == before["state"]
+PY
+harness runtime refresh --runtime opencode --json > "$TMP/guard-migrated.json"
+python3 - "$HOME/.config/opencode" "$TMP/guard-before.json" "$TMP/guard-migrated.json" <<'PY'
+import json, os, pathlib, sys
+home = pathlib.Path(sys.argv[1]); before = json.load(open(sys.argv[2]))
+assert not (home / "plugins/hearting-guards.js").is_symlink()
+for filename, target, mode, mtime in before["disabled"]:
+    path = pathlib.Path(filename); stat = path.lstat()
+    assert [os.readlink(path), stat.st_mode, stat.st_mtime_ns] == [target, mode, mtime]
+report = json.load(open(sys.argv[3]))
+row = report if report.get("runtime") == "opencode" else next(r for r in report["runtimes"] if r["runtime"] == "opencode")
+assert row["freshness"] == "fresh", row
+assert str(home / "plugins/hearting-guards.js") not in row["discovery_paths"]
+PY
+ok "exact owned guard retirement rolls back and preserves both dated disabled siblings"
 
 # Fixture-only after-capture barrier: the writer targets the resolver-selected
 # canonical registry while activation locks/snapshots are held. Runtime-local
@@ -569,6 +617,10 @@ after={r["runtime"]:r for r in json.load(open(sys.argv[2]))["runtimes"]}
 for runtime in before:
     assert after[runtime]["active_revision"] != before[runtime]["active_revision"]
     assert after[runtime]["freshness"] == "fresh"
+module = os.path.join(after["opencode"]["active_root"], "adapters/opencode/plugins/hearting-guards.js")
+entry = os.path.join(sys.argv[3], ".config/opencode/plugins/hearting-guards/index.ts")
+assert 'from ' + json.dumps(module) in open(entry).read()
+assert not os.path.lexists(os.path.join(sys.argv[3], ".config/opencode/plugins/hearting-guards.js"))
 settings = json.load(open(os.path.join(sys.argv[3], ".claude", "settings.json")))
 assert settings["statusLine"]["refreshInterval"] == 30, settings
 assert os.path.realpath(os.path.join(sys.argv[3], ".claude", "statusline.sh")).startswith(

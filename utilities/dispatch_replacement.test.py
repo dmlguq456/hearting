@@ -3583,6 +3583,268 @@ class ReplacementTest(unittest.TestCase):
         self.assertEqual(sealed.read_bytes(), before_bytes)
 
 
+class ReplacementLaunchSafetyTest(unittest.TestCase):
+    """Real claim/reuse/input and fenced child at the two launch commits.
+
+    Reuse currency, cycle admission and route/process selection are the existing
+    ReplacementTest fixture boundaries. These are not native namespace or CI
+    proofs; registry, claim/input digests, gate pipe and child are real.
+    """
+    def setUp(self):
+        self.fixture = ReplacementTest()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.children = []
+        self.addCleanup(self.finish_children)
+
+    def finish_children(self):
+        for child in self.children:
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
+        self.assertTrue(all(p.poll() is not None for p in self.children))
+
+    def spawn(self, payload):
+        def start(fd):
+            child = subprocess.Popen([sys.executable, str(Path(__file__).with_name('launch-fence.py')),
+                '--parent-pid', str(os.getpid()), '--gate-fd', str(fd), '--', sys.executable,
+                '-c', 'from pathlib import Path; Path(' + repr(str(payload)) + ').write_text("released")'],
+                pass_fds=(fd,), start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.children.append(child)
+            return child
+        return start
+
+    def launch(self, meta, payload, *, post_claim=None):
+        return D.spawn_claimed_attempt(self.fixture.jobs, meta['attempt_id'], parent_binding=None,
+                                       spawn=self.spawn(payload), post_claim=post_claim)
+
+    def test_handover_parent_is_current_at_admission_and_owned_spawn_for_every_harness(self):
+        import dispatch_seat_handover as H
+        import session_tidy as S
+        self.fixture.doCleanups()
+        for harness in ('claude', 'codex', 'opencode'):
+            for change in ('none', 'stale', 'foreign', 'unreadable', 'after-registration', 'after-claim'):
+                with self.subTest(harness=harness, change=change), contextlib.ExitStack() as stack:
+                    t = ReplacementTest(); t.setUp(); stack.callback(t.doCleanups)
+                    stack.callback(self.finish_children)
+                    old_fixture, self.fixture = self.fixture, t
+                    stack.callback(setattr, self, 'fixture', old_fixture)
+                    t.bind_source_parent(carrier=True)
+                    t.handover(harness=harness)
+                    record = t.claim()
+                    candidate = t.replacement_candidate(record,
+                        parent='parent' if change == 'stale' else 'successor',
+                        harness='codex' if change == 'stale' else harness)
+                    stack.enter_context(mock.patch.dict(os.environ, t.parent_env('successor', harness), clear=True))
+                    if change != 'stale':
+                        self.assertEqual(R.admission(t.jobs, t.jobs.read_text().splitlines(), candidate), record)
+                    if change in {'stale', 'foreign', 'unreadable'}:
+                        if change == 'foreign':
+                            t.handover(successor='foreign', harness=harness)
+                        elif change == 'unreadable':
+                            stack.enter_context(mock.patch.object(H, '_all_snapshots', side_effect=OSError('lineage unavailable')))
+                        with self.assertRaises(D.DispatchContractError):
+                            R.admission(t.jobs, t.jobs.read_text().splitlines(), candidate)
+                        # The same shared validator also refuses the exact owned row.
+                        owned = dict(candidate, launch_claimed='1', **D.process_launch_identity(os.getpid()))
+                        t.write(owned, status='open', append=True)
+                        with self.assertRaises(D.DispatchContractError):
+                            R.validate_owned_launch(t.jobs, t.jobs.read_text().splitlines(), owned)
+                        continue
+                    row = 'now\topen\t' + str(t.root) + '\t' + str(t.root) + '\treplacement\t' + \
+                        ','.join(k + '=' + v for k, v in candidate.items())
+                    self.assertTrue(D.claim_attempt_row(t.jobs, candidate['attempt_id'], row, launch=False))
+                    meta = R._rows(t.jobs.read_text().splitlines())[candidate['attempt_id']][1]
+
+                    def advance(_identity=None):
+                        path = S._ledger_path(S.Seat('pane', 'replacement-test-seat', 'wY:p5'))
+                        with path.open('a') as handle:
+                            handle.write(json.dumps({'event': 'handover', 'from': 'successor',
+                                'sid': 'next-successor', 'harness': harness, 'ts': 2,
+                                'bindings': [H.binding_of(t.jobs, t.meta), H.binding_of(t.jobs, meta)]}) + '\n')
+
+                    if change == 'after-registration':
+                        advance()
+                    payload = t.root / 'payload'
+                    if change == 'none':
+                        proc, _ = self.launch(meta, payload)
+                        proc.wait(timeout=5)
+                        self.assertTrue(payload.exists())
+                    else:
+                        with self.assertRaises(D.DispatchContractError):
+                            self.launch(meta, payload, post_claim=advance if change == 'after-claim' else None)
+                        self.assertFalse(payload.exists())
+                    self.finish_children()
+
+    def retained_peer(self, stack):
+        import artifact_producer as P
+        t = self.fixture
+        t.reuse.stop()
+        t.route['nodes'] = [{'id': 'retained-peer', 'depends_on': []}]
+        completion = t.root / 'completion' / t.route['route_id']
+        completion.mkdir(parents=True)
+        (completion / 'retained-peer.json').write_text(json.dumps({
+            'attempt_id': 'att-retained-peer', 'node_id': 'retained-peer'}))
+        peer = {**t.meta, 'attempt_id': 'att-retained-peer', 'dispatch_depth': '2',
+                'worker_type': 'stage', 'route_node': 'retained-peer', 'note': 'completed-marker',
+                'failure_class': '', 'launch_outcome': 'reaped-before-publish'}
+        t.write(peer, append=True)
+        stack.enter_context(mock.patch.object(D._route_module(), 'completion_dir', return_value=completion))
+        stack.enter_context(mock.patch.object(D, 'gate_currency', return_value=D.GateCurrency('current', 'fixture-current')))
+        stack.enter_context(mock.patch.object(D, 'note_evidence_change'))
+        stack.enter_context(mock.patch.object(R, '_gate_snapshot', return_value=[]))
+        stack.enter_context(mock.patch.object(P, 'route_cycle_for', return_value={'cycle_id': 'cyc-test', 'producer_id': 'prod-test'}))
+        stack.enter_context(mock.patch.object(P, 'cycle_route_admission', return_value=SimpleNamespace(allow=True)))
+        return peer
+
+    def test_retained_non_direct_peer_is_pinned_at_both_commits_and_registration(self):
+        # Each case gets its own claim, files, real child and registry.
+        self.fixture.doCleanups()
+        for phase in ('registration', 1, 2):
+            for change in ('conflict', 'competitor', 'descendant', 'annotation', 'independent'):
+                with self.subTest(phase=phase, change=change), contextlib.ExitStack() as stack:
+                    t = ReplacementTest(); t.setUp(); stack.callback(t.doCleanups)
+                    stack.callback(self.finish_children)
+                    old_fixture, self.fixture = self.fixture, t
+                    stack.callback(setattr, self, 'fixture', old_fixture)
+                    self.retained_peer(stack)
+                    record = t.claim()
+                    self.assertEqual([n['node'] for n in record['reuse']['completed']], ['retained-peer'])
+                    meta = t._successor(record, t.meta, status='open', launch_claimed='0')
+                    payload = t.root / 'payload'
+                    def change_lines(lines):
+                        index, fields, _ = D._launch_row(lines, 'att-retained-peer')
+                        if change in {'conflict', 'annotation'}:
+                            fields[5] += ',terminal_conflict=1' if change == 'conflict' else ',summary_sid=fresh'
+                            lines[index] = '\t'.join(fields)
+                        else:
+                            extra = D.parse_registry_metadata(fields[5])
+                            extra.update(attempt_id='att-late-peer', note='', launch_outcome='')
+                            if change != 'competitor':
+                                extra['route_node'] = 'independent'
+                            if change == 'descendant':
+                                extra['parent_attempt_id'] = 'att-retained-peer'
+                            lines.append('now\topen\t' + str(t.root) + '\t' + str(t.root)
+                                         + '\tpeer\t' + ','.join(k+'='+v for k,v in extra.items()))
+                        D._atomic_registry_replace(t.jobs, lines)
+                    original = D._launch_registry_transaction
+                    commits = []
+                    @contextlib.contextmanager
+                    def mutate(jobs):
+                        with original(jobs) as lines:
+                            commits.append(True)
+                            if len(commits) == phase:
+                                change_lines(lines)
+                            yield lines
+                    if phase == 'registration':
+                        lines = t.jobs.read_text().splitlines()
+                        index, fields, _ = D._launch_row(lines, meta['attempt_id'])
+                        del lines[index]
+                        D._atomic_registry_replace(t.jobs, lines)
+                        commit = D._commit_attempt_row
+                        def register(*args, **kwargs):
+                            change_lines(t.jobs.read_text().splitlines())
+                            return commit(*args, **kwargs)
+                        stack.enter_context(mock.patch.object(D, '_commit_attempt_row', side_effect=register))
+                        action = lambda: D.claim_attempt_row(t.jobs, meta['attempt_id'], '\t'.join(fields))
+                    else:
+                        stack.enter_context(mock.patch.object(D, '_launch_registry_transaction', side_effect=mutate))
+                        action = lambda: self.launch(meta, payload)
+                    if change in {'annotation', 'independent'}:
+                        result = action()
+                        if phase != 'registration':
+                            result[0].wait(timeout=5)
+                            self.assertTrue(payload.exists())
+                        self.assertIn('summary_sid=fresh' if change == 'annotation' else 'att-late-peer', t.jobs.read_text())
+                    else:
+                        with self.assertRaises(D.DispatchContractError) as refused:
+                            action()
+                        expected = ('attempt-registration-dependency-changed' if phase == 'registration'
+                                    else 'attempt-' + ('pre-release' if phase == 1 else 'post-claim') + '-identity-changed')
+                        self.assertEqual(refused.exception.reason, expected)
+                        self.assertFalse(payload.exists())
+                        if phase != 'registration':
+                            self.assertIsNotNone(self.children[-1].poll())
+                    self.finish_children()  # settle before this case's scratch retires
+
+    def test_owned_launch_revalidates_original_and_candidate_inputs_after_publication(self):
+        self.fixture.doCleanups()
+        for which in ('original', 'candidate'):
+            for change in ('mutate', 'missing'):
+                with self.subTest(which=which, change=change), contextlib.ExitStack() as stack:
+                    t = ReplacementTest(); t.setUp(); stack.callback(t.doCleanups)
+                    stack.callback(self.finish_children)
+                    old_fixture, self.fixture = self.fixture, t
+                    stack.callback(setattr, self, 'fixture', old_fixture)
+                    record = t.claim()
+                    meta = t._successor(record, t.meta, status='open', launch_claimed='0')
+                    aid = 'att-source' if which == 'original' else meta['attempt_id']
+                    path = R._directory(t.jobs) / 'inputs' / (aid + '.json')
+                    def drift(_identity):
+                        if change == 'missing':
+                            path.unlink()
+                        else:
+                            value = json.loads(path.read_text()); value['task'] = 'changed after publication'
+                            path.write_text(json.dumps(value))
+                    payload = t.root / 'payload'
+                    with self.assertRaises(D.DispatchContractError) as refused:
+                        self.launch(meta, payload, post_claim=drift)
+                    self.assertEqual(refused.exception.reason, 'replacement-input-unproven')
+                    self.assertFalse(payload.exists())
+                    self.assertIsNotNone(self.children[-1].poll())
+
+    def test_owned_launch_revalidates_claim_reservation_route_and_current_pin(self):
+        self.fixture.doCleanups()
+        for change in ('claim', 'missing-claim', 'reservation', 'route-outcome', 'route-hash', 'pin'):
+            with self.subTest(change=change), contextlib.ExitStack() as stack:
+                t = ReplacementTest(); t.setUp(); stack.callback(t.doCleanups)
+                stack.callback(self.finish_children)
+                old_fixture, self.fixture = self.fixture, t
+                stack.callback(setattr, self, 'fixture', old_fixture)
+                record = t.claim(); meta = t._successor(record, t.meta, status='open', launch_claimed='0')
+                def drift(_identity):
+                    if change in {'claim', 'missing-claim'}:
+                        path = R._record_path(t.jobs, record['family_id'])
+                        if change == 'missing-claim':
+                            path.unlink()
+                        else:
+                            value = json.loads(path.read_text()); value['input_digest'] = '0'*64
+                            path.write_text(json.dumps(value))
+                    elif change == 'reservation':
+                        path = R._directory(t.jobs) / 'by-source/att-source.json'
+                        value = json.loads(path.read_text()); value['family_id'] = '0'*64
+                        path.write_text(json.dumps(value))
+                    elif change == 'route-outcome':
+                        t.path.with_suffix('.outcome.json').write_text('{}')
+                    elif change == 'route-hash':
+                        value = json.loads(t.path.read_text()); value['route_hash'] = 'sha256:changed'
+                        t.path.write_text(json.dumps(value))
+                    else:
+                        t.route['selection_pins'] = {'frame': {'harness': 'claude'}}
+                payload = t.root / 'payload'
+                with self.assertRaises(D.DispatchContractError):
+                    self.launch(meta, payload, post_claim=drift)
+                self.assertFalse(payload.exists())
+                self.assertIsNotNone(self.children[-1].poll())
+
+    def test_owned_launch_keeps_initial_eligibility_duplicate_and_terminal_refusals(self):
+        t = self.fixture
+        record = t.claim(); meta = t._successor(record, t.meta, status='open', launch_claimed='0')
+        payload = t.root / 'payload'
+        proc, _ = self.launch(meta, payload)
+        proc.wait(timeout=5)
+        self.assertTrue(payload.exists())
+        with self.assertRaises(D.DispatchContractError) as duplicate:
+            self.launch(meta, t.root / 'duplicate')
+        self.assertEqual(duplicate.exception.reason, 'attempt-launch-already-claimed')
+        lines = t.jobs.read_text().splitlines(); index, fields, _ = D._launch_row(lines, meta['attempt_id'])
+        fields[1] = 'done'; lines[index] = '\t'.join(fields); D._atomic_registry_replace(t.jobs, lines)
+        with self.assertRaises(D.DispatchContractError) as terminal:
+            self.launch(meta, t.root / 'terminal')
+        self.assertEqual(terminal.exception.reason, 'attempt-not-open')
+        self.assertEqual(len(self.children), 1)
+
+
 class StageRecoveryProgressTest(unittest.TestCase):
     def test_timeout_and_no_progress_report_bounded_git_and_cycle_observations(self):
         import artifact_context
@@ -3921,6 +4183,21 @@ class ReplacementReuseCurrencyTest(unittest.TestCase):
             with self.assertRaises(D.DispatchContractError) as refused:
                 self.snapshot(states)
         self.assertEqual(refused.exception.reason, "replacement-completion-unproven")
+
+    def test_unchanged_gates_off_descendant_of_a_stale_result_keeps_claim_reuse(self):
+        states = {node["id"]: ("current", "completion-marker-verified")
+                  for node in self.route["nodes"]}
+        states["impl-review"] = ("superseded", "completion-review-source-stale")
+        states["test"] = ("revised-unrecorded", "completion-evidence-revised-unrecorded")
+        with mock.patch.dict(os.environ, {"HEARTING_GATES": "off"}, clear=False):
+            claim_reuse = self.snapshot(states)
+            launch_reuse = self.snapshot(states)
+        invalid = {row["node"]: row for row in launch_reuse["invalidated"]}
+        self.assertEqual(invalid["test"]["currency"], "revised-unrecorded")
+        self.assertTrue(R._reuse_preserved(claim_reuse, launch_reuse))
+        changed = copy.deepcopy(launch_reuse)
+        next(row for row in changed["invalidated"] if row["node"] == "test")["attempt_id"] = "att-retried"
+        self.assertFalse(R._reuse_preserved(claim_reuse, changed))
 
     def test_restored_tombstone_transition_preserves_claim_reuse(self):
         tombstone_digest = "digest-of-prior-tombstone"
@@ -4443,7 +4720,8 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
         # A released quota does not imply fresh headroom. Control both inputs
         # instead of borrowing the developer's real taps outside the fixture.
         capacity = R._capacity_reader()
-        with mock.patch("dispatch_capacity_evidence.harness_hold", return_value=None), \
+        with mock.patch.object(R, "_current_launch_harnesses", return_value={"claude", "codex", "opencode"}), \
+             mock.patch("dispatch_capacity_evidence.harness_hold", return_value=None), \
              mock.patch("dispatch_capacity_evidence.usage_states", return_value={
                  harness: "unknown" if headroom is None else "ok"
                  for harness in ("claude", "codex", "opencode")}), \

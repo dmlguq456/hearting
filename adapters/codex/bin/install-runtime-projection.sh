@@ -138,6 +138,53 @@ real() { readlink -f "$1" 2>/dev/null || true; }
 
 S="$AGENT_HOME/codex_setting"
 
+# Per-leaf skill/agent links are written only where the slot is absent, already
+# ours, or dangling. A real file/directory or a resolving link that points
+# outside the harness's own generated tree belongs to the user and is left
+# alone. Ownership uses the same predicate as runtime activation, evaluated for
+# every existing resolving leaf link in one interpreter start.
+owned_leaf_links=$(
+  {
+    for d in "$S/codex-skills"/*; do
+      if [ -d "$d" ]; then printf '%s\n' "$CODEX_HOME/skills/$(basename "$d")"; fi
+    done
+    for f in "$S/codex-agents"/*.toml; do
+      if [ -f "$f" ]; then printf '%s\n' "$CODEX_HOME/agents/$(basename "$f")"; fi
+    done
+  } | PYTHONDONTWRITEBYTECODE=1 python3 -c '
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1] + "/tools/install")
+import runtime_activation
+for line in sys.stdin:
+    candidate = Path(line.rstrip("\n"))
+    if candidate.is_symlink() and candidate.exists() \
+            and runtime_activation._native_harness_target("codex", candidate):
+        print(candidate)
+' "$AGENT_HOME" 2>/dev/null || true
+)
+leaves_preserved=0
+
+# leaf_link <source> <linkpath>: return 0 after linking, 10 when the user's
+# entry was preserved (reported as skip=...); a real write error still aborts.
+leaf_link() {
+  leaf_source=$1
+  leaf_path=$2
+  if [ -L "$leaf_path" ]; then
+    if [ "$(readlink "$leaf_path")" != "$leaf_source" ] && [ -e "$leaf_path" ] \
+        && ! printf '%s\n' "$owned_leaf_links" | grep -Fxq -- "$leaf_path"; then
+      printf 'skip=%s reason=foreign-symlink-exists\n' "$leaf_path"
+      leaves_preserved=$((leaves_preserved + 1))
+      return 10
+    fi
+  elif [ -e "$leaf_path" ]; then
+    printf 'skip=%s reason=non-symlink-exists\n' "$leaf_path"
+    leaves_preserved=$((leaves_preserved + 1))
+    return 10
+  fi
+  ln -sfn "$leaf_source" "$leaf_path"
+}
+
 # Stable harness pointers consumed by the Codex adapter at runtime.
 link "$AGENT_HOME"                       "$CODEX_HOME/hearting"
 link "$S/AGENTS.md"                      "$CODEX_HOME/AGENTS.md"
@@ -175,8 +222,11 @@ case "$skills_mode" in
   native|both)
     for d in "$S/codex-skills"/*; do
       [ -d "$d" ] || continue
-      ln -sfn "$d" "$CODEX_HOME/skills/$(basename "$d")"
-      skills_linked=$((skills_linked + 1))
+      if leaf_link "$d" "$CODEX_HOME/skills/$(basename "$d")"; then
+        skills_linked=$((skills_linked + 1))
+      else
+        [ "$?" -eq 10 ] || exit 3
+      fi
     done
     ;;
   plugin)
@@ -199,10 +249,14 @@ agents_linked=0
 mkdir -p "$CODEX_HOME/agents"
 for f in "$S/codex-agents"/*.toml; do
   [ -f "$f" ] || continue
-  ln -sfn "$f" "$CODEX_HOME/agents/$(basename "$f")"
-  agents_linked=$((agents_linked + 1))
+  if leaf_link "$f" "$CODEX_HOME/agents/$(basename "$f")"; then
+    agents_linked=$((agents_linked + 1))
+  else
+    [ "$?" -eq 10 ] || exit 3
+  fi
 done
 printf 'agents_linked=%s\n' "$agents_linked"
+printf 'leaves_preserved=%s\n' "$leaves_preserved"
 
 if [ "$install_plugin" = "1" ]; then
   if command -v codex >/dev/null 2>&1; then

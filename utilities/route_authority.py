@@ -965,6 +965,102 @@ def replacement_parent_matches(source, candidate, jobs, *, lineage=False) -> boo
     return False
 
 
+def resource_owner_consumer_matches(jobs, *, source_attempt_id, consumer_attempt_id,
+                                    resource_route_file, resource_route_id,
+                                    resource_route_hash, resource_owner_pid,
+                                    resource_owner_start, require_live=True):
+    """Prove the current owner can consume a resource bound to its predecessor.
+
+    The resource record remains attached to its original owner. Only that exact
+    attempt's launched replacement, with a current owner-route binding that
+    descends from the resource route, may act as its consumer.
+    """
+    if not all(isinstance(value, str) and value for value in (
+            source_attempt_id, consumer_attempt_id, resource_route_file,
+            resource_route_id, resource_route_hash, resource_owner_start)):
+        return False
+    # Resource-runner JSON stores an integer PID; historical waits used text.
+    # Reject bools and coercible non-PIDs before comparing the exact lineage.
+    if isinstance(resource_owner_pid, bool) or not isinstance(resource_owner_pid, (int, str)):
+        return False
+    owner_pid = str(resource_owner_pid)
+    if not owner_pid.isascii() or not owner_pid.isdigit() or not owner_pid.strip("0"):
+        return False
+    try:
+        import dispatch_replacement as DR
+        import owner_route_binding as ORB
+        import route_lineage
+        from dispatch_contract import attempt_identity_lineage, parse_registry_metadata
+        from dispatch_registry_cache import registry_snapshot
+
+        jobs_path = Path(jobs).expanduser()
+        snapshot = registry_snapshot(jobs_path)
+        if not snapshot.complete:
+            return False
+        rows = []
+        for line in snapshot.lines:
+            fields = line.split("\t")
+            if len(fields) != 6:
+                return False
+            rows.append((fields, parse_registry_metadata(fields[5])))
+        indexed = DR._rows(snapshot.lines)
+        if source_attempt_id not in indexed or consumer_attempt_id not in indexed:
+            return False
+        source_fields, source = indexed[source_attempt_id]
+        consumer_fields, consumer = indexed[consumer_attempt_id]
+        if (source.get("worker_type") != "owner" or source.get("dispatch_depth") != "1"
+                or source.get("registered_worker") != "1"
+                or consumer.get("worker_type") != "owner" or consumer.get("dispatch_depth") != "1"
+                or consumer.get("registered_worker") != "1"
+                or consumer.get("attempt_id") != consumer_attempt_id
+                or consumer_fields[1] not in (LIVE_ROW_STATUSES if require_live
+                                               else LIVE_ROW_STATUSES | {"done"})):
+            return False
+        try:
+            resource_route_path = str(Path(resource_route_file).resolve(strict=True))
+            resource_route_record = json.loads(Path(resource_route_path).read_text(encoding="utf-8"))
+            resource_route_record = ORB.ROUTE.verify_route(resource_route_record)
+            source_owner_route = str(Path(source.get("owner_route_file", "")).resolve(strict=True))
+            source_route_record = json.loads(Path(source_owner_route).read_text(encoding="utf-8"))
+            source_route_record = ORB.ROUTE.verify_route(source_route_record)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            return False
+        if ((resource_route_record.get("route_id"), resource_route_record.get("route_hash")) !=
+                (resource_route_id, resource_route_hash)
+                or (source_route_record.get("route_id"), source_route_record.get("route_hash")) !=
+                (source.get("owner_route_id"), source.get("owner_route_hash"))
+                or (owner_pid, resource_owner_start)
+                    not in attempt_identity_lineage(source)):
+            return False
+
+        effective, _lineage = DR.effective_attempts(jobs_path, {source_attempt_id})
+        if effective != {consumer_attempt_id}:
+            return False
+        if (consumer_attempt_id != source_attempt_id
+                and (source_fields[1] in LIVE_ROW_STATUSES or consumer.get("launch_started") != "1")):
+            return False
+
+        binding, status = ORB.resolve_owner_route_lifecycle(
+            jobs_path, owner_attempt_id=consumer_attempt_id, registry_rows=rows)
+        if (binding is None or status not in {
+                "owner-route-launch-binding", "owner-route-post-launch-attachment",
+                "owner-route-advance-current"}):
+            return False
+        active_raw = json.loads(Path(binding.route_file).read_text(encoding="utf-8"))
+        active = ORB.ROUTE.verify_route(active_raw)
+        if (active.get("route_id"), active.get("route_hash")) != (binding.route_id, binding.route_hash):
+            return False
+        ancestry = route_lineage.verified_route_lineage(active_raw, observe=True)
+        ancestry_identities = {(item.get("route_id"), item.get("route_hash")) for item in ancestry}
+        if ({(resource_route_id, resource_route_hash),
+             (source.get("owner_route_id"), source.get("owner_route_hash"))}
+                - ancestry_identities):
+            return False
+        return snapshot.matches_jobs(jobs_path)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return False
+
+
 def lineage_parent_matches(metadata, *, thread_id, parent_attempt_id) -> bool:
     """A replacement lineage row belongs to this receipt's parent: the exact
     registered session at depth 1, the exact parent attempt below it."""
@@ -3011,9 +3107,18 @@ def _admit_supervised_owner_resource_start(args, agent_home, jobs):
                 or owner_input.get("thread_id") == INPUT.PLACEHOLDER_THREAD):
             raise DispatchContractError("resource-owner-session-unavailable", owner.attempt_id)
         try:
-            supervisor.admit_owner_successor_start(
+            admission = supervisor.admit_owner_successor_start(
                 route, route_node, jobs, owner.attempt_id, owner_input["thread_id"],
             )
+            if (isinstance(admission, dict)
+                    and admission.get("type") == "saved-resource-output-admission"):
+                return admission
+            if not admission:
+                import resource_failure_resolution as FAILURE_RESOLUTION
+                saved = FAILURE_RESOLUTION.saved_output_admission(
+                    route, route_node, jobs, owner.attempt_id, owner_input["thread_id"])
+                if saved is not None:
+                    return {"type": "saved-resource-output-admission", "proof": saved}
         except supervisor.SupervisorError as error:
             raise DispatchContractError("resource-owner-stage-admission-blocked", str(error)) from error
     except (DispatchContractError, INPUT.InputError, OSError, subprocess.SubprocessError) as error:
@@ -3021,6 +3126,33 @@ def _admit_supervised_owner_resource_start(args, agent_home, jobs):
             raise
         raise _contract_error("resource-owner-start-authority-unavailable", str(error)) from error
     return True
+
+
+def _saved_resource_output_preview(args, jobs):
+    """Read-only counterpart to the owner start's saved-output admission."""
+    route_file = getattr(args, "route_file", None)
+    route_node = getattr(args, "route_node", None)
+    owner_attempt_id = getattr(args, "parent_attempt_id", None)
+    if not route_file or not route_node or not owner_attempt_id:
+        return None
+    try:
+        import dispatch_owner_input as INPUT
+        parent, target = INPUT._target(jobs, owner_attempt_id)
+        with INPUT._locked(jobs, owner_attempt_id) as (_, value):
+            parent, target = INPUT._target(jobs, owner_attempt_id)
+            session_id = value.get("thread_id") if isinstance(value, dict) else None
+            if (parent.status not in LIVE_ROW_STATUSES or value is None
+                    or value.get("target") != target
+                    or not session_id or session_id == INPUT.PLACEHOLDER_THREAD
+                    or not INPUT.supervisor_lease_is_held(jobs, parent.metadata)
+                    or any(item.get("state") == "queued" for item in value.get("requests", []))):
+                return None
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        import resource_failure_resolution as FAILURE_RESOLUTION
+        return FAILURE_RESOLUTION.saved_output_admission(
+            route, route_node, jobs, owner_attempt_id, session_id)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
 
 
 def completion_gate(args, action: str, agent_home, jobs, *, gate, before=()):
@@ -3035,10 +3167,22 @@ def completion_gate(args, action: str, agent_home, jobs, *, gate, before=()):
     try:
         for check in before:
             check()
+        saved_resource_admissions = None
         if action == "start":
-            _admit_supervised_owner_resource_start(args, agent_home, jobs)
-        gate(args.route_file, args.route_node, action, agent_home, jobs, attempt_id=args.attempt_id,
-             planned_revision_nodes=preview_request_nodes(args, jobs))
+            admission = _admit_supervised_owner_resource_start(args, agent_home, jobs)
+            if isinstance(admission, dict):
+                proof = admission.get("proof")
+                if isinstance(proof, dict) and proof.get("resource_node"):
+                    saved_resource_admissions = {proof["resource_node"]: proof}
+        elif action == "dry-run":
+            proof = _saved_resource_output_preview(args, jobs)
+            if isinstance(proof, dict) and proof.get("resource_node"):
+                saved_resource_admissions = {proof["resource_node"]: proof}
+        gate_args = {"attempt_id": args.attempt_id,
+                     "planned_revision_nodes": preview_request_nodes(args, jobs)}
+        if saved_resource_admissions is not None:
+            gate_args["saved_resource_admissions"] = saved_resource_admissions
+        gate(args.route_file, args.route_node, action, agent_home, jobs, **gate_args)
     except DispatchContractError as error:
         error.detail = recover_preview_gate_after_refusal(
             args.route_file, args.route_node, action, agent_home, jobs, error)

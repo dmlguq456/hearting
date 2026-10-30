@@ -8758,10 +8758,29 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
     if duties is None:
         duties = _runner_duties(store, store.list())
     retry_state = {} if retry_state is None else retry_state
-    notice_duties = []
+    notice_kinds = {"session-notice", "run-notice"}
+    notice_duties = [duty for duty in duties
+                     if (duty.get("intent") or {}).get("kind") in notice_kinds]
+    # Accepted delivery and receipt settlement must not wait for an unrelated
+    # message, batch, retirement or role check to finish. The existing consumer
+    # still owns all currentness/claim checks and its bounded recipient cursor.
+    if notice_duties:
+        try:
+            _resume_session_notice_obligations(
+                notice_duties, store, read_context=read_context,
+                selection=notice_selection, runner_incarnation=runner_incarnation)
+        except Exception:
+            for duty in notice_duties:
+                try:
+                    store.update(duty["id"], observer_error="observer-unavailable")
+                except Exception:
+                    pass
     for duty in duties:
         duty_id = duty.get("id", "")
         kind = (duty.get("intent") or {}).get("kind")
+        if kind in notice_kinds:
+            retry_state.pop(duty_id, None)
+            continue
         fingerprint = _obligation_retry_fingerprint(duty)
         # These duties observe authority outside their own bytes: registry rows
         # for batches, and confirmed lineage/current recipients for notices.
@@ -8776,9 +8795,7 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
         else:
             retry_state.pop(duty_id, None)
         try:
-            if kind in {"session-notice", "run-notice"}:
-                notice_duties.append(duty)
-            elif kind == "message" or duty.get("id", "").startswith(("message-", "delay-")):
+            if kind == "message" or duty.get("id", "").startswith(("message-", "delay-")):
                 _resume_message_obligation(duty, store, read_context=read_context)
             elif kind == "retire":
                 with peer_obligations.legacy_runner_lock(store) as acquired:
@@ -8811,17 +8828,6 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                     attempts + 1)
             else:
                 retry_state.pop(duty_id, None)
-    if notice_duties:
-        try:
-            _resume_session_notice_obligations(
-                notice_duties, store, read_context=read_context,
-                selection=notice_selection, runner_incarnation=runner_incarnation)
-        except Exception:
-            for duty in notice_duties:
-                try:
-                    store.update(duty["id"], observer_error="observer-unavailable")
-                except Exception:
-                    pass
 
 
 def _discover_session_notice_duties(store, *, read_context=None):
@@ -9300,10 +9306,7 @@ def cmd_obligation_runner(args):
     duty_retry_state = {}
     terminal_handoff_scan = True
     terminal_handoff_duties = []
-    try:
-        _steward_check_module().reconcile_all(store)
-    except Exception:
-        pass
+    recover_steward_roles = True
     while True:
         start_readiness_worker()
         if not _runner_lock_current(store, args.lock_fd):
@@ -9314,12 +9317,34 @@ def cmd_obligation_runner(args):
             if wake_fd is not None:
                 os.close(wake_fd)
             return 0
-        store.begin_read_pass()
         from peer_read_context import PeerReadContext
         from runtime_observation import ObservationContext
+        # A retained notice already has an active marker. Give that accepted
+        # work its own read pass before any cold/legacy discovery or role scan;
+        # a fast-only snapshot must never suppress the later full recovery read.
+        store.begin_read_pass()
+        try:
+            accepted_notices = store.list(
+                kinds={"session-notice", "run-notice"}, fast_active_only=True)
+            if accepted_notices:
+                _reconcile_obligations(
+                    store, accepted_notices,
+                    read_context=PeerReadContext(registry_append_only=True),
+                    retry_state=duty_retry_state, notice_selection=notice_selection,
+                    runner_incarnation=runner_incarnation)
+        finally:
+            store.end_read_pass()
+        accepted_notice_ids = {duty["id"] for duty in accepted_notices}
+        if recover_steward_roles:
+            try:
+                _steward_check_module().reconcile_all(store)
+            except Exception:
+                pass
+            recover_steward_roles = False
+        store.begin_read_pass()
         read_context = PeerReadContext(registry_append_only=True)
         notice_discovery_observed = _discover_session_notice_duties(store, read_context=read_context)
-        duties = store.list()
+        duties = [duty for duty in store.list() if duty["id"] not in accepted_notice_ids]
         if (terminal_handoff_scan
                 and any((duty.get("intent") or {}).get("kind") == "retire"
                          for duty in duties)):

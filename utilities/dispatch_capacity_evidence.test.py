@@ -154,6 +154,21 @@ class QuotaEvidenceTests(unittest.TestCase):
                 self.assertEqual(selected[:2], ("codex", "primary"))
         self.assertEqual(before, (self.jobs.read_bytes(), self.log.read_bytes(), self.config.read_bytes()))
 
+    def test_usable_codex_credits_do_not_lift_native_claude_rejection(self):
+        from fleet.collectors import usage_cache
+        with mock.patch.dict(os.environ, self.env):
+            usage_cache.record("codex", {"windows": [["7d", 100, self.now + 86400]],
+                                         "credits": {"has_credits": True}}, now=self.now)
+            # Exercise the credit exception rather than this class's manual score.
+            with mock.patch.dict(os.environ, {"HARNESS_CAPACITY_SCORES": ""}):
+                states = Q.usage_states(self.jobs, now=self.now)
+                self.assertEqual(states["codex"], "ok")
+                self.assertTrue(states["claude"].startswith("limited("))
+                self.assertEqual(Q.harness_hold(self.jobs, "claude", now=self.now)["until_epoch"],
+                                 self.now + 86400)
+                self.assertEqual(Q.active_limits(self.jobs, now=self.now)["claude"]["scope_authority"],
+                                 "launch-bound")
+
     def test_gauge_and_batch_selection_consume_the_same_scoped_feedback(self):
         capacity = load("quota_gauge", "harness-capacity.py")
         batch = load("quota_batch", "dispatch-batch.py")
@@ -399,6 +414,71 @@ class QuotaEvidenceTests(unittest.TestCase):
         self.write_capacity([self.result_line("limit \u00b7 resets 3am (Asia/Seoul)")])
         self.jobs.write_text(self.jobs.read_text().replace("failure_class=capacity", "failure_class=pass"))
         self.assertEqual(self.state(self.OBSERVED + 60), "ok")
+
+
+class LegacyQuotaReasonTests(unittest.TestCase):
+    """Historical text markers describe quota, not context/config discovery."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jobs = Path(self.tmp.name) / "jobs.log"
+        self.now = 1793262000
+        self.env = {"HOME": self.tmp.name}
+        self.gauge = mock.patch.object(Q, "gauge_limits", return_value={})
+        self.gauge.start()
+        self.addCleanup(self.gauge.stop)
+
+    def row(self, harness, note, *, reset="-", failure_class=None):
+        stamp = datetime.fromtimestamp(self.now, timezone.utc).isoformat().replace("+00:00", "Z")
+        meta = f"harness={harness},attempt_id=att-legacy,note={note},reset={reset}"
+        if failure_class is not None:
+            meta += f",failure_class={failure_class}"
+        self.jobs.write_text(f"{stamp}\tdone\t/repo\t/work\tx\t{meta}\n")
+
+    def test_unavailable_and_prefix_matches_are_not_quota_holds(self):
+        for harness in Q.HARNESSES:
+            for note in ("dead-opencode-context-limit-unavailable", "dead-config-unavailable",
+                         "dead-context-limit-unavailable", "dead-model-info-timeout",
+                         "dead-usage-limit-unavailable", "dead-session-limit-config-unavailable"):
+                with self.subTest(harness=harness, note=note):
+                    self.row(harness, note)
+                    self.assertEqual(Q.usage_states(self.jobs, now=self.now, env=self.env)[harness], "ok")
+                    self.assertIsNone(Q.harness_hold(self.jobs, harness, now=self.now, env=self.env))
+
+    def test_exact_quota_reasons_keep_unknown_reset_hold_and_expiry(self):
+        for harness in Q.HARNESSES:
+            for note in ("dead-limit", "dead-session-limit", "dead-usage-limit",
+                         "dead-rate-limit", "dead-quota-limit", "dead-capacity"):
+                with self.subTest(harness=harness, note=note):
+                    self.row(harness, note)
+                    held = Q.harness_hold(self.jobs, harness, now=self.now, env=self.env)
+                    self.assertEqual(held, {"until_epoch": self.now + 3600, "label": "unknown-reset"})
+                    self.assertIsNone(Q.harness_hold(self.jobs, harness, now=self.now + 3600, env=self.env))
+
+    def test_explicit_reset_and_pass_capacity_meaning_are_preserved(self):
+        reset = datetime.fromtimestamp(self.now + 120, timezone.utc).isoformat().replace("+00:00", "Z")
+        self.row("opencode", "dead-usage-limit", reset=reset)
+        self.assertEqual(Q.harness_hold(self.jobs, "opencode", now=self.now, env=self.env)["until_epoch"], self.now + 120)
+        self.assertIsNone(Q.harness_hold(self.jobs, "opencode", now=self.now + 120, env=self.env))
+        self.row("opencode", "dead-capacity", failure_class="pass")
+        self.assertIsNone(Q.harness_hold(self.jobs, "opencode", now=self.now, env=self.env))
+
+    def test_old_persisted_false_hold_is_rebuilt_without_rewriting_registry(self):
+        note = "dead-opencode-context-limit-unavailable"
+        self.row("opencode", note)
+        original = self.jobs.read_bytes()
+        with mock.patch.object(Q, "_settled", return_value=True), \
+             mock.patch.object(Q, "CACHE_SCHEMA", 1), \
+             mock.patch.object(Q, "_LEGACY_QUOTA_NOTES", Q._LEGACY_QUOTA_NOTES | {note}):
+            old = Q._snapshot(self.jobs, self.now)
+            self.assertEqual(old["legacy"][0]["n"], note)
+            Q._persist(old)
+        self.assertEqual(json.loads(Q._cache_path(self.jobs).read_text())["schema"], 1)
+        with mock.patch.object(Q, "_build_snapshot", wraps=Q._build_snapshot) as rebuild:
+            self.assertIsNone(Q.harness_hold(self.jobs, "opencode", now=self.now, env=self.env))
+            self.assertEqual(rebuild.call_count, 1)
+        self.assertEqual(self.jobs.read_bytes(), original)
 
 
 class EvidenceCacheTests(unittest.TestCase):
@@ -1264,6 +1344,28 @@ class SharedGaugeHoldTests(unittest.TestCase):
         self.assertEqual(limits["codex"]["scope_authority"], "gauge")
         self.assertEqual(limits["codex"]["model_scope"], "all")
 
+    def test_credit_matrix_reaches_usage_hold_and_active_limit_readers(self):
+        reset = self.now + 86400
+        cases = [({"credits": {"has_credits": True}, "spend_control_reached": None}, True),
+                 ({"credits": {"has_credits": True}}, True),
+                 ({"credits": {"has_credits": False, "unlimited": True}, "spend_control_reached": False}, True),
+                 ({"credits": {"has_credits": False, "unlimited": False}}, False),
+                 ({"credits": {"has_credits": True}, "spend_control_reached": True}, False),
+                 ({"credits": {"has_credits": True}, "spend_control_reached": "false"}, False),
+                 ({"credits": {"has_credits": "true", "unlimited": 1}}, False),
+                 ({"credits": {"balance": "56446.1701575000"}}, False),
+                 ({"credits": None}, False), ({}, False)]
+        for metadata, usable in cases:
+            with self.subTest(metadata=metadata):
+                self.record("codex", {"windows": [["7d", 100, reset]], **metadata})
+                states, hold, limits = self.readers()
+                if usable:
+                    self.assertEqual((states["codex"], hold, limits.get("codex")), ("ok", None, None))
+                else:
+                    self.assertEqual(states["codex"], f"limited({Q._iso(reset)})")
+                    self.assertEqual(hold["until_epoch"], reset)
+                    self.assertEqual(limits["codex"]["scope_authority"], "gauge")
+
     def test_ninety_nine_past_reset_and_stale_cache_stay_ok(self):
         future = self.now + 86400
         self.record("codex", {"windows": [["7d", 99, future]]})
@@ -1277,6 +1379,19 @@ class SharedGaugeHoldTests(unittest.TestCase):
         self.record("codex", {"windows": [["7d", 100, future]]}, age=4000)
         states, hold, limits = self.readers()
         self.assertEqual((states["codex"], hold, limits.get("codex")), ("ok", None, None))
+
+    def test_credits_do_not_override_model_eligibility(self):
+        import model_profile
+        import opencode_runtime
+        self.record("codex", {"windows": [["7d", 100, self.now + 86400]],
+                              "credits": {"has_credits": True}})
+        with mock.patch.object(model_profile, "resolve_runtime_profile", return_value=(
+                {"model": "opencode-go/model", "budget": "high"}, object())), \
+                mock.patch.object(opencode_runtime, "automatic_candidates", return_value=[
+                    {"model": "opencode-go/model", "state": "unavailable"}]):
+            states = Q.usage_states(self.jobs, profile="deep", now=self.now)
+        self.assertEqual(states["codex"], "ok")
+        self.assertTrue(states["opencode"].startswith("limited(provider-model-unavailable:"), states)
 
     def test_opencode_full_rl_window_holds_all_three_readers(self):
         reset = self.now + 86400
@@ -1312,6 +1427,12 @@ class SharedGaugeHoldTests(unittest.TestCase):
                          "limited(2099-01-01T00:00:00Z)")
         self.assertEqual(Q.harness_hold(self.jobs, "codex", now=self.now)["until_epoch"],
                          Q._text_reset_epoch("2099-01-01T00:00:00Z", self.now, os.environ))
+        self.record("codex", {"windows": [["7d", 100, self.now + 86400]],
+                              "credits": {"has_credits": True}})
+        states, hold, limits = self.readers()
+        self.assertEqual(states["codex"], "limited(2099-01-01T00:00:00Z)")
+        self.assertEqual(hold["until_epoch"], Q._text_reset_epoch("2099-01-01T00:00:00Z", self.now, os.environ))
+        self.assertNotIn("codex", limits)  # legacy hold survives independently of active gauge items
 
     def test_later_gauge_reset_wins_over_the_legacy_marker(self):
         stamp = datetime.fromtimestamp(self.now, timezone.utc).isoformat().replace("+00:00", "Z")

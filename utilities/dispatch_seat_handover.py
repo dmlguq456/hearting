@@ -527,20 +527,96 @@ def _transition_rows(seat_key: Optional[str] = None) -> list[tuple[str, dict]]:
     return out
 
 
-def _role_states(seat_key: Optional[str] = None) -> tuple[dict, set]:
+def _role_identity(relation: dict) -> str:
+    """Role evidence, independent of the ledger that happens to carry it."""
+    return json.dumps({field: relation.get(field) for field in (
+        "seat_key", "generation", "origin", "holder", "marker_digest", "targets", "lineage")},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _role_follows(before: dict, after: dict) -> bool:
+    """Only an exact extension of the recorded same-harness chain supersedes a role."""
+    if any(before.get(field) != after.get(field) for field in
+           ("seat_key", "generation", "origin", "marker_digest", "targets")):
+        return False
+    prefix, lineage = before.get("lineage") or [], after.get("lineage") or []
+    if len(prefix) >= len(lineage) or lineage[:len(prefix)] != prefix:
+        return False
+    holder = before.get("holder") or {}
+    successor = after.get("holder") or {}
+    if holder.get("harness") != successor.get("harness"):
+        return False
+    sid = holder.get("sid")
+    for edge in lineage[len(prefix):]:
+        if (not isinstance(edge, dict) or edge.get("from") != sid
+                or not edge.get("to") or not edge.get("snapshot_id")):
+            return False
+        sid = edge["to"]
+    return sid == successor.get("sid")
+
+
+def _role_transition_matches(identity: tuple, relation: dict) -> bool:
+    lineage = relation.get("lineage") or []
+    if identity[1] == "marker" or not lineage:
+        return True  # physical-only legacy evidence remains readable
+    edge = json.loads(identity[1])
+    last = lineage[-1]
+    return (isinstance(last, dict)
+            and (edge.get("from"), edge.get("sid"), edge.get("snapshot_id"))
+            == (last.get("from"), last.get("to"), last.get("snapshot_id"))
+            and edge.get("harness") == (relation.get("holder") or {}).get("harness"))
+
+
+def _current_roles(states: dict) -> dict:
+    return {identity: relation for identity, relation in states.items()
+            if not (_role_transition_matches(identity, relation)
+                    and any(_role_transition_matches(other_id, other) and _role_follows(relation, other)
+                            for other_id, other in states.items()))}
+
+
+def _role_actor(relation: dict, harness: str, sid: str) -> bool:
+    return any(relation.get(field) == {"harness": harness, "sid": sid}
+               for field in ("origin", "holder"))
+
+
+def _role_states(seat_key: Optional[str] = None, *, rows=None, marker_relations=()) -> tuple[dict, set]:
     states, released = {}, set()
-    for key, row in _transition_rows(seat_key):
+    canonical = {}
+    for relation in marker_relations:
+        identity = (_role_identity(relation), "marker")
+        states[identity] = relation
+        if relation.get("seat_key"):
+            canonical.setdefault(relation["seat_key"], {})[identity] = relation
+    for key, row in (_transition_rows(seat_key) if rows is None else rows):
         state = row.get("steward") if isinstance(row.get("steward"), dict) else {}
         for relation in state.get("roles") or ():
             if not isinstance(relation, dict) or not relation.get("generation"):
                 continue
-            identity = (key, str(relation["generation"]))
             item = dict(relation)
-            item.setdefault("seat_key", key)
+            item["seat_key"] = item.get("seat_key") or key
+            # The confirmed edge also belongs to identity. A conflicting alias
+            # cannot borrow authority merely by copying a generation or payload.
+            edge = json.dumps({field: row.get(field) for field in
+                               ("seat_key", "harness", "from", "sid", "snapshot_id", "source")},
+                              sort_keys=True, separators=(",", ":"))
+            identity = (_role_identity(item), edge)
             states[identity] = item
-        if row.get("event") == "steward-release" and row.get("generation"):
-            released.add((key, str(row["generation"])))
-    return states, released
+            if key == item["seat_key"]:
+                canonical.setdefault(key, {})[identity] = item
+        if (row.get("event") == "steward-release" and row.get("generation")
+                and row.get("seat_key", key) == key):
+            # Old release rows have no full payload. Bind them to the unique
+            # actor-compatible relation at this point in their canonical ledger.
+            history = {identity: relation for identity, relation in canonical.get(key, {}).items()
+                       if identity[1] != "marker"
+                       and str(relation.get("generation")) == str(row["generation"])}
+            basis = history or {identity: relation for identity, relation in canonical.get(key, {}).items()
+                                if str(relation.get("generation")) == str(row["generation"])}
+            candidates = {identity: relation for identity, relation in _current_roles(basis).items()
+                          if _role_actor(relation, row.get("harness"), row.get("sid"))}
+            if len(candidates) == 1:
+                released.update(candidates)
+    return _current_roles(states), released
 
 
 def steward_marker_generation(marker: dict) -> str:
@@ -577,15 +653,11 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
         roots, _source = pm.steward_marker_roots()
         markers = pm.read_steward_markers(roots)
         if seat_key is not None:
-            states, releases = _role_states(seat_key)
+            rows = _transition_rows(seat_key)
         else:
-            keys = set()
+            keys = {str(snapshot["seat"]["key"]) for snapshot in _all_snapshots()
+                    if isinstance(snapshot.get("seat"), dict) and snapshot["seat"].get("key")}
             legacy_marker = False
-            for snapshot in _all_snapshots():
-                key = ((snapshot.get("seat") or {}).get("key")
-                       if isinstance(snapshot.get("seat"), dict) else None)
-                if key:
-                    keys.add(str(key))
             for marker in markers.values():
                 key = marker.get("seat_key") if isinstance(marker, dict) else None
                 if key:
@@ -594,62 +666,39 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
                     legacy_marker = True
             if legacy_marker:
                 directory = _st().state_root() / "sessions"
-                try:
-                    keys.update(path.stem for path in directory.glob("*.jsonl")
-                                if path.is_file() and not path.is_symlink())
-                except OSError:
-                    pass
-            states, releases = {}, set()
-            for key in keys:
-                current, revoked = _role_states(key)
-                states.update(current)
-                releases.update(revoked)
+                keys.update(path.stem for path in directory.glob("*.jsonl")
+                            if path.is_file() and not path.is_symlink())
+            rows = [entry for key in sorted(keys) for entry in _transition_rows(key)]
+        marker_relations = []
+        marker_reader = getattr(pm, "steward_evidence_targets", None)
+        for (marker_harness, marker_sid), marker in markers.items():
+            if marker_reader is None:
+                continue
+            evidence = marker_reader(marker)
+            if not evidence:
+                continue
+            relation = _marker_relation(marker_harness, marker_sid, marker, evidence, seat_key)
+            if not relation.get("seat_key"):
+                # Legacy markers lack a seat. Infer one only from matching
+                # original evidence, never from a generation-only last winner.
+                keys = {saved.get("seat_key") or key for key, row in rows
+                        for saved in (row.get("steward") or {}).get("roles") or ()
+                        if isinstance(saved, dict) and all(saved.get(field) == relation.get(field)
+                            for field in ("generation", "origin", "marker_digest", "targets"))}
+                if len(keys) == 1:
+                    relation["seat_key"] = keys.pop()
+            marker_relations.append(relation)
+        states, releases = _role_states(rows=rows, marker_relations=marker_relations)
     except Exception:  # noqa: BLE001 - unknown authority is never a new role
         return []
-    seen = set()
     out = []
-    state_by_generation = {}
-    for (key, generation), relation in states.items():
-        state_by_generation[generation] = (key, relation)
-    marker_reader = getattr(pm, "steward_evidence_targets", None)
-    for (marker_harness, marker_sid), marker in markers.items():
-        if marker_reader is None:
-            continue
-        generation = steward_marker_generation(marker)
-        saved = state_by_generation.get(generation)
-        if saved:
-            key, relation = saved
-            relation = dict(relation)
-        else:
-            try:
-                relation = _marker_relation(marker_harness, marker_sid, marker,
-                                            marker_reader(marker), seat_key)
-                key = str(seat_key or "")
-            except Exception:  # noqa: BLE001
-                continue
-        identity = (key, generation)
-        relation["released"] = relation.get("released") is True or identity in releases
-        holder = relation.get("holder") or {}
-        if ((harness is not None and holder.get("harness") != harness)
-                or (sid is not None and holder.get("sid") != sid)
-                or (seat_key is not None and relation.get("seat_key") not in {None, seat_key})
-                or (relation["released"] and not include_released)
-                or identity in seen):
-            continue
-        if seat_key is not None and not relation.get("seat_key"):
-            relation["seat_key"] = seat_key
-        seen.add(identity)
-        out.append(relation)
-    for (key, generation), saved in states.items():
-        identity = (key, generation)
-        if identity in seen:
-            continue
+    for identity, saved in sorted(states.items()):
         relation = dict(saved)
         relation["released"] = relation.get("released") is True or identity in releases
         holder = relation.get("holder") or {}
         if ((harness is not None and holder.get("harness") != harness)
                 or (sid is not None and holder.get("sid") != sid)
-                or (seat_key is not None and key != seat_key)
+                or (seat_key is not None and relation.get("seat_key") not in {None, seat_key})
                 or (relation["released"] and not include_released)):
             continue
         out.append(relation)
@@ -1073,15 +1122,15 @@ def _revalidate_snapshot_steward(seat, harness: str, sid: str, payload: dict) ->
     """Recheck collected role/watch identities inside the seat writer transaction."""
     if not isinstance(payload, dict) or payload.get("schema") != 1:
         raise RuntimeError("snapshot-steward-payload-invalid")
-    current_roles = {str(row.get("generation")): row for row in
-                     resolved_steward_relations(seat_key=seat.key, include_released=True)}
+    current_roles = resolved_steward_relations(seat_key=seat.key, include_released=True)
     roles = []
     for candidate in payload.get("roles") or ():
         if not isinstance(candidate, dict) or not candidate.get("generation"):
             raise RuntimeError("snapshot-steward-role-invalid")
-        current = current_roles.get(str(candidate["generation"]))
-        if current is None:
+        matches = [row for row in current_roles if _role_identity(row) == _role_identity(candidate)]
+        if len(matches) != 1:
             raise RuntimeError("snapshot-steward-role-unresolved")
+        current = matches[0]
         if current.get("released") is True:
             continue
         holder = current.get("holder") or {}
@@ -1149,13 +1198,30 @@ def _append_transition_row(seat, row: dict) -> None:
         st._fold_ledger(seat)
 
 
-def record_steward_release(seat, harness: str, sid: str, generation: str, now=None) -> bool:
-    """Durably revoke one exact role generation under the caller's seat lock."""
+def record_steward_release(seat, harness: str, sid: str, generation: str, now=None, *, relation=None) -> bool:
+    """Revoke the unique actor-bound canonical relation under the caller's seat lock."""
     if not generation:
         return False
-    rows = [row for _key, row in _transition_rows(seat.key)
-            if row.get("event") == "steward-release" and row.get("generation") == generation]
-    if rows:
+    current = [row for row in resolved_steward_relations(seat_key=seat.key, include_released=True)
+               if str(row.get("generation")) == str(generation) and _role_actor(row, harness, sid)]
+    if relation is not None:
+        if (len(current) != 1 or not (
+                _role_identity(current[0]) == _role_identity(relation)
+                or _role_follows(relation, current[0]))):
+            return False
+    elif len(current) > 1:
+        return False
+    if current and current[0].get("released"):
+        return True
+    # Preserve the legacy physical-only writer. A bare old release is not
+    # idempotence evidence for a different relation that later reuses its label.
+    if not current and relation is not None:
+        return False
+    if not current and any(row.get("event") == "steward-release"
+                           and str(row.get("generation")) == str(generation)
+                           and row.get("seat_key", key) == seat.key
+                           and (row.get("harness"), row.get("sid")) == (harness, sid)
+                           for key, row in _transition_rows(seat.key)):
         return True
     _append_transition_row(seat, {
         "ts": _st().now_epoch() if now is None else now,
@@ -1995,18 +2061,18 @@ def _record_locked(seat, harness: str, sid: str, event: str, source: str, now: f
     if len(bindings) != len(snap["bindings"]):
         return None                                    # A -> C while A -> B stands: refused
 
-    # Resolve each role generation again inside the seat transaction. A copied
+    # Resolve each exact role again inside the seat transaction. A copied
     # snapshot is not authority after a release or a newer confirmed holder.
     snapshot_steward = snap.get("steward") if isinstance(snap.get("steward"), dict) else {}
-    current_roles = {str(row.get("generation")): row for row in
-                     resolved_steward_relations(seat_key=seat.key, include_released=True)}
+    current_roles = resolved_steward_relations(seat_key=seat.key, include_released=True)
     steward_roles = []
     for candidate in snapshot_steward.get("roles") or ():
         if not isinstance(candidate, dict) or not candidate.get("generation"):
             continue
-        current = current_roles.get(str(candidate["generation"]))
-        if not current or current.get("released"):
+        matches = [row for row in current_roles if _role_identity(row) == _role_identity(candidate)]
+        if len(matches) != 1 or matches[0].get("released"):
             continue
+        current = matches[0]
         holder = current.get("holder") or {}
         if holder.get("harness") != harness or holder.get("sid") != old:
             continue

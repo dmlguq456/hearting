@@ -6,6 +6,7 @@ windows from `limit_window_seconds` when present and keep the old 5h/7d mapping 
 legacy fallback.
 """
 import json
+import io
 import os
 import sys
 import tempfile
@@ -22,6 +23,75 @@ from fleet.model import Session  # noqa: E402
 
 
 class CodexDynamicWindowTest(unittest.TestCase):
+
+    def setUp(self):
+        patcher = mock.patch.dict(codex._ACCT, {"ts": 0.0, "data": None})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_api_and_rollout_preserve_credits_from_their_own_source(self):
+        credits = {"has_credits": True, "unlimited": False, "balance": "56446.1701575000"}
+        window = {"used_percent": 100, "window_minutes": 10080, "reset_at": 9000}
+        metadata = {"credits": credits, "spend_control_reached": None}
+        api = {"rate_limit": {"primary_window": window}, **metadata}
+        with mock.patch.object(codex, "_home", return_value="/no-home"), \
+                mock.patch("builtins.open", mock.mock_open(read_data='{"tokens":{"access_token":"tok"}}')), \
+                mock.patch.object(codex.urllib.request, "urlopen",
+                                  return_value=io.BytesIO(json.dumps(api).encode())):
+            live, reason = codex._api_usage_detail()
+        self.assertEqual(reason, "live")
+        line = json.dumps({"payload": {"rate_limits": {"primary": window, **metadata}}})
+        with tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(codex, "_home", return_value=home), \
+                mock.patch.object(codex, "_api_usage", return_value=None), \
+                mock.patch.object(codex, "_tail_token_count", return_value=line), \
+                mock.patch.object(codex.time, "time", return_value=1000):
+            os.makedirs(os.path.join(home, "sessions"))
+            with open(os.path.join(home, "sessions", "rollout.jsonl"), "w"):
+                pass
+            rollout = codex.account_usage()
+        for data in (live, rollout):
+            self.assertEqual(data["windows"], [["7d", 100, 9000.0]])
+            self.assertIsNone(data["rl_5h"])
+            self.assertEqual(data["rl_7d"], 100)
+            self.assertEqual({k: data[k] for k in metadata}, metadata)
+            self.assertTrue(codex.credits_usable(data))
+
+    def test_api_priority_ttl_and_new_success_do_not_borrow_old_credits(self):
+        first = {"windows": [["7d", 100, 9000]], "credits": {"has_credits": True}}
+        new = {"windows": [["7d", 100, 10000]]}
+        with mock.patch.object(codex, "_api_usage", side_effect=[first, new]) as api, \
+                mock.patch.object(codex.os, "walk", side_effect=AssertionError("API precedes rollout")), \
+                mock.patch.object(codex.time, "time", side_effect=[1000, 1060, 1061]):
+            self.assertEqual(codex.account_usage(), first)
+            self.assertEqual(codex.account_usage(), first)
+            self.assertEqual(codex.account_usage(), new)
+        self.assertEqual(api.call_count, 2)
+        self.assertNotIn("credits", codex._ACCT["data"])
+
+    def test_credit_predicate_requires_boolean_flags_and_no_spend_hold(self):
+        for credits in ({"has_credits": True}, {"unlimited": True},
+                        {"has_credits": True, "balance": "0"}):
+            for spend in ({}, {"spend_control_reached": None}, {"spend_control_reached": False}):
+                with self.subTest(credits=credits, spend=spend):
+                    self.assertTrue(codex.credits_usable({"credits": credits, **spend}))
+        for payload in (None, [], {}, {"credits": None}, {"credits": []},
+                        {"credits": {"has_credits": False, "unlimited": False}},
+                        {"credits": {"has_credits": "true", "unlimited": 1}},
+                        {"credits": {"has_credits": 1, "unlimited": "true"}},
+                        {"credits": {"balance": "56446.1701575000"}}):
+            with self.subTest(payload=payload):
+                self.assertFalse(codex.credits_usable(payload))
+        for spend in (True, "false", "true", 0, 1, [], {}):
+            with self.subTest(spend=spend):
+                self.assertFalse(codex.credits_usable(
+                    {"credits": {"unlimited": True}, "spend_control_reached": spend}))
+
+    def test_expired_rollout_keeps_three_tuple_and_zeroes_usage(self):
+        with mock.patch.object(codex.time, "time", return_value=1000):
+            result = codex._rates_from_payload({"rate_limits": {"primary": {
+                "used_percent": 100, "window_minutes": 10080, "resets_at": 999}}})
+        self.assertEqual(result, (None, 0, [["7d", 0, 999.0]]))
 
     def test_wham_primary_604800_labels_as_7d_not_5h(self):
         with mock.patch("fleet.collectors.codex.time.time", return_value=1000.0):

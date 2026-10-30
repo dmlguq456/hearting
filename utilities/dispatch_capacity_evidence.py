@@ -30,7 +30,12 @@ except ImportError:  # pragma: no cover - platforms without advisory flock use d
 HARNESSES = ("claude", "codex", "opencode")
 WINDOWS = {"five_hour": 6 * 3600, "seven_day": 8 * 86400,
            "seven_day_opus": 8 * 86400, "seven_day_sonnet": 8 * 86400}
-CACHE_SCHEMA = 1
+CACHE_SCHEMA = 2
+# Exact historical quota reasons, not every diagnostic containing "limit".
+# In particular, model context/config discovery failure is not quota evidence.
+_LEGACY_QUOTA_NOTES = frozenset({
+    "dead-limit", "dead-session-limit", "dead-usage-limit", "dead-rate-limit", "dead-quota-limit",
+})
 # Tests switch this off to compare the cached answer with a direct computation.
 _DISK_CACHE = True
 
@@ -223,7 +228,7 @@ def _build_snapshot(lines, now, previous=None):
                     record.update(e=earlier["e"], ls=earlier["ls"])
                 native.append(record)
         harness = meta.get("harness") or meta.get("owner_harness")
-        if harness in HARNESSES and (re.match(r"dead-[a-z-]*limit", note)
+        if harness in HARNESSES and (note in _LEGACY_QUOTA_NOTES
                                      or (note == "dead-capacity" and meta.get("failure_class") != "pass")):
             legacy.append({"t": fields[0], "h": harness, "a": meta.get("attempt_id"),
                            "s": meta.get("quota_scope"), "k": meta.get("quota_scope_kind"),
@@ -595,7 +600,8 @@ def gauge_limits(now):
 
     A window at 100% used with a future reset is a real usage limit, not the
     soft ordering gate; `harness-capacity.gauge_limit_epoch` is the one reader
-    (manual score, staleness and unknown-reset keep its existing rules). A
+    (Codex usable credits lift only the gauge hold; manual score, staleness
+    and unknown-reset keep their existing rules). A
     missing or broken capacity reader leaves today's answer in place.
     """
     limits = {}

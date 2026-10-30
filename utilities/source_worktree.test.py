@@ -805,6 +805,122 @@ class Sha256PreparationTest(SourceWorktreeFixture):
         self.assertEqual((ready["state"], ready["path"]), ("ready", record["path"]))
 
 
+class PreparationObservationTest(SourceWorktreeFixture):
+    def test_same_tip_checks_objects_and_uses_one_inventory_lazily(self):
+        git(self.primary, "fetch", "-q", "origin")
+        real = R._worktree_git
+        calls = []
+
+        def observe(cwd, *args):
+            calls.append(args)
+            return real(cwd, *args)
+
+        with mock.patch.object(R, "_worktree_git", side_effect=observe):
+            made = R.prepare_isolated_worktree(self.primary, "same-tip", artifact_root=self.artifact_root)
+        self.assertEqual(made["state"], "created", made)
+        self.assertEqual(made["base_sha"], self.remote_sha)
+        self.assertFalse(any(a[0] == "fetch" for a in calls))
+        self.assertEqual(sum(a[0] == "rev-list" for a in calls), 1)
+        self.assertEqual(sum(a[0] == "for-each-ref" for a in calls), 1)
+        self.assertEqual(calls.count(("worktree", "list", "--porcelain")), 1)
+        self.assertLess(sum(a[0] == "check-ref-format" for a in calls), 8)
+        print("prepare-normal-counts=" + json.dumps({
+            "fetch": 0, "refs": 1, "worktrees": 1,
+            "check_ref_format": sum(a[0] == "check-ref-format" for a in calls)}))
+
+    def test_linked_identity_does_not_probe_unrelated_worktrees(self):
+        linked = self.primary.parent / "linked"
+        git(self.primary, "worktree", "add", "-q", "-b", "linked", str(linked))
+        real = R._worktree_git
+        with mock.patch.object(R, "_worktree_git", wraps=real) as observed:
+            made = R.prepare_isolated_worktree(linked, "from-linked", artifact_root=self.artifact_root)
+        self.assertEqual(made["state"], "created", made)
+        self.assertEqual(sum(c.args[1:] == ("worktree", "list", "--porcelain")
+                             for c in observed.call_args_list), 1)
+
+    def test_changed_tip_fetches_and_pins_current_remote(self):
+        with mock.patch.object(R, "_worktree_git", wraps=R._worktree_git) as observed:
+            made = R.prepare_isolated_worktree(self.primary, "changed-tip", artifact_root=self.artifact_root)
+        self.assertEqual(made["state"], "created", made)
+        self.assertEqual(made["base_sha"], self.remote_sha)
+        self.assertEqual(sum(c.args[1] == "fetch" for c in observed.call_args_list), 1)
+
+    def test_same_tip_missing_blob_uses_fetch_and_refuses_when_fetch_fails(self):
+        # Remove only a fixture-owned loose blob after refs agree. rev-parse
+        # still resolves the commit, which alone must not authorize reuse.
+        git(self.primary, "fetch", "-q", "origin")
+        blob = git(self.primary, "rev-parse", self.remote_sha + ":remote-tip.txt")
+        common = Path(R._git_common_dir(self.primary))
+        (common / "objects" / blob[:2] / blob[2:]).unlink()
+        real = R._worktree_git
+        calls = []
+
+        def fail_fetch(cwd, *args):
+            calls.append(args)
+            if args[0] == "fetch":
+                return subprocess.CompletedProcess([], 128, "", "fixture missing-object fetch refused")
+            return real(cwd, *args)
+
+        with mock.patch.object(R, "_worktree_git", side_effect=fail_fetch):
+            result = R.prepare_isolated_worktree(self.primary, "missing-blob", artifact_root=self.artifact_root)
+        self.assertEqual(result["reason"], "remote-default-fetch-failed", result)
+        self.assertEqual(sum(a[0] == "fetch" for a in calls), 1)
+        self.assertFalse(any(a[:2] == ("worktree", "add") for a in calls))
+
+    def test_unknown_advertised_oid_keeps_existing_fetch_path(self):
+        git(self.primary, "fetch", "-q", "origin")
+        real = R._worktree_git
+
+        def no_oid(cwd, *args):
+            if args[0] == "ls-remote":
+                return subprocess.CompletedProcess([], 0, "ref: refs/heads/main\tHEAD\n", "")
+            return real(cwd, *args)
+
+        with mock.patch.object(R, "_worktree_git", side_effect=no_oid) as observed:
+            base, reason, _ = R._remote_default_base(self.primary)
+        self.assertIsNone(reason)
+        self.assertEqual(base["sha"], self.remote_sha)
+        self.assertEqual(sum(c.args[1] == "fetch" for c in observed.call_args_list), 1)
+
+    def test_initializing_partial_add_never_becomes_ready(self):
+        real = R._worktree_git
+
+        def partial_add(cwd, *args):
+            result = real(cwd, *args)
+            if args[:2] == ("worktree", "add") and result.returncode == 0:
+                path = Path(args[2])
+                gitdir = Path(git(path, "rev-parse", "--absolute-git-dir"))
+                (gitdir / "locked").write_text("initializing\n")
+                (gitdir / "index").unlink()
+                result = subprocess.CompletedProcess([], 127, "", "interrupted initializing checkout")
+                result.git_uncertain = True
+            return result
+
+        with mock.patch.object(R, "_worktree_git", side_effect=partial_add):
+            failed = R.prepare_isolated_worktree(self.primary, "partial", artifact_root=self.artifact_root)
+        self.assertEqual(failed["state"], "failed", failed)
+        with mock.patch.object(R, "_remote_default_base", side_effect=AssertionError("reserved identity")):
+            retry = R.prepare_isolated_worktree(self.primary, "partial", artifact_root=self.artifact_root)
+        self.assertEqual(retry["reason"], "preparation-identity-conflict", retry)
+        record, = (self.artifact_root / ".runtime/worktree-preparation").glob("*.json")
+        self.assertEqual(json.loads(record.read_text())["state"], "reserved")
+        self.assertTrue((Path(git(failed["path"], "rev-parse", "--absolute-git-dir")) / "locked").exists())
+
+    def test_interruption_in_slow_observation_allocates_no_branch(self):
+        real = R._worktree_git
+
+        def interrupted(cwd, *args):
+            if args[0] == "ls-remote":
+                raise KeyboardInterrupt("fixture slow advertisement cancelled")
+            return real(cwd, *args)
+
+        before = git(self.primary, "for-each-ref", "--format=%(refname)")
+        with mock.patch.object(R, "_worktree_git", side_effect=interrupted), self.assertRaises(KeyboardInterrupt):
+            R.prepare_isolated_worktree(self.primary, "cancelled", artifact_root=self.artifact_root)
+        self.assertEqual(git(self.primary, "for-each-ref", "--format=%(refname)"), before)
+        self.assertEqual(list((self.artifact_root / ".runtime/worktree-preparation").glob("*.json")), [])
+
+
 class GitRefNamespacePreparationTest(SourceWorktreeFixture):
     def test_native_common_git_ref_collision_uses_a_suffix_and_preserves_marker(self):
         common = Path(git(self.primary, "rev-parse", "--path-format=absolute", "--git-common-dir"))

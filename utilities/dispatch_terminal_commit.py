@@ -284,9 +284,11 @@ def _record_attempt(request: TerminalCommitRequest, reason: str, detail: str = "
                         "first_ns": first if isinstance(first, int) else now, "last_ns": now})
 
 
-def last_owner_refusal(request: TerminalCommitRequest) -> Optional[dict[str, Any]]:
+def last_owner_refusal(request: TerminalCommitRequest, *, observer=None) -> Optional[dict[str, Any]]:
     """Read the newest valid refusal for this exact owner transaction only."""
     directory = _commit_state_path(request).parent / "attempts"
+    if observer is not None:
+        observer("file", directory)
     directory_fd = None
     try:
         if not getattr(os, "O_NOFOLLOW", 0) or not getattr(os, "O_DIRECTORY", 0):
@@ -302,6 +304,8 @@ def last_owner_refusal(request: TerminalCommitRequest) -> Optional[dict[str, Any
         for name in entries[:4096]:
             if not re.fullmatch(r"[0-9a-f]{64}\.json", name):
                 continue
+            if observer is not None:
+                observer("file", directory / name)
             fd = None
             try:
                 before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
@@ -1889,7 +1893,7 @@ def owner_workflow_continuation(jobs, owner_attempt_id, route_file):
     )
 
 
-def _historical_request(jobs, status, metadata, *, selected_registry_rows=None):
+def _historical_request(jobs, status, metadata, *, selected_registry_rows=None, observer=None):
     """Locate a past transaction without granting current launch authority."""
     if not _completion_owner_choice(
             jobs, status, metadata,
@@ -1901,8 +1905,10 @@ def _historical_request(jobs, status, metadata, *, selected_registry_rows=None):
     # Standard owners follow recorded route adoption. Quick owners seal route_*.
     owner, _ = owner_route_binding.resolve_owner_route_lifecycle(
         Path(jobs), owner_attempt_id=metadata["attempt_id"],
-        registry_rows=selected_registry_rows)
+        registry_rows=selected_registry_rows, **({"observer": observer} if observer is not None else {}))
     path = Path(owner.route_file if owner else meta.get("route_file", "")).resolve()
+    if observer is not None:
+        observer("file", path)
     route = json.loads(path.read_text())
     digest = route_identity.route_hash(route)
     if (route.get("route_hash") != digest or route.get("route_id") != route_identity.route_id_from_hash(digest)
@@ -1919,6 +1925,59 @@ def _historical_request(jobs, status, metadata, *, selected_registry_rows=None):
     if path.parent.name == "routes" and path.parent.parent.name == ".runtime":
         root = path.parent.parent.parent
     return TerminalCommitRequest(path, metadata["attempt_id"], Path(jobs), root)
+
+
+def recorded_owner_completion_notice(jobs, status, metadata, *, observer=None):
+    """Last recorded diagnosis only; never verify settlement or publication.
+
+    A sealed checkpoint is still pending here. Only the exact stored completion
+    receipt can retire a notice; this reader grants no completion authority.
+    """
+    result = {"attempt_id": metadata.get("attempt_id"), "state": "closure-pending"}
+    try:
+        if observer is not None:
+            observer("file", Path(jobs))
+        request = _historical_request(jobs, status, metadata, observer=observer)
+        if request is None:
+            return {**result, "state": "not-applicable"}
+        route = json.loads(request.route_file.read_text())
+        result.update(route_id=route["route_id"], route_hash=route["route_hash"],
+                      artifact_root=str(request.artifact_root), checkpoint="not-claimed")
+        path = _commit_state_path(request)
+        if observer is not None:
+            observer("file", path)
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            fd = None
+        if fd is not None:
+            with os.fdopen(fd, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 64 * 1024:
+                    raise ValueError("notice-transaction-unreadable")
+                state = json.loads(stream.read(64 * 1024 + 1))
+            if (not isinstance(state, dict) or state.get("schema_version") != 1
+                    or state.get("route_id") != route["route_id"]
+                    or state.get("route_hash") != route["route_hash"]
+                    or state.get("owner_attempt_id") != request.owner_attempt_id
+                    or state.get("state") not in {"claimed", "route-closed", "producer-finalized",
+                                                   "not-applicable", "owner-envelope-sealed"}
+                    or not all(isinstance(state.get(k), str) and state[k]
+                               for k in ("terminal_marker_digest", "producer_binding_digest"))
+                    or state.get("terminal_commit_id") != terminal_commit_id(
+                        route_id=route["route_id"], route_hash=route["route_hash"],
+                        owner_attempt_id=request.owner_attempt_id,
+                        marker_digest=state["terminal_marker_digest"],
+                        producer_digest=state["producer_binding_digest"])):
+                raise ValueError("notice-transaction-binding-mismatch")
+            result["checkpoint"] = state["state"]
+        refusal = last_owner_refusal(request, observer=observer)
+        if refusal is not None:
+            result.update(last_refusal=refusal, last_refusal_reason=refusal["reason"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        result.update(state="unknown", reason=getattr(exc, "code", "recorded-diagnosis-unavailable"))
+        result.pop("checkpoint", None)
+    return result
 
 
 def _observe_settled_transaction(request, state, *, selected_registry_rows=None):

@@ -56,6 +56,12 @@ def _draw_context_gauge(grid, x, y, pct, window):
     grid.put(x + 9, y, f"{pct:3d}%", key if pct >= 50 else "dim")
 
 
+def _repo_column_width(use, labels, reserve):
+    """Give observed display names room, then share a narrow pane with the other columns."""
+    wanted = max((_seg_width(repo_rule_label(label)) for label in labels), default=0)
+    return min(max(4, wanted), max(4, min(use // 2, use - reserve))) if wanted else 0
+
+
 def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     use = max(0, grid.cols - x - 2)
     right = x + use + 1
@@ -63,8 +69,14 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     grid.fill(x, grid.cols - 1, y, " ", tint=234)
     grid.put(x - 2, y, "┃", "line")
     grid.put(1, y, "OVERVIEW", "head", tint=236)
-    c = _overview_columns(use)
-    for offset, label in ((IND + 3, "ID"), (c["h"], "HARNESS"),
+    repo_w = _repo_column_width(use, (row.get("repo") for row in vm.sessions), 44)
+    shift = repo_w + GAP if repo_w else 0
+    c = _overview_columns(use - shift)
+    for key in ("h", "title", "ctx", "now"):
+        if c[key] is not None:
+            c[key] += shift
+    for offset, label in (*(((3, "REPO"),) if repo_w else ()),
+                          (IND + 3 + shift, "ID"), (c["h"], "HARNESS"),
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()), (c["ctx"], "CTX"),
                           *(([(c["now"], "NOW")] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
@@ -98,7 +110,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
             if page_scope:
                 grid.add_hit(y, x, right, ("scope", "repo:" + str(repo.get("id", name))))
             grid.put(x + 1, y, "┈ ", "line")
-            end = grid.put(x + 3, y, name + "/", "title_dim") + 2
+            end = grid.put(x + 3, y, repo_rule_label(name, max(1, use - 6)),
+                           "title_dim", limit=x + use - 1) + 2
             grid.put(end, y, " ", "branch_s")
             for xx in range(end + 2, right):
                 grid.put(xx, y, "┈", "line")
@@ -120,18 +133,22 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 marker, marker_key = "●", "blocked"
             elif session.get("answer_wait_marker") == "◑":
                 marker, marker_key = "◑", "lvl_y"
-            grid.put(x + IND + 1, y, marker, marker_key)
-            tag_x = x + IND + 3
+            if repo_w:
+                grid.put(x + 3, y, repo_rule_label(session.get("repo"), repo_w),
+                         "title_dim", limit=x + 3 + repo_w)
+            grid.put(x + IND + 1 + shift, y, marker, marker_key)
+            tag_x = x + IND + 3 + shift
             grid.put(tag_x, y, "[", "dim")
             grid.put(tag_x + 1, y, tag, "steward" if session.get("steward") else "soft")
             grid.put(tag_x + 1 + len(tag), y, "]", "dim")
             if session.get("steward"):
-                grid.put(x + IND + 8, y, "⚑", "steward")
+                grid.put(x + IND + 8 + shift, y, "⚑", "steward")
             harness = str(session.get("harness") or "other")
             if c["narrow"]:
-                grid.put(x + c["h"], y, harness, "hb_" + harness)
+                grid.put(x + c["h"], y, harness, "hb_" + harness, limit=x + c["title"] - GAP)
                 if session.get("effort"):
-                    grid.put(x + c["h"] + len(harness), y, "·" + str(session["effort"]), "eff_xhigh")
+                    grid.put(x + c["h"] + len(harness), y, "·" + str(session["effort"]), "eff_xhigh",
+                             limit=x + c["title"] - GAP)
             elif not session.get("model"):
                 # No model value: the harness alone, as the default board draws a row without telemetry.
                 grid.put(x + c["h"], y, harness, "hb_" + harness)
@@ -496,15 +513,19 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False)
     if tag:
         tag_text = _clip(tag_text, tag_width)
     tag_room = tag_width + 2 + GAP if tag else 0
-    room = x1 - x0 - 2 - tag_room - 16 - GAP - 24 - GAP - AGE_W
-    own = room >= 8 + GAP + (12 + GAP if repo else 0)
-    repo = repo and room >= 12 + GAP
+    room = max(0, x1 - x0 - 2 - tag_room - AGE_W - GAP)
+    repo_text = repo_rule_label(route.get("repo")) if repo else ""
+    repo_w = min(_seg_width(repo_text), max(0, min(room // 2, room - 24)))
+    own = room - (repo_w + GAP if repo_w else 0) >= 8 + GAP + 12 + GAP + 12
     state = "working" if route.get("activity") == "running" else route.get("state")
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
                           "blocked": ("●", "g_blocked"), "done": ("✓", "grp_live")}.get(
                               state, ("●", "g_work_off"))
     grid.put(x0, y, marker, marker_key)
     x = x0 + 2
+    if repo_w:
+        grid.put(x, y, _clip(repo_text, repo_w), "title_dim", limit=x + repo_w)
+        x += repo_w + GAP
     if tag:
         grid.put(x, y, "[", "dim")
         grid.put(x + 1, y, tag_text, "steward" if steward else "soft", limit=x + 1 + tag_width)
@@ -512,13 +533,10 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False)
         x += tag_width + 2 + GAP
     if own:
         owner = str(route.get("harness") or "·")
-        grid.put(x, y, owner, "hb_" + owner)
+        grid.put(x, y, owner, "hb_" + owner, limit=x + 8)
         x += 8 + GAP
-    if repo:
-        grid.put(x, y, repo_rule_label(route.get("repo"), 12), "title_dim")
-        x += 12 + GAP
-    title_width = max(16, min(48, (x1 - x) // 3))
-    title_width = min(title_width, max(1, x1 - _seg_width(age) - 1 - x))     # the title ends before AGE starts
+    title_width = min(48, max(6, int((x1 - x - AGE_W - GAP) * .45)))
+    title_width = min(title_width, max(0, x1 - _seg_width(age) - GAP - x))
     grid.put(x, y, _clip(str(route.get("title") or "·"), title_width), "soft")
     x += title_width + GAP
     _draw_route_progress(grid, x, x1 - AGE_W - GAP, y, route)
@@ -670,6 +688,9 @@ def _overview_columns(use):
     narrow = use < 100
     harn_w, ctx_w = (13, 4) if narrow else (HARN_W, CTX_W)
     h = IND + 3 + 6 + GAP
+    if use < 44:
+        h = min(h, max(11, use - 27))
+        harn_w = min(harn_w, max(8, use - h - ctx_w - AGE_W - 2 * GAP))
     title = h + harn_w + GAP
     flex = use - title - ctx_w - AGE_W - 3 * GAP
     title_w = min(48, max(12 if narrow else 24, int(flex * 0.45)))
@@ -725,19 +746,25 @@ def draw_routes(grid, vm, state, x=34, y=3):
     routes = tuple(vm.routes or ())
     use = max(0, grid.cols - x - 2)
     right, bottom = x + use + 1, grid.rows - 5
-    cols = _route_columns(use)
+    repo_w = _repo_column_width(use, (route.get("repo") for route in routes), 46)
+    shift = repo_w + GAP if repo_w else 0
+    cols = _route_columns(use - shift)
+    for key in ("st", "title", "kind", "own", "ctx", "prog"):
+        cols[key] += shift
     slim = cols["slim"]
     gap = cols["gap"]
     grid.fill(x, right, y, " ", tint=234)
-    headers = [(cols["st"], "ID"), (cols["title"], "ROUTE"), (cols["kind"], "KIND"),
+    headers = ([(3, "REPO")] if repo_w else []) + [(cols["st"], "ID"), (cols["title"], "ROUTE"), (cols["kind"], "KIND"),
                (cols["own"], "HARNESS")]
     if not slim:
         headers.append((cols["ctx"], "CTX"))
     headers += [(cols["prog"], "PROGRESS"), (use - 2, "AGE")]
-    for col, name in headers:
+    for index, (col, name) in enumerate(headers):
         # a label that would run into the AGE label is left out, never overlapped
-        edge = right if name == "AGE" else x + use - 2
-        grid.put(x + col, y, name, "head", tint=234, limit=edge)
+        next_col = headers[index + 1][0] if index + 1 < len(headers) else use + 1
+        edge = right if name == "AGE" else min(x + next_col - gap, x + use - 2)
+        if x + col + len(name) <= edge:
+            grid.put(x + col, y, name, "head", tint=234, limit=edge)
     y += 1
     repos = [r.get("id", r.get("name", "")) for r in vm.repos]
     order = repos + sorted({str(route.get("repo") or "") for route in routes} - set(repos))
@@ -750,7 +777,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
             if str(getattr(state, "view", "")) not in _VIEW_NAMES:
                 grid.add_hit(y, x, right, ("scope", "repo:" + str(repo)))
             grid.put(x + 1, y, "┈ ", "line")
-            end = grid.put(x + 3, y, _clip(str(repo) + "/", min(24, max(1, use - 6))),
+            end = grid.put(x + 3, y, _clip(str(repo) + "/", max(1, use - 6)),
                            "title_dim", limit=x + use - 1)
             for xx in range(end + 1, right):
                 grid.put(xx, y, "┈", "line")
@@ -777,6 +804,9 @@ def draw_routes(grid, vm, state, x=34, y=3):
                            "blocked": ("●", "g_blocked"), "dead": ("✕", "g_dead"),
                            "done": ("✓", "done"), "idle": ("●", "g_work_off")}.get(
                                status, ("●", "g_work_off"))
+            if repo_w:
+                grid.put(x + 3, y, repo_rule_label(route.get("repo"), repo_w),
+                         "title_dim", limit=x + 3 + repo_w)
             grid.put(x + cols["st"], y, marker, key)
             tag = str(route.get("session_tag") or route.get("past_from") or "")
             if tag:
@@ -822,6 +852,19 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _tint_row(grid, y, x - 1, right, 236)
             y += 1
             worker = route.get("worker") or ()
+            worker_contexts = tuple(route.get("worker_contexts") or ())
+            context_index = route.get("worker_context_index")
+            body_context = (worker_contexts[context_index]
+                            if worker and worker[0] != "resource" and type(context_index) is int
+                            and 0 <= context_index < len(worker_contexts) else None)
+            context_text = ("CTX ·" if body_context.get("context") is None else
+                            f"CTX {body_context['context']}%") if body_context is not None else ""
+            progress_end = x + use - (9 if link else 0)
+            worker_owner_limit = min(owner_limit, x + use - 6 - gap) if link else owner_limit
+            context_x = progress_end - _seg_width(context_text)
+            inline_context = body_context is not None and (
+                not slim or context_x - (x + cols["prog"]) >= 10)
+            worker_progress_end = context_x - gap if inline_context and slim else progress_end
             label = str(worker[0]) if worker else "worker"
             unit = route.get("worker_unit")
             route_end = x + cols["kind"] - gap
@@ -858,18 +901,29 @@ def draw_routes(grid, vm, state, x=34, y=3):
                              "hb_opencode": "version_release"}.get(style, style)
                 elif style == "eff_medium":
                     style = "branch_s"
-                grid.put(cursor, y, text, style, limit=owner_limit)
+                if link and worker_owner_limit < owner_limit:
+                    text = _clip(text, max(0, worker_owner_limit - cursor))
+                grid.put(cursor, y, text, style, limit=worker_owner_limit)
                 from .grid import cell_width
                 cursor += sum(cell_width(char) for char in str(text))
             cursor = x + cols["prog"]
             for text, style in (worker[2] if len(worker) > 2 else ()):
                 if "running" in str(text):
+                    # A clipped initial is neither a readable state nor a blink target.
+                    if worker_progress_end - cursor < len("running"):
+                        break
                     style = route.get("worker_stage_key") or (hue, 1, 0)
                     if worker_running and not getattr(grid, "beat", 1):
                         style = (hue, 0, 1)
-                grid.put(cursor, y, text, style, limit=x + use - (9 if link else 0))
+                grid.put(cursor, y, text, style, limit=worker_progress_end)
                 from .grid import cell_width
                 cursor += sum(cell_width(char) for char in str(text))
+            if inline_context:
+                if slim:
+                    grid.put(context_x, y, context_text, "dim", limit=progress_end)
+                else:
+                    _draw_context_gauge(grid, x + cols["ctx"], y,
+                                        body_context.get("context"), body_context.get("window"))
             if link:
                 grid.put(x + use - 6, y, "open ▸", "accent")
             if history and not is_open:
@@ -880,8 +934,16 @@ def draw_routes(grid, vm, state, x=34, y=3):
                 _tint_row(grid, y - 1, x - 1, right, 236)
                 _tint_row(grid, y, x - 1, right, 236)
             y += 1
-            for index, worker_context in enumerate(route.get("worker_contexts") or ()):
+            for index, worker_context in enumerate(worker_contexts):
+                if body_context is not None and index == context_index and inline_context:
+                    continue
                 grid.add_hit(y, x, right, action)
+                if body_context is not None and index == context_index:
+                    # At the smallest widths keep the metric as a continuation,
+                    # without presenting the same worker's identity a second time.
+                    grid.put(route_start, y, context_text, "dim", limit=x + use)
+                    y += 1
+                    continue
                 label = str(worker_context.get("stage") or "worker")
                 grid.put(route_start, y, _clip(f"└ {label} · {index + 1}", route_end - route_start),
                          "title_dim", limit=route_end)
@@ -1333,7 +1395,7 @@ def _route_columns(use):
     if use < 60:
         return {"narrow": True, "slim": True, "tiny": True, "gap": 1, "age_w": AGE_W + 1,
                 "st": 3, "title": 10, "title_w": 5, "kind": 16, "own": 25,
-                "own_w": 8, "ctx": 32, "prog": 33}
+                "own_w": 10, "ctx": 35, "prog": 36}
     narrow, slim = use < 150, use < 120
     title, kind = (10, 12) if slim else (12, 15)
     own_w, ctx_w = (10 if slim else 13 if narrow else 26), (0 if slim else 13)

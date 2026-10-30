@@ -210,6 +210,10 @@ remembers long operating documents.
 
 ## 6. Prove completion through the consumer path
 
+When a deferred publication later completes, its verified current marker can
+prove completion even if the earlier attention notification remains recorded.
+Preserve that notification as history; it must not veto the recovered result.
+
 Verification of a fix covers not only normal completion but also late results,
 duplicate retries, unobservable state, supervisor exit and restart, delivery
 failure, and a busy owner. Choose regressions that fit the change's risk, and

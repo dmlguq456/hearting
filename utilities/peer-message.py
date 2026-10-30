@@ -3954,38 +3954,46 @@ def cmd_release(args):
 
         seat = handover.pane_seat(os.environ, args.harness, args.session_id)
 
-        generations_by_seat = {}
-        def add_generation(key, generation):
-            if key and generation:
-                generations_by_seat.setdefault(str(key), set()).add(str(generation))
-
+        relations = handover.resolved_steward_relations(include_released=True)
         marker = tidy.read_json(path)
         if isinstance(marker, dict) and is_steward_marker(marker):
-            encoded = json.dumps(marker, ensure_ascii=False, sort_keys=True,
-                                 separators=(",", ":")).encode("utf-8")
-            add_generation(getattr(seat, "key", None),
-                           marker.get("generation") or hashlib.sha256(encoded).hexdigest())
-        for relation in handover.resolved_steward_relations(include_released=True):
+            key = marker.get("seat_key") or getattr(seat, "key", None)
+            if key:
+                # Preserve the original own-marker path if unrelated global
+                # discovery is unavailable; interpretation stays in the common reader.
+                scoped = handover.resolved_steward_relations(seat_key=str(key), include_released=True)
+                if not any((row.get("origin") or {}) == {"harness": args.harness, "sid": args.session_id}
+                           and row.get("generation") == handover.steward_marker_generation(marker)
+                           for row in scoped):
+                    raise RuntimeError("steward-release-relation-unresolved")
+                known = {handover._role_identity(row) for row in relations}
+                relations += [row for row in scoped if handover._role_identity(row) not in known]
+        relations_by_seat = {}
+        for relation in relations:
             origin = relation.get("origin") or {}
             holder = relation.get("holder") or {}
             if ((origin.get("harness") == args.harness and origin.get("sid") == args.session_id)
                     or (holder.get("harness") == args.harness and holder.get("sid") == args.session_id)):
-                add_generation(relation.get("seat_key") or getattr(seat, "key", None),
-                               relation.get("generation"))
+                key = relation.get("seat_key") or getattr(seat, "key", None)
+                if key and relation.get("generation"):
+                    bound = dict(relation, seat_key=str(key))
+                    relations_by_seat.setdefault(str(key), []).append(bound)
 
-        for key, generations in sorted(generations_by_seat.items()):
+        for key, relations in sorted(relations_by_seat.items()):
             with tidy.seat_lock(key):
                 ledger_seat = tidy.Seat("pane", key)
-                for generation in sorted(generations):
-                    handover.record_steward_release(
-                        ledger_seat, args.harness, args.session_id, generation)
+                for relation in relations:
+                    if not handover.record_steward_release(
+                            ledger_seat, args.harness, args.session_id,
+                            relation["generation"], relation=relation):
+                        raise RuntimeError("steward-release-relation-unresolved")
 
         try:
             # destructive-ok: reason=caller-requested release after exact generation tombstone; boundary=<dispatch-state-root>/peer-steward/<harness>/<sid>.json
             path.unlink()
             result = "released"
         except FileNotFoundError:
-            result = "released" if generations_by_seat else "not-marked"
+            result = "released" if relations_by_seat else "not-marked"
         if result == "released":
             _steward_check("settle_session", args.harness, args.session_id,
                            reason="role-released")

@@ -640,8 +640,8 @@ check_install_layout_opencode_projection() {
   [ -f INSTALL_LAYOUT.md ] || { fail_msg "INSTALL_LAYOUT.md is missing"; return; }
 
   if is_mechanized_install_layout; then
-    check_mechanized_install_projection opencode \
-      "opencode.symlink.hearting opencode.symlink.agent-agents.md opencode.symlink.hearting-readme.md opencode.symlink.agent-core opencode.symlink.agent-capabilities opencode.symlink.agent-roles opencode.symlink.agent-bin opencode.symlink.agent-tools opencode.symlink.agent-utilities opencode.symlink.agent-skills opencode.symlink.agent-agents opencode.symlink.agent-commands opencode.symlink.hearting-guards.js"
+    OPENCODE_RUNTIME_VERSION=2.0.32 check_mechanized_install_projection opencode \
+      "opencode.symlink.hearting opencode.symlink.agent-agents.md opencode.symlink.hearting-readme.md opencode.symlink.agent-core opencode.symlink.agent-capabilities opencode.symlink.agent-roles opencode.symlink.agent-bin opencode.symlink.agent-tools opencode.symlink.agent-utilities opencode.symlink.agent-skills opencode.symlink.agent-agents opencode.symlink.agent-commands opencode.render.index.ts"
     return
   fi
 
@@ -1280,7 +1280,7 @@ check_codex_utility_projection() {
   # codex-adapter-parity audit P-40 (2026-07-04): derived under-projection completeness pair — every
   # top-level utilities/* entry must be classified projected or deferred, else fail loud (closes the
   # leak window where a newly added utility silently has no projection decision).
-  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py token-budget.py token-budget-experiment.py worker_bootstrap.py codex_tui_config.py"
+  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py token-budget.py token-budget-experiment.py worker_bootstrap.py codex_tui_config.py resource_execution_environment.py"
   UTILITY_DEFERRED=$(census utility-deferred)
   utility_count=0
   for f in utilities/*; do
@@ -2319,7 +2319,7 @@ check_opencode_utility_projection() {
   # codex-adapter-parity audit P-40 (2026-07-04): derived under-projection completeness pair — every
   # top-level utilities/* entry must be classified projected or deferred, else fail loud (closes the
   # leak window where a newly added utility silently has no projection decision).
-  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py worker_bootstrap.py codex_tui_config.py"
+  UTILITY_PROJECTED="agent-home.sh artifact-root.sh agent-worklog-state.sh harness-status.sh worktree-cleanup.py dispatch-route.sh dispatch-defaults.py worker_bootstrap.py codex_tui_config.py resource_execution_environment.py"
   UTILITY_DEFERRED=$(census utility-deferred)
   utility_count=0
   for f in utilities/*; do

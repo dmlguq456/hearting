@@ -631,6 +631,57 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
         with handover.lineage_effect_lock(meta, self.jobs_path, "warm-admission-Z") as current:
             self.assertTrue(current)
 
+    def test_history_pass_reads_hashes_and_summarizes_each_ledger_once(self):
+        seats = [self.edge("claude", f"history-{i}-A", f"history-{i}-B") for i in range(5)]
+        for i, seat in enumerate(seats):
+            tidy._append_ledger_entry(seat, dict(event="start", harness="claude", sid=f"history-{i}-B", ts=2))
+        paths = set((tidy.state_root() / "sessions").glob("*.jsonl"))
+        before = {path: self.snapshot(path) for path in paths}
+        original_read = tidy.read_bytes
+        reads = Counter()
+        def read(path):
+            if Path(path) in paths:
+                reads[Path(path)] += 1
+            return original_read(path)
+        def history(context):
+            return [tidy.seat_lineage(seat, harness="claude", sid=f"history-{i}-B", read_context=context)
+                    for i, seat in enumerate(seats)]
+        with mock.patch.object(tidy, "read_bytes", side_effect=read), \
+                mock.patch.object(tidy, "_summarize_sessions", wraps=tidy._summarize_sessions) as summarize, \
+                mock.patch.object(tidy, "_lineage_transcript", return_value={"path": None, "status": "missing"}):
+            first = history(PeerReadContext())
+            self.assertEqual(reads, Counter(paths))
+            self.assertEqual(summarize.call_count, len(paths))
+            self.assertEqual(first, history(PeerReadContext()))
+            self.assertEqual(reads, Counter({path: 2 for path in paths}))
+            self.assertEqual(summarize.call_count, 2 * len(paths))
+            for i, seat in enumerate(seats):
+                self.assertEqual(first[i], tidy.seat_lineage(seat, harness="claude", sid=f"history-{i}-B"))
+        self.assertEqual({path: self.snapshot(path) for path in paths}, before)
+
+    def test_history_pass_replacement_outage_and_recovery_invalidate_summary(self):
+        seat = self.edge("claude", "history-change-A", "history-change-B")
+        tidy._append_ledger_entry(seat, dict(event="start", harness="claude", sid="history-change-B", ts=2))
+        context = PeerReadContext()
+        with mock.patch.object(tidy, "_lineage_transcript", return_value={"path": None, "status": "missing"}):
+            first = tidy.seat_lineage(seat, harness="claude", sid="history-change-B", read_context=context)
+            self.assertTrue(first)
+            self.assertIsNotNone(context._lineage_summary)
+            tidy._append_ledger_entry(seat, dict(event="succession", source="tidy-clear", harness="claude",
+                                      sid="history-change-C", **{"from": "history-change-B"}, ts=3))
+            tidy._append_ledger_entry(seat, dict(event="start", harness="claude", sid="history-change-C", ts=4))
+            changed = tidy.seat_lineage(seat, harness="claude", sid="history-change-C", read_context=context)
+            self.assertIn("history-change-C", [row["sid"] for row in changed])
+            hidden = tidy.state_root() / "sessions" / "hidden-history.jsonl"
+            hidden.write_text(json.dumps(dict(event="start", harness="claude", sid="unrelated")) + "\n")
+            failed_context = PeerReadContext()
+            with self.unreadable(hidden):
+                failed = tidy.seat_lineage(seat, harness="claude", sid="history-change-C", read_context=failed_context)
+                self.assertTrue(all(row["relation"] == "unknown" for row in failed))
+                self.assertIsNone(failed_context._lineage_summary)
+            recovered = tidy.seat_lineage(seat, harness="claude", sid="history-change-C", read_context=failed_context)
+            self.assertEqual(recovered, changed)
+
     def test_opencode_projection_uses_the_current_readable_graph_generation(self):
         seat = self.edge("opencode", "projection-A", "projection-B")
         path = tidy._ledger_path(seat)

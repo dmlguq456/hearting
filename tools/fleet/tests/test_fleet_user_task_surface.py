@@ -20,6 +20,24 @@ from tools.fleet.explorer.state import NavState, reduce
 from tools.fleet.model import DispatchJob, Session, WorkProjection
 
 
+def assert_opencode_context_surface(case, sessions, expected):
+    """Check collected v2 values through the private serializer and actual frame."""
+    from tools.fleet.explorer.view_model import ExplorerViewModel, persistable_view_model
+
+    vm = build_view_model({"sessions": sessions, "jobs": [],
+                           "project_of": lambda _: "fixture"})
+    cached = json.loads(json.dumps(persistable_view_model(vm)))
+    replay = ExplorerViewModel.from_mapping(cached)
+    for displayed in (vm, replay):
+        actual = [(row.get("context"), row.get("window")) for row in displayed.sessions]
+        case.assertCountEqual(actual, expected)
+        text = "\n".join(draw(displayed, NavState(view="OVERVIEW"), 220, 60).text_rows())
+        for pct, _window in expected:
+            if pct is not None:
+                case.assertIn(f"{pct}%", text)
+    case.assertNotIn("context_policy", json.dumps(cached))
+
+
 def _load_native_fixture(case, name):
     """Scope standalone sibling imports (including lazy imports) to this case."""
     utilities = Path(__file__).resolve().parents[3] / "utilities"
@@ -126,6 +144,164 @@ class ContractProjectionTests(unittest.TestCase):
         contexts = build_view_model(snapshot).routes[0]["worker_contexts"]
         expected = [render._native_context_gauge(job)[0] for job in snapshot["jobs"][1:3]]
         self.assertEqual([row["context"] for row in contexts], expected)
+
+    def selected_worker_snapshot(self, count=1):
+        """Use the production route resolver, which supplies node.job, not node.attempt_id."""
+        from tools.fleet import route
+        snapshot = self.route_snapshot("codex")
+        snapshot["sessions"] = []
+        snapshot["jobs"] = snapshot["jobs"][:count + 1]
+        record = {"route_id": "rt-exact", "route_hash": "exact-hash", "slug": "task-locator",
+                  "owner_attempt_id": "att-owner", "cwd": "/synthetic/repo",
+                  "capability": "autopilot-code", "execution_topology": "staged",
+                  "work_request": {"text": "# 사용자 작업 제목\n\n상세 요청"},
+                  "nodes": [{"id": "execute", "unit": "dev/backend", "depends_on": []}]}
+        for index, job in enumerate(snapshot["jobs"]):
+            job.route_hash = "exact-hash"
+            job.pid, job.proc_start = 100 + index, str(200 + index)
+            job.worker_type = "owner" if index == 0 else "stage"
+            job.worker_mode = None if index == 0 else "dev/backend"
+            job._runtime_session_id = "sid-owner" if index == 0 else "sid-worker"
+            job.elapsed_min = 3
+        view = route._record_view(record, "rt-exact", snapshot["jobs"], {}, 1000)
+        work = WorkProjection(source="route-exact", route_id="rt-exact", route_hash="exact-hash",
+                              _route_view={"view": view, "record": record})
+        for job in snapshot["jobs"]:
+            job.work_projection = work
+        return snapshot
+
+    def test_selected_worker_context_is_on_its_body_row(self):
+        snapshot = self.selected_worker_snapshot()
+        vm = build_view_model(snapshot)
+        route = vm.routes[0]
+        self.assertEqual(route["worker_context_index"], 0)
+        self.assertEqual(len(route["worker_contexts"]), 1)
+        frame = draw(vm, NavState(view="ROUTES"), 240, 60)
+        rows = [line for line in frame.text_rows() if "└ worker" in line]
+        self.assertEqual(len(rows), 1)
+        self.assertIn(f"{render._native_context_gauge(snapshot['jobs'][1])[0]}%", rows[0])
+        self.assertIn("running 3m", rows[0])
+        self.assertNotIn("└ execute · 1", "\n".join(frame.text_rows()))
+
+    def test_two_attempts_sharing_a_sid_keep_both_contexts(self):
+        snapshot = self.selected_worker_snapshot(2)
+        vm = build_view_model(snapshot)
+        self.assertEqual(len(vm.routes[0]["worker_contexts"]), 2)
+        text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+        for pct in (render._native_context_gauge(job)[0] for job in snapshot["jobs"][1:]):
+            self.assertEqual(text.count(f"{pct}%"), 1)
+        self.assertIn("└ worker", text)
+        self.assertEqual(text.count("└ execute"), 1)
+
+    def test_conflicting_anchor_identity_never_folds_context_into_body(self):
+        for field, value in (("attempt_id", "other-attempt"), ("_runtime_session_id", "other-sid"),
+                             ("worker_type", "review"), ("worker_mode", "qa/test"),
+                             ("proc_start", "reused-process"), ("route_hash", "other-generation")):
+            with self.subTest(field=field):
+                snapshot = self.selected_worker_snapshot()
+                backing = snapshot["jobs"][0].work_projection._route_view
+                node = backing["view"]["nodes"][0]
+                anchor = replace(snapshot["jobs"][1], **{field: value}) if not field.startswith("_") else \
+                    replace(snapshot["jobs"][1])
+                anchor._runtime_session_id = value if field == "_runtime_session_id" else "sid-worker"
+                node["job"] = anchor
+                vm = build_view_model(snapshot)
+                self.assertNotIn("worker_context_index", vm.routes[0])
+                self.assertEqual(len(vm.routes[0]["worker_contexts"]), 1)
+                text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+                self.assertIn("└ execute · 1", text)
+                pct = render._native_context_gauge(snapshot["jobs"][1])[0]
+                self.assertEqual(text.count(f"{pct}%"), 1)
+
+    def test_missing_or_ambiguous_attempt_never_merges_by_sid(self):
+        for case in ("missing", "duplicate"):
+            with self.subTest(case=case):
+                snapshot = self.selected_worker_snapshot()
+                if case == "missing":
+                    snapshot["jobs"][1].attempt_id = None
+                else:
+                    snapshot["jobs"].append(snapshot["jobs"][1])
+                vm = build_view_model(snapshot)
+                self.assertNotIn("worker_context_index", vm.routes[0])
+                self.assertEqual(len(vm.routes[0]["worker_contexts"]), 1 if case == "missing" else 2)
+
+    def test_a_different_declared_role_or_resource_body_keeps_separate_context(self):
+        for unit in ("qa/test", "_kernel/resource"):
+            with self.subTest(unit=unit):
+                snapshot = self.selected_worker_snapshot()
+                snapshot["jobs"][0].work_projection._route_view["view"]["nodes"][0]["unit"] = unit
+                route = build_view_model(snapshot).routes[0]
+                self.assertNotIn("worker_context_index", route)
+                self.assertEqual(len(route["worker_contexts"]), 1)
+
+    def test_inline_context_phase_and_private_replay_do_not_change_identity_or_gauge(self):
+        from tools.fleet.explorer.view_model import persistable_view_model
+        vm = build_view_model(self.selected_worker_snapshot())
+        on = draw(vm, NavState(view="ROUTES"), 240, 60, beat=1)
+        off = draw(vm, NavState(view="ROUTES"), 240, 60, beat=0)
+        self.assertEqual(on.text_rows(), off.text_rows())
+        self.assertEqual(on.hits, off.hits)
+        pct = vm.routes[0]["worker_contexts"][0]["context"]
+        row = next(y for y, line in enumerate(on.text_rows()) if "└ worker" in line)
+        col = on.text_rows()[row].index(f"{pct}%")
+        self.assertEqual(on.cells[row][col], off.cells[row][col])
+        persisted = persistable_view_model(vm)
+        # The existing stale-view allowlist excludes worker identity/telemetry.
+        self.assertNotIn("worker_context_index", persisted["routes"][0])
+        self.assertNotIn("worker_contexts", persisted["routes"][0])
+
+    def test_unknown_and_zero_context_keep_one_exact_worker_identity(self):
+        for tokens, expected in ((None, None), (0, 0)):
+            with self.subTest(tokens=tokens):
+                snapshot = self.selected_worker_snapshot()
+                snapshot["jobs"][1].active_context_tokens = tokens
+                vm = build_view_model(snapshot)
+                self.assertEqual(vm.routes[0]["worker_context_index"], 0)
+                self.assertEqual(vm.routes[0]["worker_contexts"][0]["context"], expected)
+                text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+                self.assertNotIn("└ execute", text)
+                self.assertIn("0%" if tokens == 0 else "·", text)
+
+    def test_stale_worker_and_failed_history_keep_the_body_without_live_context(self):
+        from tools.fleet import route
+        snapshot = self.selected_worker_snapshot()
+        snapshot["jobs"][1].liveness = "dead"
+        backing = snapshot["jobs"][0].work_projection._route_view
+        backing["view"] = route._record_view(backing["record"], "rt-exact", snapshot["jobs"], {}, 1000)
+        vm = build_view_model(snapshot)
+        self.assertEqual(vm.routes[0]["stages"][0]["st"], "failed")
+        self.assertEqual(vm.routes[0]["worker_contexts"], ())
+        self.assertNotIn("worker_context_index", vm.routes[0])
+        text = "\n".join(draw(vm, NavState(view="ROUTES"), 240, 60).text_rows())
+        self.assertIn("worker ended", text)
+        self.assertNotIn(f"{render._native_context_gauge(snapshot['jobs'][1])[0]}%", text)
+
+    def test_worker_context_widths_clicks_and_fold_use_the_actual_rows(self):
+        from tools.fleet.tests import explorer_fixture as ef
+        from tools.fleet.tests.test_explorer_repo_columns import LONG, CJK
+        for repo in (LONG, CJK):
+            snapshot = self.selected_worker_snapshot()
+            snapshot["project_of"] = lambda _cwd: repo
+            vm = build_view_model(snapshot)
+            for cols in (80, 100, 140, 168, 180, 240, 320):
+                with self.subTest(repo=repo, cols=cols):
+                    state = NavState(view="ROUTES")
+                    frame, trace = ef.trace_draw(draw, vm, state, cols, 60)
+                    self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
+                    text = "\n".join(frame.text_rows())
+                    pct = render._native_context_gauge(snapshot["jobs"][1])[0]
+                    self.assertEqual(text.count(f"{pct}%"), 1)
+                    self.assertNotIn("└ execute", text)
+                    action = ("fold", "ropen:ROUTES", "rt-exact")
+                    hits = [hit for hit in frame.hits if hit.action == action]
+                    self.assertGreaterEqual(len(hits), 2)
+                    for hit in hits:
+                        opened, _ = reduce(state, {"type": "click", "action": hit.action}, frame)
+                        self.assertEqual(opened.opened_for("ropen:ROUTES"), "rt-exact")
+                    selected, trace = ef.trace_draw(draw, vm, opened, cols, 60)
+                    self.assertEqual(ef.frame_violations(selected, trace, cols, 60), [])
+                    closed, _ = reduce(opened, {"type": "click", "action": action}, selected)
+                    self.assertEqual(closed.opened_for("ropen:ROUTES"), "")
 
     def test_unassigned_owner_placeholder_does_not_hide_unique_exact_owner(self):
         snapshot = self.route_snapshot("codex", active_context_tokens=300_000,

@@ -8,7 +8,7 @@ from .tables import _clip, repo_rule_label
 from .style import steward_flag_key
 
 STAGE_HUES = ("l", "c", "g", "y", "m")          # blue · cyan · green · yellow · magenta
-LANE_HEAD_LEFT, LANE_HEAD_RIGHT = "◂", "▸"
+LANE_HEAD_LEFT, LANE_HEAD_RIGHT = "<", ">"
 STATE_MARKS = {"working": ("⠏", "spin"), "active": ("⠏", "spin"), "idle": ("●", "idle"),
                "blocked": ("●", "blocked"), "failed": ("✕", "dead"), "done": ("✓", "done"),
                "dead": ("✕", "dead")}
@@ -209,9 +209,10 @@ def _footer_start(box, clear):
 def _draw_side_lanes(grid, edges, boxes, right):
     """Stacked pairs join round their right side, one lane each way, labelled under the upper card.
 
-    Every card meets its lanes on its two first inner rows: the arriving head sits beside the
-    title row and the leaving tail leaves from the gauge row, so a lane never lands on a
-    corner, a divider or another card whatever height the cards have.
+    Both directions share one bidirectional trunk on the title row: each card's arriving head
+    and its trunk junction are on the same row, so the head and tail never sit on different
+    rows. The trunk runs in the gutter right of the cards and never lands on a corner, a
+    divider or another card whatever height the cards have.
     """
     links = tuple(edges.get("links", ()))
     for lane in edges.get("side_lanes", ()):
@@ -224,27 +225,20 @@ def _draw_side_lanes(grid, edges, boxes, right):
             continue
         ux, uy, edge, ub = top[0], top[1], top[2], top[3]
         fy = tail[1]
-        first, second = edge + 3, edge + 5
 
         def put(px, py, text, key="branch_s"):
             grid.put(px, py, text, key, limit=right)
 
-        put(edge, uy + 2, "├", top[5])                 # upper → lower
-        put(edge + 1, uy + 2, "──")
-        put(first, uy + 2, "┐")
-        for yy in range(uy + 3, fy + 1):
-            put(first, yy, "│")
-        put(first, fy + 1, "┘")
-        put(edge + 2, fy + 1, "─")
-        put(edge + 1, fy + 1, LANE_HEAD_LEFT, "soft")
-        put(edge, fy + 2, "├", tail[5])                # lower → upper
-        put(edge + 1, fy + 2, "────")
-        put(second, fy + 2, "┘")
-        for yy in range(uy + 2, fy + 2):
-            put(second, yy, "│")
-        put(second, uy + 1, "┐")
-        put(edge + 2, uy + 1, "───")
-        put(edge + 1, uy + 1, LANE_HEAD_LEFT, "soft")
+        # One bidirectional trunk: each head and its line share the title row, so
+        # the visible head and tail never sit on different rows at a card.
+        put(edge, uy + 1, LANE_HEAD_LEFT, "soft")      # lower → upper arrives
+        put(edge + 1, uy + 1, "──")
+        put(edge + 3, uy + 1, "┐")
+        put(edge, fy + 1, LANE_HEAD_LEFT, "soft")      # upper → lower arrives
+        put(edge + 1, fy + 1, "──")
+        put(edge + 3, fy + 1, "┘")
+        for yy in range(uy + 2, fy + 1):
+            put(edge + 3, yy, "│")
         label_right = min(right, top[2])
         for row, (src, dst) in enumerate(((upper, lower), (lower, upper))):
             sent = _link_when(links, src, dst)

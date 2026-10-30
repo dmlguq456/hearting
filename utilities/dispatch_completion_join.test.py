@@ -1675,6 +1675,53 @@ class DispatchCompletionJoinTest(unittest.TestCase):
             self.assertIsNone(RESOURCE.wait(args,path,control,set(),events.append))
             self.assertEqual(len(polls),3)
 
+    def test_resource_receipt_zero_exit_guidance_preserves_typed_outcome_on_replay(self):
+        import dispatch_resource_wait as RESOURCE
+        from types import SimpleNamespace
+
+        args = SimpleNamespace(parent_attempt_id="att-parent", route_id="rt-resource",
+                               route_hash="sha256:route", jobs=str(self.jobs))
+        control = SimpleNamespace(thread_id="same-native", pending=lambda: False)
+        for outcome in ("needs-attention", "succeeded"):
+            with self.subTest(outcome=outcome):
+                path = self.root / (outcome + "-zero-exit.json")
+                succeeded = outcome == "succeeded"
+                run = {"run_id": "zero-exit", "pid": 123, "starttime": "100",
+                       "command": ["approved"], "route": "/exact", "node": "full-run",
+                       "jobs": str(self.jobs), "owner_wait": {"parent_attempt_id": "att-parent"},
+                       "status": "succeeded" if succeeded else "failed", "exit_code": 0,
+                       "sentinel": "/exit", "failure_class": None if succeeded else "declared-output-pending"}
+                armed = {"node": "full-run", "successors": ["run-verify"]}
+                evidence = {"terminal": True, "quiescent": True, "succeeded": succeeded,
+                            "liveness": "exited", "exit_code": 0}
+                sup = SimpleNamespace(poll_once=lambda *_: None,
+                    read_resource_watches=lambda *_: [armed],
+                    resource_evidence=lambda _: dict(evidence),
+                    artifact_evidence=lambda _: {"checked": True,
+                                                "missing": [] if succeeded else ["result.json"]},
+                    runner=lambda: SimpleNamespace(read_sentinel=lambda _: 0))
+                ledger = SimpleNamespace(state=lambda: {"nodes": {"full-run": {"state": "RUNNING"}}})
+                ctx = (sup, {}, ledger, [(armed, run)])
+                JOIN.write_supervisor_state(path, "att-parent", set(), phase="running-turn")
+                with mock.patch.object(RESOURCE, "context", return_value=ctx), \
+                     mock.patch.object(RESOURCE.RESUME, "supervisor_alive", return_value=True), \
+                     mock.patch.object(RESOURCE, "resource_execution_succeeded", return_value=succeeded):
+                    prompt = RESOURCE.wait(args, path, control, set(), lambda _: None,
+                        sleep=lambda _: self.fail("settled receipt must return immediately"))
+                    before = path.read_bytes()
+                    state = JOIN.read_supervisor_phase_state(path, "att-parent")
+                    receipt = state.resource["outbox"]["receipt"]
+                    self.assertEqual((receipt["state"], receipt["exit_code"]), (outcome, 0))
+                    self.assertFalse(receipt["verification_pass"])
+                    self.assertFalse(receipt["workflow_complete"])
+                    self.assertEqual(RESOURCE.pending_prompt(path, "att-parent"), prompt)
+                    self.assertEqual(path.read_bytes(), before)
+                    if succeeded:
+                        self.assertIn("The payload completed successfully.", prompt)
+                    else:
+                        self.assertNotIn("The payload completed successfully.", prompt)
+                        self.assertIn("no user prohibition", prompt)
+
     def test_resource_correction_and_attention_never_become_model_child_success(self):
         import dispatch_resource_wait as RESOURCE
         from types import SimpleNamespace

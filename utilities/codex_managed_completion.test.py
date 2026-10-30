@@ -2209,7 +2209,9 @@ class NativeQueueDeliveryTest(unittest.TestCase):
     def test_notice_fence_survives_accepted_before_record_crash_and_new_watcher_reclaim(self) -> None:
         module = load_completion_module()
         pending = module.pending_delivery
-        with tempfile.TemporaryDirectory() as tmp:
+        # Only explicit clock advances expire leases; durable I/O may exceed 10ms.
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                module.time, "monotonic_ns", return_value=time.monotonic_ns()) as clock:
             root = Path(tmp)
             jobs = root / "jobs.log"
             jobs.write_text("", encoding="utf-8")
@@ -2236,12 +2238,13 @@ class NativeQueueDeliveryTest(unittest.TestCase):
                 lease_seconds=0.01, require_generation_proof=True,
                 live_recipient_generation=(SESSION, "1"), jobs=jobs,
                 retry_context=f"{SESSION}:1:{SESSION}")
+            initial_deadline = initial["claim_deadline_ns"]
+            self.assertLess(clock.return_value, initial_deadline)
             fence_identity = pending.submission_fence_identity(initial, SESSION)
             pending.prepare_submission_fence(
                 root, SESSION, delivery_id, claim_owner="crashed-watcher",
                 expected_identity=fence_identity)
             accepted_adds = [delivery_id]  # The queue accepted after the durable pre-add fence.
-            initial_deadline = initial["claim_deadline_ns"]
 
             args = SimpleNamespace(
                 queue_socket=Path("/tmp/app-server.sock"), jobs=jobs,
@@ -2277,18 +2280,16 @@ class NativeQueueDeliveryTest(unittest.TestCase):
                  mock.patch.object(module, "queue_target", return_value=SESSION), \
                  mock.patch.object(module.codex_queue_delivery, "_known_consumed", return_value=None):
                 watcher = module.NoticeWatcher(args, {"att-owner"}, capability=None)
-                with mock.patch.object(module.time, "monotonic_ns",
-                                       return_value=initial_deadline + 1):
-                    watcher._one(pending.record_path(root, SESSION, delivery_id))
+                clock.return_value = initial_deadline + 1
+                watcher._one(pending.record_path(root, SESSION, delivery_id))
                 self.assertEqual(pending.read_submission_fence(
                     root, SESSION, delivery_id,
                     expected_identity=fence_identity)["state"], "prepared")
 
                 old_claim = pending.read(root, SESSION, delivery_id)
-                with mock.patch.object(module.time, "monotonic_ns",
-                                       return_value=old_claim["claim_deadline_ns"] + 1):
-                    module.NoticeWatcher(args, {"att-owner"}, capability=None)._one(
-                        pending.record_path(root, SESSION, delivery_id))
+                clock.return_value = old_claim["claim_deadline_ns"] + 1
+                module.NoticeWatcher(args, {"att-owner"}, capability=None)._one(
+                    pending.record_path(root, SESSION, delivery_id))
                 self.assertEqual(pending.read_submission_fence(
                     root, SESSION, delivery_id,
                     expected_identity=fence_identity)["state"], "prepared")

@@ -9053,7 +9053,12 @@ class ComposeRouteTest(TestRoute):
    self.assertTrue((wt/"remote.txt").is_file()); self.assertFalse((wt/"untracked.txt").exists())
    self.assertEqual(fingerprint(),before)
    (wt/"pending.py").write_text("keep this linked task\n")
-   with mock.patch.object(R,"_worktree_git",side_effect=AssertionError("ready allocation must not fetch")):
+   real_worktree_git=R._worktree_git
+   def no_network(cwd,*args):
+    self.assertNotIn(args[:1],(("ls-remote",),("fetch",)))
+    self.assertNotEqual(args[:2],("worktree","add"))
+    return real_worktree_git(cwd,*args)
+   with mock.patch.object(R,"_worktree_git",side_effect=no_network):
     again=R.prepare_isolated_worktree(primary,"fix-x",artifact_root=reports,preparation_key=key)
    self.assertEqual((again["state"],again["path"],again["branch"]),("reused",str(wt),"fix-x"))
    explicit_key={"request":"approved linked task"}
@@ -9061,10 +9066,6 @@ class ComposeRouteTest(TestRoute):
                                        explicitly_approved=True)
    self.assertEqual((explicit["state"],explicit["cwd"]),("reused",str(wt)))
    self.assertEqual((wt/"pending.py").read_text(),"keep this linked task\n")
-   real_worktree_git=R._worktree_git
-   def no_network(cwd,*args):
-    self.assertNotIn(args[:1],(("ls-remote",),("fetch",),("worktree","add")))
-    return real_worktree_git(cwd,*args)
    with mock.patch.object(R,"_worktree_git",side_effect=no_network):
     explicit_again=R.prepare_isolated_worktree(wt,"other",artifact_root=reports,
                                                preparation_key=explicit_key)
