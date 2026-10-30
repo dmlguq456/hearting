@@ -1742,6 +1742,10 @@ If the owner is replaced, the resource row, receipt and execution identity
 remain bound to the original owner attempt. The current owner may observe and
 consume that result when the shared replacement lineage proves a launched
 successor and its owner-route ancestry includes the resource route.
+An owner that already settled the exact resource remains part of its verified
+history when a later replacement launches. Marker currency uses that launched
+history; a new effect still requires the current live owner, its input and the
+existing fresh resource checks. A claim or registration alone proves neither.
 The host controller's terminal observation in the existing workflow journal remains
 usable by an owner in another PID namespace, including the first successor start
 while the resource stage is still running and waiting for its next resource.

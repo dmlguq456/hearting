@@ -966,11 +966,13 @@ def resource_owner_consumer_matches(jobs, *, source_attempt_id, consumer_attempt
                                     resource_route_file, resource_route_id,
                                     resource_route_hash, resource_owner_pid,
                                     resource_owner_start, require_live=True):
-    """Prove the current owner can consume a resource bound to its predecessor.
+    """Prove a current consumer or a recorded resource owner's history.
 
     The resource record remains attached to its original owner. Only that exact
     attempt's launched replacement, with a current owner-route binding that
-    descends from the resource route, may act as its consumer.
+    descends from the resource route, may act as its consumer. Historical reads
+    may also validate a previously launched member of that same checked lineage;
+    this does not give the former owner current effect authority.
     """
     if not all(isinstance(value, str) and value for value in (
             source_attempt_id, consumer_attempt_id, resource_route_file,
@@ -1030,8 +1032,13 @@ def resource_owner_consumer_matches(jobs, *, source_attempt_id, consumer_attempt
                     not in attempt_identity_lineage(source)):
             return False
 
-        effective, _lineage = DR.effective_attempts(jobs_path, {source_attempt_id})
-        if effective != {consumer_attempt_id}:
+        if require_live:
+            effective, _lineage = DR.effective_attempts(jobs_path, {source_attempt_id})
+            consumer_proven = effective == {consumer_attempt_id}
+        else:
+            consumer_proven = consumer_attempt_id in DR.verified_replacement_history(
+                jobs_path, source_attempt_id)
+        if not consumer_proven:
             return False
         if (consumer_attempt_id != source_attempt_id
                 and (source_fields[1] in LIVE_ROW_STATUSES or consumer.get("launch_started") != "1")):
