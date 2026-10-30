@@ -179,7 +179,8 @@ def _pass_lineage_graph(read_context=None) -> LineageGraph:
     if read_context is None:
         return lineage_graph()
     try:
-        signature = _lineage_signature(_st().state_root() / "sessions")
+        signature = read_context.lineage_signature(
+            lambda: _lineage_signature(_st().state_root() / "sessions"))
         return read_context.lineage_graph(signature, lambda: lineage_graph(read_context=read_context))
     except (OSError, ValueError, TypeError):
         _LINEAGE_GRAPH_CACHE.clear()
@@ -1622,30 +1623,31 @@ def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
     from peer_read_context import PeerReadContext
     context = read_context or PeerReadContext()
     try:
-        graph = _pass_lineage_graph(context)
-        candidates = set(graph.ledger_keys)
-        owed = {}
-        for rows in graph.ledger_rows.values():
-            for row in rows:
-                origin = _st()._handover_origin(row)
-                if origin is not None:
-                    candidates.add(origin)
-                for binding in row.get("bindings") or ():
-                    parent = str(binding.get("parent") or (origin[1] if origin else ""))
-                    meta = {"dispatch_depth": "1", "worker_type": "owner", "attempt_id": binding.get("attempt") or "candidate",
-                            "parent_sid": parent, "parent_harness": origin[0] if origin else harness or "",
-                            "route_id": binding["route"], "route_hash": binding["hash"], "route_node": binding["node"]}
-                    answer = resolve_recipient("job-holder", metadata=meta, jobs=binding["jobs"], read_context=context)
-                    if (answer.state != "unreadable" and answer.session_id == session
-                            and (not harness or answer.harness == harness)):
-                        owed.setdefault(parent, set())
-                        if binding.get("attempt"):
-                            owed[parent].add(binding["attempt"])
-        for source_harness, origin in candidates:
-            answer = resolve_recipient("seat-successor", session=origin, harness=source_harness, read_context=context)
-            if (answer.state == "confirmed" and answer.session_id == session
-                    and (not harness or answer.harness == harness)):
-                owed.setdefault(origin, set())
+        with context.pinned_lineage():
+            graph = _pass_lineage_graph(context)
+            candidates = set(graph.ledger_keys)
+            owed = {}
+            for rows in graph.ledger_rows.values():
+                for row in rows:
+                    origin = _st()._handover_origin(row)
+                    if origin is not None:
+                        candidates.add(origin)
+                    for binding in row.get("bindings") or ():
+                        parent = str(binding.get("parent") or (origin[1] if origin else ""))
+                        meta = {"dispatch_depth": "1", "worker_type": "owner", "attempt_id": binding.get("attempt") or "candidate",
+                                "parent_sid": parent, "parent_harness": origin[0] if origin else harness or "",
+                                "route_id": binding["route"], "route_hash": binding["hash"], "route_node": binding["node"]}
+                        answer = resolve_recipient("job-holder", metadata=meta, jobs=binding["jobs"], read_context=context)
+                        if (answer.state != "unreadable" and answer.session_id == session
+                                and (not harness or answer.harness == harness)):
+                            owed.setdefault(parent, set())
+                            if binding.get("attempt"):
+                                owed[parent].add(binding["attempt"])
+            for source_harness, origin in candidates:
+                answer = resolve_recipient("seat-successor", session=origin, harness=source_harness, read_context=context)
+                if (answer.state == "confirmed" and answer.session_id == session
+                        and (not harness or answer.harness == harness)):
+                    owed.setdefault(origin, set())
         return [(session, None), *((key, LineageAttempts(attempts)) for key, attempts in sorted(owed.items()) if key != session)]
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
         return []

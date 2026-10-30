@@ -8,7 +8,10 @@ operation.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+
+_UNOBSERVED = object()
 
 
 class PeerReadContext:
@@ -18,6 +21,7 @@ class PeerReadContext:
         self._handover_snapshots = None
         self._handover_ledgers = {}
         self._lineage_graphs = {}
+        self._lineage_pin = None
         self._lineage_summary = None
         self._recipient_censuses = {}
         self._transfer_roots = None
@@ -91,6 +95,31 @@ class PeerReadContext:
             self._handover_ledgers[key] = tuple(loader())
         return self._handover_ledgers[key]
 
+    def lineage_signature(self, observe):
+        """Observe the lineage directory; inside ``pinned_lineage`` only once."""
+        if self._lineage_pin is None:
+            return observe()
+        if self._lineage_pin is _UNOBSERVED:
+            self._lineage_pin = observe()
+        return self._lineage_pin
+
+    @contextmanager
+    def pinned_lineage(self):
+        """Resolve one loop of recipients against a single lineage observation.
+
+        Re-stating every ledger for each of a sweep's ~1,700 recipients made a
+        10s prompt hook time out (2026-10-30). Outside the loop each read still
+        observes writer changes, and effect boundaries read fresh lineage.
+        """
+        if self._lineage_pin is not None:
+            yield
+            return
+        self._lineage_pin = _UNOBSERVED
+        try:
+            yield
+        finally:
+            self._lineage_pin = None
+
     def lineage_graph(self, signature, loader):
         """Reuse this read-only pass's graph; normal observations replace it.
 
@@ -113,4 +142,6 @@ class PeerReadContext:
     def invalidate_lineage_graph(self):
         """An unavailable current dependency cannot leave authority cached."""
         self._lineage_graphs.clear()
+        if self._lineage_pin is not None:
+            self._lineage_pin = _UNOBSERVED
         self._lineage_summary = None
