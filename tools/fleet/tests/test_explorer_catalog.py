@@ -93,6 +93,43 @@ class ModelCatalogTests(unittest.TestCase):
         self.assertTrue(self.requests[0][1].startswith("Basic "))
         self.assertNotIn("fixture-private-password", repr(catalog))
 
+    def test_v2_variant_rows_reach_the_catalog_and_model_config(self):
+        self._native_service({"location": {"directory": str(self.root)}, "data": [
+            {"providerID": "opencode-go", "id": "argon", "enabled": True, "status": "active",
+             "variants": [{"id": "low", "settings": {}}, {"id": "high"}]},
+            {"providerID": "opencode-go", "id": "glm", "enabled": True, "status": "active",
+             "variants": ["minimal", {"id": "none"}]},
+            {"providerID": "opencode-go", "id": "missing", "enabled": True, "status": "active"},
+            {"providerID": "opencode-go", "id": "empty", "enabled": True, "status": "active",
+             "variants": []},
+            {"providerID": "opencode-go", "id": "broken", "enabled": True, "status": "active",
+             "variants": [{"name": "high"}]},
+        ]})
+        catalog = model_catalog.read_catalog("opencode")
+        self.assertEqual(catalog.models, (
+            "opencode-go/argon", "opencode-go/glm", "opencode-go/missing",
+            "opencode-go/empty", "opencode-go/broken"))
+        self.assertEqual(catalog.variants, {
+            "opencode-go/argon": ("low", "high"),
+            "opencode-go/glm": ("minimal", "none"),
+        })
+
+        from tools.fleet.explorer import focus
+
+        class ModelConfig:
+            @staticmethod
+            def resolve_config(adapter):
+                if adapter != "opencode":
+                    raise LookupError(adapter)
+                return {"CFG_MODEL_PROFILE_BALANCED": "balanced:high",
+                        "CFG_TIER_BALANCED_MODEL": "opencode-go/argon",
+                        "CFG_TIER_BALANCED_VARIANT": "high"}, {}
+
+        with mock.patch.object(focus, "utility", return_value=ModelConfig):
+            config = focus.read_model_config()
+        self.assertEqual(config["catalog_sources"]["opencode"]["variants"], catalog.variants)
+        self.assertEqual(config["efforts"], ["low", "medium", "high", "xhigh", "max"])
+
     def test_caller_directory_selects_catalog_on_same_existing_service_without_writes(self):
         home = self.root / "service-home"
         project = self.root / "project space + &?#% 한글"

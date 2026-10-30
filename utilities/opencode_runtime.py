@@ -312,21 +312,43 @@ def is_v2(binary: str = "opencode", version: tuple[int, int, int] | None = None,
     return bool(version and version[0] >= 2)
 
 
+def observed_variants(value):
+    """Normalize one catalog row's ``variants`` field into an ordered id tuple.
+
+    The native service reports ``[{"id": ..., "settings": ...}, ...]`` rows;
+    simplified fixtures may use plain strings. A missing, empty, or malformed
+    list means this exact model's variants are unobserved, never that it
+    supports nothing.
+    """
+    if not isinstance(value, (list, tuple)):
+        return ()
+    result = []
+    for item in value:
+        identifier = item.get("id") if isinstance(item, Mapping) else item
+        if not isinstance(identifier, str) or not identifier:
+            return ()
+        if identifier not in result:
+            result.append(identifier)
+    return tuple(result)
+
+
 def read_model_catalog(*, directory=None, environ=None):
     """Read the existing V2 service's catalog without starting or refreshing it.
 
     ``None`` permits the V1 cache reader. A known V2 service/version with no
     readable current snapshot stays unknown; its retained V1 cache is not current.
-    Only model identities leave this boundary, never service credentials/settings.
-    The native location is the caller's cwd unless an existing caller supplies
-    a directory. An unavailable directory stays unknown, never server-default.
+    Only model identities and their observed catalog variant ids leave this
+    boundary, never service credentials/settings. The native location is the
+    caller's cwd unless an existing caller supplies a directory. An unavailable
+    directory stays unknown, never server-default.
     """
     env = os.environ if environ is None else environ
     home = Path(env.get("HOME") or Path.home())
     state = Path(env.get("XDG_STATE_HOME") or home / ".local/state")
     path = state / "opencode" / "service.json"
     source = str(path) + "#/api/model"
-    unknown = {"state": "unknown", "source": source, "models": (), "observed_at": None}
+    unknown = {"state": "unknown", "source": source, "models": (), "variants": {},
+               "observed_at": None}
 
     def generation():
         info = path.lstat()
@@ -397,6 +419,7 @@ def read_model_catalog(*, directory=None, environ=None):
             return unknown
         models = []
         seen = set()
+        variants = {}
         for row in rows:
             if not isinstance(row, dict):
                 return unknown
@@ -412,10 +435,30 @@ def read_model_catalog(*, directory=None, environ=None):
             if identifier not in seen:
                 seen.add(identifier)
                 models.append(identifier)
+                ids = observed_variants(row.get("variants"))
+                if ids:
+                    variants[identifier] = ids
         return {"state": "available" if models else "empty", "source": source,
-                "models": tuple(models), "observed_at": time.time()}
+                "models": tuple(models), "variants": variants, "observed_at": time.time()}
     except (OSError, ValueError, TypeError, RuntimeError, http.client.HTTPException):
         return unknown
+
+
+def variant_support(model, variant, observed):
+    """Classify one exact runtime variant against one model's catalog observation.
+
+    ``model`` is always the full ``provider/model`` id and ``observed`` is that
+    model's ordered variant id tuple. An absent observation stays ``unknown``:
+    it is never read as "nothing is supported". ``runtime-default`` and an
+    omitted variant are always supported.
+    """
+    if variant in (None, "", "runtime-default"):
+        return "supported"
+    if not isinstance(model, str) or "/" not in model:
+        return "unknown"
+    if not observed:
+        return "unknown"
+    return "supported" if variant in observed else "unsupported"
 
 
 @lru_cache(maxsize=32)
@@ -1398,15 +1441,17 @@ def automatic_model_fallbacks(config_path: str | Path | None = None) -> list[tup
 
 
 def select_automatic_model(model: str, variant: str, *, config_path=None,
-                           environ=None) -> tuple[str, str, dict]:
+                           environ=None, catalog=None) -> tuple[str, str, dict]:
     """Choose the first automatically eligible candidate in configured order.
 
     Without one, the primary is returned unchanged: an unknown primary keeps
     ``automatic_eligible=False`` so an explicitly chosen harness can still run
     it while automatic callers do not, and a confirmed-unavailable primary is
-    never traded for an unverified fallback.
+    never traded for an unverified fallback. ``catalog`` is the same optional
+    per-model variant observation accepted by ``automatic_candidates``.
     """
-    rows = automatic_candidates(model, variant, config_path=config_path, environ=environ)
+    rows = automatic_candidates(model, variant, config_path=config_path, environ=environ,
+                                catalog=catalog)
     primary = rows[0]
     for row in rows:
         if row["automatic_eligible"]:
@@ -1419,10 +1464,16 @@ def select_automatic_model(model: str, variant: str, *, config_path=None,
 
 
 def automatic_candidates(model: str, variant: str, *, config_path=None,
-                         environ=None) -> list[dict]:
-    """Candidate evidence, in configured order, for automatic placement."""
+                         environ=None, catalog=None) -> list[dict]:
+    """Candidate evidence, in configured order, for automatic placement.
+
+    When ``catalog`` is a dict, a candidate whose exact variant the observation
+    reports as unsupported is excluded from automatic placement. An unobserved
+    candidate stays unchanged: only a confirmed rejection is filtered.
+    """
     rows = []
     candidates = [(model, variant), *automatic_model_fallbacks(config_path)]
+    variant_map = catalog.get("variants") if isinstance(catalog, Mapping) else None
     seen = set()
     for candidate, effort in candidates:
         key = (candidate, effort)
@@ -1433,6 +1484,11 @@ def automatic_candidates(model: str, variant: str, *, config_path=None,
         row = {**evidence, "model": candidate, "variant": effort}
         if evidence.get("model") not in (None, candidate.split("/", 1)[-1].split("#", 1)[0]):
             row["evidence_model"] = evidence["model"]
+        if (isinstance(variant_map, Mapping)
+                and variant_support(candidate, effort, variant_map.get(candidate))
+                == "unsupported"):
+            row["automatic_eligible"] = False
+            row["variant_reason"] = "variant-unavailable"
         rows.append(row)
     return rows
 

@@ -470,7 +470,7 @@ class OwnerRuntimePermissionProjectionTest(unittest.TestCase):
             mock.patch.object(wrapper, "launch_reap_watch", return_value=4243),
             mock.patch.object(wrapper.opencode_runtime, "is_v2", return_value=True),
             mock.patch.object(wrapper.opencode_runtime, "select_automatic_model",
-                              side_effect=lambda model, variant: (model, variant, {"state": "available"})),
+                              side_effect=lambda model, variant, **kwargs: (model, variant, {"state": "available"})),
             mock.patch.object(context, "_installed_version", return_value="2.0.32"),
             mock.patch.object(context, "_run", side_effect=native_api),
             mock.patch.object(wrapper.subprocess, "Popen", side_effect=tracked_popen),

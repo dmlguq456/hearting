@@ -43,7 +43,36 @@ def _step(vm, state, event, cols):
     return state, effects, draw(vm, state, cols, 70, beat=1)
 
 
+def _vm_with_variants(model, variants):
+    vm = _vm()
+    values = vm.to_mapping()
+    models = dict(values["models"])
+    sources = dict(models.get("catalog_sources") or {})
+    sources["opencode"] = {"state": "available", "source": "/cache/models.json",
+                           "observed_at": 1, "variants": {model: tuple(variants)}}
+    models["catalog_sources"] = sources
+    values["models"] = models
+    return ExplorerViewModel.from_mapping(values)
+
+
 class ModelPicker(unittest.TestCase):
+    def test_observed_model_variants_replace_the_global_effort_chips(self):
+        model = "opencode-go/go-model-00"
+        vm = _vm_with_variants(model, ("minimal", "low", "max"))
+        state = _state(**{"ui:model": model, "ui:effort": "minimal"})
+        frame = draw(vm, state, 160, 70, beat=1)
+        efforts = [hit.action[2] for hit in frame.hits if hit.action[:2] == ("ui", "effort")]
+        self.assertEqual(efforts, ["minimal", "low", "max", "runtime-default"])
+        actions = {hit.action for hit in frame.hits if hit.action[:1] == ("models.apply",)}
+        self.assertIn(("models.apply", "opencode", "profile", "balanced", model, "minimal", False),
+                      actions)
+
+        unobserved = _vm()
+        state = _state(**{"ui:model": model})
+        frame = draw(unobserved, state, 160, 70, beat=1)
+        efforts = [hit.action[2] for hit in frame.hits if hit.action[:2] == ("ui", "effort")]
+        self.assertEqual(efforts, ["low", "medium", "high", "xhigh", "max", "runtime-default"])
+
     def test_saved_id_absent_from_current_catalog_is_marked_and_latest_choice_applies(self):
         vm = _vm()
         values = vm.to_mapping()

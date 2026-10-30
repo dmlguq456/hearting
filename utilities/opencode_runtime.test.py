@@ -986,6 +986,80 @@ class OpenCodeTypedErrorTest(unittest.TestCase):
              "message": "OpenCode Go subscription required."})["reason"], "subscription-missing")
 
 
+class OpenCodeVariantObservationTest(unittest.TestCase):
+    """The catalog's per-model variant ids decide only confirmed unsupported rows."""
+
+    def test_variant_support_three_states_and_always_allowed_defaults(self):
+        observed = ("low", "medium", "high")
+        self.assertEqual(runtime.variant_support("opencode-go/model", "high", observed),
+                         "supported")
+        self.assertEqual(runtime.variant_support("opencode-go/model", "xhigh", observed),
+                         "unsupported")
+        self.assertEqual(runtime.variant_support("opencode-go/model", "xhigh", ()), "unknown")
+        self.assertEqual(runtime.variant_support("opencode-go/model", "xhigh", None), "unknown")
+        for variant in (None, "", "runtime-default"):
+            self.assertEqual(runtime.variant_support("opencode-go/model", variant, ()),
+                             "supported")
+        self.assertEqual(runtime.variant_support("not-a-full-id", "high", observed), "unknown")
+
+    def test_read_model_catalog_carries_only_observed_variant_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            state = root / "state"
+            path = state / "opencode" / "service.json"
+            path.parent.mkdir(parents=True)
+            payload = {"data": [
+                {"providerID": "opencode-go", "id": "argon", "enabled": True, "status": "active",
+                 "variants": [{"id": "low", "settings": {}}, {"id": "high"}]},
+                {"providerID": "opencode-go", "id": "glm", "enabled": True, "status": "active",
+                 "variants": ["minimal", {"id": "none"}]},
+                {"providerID": "opencode-go", "id": "missing", "enabled": True, "status": "active"},
+                {"providerID": "opencode-go", "id": "empty", "enabled": True, "status": "active",
+                 "variants": []},
+                {"providerID": "opencode-go", "id": "broken", "enabled": True, "status": "active",
+                 "variants": [{"name": "high"}]},
+                {"providerID": "opencode-go", "id": "disabled", "enabled": False,
+                 "status": "active", "variants": ["low"]},
+            ]}
+            path.write_text(json.dumps({"version": "2.0.32", "url": "http://127.0.0.1:9"}))
+            path.chmod(0o600)
+
+            class Response:
+                status = 200
+
+                def read(self, limit=-1):
+                    return json.dumps(payload).encode()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_args):
+                    return False
+
+            class Opener:
+                def open(self, _request, timeout=None):
+                    return Response()
+
+            with unittest.mock.patch.dict(os.environ, {
+                    "HOME": str(root), "XDG_STATE_HOME": str(state)}, clear=True), \
+                    unittest.mock.patch("urllib.request.build_opener", return_value=Opener()):
+                catalog = runtime.read_model_catalog(directory=root)
+            self.assertEqual(catalog["state"], "available")
+            self.assertEqual(catalog["models"], (
+                "opencode-go/argon", "opencode-go/glm", "opencode-go/missing",
+                "opencode-go/empty", "opencode-go/broken"))
+            self.assertEqual(catalog["variants"], {
+                "opencode-go/argon": ("low", "high"),
+                "opencode-go/glm": ("minimal", "none"),
+            })
+
+            with unittest.mock.patch.dict(os.environ, {
+                    "HOME": str(root / "missing-home"), "XDG_STATE_HOME": str(state),
+                    "OPENCODE_RUNTIME_VERSION": "2.0.32"}, clear=True):
+                unknown = runtime.read_model_catalog(directory=root)
+            self.assertEqual((unknown["state"], unknown["variants"]), ("unknown", {}))
+
+
 class OpenCodeAutomaticEligibilityTest(unittest.TestCase):
     """Provider evidence against a real V2 credential store and Fleet cache."""
 
@@ -1145,6 +1219,36 @@ class OpenCodeAutomaticEligibilityTest(unittest.TestCase):
         self.assertEqual((model, evidence["state"]), ("opencode-go/primary", "unavailable"))
         # An eligible primary stays first.
         self.assertEqual(select("opencode-go/other")[0], "opencode-go/other")
+
+    def test_catalog_variant_rejection_excludes_only_the_confirmed_row(self):
+        self.fallbacks("opencode-go/fallback:max")
+        catalog = {"state": "available", "variants": {
+            "opencode-go/primary": ("low", "medium"),
+            "opencode-go/fallback": ("low", "high", "max"),
+        }}
+        rows = runtime.automatic_candidates("opencode-go/primary", "xhigh",
+                                            config_path=self.config, catalog=catalog)
+        self.assertEqual((rows[0]["automatic_eligible"], rows[0]["variant_reason"]),
+                         (False, "variant-unavailable"))
+        self.assertTrue(rows[1]["automatic_eligible"])
+        self.assertNotIn("variant_reason", rows[1])
+        model, variant, evidence = runtime.select_automatic_model(
+            "opencode-go/primary", "xhigh", config_path=self.config, catalog=catalog)
+        self.assertEqual((model, variant), ("opencode-go/fallback", "max"))
+        self.assertEqual(evidence["fallback_from_reason"], "no-observation")
+
+        # An unobserved candidate and a supported one keep their previous eligibility.
+        unknown_catalog = {"state": "available", "variants": {}}
+        rows = runtime.automatic_candidates("opencode-go/primary", "xhigh",
+                                            config_path=self.config, catalog=unknown_catalog)
+        self.assertTrue(rows[0]["automatic_eligible"])
+        self.assertNotIn("variant_reason", rows[0])
+        supported = {"state": "available", "variants": {
+            "opencode-go/primary": ("low", "high", "xhigh")}}
+        rows = runtime.automatic_candidates("opencode-go/primary", "xhigh",
+                                            config_path=self.config, catalog=supported)
+        self.assertTrue(rows[0]["automatic_eligible"])
+        self.assertNotIn("variant_reason", rows[0])
 
     def test_candidates_keep_their_requested_model_identity(self):
         runtime.record_model_outcome("opencode-go/model", success=True)

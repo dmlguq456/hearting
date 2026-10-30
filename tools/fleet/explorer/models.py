@@ -631,7 +631,13 @@ def draw_models(grid: CellGrid, vm, state, x=X, y=3):
     if missing_current:
         grid.put(box_left + 12, y + 2, "not in catalog · choose from the current list", "dim", limit=right)
     grid.put(box_left + 3, y + 4 + extra, "effort", "label")
-    effort_options = tuple(data.get("efforts", ())) + (("runtime-default",) if harness == "opencode" else ())
+    effort_options = tuple(data.get("efforts", ()))
+    observed = catalog.get("variants")
+    if harness == "opencode" and isinstance(observed, Mapping):
+        model_variants = observed.get(model_choice)
+        if isinstance(model_variants, (list, tuple)) and model_variants:
+            effort_options = tuple(model_variants)
+    effort_options += (("runtime-default",) if harness == "opencode" else ())
     _chips(grid, box_left + 12, y + 4 + extra, effort_options, current_effort, values.get("ui:effort"), "effort",
            right - 2)
     command = f"hearting model set {harness} profile/{profile} {model_choice}@{effort_choice}"
