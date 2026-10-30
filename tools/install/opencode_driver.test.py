@@ -337,6 +337,28 @@ class OpenCodeGuardProjectionTest(unittest.TestCase):
         self.uninstall()
         self.assertFalse(self.package.exists())
 
+    def test_guard_render_from_a_symlinked_bundle_root_passes_the_same_root_check(self):
+        # 2026-10-30: the installer renders the import from the bundle's
+        # symlinked `source` root; preflight resolved that root first and
+        # rejected identical bytes, so every OpenCode headless launch exited 69.
+        projector = self.driver.projector
+        bundle = self.root / "bundle/source"
+        bundle.parent.mkdir(parents=True)
+        bundle.symlink_to(self.source)
+        layout = projector.opencode_guard_layout(bundle, self.home)
+        for entry in layout["entries"]:
+            if entry["action"] == "render":
+                Path(entry["dest"]).parent.mkdir(parents=True, exist_ok=True)
+                Path(entry["dest"]).write_text(entry["content"])
+        self.assertIn(str(bundle), self.package.read_text())
+        self.assertEqual(projector.opencode_guard_health(layout), [])
+        resolved = projector.opencode_guard_layout(bundle.resolve(), self.home)
+        self.assertTrue(projector.opencode_guard_health(resolved))
+        preflight = (SOURCE_ROOT / "adapters/opencode/bin/preflight.sh").read_text()
+        self.assertIn('root = pathlib.Path(state.get("active_root") or sys.argv[2])\n', preflight)
+        self.package.write_text(self.package.read_text() + "// foreign\n")
+        self.assertTrue(projector.opencode_guard_health(layout))
+
     def test_user_edited_render_is_preserved_and_never_reregistered(self):
         self.assertFalse(self.driver.install()["blocked"])
         recorded = self.manifest()["files"].copy()
