@@ -228,10 +228,10 @@ class Case1ParentSessionTest(unittest.TestCase):
                 row = HANDOVER.record_locked(seat, "codex", "third", "start", "clear", 4)
             self.assertEqual((row["from"], row["sid"]), ("successor", "third"))
 
-    def test_unreadable_handover_keeps_registered_parent_safe_default(self):
+    def test_unreadable_handover_waits_without_registered_parent_authority(self):
         jobs = Path("/tmp/registered-parent-unreadable-jobs")
-        with mock.patch.object(HANDOVER, "_lineage_seats", side_effect=OSError("unreadable")):
-            self.assertTrue(RA.owns(self.OWNER, "codex-sid", jobs))
+        with mock.patch.object(HANDOVER, "_readable_lineage_signature", side_effect=OSError("unreadable")):
+            self.assertFalse(RA.owns(self.OWNER, "codex-sid", jobs))
             self.assertFalse(RA.owns(self.OWNER, "claude-sid", jobs))
 
     def test_a_non_owner_cannot_start_the_replacement_owner(self):

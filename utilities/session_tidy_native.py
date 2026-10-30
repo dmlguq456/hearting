@@ -243,8 +243,12 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
     target = (req.get("seat") or {}).get("native")
     sid = req.get("new_session") if continuing else req.get("sid")
     word = "continued" if continuing else "cleared"
+    claim = None
     def result(outcome, reason="", new_session=""):
-        return {word: outcome, "reason": reason, "new_session": new_session}
+        fields = {word: outcome, "reason": reason, "new_session": new_session}
+        if continuing and claim is not None:
+            fields["claim_id"] = (claim.get("continued") or {}).get("claim_id", "")
+        return fields
     if req.get("harness") != "claude" or not target:
         return result("skipped", "unsupported-harness")
     why = idle_reason(target, sid)
@@ -261,7 +265,7 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
                 current, why = validator(request_path, nonce)
                 if current is None: return result("skipped", why)
                 if current.get("snapshot_state") in ("pending", "deferred"):
-                    return result("skipped", "snapshot-pending")
+                    return result("queued", "snapshot-pending")
                 why = idle_reason(target, sid)
                 if not why and continuing:
                     seat = st.seat_from_dict(req["seat"])
@@ -286,28 +290,41 @@ def command(req, request_path, nonce, *, continuing, screen_ready):
             else:
                 claim, why = clear.claim_clear(request_path, nonce)
                 if claim is None: return result("skipped", why)
-            # Re-read the same terminal after the booking/claim checks. A draft
-            # arriving during those checks must not be cleared or submitted.
-            lines = view.read(timeout=1)
-            why = "screen-unknown" if lines is None else screen_ready("claude", lines)
-            why = why or idle_reason(target, sid)
-            if why or proc.poll() is not None:
-                if continuing: clear.release_unsent_continue(claim)
-                return result("skipped", why or "target-changed")
-            # The screen read can wait while a short user prompt finishes. Its
-            # idle/empty result must not hide a newer prompt, card or booking.
-            if continuing:
-                current, why = clear.validate_continue(request_path, nonce, _sending_claim=claim)
-            else:
-                current, why = clear.validate_request(request_path, nonce,
-                                                     _sending_claim=claim.get("clear_claim"))
-            if current is None:
+            while True:
+                # Keep the exact unsent clear claim during a transient source
+                # read failure. Re-read the terminal after that wait as well.
+                current, why = clear.reobserve_request(
+                    request_path, nonce, sleep=time.sleep, continuing=continuing,
+                    _sending_claim=claim if continuing else claim.get("clear_claim"))
+                if current is None:
+                    if continuing: clear.release_unsent_continue(claim)
+                    return result("skipped", why)
+                lines = view.read(timeout=1)
+                why = "screen-unknown" if lines is None else screen_ready("claude", lines)
+                why = why or idle_reason(target, sid)
+                if why or proc.poll() is not None:
+                    if continuing: clear.release_unsent_continue(claim)
+                    return result("skipped", why or "target-changed")
+                # An idle screen must not hide a newer prompt, card or booking.
+                if continuing:
+                    current, why = clear.validate_continue(request_path, nonce, _sending_claim=claim)
+                else:
+                    current, why = clear.validate_request(request_path, nonce,
+                                                         _sending_claim=claim.get("clear_claim"))
+                if current is not None:
+                    break
+                if why == "idle-card-observation-unavailable":
+                    continue
                 if continuing: clear.release_unsent_continue(claim)
                 return result("skipped", why)
             text = clear.followup_text(req) if continuing else "/clear"
             # A single write includes Enter; partial/failed writes are never retried.
             data = (text + "\r").encode()
-            if os.write(fd, data) != len(data): return result("unverified", "partial-send")
+            try:
+                written = os.write(fd, data)
+            except OSError:
+                return result("unverified", "partial-send")
+            if written != len(data): return result("unverified", "partial-send")
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 record = live(target)

@@ -2327,6 +2327,446 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         different = dict(unknown, name="different-name")
         self.assertNotEqual(peer_message.prepare_peer_message("unknown peer", self.sender, different, defer=True)[1], ref)
 
+    def test_exact_retained_request_distinguishes_every_intent_input_during_outage(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        def prepare(body="exact correction", sender=None, recipient=None, **kw):
+            return peer_message.prepare_peer_message(body, sender or self.sender, recipient or exact,
+                defer=True, original_target=kw.pop("original_target", "child"),
+                server=kw.pop("server", "selected"), refs=kw.pop("refs", ["request"]), **kw)
+        original = prepare()
+        before = peer_message._read_pending(original[1])
+        for recipient in (unknown, exact, dict(exact, session_id="current-namesake")):
+            self.assertEqual(prepare(recipient=recipient), original)
+        self.assertEqual(prepare(recipient=dict(unknown, name="w1:pX"), original_target="w1:pX"), original)
+        self.assertEqual(peer_message._read_pending(original[1]), before)
+        self.assertEqual(prepare(original_target="[3e]"), original)
+        unknown = dict(unknown, name="[3e]")
+        self.assertEqual(prepare(recipient=unknown, original_target="[3e]"), original)
+        before = peer_message._read_pending(original[1])
+        variants = ({"body": "different"}, {"refs": ["different"]}, {"server": "ambient"},
+                    {"sender": dict(self.sender, session_id="other")}, {"with_trailer": False},
+                    {"producer_binding": {"different": "producer"}},
+                    {"handoff": {"card_id": "other-card"}})
+        # A different producer is a different intent. Producer admission itself
+        # is tested separately; this test isolates retained preparation matching.
+        with mock.patch.object(peer_message, "_valid_runtime_producer_binding", return_value=True):
+            for kwargs in variants:
+                with self.subTest(kwargs=kwargs):
+                    self.assertNotEqual(prepare(recipient=unknown, original_target="[3e]", **kwargs)[1], original[1])
+        other_address = {"harness": "unknown", "session_id": None, "name": "unrelated"}
+        self.assertNotEqual(prepare(recipient=other_address, original_target="unrelated")[1], original[1])
+        self.assertEqual(peer_message._read_pending(original[1]), before)
+
+    def test_legacy_exact_reuse_requires_recorded_endpoint_and_reliable_address_evidence(self):
+        import peer_obligations
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        store = peer_obligations.ObligationStore()
+        for evidence in ("duty", "row-and-duty", "pane", "tag", "none", "name-only", "wrong-server",
+                         "wrong-digest", "wrong-recipient", "wrong-identity", "wrong-sender", "wrong-refs"):
+            with self.subTest(evidence=evidence):
+                body = "legacy exact " + evidence
+                text, ref = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                    **({"server": "selected"} if evidence in ("row-and-duty", "pane", "name-only") else {}))
+                original = peer_message._read_pending(ref)
+                if evidence not in ("none", "name-only", "pane"):
+                    identity = {"server": "selected", "pane": "w1:pX", **{k: exact[k] for k in ("harness", "session_id")}}
+                    intent = {"ref": ref, "body_digest": original["body_sha256"], "from": self.sender,
+                              "to": exact, "target": "w1:pX", "refs": []}
+                    if evidence == "tag": intent["target"] = "[3e]"
+                    if evidence == "wrong-server": identity["server"] = "ambient"
+                    if evidence == "wrong-digest": intent["body_digest"] = "0" * 64
+                    if evidence == "wrong-recipient": intent["to"] = dict(exact, session_id="namesake")
+                    if evidence == "wrong-identity": identity["session_id"] = "namesake"
+                    if evidence == "wrong-sender": intent["from"] = dict(self.sender, session_id="other")
+                    if evidence == "wrong-refs": intent["refs"] = ["other"]
+                    store.create("message-" + ref, "message", identity, intent)
+                address = "[3e]" if evidence == "tag" else "w1:pX" if evidence == "pane" else "child"
+                result = peer_message.prepare_peer_message(body, self.sender, dict(unknown, name=address),
+                    defer=True, original_target=address, server="selected")
+                if evidence in ("duty", "row-and-duty", "pane", "tag"):
+                    self.assertEqual(result, (text, ref))
+                    self.assertEqual(peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                        original_target=address, server="selected"), result)
+                else:
+                    self.assertNotEqual(result[1], ref)
+                self.assertEqual(peer_message._read_pending(ref), original)
+
+    def test_verified_aliases_survive_sequences_without_guessing_unseen_addresses(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        for unresolved in (False, True):
+            body = "alias history " + str(unresolved)
+            def prepare(target, recipient=exact, **kw):
+                return peer_message.prepare_peer_message(body, self.sender, recipient,
+                    defer=True, original_target=target, server=kw.pop("server", "selected"), **kw)
+            original = prepare("child", unknown if unresolved else exact)
+            self.assertEqual(prepare("child"), original)
+            before = peer_message._read_pending(original[1])
+            wire = peer_message._transfer_path(original[1]).read_bytes()
+            aliases = ["[3e]", "renamed", "w1:pMoved", "[4f]"]
+            for alias in aliases:
+                self.assertEqual(prepare(alias, dict(exact, name="renamed", pane_id="w1:pMoved")), original)
+                for seen in aliases[:aliases.index(alias) + 1]:
+                    for _ in range(2):
+                        self.assertEqual(prepare(seen, dict(unknown, name=seen)), original)
+            after = peer_message._read_pending(original[1])
+            self.assertEqual({a["target"] for a in after["verified_addresses"]}, set(aliases))
+            self.assertEqual({k: v for k, v in after.items() if k != "verified_addresses"}, before)
+            self.assertEqual(peer_message._transfer_path(original[1]).read_bytes(), wire)
+            # Resolution to another pin is never remembered on the old request.
+            self.assertEqual(prepare("renamed", dict(exact, session_id="namesake")), original)
+            self.assertEqual(peer_message._read_pending(original[1]), after)
+            self.assertNotEqual(prepare("never-observed", dict(unknown, name="never-observed"))[1], original[1])
+            self.assertNotEqual(prepare("[3e]", dict(unknown, name="[3e]"), server="ambient")[1], original[1])
+
+    def test_legacy_aliases_need_recorded_endpoint_and_new_exact_observation(self):
+        import peer_obligations
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "[3e]"}
+        for evidence in ("row", "duty", "none"):
+            body = "legacy alias " + evidence
+            original = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                **({"server": "selected"} if evidence == "row" else {}))
+            before = peer_message._read_pending(original[1])
+            if evidence == "duty":
+                peer_obligations.ObligationStore().create("message-" + original[1], "message",
+                    {"server": "selected", **exact}, {"ref": original[1], "body_digest": before["body_sha256"],
+                    "from": self.sender, "to": exact, "target": "w1:pX", "refs": []})
+            # Nothing records this tag until a real exact retry uses it.
+            unseen = peer_message.prepare_peer_message(body, self.sender, unknown, defer=True,
+                original_target="[3e]", server="selected")
+            self.assertNotEqual(unseen[1], original[1])
+            self.assertEqual(peer_message._read_pending(original[1]), before)
+            # Retire only this fixture's independent negative-control request.
+            peer_message._pending_path(unseen[1]).unlink()
+            peer_message._transfer_path(unseen[1]).unlink()
+            observed = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                original_target="[3e]", server="selected")
+            if evidence == "none":
+                self.assertNotEqual(observed[1], original[1])
+                self.assertEqual(peer_message._read_pending(original[1]), before)
+            else:
+                self.assertEqual(observed, original)
+                # The association itself retains its checked endpoint/pin;
+                # later duty observations need not invent either fact.
+                with mock.patch.object(peer_obligations.ObligationStore, "get", return_value=None):
+                    self.assertEqual(peer_message.prepare_peer_message(body, self.sender, unknown,
+                        defer=True, original_target="[3e]", server="selected"), original)
+
+    def test_alias_updates_merge_fresh_submission_and_reject_changed_binding(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        for mutation in ("submitted", "received", "bound", "missing", "unreadable"):
+            with self.subTest(mutation=mutation):
+                body = "alias CAS " + mutation
+                unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+                text, ref = peer_message.prepare_peer_message(body, self.sender,
+                    unknown if mutation == "bound" else exact, defer=True,
+                    original_target="child", server="selected")
+                if mutation == "bound":
+                    peer_message.bind_unresolved_pending_recipient(ref, exact)
+                snapshot = peer_message._read_pending(ref)
+                # The scan has already observed this snapshot; another existing
+                # writer changes the row before the alias writer acquires its CAS.
+                if mutation == "submitted":
+                    current = dict(snapshot, state="queued", rpc_claim={"token": "concurrent"},
+                                   actual_message_id="native-item", receipt="native-queue-accepted")
+                elif mutation == "received":
+                    self.assertEqual(peer_message.receive_peer_message(text, exact), 0)
+                    current = peer_message._read_pending(ref)
+                    self.assertIsNone(current["text"])
+                elif mutation == "bound":
+                    current = dict(snapshot, bound_to=dict(exact, session_id="other"))
+                else:
+                    current = snapshot
+                peer_message._save_pending(current)
+                with mock.patch.object(peer_message, "_pending_rows", return_value=iter([snapshot])):
+                    if mutation in ("missing", "unreadable"):
+                        read = mock.patch.object(peer_message, "_read_pending", return_value=None,
+                            side_effect=OSError("unavailable") if mutation == "unreadable" else None)
+                    else:
+                        read = contextlib.nullcontext()
+                    with read, mock.patch.object(peer_message, "_prepare_peer_message") as publish:
+                        if mutation in ("bound", "missing", "unreadable"):
+                            with self.assertRaises((OSError, ValueError)):
+                                peer_message.prepare_peer_message(body, self.sender, exact,
+                                    defer=True, original_target="[3e]", server="selected")
+                        else:
+                            self.assertEqual(peer_message.prepare_peer_message(body, self.sender, exact,
+                                defer=True, original_target="[3e]", server="selected"), (text, ref))
+                        publish.assert_not_called()
+                latest = peer_message._read_pending(ref)
+                self.assertEqual({k: v for k, v in latest.items() if k != "verified_addresses"}, current)
+
+    def test_concurrent_alias_recording_and_outage_preparation_keep_every_association(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        body = "alias concurrency"
+        text, ref = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+            original_target="child", server="selected")
+        entered, release = threading.Event(), threading.Event()
+        save = peer_message._save_pending
+        errors = []
+        def paused(row):
+            if row.get("verified_addresses", [{}])[-1].get("target") == "[3e]":
+                entered.set()
+                if not release.wait(5): raise AssertionError("alias writer not released")
+            return save(row)
+        def prepare(alias, recipient=exact):
+            return peer_message.prepare_peer_message(body, self.sender, recipient, defer=True,
+                original_target=alias, server="selected")
+        def first():
+            try: self.assertEqual(prepare("[3e]"), (text, ref))
+            except BaseException as exc: errors.append(exc)
+        with mock.patch.object(peer_message, "_save_pending", side_effect=paused):
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                # Different pane/native preparation key, same retained row CAS.
+                with self.assertRaises(BlockingIOError):
+                    prepare("renamed", dict(exact, pane_id="w1:pMoved"))
+                with self.assertRaises(BlockingIOError):
+                    prepare("[3e]", {"harness": "unknown", "session_id": None, "name": "[3e]"})
+            finally:
+                release.set(); thread.join(5)
+                self.assertFalse(thread.is_alive())
+        self.assertFalse(errors, errors)
+        self.assertEqual(prepare("renamed", dict(exact, pane_id="w1:pMoved")), (text, ref))
+        for alias in ("[3e]", "renamed"):
+            self.assertEqual(prepare(alias, {"harness": "unknown", "session_id": None, "name": alias}), (text, ref))
+        self.assertEqual({a["target"] for a in peer_message._read_pending(ref)["verified_addresses"]}, {"[3e]", "renamed"})
+        self.assertEqual(len(list(peer_message._pending_rows())), 1)
+
+    def test_alias_recording_during_native_rpc_preserves_inflight_claim_and_single_add(self):
+        import codex_queue_delivery as queue
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        body = "alias while native submission is inflight"
+        text, ref = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+            original_target="child", server="selected")
+        entered, release = threading.Event(), threading.Event()
+        adds, results, errors = [], [], []
+        def rpc(_path, method, params, **_kw):
+            if method == "thread/queue/list": return {"data": [], "nextCursor": None}
+            self.assertEqual(method, "thread/queue/add")
+            adds.append(params)
+            entered.set()
+            if not release.wait(5): raise AssertionError("native add not released")
+            return {"queuedSubmission": {"id": "native-item"}}
+        def deliver():
+            try: results.append(peer_message.deliver_pending_codex(ref))
+            except BaseException as exc: errors.append(exc)
+        with mock.patch("codex_queue_dispatch.resolve_queue_socket", return_value="fixture-socket"), \
+             mock.patch.object(queue, "_known_consumed", return_value=None), \
+             mock.patch.object(queue, "_rpc", side_effect=rpc):
+            thread = threading.Thread(target=deliver)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                inflight = peer_message._read_pending(ref)
+                self.assertTrue(inflight["rpc_claim"]["token"])
+                self.assertEqual((inflight["state"], inflight["receipt"]), ("unverified", "native-queue-inflight"))
+                for alias in ("[3e]", "renamed", "w1:pMoved"):
+                    self.assertEqual(peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                        original_target=alias, server="selected"), (text, ref))
+                    self.assertEqual(peer_message.prepare_peer_message(body, self.sender,
+                        {"harness": "unknown", "session_id": None, "name": alias}, defer=True,
+                        original_target=alias, server="selected"), (text, ref))
+                latest = peer_message._read_pending(ref)
+                self.assertEqual({k: v for k, v in latest.items() if k != "verified_addresses"}, inflight)
+                self.assertEqual(peer_message.deliver_pending_codex(ref)["reason"], "peer-native-inflight")
+            finally:
+                release.set(); thread.join(5)
+                self.assertFalse(thread.is_alive())
+            self.assertFalse(errors, errors)
+            peer_message.deliver_pending_codex(ref)
+        latest = peer_message._read_pending(ref)
+        self.assertEqual(len(latest["verified_addresses"]), 3)
+        self.assertEqual(len(adds), 1)
+        self.assertEqual(adds[0]["clientUserMessageId"], "delivery-peer-" + ref)
+        self.assertEqual(adds[0]["threadId"], exact["session_id"])
+        self.assertEqual(adds[0]["input"], [{"type": "text", "text": text}])
+        sys.stdout.write("peer-alias-inflight=" + json.dumps({"ref": ref, "adds": adds,
+            "aliases": latest["verified_addresses"], "results": results}) + "\n")
+
+    def test_alias_write_failure_and_interruption_never_fall_through_to_publication(self):
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        for defer, fault in ((True, "before-replace"), (False, "before-replace"),
+                             (True, "after-replace"), (True, "read-unavailable")):
+            with self.subTest(defer=defer, fault=fault):
+                body = "alias interruption " + str(defer) + fault
+                original = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                    original_target="child", server="selected")
+                wire = peer_message._transfer_path(original[1]).read_bytes()
+                fsync = peer_message.os.fsync
+                def fail_directory(fd):
+                    if stat.S_ISDIR(os.fstat(fd).st_mode): raise OSError("directory fsync interruption")
+                    return fsync(fd)
+                patch = (mock.patch.object(peer_message.os, "replace", side_effect=OSError("replace failed"))
+                         if fault == "before-replace" else
+                         mock.patch.object(peer_message.os, "fsync", side_effect=fail_directory)
+                         if fault == "after-replace" else
+                         mock.patch.object(peer_message, "_read_pending", side_effect=OSError("state unavailable")))
+                with patch, mock.patch.object(peer_message, "_prepare_peer_message") as publish:
+                    with self.assertRaises(OSError):
+                        peer_message.prepare_peer_message(body, self.sender, exact, defer=defer,
+                            original_target="[3e]", server="selected")
+                    publish.assert_not_called()
+                self.assertEqual(peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                    original_target="[3e]", server="selected"), original)
+                self.assertEqual(peer_message.prepare_peer_message(body, self.sender,
+                    {"harness": "unknown", "session_id": None, "name": "[3e]"}, defer=True,
+                    original_target="[3e]", server="selected"), original)
+                self.assertEqual(peer_message._transfer_path(original[1]).read_bytes(), wire)
+                self.assertFalse(list(peer_message._pending_dir().glob(".pending-*")))
+
+    def test_exact_outage_retry_preserves_native_rpc_submission_and_ambiguity(self):
+        import codex_queue_delivery as queue
+        exact = dict(self.recipient, name="child", pane_id="w1:pX")
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        for ambiguous in (False, True):
+            with self.subTest(ambiguous=ambiguous):
+                body = "native exact outage " + str(ambiguous)
+                text, ref = peer_message.prepare_peer_message(body, self.sender, exact, defer=True,
+                    original_target="child", server="selected")
+                calls, adds = [], []
+                def rpc(_path, method, params, **kw):
+                    calls.append(method)
+                    self.assertEqual(params["threadId"], exact["session_id"])
+                    if method == "thread/queue/list": return {"data": [], "nextCursor": None}
+                    if method == "thread/queue/add":
+                        adds.append(params)
+                        if ambiguous: raise queue.QueueDeliveryError("queue-websocket-timeout", ambiguous=True)
+                        return {"queuedSubmission": {"id": "exact-native-item"}}
+                    self.fail(method)
+                with mock.patch("codex_queue_dispatch.resolve_queue_socket", return_value="fixture-socket"), \
+                     mock.patch.object(queue, "_known_consumed", return_value=None), \
+                     mock.patch.object(queue, "_rpc", side_effect=rpc):
+                    peer_message.deliver_pending_codex(ref)
+                    submitted = peer_message._read_pending(ref)
+                    for _ in range(3):
+                        for recipient in (unknown, exact):
+                            self.assertEqual(peer_message.prepare_peer_message(body, self.sender, recipient,
+                                defer=True, original_target="child", server="selected"), (text, ref))
+                            self.assertEqual(peer_message._read_pending(ref), submitted)
+                        peer_message.deliver_pending_codex(ref)
+                        submitted = peer_message._read_pending(ref)
+                self.assertEqual(len(adds), 1)
+                self.assertEqual(adds[0]["clientUserMessageId"], "delivery-peer-" + ref)
+                self.assertEqual(adds[0]["input"], [{"type": "text", "text": text}])
+                self.assertEqual(len([r for r in peer_message._pending_rows() if r["ref"] == ref]), 1)
+                sys.stdout.write("peer-retained-rpc=" + json.dumps({"ambiguous": ambiguous, "ref": ref,
+                    "methods": calls, "adds": adds, "submission_state": submitted["state"]}) + "\n")
+
+    def test_unresolved_preparation_reuses_only_the_same_original_endpoint_and_intent(self):
+        import peer_obligations
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        exact = {"harness": "codex", "session_id": "native", "name": "child", "pane_id": "w1:pX"}
+        def prepare(body="correction", sender=None, recipient=None, **kwargs):
+            return peer_message.prepare_peer_message(body, sender or self.sender, recipient or unknown,
+                defer=True, original_target="child", server=kwargs.pop("server", "selected"),
+                refs=kwargs.pop("refs", ["request"]), **kwargs)
+        original = prepare()
+        self.assertEqual(prepare(), original)
+        self.assertEqual(prepare(recipient=exact), original)
+        self.assertEqual(prepare(), original)
+        for kwargs in ({"body": "different"}, {"refs": ["other"]}, {"server": "ambient"},
+                       {"sender": dict(self.sender, session_id="other")}, {"with_trailer": False}):
+            with self.subTest(kwargs=kwargs):
+                self.assertNotEqual(prepare(**kwargs)[1], original[1])
+        # Legacy rows use the endpoint already recorded by their message duty.
+        _, legacy = peer_message.prepare_peer_message("legacy", self.sender, unknown, defer=True)
+        self.assertNotEqual(prepare("legacy", refs=[], server="default")[1], legacy)
+        self.assertIsNone(peer_message._read_pending(legacy).get("bound_to"))
+        peer_obligations.ObligationStore().create("message-" + legacy, "message", {"server": "selected"},
+            {"ref": legacy, "body_digest": peer_message._read_pending(legacy)["body_sha256"],
+             "target": "child", "from": self.sender, "to": unknown})
+        self.assertEqual(prepare("legacy", refs=[])[1], legacy)
+        self.assertNotEqual(prepare("legacy", refs=[], server="ambient")[1], legacy)
+
+    def test_unresolved_ambiguous_or_conflicting_intents_stay_unsent_on_exact_retry(self):
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        exact = {"harness": "codex", "session_id": "native", "name": "child"}
+        for receipt in ("target-name-ambiguous", "target-identity-changed", "submission-ambiguous"):
+            with self.subTest(receipt=receipt):
+                args = (receipt, self.sender)
+                text, ref = peer_message.prepare_peer_message(*args, unknown, defer=True,
+                    receipt=receipt, original_target="child", server="selected")
+                for recipient in (unknown, exact):
+                    self.assertEqual(peer_message.prepare_peer_message(*args, recipient, defer=True,
+                        original_target="child", server="selected"), (text, ref))
+                self.assertIsNone(peer_message._read_pending(ref).get("bound_to"))
+                self.assertEqual(peer_message._read_pending(ref)["receipt"], receipt)
+
+    def test_concurrent_unresolved_and_exact_preparations_share_the_original_address_lock(self):
+        self._concurrent_address_preparations(start_exact=False)
+        self._concurrent_address_preparations(start_exact=True)
+
+    def _concurrent_address_preparations(self, *, start_exact):
+        unknown = {"harness": "unknown", "session_id": None, "name": "child"}
+        exact = {"harness": "codex", "session_id": "native", "name": "child"}
+        body = "concurrent original " + str(start_exact)
+        initial_count = len(list(peer_message._pending_rows()))
+        entered, release = threading.Event(), threading.Event()
+        original_prepare = peer_message._prepare_peer_message
+        results, errors = [], []
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("preparation not released")
+            return original_prepare(*args, **kwargs)
+        def prepare(recipient):
+            return peer_message.prepare_peer_message(body, self.sender, recipient,
+                defer=True, original_target="child", server="selected", refs=["request"])
+        def first():
+            try: results.append(prepare(exact if start_exact else unknown))
+            except BaseException as exc: errors.append(exc)
+        with mock.patch.object(peer_message, "_prepare_peer_message", side_effect=delayed):
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                for recipient in (unknown, exact):
+                    with self.assertRaises(BlockingIOError):
+                        prepare(recipient)
+            finally:
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        self.assertEqual(prepare(unknown), results[0])
+        self.assertEqual(prepare(exact), results[0])
+        self.assertEqual(len(list(peer_message._pending_rows())), initial_count + 1)
+
+    def test_concurrent_exact_aliases_still_share_the_native_preparation_lock(self):
+        exact = dict(self.recipient, pane_id="w1:pX", name="child")
+        entered, release = threading.Event(), threading.Event()
+        original_prepare = peer_message._prepare_peer_message
+        results, errors = [], []
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(5): raise AssertionError("preparation not released")
+            return original_prepare(*args, **kwargs)
+        def prepare(target):
+            return peer_message.prepare_peer_message("aliased original", self.sender, exact,
+                defer=True, original_target=target, server="selected")
+        def first():
+            try: results.append(prepare("child"))
+            except BaseException as exc: errors.append(exc)
+        with mock.patch.object(peer_message, "_prepare_peer_message", side_effect=delayed):
+            thread = threading.Thread(target=first)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaises(BlockingIOError): prepare("w1:pX")
+            finally:
+                release.set()
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
+        self.assertFalse(errors)
+        self.assertEqual(prepare("w1:pX"), results[0])
+        self.assertEqual(len(list(peer_message._pending_rows())), 1)
+
     def test_two_recipient_rpc_and_receive_race_do_not_block_or_resurrect_payload(self):
         import codex_queue_delivery as queue
         text, ref = self.pending()
@@ -2374,6 +2814,65 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(row["text"], text)
 
 
+class SealedHandoffCommandTest(_TmpRootMixin, unittest.TestCase):
+    def test_command_is_sealed_and_retry_reuses_source_and_context(self):
+        sender = {"harness": "claude", "session_id": "old"}
+        recipient = {"harness": "codex", "session_id": "new"}
+        context = {"card_id": "card", "predecessor": sender, "successor": recipient}
+        for body in ("[handoff] small card", "[handoff] card\n" + "constraint\n" * 650):
+            with self.subTest(bytes=len(body.encode())), mock.patch.object(
+                    peer_message, "_reference_access_evidence_valid", return_value=True):
+                text, ref = peer_message.prepare_peer_message(
+                    body, sender, recipient, defer=True, handoff=context)
+                command = peer_message.handoff_accept_command(ref)
+                self.assertIn(command, text)
+                self.assertIn("read", text.lower())
+                row = peer_message._read_pending(ref)
+                self.assertEqual(row["handoff"], context)
+                self.assertEqual(peer_message._read_transfer_record(ref)["handoff"], context)
+                self.assertEqual(row["body_sha256"], hashlib.sha256(text.encode()).hexdigest())
+                self.assertEqual(peer_message.prepare_peer_message(
+                    body, sender, recipient, defer=True, handoff=context), (text, ref))
+                if len(body.encode()) > 2048:
+                    self.assertLessEqual(len(text.encode()), peer_message._BODY_REFERENCE_ENVELOPE_BYTES)
+                    _, raw = peer_message._read_body_payload(ref, row["body_ref"])
+                    self.assertEqual(raw, body.encode())
+        text, _ = peer_message.prepare_peer_message("ordinary", sender, recipient, defer=True)
+        self.assertNotIn("handoff accept", text)
+
+    def test_unresolved_original_is_retained_and_bound_only_once_before_send(self):
+        sender = {"harness": "claude", "session_id": "old"}
+        original = {"harness": "unknown", "session_id": None, "name": "new peer"}
+        text, ref = peer_message.prepare_peer_message("correction", sender, original, defer=True)
+        recipient = {"harness": "codex", "session_id": "new", "pane_id": "w1:p1"}
+        row = peer_message.bind_unresolved_pending_recipient(ref, recipient)
+        self.assertEqual(row["to"], original)
+        self.assertEqual(row["text"], text)
+        self.assertEqual(peer_message.pending_delivery_recipient(row), recipient)
+        self.assertIsNone(peer_message.bind_unresolved_pending_recipient(ref, dict(recipient, session_id="other")))
+        row["state"] = "queued"
+        peer_message._save_pending(row)
+        self.assertIsNone(peer_message.bind_unresolved_pending_recipient(ref, recipient))
+
+
+    def test_unresolved_retry_binds_and_reuses_the_original_ref_even_after_submission(self):
+        sender = {"harness": "claude", "session_id": "old"}
+        original = {"harness": "unknown", "session_id": None, "name": "recovering peer"}
+        text, ref = peer_message.prepare_peer_message("original correction", sender, original, defer=True)
+        recipient = {"harness": "codex", "session_id": "native-current", "pane_id": "w1:p1", "name": "peer"}
+        retry = peer_message.prepare_peer_message("original correction", sender, recipient, defer=True,
+                                                 original_target="recovering peer")
+        self.assertEqual(retry, (text, ref))
+        row = peer_message._read_pending(ref)
+        self.assertEqual(row["to"], original)
+        self.assertEqual(peer_message.pending_delivery_recipient(row)["session_id"], "native-current")
+        row["state"] = "queued"
+        peer_message._save_pending(row)
+        self.assertEqual(peer_message.prepare_peer_message("original correction", sender, recipient, defer=True,
+                            original_target="recovering peer"), (text, ref))
+        self.assertEqual(len(list(peer_message._pending_dir().glob("*.json"))), 1)
+
+
 class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -2385,19 +2884,21 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         self.steward.peer_message = peer_message
         self.sender = {"harness": "claude", "session_id": "predecessor", "name": "old"}
         self.recipient = {"harness": "codex", "session_id": "successor", "name": "new"}
-        self.predecessor = {**self.sender, "pane": "p1", "server": "default", "foreground": {"pid": 11, "start": "101"}}
-        self.successor = {**self.recipient, "pane": "p2", "server": "default", "foreground": {"pid": 22, "start": "202"}}
-        self.caller = (session_tidy.Seat("pane", "seat", "p2"), "codex", "successor")
+        self.predecessor = {**self.sender, "pane": "w1:p1", "server": "default", "foreground": {"pid": 11, "start": "101"}}
+        self.successor = {**self.recipient, "pane": "w1:p2", "server": "default", "foreground": {"pid": 22, "start": "202"}}
+        self.caller = (session_tidy.Seat("pane", "seat", "w1:p2"), "codex", "successor")
         self.text, self.ref = peer_message.prepare_peer_message("[handoff] card", self.sender, self.recipient, defer=True)
         row = peer_message._read_pending(self.ref)
-        row["handoff"] = {"target": "p1", "predecessor": self.predecessor, "successor": self.successor,
-            "requester": {"harness": "codex", "session_id": "successor", "pane": "p2", "server": "default"}}
+        row["handoff"] = {"target": "w1:p1", "predecessor": self.predecessor, "successor": self.successor,
+            "requester": {"harness": "codex", "session_id": "successor", "pane": "w1:p2", "server": "default"}}
         peer_message._save_pending(row)
         self.store = self.steward.peer_obligations.ObligationStore(self.jobs_path.parent)
         def current_candidate(pane, *, expected_harness=None, expected_sid=None,
                              require_process_session=False, target_observation=None,
                              pane_info=None, **_kwargs):
-            state, ident, _code, reason = target_observation
+            observed = target_observation or self.steward._retire_target(pane)
+            state, ident = observed[:2]
+            reason = observed[3] if len(observed) > 3 else None
             session_id = peer_message.usable_session_id(ident.get("session_id"))
             if (reason or ident.get("pane") != pane
                     or expected_harness and ident.get("harness") != expected_harness
@@ -2420,6 +2921,76 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             mock.patch.object(self.steward, "_HERDR_SESSION", None)]
         for p in patches:
             p.start(); self.addCleanup(p.stop)
+
+    def test_current_source_context_controls_only_retirement_on_acceptance_and_duty_replay(self):
+        import session_tidy as tidy
+        source = tidy.session_seat(tidy.Seat("pane", "context-source", "w1:p1"), "claude", "predecessor")
+        cases = {"replacement": "handoff-context-new-card", "prompt": "handoff-context-new-input",
+                 "frontier-unreadable": "handoff-context-unreadable", "card-unreadable": "handoff-context-unreadable",
+                 "equivalent": None, "missing": None}
+        for name, reason in cases.items():
+            with self.subTest(name=name):
+                card = tidy.write_card(source, "claude", "predecessor", "preserved original " + name, prompt_seq=0)
+                frontier = tidy._prompt_seq_path(source)
+                tidy.atomic_write_json(frontier, {"schema": tidy.SCHEMA, "seq": 0})
+                context = dict(peer_message._read_pending(self.ref)["handoff"],
+                    source_seat=dict(source.as_dict(), session={"harness": "claude", "sid": "predecessor"}),
+                    prompt_seq=0, card_generation=card["generation"],
+                    card_body_sha256=hashlib.sha256(card["body"].encode()).hexdigest())
+                text, ref = peer_message.prepare_peer_message(card["body"], self.sender, self.recipient,
+                    defer=True, handoff=context, refs=["context-case:" + name])
+                card_path = tidy.card_json_path(source)
+                original = card_path.read_bytes()
+                if name == "replacement":
+                    newer = tidy.write_card(source, "claude", "predecessor", "new undelivered constraints", prompt_seq=0)
+                    self.assertGreater(newer["generation"], card["generation"])
+                    self.assertNotIn(newer["body"], text)
+                elif name == "prompt":
+                    tidy.bump_prompt_seq(source, "claude", "predecessor", tidy.now_epoch())
+                elif name == "frontier-unreadable":
+                    frontier.write_text('{broken')
+                    self.assertEqual(tidy.read_prompt_seq(source), 0)  # Compatibility API masks this damage.
+                elif name == "card-unreadable":
+                    card_path.write_bytes(b"\xff")
+                elif name == "equivalent":
+                    newer = tidy.write_card(source, "claude", "predecessor", card["body"], prompt_seq=0)
+                    self.assertGreater(newer["generation"], card["generation"])
+                elif name == "missing":
+                    card_path.unlink()
+                before_retire = len([d for d in self.store.list() if d["intent"]["kind"] == "retire"])
+                line, code = self.runner.accept_handoff(ref, self.caller)
+                self.assertEqual(code, 0, line)
+                row = peer_message._read_pending(ref)
+                self.assertTrue(row["acceptance"]["read_and_accepted"])
+                reply = row["acceptance"]["reply_ref"]
+                duty = next(d for d in self.store.list() if d["intent"].get("handoff_acceptance") and d["intent"]["ref"] == ref)
+                if reason:
+                    self.assertIn("retire=deferred", line)
+                    self.assertIn(reason, line)
+                    self.assertNotIn("request_id=", line)
+                    self.assertNotIn("retire_id", row["acceptance"])
+                    self.runner.resume_handoff_acceptance(ref, steward=self.steward)
+                    self.steward._resume_message_obligation(duty, self.store)
+                    pending = self.store.get(duty["id"])
+                    self.assertEqual(pending["state"], "pending")
+                    self.assertEqual(pending["observation"]["reason"], reason)
+                    self.assertEqual(len([d for d in self.store.list() if d["intent"]["kind"] == "retire"]), before_retire)
+                    card_path.write_bytes(original)
+                    tidy.atomic_write_json(frontier, {"schema": tidy.SCHEMA, "seq": 0})
+                    duty = pending
+                else:
+                    self.assertIn("retire=reserved", line)
+                self.steward._resume_message_obligation(duty, self.store)
+                self.assertEqual(self.store.get(duty["id"])["state"], "complete")
+                accepted = peer_message._read_pending(ref)["acceptance"]
+                self.assertEqual(accepted["reply_ref"], reply)
+                self.assertTrue(accepted["retire_id"])
+                self.assertEqual(peer_message._read_pending(ref)["text"], row["text"])
+                self.assertEqual(peer_message._read_pending(ref)["body_sha256"], row["body_sha256"])
+                self.assertEqual(self.runner.resume_handoff_acceptance(ref, steward=self.steward)["reply_ref"], reply)
+        import dispatch_seat_handover as handover
+        self.assertEqual(len([r for rows in handover._lineage_seats().values() for r in rows]), 1)
+        self.assertEqual(len([d for d in self.store.list() if d["intent"]["kind"] == "retire"]), 1)
 
     def legacy_reference(self, body, sender, recipient):
         evidence = {"schema": "legacy-reference-fixture", "recipient": dict(recipient)}
@@ -2479,15 +3050,15 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                 card = "[handoff] card\n" + "referenced document and predecessor details " * 120
                 text, ref = self.legacy_reference(card, self.sender, recipient)
                 predecessor = {**self.predecessor}
-                successor = {**recipient, "pane": "p2", "server": "default",
+                successor = {**recipient, "pane": "w1:p2", "server": "default",
                              "foreground": {"pid": 22, "start": "202"}}
                 row = peer_message._read_pending(ref)
-                row["handoff"] = {"card_id": "card-exact", "target": "p1",
+                row["handoff"] = {"card_id": "card-exact", "target": "w1:p1",
                     "predecessor": predecessor, "successor": successor,
                     "requester": {"harness": harness, "session_id": recipient["session_id"],
-                                  "pane": "p2", "server": "default"}}
+                                  "pane": "w1:p2", "server": "default"}}
                 peer_message._save_pending(row)
-                caller = (session_tidy.Seat("pane", "seat-" + harness, "p2"),
+                caller = (session_tidy.Seat("pane", "seat-" + harness, "w1:p2"),
                           harness, recipient["session_id"])
                 current = {key: value for key, value in successor.items()
                            if key not in {"server", "foreground"}}
@@ -2776,7 +3347,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         original_jobs = ("now\trunning\t0\tjob\tlog\t" +
             ",".join(f"{key}={value}" for key, value in meta.items()) + "\n").encode()
         self.jobs_path.write_bytes(original_jobs)
-        with mock.patch.object(handover, "record_retire_handover", return_value=None):
+        with mock.patch.object(handover, "record_retire_handover", return_value={"legacy": True}):
             self.runner.accept_handoff(self.ref, self.caller)
         accepted = peer_message._read_pending(self.ref)["acceptance"]
         self.assertTrue(accepted["settled"])
@@ -2807,44 +3378,41 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
     def test_sidless_first_input_binds_the_same_handoff_ref_before_acceptance(self):
         import session_tidy
         recipient = {"harness": "codex", "session_id": None,
-                     "pane_id": "p2", "name": "new"}
+                     "pane_id": "w1:p2", "name": "new"}
         proof = {"schema": "peer-first-input-process-v1", "harness": "codex",
-                 "pane_id": "p2", "pid": 22, "start": "202",
+                 "pane_id": "w1:p2", "pid": 22, "start": "202",
                  "pid_namespace": "pid:[4026531836]"}
+        successor = dict(self.successor, session_id=None)
+        requester = {"harness": "codex", "session_id": None, "pane": "w1:p2", "server": "default"}
+        context = {"card_id": "sidless-card", "target": "w1:p1", "predecessor": self.predecessor,
+                   "successor": successor, "requester": requester}
         text, ref = peer_message.prepare_peer_message(
             "[handoff] first turn card", self.sender, recipient, defer=True,
-            first_input_process=proof)
-        row = peer_message._read_pending(ref)
-        successor = dict(self.successor, session_id=None)
-        requester = {"harness": "codex", "session_id": None,
-                     "pane": "p2", "server": "default"}
-        row["handoff"] = {"card_id": "sidless-card", "target": "p1",
-            "predecessor": self.predecessor, "successor": successor,
-            "requester": requester}
-        peer_message._save_pending(row)
+            first_input_process=proof, handoff=context)
+        self.assertIn(peer_message.handoff_accept_command(ref), text)
         before_transfer = peer_message._transfer_path(ref).read_bytes()
         with self.assertRaisesRegex(ValueError, "handoff-context-invalid"):
             self.runner.accept_handoff(ref, self.caller)
         with mock.patch.object(peer_message, "_first_input_process_is_current", return_value=True):
             bound = peer_message.bind_pending_recipient(
-                ref, {"harness": "codex", "session_id": "first-session", "pane_id": "p2"},
+                ref, {"harness": "codex", "session_id": "first-session", "pane_id": "w1:p2"},
                 process_proof=proof)
             self.assertIsNotNone(bound)
             self.assertIsNone(peer_message.bind_pending_recipient(
-                ref, {"harness": "codex", "session_id": "replacement", "pane_id": "p2"},
+                ref, {"harness": "codex", "session_id": "replacement", "pane_id": "w1:p2"},
                 process_proof=proof))
             self.assertEqual(peer_message._transfer_path(ref).read_bytes(), before_transfer)
             self.assertEqual(bound["to"]["session_id"], None)
             self.assertEqual(bound["bound_to"], {
-                "harness": "codex", "session_id": "first-session", "pane_id": "p2"})
+                "harness": "codex", "session_id": "first-session", "pane_id": "w1:p2"})
             self.assertEqual(bound["handoff"]["successor"]["session_id"], "first-session")
             self.assertEqual(bound["handoff"]["requester"]["session_id"], "first-session")
             self.assertNotIn("acceptance", bound)
-            caller = (session_tidy.Seat("pane", "sidless-seat", "p2"),
+            caller = (session_tidy.Seat("pane", "sidless-seat", "w1:p2"),
                       "codex", "first-session")
             self.steward._retire_target.return_value = (
                 "idle", {"harness": "codex", "session_id": "first-session",
-                         "name": "new", "pane": "p2"}, None, None)
+                         "name": "new", "pane": "w1:p2"}, None, None)
             accepted, code = self.runner.accept_handoff(ref, caller)
         self.assertEqual(code, 0, accepted)
         self.assertTrue(peer_message._read_pending(ref)["acceptance"]["settled"])
@@ -2873,10 +3441,8 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             ordinary_rc = self.steward.cmd_prompt(args)
             completion_rc = self.steward.cmd_prompt(args, producer_binding=producer)
         self.assertEqual((ordinary_rc, completion_rc), (5, 5))
-        self.assertEqual(outputs, [
-            'prompted=false reason=target-identity-unverified target="w1:p2" candidate_panes=["w1:p2"]',
-            'prompted=false reason=target-identity-unverified target="w1:p2" candidate_panes=["w1:p2"]',
-        ])
+        self.assertEqual(len(outputs), 2)
+        self.assertTrue(all(line.startswith("prompted=unverified") for line in outputs))
         send.assert_not_called()
 
     def test_owner_peer_and_completion_without_herdr_remain_unavailable(self):
@@ -2886,11 +3452,11 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(self.steward, "_prompt_current_candidate") as identity, \
              mock.patch.object(self.steward, "_herdr_prompt") as send, \
              mock.patch("builtins.print", side_effect=lambda *a, **_k: outputs.append(" ".join(map(str, a)))):
-            self.assertEqual(self.steward.cmd_prompt(args), 4)
-            self.assertEqual(self.steward.cmd_prompt(args, producer_binding={}), 4)
+            self.assertEqual(self.steward.cmd_prompt(args), 5)
+            self.assertEqual(self.steward.cmd_prompt(args, producer_binding={}), 5)
         self.assertEqual(len(outputs), 2)
-        self.assertTrue(all(line.startswith("herdr-unavailable reason=herdr-not-found ")
-                            for line in outputs))
+        self.assertTrue(all(line.startswith("prompted=unverified") for line in outputs))
+        self.assertTrue(list(peer_message._pending_rows()))
         identity.assert_not_called()
         send.assert_not_called()
 
@@ -2924,32 +3490,33 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
         import session_tidy as tidy
         from types import SimpleNamespace
         def target(name):
-            identity = self.predecessor if name == "p1" else self.successor
+            identity = self.predecessor if name == "w1:p1" else self.successor
             return "idle", {k:v for k,v in identity.items() if k not in {"foreground", "server"}}, None, None
         refs = []
         outcome, exit_code = getattr(self, "handoff_outcome", ("queued", 3))
-        def send(args, *, expected_recipient, on_prepared):
+        def send(args, *, expected_recipient, on_prepared, handoff=None, resolved_recipient=None):
             self.assertEqual(expected_recipient, ("codex", "successor"))
             body = Path(args.body_file).read_text()
-            text, ref = peer_message.prepare_peer_message(body, self.sender, self.recipient, defer=True)
+            text, ref = peer_message.prepare_peer_message(body, self.sender, self.recipient, defer=True, handoff=handoff)
             on_prepared(ref)
             refs.append(ref)
             row = peer_message._read_pending(ref)
-            self.assertEqual(row["handoff"]["card_id"], "card-exact")
+            self.assertEqual(row["handoff"]["card_generation"], 7)
+            self.assertEqual(row["handoff"]["card_body_sha256"], hashlib.sha256(body.rstrip("\n").encode()).hexdigest())
             self.assertEqual(row["handoff"]["predecessor"], self.predecessor)
             self.assertEqual(row["handoff"]["successor"], self.successor)
             self.assertNotIn("acceptance", row)
             print(f"prompted={outcome} reason=native-queue")
             return exit_code
-        with mock.patch.object(tidy, "read_latest_card", return_value={"id": "card-exact", "body": "read this card"}), \
+        with mock.patch.object(tidy, "read_latest_card", return_value={"generation": 7, "body": "read this card"}), \
              mock.patch.object(tidy, "state_root", return_value=self.tmp_root), \
              mock.patch.object(tidy, "mark_card_handed_off") as marked, \
              mock.patch.object(self.runner, "injected_executable", return_value=None), \
              mock.patch.object(self.steward, "_retire_target", side_effect=target), \
-             mock.patch.object(self.steward, "_retire_foreground", side_effect=lambda pane, *a, **kw: (self.predecessor if pane == "p1" else self.successor)["foreground"]), \
+             mock.patch.object(self.steward, "_retire_foreground", side_effect=lambda pane, *a, **kw: (self.predecessor if pane == "w1:p1" else self.successor)["foreground"]), \
              mock.patch.object(self.steward, "_current_session_identity", return_value=("predecessor", "claude")), \
              mock.patch.object(self.steward, "cmd_prompt", side_effect=send):
-            line, code = self.runner.handoff(tidy.Seat("pane", "old-seat", "p1"), "p2")
+            line, code = self.runner.handoff(tidy.Seat("pane", "old-seat", "w1:p1"), "w1:p2")
         self.assertEqual(code, exit_code)
         self.assertIn(f"prompted={outcome}", line)
         marked.assert_called_once()
@@ -2963,7 +3530,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                 expected_observed = []
                 prepared = []
                 def target(pane):
-                    if pane == "p1":
+                    if pane == "w1:p1":
                         return "idle", {key: value for key, value in self.predecessor.items()
                                          if key not in {"foreground", "server"}}, None, None
                     raw = dict(self.successor, session_id="-")
@@ -2971,7 +3538,9 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                                      if key not in {"foreground", "server"}}, None, None
                 def candidate(pane, *, expected_harness=None, expected_sid=None,
                               target_observation=None, **_kwargs):
-                    state, ident, _code, reason = target_observation
+                    observed = target_observation or self.steward._retire_target(pane)
+                    state, ident = observed[:2]
+                    reason = observed[3] if len(observed) > 3 else None
                     if reason:
                         return None, reason
                     native_sid = sid
@@ -2981,13 +3550,13 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                             "_pane_info": {"pane_id": pane,
                                 "foreground_processes": [{"pid": 22}]},
                             "_native_session_id": native_sid}, None
-                def send(args, *, expected_recipient, on_prepared):
+                def send(args, *, expected_recipient, on_prepared, handoff=None, resolved_recipient=None):
                     expected_observed.append(expected_recipient)
                     if sid is None:
                         recipient = {"harness": "codex", "session_id": None,
-                                     "pane_id": "p2", "name": "new"}
+                                     "pane_id": "w1:p2", "name": "new"}
                         proof = {"schema": "peer-first-input-process-v1", "harness": "codex",
-                                 "pane_id": "p2", "pid": 22, "start": "202",
+                                 "pane_id": "w1:p2", "pid": 22, "start": "202",
                                  "pid_namespace": "pid:[4026531836]"}
                     else:
                         recipient = dict(self.recipient)
@@ -3011,7 +3580,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                      mock.patch.object(self.steward, "_current_session_identity",
                                        return_value=("predecessor", "claude")), \
                      mock.patch.object(self.steward, "cmd_prompt", side_effect=send):
-                    line, code = self.runner.handoff(tidy.Seat("pane", "old-seat", "p1"), "p2")
+                    line, code = self.runner.handoff(tidy.Seat("pane", "old-seat", "w1:p1"), "w1:p2")
                 self.assertEqual((code, expected_observed), (0, [("codex", sid)]))
                 self.assertIn("prompted=true", line)
                 row = prepared[0]
@@ -3021,7 +3590,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                     self.assertNotIn("first_input_process", row)
                 else:
                     self.assertIsNone(row["to"]["session_id"])
-                    self.assertEqual(row["to"]["pane_id"], "p2")
+                    self.assertEqual(row["to"]["pane_id"], "w1:p2")
                     self.assertEqual(row["first_input_process"]["pid"], 22)
                     self.assertIsNone(row["handoff"]["requester"]["session_id"])
 
@@ -3031,26 +3600,26 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
 
     def test_acceptance_reservation_uses_existing_cancelled_retry_lineage(self):
         request = peer_message._read_pending(self.ref)["handoff"]["requester"]
-        original_id = self.steward.peer_obligations.stable_duty_id("retire", self.predecessor, "p1")
-        self.store.create(original_id, "retire", self.predecessor, {"target": "p1", "requester": request})
+        original_id = self.steward.peer_obligations.stable_duty_id("retire", self.predecessor, "w1:p1")
+        self.store.create(original_id, "retire", self.predecessor, {"target": "w1:p1", "requester": request})
         self.store.update(original_id, state="cancelled", cleanup="complete")
-        retry = self.steward.reserve_handoff_retire("p1", self.predecessor, request)
+        retry = self.steward.reserve_handoff_retire("w1:p1", self.predecessor, request)
         self.assertNotEqual(retry, original_id)
         self.assertEqual(self.store.get(retry)["intent"]["retry_of"], original_id)
         self.assertEqual(self.store.get(retry)["intent"]["requester"], request)
-        self.assertEqual(self.steward.reserve_handoff_retire("p1", self.predecessor, request), retry)
+        self.assertEqual(self.steward.reserve_handoff_retire("w1:p1", self.predecessor, request), retry)
         self.assertEqual(self.store.get(original_id)["state"], "cancelled")
 
     def test_original_retire_request_is_preserved_with_unknown_current_foreground(self):
         request = peer_message._read_pending(self.ref)["handoff"]["requester"]
         original = self.store.create("retire-c375ee7af4e37ec3085239d1b7bd98db", "retire", self.predecessor,
-                                     {"target": "p1", "requester": request})
+                                     {"target": "w1:p1", "requester": request})
         unknown = dict(self.predecessor, foreground=None)
-        reserved = self.steward.reserve_handoff_retire("p1", unknown, request)
+        reserved = self.steward.reserve_handoff_retire("w1:p1", unknown, request)
         self.assertEqual(reserved, original["id"])
         self.assertEqual(self.store.get(reserved)["intent"], original["intent"])
         with self.assertRaises(ValueError):
-            self.steward.reserve_handoff_retire("p1", unknown, dict(request, session_id="supervisor"))
+            self.steward.reserve_handoff_retire("w1:p1", unknown, dict(request, session_id="supervisor"))
 
     def test_concurrent_duplicate_keeps_one_reply_and_reservation(self):
         barrier = threading.Barrier(2)
@@ -3130,10 +3699,45 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
             peer_message.schedule_acceptance_reply(self.ref, dict(self.recipient, session_id="foreign"), self.sender)
         self.assertEqual(path.read_bytes(), before)
 
+    def test_native_acceptance_without_either_pane_retains_reply_and_retire_continuation(self):
+        import session_tidy as tidy
+        original = json.loads(json.dumps(peer_message._read_pending(self.ref)))
+        for missing in ("predecessor", "successor"):
+            with self.subTest(missing=missing):
+                _text, ref = peer_message.prepare_peer_message("card without " + missing, self.sender, self.recipient, defer=True)
+                row = peer_message._read_pending(ref)
+                row["handoff"] = json.loads(json.dumps(original["handoff"]))
+                context = row["handoff"]
+                context[missing]["pane"] = ""
+                context[missing]["foreground"] = None
+                context["target"] = context["predecessor"].get("pane")
+                context["requester"]["pane"] = context["successor"].get("pane")
+                peer_message._save_pending(row)
+                caller = self.caller if missing == "predecessor" else (
+                    tidy.Seat("native", "native-successor", harness="codex", sid="successor"), "codex", "successor")
+                with mock.patch.object(self.steward, "reserve_handoff_retire") as reserve:
+                    # Exercise the public CLI entry; it delegates to the actual accept/settle functions.
+                    args = tidy.build_parser().parse_args(["handoff", "accept", ref])
+                    output = io.StringIO()
+                    with mock.patch.object(tidy, "resolve_caller", return_value=caller), contextlib.redirect_stdout(output):
+                        code = tidy.cmd_handoff(args)
+                    self.assertEqual(code, 0, output.getvalue())
+                    self.assertIn("retire=deferred", output.getvalue())
+                    self.assertNotIn("request_id=", output.getvalue())
+                    saved = peer_message._read_pending(ref)["acceptance"]
+                    self.assertTrue(saved["read_and_accepted"])
+                    self.assertFalse(saved["settled"])
+                    self.assertNotIn("retire_id", saved)
+                    duty = next(d for d in self.store.list() if d["intent"].get("handoff_acceptance") and d["intent"]["ref"] == ref)
+                    self.steward._resume_message_obligation(duty, self.store)
+                    self.assertEqual(self.store.get(duty["id"])["state"], "pending")
+                    self.assertEqual(peer_message._read_pending(ref)["acceptance"]["reply_ref"], saved["reply_ref"])
+                    reserve.assert_not_called()
+
     def test_unverified_successor_lifetimes_cannot_accept(self):
         original = peer_message._read_pending(self.ref)
         known = self.successor["foreground"]
-        cases = [(None, None), (known, None), ({"pid": 22}, known),
+        cases = [(known, None), ({"pid": 22}, known),
                  ({"pid": True, "start": "202"}, known),
                  ({"pid": 22, "start": "invalid"}, known),
                  (known, {"pid": 22, "start": 0})]
@@ -3158,14 +3762,14 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
     def test_unknown_fresh_predecessor_never_books_a_new_lifetime(self):
         requester = peer_message._read_pending(self.ref)["handoff"]["requester"]
         with self.assertRaisesRegex(ValueError, "predecessor-lifetime-unverified"):
-            self.steward.reserve_handoff_retire("p1", dict(self.predecessor, foreground=None), requester)
+            self.steward.reserve_handoff_retire("w1:p1", dict(self.predecessor, foreground=None), requester)
         self.assertEqual(self.store.list(), [])
 
     def test_presend_refusals_do_not_consume_card(self):
         import session_tidy as tidy
         import subprocess
         def target(name):
-            ident = self.predecessor if name == "p1" else self.successor
+            ident = self.predecessor if name == "w1:p1" else self.successor
             return "idle", {k:v for k,v in ident.items() if k not in {"foreground", "server"}}, None, None
         for injected in (None, Path("/isolated/fake-steward")):
             for verdict in ("prompted=false reason=target-identity-changed",
@@ -3182,7 +3786,7 @@ class HandoffAcceptanceTest(_TmpRootMixin, unittest.TestCase):
                          mock.patch.object(self.steward, "_current_session_identity", return_value=("predecessor", "claude")), \
                          mock.patch.object(self.steward, "cmd_prompt", side_effect=refused), \
                          mock.patch.object(self.runner.subprocess, "run", return_value=subprocess.CompletedProcess([],5,verdict,"")):
-                        line, code = self.runner.handoff(tidy.Seat("pane","old","p1"), "p2")
+                        line, code = self.runner.handoff(tidy.Seat("pane","old","w1:p1"), "w1:p2")
                     self.assertEqual(code, 5)
                     marked.assert_not_called()
                     self.assertIn(verdict, line)

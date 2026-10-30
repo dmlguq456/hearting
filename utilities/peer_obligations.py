@@ -927,7 +927,7 @@ def retain_registered_completion(jobs, attempt_id, session_id, carrier, *, holde
 
 def retain_session_notice(jobs, harness, storage_sid, record):
     """Retain one route-free notice under its immutable storage identity."""
-    from dispatch_seat_handover import chain_end
+    from dispatch_seat_handover import record_recipient_binding
     from harness_capabilities import parent_completion
     import dispatch_pending_delivery as pending
     import session_notice
@@ -955,8 +955,7 @@ def retain_session_notice(jobs, harness, storage_sid, record):
         if any(isinstance(value, str) and value.startswith(session_notice.LINEAGE_PREFIX)
                for value in stored.get("lineage", [])):
             return session_notice.retain_pending(jobs, {**stored, "_storage_key": storage_sid})
-        recipient, state = chain_end(harness, storage_sid)
-        if state == "unresolved":
+        if record_recipient_binding(stored, storage_sid, harness=harness, jobs=jobs) is None:
             return False
         identity = {"state_root": str(root), "storage_sid": storage_sid,
                     "harness": harness, "delivery_id": record["delivery_id"],

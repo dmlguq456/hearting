@@ -208,7 +208,7 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
                 record = pending_delivery.read(root, storage_key, entry.stem)
             except (OSError, pending_delivery.PendingDeliveryError):
                 continue
-            if (record and record.get("recipient_kind") == recipient_kind
+            if (record and (record.get("recipient_kind") == recipient_kind or storage_key != session_id)
                     and record.get("state") in pending_delivery.OPEN_STATES
                     and record_for_session(record, allowed, session=session_id,
                                            harness=harness,
@@ -537,6 +537,15 @@ def sweep_deliver(
             member_id = record["delivery_id"]
             expected_identity = group_identities[member_id]
             try:
+                from dispatch_seat_handover import record_for_session, storage_recipients
+                from peer_read_context import PeerReadContext
+                effect_context = PeerReadContext()
+                allowances = dict(storage_recipients(session_id, harness=harness, read_context=effect_context))
+                if storage_key not in allowances or not record_for_session(
+                        record, allowances[storage_key], session=session_id, harness=harness,
+                        storage_key=storage_key, jobs=jobs, read_context=effect_context):
+                    group_ok = False
+                    break
                 if not keep_claim(root, storage_key, member_id, record, claim_owner, jobs=jobs,
                                   notice_context=notice_context):
                     group_ok = False
@@ -1012,10 +1021,10 @@ def _opencode_delivery_expectations(roots: list[Path], recipient_kind: str,
                 try:
                     record = pending_delivery.read(root, storage, delivery_id)
                     if (record is None or record.get("state") != "acked"
-                            or record.get("recipient_kind") != recipient_kind
+                            or (record.get("recipient_kind") != recipient_kind and storage == session_id)
                             or not record_for_session(record, allowed, session=session_id,
                                                       harness=harness,
-                                                      storage_key=storage, read_context=read_context)):
+                                                      storage_key=storage, jobs=record_jobs(root, record), read_context=read_context)):
                         continue
                     by_id.setdefault(delivery_id, []).append(
                         (root, {**record, STORAGE_KEY: storage}))

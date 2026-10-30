@@ -216,7 +216,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         session_id = (self.active_session_id if dispatch_binding else
                       self._session_id("recipient", index))
         recipient = {"harness": "codex", "session_id": session_id,
-                     "name": f"recipient-{index:03d}"}
+                     "name": f"recipient-{index:03d}", "pane_id": f"synthetic-pane-{index:03d}"}
         duty_id = "message-" + hashlib.sha256(f"synthetic-duty-{index}".encode()).hexdigest()[:32]
         refs = [dispatch_binding["duty_id"]] if dispatch_binding else []
         body = "synthetic operational-shape message " + ("context evidence " * (index % 9 + 1))
@@ -241,7 +241,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         )
         if initial_observation is not None:
             self.store.update(duty_id, state="unknown", observation=initial_observation)
-        return duty_id, ref, recipient["name"]
+        return duty_id, ref, recipient["pane_id"]
 
     def _seed_workload(self, *, recurring_negative=False):
         from harness_capabilities import parent_completion
@@ -403,9 +403,25 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         cancelled = self.store.create("cancelled-retire-synthetic", "retire", {}, {})
         self.store.update(cancelled["id"], state="cancelled")
         self.cancelled_fixture_id = cancelled["id"]
+        self.negative_lineage_paths = []
+        if recurring_negative:
+            import session_tidy
+            # Empty terminal work is now a valid zero-job handoff. Keep the
+            # recurring negative workload using genuinely unreadable lineage.
+            directory = session_tidy.state_root() / "sessions"
+            directory.mkdir(parents=True, exist_ok=True)
+            for index, (meta, _successor) in enumerate(self.retire_handover_meta):
+                path = directory / f"negative-lineage-{index}.jsonl"
+                path.write_text("".join(json.dumps({"event": "succession", "source": "tidy-clear",
+                    "harness": "claude", "from": meta["parent_sid"],
+                    "sid": f"negative-{index}-{branch}", "ts": 1}) + "\n" for branch in ("B", "C")))
+                self.negative_lineage_paths.append(path)
         return registered_ids, carrier, active_attempt
 
     def _create_open_retire_delivery(self, index):
+        # The same input event restores one source's observation; the other
+        # source stays ambiguous and the existing runner must keep waiting.
+        self.negative_lineage_paths[index].write_text("")
         meta, _successor_sid = self.retire_handover_meta[index]
         attempt_id = meta["attempt_id"]
         receipt = {
@@ -583,6 +599,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         expected_binding_locks = {}
         binding_observer_errors = []
         authority_counts = {}
+        lineage_unknown_counts = {}
         retire_recovery_events = []
         record_retire_events = []
         retire_delivery_input = {}
@@ -790,7 +807,13 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                     "predecessor_sid": args[0] if args else kwargs.get("predecessor_sid"),
                     "pass": counts["passes"], "window": window_phase[0],
                 })
-            return original_record_retire(*args, **kwargs)
+            try:
+                return original_record_retire(*args, **kwargs)
+            except dispatch_seat_handover.RegistryUnreadable:
+                source_sid = args[0] if args else kwargs.get("predecessor_sid")
+                key = (source_sid, window_phase[0])
+                lineage_unknown_counts[key] = lineage_unknown_counts.get(key, 0) + 1
+                raise
 
         def checked_binding_mutexes(bindings, *, wait=None):
             bindings = list(bindings)
@@ -1206,7 +1229,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         self.assertLessEqual(counts["context_attempt_row_lookups"], 7 * counts["passes"])
         self.assertGreaterEqual(counts["completed_retire_recoveries"], 2)
         self.assertGreaterEqual(counts["record_retire_calls"], 2)
-        self.assertGreaterEqual(counts["handover_authority_calls"], 2)
+        self.assertGreaterEqual(counts["handover_authority_calls"], 1 if recurring_negative else 2)
         self.assertEqual(counts["service_runner_calls"], counts["passes"])
         self.assertEqual(counts["batch_activation_calls"], counts["passes"])
         self.assertEqual(counts["watch_activation_calls"], 0)
@@ -1277,14 +1300,10 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         if recurring_negative:
             target_meta, target_successor = self.retire_handover_meta[0]
             other_meta, _other_successor = self.retire_handover_meta[1]
-            for attempt_id in (target_meta["attempt_id"], other_meta["attempt_id"]):
+            for meta in (target_meta, other_meta):
                 for measured_window in ("cold", "steady"):
-                    self.assertGreaterEqual(
-                        authority_counts.get(attempt_id, {}).get(f"{measured_window}_denied", 0),
-                        2, f"{attempt_id} must be rediscovered and denied on multiple "
-                        f"{measured_window} passes: authority={authority_counts}; "
-                        f"counts={counts}; retire={retire_recovery_events}; "
-                        f"record={record_retire_events}; locks={lock_events}")
+                    self.assertGreaterEqual(lineage_unknown_counts.get((meta["parent_sid"], measured_window), 0),
+                        2, f"{meta['attempt_id']} must reobserve the same unreadable lineage on multiple {measured_window} passes")
             for duty_id in (self.completed_retire_ids[0], self.completed_retire_ids[1]):
                 for measured_window in ("cold", "steady"):
                     resumed = [row for row in retire_recovery_events
@@ -1318,8 +1337,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                              target_meta["attempt_id"])
             self.assertTrue(peer_steward._seat_successor_path("w1:pNew1").exists(),
                             "the still-ineligible duty keeps its original successor mark")
-            self.assertEqual(dispatch_seat_handover.effective_parent(other_meta, self.jobs),
-                             other_meta["parent_sid"])
+            self.assertEqual(dispatch_seat_handover.effective_parent(other_meta, self.jobs), "")
         else:
             self.assertEqual(counts["completed_retire_recoveries"], 2,
                              f"authority={authority_counts}; retire={retire_recovery_events}; "
@@ -1354,18 +1372,24 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
         successor_locks = [key for key in lock_identities if key.startswith("peer-successor-")]
         binding_locks = [key for key in lock_identities if key.startswith("lineage-binding-")]
         seat_locks = [key for key in lock_identities
-                      if not key.startswith(("peer-successor-", "lineage-binding-"))]
+                      if key != "lineage-write" and not key.startswith(("peer-successor-", "lineage-binding-", "lineage-source-"))]
         self.assertEqual(binding_observer_errors, [],
                          f"binding lock test observer raised: {binding_observer_errors}")
         self.assertEqual(len(set(successor_locks)), 2, lock_identities)
         self.assertEqual(len(set(seat_locks)), 2, lock_identities)
+        coordination_locks = {key for key in lock_identities
+                              if key == "lineage-write" or key.startswith("lineage-source-")}
+        expected_coordination_locks = {"lineage-write"} | {
+            "lineage-source-" + hashlib.sha256(json.dumps(["claude", meta["parent_sid"]]).encode()).hexdigest()
+            for meta, _sid in self.retire_handover_meta}
+        self.assertEqual(coordination_locks, expected_coordination_locks)
         observed_binding_locks = set(binding_locks)
         expected_binding_lock_set = set().union(*expected_binding_locks.values())
         self.assertEqual(observed_binding_locks, expected_binding_lock_set,
                          f"logical binding locks must exactly match admitted operations: "
                          f"observed={observed_binding_locks}; expected={expected_binding_lock_set}")
         self.assertEqual(len(set(lock_identities)),
-                         4 + len(expected_binding_lock_set), lock_identities)
+                         4 + len(expected_binding_lock_set) + len(expected_coordination_locks), lock_identities)
         for measured_window in expected_binding_locks:
             seen = {row["key"] for row in lock_events if row["window"] == measured_window}
             seen_bindings = {key for key in seen if key.startswith("lineage-binding-")}
@@ -1380,7 +1404,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                 seen = {row["key"] for row in lock_events
                         if row["window"] == measured_window}
                 seen_physical = {key for key in seen
-                                 if not key.startswith("lineage-binding-")}
+                                 if key != "lineage-write" and not key.startswith(("lineage-binding-", "lineage-source-"))}
                 self.assertEqual(
                     seen_physical, expected_physical_locks,
                     f"all four physical seat/successor lock identities must be entered "
@@ -1399,7 +1423,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                 self.assertTrue(any(binding.get("attempt") == meta["attempt_id"]
                                     for binding in snapshot["bindings"]))
                 ledger = dispatch_seat_handover.handover_rows(seat)
-                self.assertTrue(any(row.get("from") == meta["parent_sid"]
+                self.assertTrue(any(session_tidy._handover_origin(row)[1] == meta["parent_sid"]
                                     and row.get("sid") == successor_sid
                                     and any(item.get("attempt") == meta["attempt_id"]
                                             for item in row.get("bindings", []))
@@ -1408,8 +1432,7 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
                 self.assertFalse(peer_steward._seat_successor_path(pane).exists())
             else:
                 self.assertIsNone(snapshot)
-                self.assertEqual(dispatch_seat_handover.effective_parent(meta, self.jobs),
-                                 meta["parent_sid"])
+                self.assertEqual(dispatch_seat_handover.effective_parent(meta, self.jobs), "")
                 self.assertTrue(peer_steward._seat_successor_path(pane).exists())
         self.assertEqual(self.jobs.stat().st_size, 23_499_871)
         denied_counts = {
@@ -1463,6 +1486,8 @@ class RunnerWorkloadCorrectionTest(unittest.TestCase):
             f"handover_authority_calls={counts['handover_authority_calls']} "
             f"negative_authority_denials_cold={denied_counts['cold']} "
             f"negative_authority_denials_steady={denied_counts['steady']} "
+            f"lineage_unknown_cold={sum(count for (_sid, window_name), count in lineage_unknown_counts.items() if window_name == 'cold')} "
+            f"lineage_unknown_steady={sum(count for (_sid, window_name), count in lineage_unknown_counts.items() if window_name == 'steady')} "
             f"retire_delivery_authority_change={'yes' if retire_delivery_input else 'no'} "
             f"retire_delivery_authority_seen_pass={retire_delivery_input.get('observed_pass', 'n/a')} "
             f"retire_delivery_claim_owner={((retire_delivery_input.get('record') or {}).get('claim_owner') if retire_delivery_input else 'n/a')} "

@@ -464,9 +464,12 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
     metadata = metadata or {}
     if action == "handover" and not facts.get("eligible", False):
         return ContinuationDecision(False, "settled", next_action="settle")
-    if (action == "handover" or facts.get("actor")) and not owns(
-            metadata, facts.get("actor"), jobs, read_context=facts.get("read_context")):
-        return ContinuationDecision(False, "protected", "work-parent-recovery-required", "report")
+    if action == "handover" or facts.get("actor"):
+        from dispatch_seat_handover import resolve_recipient, recipient_continuation
+        choice = recipient_continuation(resolve_recipient("job-holder", metadata=metadata, jobs=jobs,
+            read_context=facts.get("read_context")), facts.get("actor"))
+        if not choice.allowed:
+            return choice
     if facts.get("history_conflict"):
         return ContinuationDecision(False, "protected", facts["history_conflict"], "report")
     if action == "identity-refusal-reentry":

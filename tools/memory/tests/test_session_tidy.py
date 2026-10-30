@@ -9,6 +9,8 @@ markers unless a test sets one on purpose).
 from __future__ import annotations
 
 import contextlib
+import copy
+import hashlib
 import io
 import json
 import os
@@ -2429,15 +2431,15 @@ class CodexCompactBridgeTest(TidyCase):
             self.assertEqual((retained["id"], retained["operation_id"]), (queue_id, operation_id))
             self.assertGreaterEqual(len(starts), 2, "normal prompt reconciliation did not restart the same queue")
 
-    def test_old_booking_and_queue_can_be_accepted_but_partial_relation_cannot_clear(self):
+    def _accepted_compact_booking(self, tag="legacy"):
         path = self.rollout()
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), \
                 mock.patch.object(clear, "herdr_command", return_value="/bin/true"), \
                 mock.patch.object(clear, "_start_helper", return_value=4321), \
                 mock.patch.object(runner, "start_detached", return_value=9876):
             result = st.run_hook("codex", "compact", self.SID, phase="after", compact_summary="",
-                                 compact_context={"trigger": "auto", "turn_id": "turn-legacy",
-                                                  "event_id": "compact-legacy"},
+                                 compact_context={"trigger": "auto", "turn_id": "turn-" + tag,
+                                                  "event_id": "compact-" + tag},
                                  transcript=str(path), cwd=str(self.cwd), env=self.env)
             self.assertEqual(result, "booking=scheduled")
             booking = clear.read_reservation(self.seat.key)
@@ -2473,6 +2475,23 @@ class CodexCompactBridgeTest(TidyCase):
             valid, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
             self.assertIsNotNone(valid, reason)
 
+            return accepted
+
+    def test_old_booking_and_queue_can_be_accepted_but_partial_relation_cannot_clear(self):
+        accepted = booking = self._accepted_compact_booking()
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            accepted.pop("acceptance")
+            clear._write_reservation(accepted)
+            recovered, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
+            self.assertIsNotNone(recovered, reason)
+            queue_path = runner._item_path(booking["queue_id"])
+            queue_bytes = queue_path.read_bytes()
+            queue_path.write_text('{unreadable')
+            unreadable, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
+            self.assertIsNone(unreadable)
+            self.assertEqual(reason, "idle-card-observation-unavailable")
+            self.assertEqual(clear.read_reservation(self.seat.key)["status"], "reserved")
+            queue_path.write_bytes(queue_bytes)
             accepted["acceptance"] = {"schema": 1, "nonce": booking["nonce"], "queue_id": booking["queue_id"]}
             clear._write_reservation(accepted)
             invalid, reason = clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])
@@ -2481,6 +2500,162 @@ class CodexCompactBridgeTest(TidyCase):
             retained = runner.read_item(booking["queue_id"])
             self.assertEqual((retained["id"], retained["operation_id"]),
                              (booking["queue_id"], accepted["operation_id"]))
+
+    def test_public_validation_and_helper_reobserve_unavailable_sources_at_each_boundary(self):
+        import dispatch_seat_handover as handover
+        sources = ("card", "queue", "frontier", "frontier-schema", "frontier-utf8")
+        for phase in ("snapshot", "compact-wait", "final-validation", "writer"):
+            for source in sources:
+                tag = phase + "-" + source
+                with self.subTest(phase=phase, source=source):
+                    booking = self._accepted_compact_booking(tag)
+                    path = clear.reservation_path(self.seat.key)
+                    if phase != "snapshot":
+                        self.assertTrue(clear._prepare_handover_snapshot(booking))
+                    source_path = (st.card_json_path(self.seat) if source == "card" else
+                                   runner._item_path(booking["queue_id"]) if source == "queue" else
+                                   st._prompt_seq_path(self.seat))
+                    original = source_path.read_bytes()
+                    damaged = [False]
+                    calls, pauses = [], []
+                    identity = {key: booking[key] for key in ("nonce", "operation_id", "queue_id")}
+                    token = booking["idle_request"]["token"]
+                    def damage():
+                        if damaged[0]:
+                            return
+                        damaged[0] = True
+                        source_path.write_bytes(b'{"schema":1,"seq":"unknown"}' if source == "frontier-schema"
+                                                else b'\xff' if source in {"card", "frontier-utf8"} else b'{damaged')
+                        checked, why = clear.validate_request(path, booking["nonce"])
+                        self.assertIsNone(checked)
+                        self.assertEqual(why, "idle-card-observation-unavailable")
+                    def restore(delay):
+                        pauses.append(delay)
+                        held = clear.read_reservation(self.seat.key)
+                        self.assertEqual({key: held[key] for key in identity}, identity)
+                        self.assertEqual(held["idle_request"]["token"], token)
+                        self.assertEqual(held["status"], "reserved")
+                        self.assertEqual(calls, [])
+                        source_path.write_bytes(original)
+                    def wait(*_args):
+                        if phase == "final-validation":
+                            damage()
+                        return "idle"
+                    def steward(pathname, nonce, _pane):
+                        if phase == "writer":
+                            damage()
+                        claimed, why = clear.claim_clear(pathname, nonce)
+                        if claimed is None:
+                            return {"cleared": "skipped", "reason": why}
+                        calls.append(("clear", claimed["clear_claim"]["token"]))
+                        return {"cleared": "true", "new_session": "successor-" + tag}
+                    def continuer(pathname, nonce, _pane):
+                        claimed, why = clear.claim_continue(pathname, nonce)
+                        self.assertIsNotNone(claimed, why)
+                        calls.append(("continue", claimed["continued"]["claim_id"]))
+                        return {"continued": "true", "claim_id": claimed["continued"]["claim_id"]}
+                    if phase in {"snapshot", "compact-wait"}:
+                        damage()
+                    try:
+                        result = clear.run_helper(self.seat.key, booking["nonce"], wait=wait,
+                                                  steward=steward, continuer=continuer, sleep=restore)
+                    finally:
+                        source_path.write_bytes(original)
+                    self.assertEqual(result, "continued")
+                    self.assertEqual([call[0] for call in calls], ["clear", "continue"])
+                    self.assertIn(len(pauses), (1, 2) if phase == "snapshot" else (1,))
+                    held = clear.read_reservation(self.seat.key)
+                    self.assertEqual({key: held[key] for key in identity}, identity)
+                    self.assertEqual(held["idle_request"]["token"], token)
+                    self.assertEqual(held["clear_claim"]["token"], calls[0][1])
+                    self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=restore), "superseded")
+
+    def test_relation_reread_keeps_unavailable_frontier_and_continue_recovers_after_clear(self):
+        booking = self._accepted_compact_booking("relation-reread")
+        path = clear.reservation_path(self.seat.key)
+        frontier = st._prompt_seq_path(self.seat)
+        original = frontier.read_bytes()
+        read_json = st.read_json
+        reads = []
+        def read(pathname):
+            data = read_json(pathname)
+            if pathname == frontier:
+                reads.append(1)
+                if len(reads) == 1:
+                    frontier.write_bytes(b'\xff')
+            return data
+        try:
+            with mock.patch.object(st, "read_json", side_effect=read):
+                self.assertEqual(clear.validate_request(path, booking["nonce"])[1],
+                                 "idle-card-observation-unavailable")
+        finally:
+            frontier.write_bytes(original)
+        card_path = st.card_json_path(self.seat)
+        card_bytes = card_path.read_bytes()
+        effects, pauses = [], []
+        def steward(pathname, nonce, _pane):
+            claim, why = clear.claim_clear(pathname, nonce)
+            self.assertIsNotNone(claim, why)
+            effects.append("clear")
+            card_path.write_bytes(b'\xff')
+            return {"cleared": "true", "new_session": "recovered-continue"}
+        def restore(delay):
+            pauses.append(delay)
+            held = clear.read_reservation(self.seat.key)
+            self.assertEqual(held["status"], "cleared")
+            self.assertEqual(held["continued"]["state"], "pending")
+            self.assertEqual(effects, ["clear"])
+            card_path.write_bytes(card_bytes)
+        def continuer(pathname, nonce, _pane):
+            claim, why = clear.claim_continue(pathname, nonce)
+            self.assertIsNotNone(claim, why)
+            effects.append("continue")
+            return {"continued": "true", "claim_id": claim["continued"]["claim_id"]}
+        self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], wait=lambda *_: "idle",
+                                         steward=steward, continuer=continuer, sleep=restore), "continued")
+        self.assertEqual(effects, ["clear", "continue"])
+        self.assertEqual(len(pauses), 1)
+        held = clear.read_reservation(self.seat.key)
+        self.assertEqual((held["nonce"], held["queue_id"], held["operation_id"]),
+                         (booking["nonce"], booking["queue_id"], booking["operation_id"]))
+
+    def test_unavailable_observation_expires_without_extending_booking_or_accepting_native_request(self):
+        booking = self._accepted_compact_booking("expired-read")
+        path = clear.reservation_path(self.seat.key)
+        clock = [st.now_epoch()]
+        booking["deadline"] = clock[0] + 2
+        clear._write_reservation(booking)
+        st.card_json_path(self.seat).write_bytes(b'\xff')
+        def sleep(delay):
+            clock[0] += delay
+        with mock.patch.object(st, "now_epoch", side_effect=lambda: clock[0]), \
+             mock.patch.object(clear, "_run_steward") as effect:
+            result = clear.run_helper(self.seat.key, booking["nonce"], sleep=sleep)
+        self.assertEqual(result, "skipped")
+        effect.assert_not_called()
+        self.assertEqual(clear.read_reservation(self.seat.key)["deadline"], booking["deadline"])
+        booking = self._accepted_compact_booking("unaccepted-read")
+        booking["idle_request"]["state"] = "unverified"
+        clear._write_reservation(booking)
+        self.assertEqual(clear.validate_request(path, booking["nonce"])[1], "idle-card-not-accepted")
+        with mock.patch.object(clear, "_run_steward") as effect:
+            self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=sleep), "unverified")
+        effect.assert_not_called()
+
+    def test_real_card_replacement_and_new_input_still_stop_clear(self):
+        for change in ("card", "prompt"):
+            with self.subTest(change=change):
+                booking = self._accepted_compact_booking("replaced-" + change)
+                if change == "card":
+                    st.write_card(self.seat, "codex", self.SID, "new unsaved work", cwd=str(self.cwd),
+                                  prompt_seq=st.read_prompt_seq(self.seat))
+                else:
+                    st.bump_prompt_seq(self.seat, "codex", self.SID, st.now_epoch())
+                self.assertEqual(clear.validate_request(clear.reservation_path(self.seat.key), booking["nonce"])[1],
+                                 "card-changed" if change == "card" else "new-input")
+                with mock.patch.object(clear, "_run_steward") as effect:
+                    self.assertEqual(clear.run_helper(self.seat.key, booking["nonce"], sleep=lambda _: None), "skipped")
+                effect.assert_not_called()
 
     def test_manual_unknown_or_unidentified_codex_compaction_stays_queue_only(self):
         path = self.rollout()
@@ -3722,7 +3897,7 @@ class TidyOneCallTest(TidyCase):
         self.hook("claude", "prompt", "sid-A")
         calls = []
 
-        def handoff(seat, target):
+        def handoff(seat, target, *, caller=None):
             calls.append((len(self.queued()), self.reservation(seat)["status"], target))
             return "prompted=failed target=peer-x", 1
 
@@ -4045,6 +4220,22 @@ class ClearHelperTest(TidyCase):
 
     def status(self, seat):
         return st.read_json(self.state / "clear" / f"{seat.key}.json")["status"]
+
+    def test_snapshot_preparation_wait_keeps_the_same_helper_and_clear_identity(self):
+        seat, req = self.booked()
+        calls = []
+        def steward(path, nonce, pane):
+            calls.append(nonce)
+            if len(calls) == 1:
+                return {"cleared": "queued", "reason": "snapshot-pending"}
+            return {"cleared": "true", "new_session": "sid-B"}
+        with self.iso.patched_environ(self.extra):
+            result = clear.run_helper(seat.key, req["nonce"], wait=lambda *_: "idle",
+                steward=steward, sleep=lambda _: None)
+            saved = clear.read_reservation(seat.key)
+        self.assertEqual(result, "cleared")
+        self.assertEqual(calls, [req["nonce"], req["nonce"]])
+        self.assertEqual((saved["nonce"], saved["status"]), (req["nonce"], "cleared"))
 
     def test_an_idle_window_is_cleared_once_and_silently(self):
         seat, req = self.booked()
@@ -4547,6 +4738,352 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual([b["attempt"] for b in snap["bindings"]], [keep["attempt_id"]])
         self.assertEqual(snap["from"], {"harness": "claude", "sid": "sid-A"})
 
+    def test_project_handover_requires_an_existing_exact_session_binding(self):
+        with self.iso.patched_environ():
+            shared = st.seat_for_project("codex", "same-project")
+            self.assertIsNone(self.handover.record_retire_handover("project-A", "claude", "project-B", "codex",
+                successor_seat=shared, jobs=self.jobs))
+            for old, new in (("project-A", "project-B"), ("project-X", "project-Y")):
+                exact = st.session_seat(shared, "codex", new)
+                row = self.handover.record_retire_handover(old, "claude", new, "codex",
+                    successor_seat=exact, jobs=self.jobs)
+                self.assertEqual(row["bindings"], [])
+                self.assertEqual(self.handover.session_successor(old), (new, "codex"))
+            self.assertEqual(len(list(self.handover._snapshot_dir().glob("*.json"))), 2)
+
+    def test_missing_registry_rows_keep_exact_ledger_ownership_for_all_consumers(self):
+        import importlib.util
+        from dispatch_registry_cache import registry_snapshot
+        self.row("att-lost")
+        with self.iso.patched_environ():
+            self.handover.record_retire_handover("sid-A", "claude", "sid-B", "codex",
+                successor_seat=self.seat(PANE_BESIDE), jobs=self.jobs)
+            spec = importlib.util.spec_from_file_location("fix_queue_target", ROOT / "utilities/codex-managed-completion.py")
+            completion = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = completion
+            spec.loader.exec_module(completion)
+            original = self.jobs.read_bytes()
+            record = {"attempt_ids": ["att-lost"]}
+            inherited = dict(self.handover.storage_recipients("sid-B"))["sid-A"]
+            for data, complete in ((b"", True), (b"malformed\n", False),
+                                   (original.rstrip(b"\n"), False), (b"\xff\n", False)):
+                with self.subTest(data=data):
+                    self.jobs.write_bytes(data)
+                    self.assertEqual(registry_snapshot(self.jobs).complete, complete)
+                    self.assertFalse(self.handover.record_for_session(record, None, session="sid-A", jobs=self.jobs))
+                    self.assertEqual(self.handover.record_for_session(record, inherited, session="sid-B", jobs=self.jobs), complete)
+                    self.assertEqual(completion.queue_target(self.jobs, {"att-lost"}, "sid-A"), "sid-B" if complete else "")
+            self.jobs.unlink()
+            self.assertFalse(self.handover.record_for_session(record, None, session="sid-A", jobs=self.jobs))
+            self.assertTrue(self.handover.record_for_session(record, inherited, session="sid-B", jobs=self.jobs))
+            self.assertEqual(completion.queue_target(self.jobs, {"att-lost"}, "sid-A"), "sid-B")
+            self.jobs.write_bytes(original)
+            self.assertFalse(self.handover.record_for_session(record, None, session="sid-A", jobs=self.jobs))
+            self.assertTrue(self.handover.record_for_session(record, inherited, session="sid-B", jobs=self.jobs))
+            # A verified empty registry with no relevant handover keeps the original address.
+            self.jobs.write_bytes(b"")
+            self.assertTrue(self.handover.record_for_session({"attempt_ids": ["unbound"]}, None,
+                session="untouched", jobs=self.jobs))
+            self.assertEqual(completion.queue_target(self.jobs, {"unbound"}, "untouched"), "untouched")
+
+    def test_sweep_retains_damaged_registry_records_and_never_splits_mixed_holders(self):
+        import dispatch_pending_delivery as pending
+        import dispatch_session_sweep as sweep
+        self.row("att-one", node="one")
+        self.row("att-two", node="two")
+        with self.iso.patched_environ(), mock.patch("peer_obligations.ensure_normal_runner"):
+            self.handover.record_retire_handover("sid-A", "claude", "sid-B", "codex",
+                successor_seat=self.seat(PANE_BESIDE), jobs=self.jobs)
+            original = self.jobs.read_bytes()
+            root = self.jobs.parent
+            receipt = {"state": "attention", "job_registry": str(self.jobs), "children": [
+                {"attempt_id": "att-one", "status": "done", "required_action": "inspect-done-failure"}]}
+            def create(digit, attempts):
+                return pending.create(root, recipient_kind="claude-parent-runtime", recipient_key="sid-A",
+                    delivery_id="delivery-" + digit * 32, session_generation="", session_generation_supported="0",
+                    attempt_ids=attempts, parent_attempt_id="parent", route_id="rt-1", route_node="one",
+                    receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt),
+                    row_revisions={a: "revision" for a in attempts})
+            single = create("1", ["att-one"])
+            for data in (b"malformed\n", original.rstrip(b"\n"), b"\xff\n"):
+                self.jobs.write_bytes(data)
+                for sid, kind in (("sid-A", "claude-parent-runtime"), ("sid-B", "codex-native-queue")):
+                    self.assertEqual(sweep.sweep_deliver(root, kind, sid)[0], [])
+                current = pending.read(root, "sid-A", single["delivery_id"])
+                self.assertEqual((current["state"], current["attempts"], current["claim_owner"]), ("pending", 0, None))
+                self.assertEqual(current["receipt_digest"], single["receipt_digest"])
+            # The completely readable empty generation still preserves B's exact ledger binding.
+            self.jobs.write_bytes(b"")
+            self.assertEqual(sweep.sweep_deliver(root, "claude-parent-runtime", "sid-A")[0], [])
+            delivered, _ = sweep.sweep_deliver(root, "codex-native-queue", "sid-B")
+            self.assertEqual([r["delivery_id"] for r in delivered], [single["delivery_id"]])
+            self.assertEqual(delivered[0][sweep.STORAGE_KEY], "sid-A")
+            self.assertEqual(delivered[0]["receipt_digest"], single["receipt_digest"])
+            self.assertTrue(delivered[0]["claim_owner"])
+            self.assertEqual(sweep.ack_delivered(root, "sid-B", delivered, acked_by="fixture:sid-B"), 1)
+            acked = pending.read(root, "sid-A", single["delivery_id"])
+            self.assertEqual((acked["state"], acked["acked_by"]), ("acked", "fixture:sid-B"))
+            self.jobs.write_bytes(original)
+            # Move only att-two to another exact holder using the existing ledger representation.
+            seat = self.seat(PANE_BESIDE)
+            path = st._ledger_path(seat)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            transition = next(r for r in rows if r.get("event") == "handover")
+            extra = dict(transition, **{"from": "sid-B", "sid": "sid-C", "ts": transition["ts"] + 1,
+                "bindings": [b for b in transition["bindings"] if b["attempt"] == "att-two"]})
+            path.write_text(path.read_text() + json.dumps(extra) + "\n")
+            mixed = create("2", ["att-one", "att-two"])
+            self.jobs.write_bytes(b"")
+            for sid in ("sid-A", "sid-B", "sid-C"):
+                self.assertEqual(sweep.sweep_deliver(root, "codex-native-queue", sid)[0], [])
+            unchanged = pending.read(root, "sid-A", mixed["delivery_id"])
+            self.assertEqual((unchanged["state"], unchanged["attempts"], unchanged["claim_owner"]), ("pending", 0, None))
+            self.assertEqual(unchanged["receipt_digest"], mixed["receipt_digest"])
+
+    def test_sweep_releases_the_whole_claimed_batch_when_a_member_moves_or_becomes_unknown(self):
+        import dispatch_pending_delivery as pending
+        import dispatch_session_sweep as sweep
+        self.row("att-one", node="one")
+        self.row("att-two", node="two")
+        with self.iso.patched_environ(), mock.patch("peer_obligations.ensure_normal_runner"):
+            self.handover.record_retire_handover("sid-A", "claude", "sid-B", "codex",
+                successor_seat=self.seat(PANE_BESIDE), jobs=self.jobs)
+            root, seat = self.jobs.parent, self.seat(PANE_BESIDE)
+            ledger_path = st._ledger_path(seat)
+            original_ledger = ledger_path.read_bytes()
+            transition = next(json.loads(line) for line in original_ledger.splitlines()
+                              if json.loads(line).get("event") == "handover")
+            self.jobs.write_bytes(b"")
+            claim_batch = pending._claim_ready_batch_snapshot
+            for index, mode in enumerate(("moved", "malformed", "partial", "utf8")):
+                with self.subTest(mode=mode):
+                    records = []
+                    for number, attempt in enumerate(("att-one", "att-two")):
+                        receipt = {"state": "attention", "job_registry": str(self.jobs), "children": [
+                            {"attempt_id": attempt, "status": "done", "required_action": "inspect-done-failure"}]}
+                        records.append(pending.create(root, recipient_kind="claude-parent-runtime", recipient_key="sid-A",
+                            delivery_id="delivery-" + f"{index * 2 + number + 10:032x}",
+                            session_generation="", session_generation_supported="0", attempt_ids=[attempt],
+                            parent_attempt_id="parent", route_id="rt-1", route_node="one",
+                            receipt=receipt, receipt_digest=pending._canonical_receipt_digest(receipt),
+                            row_revisions={attempt: "revision"}))
+                    ids = tuple(r["delivery_id"] for r in records)
+                    def grouping(_jobs, record, **_kwargs):
+                        info = self.jobs.stat()
+                        return {"delivery_ids": ids, "held": False, "registry_path": str(self.jobs),
+                            "registry_signature": (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns),
+                            "seed_identity": (record["delivery_id"], record["receipt_digest"],
+                                              tuple(record["attempt_ids"]), record["recipient_digest"])}
+                    def change_after_claim(*args, **kwargs):
+                        members = claim_batch(*args, **kwargs)
+                        if mode == "moved":
+                            extra = dict(transition, **{"from": "sid-B", "sid": "sid-C", "ts": transition["ts"] + 1,
+                                "bindings": [b for b in transition["bindings"] if b["attempt"] == "att-two"]})
+                            ledger_path.write_bytes(original_ledger + (json.dumps(extra) + "\n").encode())
+                        else:
+                            self.jobs.write_bytes({"malformed": b"malformed\n", "partial": b"partial", "utf8": b"\xff\n"}[mode])
+                        return members
+                    with mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=grouping), \
+                         mock.patch.object(pending, "_claim_ready_batch_snapshot", side_effect=change_after_claim), \
+                         mock.patch.object(pending, "ack", wraps=pending.ack) as ack:
+                        self.assertEqual(sweep.sweep_deliver(root, "codex-native-queue", "sid-B")[0], [])
+                        ack.assert_not_called()
+                    for record in records:
+                        current = pending.read(root, "sid-A", record["delivery_id"])
+                        self.assertEqual((current["state"], current["claim_owner"], current["attempts"]), ("pending", None, 1))
+                        for key in ("delivery_id", "receipt_digest", "recipient_digest", "attempt_ids", "row_revisions"):
+                            self.assertEqual(current[key], record[key])
+                    self.jobs.write_bytes(b"")
+                    ledger_path.write_bytes(original_ledger)
+                    # Existing retry backoff elapses; recovery receives the same complete batch.
+                    later = pending.time.time_ns() + 1_000_000_000
+                    with mock.patch("dispatch_notice_state.resolve_delivery_batch", side_effect=grouping), \
+                         mock.patch.object(pending.time, "time_ns", return_value=later):
+                        self.assertEqual(sweep.sweep_deliver(root, "claude-parent-runtime", "sid-A")[0], [])
+                        delivered, _ = sweep.sweep_deliver(root, "codex-native-queue", "sid-B")
+                    self.assertEqual({r["delivery_id"] for r in delivered}, set(ids))
+                    self.assertEqual(sweep.ack_delivered(root, "sid-B", delivered, acked_by="batch-fixture:sid-B"), 2)
+                    self.assertTrue(all(pending.read(root, "sid-A", did)["state"] == "acked" for did in ids))
+
+    def test_concurrent_edges_cannot_close_short_or_long_cycles(self):
+        import concurrent.futures
+        import threading
+        h = self.handover
+        for count in (0, 1):
+            for shape in ("reverse", "long", "auto-first", "auto-second"):
+                with self.subTest(jobs=count, shape=shape), self.iso.patched_environ():
+                    prefix = f"cycle-{count}-{shape}-"
+                    a, b, c, d = [prefix + x for x in "ABCD"]
+                    seats = {x: self.seat("test:" + x) for x in (a, b, c, d)}
+                    if count:
+                        route = prefix + "route"
+                        route_file = self.open_route(route, "sha256:aa")
+                        self.row(prefix + "job-a", parent=a, route=route, route_file=route_file)
+                        self.row(prefix + "job-c", parent=c, node="second", route=route, route_file=route_file)
+                    def explicit(old, new):
+                        return h.record_retire_handover(old, "claude", new, "claude",
+                                                       successor_seat=seats[new], jobs=self.jobs)
+                    if shape == "reverse":
+                        first, second = (a, b), (b, a)
+                    else:
+                        self.assertIsNotNone(explicit(a, b))
+                        self.assertIsNotNone(explicit(c, d))
+                        first, second = (b, c), (d, a)
+                    automatic = first if shape == "auto-first" else second if shape == "auto-second" else None
+                    if automatic:
+                        old, new = automatic
+                        # Use the actual snapshot/start ledger and confirmed-clear writer.
+                        st.record_event(seats[old], "claude", new, "start", cwd=str(self.cwd))
+                    publishing, contender = threading.Event(), threading.Event()
+                    append, seat_lock = h._append_transition_row, st.seat_lock
+                    observed = []
+                    @contextlib.contextmanager
+                    def lock(key, **kwargs):
+                        if publishing.is_set() and key == "lineage-write":
+                            contender.set()
+                        with seat_lock(key, **kwargs):
+                            observed.append((threading.current_thread().name, key))
+                            yield
+                    def publish(seat, row):
+                        if st._handover_origin(row)[1] == first[0]:
+                            publishing.set()
+                            self.assertTrue(contender.wait(5), "second writer never reached exclusion/publication")
+                        elif st._handover_origin(row)[1] == second[0]:
+                            # Also releases the negative-control baseline without the new mutex.
+                            contender.set()
+                        return append(seat, row)
+                    def transfer(edge):
+                        old, new = edge
+                        if edge == automatic:
+                            with st.seat_lock(seats[old].key):
+                                return h.record_locked(seats[old], "claude", new, "start", "clear", st.now_epoch())
+                        return explicit(old, new)
+                    with mock.patch.object(st, "seat_lock", side_effect=lock), \
+                         mock.patch.object(h, "_append_transition_row", side_effect=publish), \
+                         concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                        one = pool.submit(transfer, first)
+                        self.assertTrue(publishing.wait(5))
+                        two = pool.submit(transfer, second)
+                        results = [one.result(timeout=10), two.result(timeout=10)]
+                    self.assertIsNotNone(results[0])
+                    self.assertIsNone(results[1])
+                    for source in (a, b, c, d):
+                        self.assertNotEqual(h.resolve_recipient("seat-successor", session=source,
+                                                               harness="claude").state, "unreadable")
+                    for thread in {thread for thread, _key in observed}:
+                        keys = [key for owner, key in observed if owner == thread]
+                        self.assertEqual(keys[1], "lineage-write")
+                        self.assertTrue(keys[2].startswith("lineage-source-"))
+                        self.assertFalse(any(key in {seat.key for seat in seats.values()} for key in keys[2:]))
+                    # Retained binding identities remain complete and usable through the winner.
+                    if count:
+                        rows, error = h._lineage_index()
+                        self.assertFalse(error)
+                        self.assertTrue(any(binding["attempt"] == prefix + "job-a"
+                                            for values in rows.values() for row in values
+                                            for binding in row["bindings"]))
+
+    def test_zero_job_source_race_replay_chain_and_empty_publication(self):
+        import concurrent.futures, threading
+        from peer_read_context import PeerReadContext
+        with self.iso.patched_environ():
+            seats = [self.seat("test:zero-B"), self.seat("test:zero-C")]
+            barrier = threading.Barrier(2)
+            def transfer(index):
+                barrier.wait(timeout=3)
+                return self.handover.record_retire_handover("zero-A", "claude", "zero-" + str(index),
+                    "codex", successor_seat=seats[index], jobs=self.jobs)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(transfer, range(2)))
+            self.assertEqual(sum(row is not None for row in results), 1)
+            winner = next(index for index, row in enumerate(results) if row is not None)
+            row = results[winner]
+            self.assertEqual(row["bindings"], [])
+            replay = self.handover.record_retire_handover("zero-A", "claude", row["sid"], "codex",
+                successor_seat=seats[winner], jobs=self.jobs)
+            self.assertEqual(replay, row)
+            self.assertIsNone(self.handover.record_retire_handover(row["sid"], "codex", "zero-A", "claude",
+                successor_seat=self.seat("test:zero-A"), jobs=self.jobs))
+            d_seat = self.seat("test:zero-D")
+            self.assertIsNotNone(self.handover.record_retire_handover(row["sid"], "codex", "zero-D", "opencode",
+                successor_seat=d_seat, jobs=self.jobs))
+            with st.seat_lock(seats[winner].key):
+                self.handover.publish_snapshot_locked(seats[winner], "codex", row["sid"], [], jobs=self.jobs)
+            result = self.handover.resolve_recipient("seat-successor", session="zero-A", read_context=PeerReadContext())
+            self.assertEqual((result.state, result.session_id, result.harness), ("confirmed", "zero-D", "opencode"))
+            self.assertEqual(len(self.handover.handover_rows(seats[winner])), 1)
+
+    def test_zero_job_automatic_and_explicit_successors_share_the_source_mutex(self):
+        import concurrent.futures, threading
+        with self.iso.patched_environ():
+            seat, other = self.seat("test:auto-zero"), self.seat("test:explicit-zero")
+            self.handover.record_retire_handover("auto-A", "claude", "auto-B", "codex",
+                successor_seat=seat, jobs=self.jobs)
+            st.record_event(seat, "codex", "auto-D", "start", cwd=str(self.cwd))
+            barrier = threading.Barrier(2)
+            def automatic():
+                barrier.wait(timeout=3)
+                with st.seat_lock(seat.key):
+                    return self.handover.record_locked(seat, "codex", "auto-D", "start", "clear", st.now_epoch())
+            def explicit():
+                barrier.wait(timeout=3)
+                return self.handover.record_retire_handover("auto-B", "codex", "auto-E", "claude",
+                    successor_seat=other, jobs=self.jobs)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+                a, b = pool.submit(automatic), pool.submit(explicit)
+                rows = [a.result(timeout=5), b.result(timeout=5)]
+            self.assertEqual(sum(row is not None for row in rows), 1)
+            self.assertIn(self.handover.session_successor("auto-B")[0], {"auto-D", "auto-E"})
+
+    def test_strict_ledger_read_and_effect_boundary_do_not_reuse_pass_authority(self):
+        from peer_read_context import PeerReadContext
+        meta = self.row("strict-attempt")
+        self.snapshot()
+        self.start("sid-B")
+        with self.iso.patched_environ():
+            context = PeerReadContext()
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs, read_context=context), "sid-B")
+            seat = self.seat()
+            path = st._ledger_path(seat)
+            before = path.read_bytes()
+            try:
+                path.write_text('{broken json\n')
+                result = self.handover.resolve_recipient("job-holder", metadata=meta, jobs=self.jobs)
+                self.assertEqual(result.state, "unreadable")
+                self.assertEqual(result.registered_session, "sid-A")
+                self.assertEqual(self.handover.effective_parent(meta, self.jobs), "")
+                self.assertFalse(self.handover.owns(meta, "sid-A", self.jobs))
+                self.assertEqual(self.handover.storage_recipients("sid-B"), [])
+                # The generation-checked pass also observes changed dependencies.
+                self.assertEqual(self.handover.effective_parent(meta, self.jobs, read_context=context), "")
+                with self.handover.lineage_effect_lock(meta, self.jobs, "sid-B") as allowed:
+                    self.assertFalse(allowed)
+            finally:
+                path.write_bytes(before)
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "sid-B")
+
+    def test_schema_damage_is_unreadable_instead_of_a_verified_empty_lineage(self):
+        meta = self.row("schema-damage")
+        self.snapshot()
+        self.start("sid-B")
+        with self.iso.patched_environ():
+            seat = self.seat()
+            path = st._ledger_path(seat)
+            original = path.read_bytes()
+            for replacement in ({"bindings": [{}]}, {"ts": float("nan")}, {"from": ""}):
+                entries = [json.loads(line) for line in original.splitlines()]
+                entry = next(row for row in entries if row.get("event") == "handover")
+                entry.update(replacement)
+                path.write_text("".join(json.dumps(row) + "\n" for row in entries))
+                result = self.handover.resolve_recipient("job-holder", metadata=meta, jobs=self.jobs)
+                self.assertEqual((result.state, result.session_id), ("unreadable", ""))
+            path.write_bytes(original)
+            snapshot = self.handover.read_snapshot(seat.key)
+            snapshot["bindings"] = [{}]
+            st.atomic_write_json(self.handover._snapshot_path(seat.key), snapshot)
+            self.assertEqual(self.handover.resolve_recipient("job-holder", metadata=meta, jobs=self.jobs).state,
+                             "unreadable")
+
     def test_the_twelve_job_cap_keeps_every_attempt_for_each_selected_job(self):
         self.row("att-active-1", node="active-one")
         self.row("att-active-2", node="active-two", worker="frame")
@@ -4576,22 +5113,22 @@ class SeatHandoverTest(TidyCase):
         for index in range(12):
             self.row(f"att-finished-{index}", status="done", route="rt-finished", node=f"done-{index}",
                      digest="sha256:finished", route_file=route_file)
-        self.assertEqual(self.snapshot(), 12)
+        self.assertEqual(self.snapshot(), 13)
         with self.iso.patched_environ():
             snap = self.handover.read_snapshot(self.seat().key)
         nodes = {b["node"] for b in snap["bindings"]}
         self.assertIn("running", nodes)
         self.assertEqual(nodes & {f"done-{index}" for index in range(12)},
-                         {f"done-{index}" for index in range(1, 12)})
+                         {f"done-{index}" for index in range(12)})
 
         self.rows.clear()
         for index in range(13):
             self.row(f"att-open-{index}", node=f"open-{index}")
-        self.assertEqual(self.snapshot(), 12)
+        self.assertEqual(self.snapshot(), 13)
         with self.iso.patched_environ():
             snap = self.handover.read_snapshot(self.seat().key)
         self.assertEqual({b["node"] for b in snap["bindings"]},
-                         {f"open-{index}" for index in range(1, 13)})
+                         {f"open-{index}" for index in range(13)})
 
         self.rows.clear()
         route_file = self.open_route("rt-latest", "sha256:latest")
@@ -4602,12 +5139,12 @@ class SeatHandoverTest(TidyCase):
         for index in range(12):
             self.row(f"att-final-{index}", status="done", route="rt-latest", node=f"final-{index}",
                      digest="sha256:latest", route_file=route_file)
-        self.assertEqual(self.snapshot(), 12)
+        self.assertEqual(self.snapshot(), 13)
         with self.iso.patched_environ():
             snap = self.handover.read_snapshot(self.seat().key)
-        self.assertNotIn("latest", {b["node"] for b in snap["bindings"]})
+        self.assertIn("latest", {b["node"] for b in snap["bindings"]})
         self.assertEqual({b["node"] for b in snap["bindings"]},
-                         {f"final-{index}" for index in range(12)})
+                         {f"final-{index}" for index in range(12)} | {"latest"})
 
     def test_a_confirmed_clear_refreshes_only_the_selected_jobs_after_snapshot(self):
         original = self.row("att-before-clear", node="selected")
@@ -4629,6 +5166,144 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual(retry["parent_sid"], "sid-A")
         self.assertEqual(original["parent_sid"], "sid-A")
         self.assertNotIn("att-unselected", {b["attempt"] for b in rows[0]["bindings"]})
+
+    def book_clear(self, old, harness="claude", pane=PANE):
+        with self.iso.patched_environ({"HERDR_PANE_ID": pane}):
+            seat = self.seat(pane)
+            with st.seat_lock(seat.key):
+                clear._write_reservation({"schema": 1, "nonce": "booking-" + old,
+                    "status": "reserved", "created": st.now_epoch() - 4,
+                    "deadline": st.now_epoch() + 500, "seat": seat.as_dict(),
+                    "harness": harness, "sid": old, "card_generation": 0,
+                    "prompt_seq": st.read_prompt_seq(seat)})
+
+    def test_matched_booking_hook_preserves_exact_bindings_retries_and_onward_harness_transfer(self):
+        for harness, onward in (("claude", "codex"), ("codex", "opencode"), ("opencode", "claude")):
+            with self.subTest(harness=harness), self.iso.patched_environ():
+                old, new, last = [harness + "-" + suffix for suffix in "ABC"]
+                pane = "test:booking-" + harness
+                first = self.row(harness + "-before", parent=old, harness=harness,
+                                 route="rt-" + harness, node="selected")
+                # An inherited job retains its own registered parent.
+                ancestor = harness + "-ancestor"
+                inherited = self.row(harness + "-inherited", parent=ancestor, harness=harness,
+                                     route="rt-" + harness, node="inherited")
+                self.handover.record_retire_handover(ancestor, harness, old, harness,
+                    successor_seat=self.seat(pane), jobs=self.jobs, now=st.now_epoch() - 10)
+                self.assertEqual(self.snapshot(old, harness, pane, st.now_epoch() - 5), 2)
+                retry = self.row(harness + "-retry", parent=old, harness=harness,
+                                 route="rt-" + harness, node="selected", worker="frame")
+                self.row(harness + "-unselected", parent=old, harness=harness, node="unselected")
+                self.book_clear(old, harness, pane)
+                record = self.handover.record_locked
+                observed = []
+                def after_succession(seat, h, sid, event, source, now):
+                    graph = self.handover.lineage_graph()
+                    observed.append((h, old, sid) in graph.edges)
+                    return record(seat, h, sid, event, source, now)
+                with mock.patch.object(self.handover, "record_locked", side_effect=after_succession):
+                    _out, rows = self.start(new, harness=harness, pane=pane)
+                self.assertEqual(observed, [True], "exercise succession-before-record hook ordering")
+                expected = [self.handover.binding_of(self.jobs, meta) for meta in (first, inherited, retry)]
+                bindings = lambda values: {json.dumps(value, sort_keys=True) for value in values}
+                self.assertEqual(bindings(rows[-1]["bindings"]), bindings(expected))
+                snap = self.handover.read_snapshot(self.seat(pane).key)
+                self.assertEqual(bindings(snap["bindings"]), bindings(expected))
+                discovered = self.handover.current_bindings(harness, new, self.jobs)
+                self.assertTrue(bindings(expected) <= bindings(discovered))
+                # Duplicate hook callbacks do not duplicate or trim the transition.
+                _out, again = self.start(new, harness=harness, event="prompt", source="", pane=pane)
+                self.assertEqual(again, rows)
+                self.assertEqual(self.handover.read_snapshot(self.seat(pane).key), snap)
+                registry_bytes = self.jobs.read_bytes()
+                self.jobs.write_bytes(b"")
+                try:
+                    for meta in (first, inherited, retry):
+                        answer = self.handover.resolve_attempt_recipient(self.jobs, meta["attempt_id"],
+                            registered=meta["parent_sid"], harness=harness)
+                        self.assertEqual((answer.session_id, answer.harness), (new, harness))
+                finally:
+                    self.jobs.write_bytes(registry_bytes)
+                moved = self.handover.record_retire_handover(new, harness, last, onward,
+                    successor_seat=self.seat(pane + "-onward"), jobs=self.jobs)
+                self.assertEqual(bindings(moved["bindings"]), bindings(discovered))
+                for meta in (first, inherited, retry):
+                    answer = self.handover.resolve_attempt_recipient(self.jobs, meta["attempt_id"],
+                        registered=meta["parent_sid"], harness=harness)
+                    self.assertEqual((answer.session_id, answer.harness), (last, onward))
+                # Losing registry rows must preserve the same exact attempt evidence.
+                registry_bytes = self.jobs.read_bytes()
+                self.jobs.write_bytes(b"")
+                try:
+                    for meta in (first, inherited, retry):
+                        answer = self.handover.resolve_attempt_recipient(self.jobs, meta["attempt_id"],
+                            registered=meta["parent_sid"], harness=harness)
+                        self.assertEqual((answer.session_id, answer.harness), (last, onward))
+                finally:
+                    self.jobs.write_bytes(registry_bytes)
+
+    def test_second_matched_booking_keeps_original_and_new_registered_parents(self):
+        first = self.row("book-original")
+        self.snapshot(now=st.now_epoch() - 5)
+        self.book_clear("sid-A")
+        self.start("sid-B")
+        own = self.row("book-own-B", parent="sid-B", node="own-B")
+        self.snapshot(sid="sid-B", now=st.now_epoch() - 5)
+        retry = self.row("book-retry-B", parent="sid-B", node="own-B", worker="frame")
+        self.book_clear("sid-B")
+        _out, rows = self.start("sid-C")
+        expected = {json.dumps(self.handover.binding_of(self.jobs, meta), sort_keys=True)
+                    for meta in (first, own, retry)}
+        self.assertEqual({json.dumps(b, sort_keys=True) for b in rows[-1]["bindings"]}, expected)
+        with self.iso.patched_environ():
+            self.assertEqual({json.dumps(b, sort_keys=True) for b in
+                self.handover.read_snapshot(self.seat().key)["bindings"]}, expected)
+            self.assertEqual({b["attempt"] for b in self.handover.current_bindings("claude", "sid-C", self.jobs)},
+                             {"book-original", "book-own-B", "book-retry-B"})
+
+    def test_matched_booking_still_excludes_foreign_holder_fork_cycle_and_unreadable_authority(self):
+        with self.iso.patched_environ():
+            for case in ("foreign", "foreign-same-sid", "fork", "cycle", "unreadable"):
+                with self.subTest(case=case):
+                    old, new = case + "-A", case + "-B"
+                    pane = "test:excluded-" + case
+                    meta = self.row(case + "-attempt", parent=old, route="rt-" + case)
+                    self.snapshot(old, "claude", pane, st.now_epoch() - 5)
+                    self.book_clear(old, pane=pane)
+                    record = self.handover.record_locked
+                    path = st._ledger_path(self.seat(pane))
+                    observed = []
+                    def changed_authority(seat, harness, sid, event, source, now):
+                        self.assertIn((harness, old, sid), self.handover.lineage_graph().edges)
+                        before = path.read_bytes()
+                        if case.startswith("foreign"):
+                            # A separate explicit binding to B is not evidence that
+                            # this job traversed the booking's A -> B transition.
+                            st._append_ledger_entry(seat, {"event": "handover", "harness": harness,
+                                "from": "another-holder", "sid": new if case == "foreign-same-sid" else "elsewhere",
+                                "bindings": [self.handover.binding_of(self.jobs, meta)], "ts": now + 1})
+                        elif case == "unreadable":
+                            path.write_text('{broken authority\n')
+                        else:
+                            st._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear",
+                                "harness": harness, "from": new if case == "cycle" else old,
+                                "sid": old if case == "cycle" else "fork-target", "ts": now + 1})
+                        try:
+                            row = record(seat, harness, sid, event, source, now)
+                            observed.append(row)
+                            return row
+                        finally:
+                            if case == "unreadable":
+                                path.write_bytes(before)
+                    with mock.patch.object(self.handover, "record_locked", side_effect=changed_authority):
+                        self.start(new, pane=pane)
+                    self.assertEqual(len(observed), 1)
+                    if case.startswith("foreign"):
+                        self.assertEqual(observed[0]["bindings"], [])
+                    else:
+                        self.assertIsNone(observed[0])
+                        self.assertEqual(self.handover.read_snapshot(self.seat(pane).key)["bindings"],
+                                         [self.handover.binding_of(self.jobs, meta)])
 
     def test_the_clear_start_reads_the_registry_once_and_asks_only_about_new_attempts(self):
         # The card hook has seconds: a full registry walk or route verification per binding of
@@ -4688,20 +5363,20 @@ class SeatHandoverTest(TidyCase):
         self.assertIsNotNone(row)
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE_BESIDE}):
             snapshot = self.handover.read_snapshot(seat.key)
-        self.assertEqual(len(snapshot["bindings"]), 15)
+        self.assertEqual(len(snapshot["bindings"]), 16)
         self.assertEqual(len({(b["jobs"], b["route"], b["hash"], b["node"])
-                              for b in snapshot["bindings"]}), 12)
+                              for b in snapshot["bindings"]}), 13)
         self.assertEqual({(b["attempt"], b["parent"]) for b in snapshot["bindings"] if b["node"] == "shared"}, {
             ("att-kept-1", "sid-B"), ("att-kept-2", "sid-B"),
             ("att-new-1", "sid-A"), ("att-new-2", "sid-A"),
         })
-        self.assertNotIn("att-done-0", {b["attempt"] for b in snapshot["bindings"]})
+        self.assertIn("att-done-0", {b["attempt"] for b in snapshot["bindings"]})
         self.assertEqual({b["attempt"] for b in row["bindings"]},
                          {b["attempt"] for b in snapshot["bindings"] if b["parent"] == "sid-A"})
 
         # The next clear uses the merged snapshot as its bounded authority set.
         _out, next_rows = self.start("sid-C", pane=PANE_BESIDE)
-        self.assertEqual([(r["from"], r["sid"]) for r in next_rows],
+        self.assertEqual([(st._handover_origin(r)[1], r["sid"]) for r in next_rows],
                          [("sid-A", "sid-B"), ("sid-B", "sid-C")])
         self.assertEqual({(b["attempt"], b["parent"]) for b in next_rows[-1]["bindings"]},
                          {(b["attempt"], b["parent"]) for b in snapshot["bindings"]})
@@ -4872,6 +5547,28 @@ class SeatHandoverTest(TidyCase):
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
             self.assertEqual(self.handover.effective_parent(meta, self.jobs), "ses_B")
 
+    def test_opencode_chat_message_wire_reaches_the_same_hook_writer_once(self):
+        meta = self.row("opencode-cli", parent="ses_A", harness="opencode")
+        self.snapshot(sid="ses_A", harness="opencode", now=st.now_epoch() - 5)
+        args = ("hook", "--harness", "opencode", "--event", "prompt", "--session-id", "ses_cli",
+                "--cwd", str(self.cwd), "--format", "json")
+        for _ in range(2):
+            event = self.cli(*args, input=json.dumps({"prompt": "continue the accepted work"}))
+            self.assertEqual(event.returncode, 0, event.stderr)
+            self.assertIn("additionalContext", json.loads(event.stdout))
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "ses_cli")
+            rows = self.handover.handover_rows(self.seat())
+            self.assertEqual([(row["from"], row["sid"]) for row in rows], [("ses_A", "ses_cli")])
+
+    def test_opencode_callback_cannot_promote_a_fork_or_an_older_native_session(self):
+        meta = self.row("opencode-protected", parent="ses_A", harness="opencode")
+        self.snapshot(sid="ses_A", harness="opencode", now=st.now_epoch() - 5)
+        self.start("ses_fork", harness="opencode", event="start", source="fork")
+        self.assertEqual(self.start("ses_fork", harness="opencode", event="prompt", source="")[1], [])
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "ses_A")
+
     def test_storage_stays_with_the_registered_parent_and_only_bound_attempts_reach_the_taker(self):
         self.row("att-1")
         self.snapshot(now=st.now_epoch() - 5)
@@ -4928,7 +5625,8 @@ class SeatHandoverTest(TidyCase):
         meta = self.row("att-1", parent="sid-A", harness="codex")
         self.row("att-depth2", parent="sid-A", harness="codex", depth="2")
         row = self.retire("sid-A", "codex", "sid-B", "claude")
-        self.assertEqual((row["from"], row["sid"], row["harness"], row["source"]), ("sid-A", "sid-B", "claude", "retire"))
+        self.assertEqual((st._handover_origin(row), row["sid"], row["harness"], row["source"]),
+                             (("codex", "sid-A"), "sid-B", "claude", "retire"))
         self.assertEqual([(b["attempt"], b["parent"]) for b in row["bindings"]], [("att-1", "sid-A")])
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE_BESIDE}):
             self.assertEqual(self.handover.effective_parent(meta, self.jobs), "sid-B")
@@ -4966,7 +5664,7 @@ class SeatHandoverTest(TidyCase):
 
     def test_a_retire_with_nothing_live_hands_nothing(self):
         self.row("att-done", parent="sid-A", status="done")
-        self.assertIsNone(self.retire("sid-A", "codex", "sid-B", "claude"))
+        self.assertEqual(self.retire("sid-A", "codex", "sid-B", "claude")["bindings"], [])
         self.assertIsNone(self.retire("sid-A", "codex", "sid-A", "codex"))
 
     def test_retire_hands_open_route_after_terminal_receipt_is_acked(self):
@@ -5003,11 +5701,11 @@ class SeatHandoverTest(TidyCase):
             with self.subTest(raw=raw):
                 if raw is not None:
                     path.write_text(raw)
-                self.assertIsNone(self.retire("sid-A", "claude", "sid-B", "codex"))
+                self.assertEqual(self.retire("sid-A", "claude", "sid-B", "codex")["bindings"], [])
                 self.assertEqual(self.effective(meta), "sid-A")
         path.write_text(json.dumps({"route_id": "rt-1", "route_hash": "sha256:aa"}))
         path.with_suffix(".outcome.json").write_text(json.dumps({"terminal_gate_proven": False}))
-        self.assertIsNone(self.retire("sid-A", "claude", "sid-B", "codex"))
+        self.assertEqual(self.retire("sid-A", "claude", "sid-B", "codex")["bindings"], [])
 
     def test_finished_node_less_owner_keeps_its_verified_route_until_close(self):
         import owner_route_binding as owner
@@ -5035,7 +5733,7 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual(self.effective(meta), "sid-B")
         self.assertEqual(self.jobs.read_bytes(), before)
         path.with_suffix(".outcome.json").write_text("{}")
-        self.assertIsNone(self.retire("sid-B", "codex", "sid-C", "opencode", pane="test:pane-c"))
+        self.assertEqual(self.retire("sid-B", "codex", "sid-C", "opencode", pane="test:pane-c")["bindings"], [])
 
     # -- seat lineage: a node-less owner and the one answer for delivery and authority ------------------
 
@@ -5299,12 +5997,12 @@ class SeatHandoverTest(TidyCase):
                     for sid in ("sid-B", "sid-C", "sid-X"):
                         self.handover.owns(meta, sid, self.jobs)
             self.assertTrue(self.handover.owns(owner, "sid-C", self.jobs))
-        self.assertEqual([call.args[2] for call in resolved.call_args_list], ["sid-C"])
+        self.assertEqual([call.args[2] for call in resolved.call_args_list], [])
 
-    def test_a_broken_state_answers_the_registered_parent(self):
+    def test_a_broken_state_never_restores_the_registered_parent(self):
         meta = self.row("att-1")
         with mock.patch.object(self.handover, "_all_snapshots", side_effect=OSError("boom")):
-            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "sid-A")
+            self.assertEqual(self.handover.effective_parent(meta, self.jobs), "")
 
     def test_markerless_role_only_clear_handoff_reaches_c_through_all_three_harnesses(self):
         pm = self.handover._peer_message()
@@ -5371,7 +6069,7 @@ class SeatHandoverTest(TidyCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(pm.cmd_release(SimpleNamespace(harness="claude", session_id="sid-A")), 0)
         _out, rows = self.start("sid-B")
-        self.assertEqual(rows, [])
+        self.assertTrue(all(not row.get("steward") for row in rows))
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
             self.assertEqual(self.handover.resolved_steward_relations(
                 "claude", "sid-B", seat_key=self.seat().key), [])
@@ -5396,6 +6094,87 @@ class SeatHandoverTest(TidyCase):
         with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
             self.assertEqual(len(self.handover.resolved_steward_relations(
                 "claude", "sid-B", seat_key=self.seat().key)), 1)
+
+    @mock.patch("peer_obligations.request_obligation_recovery", return_value=True)
+    def test_release_under_seat_lock_wins_over_waiting_snapshot_adoption(self, _recovery):
+        import threading
+        pm = self.handover._peer_message()
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), mock.patch("steward_check._ensure_runner"):
+            self.assertTrue(pm.mark_steward("claude", "sid-A",
+                {"harness": "unknown", "name": "-"}, "explicit", "1", source="explicit"))
+            self.assertEqual(self.snapshot(), 0)
+            seat = self.seat()
+            role = self.handover.read_snapshot(seat.key)["steward"]["roles"][0]
+            real_lock = st.seat_lock
+            waiting = threading.Event()
+            failures = []
+
+            def wait_for_seat(key, **kwargs):
+                if key == seat.key:
+                    waiting.set()
+                return real_lock(key, **kwargs)
+
+            def adopt():
+                try:
+                    st.run_hook("claude", "start", "sid-B", source="clear",
+                                cwd=str(self.cwd), env=os.environ, emit=lambda _line: None)
+                except BaseException as exc:
+                    failures.append(exc)
+
+            thread = threading.Thread(target=adopt)
+            try:
+                with real_lock(seat.key), mock.patch.object(st, "seat_lock", side_effect=wait_for_seat):
+                    thread.start()
+                    self.assertTrue(waiting.wait(5))
+                    self.assertTrue(self.handover.record_steward_release(
+                        seat, "claude", "sid-A", role["generation"], relation=role))
+            finally:
+                # Leave the lock before joining its waiting writer.
+                if thread.ident is not None:
+                    thread.join(10)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(failures, [])
+            self.assertTrue(all(not row.get("steward") for row in self.handover.handover_rows(seat)))
+            self.assertEqual(self.handover.resolved_steward_relations("claude", "sid-B", seat_key=seat.key), [])
+
+    @mock.patch("peer_obligations.request_obligation_recovery", return_value=True)
+    def test_record_adoption_matches_snapshot_evidence_when_generations_collide(self, _recovery):
+        pm = self.handover._peer_message()
+        for reverse in (False, True):
+            pane = "test:role-collision-" + str(reverse)
+            with self.subTest(reverse=reverse), self.iso.patched_environ({"HERDR_PANE_ID": pane}), \
+                 mock.patch("steward_check._ensure_runner"):
+                self.assertTrue(pm.mark_steward("claude", "sid-A",
+                    {"harness": "unknown", "name": "-"}, "explicit", "1", source="explicit"))
+                self.assertEqual(self.snapshot(pane=pane), 0)
+                seat = self.seat(pane)
+                role = self.handover.read_snapshot(seat.key)["steward"]["roles"][0]
+                other = copy.deepcopy(role)
+                other["targets"][0]["name"] = "unrelated"
+                current = [role, other] if reverse else [other, role]
+                with mock.patch.object(self.handover, "resolved_steward_relations", return_value=current):
+                    _out, rows = self.start("sid-B", pane=pane)
+                adopted = rows[-1]["steward"]["roles"]
+                self.assertEqual(len(adopted), 1)
+                self.assertEqual(adopted[0]["targets"], role["targets"])
+                self.assertEqual(adopted[0]["holder"], {"harness": "claude", "sid": "sid-B"})
+
+    @mock.patch("peer_obligations.request_obligation_recovery", return_value=True)
+    def test_own_marker_release_survives_unrelated_global_discovery_failure(self, _recovery):
+        pm = self.handover._peer_message()
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}), mock.patch("steward_check._ensure_runner"):
+            self.assertTrue(pm.mark_steward("claude", "sid-A",
+                {"harness": "unknown", "name": "-"}, "explicit", "1", source="explicit"))
+            self.assertEqual(self.snapshot(), 0)
+            seat = self.seat()
+            with mock.patch.object(self.handover, "_all_snapshots", side_effect=OSError("unrelated global snapshot")), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pm.cmd_release(SimpleNamespace(harness="claude", session_id="sid-A")), 0)
+            self.assertFalse(pm.steward_marker_path("claude", "sid-A").exists())
+        _out, rows = self.start("sid-B")
+        self.assertTrue(all(not row.get("steward") for row in rows))
+        with self.iso.patched_environ({"HERDR_PANE_ID": PANE}):
+            self.assertEqual(self.handover.resolved_steward_relations("claude", "sid-B", seat_key=seat.key), [])
 
     def test_clear_and_compact_snapshot_callers_preserve_role_only_payload(self):
         pm = self.handover._peer_message()
@@ -5812,6 +6591,249 @@ class SeatHandoverTest(TidyCase):
             self.assertTrue(any(row.get("event") == "steward-release"
                                 for _key, row in self.handover._transition_rows(seat.key)))
             self.assertEqual(st.session_summary(seat)[("claude", "sid-A")]["last_seen"], 100)
+
+
+class StewardMirrorTest(TidyCase):
+    """Reconstruct the e0 diagnostic rows in private storage; never read its live paths."""
+
+    def setUp(self):
+        super().setUp()
+        import dispatch_seat_handover as handover
+        self.handover = handover
+        self.pm = handover._peer_message()
+        peer_reader = mock.patch.object(handover, "_peer_message", return_value=self.pm)
+        peer_reader.start()
+        self.addCleanup(peer_reader.stop)
+        self.physical = "8ab8e633a26a786454f8"
+        self.origin = "380d69d1-7eac-44a4-9fe9-486ffcf6336d"
+        self.holder = "bdae4343-0565-45eb-bda1-488767caf45e"
+        self.logical = st._native_session_key("claude", self.holder)
+        self.role = {
+            "seat_key": self.physical, "generation": "b4bb143c5bc92d9c4d1d54b841a0c509",
+            "marker_digest": "e453aeef7c66cc8de13764cb64467daa88c47d7105886f4350d5da6a1b08c1f7",
+            "origin": {"harness": "claude", "sid": self.origin},
+            "holder": {"harness": "claude", "sid": self.holder},
+            "targets": [{"harness": "unknown", "name": "-", "session_id": None,
+                         "source": "explicit", "kind": "explicit", "ts": "fixture"}],
+            "lineage": [{"from": self.origin, "to": self.holder,
+                         "snapshot_id": "3b8ea7a1e6efccf8b4230a3f9b01d0e2"}],
+        }
+        self.row = {"event": "handover", "ts": 1793224108.457673, "harness": "claude",
+                    "sid": self.holder, "from": self.origin, "source": "clear",
+                    "seat_key": self.physical, "bindings": [],
+                    "snapshot_id": "3b8ea7a1e6efccf8b4230a3f9b01d0e2",
+                    "steward": {"schema": 1, "roles": [self.role], "watches": []}}
+        self.release = {"event": "steward-release", "ts": 1793246841.9498513,
+                        "harness": "claude", "sid": self.holder,
+                        "generation": self.role["generation"], "seat_key": self.physical}
+
+    def write_rows(self, key, rows):
+        path = st.state_root() / "sessions" / (key + ".jsonl")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def discovery(self, keys):
+        return mock.patch.object(self.handover, "_all_snapshots",
+                                 return_value=[{"seat": {"key": key}} for key in keys])
+
+    def test_historical_physical_release_collapses_only_exact_mirrors(self):
+        sys.path.insert(0, str(ROOT / "tools"))
+        from fleet.collectors import steward
+        import steward_check
+        for marker_present in (False, True):
+            for keys in ((self.physical, self.logical), (self.logical, self.physical), (self.physical,)):
+                with self.subTest(marker=marker_present, keys=keys), self.iso.patched_environ():
+                    marker = {"harness": "claude", "session_id": self.origin,
+                              "generation": self.role["generation"], "seat_key": self.physical,
+                              "targets": {"-": self.role["targets"][0]}}
+                    if marker_present:
+                        self.role["marker_digest"] = hashlib.sha256(json.dumps(
+                            marker, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                    self.write_rows(self.physical, [self.row, self.release])
+                    self.write_rows(self.logical, [self.row])
+                    with self.discovery(keys), mock.patch.object(self.pm, "read_steward_markers",
+                            return_value={("claude", self.origin): marker} if marker_present else {}):
+                        relations = self.handover.resolved_steward_relations(include_released=True)
+                        self.assertEqual(len(relations), 1)
+                        self.assertTrue(relations[0]["released"])
+                        self.assertEqual(self.handover.resolved_steward_relations(), [])
+                        self.assertFalse(steward_check._role_held("claude", self.holder)["held"])
+                        self.assertFalse(steward.role_flag("claude", self.holder, markers={},
+                                                          sessions=[], _relations=relations, _targets=[]))
+                        # Physical/logical file enumeration cannot change release identity.
+                        rows = [entry for key in keys for entry in self.handover._transition_rows(key)]
+                        states, releases = self.handover._role_states(rows=rows)
+                        self.assertEqual(len(states), 1)
+                        self.assertEqual(set(states), releases)
+
+    def test_each_identity_mismatch_survives_the_other_relations_release(self):
+        for field in ("generation", "seat_key", "origin", "origin-harness", "holder", "holder-harness",
+                      "marker_digest", "targets", "lineage", "row-snapshot", "row-from", "row-harness", "row-seat"):
+            with self.subTest(field=field), self.iso.patched_environ():
+                other = copy.deepcopy(self.row)
+                role = other["steward"]["roles"][0]
+                if field in {"origin", "holder"}:
+                    role[field]["sid"] += "-other"
+                elif field.endswith("-harness") and not field.startswith("row-"):
+                    role[field.split("-")[0]]["harness"] = "opencode"
+                elif field == "targets":
+                    role[field][0]["name"] = "other"
+                elif field == "lineage":
+                    role[field][0]["snapshot_id"] = "other"
+                    other["snapshot_id"] = "other"
+                elif field.startswith("row-"):
+                    other[{"row-snapshot": "snapshot_id", "row-from": "from", "row-harness": "harness", "row-seat": "seat_key"}[field]] = "other"
+                else:
+                    role[field] += "-other"
+                self.write_rows(self.physical, [self.row, self.release])
+                self.write_rows(self.logical, [other])
+                for keys in ((self.physical, self.logical), (self.logical, self.physical)):
+                    with self.discovery(keys):
+                        relations = self.handover.resolved_steward_relations(include_released=True)
+                        self.assertEqual(len(relations), 2)
+                        self.assertEqual(sorted(row["released"] for row in relations), [False, True])
+                        self.assertEqual(len(self.handover.resolved_steward_relations()), 1)
+
+    def test_current_marker_cannot_rebind_a_historical_release_to_different_evidence(self):
+        with self.iso.patched_environ():
+            marker = {"harness": "claude", "session_id": self.origin,
+                      "generation": self.role["generation"], "seat_key": self.physical,
+                      "targets": {"other": {"harness": "unknown", "name": "other",
+                                             "source": "explicit", "kind": "explicit"}}}
+            self.write_rows(self.physical, [self.row, self.release])
+            self.write_rows(self.logical, [self.row])
+            with self.discovery((self.physical, self.logical)), mock.patch.object(
+                    self.pm, "read_steward_markers", return_value={("claude", self.origin): marker}):
+                relations = self.handover.resolved_steward_relations(include_released=True)
+                self.assertEqual(len(relations), 2)
+                original = next(row for row in relations if row["holder"]["sid"] == self.holder)
+                self.assertTrue(original["released"])
+                self.assertEqual([row["holder"]["sid"] for row in self.handover.resolved_steward_relations()], [self.origin])
+
+    def test_ambiguous_canonical_release_and_snapshot_do_not_pick_a_generation_winner(self):
+        with self.iso.patched_environ():
+            other = copy.deepcopy(self.row)
+            other_role = other["steward"]["roles"][0]
+            other_role["targets"][0]["name"] = "other"
+            self.write_rows(self.physical, [self.row, other, self.release])
+            self.write_rows(self.logical, [self.row])
+            seat = st.Seat("pane", self.physical)
+            for roles in ([self.role, other_role], [other_role, self.role]):
+                self.write_rows(self.physical, [dict(self.row, steward={"roles": roles}), self.release])
+                with self.discovery((self.physical, self.logical)):
+                    self.assertEqual(len(self.handover.resolved_steward_relations()), 2)
+                    payload = self.handover._revalidate_snapshot_steward(
+                        seat, "claude", self.holder, {"schema": 1, "roles": [self.role]})
+                    self.assertEqual(payload["roles"][0]["targets"], self.role["targets"])
+                    changed = copy.deepcopy(self.role); changed["marker_digest"] = "foreign"
+                    with self.assertRaisesRegex(RuntimeError, "role-unresolved"):
+                        self.handover._revalidate_snapshot_steward(
+                            seat, "claude", self.holder, {"schema": 1, "roles": [changed]})
+                    with st.seat_lock(seat.key):
+                        self.assertFalse(self.handover.record_steward_release(
+                            seat, "claude", self.holder, self.role["generation"], relation=self.role))
+                    before = (st.state_root() / "sessions" / (self.physical + ".jsonl")).read_bytes()
+                    with mock.patch.object(self.handover, "pane_seat", return_value=seat), \
+                         contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(self.pm.cmd_release(SimpleNamespace(harness="claude", session_id=self.holder)), 1)
+                    self.assertEqual((st.state_root() / "sessions" / (self.physical + ".jsonl")).read_bytes(), before)
+
+    def test_current_chain_holder_wins_over_old_alias_and_stale_predecessor_off(self):
+        with self.iso.patched_environ():
+            successor = copy.deepcopy(self.row)
+            successor.update(ts=self.row["ts"] + 1, sid="holder-C", snapshot_id="snapshot-BC", **{"from": self.holder})
+            role = successor["steward"]["roles"][0]
+            role["holder"]["sid"] = "holder-C"
+            role["lineage"].append({"from": self.holder, "to": "holder-C", "snapshot_id": "snapshot-BC"})
+            self.write_rows(self.physical, [self.row, successor])
+            self.write_rows(self.logical, [self.row])
+            with self.discovery((self.logical, self.physical)), \
+                 mock.patch.object(self.handover, "pane_seat", return_value=st.Seat("pane", self.physical)), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                current = self.handover.resolved_steward_relations()
+                self.assertEqual([row["holder"]["sid"] for row in current], ["holder-C"])
+                self.assertEqual(self.pm.cmd_release(SimpleNamespace(harness="claude", session_id=self.holder)), 0)
+                self.assertEqual(self.handover.resolved_steward_relations(), current)
+                self.assertEqual(self.pm.cmd_release(SimpleNamespace(harness="claude", session_id="holder-C")), 0)
+                self.assertEqual(self.handover.resolved_steward_relations(), [])
+
+    def test_origin_release_revalidates_a_confirmed_hop_after_collection(self):
+        with self.iso.patched_environ():
+            successor = copy.deepcopy(self.row)
+            successor.update(ts=self.row["ts"] + 1, sid="holder-C", snapshot_id="snapshot-BC", **{"from": self.holder})
+            role = successor["steward"]["roles"][0]
+            role["holder"]["sid"] = "holder-C"
+            role["lineage"].append({"from": self.holder, "to": "holder-C", "snapshot_id": "snapshot-BC"})
+            self.write_rows(self.physical, [self.row, successor])
+            self.write_rows(self.logical, [self.row])
+            seat = st.Seat("pane", self.physical)
+            with self.discovery((self.logical, self.physical)), st.seat_lock(seat.key):
+                self.assertFalse(self.handover.record_steward_release(
+                    seat, "claude", self.holder, self.role["generation"], relation=self.role))
+                self.assertTrue(self.handover.record_steward_release(
+                    seat, "claude", self.origin, self.role["generation"], relation=self.role))
+                self.assertEqual(self.handover.resolved_steward_relations(), [])
+
+    def test_off_from_holder_or_origin_is_idempotent_with_both_storage_copies(self):
+        for actor in (self.holder, self.origin):
+            with self.subTest(actor=actor), self.iso.patched_environ():
+                self.write_rows(self.physical, [self.row])
+                self.write_rows(self.logical, [self.row])
+                seat = st.Seat("pane", self.physical)
+                with self.discovery((self.physical, self.logical)), \
+                     mock.patch.object(self.handover, "pane_seat", return_value=seat), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    args = SimpleNamespace(harness="claude", session_id=actor)
+                    self.assertEqual(self.pm.cmd_release(args), 0)
+                    self.assertEqual(self.pm.cmd_release(args), 0)
+                    self.assertEqual(self.handover.resolved_steward_relations(), [])
+                    releases = [row for _key, row in self.handover._transition_rows(self.physical)
+                                if row["event"] == "steward-release"]
+                    self.assertEqual(len(releases), 1)
+                    self.assertEqual([row for _key, row in self.handover._transition_rows(self.logical)], [self.row])
+
+    def test_role_off_preserves_accepted_watch_receipt_duty_and_holder_continuation(self):
+        import peer_obligations
+        for harness in ("claude", "codex", "opencode"):
+            with self.subTest(harness=harness), self.iso.patched_environ():
+                seat = st.Seat("pane", self.physical)
+                root = self.pm.peer_state_root()
+                watch_id = "watch-mirror-" + harness
+                arm = {"schema_version": 1, "watch_id": watch_id, "server": "private",
+                       "target": "target", "until": ["done"], "armed_ts": "fixture",
+                       "deadline": {"wall": 9999999999}, "agent": {"harness": "codex", "session_id": "target"},
+                       "steward": {"harness": harness, "session_id": self.origin},
+                       "steward_seat": seat.as_dict()}
+                paths = root / "peer-watches"
+                paths.mkdir(parents=True, exist_ok=True)
+                arm_path = paths / (watch_id + ".json")
+                arm_path.write_text(json.dumps(arm))
+                receipt_path = paths / (watch_id + ".receipt.json")
+                receipt_path.write_text(json.dumps({"watch_id": watch_id, "status": "done", "matched": True}))
+                watch = self.handover._watch_reference_from_arm(watch_id, root, arm)
+                watch["holder"] = {"harness": harness, "sid": self.holder}
+                watch["lineage"] = copy.deepcopy(self.role["lineage"])
+                row = copy.deepcopy(self.row)
+                row["harness"] = harness
+                for field in ("origin", "holder"):
+                    row["steward"]["roles"][0][field]["harness"] = harness
+                row["steward"]["watches"] = [watch]
+                self.write_rows(self.physical, [row])
+                self.write_rows(self.logical, [row])
+                store = peer_obligations.ObligationStore(root)
+                duty = store.create(watch_id, "watch", {"watch_id": watch_id}, {"arm": arm})
+                before = (arm_path.read_bytes(), receipt_path.read_bytes(), copy.deepcopy(duty))
+                with self.discovery((self.physical, self.logical)), \
+                     mock.patch.object(self.handover, "pane_seat", return_value=seat), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(self.pm.cmd_release(SimpleNamespace(harness=harness, session_id=self.holder)), 0)
+                    self.assertEqual(self.handover.resolved_steward_relations(), [])
+                    current = self.handover.resolve_watch(watch_id, seat_key=seat.key)
+                    self.assertEqual(current["holder"], {"harness": harness, "sid": self.holder})
+                    self.assertEqual(current["origin"], {"harness": harness, "sid": self.origin})
+                    self.assertEqual(current["deadline"], arm["deadline"])
+                    self.assertFalse((paths / (watch_id + ".ack.json")).exists())
+                    self.assertEqual((arm_path.read_bytes(), receipt_path.read_bytes(), store.get(watch_id)), before)
 
 
 class CardExactIdentityTest(TidyCase):

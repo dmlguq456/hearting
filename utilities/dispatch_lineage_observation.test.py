@@ -93,6 +93,73 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
             copy.write_text(json.dumps(row) + "\n")
         return meta, record, seat, row
 
+    def test_legacy_logical_binding_does_not_require_an_audit_attempt(self):
+        meta, record, seat, row = self.legacy_handoff("audit-optional", "codex", "claude")
+        for binding in row["bindings"]:
+            binding.pop("attempt")
+        for path in ledger_copies(seat, row):
+            path.write_text(json.dumps(row) + "\n")
+        self.assertEqual(handover.effective_parent(meta, self.jobs_path), "audit-optional-Z")
+        self.assertEqual(handover.record_recipient_binding(record, "audit-optional-A",
+            harness="codex", jobs=self.jobs_path), ("claude", "audit-optional-Z"))
+        self.assertIn("audit-optional-A", dict(handover.storage_recipients("audit-optional-Z", harness="claude")))
+        # After the exact registry row is gone the missing audit cannot identify
+        # its job. Neither historical address nor an unrelated holder is authority.
+        self.jobs_path.write_text("")
+        self.assertIsNone(handover.record_recipient_binding(record, "audit-optional-A",
+            harness="codex", jobs=self.jobs_path))
+
+    def test_strict_state_read_rejects_missing_sid_without_poisoning_unrelated_legacy_history(self):
+        meta, _record, seat = self.handoff("empty-object")
+        path = tidy._ledger_path(seat)
+        original = path.read_bytes()
+        path.write_bytes(original + b"{}\n")
+        with self.assertRaises(ValueError):
+            tidy._read_ledger_lines(seat, strict=True)
+        # Forward-compatible unrelated rows grant no edge and do not erase a
+        # separately confirmed qualified handover in the common graph.
+        self.assertEqual(handover.effective_parent(meta, self.jobs_path), "empty-object-Z")
+        self.assertFalse(handover.owns(meta, "empty-object-A", self.jobs_path))
+        path.write_bytes(original)
+        self.assertEqual(handover.effective_parent(meta, self.jobs_path), "empty-object-Z")
+
+    def test_cross_harness_prior_batch_keeps_the_already_acked_original_marker(self):
+        import session_notice
+        import peer_obligations
+        from dispatch_recipient_receipt import opencode_messages_evidence, settle_native_receipt
+        old, current = "cross-prior-A", "cross-prior-B"
+        with mock.patch.object(peer_obligations, "ensure_normal_runner", return_value=False), \
+             mock.patch.object(peer_obligations, "request_dispatch_reconciliation", return_value=False):
+            records = [session_notice.notify("claude", old, key="cross-prior-" + str(i),
+                subject="cross prior", text="original body " + str(i), jobs=self.jobs_path) for i in range(2)]
+        tidy._append_ledger_entry(tidy.Seat("pane", "cross-prior"), {
+            "event": "handover", "source": "retire", "harness": "opencode", "sid": current,
+            "from": {"harness": "claude", "sid": old}, "bindings": [], "ts": 1})
+        sent = []
+        for record in records:
+            claim = pending.claim(self.tmp_root, old, record["delivery_id"], claim_owner="original-carrier",
+                lease_seconds=30, require_generation_proof=False)
+            sent.append(pending.mark_sent_ambiguous(self.tmp_root, old, claim["delivery_id"], claim_owner="original-carrier"))
+        original_body = sweep.delivery_context([(self.tmp_root, [{**r, sweep.STORAGE_KEY: old} for r in sent])])
+        identities = [pending.received_ack_identity(r, old, r["delivery_id"]) for r in sent]
+        pending.ack_received(self.tmp_root, old, sent[1]["delivery_id"], expected_identity=identities[1],
+                             acked_by="independent-carrier")
+        native = [{"info": {"sessionID": current, "role": "user"},
+                   "parts": [{"type": "text", "text": original_body}]}]
+        expected = sweep._opencode_delivery_expectations([self.tmp_root], "opencode-turn", current, native)
+        self.assertEqual(len(expected), 1)
+        self.assertEqual({delivery for delivery, _identity in expected[0]["bindings"]},
+                         {r["delivery_id"] for r in sent})
+        self.assertEqual(expected[0]["text"], original_body)
+        evidence = opencode_messages_evidence(native, current, expected)
+        result = settle_native_receipt(self.tmp_root, old, "opencode", current, sent[0], evidence,
+                                       acked_by="cross-prior-receipt")
+        self.assertTrue(result["received"] and result["settled"])
+        for record, identity in zip(sent, identities):
+            stored = pending.read(self.tmp_root, old, record["delivery_id"])
+            self.assertEqual((stored["state"], stored["attempts"]), ("acked", 1))
+            self.assertEqual(pending.received_ack_identity(stored, old, stored["delivery_id"]), identity)
+
     def test_legacy_exact_binding_crosses_harness_without_parent_harness_and_reuses_context(self):
         from harness_capabilities import parent_completion
         for harness, target in (("claude", "claude"), ("codex", "codex"),
@@ -1160,7 +1227,7 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
         metas = [dict(attempt_schema_version="2", dispatch_depth="1", worker_type="owner",
             registered_worker="1", attempt_id=f"att-{tag}-{i}", parent_sid=origin,
             parent_harness="claude", route_id=f"rt-{tag}-{i}", route_hash=f"sha256:{tag}-{i}",
-            route_node="" if i == 0 else "owner") for i in range(handover.MAX_BINDINGS + 1)]
+            route_node="" if i == 0 else "owner") for i in range(13)]
         jobs.write_text("".join("now\trunning\t/w\t/w\tfixture\t" +
             ",".join(k + "=" + v for k, v in meta.items()) + "\n" for meta in metas))
         bindings = [handover.binding_of(jobs, meta) for meta in metas]
@@ -1205,7 +1272,7 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
                              Counter(paths))
             observed = list(raw)
             self.assertEqual(len(self.candidates(jobs, holder, context=context)), 13)
-            self.assertEqual(len(handover.current_bindings("codex", holder, jobs, read_context=context)), 12)
+            self.assertEqual(len(handover.current_bindings("codex", holder, jobs, read_context=context)), 13)
             self.assertEqual(len(handover._handover_binding_keys_for_session(jobs, holder,
                                                                             read_context=context)), 13)
             self.assertEqual(dict(handover.storage_recipients(holder, harness="codex",
@@ -1241,7 +1308,7 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
                             self.assertTrue(handover._chain_to(handover.handover_rows(seats[0]), current))
                             self.assertEqual(len(handover._handover_binding_keys_for_session(jobs, current)), 13)
                             self.assertEqual(len(self.candidates(jobs, current, context=context)), 13)
-                            self.assertEqual(len(handover.current_bindings("codex", current, jobs)), 12)
+                            self.assertEqual(len(handover.current_bindings("codex", current, jobs)), 13)
                             for meta in metas:
                                 record = {"attempt_ids": [meta["attempt_id"]]}
                                 self.assertEqual(handover.record_recipient_binding(record, origin, harness="claude",
@@ -1275,9 +1342,11 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
                             if row.get("event") == "handover":
                                 row["from"] = bad
                         path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-                    self.assertEqual(self.candidates(jobs, holder), [])
+                    with self.assertRaises(handover.RegistryUnreadable):
+                        self.candidates(jobs, holder)
                     self.assertEqual(handover.effective_parent(metas[0], jobs), "")
-                    self.assertEqual(handover.current_bindings("codex", holder, jobs), [])
+                    with self.assertRaises(handover.RegistryUnreadable):
+                        handover.current_bindings("codex", holder, jobs)
             for path, raw in originals.items():
                 path.write_bytes(raw)
             self.assertEqual(len(self.candidates(jobs, holder)), 13)
@@ -1308,7 +1377,7 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
                     self.assertEqual({handover._logical_key(b) for b, _ in possible}, expected)
                     self.assertIn((metas[0]["route_id"], metas[0]["route_hash"], ""),
                                   handover._handover_binding_keys_for_session(jobs, holder))
-                    self.assertEqual(len(handover.current_bindings("codex", holder, jobs)), 12)
+                    self.assertEqual(len(handover.current_bindings("codex", holder, jobs)), 13)
                     with mock.patch.object(handover, "pane_seat", return_value=seats[0]):
                         self.assertEqual(dict(handover.storage_recipients(holder, harness="codex"))[origin],
                                          frozenset(meta["attempt_id"] for meta in metas))
@@ -1353,8 +1422,20 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
                     **{"from": left}, sid=right, ts=300,
                     bindings=[bindings[0]] if kind == "explicit-merge" else [])
                 tidy._append_ledger_entry(tidy.Seat("pane", kind + "-hidden"), row)
-                self.assertEqual(handover._handover_binding_keys_for_session(jobs, target), ())
-                self.assertEqual(self.candidates(jobs, target), [])
+                if kind == "explicit-merge":
+                    # Seat provenance is ambiguous, but each exact job still has
+                    # one current holder. Discovery must use that job answer.
+                    self.assertEqual(handover.resolve_recipient("seat-successor",
+                        session=holder, harness="codex").state, "unreadable")
+                    self.assertEqual(len(handover._handover_binding_keys_for_session(jobs, target)), 13)
+                    self.assertEqual(len(self.candidates(jobs, target)), 13)
+                    for meta in _metas:
+                        self.assertEqual(handover.effective_parent(meta, jobs), target)
+                        self.assertFalse(handover.owns(meta, origin, jobs))
+                        self.assertTrue(handover.owns(meta, target, jobs))
+                else:
+                    self.assertEqual(handover._handover_binding_keys_for_session(jobs, target), ())
+                    self.assertEqual(self.candidates(jobs, target), [])
 
     def test_manual_clear_is_not_an_implicit_edge_and_global_incomplete_is_not_local_authority(self):
         jobs, _origin, holder, metas, _bindings, seats = self.seed("unavailable")
@@ -1377,7 +1458,8 @@ class BindingScopeDiscoveryTest(peer._TmpRootMixin, unittest.TestCase):
                     stack.enter_context(mock.patch.object(tidy.os, "open", side_effect=open_file))
                 handover._LINEAGE_GRAPH_CACHE.clear()
                 self.assertTrue(local)
-                self.assertEqual(self.candidates(jobs, holder), [])
+                with self.assertRaises(handover.RegistryUnreadable):
+                    self.candidates(jobs, holder)
                 self.assertEqual(handover.effective_parent(metas[0], jobs), "")
             path.write_bytes(original)
         self.assertEqual(len(self.candidates(jobs, holder)), 13)

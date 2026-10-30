@@ -3331,7 +3331,7 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
         self.assertTrue(all(pending.read(self.root, recipient["session_id"], record["delivery_id"])["state"] == "acked"
                             for record in records[1:]))
 
-    def test_owner_session_uses_exact_resource_authority_before_tidy(self):
+    def test_owner_session_keeps_exact_native_consumer_after_tidy(self):
         import dispatch_completion_join as join
         from dispatch_contract import dispatch_state_root
         from dispatch_seat_handover import record_recipient_binding
@@ -3342,9 +3342,49 @@ class CanonicalNoticeJoinTest(unittest.TestCase):
         record, = self.notices(sid="owner-A", lineage={"kind": "owner-session", "harness": "claude",
             "session_id": "owner-A", "attempt_id": meta["attempt_id"]})
         self.edge("claude", "owner-A", "owner-B")
-        self.assertEqual(record_recipient_binding(record, "owner-A", harness="claude"), ("claude", "owner-B"))
+        self.assertEqual(record_recipient_binding(record, "owner-A", harness="claude"), ("claude", "owner-A"))
         state.write_text("{")
         self.assertIsNone(record_recipient_binding(record, "owner-A", harness="claude"))
+
+    def test_three_questions_share_one_pass_without_transferring_the_native_consumer(self):
+        import dispatch_completion_join as join
+        from dispatch_contract import dispatch_state_root
+        import dispatch_seat_handover as handover
+        import session_tidy as tidy
+        from peer_read_context import PeerReadContext
+        meta = self.parent_row("three-A")
+        state = dispatch_state_root(self.jobs) / "supervisor-state" / (meta["attempt_id"] + ".json")
+        join._write_supervisor_state_unlocked(state, meta["attempt_id"], set(),
+            resource={"session_id": "three-A", "delivered": [], "outbox": None})
+        self.edge("claude", "three-A", "three-seat")
+        # Schema-1 exact job authority deliberately does not create a seat edge.
+        tidy._append_ledger_entry(tidy.Seat("pane", "three-job"), {
+            "event": "handover", "harness": "codex", "sid": "three-job", "ts": 2,
+            "from": {"harness": "claude", "sid": "three-A"},
+            "bindings": [handover.binding_of(self.jobs, meta)]})
+        records = []
+        for index, kind in enumerate(("provenance", "attempt-parent", "owner-session")):
+            lineage = {"kind": kind, "harness": "claude", "session_id": "three-A"}
+            if kind != "provenance":
+                lineage["attempt_id"] = meta["attempt_id"]
+            record, = self.notices(sid="three-A", label=kind, offset=index, lineage=lineage)
+            records.append(record)
+        frozen = [dict(record) for record in records]
+        context = PeerReadContext()
+        self.assertEqual([handover.record_recipient_binding(record, "three-A", harness="claude",
+            jobs=self.jobs, read_context=context) for record in records],
+            [("claude", "three-seat"), ("codex", "three-job"), ("claude", "three-A")])
+        job = handover.resolve_recipient("job-holder", metadata=meta, jobs=self.jobs, read_context=context)
+        self.assertEqual((job.session_id, job.harness, job.registered_session),
+                         ("three-job", "codex", "three-A"))
+        self.assertTrue(handover.owns(meta, "three-job", self.jobs, read_context=context))
+        self.assertFalse(handover.owns(meta, "three-seat", self.jobs, read_context=context))
+        self.assertEqual(records, frozen)
+        with mock.patch.object(handover, "_readable_lineage_signature", side_effect=OSError("fixture outage")):
+            self.assertEqual([handover.record_recipient_binding(record, "three-A", harness="claude",
+                jobs=self.jobs) for record in records], [None, None, ("claude", "three-A")])
+        state.write_text("{")
+        self.assertIsNone(handover.record_recipient_binding(records[2], "three-A", harness="claude", jobs=self.jobs))
 
     def test_missing_contradictory_manual_and_fork_authority_stays_unresolved(self):
         import dispatch_seat_handover as handover

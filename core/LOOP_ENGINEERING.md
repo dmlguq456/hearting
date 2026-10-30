@@ -41,7 +41,11 @@ notices. Native notice watchers use the same claim and recipient check at their
 add callback, and keep the original submission identity for historical receipt
 settlement; a replacement row remains a different identity even with the same
 receipt digest. Ordinary notices keep their stored provenance or exact parent
-or owner-session authority, then use the common confirmed recipient lineage.
+or owner-session authority. The common recipient answer distinguishes seat
+succession, job ownership and the attempt's native consumer; that consumer
+does not follow a seat successor. It returns current identity, observation
+health and the original address together, without restoring old authority
+when a read fails.
 The existing notice courier carries both current and legacy duties through the
 same grouping, first-write and receipt checks. Output, process exit, queue
 acceptance, or an incomplete native-history read is not receipt evidence.
@@ -126,6 +130,9 @@ owns further observation. Do not turn uncertain history into a new retry rule.
 Observational callbacks must not delay the operation they observe. Provider
 telemetry must let the runtime consume its original response without waiting
 for a cloned body or its reader cancellation.
+Prompt fallback acknowledges its displayed watch receipts in one bounded child
+runtime; each receipt still uses the shared current-recipient ACK checks after
+the context has been emitted.
 
 ## 5. Remove duplicated decisions before stacking exceptions
 
@@ -303,6 +310,8 @@ defect. A slower or emptier view is a regression even when every check passes.
 Publish observed session identity, execution/wait reasons and resources first;
 campaign titles, route details and installation/git metadata fill asynchronously.
 Unknown observations stay unknown, and slow details must not stop basic refresh.
+An unknown current parent also defers CWD-based child classification; it cannot
+turn a registered parent or confirmed successor into a child.
 Titles summarize the person's current goal in their language; NOW describes
 progress toward that goal. Internal stage, review and handoff instructions do
 not replace the goal. Failed generation preserves the last successful text and

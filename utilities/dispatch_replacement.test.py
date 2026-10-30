@@ -3618,6 +3618,64 @@ class ReplacementLaunchSafetyTest(unittest.TestCase):
         return D.spawn_claimed_attempt(self.fixture.jobs, meta['attempt_id'], parent_binding=None,
                                        spawn=self.spawn(payload), post_claim=post_claim)
 
+    def test_handover_parent_is_current_at_admission_and_owned_spawn_for_every_harness(self):
+        import dispatch_seat_handover as H
+        import session_tidy as S
+        self.fixture.doCleanups()
+        for harness in ('claude', 'codex', 'opencode'):
+            for change in ('none', 'stale', 'foreign', 'unreadable', 'after-registration', 'after-claim'):
+                with self.subTest(harness=harness, change=change), contextlib.ExitStack() as stack:
+                    t = ReplacementTest(); t.setUp(); stack.callback(t.doCleanups)
+                    stack.callback(self.finish_children)
+                    old_fixture, self.fixture = self.fixture, t
+                    stack.callback(setattr, self, 'fixture', old_fixture)
+                    t.bind_source_parent(carrier=True)
+                    t.handover(harness=harness)
+                    record = t.claim()
+                    candidate = t.replacement_candidate(record,
+                        parent='parent' if change == 'stale' else 'successor',
+                        harness='codex' if change == 'stale' else harness)
+                    stack.enter_context(mock.patch.dict(os.environ, t.parent_env('successor', harness), clear=True))
+                    if change != 'stale':
+                        self.assertEqual(R.admission(t.jobs, t.jobs.read_text().splitlines(), candidate), record)
+                    if change in {'stale', 'foreign', 'unreadable'}:
+                        if change == 'foreign':
+                            t.handover(successor='foreign', harness=harness)
+                        elif change == 'unreadable':
+                            stack.enter_context(mock.patch.object(H, '_all_snapshots', side_effect=OSError('lineage unavailable')))
+                        with self.assertRaises(D.DispatchContractError):
+                            R.admission(t.jobs, t.jobs.read_text().splitlines(), candidate)
+                        # The same shared validator also refuses the exact owned row.
+                        owned = dict(candidate, launch_claimed='1', **D.process_launch_identity(os.getpid()))
+                        t.write(owned, status='open', append=True)
+                        with self.assertRaises(D.DispatchContractError):
+                            R.validate_owned_launch(t.jobs, t.jobs.read_text().splitlines(), owned)
+                        continue
+                    row = 'now\topen\t' + str(t.root) + '\t' + str(t.root) + '\treplacement\t' + \
+                        ','.join(k + '=' + v for k, v in candidate.items())
+                    self.assertTrue(D.claim_attempt_row(t.jobs, candidate['attempt_id'], row, launch=False))
+                    meta = R._rows(t.jobs.read_text().splitlines())[candidate['attempt_id']][1]
+
+                    def advance(_identity=None):
+                        path = S._ledger_path(S.Seat('pane', 'replacement-test-seat', 'wY:p5'))
+                        with path.open('a') as handle:
+                            handle.write(json.dumps({'event': 'handover', 'from': 'successor',
+                                'sid': 'next-successor', 'harness': harness, 'ts': 2,
+                                'bindings': [H.binding_of(t.jobs, t.meta), H.binding_of(t.jobs, meta)]}) + '\n')
+
+                    if change == 'after-registration':
+                        advance()
+                    payload = t.root / 'payload'
+                    if change == 'none':
+                        proc, _ = self.launch(meta, payload)
+                        proc.wait(timeout=5)
+                        self.assertTrue(payload.exists())
+                    else:
+                        with self.assertRaises(D.DispatchContractError):
+                            self.launch(meta, payload, post_claim=advance if change == 'after-claim' else None)
+                        self.assertFalse(payload.exists())
+                    self.finish_children()
+
     def retained_peer(self, stack):
         import artifact_producer as P
         t = self.fixture
@@ -4662,7 +4720,8 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
         # A released quota does not imply fresh headroom. Control both inputs
         # instead of borrowing the developer's real taps outside the fixture.
         capacity = R._capacity_reader()
-        with mock.patch("dispatch_capacity_evidence.harness_hold", return_value=None), \
+        with mock.patch.object(R, "_current_launch_harnesses", return_value={"claude", "codex", "opencode"}), \
+             mock.patch("dispatch_capacity_evidence.harness_hold", return_value=None), \
              mock.patch("dispatch_capacity_evidence.usage_states", return_value={
                  harness: "unknown" if headroom is None else "ok"
                  for harness in ("claude", "codex", "opencode")}), \

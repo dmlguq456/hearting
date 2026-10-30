@@ -53,12 +53,143 @@ class ManagedDispatchParentTest(unittest.TestCase):
             sessions, [job], "both", False, 0, layout="wide", term_width=180,
         ))
 
+    def test_current_parent_and_harness_share_one_coherent_read_pass(self):
+        from fleet.collectors import _effective_job_parent
+        utilities = TOOLS.parent / "utilities"
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import dispatch_seat_handover as handover
+        import session_tidy as tidy
+        job = self.job()
+        meta = {"parent_sid": job.parent_sid, "parent_harness": "codex", "attempt_id": "att-coherent",
+                "dispatch_depth": "1", "worker_type": "owner", "route_id": "rt-coherent", "route_hash": "sha256:coherent"}
+        job._registry_metadata, job._registry_path = meta, "/fixture/jobs.log"
+        binding = handover.binding_of(job._registry_path, meta)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+            seat = tidy.Seat("pane", "coherent")
+            def publish(sid, harness, ts):
+                tidy._append_ledger_entry(seat, {"event": "handover", "source": "retire",
+                    "from": {"harness": "codex", "sid": job.parent_sid},
+                    "sid": sid, "harness": harness, "bindings": [binding], "ts": ts})
+            publish("current-B", "claude", 1)
+            resolve = handover.resolve_recipient
+            def moved(*args, **kwargs):
+                answer = resolve(*args, **kwargs)
+                publish("current-C", "opencode", 2)
+                return answer
+            with mock.patch.object(handover, "resolve_recipient", side_effect=moved) as reader:
+                self.assertEqual(_effective_job_parent(job), ("current-B", "claude"))
+                reader.assert_called_once()
+            self.assertEqual(_effective_job_parent(job), ("current-C", "opencode"))
+
+    def test_unreadable_lineage_retains_only_the_previously_confirmed_edge_for_existing_grace(self):
+        from fleet.collectors import _effective_job_parent
+        utilities = TOOLS.parent / "utilities"
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import dispatch_seat_handover as handover
+        import session_tidy as tidy
+        job = self.job()
+        job._registry_metadata = {"parent_sid": job.parent_sid, "parent_harness": "codex",
+            "attempt_id": "att-grace", "dispatch_depth": "1", "worker_type": "owner",
+            "route_id": "rt-grace", "route_hash": "sha256:grace"}
+        job._registry_path = "/fixture/jobs.log"
+        parent = self.session(sid="confirmed-successor")
+        original = job.parent_sid
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+            seat = tidy.Seat("pane", "grace")
+            tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear",
+                "harness": "codex", "sid": parent.session_id, "from": original, "ts": 1})
+            resolve_parent_edges([parent], [job])
+            self.assertEqual(job._parent_edge_sid, parent.session_id)
+            tidy._ledger_path(seat).write_text('{broken ledger\n')
+            self.assertEqual(_effective_job_parent(job), ("", ""))
+            for _ in range(3):
+                resolve_parent_edges([self.session(sid=original)], [job])
+                self.assertEqual(job._parent_edge_sid, parent.session_id)
+            resolve_parent_edges([self.session(sid=original)], [job])
+            self.assertIsNone(job._parent_edge_sid)
+            model.reset_parent_edge_tracker()
+            resolve_parent_edges([self.session(sid=original)], [job])
+            self.assertIsNone(job._parent_edge_sid)
+            self.assertFalse(job._parent_edge_promoted_orphan)
+            classified = render._classify_group_jobs("repo", [job], [self.session(sid=original)])
+            self.assertNotIn(job, classified["children"].get(original, []))
+            self.assertIn(job, classified["orphans"])
+        self.assertEqual(job.parent_sid, original)
+
     def test_unique_exact_managed_dir_recovers_parent(self):
         text = self.rendered([self.session()], self.job())
         self.assertIn("managed parent", text)
         self.assertIn("managed-owner", text)
         self.assertNotIn("orphaned dispatch rows", text)
         self.assertNotIn("(orphan)", text)
+
+    def test_unknown_current_parent_defers_cwd_classification_before_edge_resolution(self):
+        utilities = TOOLS.parent / "utilities"
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import session_tidy as tidy
+        for harness in ("claude", "codex", "opencode"):
+            for parent_cwd in (None, "/different/parent"):
+                for successor in (False, True):
+                    for grace in (False, True):
+                        with self.subTest(harness=harness, parent_cwd=parent_cwd,
+                                          successor=successor, grace=grace), \
+                             tempfile.TemporaryDirectory() as tmp, \
+                             mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+                            model.reset_parent_edge_tracker()
+                            registered = "parent-A"
+                            current = "parent-B" if successor else registered
+                            root = Session(harness=harness, pid=10, cwd="/same/repo",
+                                           session_id=current, liveness="working", slug="parent")
+                            job = DispatchJob(key="code", slug="order-child", harness=harness,
+                                cwd=root.cwd, parent_sid=registered, parent_cwd=parent_cwd,
+                                is_child=True, source="jobs", liveness="working")
+                            job._registry_metadata = {"parent_sid": registered, "parent_harness": harness,
+                                "attempt_id": "order-attempt", "dispatch_depth": "1", "worker_type": "owner",
+                                "route_id": "order-route", "route_hash": "sha256:order"}
+                            job._registry_path = str(Path(tmp) / "jobs.log")
+                            seat = tidy.Seat("pane", "collection-order")
+                            tidy._append_ledger_entry(seat, {"event": "start", "harness": harness,
+                                                           "sid": registered, "ts": 1})
+                            if successor:
+                                tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear",
+                                    "harness": harness, "from": registered, "sid": current, "ts": 2})
+                            def collect():
+                                # This is the production funnel order. The classifier
+                                # must not hide a root before edge/grace resolution.
+                                _mark_dispatch_child_sessions([root], [job])
+                                resolve_parent_edges([root], [job])
+                                self.assertFalse(root.is_child)
+                                self.assertEqual(job.parent_sid, registered)
+                            if grace:
+                                collect()
+                                self.assertEqual(job._parent_edge_sid, current)
+                            tidy._ledger_path(seat).write_text('{unreadable lineage\n')
+                            for _ in range(3):
+                                collect()
+                                self.assertEqual(job._parent_edge_sid, current if grace else None)
+                                self.assertFalse(job._parent_edge_promoted_orphan)
+                            collect()
+                            self.assertIsNone(job._parent_edge_sid)
+                            self.assertEqual(job._parent_edge_promoted_orphan, grace)
+
+    def test_collection_order_keeps_known_child_hiding_and_plugin_queue_isolation(self):
+        for source in ("jobs", "plugin-queue"):
+            with self.subTest(source=source):
+                model.reset_parent_edge_tracker()
+                root = self.session(sid="registered-parent")
+                child = self.session(sid="known-child", pid=11)
+                job = self.job(source=source)
+                job.cwd = root.cwd
+                job.parent_sid = root.session_id
+                job.parent_cwd = "/different/parent"
+                _mark_dispatch_child_sessions([root, child], [job])
+                resolve_parent_edges([root, child], [job])
+                self.assertFalse(root.is_child)
+                self.assertEqual(child.is_child, source == "jobs")
+                self.assertEqual(job._parent_edge_sid, root.session_id)
 
     def test_collector_hidden_current_thread_attaches_to_original_tui(self):
         for reverse in (False, True):

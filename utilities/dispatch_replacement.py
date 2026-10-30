@@ -2105,10 +2105,13 @@ def _validate_launch(jobs, lines, metadata, *, owned_launch=None):
     _, source, replay = validate_claim_source(jobs, lines, record, owned_launch=owned_launch)
     candidate = launch_input(jobs, metadata['attempt_id'], metadata)
     parent_values = {}
+    if source.get('dispatch_depth') == '1':
+        from dispatch_seat_handover import resolve_recipient, recipient_continuation
+        current = resolve_recipient("job-holder", metadata=source, jobs=jobs)
+        route_authority.require_continuation(recipient_continuation(current, metadata['parent_sid']))
     if source.get('dispatch_depth') == '1' and metadata.get('parent_sid') != source.get('parent_sid'):
-        from dispatch_seat_handover import effective_parent_harness
         parent_values = {'parent_session_id': metadata['parent_sid'],
-                         'parent_harness': effective_parent_harness(source, jobs)}
+                         'parent_harness': current.harness}
         if 'parent_completion_delivery' in (candidate.get('resolved') or {}):
             from types import SimpleNamespace
             from dispatch_parent_completion import resolve_parent_completion_delivery

@@ -598,35 +598,6 @@ def _holder_name(harness, session_id, rows):
         return None
 
 
-def _superseded_holders(relations):
-    """``{(generation, harness, sid)}`` of holders a confirmed successor already replaced.
-
-    One generation can sit under several seat keys, so a hand-over chain a -> b -> c shows
-    up as three unreleased relations. Only the chain end holds the role: a holder that
-    some lineage entry of its generation names as ``from`` is mid-chain. A fork (several
-    ends) or a lineage that leaves no end drops nothing."""
-    holders, origins = {}, {}
-    for relation in relations:
-        if relation.get("released") is True or not relation.get("generation"):
-            continue
-        holder = relation.get("holder") or {}
-        harness = str(holder.get("harness") or "").lower()
-        sid = holder.get("sid")
-        if not sid:
-            continue
-        generation = str(relation["generation"])
-        holders.setdefault(generation, set()).add((harness, sid))
-        for entry in relation.get("lineage") or ():
-            if isinstance(entry, dict) and entry.get("from"):
-                origins.setdefault(generation, set()).add((harness, entry["from"]))
-    out = set()
-    for generation, members in holders.items():
-        middle = members & origins.get(generation, set())
-        if len(members) > 1 and middle and members - middle:
-            out.update((generation, harness, sid) for harness, sid in middle)
-    return out
-
-
 def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None, agents=None,
                   observation=None, _rows=None):
     """Distinct current holders attributed to ``repository_key``.
@@ -652,7 +623,6 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
         except Exception:
             agents = None
     out, seen = [], set()
-    superseded = _superseded_holders(relations)
     for relation in relations:
         if relation.get("released") is True:
             continue
@@ -660,8 +630,6 @@ def _repo_holders(repository_key, *, markers=None, relations=None, sessions=None
         harness = str(holder.get("harness") or "").lower()
         sid = holder.get("sid")
         if not sid or (harness, sid) in seen:
-            continue
-        if (str(relation.get("generation")), harness, sid) in superseded:
             continue
         row_repository = repository_for_session(harness, sid, sessions=rows)
         basis = None
@@ -710,14 +678,13 @@ def supervision_by_repository(sessions=None, *, limit=None, markers=None, relati
     rows = _context_rows(markers, relations, sessions)
     observation = end_observation() if observation is None else observation
     keys = set()
-    superseded = _superseded_holders(relations)
     for relation in relations:
         if relation.get("released") is True:
             continue
         holder = relation.get("holder") or {}
         harness = str(holder.get("harness") or "").lower()
         sid = holder.get("sid")
-        if not sid or (str(relation.get("generation")), harness, sid) in superseded:
+        if not sid:
             continue
         key = repository_for_session(harness, sid, sessions=rows)
         if key is None:

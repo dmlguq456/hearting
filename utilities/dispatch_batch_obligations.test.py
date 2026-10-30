@@ -979,18 +979,18 @@ class DeliveryDutyLifetimeTest(unittest.TestCase):
         view = _Handover(rows)
         probe = mock.Mock(return_value=list(tui))
         with mock.patch("dispatch_registry_cache.registry_view", return_value=view), \
-             mock.patch.object(handover, "effective_parent", return_value=successor), \
-             mock.patch.object(handover, "effective_parent_harness", return_value=harness), \
+             mock.patch.object(handover, "resolve_recipient", return_value=handover.RecipientResolution(
+                 successor, harness, "confirmed", self.PARENT, "codex")), \
              mock.patch("pane_ownership.codex_tui_processes_for_session", probe):
             result = obligations.parent_successor(
                 self.jobs, self.PARENT, ["att-a"], current_session=current_session)
         return result, probe
 
-    def test_successor_must_be_a_codex_session_with_a_live_tui(self):
+    def test_successor_ownership_is_independent_of_carrier_and_live_tui(self):
         rows = {"att-a": ("done", {"parent_sid": self.PARENT})}
         self.assertEqual(self._successor(rows, tui=[{"pid": 1}])[0], "successor-thread")
-        self.assertEqual(self._successor(rows, harness="claude", tui=[{"pid": 1}])[0], "")
-        self.assertEqual(self._successor(rows, tui=[])[0], "")
+        self.assertEqual(self._successor(rows, harness="claude", tui=[{"pid": 1}])[0], "successor-thread")
+        self.assertEqual(self._successor(rows, tui=[])[0], "successor-thread")
         self.assertEqual(self._successor({})[0], "")
         self.assertEqual(self._successor(rows, successor=self.PARENT, tui=[{"pid": 1}])[0], "")
 
@@ -1069,9 +1069,8 @@ class DeliveryDutyLifetimeTest(unittest.TestCase):
              mock.patch("pane_ownership.codex_tui_processes_for_session", side_effect=probe), \
              mock.patch("dispatch_registry_cache.registry_view",
                         return_value=_Handover({"att-a": ("done", {})})), \
-             mock.patch("dispatch_seat_handover.effective_parent",
-                        return_value="successor-thread"), \
-             mock.patch("dispatch_seat_handover.effective_parent_harness", return_value="codex"), \
+             mock.patch("dispatch_seat_handover.resolve_recipient", return_value=Namespace(
+                 session_id="successor-thread", harness="codex", state="confirmed")), \
              mock.patch.object(obligations.subprocess, "Popen", return_value=Launched()):
             self.assertEqual(obligations.ensure_observers(self.jobs), 1)
 

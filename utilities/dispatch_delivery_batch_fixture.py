@@ -87,7 +87,7 @@ def _child(source_root: Path, output: Path) -> int:
             route_files = []
             attempts = []
             for index in range(SIBLINGS):
-                attempt_id = f"att-measure-{index:032x}"
+                attempt_id = f"att-{index:032x}"
                 route_id = f"rt-measure-{variant}-{index:02d}"
                 route = {"route_id": route_id,
                          "parent_cycle_id": f"cycle-measure-{variant}",
@@ -319,7 +319,7 @@ def _carrier_scenario(root: Path, variant: str, recipient_kind: str,
         row_revision = f"revision-{index:02d}"
         fields = ["2026-10-23T00:00:00Z", "running", str(root), str(root), "execute", ""]
         metadata = {
-            "attempt_id": attempt, "dispatch_depth": "1", "registered_worker": "1",
+            "attempt_id": attempt, "attempt_schema_version": "2", "dispatch_depth": "1", "registered_worker": "1",
             "worker_type": "execute", "parent_sid": recipient,
             "parent_attempt_id": PARENT,
             "parent_harness": "codex" if carrier == "codex_native_queue" else "claude",
@@ -399,6 +399,11 @@ def _measure_rewake(source_root: Path, variant: str) -> dict:
                 candidate_launch = rewake.Launch(attempt_id=candidate_attempt, jobs=jobs,
                                                   session_id=recipient, armed="registry")
                 metadata = {"delivery_id": candidate_id, "parent_sid": recipient}
+                claim = rewake.claim_arm(jobs, candidate_attempt, recipient, fresh=True)
+                if not isinstance(claim, rewake.ArmClaim):
+                    held_arm = rewake._read_arm(rewake.arm_path(jobs, candidate_attempt))
+                    claim = rewake.ArmClaim(rewake.arm_path(jobs, candidate_attempt), candidate_attempt,
+                        recipient, int(held_arm["arms"]), tuple(held_arm["holder"]))
                 stdout, stderr = io.StringIO(), io.StringIO()
                 with mock.patch.object(rewake, "_incarnation_binding_matches", return_value=True), \
                      mock.patch.object(rewake, "classified_receipt", side_effect=lambda l, st, r, _root:
@@ -409,7 +414,7 @@ def _measure_rewake(source_root: Path, variant: str) -> dict:
                      mock.patch.object(rewake, "_ended", side_effect=lambda _claim, code, **_kw: code), \
                      mock.patch.object(rewake.sys, "stdout", stdout), \
                      mock.patch.object(rewake.sys, "stderr", stderr):
-                    win = rewake._carrier_one_claim(candidate_launch, metadata)
+                    win = rewake._carrier_one_claim(candidate_launch, metadata, arm=claim)
                     if isinstance(win, getattr(rewake, "ClaimHeld", ())):
                         held.append(candidate)
                         continue
@@ -422,7 +427,7 @@ def _measure_rewake(source_root: Path, variant: str) -> dict:
                         from dispatch_recipient_receipt import receipt_marker
                         claimed_record = pending.read(root, recipient, win.delivery_id)
                         message += "\n" + receipt_marker(claimed_record, recipient)
-                    code = rewake._emit_with_gates(candidate_launch, mock.sentinel.arm,
+                    code = rewake._emit_with_gates(candidate_launch, claim,
                                                   "attention" if known[candidate_id] else "success",
                                                   message, block=False, owner_closed=True)
                     output = stderr.getvalue() or stdout.getvalue()

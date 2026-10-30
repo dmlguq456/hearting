@@ -17,7 +17,6 @@ class PeerReadContext:
         self._registry_views = {}
         self._handover_snapshots = None
         self._handover_ledgers = {}
-        self._lineage_ledgers = None
         self._lineage_graphs = {}
         self._lineage_summary = None
         self._recipient_censuses = {}
@@ -91,12 +90,6 @@ class PeerReadContext:
         if key not in self._handover_ledgers:
             self._handover_ledgers[key] = tuple(loader())
         return self._handover_ledgers[key]
-
-    def lineage_ledgers(self, loader):
-        """Read each raw seat ledger once for this short-lived lineage pass."""
-        if self._lineage_ledgers is None:
-            self._lineage_ledgers = loader()
-        return self._lineage_ledgers
 
     def lineage_graph(self, signature, loader):
         """Reuse this read-only pass's graph; normal observations replace it.

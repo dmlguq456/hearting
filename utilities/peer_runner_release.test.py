@@ -904,7 +904,8 @@ print(json.dumps(result))
                 "[steer] future schema payload", self.sender, self.recipient, defer=True)
             future_path = peer_message._pending_path(future_ref)
             future_row = json.loads(future_path.read_text(encoding="utf-8"))
-            future_path.write_text(json.dumps(dict(future_row, schema_version=2)),
+            # Schema 2 is the current unresolved-address variant; 3 remains future.
+            future_path.write_text(json.dumps(dict(future_row, schema_version=3)),
                                    encoding="utf-8")
             initial_bytes = {
                 pane_ref: peer_message._pending_path(pane_ref).read_bytes(),

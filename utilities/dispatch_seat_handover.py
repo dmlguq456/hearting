@@ -45,6 +45,7 @@ from dataclasses import dataclass
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import secrets
@@ -53,7 +54,7 @@ import stat
 import sys
 import time
 from types import MappingProxyType
-from typing import Iterable, Optional
+from typing import Iterable, Optional, NamedTuple
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
@@ -65,10 +66,8 @@ ROW_EVENT = "handover"
 WORKER_TYPES = frozenset({"owner", "frame", "review"})
 OPEN_ROW_STATUSES = frozenset({"open", "running"})
 LINE_MAX_BYTES = 520
-# Maximum distinct logical jobs carried by one handover.  A selected job can
-# contribute multiple flat attempt/parent bindings.
-MAX_BINDINGS = 12
 KEEP_ROWS = 40
+LINEAGE_WRITE_KEY = "lineage-write"
 _LINEAGE_GRAPH_CACHE = {}
 
 
@@ -81,6 +80,8 @@ class LineageGraph:
     ledger_rows: object
     binding_rows: object
     generation: tuple
+    seat_edges: tuple
+    seat_unresolved: frozenset
 
 
 def _lineage_generation(info):
@@ -136,6 +137,9 @@ def _readable_lineage_signature(directory: Path):
 def _build_lineage_graph(read_context=None) -> LineageGraph:
     directory = _st().state_root() / "sessions"
     try:
+        # Snapshots are not a second lineage reader; their unreadable schema
+        # still prevents a current authority judgment.
+        _all_snapshots()
         signature, contents = _readable_lineage_signature(directory)
         metadata = (signature[0], tuple(item[:-1] for item in signature[1]), signature[2])
         cached = _LINEAGE_GRAPH_CACHE.get(signature)
@@ -250,10 +254,78 @@ def _build_lineage_graph_uncached(signature, contents) -> LineageGraph:
                                     for key, rows in rows_by_key.items()})
     frozen_bindings = MappingProxyType({key: MappingProxyType(dict(value[1]))
                                         for key, value in latest_bindings.items()})
+    seat_edges, seat_unresolved = _seat_graph(rows_by_key, edges)
     return LineageGraph(tuple(sorted(edges)), frozenset(unresolved),
                         MappingProxyType({vertex: tuple(sorted(keys))
                                           for vertex, keys in keys_by_vertex.items()}), frozen_rows,
-                        frozen_bindings, signature)
+                        frozen_bindings, signature, seat_edges, seat_unresolved)
+
+
+
+def _seat_graph(rows_by_key, edges):
+    qualified = {((h, origin), (h, target)) for h, origin, target in edges}
+    vertices = {vertex for pair in qualified for vertex in pair}
+    legacy = set()
+    for rows in rows_by_key.values():
+        for row in rows:
+            if row.get("event") != "handover" or row.get("source") != "retire":
+                continue
+            origin = _st()._handover_origin(row)
+            if origin is None:
+                raise ValueError("handover-origin-invalid")
+            target = (row["harness"], row["sid"])
+            vertices.add(target)
+            if isinstance(row.get("from"), str):
+                legacy.add((origin[1], target))
+            else:
+                qualified.add((origin, target))
+                vertices.add(origin)
+    for sid, target in legacy:
+        origins = {vertex for vertex in vertices if vertex[1] == sid}
+        qualified.update((origin, target) for origin in origins or {("", sid)})
+    outgoing, incoming, adjacent = {}, {}, {}
+    for origin, target in qualified:
+        outgoing.setdefault(origin, set()).add(target)
+        incoming.setdefault(target, set()).add(origin)
+        adjacent.setdefault(origin, set()).add(target)
+        adjacent.setdefault(target, set()).add(origin)
+    invalid = {vertex for vertex in adjacent
+               if len(outgoing.get(vertex, ())) > 1 or len(incoming.get(vertex, ())) > 1}
+    for start in outgoing:
+        cursor, seen = start, set()
+        while len(outgoing.get(cursor, ())) == 1:
+            if cursor in seen:
+                invalid.update(seen)
+                break
+            seen.add(cursor)
+            cursor = next(iter(outgoing[cursor]))
+    remaining = list(invalid)
+    while remaining:
+        for neighbor in adjacent.get(remaining.pop(), ()):
+            if neighbor not in invalid:
+                invalid.add(neighbor)
+                remaining.append(neighbor)
+    return tuple(sorted(qualified)), frozenset(invalid)
+
+
+def _seat_end(graph, harness, session):
+    vertices = {vertex for pair in graph.seat_edges for vertex in pair}
+    start = (harness, session)
+    if not harness:
+        candidates = {vertex for vertex in vertices if vertex[1] == session}
+        if len(candidates) > 1:
+            raise ValueError("notice-lineage-unresolved")
+        start = next(iter(candidates), start)
+    elif start not in vertices and ("", session) in vertices:
+        start = ("", session)  # Legacy accepted retire with no source harness.
+    if start in graph.seat_unresolved:
+        raise ValueError("notice-lineage-unresolved")
+    outgoing = dict(graph.seat_edges)
+    current = start
+    while current in outgoing:
+        current = outgoing[current]
+    return (current[1], current[0] or harness,
+            "successor" if current != start else "self")
 
 
 def lineage_graph(*, read_context=None) -> LineageGraph:
@@ -269,7 +341,8 @@ def chain_end(harness: str, sid: str, *, read_context=None) -> tuple[str, str]:
         return sid, "unresolved"
 
 
-def _chain_end(graph: LineageGraph, harness: str, sid: str) -> tuple[str, str]:
+def _chain_end(graph: LineageGraph, harness: str, sid: str, *, traversed=None) -> tuple[str, str]:
+    """Resolve once, optionally retaining exact edges for the transition writer."""
     vertex = (harness, sid)
     if vertex in graph.unresolved:
         return sid, "unresolved"
@@ -285,6 +358,8 @@ def _chain_end(graph: LineageGraph, harness: str, sid: str) -> tuple[str, str]:
         target = next(iter(targets))
         if target in seen:
             return sid, "unresolved"
+        if traversed is not None:
+            traversed.add((harness, current, target))
         current, moved = target, True
         seen.add(current)
         if (harness, current) in graph.unresolved:
@@ -379,16 +454,35 @@ def _all_snapshots(read_context=None) -> list[dict]:
     return _all_snapshots_uncached()
 
 
+def _bindings_readable(bindings):
+    return isinstance(bindings, list) and all(
+        isinstance(binding, dict)
+        and all(isinstance(binding.get(key), str) and bool(binding[key])
+                for key in ("jobs", "route", "hash", "attempt"))
+        and isinstance(binding.get("node"), str)
+        and ("parent" not in binding or isinstance(binding["parent"], str) and bool(binding["parent"]))
+        for binding in bindings)
+
+
 def _all_snapshots_uncached() -> list[dict]:
-    out = []
     try:
-        names = sorted(p for p in _snapshot_dir().glob("*.json") if p.is_file() and not p.is_symlink())
-    except OSError:
-        return out
-    for path in names:
+        with os.scandir(_snapshot_dir()) as entries:
+            names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+    except FileNotFoundError:
+        return []
+    out = []
+    for name in names:
+        path = _snapshot_dir() / name
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("handover-snapshot-unsafe")
         data = read_snapshot(path.stem)
-        if data:
-            out.append(data)
+        seat = data.get("seat") if isinstance(data, dict) else None
+        if (not isinstance(seat, dict) or not seat.get("key")
+                or seat.get("kind") not in {"pane", "native", "project"}
+                or not isinstance(data["from"].get("sid"), str) or not data["from"]["sid"]
+                or not _bindings_readable(data.get("bindings"))):
+            raise ValueError("handover-snapshot-invalid")
+        out.append(data)
     return out
 
 
@@ -397,8 +491,8 @@ def handover_rows(seat, *, read_context=None) -> list[dict]:
     def load():
         st = _st()
         with st.seat_ledger_readonly_scope():
-            return [e for e in st._read_ledger_lines(seat)
-                    if e.get("event") == ROW_EVENT and e.get("from")]
+            return [e for e in st._read_ledger_lines(seat, strict=True)
+                    if e.get("event") == ROW_EVENT]
 
     rows = (read_context.handover_rows(seat, load) if read_context is not None else load())
     return sorted(rows, key=lambda r: float(r.get("ts", 0) or 0))
@@ -436,20 +530,96 @@ def _transition_rows(seat_key: Optional[str] = None) -> list[tuple[str, dict]]:
     return out
 
 
-def _role_states(seat_key: Optional[str] = None) -> tuple[dict, set]:
+def _role_identity(relation: dict) -> str:
+    """Role evidence, independent of the ledger that happens to carry it."""
+    return json.dumps({field: relation.get(field) for field in (
+        "seat_key", "generation", "origin", "holder", "marker_digest", "targets", "lineage")},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _role_follows(before: dict, after: dict) -> bool:
+    """Only an exact extension of the recorded same-harness chain supersedes a role."""
+    if any(before.get(field) != after.get(field) for field in
+           ("seat_key", "generation", "origin", "marker_digest", "targets")):
+        return False
+    prefix, lineage = before.get("lineage") or [], after.get("lineage") or []
+    if len(prefix) >= len(lineage) or lineage[:len(prefix)] != prefix:
+        return False
+    holder = before.get("holder") or {}
+    successor = after.get("holder") or {}
+    if holder.get("harness") != successor.get("harness"):
+        return False
+    sid = holder.get("sid")
+    for edge in lineage[len(prefix):]:
+        if (not isinstance(edge, dict) or edge.get("from") != sid
+                or not edge.get("to") or not edge.get("snapshot_id")):
+            return False
+        sid = edge["to"]
+    return sid == successor.get("sid")
+
+
+def _role_transition_matches(identity: tuple, relation: dict) -> bool:
+    lineage = relation.get("lineage") or []
+    if identity[1] == "marker" or not lineage:
+        return True  # physical-only legacy evidence remains readable
+    edge = json.loads(identity[1])
+    last = lineage[-1]
+    return (isinstance(last, dict)
+            and (edge.get("from"), edge.get("sid"), edge.get("snapshot_id"))
+            == (last.get("from"), last.get("to"), last.get("snapshot_id"))
+            and edge.get("harness") == (relation.get("holder") or {}).get("harness"))
+
+
+def _current_roles(states: dict) -> dict:
+    return {identity: relation for identity, relation in states.items()
+            if not (_role_transition_matches(identity, relation)
+                    and any(_role_transition_matches(other_id, other) and _role_follows(relation, other)
+                            for other_id, other in states.items()))}
+
+
+def _role_actor(relation: dict, harness: str, sid: str) -> bool:
+    return any(relation.get(field) == {"harness": harness, "sid": sid}
+               for field in ("origin", "holder"))
+
+
+def _role_states(seat_key: Optional[str] = None, *, rows=None, marker_relations=()) -> tuple[dict, set]:
     states, released = {}, set()
-    for key, row in _transition_rows(seat_key):
+    canonical = {}
+    for relation in marker_relations:
+        identity = (_role_identity(relation), "marker")
+        states[identity] = relation
+        if relation.get("seat_key"):
+            canonical.setdefault(relation["seat_key"], {})[identity] = relation
+    for key, row in (_transition_rows(seat_key) if rows is None else rows):
         state = row.get("steward") if isinstance(row.get("steward"), dict) else {}
         for relation in state.get("roles") or ():
             if not isinstance(relation, dict) or not relation.get("generation"):
                 continue
-            identity = (key, str(relation["generation"]))
             item = dict(relation)
-            item.setdefault("seat_key", key)
+            item["seat_key"] = item.get("seat_key") or key
+            # The confirmed edge also belongs to identity. A conflicting alias
+            # cannot borrow authority merely by copying a generation or payload.
+            edge = json.dumps({field: row.get(field) for field in
+                               ("seat_key", "harness", "from", "sid", "snapshot_id", "source")},
+                              sort_keys=True, separators=(",", ":"))
+            identity = (_role_identity(item), edge)
             states[identity] = item
-        if row.get("event") == "steward-release" and row.get("generation"):
-            released.add((key, str(row["generation"])))
-    return states, released
+            if key == item["seat_key"]:
+                canonical.setdefault(key, {})[identity] = item
+        if (row.get("event") == "steward-release" and row.get("generation")
+                and row.get("seat_key", key) == key):
+            # Old release rows have no full payload. Bind them to the unique
+            # actor-compatible relation at this point in their canonical ledger.
+            history = {identity: relation for identity, relation in canonical.get(key, {}).items()
+                       if identity[1] != "marker"
+                       and str(relation.get("generation")) == str(row["generation"])}
+            basis = history or {identity: relation for identity, relation in canonical.get(key, {}).items()
+                                if str(relation.get("generation")) == str(row["generation"])}
+            candidates = {identity: relation for identity, relation in _current_roles(basis).items()
+                          if _role_actor(relation, row.get("harness"), row.get("sid"))}
+            if len(candidates) == 1:
+                released.update(candidates)
+    return _current_roles(states), released
 
 
 def steward_marker_generation(marker: dict) -> str:
@@ -486,15 +656,11 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
         roots, _source = pm.steward_marker_roots()
         markers = pm.read_steward_markers(roots)
         if seat_key is not None:
-            states, releases = _role_states(seat_key)
+            rows = _transition_rows(seat_key)
         else:
-            keys = set()
+            keys = {str(snapshot["seat"]["key"]) for snapshot in _all_snapshots()
+                    if isinstance(snapshot.get("seat"), dict) and snapshot["seat"].get("key")}
             legacy_marker = False
-            for snapshot in _all_snapshots():
-                key = ((snapshot.get("seat") or {}).get("key")
-                       if isinstance(snapshot.get("seat"), dict) else None)
-                if key:
-                    keys.add(str(key))
             for marker in markers.values():
                 key = marker.get("seat_key") if isinstance(marker, dict) else None
                 if key:
@@ -503,62 +669,39 @@ def resolved_steward_relations(harness: Optional[str] = None, sid: Optional[str]
                     legacy_marker = True
             if legacy_marker:
                 directory = _st().state_root() / "sessions"
-                try:
-                    keys.update(path.stem for path in directory.glob("*.jsonl")
-                                if path.is_file() and not path.is_symlink())
-                except OSError:
-                    pass
-            states, releases = {}, set()
-            for key in keys:
-                current, revoked = _role_states(key)
-                states.update(current)
-                releases.update(revoked)
+                keys.update(path.stem for path in directory.glob("*.jsonl")
+                            if path.is_file() and not path.is_symlink())
+            rows = [entry for key in sorted(keys) for entry in _transition_rows(key)]
+        marker_relations = []
+        marker_reader = getattr(pm, "steward_evidence_targets", None)
+        for (marker_harness, marker_sid), marker in markers.items():
+            if marker_reader is None:
+                continue
+            evidence = marker_reader(marker)
+            if not evidence:
+                continue
+            relation = _marker_relation(marker_harness, marker_sid, marker, evidence, seat_key)
+            if not relation.get("seat_key"):
+                # Legacy markers lack a seat. Infer one only from matching
+                # original evidence, never from a generation-only last winner.
+                keys = {saved.get("seat_key") or key for key, row in rows
+                        for saved in (row.get("steward") or {}).get("roles") or ()
+                        if isinstance(saved, dict) and all(saved.get(field) == relation.get(field)
+                            for field in ("generation", "origin", "marker_digest", "targets"))}
+                if len(keys) == 1:
+                    relation["seat_key"] = keys.pop()
+            marker_relations.append(relation)
+        states, releases = _role_states(rows=rows, marker_relations=marker_relations)
     except Exception:  # noqa: BLE001 - unknown authority is never a new role
         return []
-    seen = set()
     out = []
-    state_by_generation = {}
-    for (key, generation), relation in states.items():
-        state_by_generation[generation] = (key, relation)
-    marker_reader = getattr(pm, "steward_evidence_targets", None)
-    for (marker_harness, marker_sid), marker in markers.items():
-        if marker_reader is None:
-            continue
-        generation = steward_marker_generation(marker)
-        saved = state_by_generation.get(generation)
-        if saved:
-            key, relation = saved
-            relation = dict(relation)
-        else:
-            try:
-                relation = _marker_relation(marker_harness, marker_sid, marker,
-                                            marker_reader(marker), seat_key)
-                key = str(seat_key or "")
-            except Exception:  # noqa: BLE001
-                continue
-        identity = (key, generation)
-        relation["released"] = relation.get("released") is True or identity in releases
-        holder = relation.get("holder") or {}
-        if ((harness is not None and holder.get("harness") != harness)
-                or (sid is not None and holder.get("sid") != sid)
-                or (seat_key is not None and relation.get("seat_key") not in {None, seat_key})
-                or (relation["released"] and not include_released)
-                or identity in seen):
-            continue
-        if seat_key is not None and not relation.get("seat_key"):
-            relation["seat_key"] = seat_key
-        seen.add(identity)
-        out.append(relation)
-    for (key, generation), saved in states.items():
-        identity = (key, generation)
-        if identity in seen:
-            continue
+    for identity, saved in sorted(states.items()):
         relation = dict(saved)
         relation["released"] = relation.get("released") is True or identity in releases
         holder = relation.get("holder") or {}
         if ((harness is not None and holder.get("harness") != harness)
                 or (sid is not None and holder.get("sid") != sid)
-                or (seat_key is not None and key != seat_key)
+                or (seat_key is not None and relation.get("seat_key") not in {None, seat_key})
                 or (relation["released"] and not include_released)):
             continue
         out.append(relation)
@@ -982,15 +1125,15 @@ def _revalidate_snapshot_steward(seat, harness: str, sid: str, payload: dict) ->
     """Recheck collected role/watch identities inside the seat writer transaction."""
     if not isinstance(payload, dict) or payload.get("schema") != 1:
         raise RuntimeError("snapshot-steward-payload-invalid")
-    current_roles = {str(row.get("generation")): row for row in
-                     resolved_steward_relations(seat_key=seat.key, include_released=True)}
+    current_roles = resolved_steward_relations(seat_key=seat.key, include_released=True)
     roles = []
     for candidate in payload.get("roles") or ():
         if not isinstance(candidate, dict) or not candidate.get("generation"):
             raise RuntimeError("snapshot-steward-role-invalid")
-        current = current_roles.get(str(candidate["generation"]))
-        if current is None:
+        matches = [row for row in current_roles if _role_identity(row) == _role_identity(candidate)]
+        if len(matches) != 1:
             raise RuntimeError("snapshot-steward-role-unresolved")
+        current = matches[0]
         if current.get("released") is True:
             continue
         holder = current.get("holder") or {}
@@ -1058,13 +1201,30 @@ def _append_transition_row(seat, row: dict) -> None:
         st._fold_ledger(seat)
 
 
-def record_steward_release(seat, harness: str, sid: str, generation: str, now=None) -> bool:
-    """Durably revoke one exact role generation under the caller's seat lock."""
+def record_steward_release(seat, harness: str, sid: str, generation: str, now=None, *, relation=None) -> bool:
+    """Revoke the unique actor-bound canonical relation under the caller's seat lock."""
     if not generation:
         return False
-    rows = [row for _key, row in _transition_rows(seat.key)
-            if row.get("event") == "steward-release" and row.get("generation") == generation]
-    if rows:
+    current = [row for row in resolved_steward_relations(seat_key=seat.key, include_released=True)
+               if str(row.get("generation")) == str(generation) and _role_actor(row, harness, sid)]
+    if relation is not None:
+        if (len(current) != 1 or not (
+                _role_identity(current[0]) == _role_identity(relation)
+                or _role_follows(relation, current[0]))):
+            return False
+    elif len(current) > 1:
+        return False
+    if current and current[0].get("released"):
+        return True
+    # Preserve the legacy physical-only writer. A bare old release is not
+    # idempotence evidence for a different relation that later reuses its label.
+    if not current and relation is not None:
+        return False
+    if not current and any(row.get("event") == "steward-release"
+                           and str(row.get("generation")) == str(generation)
+                           and row.get("seat_key", key) == seat.key
+                           and (row.get("harness"), row.get("sid")) == (harness, sid)
+                           for key, row in _transition_rows(seat.key)):
         return True
     _append_transition_row(seat, {
         "ts": _st().now_epoch() if now is None else now,
@@ -1135,6 +1295,130 @@ def _binds(bindings: Iterable[dict], jobs, meta: dict) -> bool:
                and b.get("node") == node for b in bindings if isinstance(b, dict))
 
 
+class RecipientResolution(NamedTuple):
+    session_id: str
+    harness: str
+    state: str
+    registered_session: str
+    registered_harness: str
+    reason: str = ""
+
+
+def recipient_continuation(result, actor=None):
+    from route_authority import ContinuationDecision
+    if result.state == "unreadable":
+        return ContinuationDecision(False, "wait", "handover-unreadable", "same-command",
+                                    "The existing controller observes the same lineage again.")
+    if actor is not None and result.session_id != actor:
+        return ContinuationDecision(False, "protected", "work-parent-recovery-required", "report")
+    return ContinuationDecision(True, "continue")
+
+
+
+def _lineage_index(read_context=None):
+    """Compatibility rows projection; graph health owns the observation."""
+    try:
+        return _lineage_seats(read_context=read_context), ""
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        return {}, "handover-unreadable:" + str(exc)
+
+
+def resolve_recipient(question, *, metadata=None, jobs=None, session="", harness="", read_context=None):
+    """Answer each recipient question from the common qualified observation."""
+    metadata = metadata or {}
+    notice = question in {"provenance", "attempt-parent", "owner-session"}
+    registered = str((metadata.get("session_id") if notice else metadata.get("parent_sid")) or session or "")
+    original_harness = str((metadata.get("harness") if notice else _registered_parent_harness(metadata)) or harness or "")
+    try:
+        if notice and question != "provenance":
+            from dispatch_completion_join import current_attempt_row, read_supervisor_phase_state
+            from dispatch_contract import dispatch_state_root
+            from harness_capabilities import parent_completion
+            row = current_attempt_row(jobs, metadata["attempt_id"], read_context=read_context) if jobs is not None else None
+            if row is None or row.status not in {"open", "running", "done"}:
+                raise ValueError("notice-attempt-unavailable")
+            if question == "owner-session":
+                if row.metadata.get("harness") != original_harness:
+                    raise ValueError("notice-consumer-harness-mismatch")
+                state = read_supervisor_phase_state(dispatch_state_root(jobs) / "supervisor-state" /
+                    (metadata["attempt_id"] + ".json"), metadata["attempt_id"])
+                if state is None or not isinstance(state.resource, dict) or state.resource.get("session_id") != registered:
+                    raise ValueError("notice-consumer-unavailable")
+                return RecipientResolution(registered, original_harness, "no-handover", registered, original_harness)
+            if (row.metadata.get("parent_sid") != registered
+                    or (_registered_parent_harness(row.metadata) or original_harness) != original_harness
+                    or row.metadata.get("parent_completion_delivery") != parent_completion(original_harness).get("carrier")):
+                raise ValueError("notice-parent-mismatch")
+            return resolve_recipient("job-holder", metadata=row.metadata, jobs=jobs,
+                session=registered, harness=original_harness, read_context=read_context)
+        graph = _pass_lineage_graph(read_context)
+        if question in {"seat-successor", "provenance"}:
+            current, current_harness, disposition = _seat_end(graph, original_harness, registered)
+        elif question == "job-holder":
+            if not registered or jobs is None or not eligible_row(metadata):
+                current, current_harness, disposition = registered, original_harness, "self"
+            else:
+                current, current_harness, disposition = _lineage_holder(graph,
+                    (_jobs_key(jobs), *route_identity(metadata)), registered, original_harness)
+        else:
+            raise ValueError("unknown-recipient-question")
+        if disposition == "unresolved":
+            raise ValueError("handover-lineage-unresolved")
+        return RecipientResolution(current, current_harness,
+            "confirmed" if (current, current_harness) != (registered, original_harness) else "no-handover",
+            registered, original_harness)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        return RecipientResolution("", "", "unreadable", registered, original_harness,
+                                   "handover-unreadable:" + str(exc))
+
+
+def resolve_attempt_recipient(jobs, attempt, registered, harness="", *, read_context=None):
+    """Missing exact rows still consult ledger bindings; damaged input waits."""
+    from dispatch_registry_cache import registry_snapshot
+    try:
+        try:
+            snapshot = registry_snapshot(Path(jobs))
+        except FileNotFoundError:
+            snapshot = None
+        if snapshot is not None and not snapshot.complete:
+            raise ValueError(snapshot.reason)
+        row = snapshot.view.handover_attempt(attempt) if snapshot is not None else None
+        if row is not None:
+            if row[1].get("parent_sid") != registered:
+                raise ValueError("registered-parent-mismatch")
+            return resolve_recipient("job-holder", metadata=row[1], jobs=jobs,
+                                     session=registered, harness=harness, read_context=read_context)
+        graph = _pass_lineage_graph(read_context)
+        bindings = set()
+        legacy_membership_unknown = False
+        for rows in graph.ledger_rows.values():
+            for row in rows:
+                origin = _st()._handover_origin(row)
+                for binding in row.get("bindings") or ():
+                    parent = str(binding.get("parent") or (origin[1] if origin else ""))
+                    if (binding.get("jobs") == _jobs_key(jobs) and parent == registered
+                            and not binding.get("attempt")):
+                        legacy_membership_unknown = True
+                    if (binding.get("jobs") == _jobs_key(jobs) and binding.get("attempt") == attempt
+                            and parent == registered):
+                        bindings.add((_logical_key(binding), parent))
+        owners = {_lineage_holder(graph, key, parent, harness) for key, parent in bindings}
+        if len(owners) > 1 or any(state == "unresolved" for _sid, _harness, state in owners):
+            raise ValueError("handover-conflicting-attempt")
+        if owners:
+            current, current_harness, _state = next(iter(owners))
+        else:
+            # With no binding this is still a job question, not seat succession.
+            if legacy_membership_unknown or _chain_end(graph, harness, registered)[1] != "self":
+                raise ValueError("missing-attempt-binding")
+            current, current_harness = registered, harness
+        return RecipientResolution(current, current_harness,
+            "confirmed" if (current, current_harness) != (registered, harness) else "no-handover", registered, harness)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
+        return RecipientResolution("", "", "unreadable", registered, harness,
+                                   "handover-unreadable:" + str(exc))
+
+
 def _lineage_seats(extra=(), *, read_context=None) -> dict:
     """Compatibility projection over the single normalized graph snapshot."""
     graph = _pass_lineage_graph(read_context)
@@ -1148,7 +1432,8 @@ def _lineage_successor(rows_by_seat: dict, sid: str, harness: str) -> str:
     return sid if state == "unresolved" else end
 
 
-def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: str) -> tuple[str, str, str]:
+def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: str, *,
+                    traversed=None) -> tuple[str, str, str]:
     """Who answers for one logical job (jobs, route, hash, node) now.
 
     The latest row that binds the job names its holder (a later hand-off wins).  From there the
@@ -1168,98 +1453,19 @@ def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: s
     # the shared source-qualified graph can advance that exact holder without
     # another binding. A later legacy binding for a different job is not an
     # unbound edge, nor can chronological rows bypass a fork.
-    end, state = _chain_end(graph, harness, holder)
+    end, state = _chain_end(graph, harness, holder, traversed=traversed)
     return end, harness, state
 
 
 def session_successor(session: str, *, harness=None, read_context=None) -> tuple[str, str]:
-    """Resolve a session notice's unique confirmed seat chain, including retire.
-
-    Job authority remains in _lineage_holder. Only provenance notices use these
-    cross-harness seat transitions; ambiguous or unreadable observations raise
-    instead of restoring the original recipient.
-    """
-    st = _st()
-    edges, legacy_retire, vertices = set(), set(), set()
-    for rows in _lineage_seats(read_context=read_context).values():
-        for row in rows:
-            edge = st.tidy_lineage_edge(row)
-            if edge is not None:
-                name, origin, target = edge
-                left, right = (name, origin), (name, target)
-            elif row.get("event") == "handover" and row.get("source") == "retire":
-                source = st._handover_origin(row)
-                if source is None:
-                    continue
-                right = (row.get("harness"), row.get("sid"))
-                if isinstance(row.get("from"), str):
-                    # Older accepted retire rows stored only a source SID.
-                    legacy_retire.add((source[1], right))
-                    vertices.add(right)
-                    continue
-                left = source
-            else:
-                continue
-            vertices.update((left, right))
-            edges.add((left, right))
-    if harness:
-        start = (harness, session)
-    else:
-        # A legacy retire's source may already be a qualified incoming target,
-        # even though its outgoing edge has not been expanded yet.
-        candidates = {vertex for vertex in vertices if vertex[1] == session}
-        if len(candidates) > 1:
-            raise OSError("notice-lineage-unresolved")
-        start = next(iter(candidates), ("", session))
-    vertices.add(start)
-    for origin, right in legacy_retire:
-        sources = {vertex for vertex in vertices if vertex[1] == origin}
-        for left in sources or {("", origin)}:
-            edges.add((left, right))
-    outgoing, incoming, adjacent = {}, {}, {}
-    for origin, target in edges:
-        outgoing.setdefault(origin, set()).add(target)
-        incoming.setdefault(target, set()).add(origin)
-        adjacent.setdefault(origin, set()).add(target)
-        adjacent.setdefault(target, set()).add(origin)
-    # Check the whole connected component, so a downstream query cannot revive
-    # authority on one side of a fork, merge, or cycle.
-    component, remaining = set(), [start]
-    while remaining:
-        vertex = remaining.pop()
-        if vertex in component:
-            continue
-        component.add(vertex)
-        remaining.extend(adjacent.get(vertex, ()))
-    if any(len(outgoing.get(vertex, ())) > 1 or len(incoming.get(vertex, ())) > 1
-           for vertex in component):
-        raise OSError("notice-lineage-unresolved")
-    current, seen = start, {start}
-    while outgoing.get(current):
-        current = next(iter(outgoing[current]))
-        if current in seen:
-            raise OSError("notice-lineage-unresolved")
-        seen.add(current)
-    return (current[1], current[0]) if current != start else ("", "")
-
+    result = resolve_recipient("seat-successor", session=session, harness=harness or "", read_context=read_context)
+    if result.state == "unreadable":
+        raise OSError(result.reason)
+    return (result.session_id, result.harness) if result.state == "confirmed" else ("", "")
 
 def _effective(meta: dict, jobs=None, *, read_context=None, extra_seats=()) -> tuple[str, str]:
-    """``(session, harness)`` answering for ``meta``'s attempt now: the lineage holder of its
-    logical job.  The chain may cross panes and harnesses (a seat change hands a Codex parent's
-    route to a Claude successor), so the rows of every seat with a snapshot are read together;
-    only an exact binding on registry file, route id, route hash and node moves a job."""
-    registered = str(meta.get("parent_sid") or "")
-    harness = _registered_parent_harness(meta)
-    if not registered or jobs is None or not eligible_row(meta):
-        return registered, harness
-    try:
-        key = (_jobs_key(jobs), *route_identity(meta))
-        holder, holder_harness, state = _lineage_holder(
-            _pass_lineage_graph(read_context), key, registered, harness)
-        return ("" if state == "unresolved" else holder), holder_harness
-    except Exception:  # noqa: BLE001 - incomplete observation grants no current authority
-        return "", harness
-
+    result = resolve_recipient("job-holder", metadata=meta, jobs=jobs, read_context=read_context)
+    return result.session_id, result.harness
 
 def _registered_parent_harness(meta: dict) -> str:
     """Recover the parent harness from real depth-1 registry rows.
@@ -1314,54 +1520,21 @@ def binding_mutexes(bindings: Iterable[dict], *, wait: Optional[float] = None):
 @contextlib.contextmanager
 def lineage_effect_lock(meta: dict, jobs, expected_parent: str, *, wait: float = 0.05):
     """Serialize an effect with every writer of this binding, including its first one."""
-    registered = str(meta.get("parent_sid") or "")
-    readable = True
     stack = contextlib.ExitStack()
     try:
-        route, digest, node = route_identity(meta)
-        binding = {"jobs": _jobs_key(jobs), "route": route, "hash": digest, "node": node}
-        stack.enter_context(binding_mutexes([binding], wait=wait))
-        # Validate every readable snapshot and ledger under the same mutex
-        # used by publication, clear, and retire writers. A missing snapshot
-        # is a valid no-handover state, not a synchronization gap.
-        try:
-            paths = sorted(_snapshot_dir().glob("*.json")) if _snapshot_dir().exists() else []
-            if any(path.is_symlink() or (path.is_file() and read_snapshot(path.stem) is None)
-                   for path in paths):
-                readable = False
-            snapshots = _all_snapshots_uncached() if readable else []
-            seats = {}
-            for snapshot in snapshots:
-                data = snapshot.get("seat")
-                if isinstance(data, dict) and data.get("key"):
-                    key = str(data["key"])
-                    seats.setdefault(key, _seat_of(key, snapshot))
-            for seat in seats.values():
-                ledger = _st()._ledger_path(seat)
-                if not ledger.exists():
-                    continue
-                raw = _st().read_bytes(ledger)
-                if raw is None:
-                    readable = False
-                    break
-                for line in raw.splitlines():
-                    if line.strip() and not isinstance(json.loads(line), dict):
-                        readable = False
-                        break
-                if not readable:
-                    break
-        except (OSError, ValueError, TypeError):
-            readable = False
-        current = _effective(meta, jobs)[0] if readable else ""
-    except (OSError, ValueError, TypeError, RuntimeError, BlockingIOError):
+        stack.enter_context(binding_mutexes([{"jobs": _jobs_key(jobs), "route": route_identity(meta)[0],
+            "hash": route_identity(meta)[1], "node": route_identity(meta)[2]}], wait=wait))
+        # No pass cache crosses the effect boundary.
+        current = resolve_recipient("job-holder", metadata=meta, jobs=jobs)
+        allowed = recipient_continuation(current, expected_parent).allowed
+    except (OSError, ValueError, TypeError, RuntimeError):
         stack.close()
         yield False
         return
     try:
-        yield readable and current == expected_parent
+        yield allowed
     finally:
         stack.close()
-
 
 def effective_parent(meta: dict, jobs=None, *, read_context=None) -> str:
     """The session that answers for ``meta``'s attempt now: the registered ``parent_sid``, or
@@ -1383,62 +1556,19 @@ def record_recipient(record: dict, storage_key: str, *, harness: str,
 
 
 def _notice_recipient_binding(lineage, jobs, source_harness, *, read_context=None):
-    """Resolve the stored notice authority before following qualified tidy edges."""
-    from harness_capabilities import HARNESSES, parent_completion
-    try:
-        kind = lineage["kind"]
-        if kind == "provenance":
-            successor, successor_harness = session_successor(
-                lineage["session_id"], harness=source_harness, read_context=read_context)
-            if successor:
-                return (successor_harness, successor) if successor_harness in HARNESSES else None
-        if kind == "attempt-parent":
-            from dispatch_completion_join import current_attempt_row
-            row = current_attempt_row(jobs, lineage["attempt_id"]) if jobs is not None else None
-            if (row is None or row.status not in {"open", "running", "done"}
-                    or row.metadata.get("parent_sid") != lineage["session_id"]
-                    or _registered_parent_harness(row.metadata) != source_harness
-                    or row.metadata.get("parent_completion_delivery") != parent_completion(source_harness).get("carrier")):
-                return None
-            if eligible_row(row.metadata):
-                sid, holder_harness = _effective(row.metadata, jobs, read_context=read_context)
-            else:
-                sid, state = chain_end(source_harness, lineage["session_id"], read_context=read_context)
-                holder_harness = source_harness
-                if state == "unresolved":
-                    return None
-            return (holder_harness, sid) if sid and holder_harness in HARNESSES else None
-        if kind == "owner-session":
-            from dispatch_completion_join import current_attempt_row, read_supervisor_phase_state
-            from dispatch_contract import dispatch_state_root
-            row = current_attempt_row(jobs, lineage["attempt_id"]) if jobs is not None else None
-            if (row is None or row.status not in {"open", "running", "done"}
-                    or row.metadata.get("harness") != source_harness):
-                return None
-            state = read_supervisor_phase_state(
-                dispatch_state_root(jobs) / "supervisor-state" / (lineage["attempt_id"] + ".json"),
-                lineage["attempt_id"])
-            resource = state.resource if state is not None else None
-            if not isinstance(resource, dict) or resource.get("session_id") != lineage["session_id"]:
-                return None
-        end, state = chain_end(source_harness, lineage["session_id"], read_context=read_context)
-        return None if state == "unresolved" else (source_harness, end)
-    except (ImportError, OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
-        return None
-
+    """Compatibility pair projection of the question-specific common answer."""
+    result = resolve_recipient(lineage.get("kind"), metadata=lineage, jobs=jobs,
+        session=lineage.get("session_id", ""), harness=source_harness or "", read_context=read_context)
+    return (result.harness, result.session_id) if result.state != "unreadable" and result.session_id else None
 
 def record_recipient_binding(record: dict, storage_key: str, *, harness: str,
                              jobs=None, read_context=None) -> Optional[tuple[str, str]]:
-    """Resolve one stored record through its immutable identity and current lineage.
-
-    Notices validate their stored provenance, parent or owner-session authority
-    before following the common confirmed lineage.
-    Registered records require every attempt to remain registered under the supplied key;
-    their explicit binding holder, when present, is then followed to the graph end.
-    """
+    """Validate storage identity, then project every member's common answer."""
     if not isinstance(record, dict) or not isinstance(storage_key, str) or not storage_key:
         return None
     receipt = record.get("receipt")
+    if "receipt" in record and not isinstance(receipt, dict):
+        return None
     if isinstance(receipt, dict) and receipt.get("kind") == "notice":
         try:
             import session_notice
@@ -1450,45 +1580,18 @@ def record_recipient_binding(record: dict, storage_key: str, *, harness: str,
         except (ImportError, OSError, RuntimeError, ValueError, TypeError, KeyError, AttributeError):
             return None
     ids = record.get("attempt_ids")
-    if not isinstance(ids, list) or not ids or any(not isinstance(item, str) for item in ids):
+    if not isinstance(ids, list) or not ids or any(not isinstance(item, str) or not item for item in ids):
         return None
     jobs = Path(jobs) if jobs is not None else _default_jobs()
     if jobs is None:
         return None
-    latest = latest_rows(jobs, ids)
-    targets = set()
-    try:
-        graph = _pass_lineage_graph(read_context)
-    except (OSError, ValueError, TypeError):
+    from peer_read_context import PeerReadContext
+    context = read_context or PeerReadContext()
+    answers = [resolve_attempt_recipient(jobs, attempt, storage_key, harness, read_context=context) for attempt in ids]
+    if any(answer.state == "unreadable" for answer in answers):
         return None
-    for attempt in ids:
-        current = latest.get(attempt)
-        if not current:
-            return None
-        _status, meta = current
-        if str(meta.get("parent_sid") or "") != storage_key:
-            return None
-        if not eligible_row(meta):
-            if _chain_end(graph, harness, storage_key)[1] == "unresolved":
-                return None
-            targets.add((storage_key, _registered_parent_harness(meta) or harness))
-            continue
-        registered = storage_key
-        row_harness = _registered_parent_harness(meta) or harness
-        try:
-            key = (_jobs_key(jobs), *route_identity(meta))
-            target, target_harness, state = _lineage_holder(
-                graph, key, registered, row_harness)
-        except Exception:  # noqa: BLE001 - unreadable/ambiguous lineage remains pending
-            return None
-        if state == "unresolved":
-            return None
-        targets.add((target, target_harness))
-    if len(targets) != 1:
-        return None
-    sid, current_harness = next(iter(targets))
-    return current_harness, sid
-
+    targets = {(answer.harness, answer.session_id) for answer in answers}
+    return next(iter(targets)) if len(targets) == 1 else None
 
 _OWN_SEATS: dict = {}
 
@@ -1510,101 +1613,42 @@ def _own_seat(session: str):
 
 
 def owns(meta: dict, session: str, jobs=None, *, read_context=None) -> bool:
-    """True only for the session that answers for ``meta``'s attempt now.
-
-    Without a registry that is the registered parent.  With one it is the end of the
-    handover lineage, so a registered parent that handed the job on no longer owns it.
-    For the caller's own session its own seat is read too, like
-    :func:`storage_recipients`. Unavailable lineage leaves current authority unresolved.
-    """
-    if not session:
-        return False
-    if jobs is None:
-        return meta.get("parent_sid") == session
-    own = _own_seat(session)
-    if own is None:
-        return effective_parent(meta, jobs, read_context=read_context) == session
-    return _effective(meta, jobs, read_context=read_context, extra_seats=(own,))[0] == session
+    """Whether this exact session is the shared reader's confirmed current holder."""
+    return bool(session) and effective_parent(meta, jobs, read_context=read_context) == session
 
 
 def storage_recipients(session: str, env=None, harness: Optional[str] = None, *, read_context=None) -> list:
-    """``[(storage key, attempt ids | None)]``: where records addressed to ``session`` live.
-
-    The session's own key first (all its records); then one entry per registered parent it
-    took over from, limited to the attempts the lineage still gives it.  A pending record is
-    stored under the *registered* parent (A) and keeps its delivery id, digest, lease and
-    ack there; only the receiving session changes."""
-    out: list = [(session, None)]
+    """Original storage scopes for the current qualified recipient; never move rows."""
+    from peer_read_context import PeerReadContext
+    context = read_context or PeerReadContext()
     try:
-        seat = pane_seat(env, harness, session)
-        if seat is None:
-            return out
-        graph = _pass_lineage_graph(read_context)
-        lineage_harnesses = {edge_harness for edge_harness, origin, target in graph.edges
-                             if session in {origin, target}}
-        current_harness = (harness or (next(iter(lineage_harnesses)) if len(lineage_harnesses) == 1 else "")
-                           or _st().session_from_env(None, env or os.environ)[0])
-        lineage_storage = set()
-        if current_harness:
-            end, state = _chain_end(graph, current_harness, session)
-            if state != "unresolved" and end == session:
-                reverse = {}
-                for edge_harness, origin, target in graph.edges:
-                    if edge_harness == current_harness:
-                        reverse.setdefault(target, set()).add(origin)
-                cursor, seen = session, {session}
-                while len(reverse.get(cursor, ())) == 1:
-                    parent = next(iter(reverse[cursor]))
-                    if parent in seen:
-                        lineage_storage.clear()
-                        break
-                    lineage_storage.add(parent)
-                    seen.add(parent)
-                    cursor = parent
-        # A provenance-only notice follows main's accepted retire transition,
-        # even when this origin has no job binding of its own. The empty attempt
-        # scope admits notices only; each record still checks its current pair.
-        retire_origins = {origin[1] for rows in graph.ledger_rows.values() for row in rows
-                          if row.get("event") == "handover" and row.get("source") == "retire"
-                          and (origin := _st()._handover_origin(row)) is not None}
-        for origin in retire_origins:
-            try:
-                target, target_harness = session_successor(origin, read_context=read_context)
-            except (OSError, ValueError, TypeError):
-                continue
-            if target == session and (not current_harness or target_harness == current_harness):
-                lineage_storage.add(origin)
-        owed: dict = {}
-        # Explicit registry bindings remain valid across the existing cross-seat retire
-        # path; same-harness clear inheritance comes only from the normalized graph.
+        graph = _pass_lineage_graph(context)
+        candidates = set(graph.ledger_keys)
+        owed = {}
         for rows in graph.ledger_rows.values():
             for row in rows:
-                bindings = [b for b in row.get("bindings") or ()
-                            if isinstance(b, dict) and b.get("attempt")]
-                for binding in bindings:
-                    key = (binding.get("jobs"), binding.get("route"), binding.get("hash"), binding.get("node"))
-                    if not all(isinstance(part, str) for part in key):
-                        continue
-                    origin = _st()._handover_origin(row)
+                origin = _st()._handover_origin(row)
+                if origin is not None:
+                    candidates.add(origin)
+                for binding in row.get("bindings") or ():
                     parent = str(binding.get("parent") or (origin[1] if origin else ""))
-                    if not parent:
-                        continue
-                    holder, holder_harness, state = _lineage_holder(
-                        graph, key, parent,
-                        str(row.get("harness") or current_harness or ""))
-                    if (state == "unresolved" or holder != session
-                            or current_harness and holder_harness != current_harness):
-                        continue
-                    owed.setdefault(parent, set()).add(binding["attempt"])
-        for key, attempts in owed.items():
-            if key != session:
-                out.append((key, LineageAttempts(attempts)))
-        for predecessor in lineage_storage - owed.keys() - {session}:
-            out.append((predecessor, LineageAttempts()))
-    except Exception:  # noqa: BLE001
-        return [(session, None)]
-    return out
-
+                    meta = {"dispatch_depth": "1", "worker_type": "owner", "attempt_id": binding.get("attempt") or "candidate",
+                            "parent_sid": parent, "parent_harness": origin[0] if origin else harness or "",
+                            "route_id": binding["route"], "route_hash": binding["hash"], "route_node": binding["node"]}
+                    answer = resolve_recipient("job-holder", metadata=meta, jobs=binding["jobs"], read_context=context)
+                    if (answer.state != "unreadable" and answer.session_id == session
+                            and (not harness or answer.harness == harness)):
+                        owed.setdefault(parent, set())
+                        if binding.get("attempt"):
+                            owed[parent].add(binding["attempt"])
+        for source_harness, origin in candidates:
+            answer = resolve_recipient("seat-successor", session=origin, harness=source_harness, read_context=context)
+            if (answer.state == "confirmed" and answer.session_id == session
+                    and (not harness or answer.harness == harness)):
+                owed.setdefault(origin, set())
+        return [(session, None), *((key, LineageAttempts(attempts)) for key, attempts in sorted(owed.items()) if key != session)]
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return []
 
 def _chain_to(rows: list, session: str, *, graph=None) -> list:
     """Authority handovers plus tidy edges on the unique ancestry to ``session``.
@@ -1676,30 +1720,37 @@ def _chain_to(rows: list, session: str, *, graph=None) -> list:
 
 def record_for_session(record: dict, allowed: Optional[frozenset], *, session=None, harness=None,
                        storage_key=None, read_context=None, jobs=None) -> bool:
-    """Apply current recipient authority, including records under the taker's own key.
-
-    The attempt-only form remains available for legacy exact binding callers.
-    A discovery scope is never authority over a currently unresolved recipient.
-    """
-    if session is not None and storage_key is not None:
-        resolved = record_recipient_binding(record, storage_key, harness=str(harness or ""),
-                                            read_context=read_context, jobs=jobs)
-        if resolved is not None:
-            return resolved == (harness, session) if harness else resolved[1] == session
-        receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
-        end, state = chain_end(str(harness or ""), storage_key, read_context=read_context)
-        if (receipt.get("kind") == "notice" or state == "unresolved"
-                or (state == "successor" and end != session)):
-            return False
-        # Old registered receipts may predate retained registry rows. Only that
-        # missing-row case may use the existing exact attempt binding fallback.
+    """An enumeration scope never substitutes for current recipient authority."""
+    if session is not None:
+        if storage_key is not None:
+            pair = record_recipient_binding(record, storage_key, harness=str(harness or ""), jobs=jobs, read_context=read_context)
+            return pair is not None and (pair == (harness, session) if harness else pair[1] == session)
+        from peer_read_context import PeerReadContext
+        context = read_context or PeerReadContext()
         ids = record.get("attempt_ids") or []
-        jobs = Path(jobs) if jobs is not None else _default_jobs()
-        registered = latest_rows(jobs, ids) if jobs is not None else {}
-        if any(attempt in registered for attempt in ids):
-            return False
-        if allowed is None:
-            return storage_key == session and end == session
+        for attempt in ids:
+            row = None
+            try:
+                from dispatch_registry_cache import registry_snapshot
+                snapshot = registry_snapshot(Path(jobs))
+                row = snapshot.view.handover_attempt(attempt)
+                registered = row[1].get("parent_sid") if row else session
+            except FileNotFoundError:
+                registered = session
+            except (OSError, ValueError, TypeError):
+                return False
+            # Missing-row inherited scopes still identify their original parent.
+            if row is None and allowed is not None:
+                graph = _pass_lineage_graph(context)
+                parents = {str(b.get("parent") or (_st()._handover_origin(r) or ("", ""))[1])
+                           for rows in graph.ledger_rows.values() for r in rows for b in r.get("bindings") or ()
+                           if b.get("jobs") == _jobs_key(jobs) and b.get("attempt") == attempt}
+                if len(parents) != 1:
+                    return False
+                registered = next(iter(parents))
+            answer = resolve_attempt_recipient(jobs, attempt, registered, harness or "", read_context=context)
+            if answer.state == "unreadable" or answer.session_id != session:
+                return False
     if allowed is None:
         return True
     receipt = record.get("receipt") if isinstance(record, dict) else None
@@ -1724,7 +1775,6 @@ def record_for_session(record: dict, allowed: Optional[frozenset], *, session=No
                 return False
     ids = record.get("attempt_ids")
     return isinstance(ids, list) and bool(ids) and all(i in allowed for i in ids)
-
 
 # ---------------------------------------------------------------------------
 # Snapshot (at enqueue) and the ledger row (at the successor's confirmed start)
@@ -1805,80 +1855,38 @@ def _deduplicate_bindings(bindings: Iterable[dict]) -> list[dict]:
 
 
 def _select_binding_rows(rows: Iterable[tuple[dict, Optional[str]]]) -> list[dict]:
-    """Select at most ``MAX_BINDINGS`` logical jobs, then retain their full flat history.
-
-    Group priority is the last candidate position for that logical key.  Active
-    groups are ranked first, then eligible finished groups; ties therefore need
-    no clock or external ordering input.
-    """
-    candidates = list(rows)
-    groups: dict[tuple, dict] = {}
-    seen = set()
-    unique: list[tuple[dict, Optional[str]]] = []
-    for index, (binding, status) in enumerate(candidates):
-        key = _logical_key(binding)
-        group = groups.setdefault(key, {"last": index, "active": False})
-        group["last"] = index
-        group["active"] = group["active"] or status in OPEN_ROW_STATUSES
-        identity = _binding_identity(binding)
-        if identity not in seen:
-            seen.add(identity)
-            unique.append((binding, status))
-
-    ranked = sorted(groups, key=lambda key: groups[key]["last"], reverse=True)
-    active = [key for key in ranked if groups[key]["active"]]
-    finished = [key for key in ranked if not groups[key]["active"]]
-    selected = set(active[:MAX_BINDINGS])
-    selected.update(finished[:max(0, MAX_BINDINGS - len(selected))])
-    return [binding for binding, _status in unique if _logical_key(binding) in selected]
+    """Preserve every exact binding; logical ownership has no display limit."""
+    return _deduplicate_bindings(binding for binding, _status in rows)
 
 
 def _handover_binding_keys_for_session(jobs, sid: str, *, read_context=None) -> tuple[tuple[str, str, str], ...]:
-    """Current exact jobs/route/node bindings handed along to this session."""
-    jobs_key = _jobs_key(jobs)
+    """Enumerate candidates using the same job answer as current admission."""
+    from peer_read_context import PeerReadContext
+    context = read_context or PeerReadContext()
+    try:
+        graph = _pass_lineage_graph(context)
+    except (OSError, ValueError, TypeError) as exc:
+        raise RegistryUnreadable(str(exc)) from exc
     keys = set()
-    if read_context is None:
-        from peer_read_context import PeerReadContext
-        read_context = PeerReadContext()
-    try:
-        graph = _pass_lineage_graph(read_context)
-    except (OSError, ValueError, TypeError):
-        return ()
-    rows, observed_seat = [], False
-    for snapshot in _all_snapshots(read_context):
-        seat_data = snapshot.get("seat")
-        if not isinstance(seat_data, dict):
+    for key, row in graph.binding_rows.items():
+        if key[0] != _jobs_key(jobs):
             continue
-        try:
-            seat = _seat_of(str(seat_data.get("key") or ""), snapshot)
-            observed_seat = True
-            rows.extend(graph.ledger_rows.get(seat.key, ()))
-        except Exception:  # noqa: BLE001 - discovery failure leaves no inherited candidates
-            continue
-    if not observed_seat:
-        return ()
-    try:
-        chain = _chain_to(rows, sid, graph=graph)
-    except (OSError, ValueError, TypeError):
-        return ()
-    for row in chain:
-        for binding in row.get("bindings") or ():
-            if not isinstance(binding, dict) or binding.get("jobs") != jobs_key:
-                continue
-            route = str(binding.get("route") or "")
-            digest = str(binding.get("hash") or "")
-            node = str(binding.get("node") or "")
-            if route and digest:         # a node-less owner binds as (route, hash, "")
-                keys.add((route, digest, node))
+        origin = _st()._handover_origin(row)
+        meta = {"dispatch_depth": "1", "worker_type": "owner", "attempt_id": "candidate",
+                "parent_sid": origin[1] if origin else "", "parent_harness": origin[0] if origin else "",
+                "route_id": key[1], "route_hash": key[2], "route_node": key[3]}
+        answer = resolve_recipient("job-holder", metadata=meta, jobs=jobs, read_context=context)
+        if answer.state != "unreadable" and answer.session_id == sid:
+            keys.add((key[1], key[2], key[3]))
     return tuple(keys)
-
-
 def _handover_candidate_rows(jobs, sid: str, *, read_context=None):
     from dispatch_registry_cache import registry_view
     view = registry_view(
         Path(jobs),
         append_only=bool(getattr(read_context, "registry_append_only", False)),
     )
+    if view.malformed_rows or view.has_invalid_utf8 or view.has_partial_tail:
+        raise RegistryUnreadable("registry-unreadable")
     keys = _handover_binding_keys_for_session(jobs, sid, read_context=read_context)
     return view.handover_candidates(sid, keys)
 
@@ -1893,8 +1901,8 @@ def _handover_candidates(harness: str, sid: str, jobs, rows=None, *, read_contex
             candidate_rows = ((status, record.handover_metadata())
                               for status, record in _handover_candidate_rows(
                                   jobs, sid, read_context=read_context))
-        except OSError:
-            candidate_rows = ()
+        except OSError as exc:
+            raise RegistryUnreadable(str(exc)) from exc
     else:
         candidate_rows = rows.values()
     found = []
@@ -1937,7 +1945,7 @@ def _bindings_with_current_status(bindings: Iterable[dict]) -> list[tuple[dict, 
 
 def current_bindings(harness: str, sid: str, jobs=None, *, read_context=None) -> list:
     """The selected depth-1 attempts ``sid`` answers for, whatever harness registered them.
-    The cap is on distinct logical jobs; each selected job keeps all eligible flat bindings.
+    Every logical job keeps all eligible flat bindings.
     A finished (done, cancelled or killed) attempt counts while its route or completion record is
     still open; node-less owner bindings count like node bindings.
     ``harness`` is kept for callers; ownership alone decides."""
@@ -1982,7 +1990,7 @@ def publish_snapshot_locked(seat, harness: str, sid: str, bindings: list[dict], 
     with binding_mutexes(affected):
         if read_snapshot(seat.key) != old_snapshot:
             raise RuntimeError("snapshot-binding-changed")
-        if not bindings and not steward_payload:
+        if not bindings and not steward_payload and not card and not handover_rows(seat):
             with contextlib.suppress(OSError):
                 os.unlink(_snapshot_path(seat.key))
             return 0
@@ -1998,7 +2006,36 @@ def publish_snapshot_locked(seat, harness: str, sid: str, bindings: list[dict], 
         return len(bindings)
 
 
+@contextlib.contextmanager
+def source_session_mutex(harness, sid):
+    """Shared source decision even when there are no jobs or destination seats differ."""
+    key = "lineage-source-" + hashlib.sha256(json.dumps([harness, sid]).encode()).hexdigest()
+    with _st().seat_lock(key):
+        yield
+
+
 def record_locked(seat, harness: str, sid: str, event: str, source: str, now: float) -> Optional[dict]:
+    # Caller holds the physical seat. All edge writers then take the same
+    # mutation lock before source/binding locks: reachability and publication
+    # must see one graph even when concurrent edges have disjoint endpoints.
+    with _st().seat_lock(LINEAGE_WRITE_KEY):
+        snap = read_snapshot(seat.key)
+        if not snap:
+            return None
+        with source_session_mutex(str(snap["from"].get("harness") or ""), str(snap["from"].get("sid") or "")):
+            if read_snapshot(seat.key) != snap:
+                return None
+            old = str(snap["from"].get("sid") or "")
+            result = resolve_recipient("seat-successor", session=old, harness=harness)
+            if result.state == "unreadable" or (result.state == "confirmed" and result.session_id != sid):
+                return None
+            target = resolve_recipient("seat-successor", session=sid, harness=harness)
+            if target.state == "unreadable" or target.session_id == old:
+                return None
+            return _record_locked(seat, harness, sid, event, source, now)
+
+
+def _record_locked(seat, harness: str, sid: str, event: str, source: str, now: float) -> Optional[dict]:
     """Append the A -> B row when ``sid`` is the confirmed successor of the snapshot's session
     (caller holds the seat lock).  Returns the row, or None (nothing to do / not confirmed)."""
     st = _st()
@@ -2028,18 +2065,18 @@ def record_locked(seat, harness: str, sid: str, event: str, source: str, now: fl
     if len(bindings) != len(snap["bindings"]):
         return None                                    # A -> C while A -> B stands: refused
 
-    # Resolve each role generation again inside the seat transaction. A copied
+    # Resolve each exact role again inside the seat transaction. A copied
     # snapshot is not authority after a release or a newer confirmed holder.
     snapshot_steward = snap.get("steward") if isinstance(snap.get("steward"), dict) else {}
-    current_roles = {str(row.get("generation")): row for row in
-                     resolved_steward_relations(seat_key=seat.key, include_released=True)}
+    current_roles = resolved_steward_relations(seat_key=seat.key, include_released=True)
     steward_roles = []
     for candidate in snapshot_steward.get("roles") or ():
         if not isinstance(candidate, dict) or not candidate.get("generation"):
             continue
-        current = current_roles.get(str(candidate["generation"]))
-        if not current or current.get("released"):
+        matches = [row for row in current_roles if _role_identity(row) == _role_identity(candidate)]
+        if len(matches) != 1 or matches[0].get("released"):
             continue
+        current = matches[0]
         holder = current.get("holder") or {}
         if holder.get("harness") != harness or holder.get("sid") != old:
             continue
@@ -2073,13 +2110,16 @@ def record_locked(seat, harness: str, sid: str, event: str, source: str, now: fl
         steward_watches.append(adopted)
     steward_payload = ({"schema": 1, "roles": steward_roles, "watches": steward_watches}
                        if steward_roles or steward_watches else None)
-    if not bindings and not steward_payload:
-        return None
 
     # A selected job can acquire a permitted retry after enqueue but before the
     # confirmed clear hook.  Refresh only those selected logical keys, retaining
     # the snapshot rows as the original authority boundary.
     selected_keys = {_logical_key(binding) for binding in snapshot_bindings}
+    graph = _pass_lineage_graph()
+    transition = (harness, old, sid)
+    # The matched booking may have published this exact succession already.
+    # New retries use that same current holder's normal admission check.
+    refresh_actor = sid if transition in graph.edges else old
     refreshed = []
     for jobs_path in dict.fromkeys(str(binding.get("jobs") or "") for binding in snapshot_bindings):
         if not jobs_path or not Path(jobs_path).is_file():
@@ -2101,7 +2141,8 @@ def record_locked(seat, harness: str, sid: str, event: str, source: str, now: fl
                 if (aid and aid not in bound
                         and (jobs_key, *route_identity(meta)) in selected_keys):
                     fresh[aid] = (status, meta)
-            refreshed.extend(binding for binding, _status in _handover_candidates(harness, old, jobs_path, rows=fresh))
+            refreshed.extend(binding for binding, _status in _handover_candidates(
+                harness, refresh_actor, jobs_path, rows=fresh))
         except Exception:  # noqa: BLE001 - the original snapshot remains a safe fallback
             continue
     bindings = _deduplicate_bindings([*bindings, *refreshed])
@@ -2114,6 +2155,21 @@ def record_locked(seat, harness: str, sid: str, event: str, source: str, now: fl
     with binding_mutexes(snapshot_bindings):
         if read_snapshot(seat.key) != snap:
             return None
+        try:
+            graph = _pass_lineage_graph()
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            return None
+        kept = []
+        for binding in bindings:
+            traversed = set()
+            holder, holder_harness, disposition = _lineage_holder(
+                graph, _logical_key(binding), str(binding.get("parent") or old), harness,
+                traversed=traversed)
+            if (disposition != "unresolved" and holder_harness == harness
+                    and (holder == old or holder == sid and transition in traversed)):
+                kept.append(binding)
+        bindings = kept
+        row["bindings"] = bindings
         _append_transition_row(seat, row)
         refreshed_snapshot = dict(snap)
         refreshed_snapshot["bindings"] = bindings
@@ -2150,96 +2206,106 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
         return None
     st = _st()
     seat = successor_seat or pane_seat(env, successor_harness, successor_sid)
-    if seat is None or seat.kind != "pane":
+    if seat is None or seat.kind not in {"pane", "native", "project"}:
         return None
+    if seat.kind == "project":
+        if st.session_identity(seat) != (successor_harness, successor_sid):
+            return None  # A shared project/inherited pane is not an exact native receiver.
+        import dataclasses
+        seat = dataclasses.replace(st.session_seat(seat, successor_harness, successor_sid),
+                                   key=st._native_session_key(successor_harness, successor_sid))
     jobs = jobs or _default_jobs()
     now = st.now_epoch() if now is None else now
-    with st.seat_lock(seat.key):
-        existing = next((r for r in handover_rows(seat)
-                         if r.get("from") == predecessor_sid and r.get("sid") == successor_sid), None)
-        if existing is not None:
-            return existing
-        # Only what the predecessor answers for now: a registered parent that already handed an
-        # attempt on keeps its name but no longer answers for it (never A -> B and A -> C).
-        view = None
+    # Never acquire another physical seat after the common mutation lock.
+    # Lock order: destination seat -> lineage write -> source -> sorted bindings.
+    with st.seat_lock(seat.key), st.seat_lock(LINEAGE_WRITE_KEY), \
+            source_session_mutex(predecessor_harness, predecessor_sid):
+        seats, error = _lineage_index()
+        if error:
+            raise RegistryUnreadable(error)
+        # A replay row is history, not an alternative current-recipient
+        # judgment. Observe the common answer before using that history.
+        target = resolve_recipient("seat-successor", session=successor_sid, harness=successor_harness)
+        if target.state == "unreadable":
+            raise RegistryUnreadable(target.reason)
+        if target.session_id == predecessor_sid:
+            return None
+        source = resolve_recipient("seat-successor", session=predecessor_sid, harness=predecessor_harness)
+        if source.state == "unreadable":
+            raise RegistryUnreadable(source.reason)
+        prior = [r for values in seats.values() for r in values
+                 if (st.tidy_lineage_edge(r) is not None or r.get("source") == "retire")
+                 and (st._handover_origin(r) == (predecessor_harness, predecessor_sid)
+                      or isinstance(r.get("from"), str) and r["from"] == predecessor_sid
+                      and r.get("source") == "retire")]
+        if prior:
+            return next((r for r in prior if (r["sid"], r["harness"]) ==
+                         (successor_sid, successor_harness)), None)
+        if source.session_id != predecessor_sid:
+            return None
         rows = {}
         if jobs:
             try:
                 from dispatch_registry_cache import registry_view
                 view = registry_view(Path(jobs))
-                rows = {record.handover_metadata().get("attempt_id", ""): (status,
-                         record.handover_metadata())
-                        for status, record in _handover_candidate_rows(jobs, predecessor_sid)
-                        if record.handover_metadata().get("attempt_id")}
+                if view.malformed_rows or view.has_invalid_utf8 or view.has_partial_tail:
+                    raise RegistryUnreadable("registry-schema-invalid")
+                rows = {record.handover_metadata().get("attempt_id", ""): (status, record.handover_metadata())
+                        for status, record in _handover_candidate_rows(jobs, predecessor_sid)}
             except FileNotFoundError:
-                # No registry file yet: nothing has been registered, so an
-                # empty ownership answer is verified rather than unknown.
-                view = None
-                rows = {}
-            except OSError as exc:
-                # The file exists but its rows could not be read. Returning an
-                # empty answer here would read as "nothing to hand over" and let
-                # an accepted handover settle without the successor binding.
-                raise RegistryUnreadable(f"jobs registry unreadable: {exc}") from exc
-        possible_rows = _handover_candidates(
-            predecessor_harness, predecessor_sid, jobs, rows=rows)
-        if not possible_rows:
-            return None
-        # The seat's snapshot names the session now at it (the successor), so its own later
-        # /clear hands everything on; what its own snapshot already bound is kept.
+                pass  # A verified absent registry has zero jobs.
+            except (OSError, ValueError) as exc:
+                raise RegistryUnreadable(str(exc)) from exc
+        possible_rows = _handover_candidates(predecessor_harness, predecessor_sid, jobs, rows=rows)
         own_before = read_snapshot(seat.key)
         affected = [*(own_before.get("bindings") or [] if own_before else []),
                     *(binding for binding, _status in possible_rows)]
         with binding_mutexes(affected):
             if read_snapshot(seat.key) != own_before:
                 return None
-            # Revalidate predecessor ownership while holding every affected
-            # logical binding mutex, then commit snapshot and ledger together.
-            predecessor_rows = [
-                (binding, status) for binding, status in possible_rows
-                if binding["attempt"] in rows and effective_parent(
-                    rows[binding["attempt"]][1], jobs) == predecessor_sid
-            ]
-            if not predecessor_rows:
+            source = resolve_recipient("seat-successor", session=predecessor_sid, harness=predecessor_harness)
+            if source.state == "unreadable":
+                raise RegistryUnreadable(source.reason)
+            if source.session_id != predecessor_sid:
                 return None
-            kept = own_before["bindings"] if own_before and (
-                own_before["from"].get("sid") == successor_sid) else []
-            union = _select_binding_rows([*_bindings_with_current_status(kept), *predecessor_rows])
-            selected_keys = {_logical_key(binding) for binding in union}
-            bindings = _deduplicate_bindings(
-                binding for binding, _status in predecessor_rows if _logical_key(binding) in selected_keys
-            )
-            if not bindings:
-                return None
-            row = {"ts": now, "harness": successor_harness, "sid": successor_sid, "event": ROW_EVENT,
-                   "from": predecessor_sid, "source": "retire", "bindings": bindings}
+            bindings = _deduplicate_bindings(binding for binding, _status in possible_rows
+                if effective_parent(rows[binding["attempt"]][1], jobs) == predecessor_sid)
+            # If a job changed while waiting, transfer only the still-owned bindings.
+            kept = own_before["bindings"] if own_before and own_before["from"].get("sid") == successor_sid else []
+            union = _deduplicate_bindings([*kept, *bindings])
+            row = {"ts": now, "harness": successor_harness, "sid": successor_sid,
+                   "event": ROW_EVENT, "from": {"harness": predecessor_harness, "sid": predecessor_sid},
+                   "source": "retire", "bindings": bindings}
+            seat_data = seat.as_dict()
+            if seat.kind == "project":
+                seat_data["session"] = {"harness": successor_harness, "sid": successor_sid}
             st.atomic_write_json(_snapshot_path(seat.key), {
-                "schema": SCHEMA, "seat": seat.as_dict(),
+                "schema": SCHEMA, "seat": seat_data,
                 "from": {"harness": successor_harness, "sid": successor_sid}, "at": now,
                 "bindings": union})
-            path = st._ledger_path(seat)
-            st.ensure_dir(path.parent)
-            st._reject_symlink(path)
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-            try:
-                os.write(fd, (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8"))
-            finally:
-                os.close(fd)
+            _append_transition_row(seat, row)
             return row
 
 
 def _confirmed_clear(seat, harness: str, old: str, sid: str, event: str, source: str) -> bool:
-    if harness == "opencode":
-        return True                # no start hook: the first message of a new session after the snapshot
+    origins = {str(row.get("source") if row.get("event") == "start" else row.get("start_source") or "")
+               for row in _st()._read_ledger_lines(seat, strict=True)
+               if (row.get("harness"), row.get("sid")) == (harness, sid)}
+    if source == "fork" or "fork" in origins:
+        return False
     if event == "start" and source == "clear":
         return True
     try:
         import session_tidy_clear as clear
         booking = clear.read_reservation(seat.key)
-    except Exception:  # noqa: BLE001
-        return False
-    return bool(booking) and booking.get("sid") == old and booking.get("harness") == harness and (
-        (booking.get("observed") or {}).get("sid") == sid or booking.get("new_session") == sid)
+    except (OSError, ValueError, TypeError):
+        booking = None
+    if bool(booking) and booking.get("sid") == old and booking.get("harness") == harness and (
+            (booking.get("observed") or {}).get("sid") == sid or booking.get("new_session") == sid):
+        return True
+    if harness == "opencode" and event == "prompt":
+        return not (origins | {source}) & {"startup", "resume", "select", "new"}
+    return False
 
 
 # ---------------------------------------------------------------------------

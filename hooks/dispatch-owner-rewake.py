@@ -582,10 +582,30 @@ def _handed_to(jobs: Path, attempt_id: object, session: str) -> bool:
         and seat_handover.effective_parent(metadata, jobs) == session
 
 
-def _handed_away(launch: "Launch") -> bool:
-    """Whether the attempt this hook waits for is now answered by another session (a cleared window's successor)."""
+class LineageMoved(RuntimeError):
+    """A confirmed different holder or lost arm suppresses this carrier."""
+
+
+class LineageUnavailable(RuntimeError):
+    """Keep the same arm/controller waiting; this is not a claim refusal."""
+
+
+def _recipient_decision(launch):
     metadata = _row_metadata(launch.jobs, launch.attempt_id)
-    return bool(metadata) and seat_handover.effective_parent(metadata, launch.jobs) != launch.session_id
+    if not metadata:
+        raise LineageUnavailable("attempt-row-unreadable")
+    result = seat_handover.resolve_recipient("job-holder", metadata=metadata, jobs=launch.jobs)
+    if not result.session_id and result.state != "unreadable":
+        raise LineageUnavailable("recipient-unavailable")
+    choice = seat_handover.recipient_continuation(result, launch.session_id)
+    if choice.state == "wait":
+        raise LineageUnavailable(choice.reason)
+    return choice
+
+
+def _handed_away(launch: Launch) -> bool:
+    """Only a confirmed other holder is handed away; unavailable reads stay distinct."""
+    return not _recipient_decision(launch).allowed
 
 
 def _holds_arm(claim: "ArmClaim") -> bool:
@@ -1256,7 +1276,7 @@ def _delivery_owing_row(launch: Launch) -> dict[str, str] | None:
     return row.metadata
 
 
-def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | ClaimHeld | None:
+def _carrier_one_claim(launch: Launch, metadata: dict[str, str], *, arm=None) -> ClaimWin | ClaimHeld | None:
     """P3 claim gate. Never creates a record (§4.4 -- carrier 1 only claims
     what trigger 1/2 already materialized); returns the winning claim, a
     ``ClaimHeld`` while the record's sibling success batch is incomplete, or
@@ -1266,6 +1286,16 @@ def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | C
     re-delivery). A ready batch is claimed whole, so one carrier wakes the
     parent for all of its members."""
 
+    with seat_handover.lineage_effect_lock(metadata, launch.jobs, launch.session_id) as owner:
+        choice = _recipient_decision(launch)
+        if not choice.allowed or (arm is not None and not _holds_arm(arm)):
+            return None
+        if not owner:
+            raise LineageUnavailable("lineage-effect-unavailable")
+        return _carrier_one_claim_locked(launch, metadata)
+
+
+def _carrier_one_claim_locked(launch, metadata):
     if not _incarnation_binding_matches(metadata):
         return None
     delivery_id = metadata.get("delivery_id", "")
@@ -1285,7 +1315,7 @@ def _carrier_one_claim(launch: Launch, metadata: dict[str, str]) -> ClaimWin | C
             require_generation_proof=False,
         )
     except pending_delivery.PendingDeliveryError as exc:
-        if exc.detail == "batch-hold":
+        if exc.detail == "batch-hold" or exc.reason == "pending-delivery-retry-deferred":
             return ClaimHeld()
         return None
     from dispatch_notice_state import keep_claim
@@ -1601,7 +1631,7 @@ def _observe_carrier(launch: Launch, claim: ArmClaim, payload: Any) -> int:
     _retain_completion(launch, claim)
     observation: dict[str, Any] = {"wait_state": "starting", "reason": "carrier-return",
                                    "exit_code": 1, "exit_kind": "exception", "exit_text": ""}
-    holder = {"claim": claim}
+    holder = {"launch": launch, "claim": claim}
     handlers = {}
 
     def terminated(signum, _frame):
@@ -1686,11 +1716,10 @@ def _announce_gate(launch: Launch, claim: ArmClaim, observation: dict[str, Any])
         return None
     with seat_handover.lineage_effect_lock(
             metadata, launch.jobs, launch.session_id) as current_owner:
+        choice = _recipient_decision(launch)
         fresh_metadata = _row_metadata(launch.jobs, launch.attempt_id)
-        if (not current_owner or not _holds_arm(claim) or not fresh_metadata
-                or fresh_metadata.get("parent_sid") != metadata.get("parent_sid")
-                or seat_handover.effective_parent(fresh_metadata, launch.jobs)
-                   != launch.session_id):
+        if (not choice.allowed or not current_owner or not _holds_arm(claim) or not fresh_metadata
+                or fresh_metadata.get("parent_sid") != metadata.get("parent_sid")):
             return None
         notices = _gate_notices(
             launch, attempt_only=True, settle="sent-ambiguous", announced=announced,
@@ -1720,8 +1749,31 @@ def _announce_gate(launch: Launch, claim: ArmClaim, observation: dict[str, Any])
 
 
 def _run_carrier(launch, claim, payload, observation, holder) -> int:
+    interval = _bounded_number("AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 1, 300)
+    maximum = _bounded_number("AGENT_CLAUDE_REWAKE_MAX_SECONDS", DEFAULT_MAX_SECONDS, interval, 86_400)
+    deadline = time.monotonic() + maximum
+    holder.update(launch=launch, claim=claim)
+    while True:
+        launch, claim = holder["launch"], holder["claim"]
+        try:
+            _recipient_decision(launch)
+            return _run_carrier_once(launch, claim, payload, observation, holder, deadline)
+        except LineageMoved:
+            observation.update(reason="arm-not-held-or-handed-away")
+            return 0
+        except LineageUnavailable as exc:
+            launch, claim = holder["launch"], holder["claim"]
+            observation.update(wait_state="unknown", reason=str(exc))
+            if not _holds_arm(claim):
+                return 0
+            if time.monotonic() >= deadline:
+                settle_arm(claim, "lapsed")
+                return 0
+            time.sleep(min(interval, max(0.0, deadline - time.monotonic())))
+
+
+def _run_carrier_once(launch, claim, payload, observation, holder, deadline) -> int:
     root = agent_home()
-    deadline = time.monotonic()
     readiness = root / "utilities" / "dispatch-attempt-ready.py"
     if not readiness.is_file():
         # A helper missing from *this* call's agent home (release rotation, a
@@ -1740,7 +1792,6 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
         maximum = _bounded_number(
             "AGENT_CLAUDE_REWAKE_MAX_SECONDS", DEFAULT_MAX_SECONDS, interval, 86_400
         )
-        deadline = time.monotonic() + maximum
         while True:
             wait_state, wait_reason = wait_for_attempt(
                 launch, readiness, gate_probe=lambda: _open_gate_pending(launch),
@@ -1764,7 +1815,7 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
                     return 0 if successor.watched else no_arm_notice(payload, reason=successor.reason)
                 if successor is not None:
                     launch, claim = successor
-                    holder["claim"] = claim
+                    holder.update(launch=launch, claim=claim)
                     _retain_completion(launch, claim)
                     continue  # Same deadline; one registry-bound successor only.
                 if _owner_status(launch) in {"open", "running"}:
@@ -1847,7 +1898,7 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
         # as before the claim gate existed; only a genuine delivery-owing
         # terminal notice is claim-gated.
         return _emit_with_gates(launch, claim, state, message, block=False, owner_closed=wait_state == "ready")
-    win = _carrier_one_claim(launch, owing)
+    win = _carrier_one_claim(launch, owing, arm=claim)
     hold_wait = 0.0
     while isinstance(win, ClaimHeld):
         # The sibling batch is incomplete: keep the arm and the record, wait
@@ -1867,7 +1918,7 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
         hold_wait = min(HOLD_MAX_SECONDS, max(hold_wait * 2, float(_bounded_number(
             "AGENT_CLAUDE_REWAKE_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, 1, 300))))
         time.sleep(min(hold_wait, max(0.0, deadline - time.monotonic())))
-        win = _carrier_one_claim(launch, owing)
+        win = _carrier_one_claim(launch, owing, arm=claim)
     if win is None and _record_missing(launch, owing):
         grace = _bounded_number(
             "AGENT_CLAUDE_REWAKE_RECORD_GRACE_SECONDS", DEFAULT_RECORD_GRACE_SECONDS, 0, 3_600
@@ -1878,7 +1929,7 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
         until = time.monotonic() + grace
         while win is None and time.monotonic() < until and _record_missing(launch, owing):
             time.sleep(max(0.0, min(step, until - time.monotonic())))
-            win = _carrier_one_claim(launch, owing)
+            win = _carrier_one_claim(launch, owing, arm=claim)
     if not isinstance(win, ClaimWin):
         # Another carrier holds (or already acked) the durable record: the
         # completion is delivered by it, so this attempt is finished here --
@@ -1910,8 +1961,15 @@ def _run_carrier(launch, claim, payload, observation, holder) -> int:
             return False
         emitted = True
         return True
-    exit_code = _emit_with_gates(launch, claim, state, message, block=False,
-                                 owner_closed=True, receipt_binding=binding, before_emit=before_emit)
+    try:
+        exit_code = _emit_with_gates(launch, claim, state, message, block=False,
+                                     owner_closed=True, receipt_binding=binding, before_emit=before_emit)
+    except (LineageUnavailable, LineageMoved):
+        from dispatch_recipient_receipt import release_unsubmitted_claim
+        for _delivery_id, record in win.members:
+            release_unsubmitted_claim(win.root, win.recipient_key, record,
+                                      win.claim_owner, launch.session_id)
+        raise
     if not emitted:
         return exit_code
     for delivery_id in (member_id for member_id, _record in win.members) if win.members else (win.delivery_id,):
@@ -1960,6 +2018,22 @@ def _emit_with_gates(
     exact native recipient evidence settles it through the shared CAS.
     """
 
+    metadata = _row_metadata(launch.jobs, launch.attempt_id)
+    if not metadata:
+        raise LineageUnavailable("attempt-row-unreadable")
+    with seat_handover.lineage_effect_lock(metadata, launch.jobs, launch.session_id) as owner:
+        choice = _recipient_decision(launch)
+        if not choice.allowed or not _holds_arm(claim):
+            raise LineageMoved()
+        if not owner:
+            raise LineageUnavailable("lineage-effect-unavailable")
+        return _emit_with_gates_locked(launch, claim, state, message, block=block,
+                                      owner_closed=owner_closed, receipt_binding=receipt_binding,
+                                      before_emit=before_emit)
+
+
+def _emit_with_gates_locked(launch, claim, state, message, *, block, owner_closed=False,
+                            receipt_binding=None, before_emit=None):
     # The owner's own outcome, read before any gate is folded in (top review
     # R2-M1): a gate belongs to whoever raised it and only changes what this
     # receipt *displays*. Letting it also decide this claim sealed a timed-out

@@ -1064,60 +1064,41 @@ def queue_target(jobs: Path, attempts: set[str], registered: str, *,
             return ""
         try:
             import dispatch_seat_handover as handover
-            pair = handover.record_recipient_binding(
-                record, storage_key, harness="codex", jobs=jobs)
-            if not pair or pair[0] != "codex":
-                return ""
-            recipient = pair[1]
-            receipt = record.get("receipt") if isinstance(record, dict) else None
-            if isinstance(receipt, dict) and receipt.get("kind") == "notice":
-                return recipient
-            record_attempts = record.get("attempt_ids")
-            if not isinstance(record_attempts, list) or not record_attempts:
-                return ""
-            rows = handover.latest_rows(jobs)
-            owners = {(handover.effective_parent(rows[attempt][1], jobs),
-                       handover.effective_parent_harness(rows[attempt][1], jobs))
-                      for attempt in record_attempts if attempt in rows}
-            if len(owners) == 1:
-                owner, harness = owners.pop()
-                return owner if harness == "codex" and owner == recipient else ""
-            return ""
-        except Exception:  # noqa: BLE001 - an unknown target must remain pending
+            pair = handover.record_recipient_binding(record, storage_key, harness="codex", jobs=jobs)
+            return pair[1] if pair is not None and pair[0] == "codex" else ""
+        except (OSError, ValueError, TypeError, RuntimeError):
             return ""
     try:
         import dispatch_seat_handover as handover
-        from dispatch_registry_cache import registry_view
-        view = registry_view(Path(jobs))
-        rows = {a: row for a in attempts if (row := view.handover_attempt(a)) is not None}
-        owners = {(handover.effective_parent(rows[a][1], jobs),
-                   handover.effective_parent_harness(rows[a][1], jobs))
-                  for a in attempts if a in rows}
+        from peer_read_context import PeerReadContext
+        context = PeerReadContext()
+        answers = [handover.resolve_attempt_recipient(jobs, attempt, registered, "codex",
+                    read_context=context) for attempt in attempts]
+        owners = {(answer.session_id, answer.harness) for answer in answers if answer.state != "unreadable"}
+        if len(answers) != sum(answer.state != "unreadable" for answer in answers):
+            return ""
         if len(owners) == 1:
             owner, harness = owners.pop()
-            return owner if harness == "codex" or (not harness and owner == registered) else ""
-        if owners:
-            return ""
-    except Exception:  # noqa: BLE001 - the registered parent remains a valid target
+            return owner if harness == "codex" else ""
+    except Exception:  # noqa: BLE001 - retain the original storage record on unknown
         pass
-    return registered
-
+    return ""
 
 def _queue_target_from_rows(jobs: Path, rows, registered: str, *, read_context=None) -> str:
     """Resolve the recipient from the already-read exact batch rows."""
     try:
         import dispatch_seat_handover as handover
-        owners = {(handover.effective_parent(row.metadata, jobs, read_context=read_context),
-                   handover.effective_parent_harness(row.metadata, jobs, read_context=read_context))
-                  for row in rows}
+        answers = [handover.resolve_recipient("job-holder", metadata={"parent_sid": registered, "parent_harness": "codex", **row.metadata}, jobs=jobs,
+                    harness="codex", read_context=read_context) for row in rows]
+        owners = {(answer.session_id, answer.harness) for answer in answers if answer.state != "unreadable"}
+        if any(answer.state == "unreadable" for answer in answers):
+            return ""
         if len(owners) == 1:
             owner, harness = owners.pop()
-            return owner if harness == "codex" or (not harness and owner == registered) else ""
-        if owners:
-            return ""
-    except Exception:  # noqa: BLE001 - the registered parent remains a safe target
+            return owner if harness == "codex" else ""
+    except Exception:  # noqa: BLE001 - retain the original storage record on unknown
         pass
-    return registered
+    return ""
 
 
 _PRIOR_SUCCESS_FOLLOWUP = codex_queue_delivery._PRIOR_SUCCESS_FOLLOWUP
@@ -1195,6 +1176,8 @@ def _native_queue_delivery_once(
     target = (delivery_target if initial_rows is not None and delivery_target is not None else
               _queue_target_from_rows(args.jobs, rows, args.thread_id,
                                       read_context=PeerReadContext()))
+    if not target:
+        raise CompletionError("native-queue-recipient-unavailable")
     if delivery_target is not None and target != delivery_target:
         raise CompletionError("native-queue-target-changed")
     if not target:
@@ -1657,7 +1640,11 @@ def deliver_to_native_queue(args, receipt, attempts, *, stop_check=None):
             target = _queue_target_from_rows(args.jobs, rows, args.thread_id,
                                              read_context=PeerReadContext())
             if not target:
-                raise CompletionError("notice-recipient-unavailable")
+                from peer_obligations import retain_registered_completion
+                for row in rows:
+                    retain_registered_completion(args.jobs, row.attempt_id, args.thread_id,
+                                                 CODEX_QUEUE_PARENT_DELIVERY)
+                return {"schema_version": 1, "status": "retryable", "reason": "native-queue-recipient-unavailable"}
             session = codex_queue_delivery.DeliverySession(path, timeout=5.0)
             result = _native_queue_delivery_once(
                 args, receipt, attempts, allow_enqueue=not submitted,

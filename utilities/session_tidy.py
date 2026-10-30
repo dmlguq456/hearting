@@ -65,6 +65,7 @@ import datetime
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -848,7 +849,7 @@ def _handover_origin(row) -> Optional[tuple[str, str]]:
     return harness, origin
 
 
-def _parse_ledger_lines(raw: Optional[bytes]) -> list[dict]:
+def _parse_ledger_lines(raw: Optional[bytes], *, strict: bool = False) -> list[dict]:
     """Preserve observation health while parsing one ledger incarnation."""
     entries = _LedgerLines()
     entries.usable = raw is not None
@@ -868,7 +869,25 @@ def _parse_ledger_lines(raw: Optional[bytes]) -> list[dict]:
         if not isinstance(item, dict):
             entries.usable = False
             continue
+        if strict and not item.get("sid"):
+            entries.usable = False
         event, source = item.get("event"), item.get("source")
+        if event in {"handover", "succession"}:
+            try:
+                if not math.isfinite(float(item.get("ts", 0) or 0)):
+                    entries.usable = False
+            except (ValueError, TypeError):
+                entries.usable = False
+            bindings = item.get("bindings", [])
+            if (not isinstance(bindings, list) or not all(
+                    isinstance(binding, dict)
+                    and all(isinstance(binding.get(key), str) and binding[key]
+                            for key in ("jobs", "route", "hash"))
+                    and ("attempt" not in binding or isinstance(binding["attempt"], str) and binding["attempt"])
+                    and isinstance(binding.get("node"), str)
+                    and ("parent" not in binding or isinstance(binding["parent"], str) and binding["parent"])
+                    for binding in bindings)):
+                entries.usable = False
         # Schema-1 handovers predate source annotations. Their exact logical
         # bindings remain authority, but tidy_lineage_edge deliberately gives
         # these rows no unbound succession edge.
@@ -906,25 +925,41 @@ def _parse_ledger_lines(raw: Optional[bytes]) -> list[dict]:
 
 
 def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True,
-                       raw: Optional[bytes] = None) -> list[dict]:
-    """Read logical state with physical relations, or parse exact observed graph bytes."""
+                       strict: bool = False, raw: Optional[bytes] = None) -> list[dict]:
+    """Parse one observed incarnation, preserving health for every reader."""
     if raw is not None:
-        return _parse_ledger_lines(raw)
-    path = _native_ledger_path(seat)
-    physical = _physical_ledger_path(seat)
-    scope = _LEDGER_READ_SCOPE.get()
+        entries = _parse_ledger_lines(raw, strict=True) if strict else _parse_ledger_lines(raw)
+        if strict and not entries.usable:
+            raise ValueError("seat-ledger-schema-invalid")
+        return entries
+    path, physical = _native_ledger_path(seat), _physical_ledger_path(seat)
+    scope = None if strict else _LEDGER_READ_SCOPE.get()
     read_only = _LEDGER_READ_ONLY.get()
     cache_key = os.fspath(path) + ("#lineage" if include_physical_relations and path != physical else "")
-    if scope is not None:
-        cached = scope.get(cache_key)
-        if cached is not None:
-            return cached if read_only else copy.deepcopy(cached)
-    entries = _parse_ledger_lines(read_bytes(path))
+    if scope is not None and cache_key in scope:
+        cached = scope[cache_key]
+        return cached if read_only else copy.deepcopy(cached)
+
+    def parse(source):
+        if strict:
+            _reject_symlink(source)
+            try:
+                observed = source.read_bytes()
+            except FileNotFoundError:
+                observed = b""
+        else:
+            observed = read_bytes(source)
+        rows = _parse_ledger_lines(observed, strict=True) if strict else _parse_ledger_lines(observed)
+        if strict and not rows.usable:
+            raise ValueError("seat-ledger-schema-invalid")
+        return rows
+
+    entries = parse(path)
     if include_physical_relations and path != physical:
-        seen = {json.dumps(row, ensure_ascii=False, sort_keys=True) for row in entries}
-        physical_rows = _parse_ledger_lines(read_bytes(physical))
+        physical_rows = parse(physical)
         if physical.exists():
             entries.usable = entries.usable and physical_rows.usable
+        seen = {json.dumps(row, ensure_ascii=False, sort_keys=True) for row in entries}
         for row in physical_rows:
             if row.get("event") not in {"handover", "succession", "steward-release"}:
                 continue
@@ -935,7 +970,6 @@ def _read_ledger_lines(seat: Seat, *, include_physical_relations: bool = True,
     if scope is not None:
         scope[cache_key] = entries if read_only else copy.deepcopy(entries)
     return entries
-
 
 def _append_ledger_entry(seat: Seat, entry: dict) -> None:
     """Append logical state and retain the same event in its physical seat ledger."""
@@ -3691,7 +3725,7 @@ def cmd_tidy(args) -> int:
     code = 0
     if handoff:
         import session_tidy_runner as runner
-        handoff_line, code = runner.handoff(caller[0], args.handoff)
+        handoff_line, code = runner.handoff(caller[0], args.handoff, caller=caller)
         print(handoff_line)
     origin = str((idle_context or {}).get("origin") or "")
     print("say=" + tidy_report_line(line, handoff=handoff, origin=origin, harness=caller[1]))
@@ -3765,7 +3799,7 @@ def cmd_handoff(args) -> int:
         except ValueError as exc:
             raise StateError(str(exc)) from exc
     else:
-        line, code = runner.handoff(caller[0], args.target)
+        line, code = runner.handoff(caller[0], args.target, caller=caller)
     print(line)
     return code
 

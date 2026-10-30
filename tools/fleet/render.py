@@ -3886,11 +3886,12 @@ def _group_key_job(j, session_groups=None, job_groups=None, managed_session_grou
     edge_sid = getattr(j, "_parent_edge_sid", None)
     if edge_sid in session_groups:
         return session_groups[edge_sid]
-    if getattr(j, "parent_sid", None) and j.parent_sid in session_groups:
+    if not hasattr(j, "_parent_edge_sid") and getattr(j, "parent_sid", None) and j.parent_sid in session_groups:
         return session_groups[j.parent_sid]
     parent_managed_dir = getattr(j, "parent_managed_dir", None)
     if (
-        getattr(j, "source", None) != "plugin-queue"
+        not hasattr(j, "_parent_edge_sid")
+        and getattr(j, "source", None) != "plugin-queue"
         and parent_managed_dir
         and os.path.normpath(parent_managed_dir) in managed_session_groups
     ):
@@ -9086,7 +9087,7 @@ def _classify_group_jobs(name, group_jobs, shown):
                     # from shown_sids. The parent row itself is filtered off-screen this
                     # tick.
                     grace_jobs.append(j)
-            elif (getattr(j, "is_child", False) and j.parent_sid
+            elif (not hasattr(j, "_parent_edge_sid") and getattr(j, "is_child", False) and j.parent_sid
                   and j.parent_sid in shown_sids):
                 # No ledger verdict reached this row (collector never ran
                 # resolve_parent_edges against it) — fall back to the pre-ledger check.
@@ -9107,7 +9108,7 @@ def _classify_group_jobs(name, group_jobs, shown):
                 # Takes priority over the parent_managed_dir/parent_cwd fallbacks below so a
                 # confirmed edge is never re-resolved through a less precise cwd match.
                 grace_jobs.append(j)
-        elif j.is_child and j.parent_sid and j.parent_sid in shown_sids:
+        elif not hasattr(j, "_parent_edge_sid") and j.is_child and j.parent_sid and j.parent_sid in shown_sids:
             # No ledger verdict reached this row — fall back to the pre-ledger check.
             children.setdefault(j.parent_sid, []).append(j)
         elif getattr(j, "source", None) == "plugin-queue":
@@ -9117,7 +9118,7 @@ def _classify_group_jobs(name, group_jobs, shown):
             # session happens to sit in that directory, which is the misattribution the
             # separate-surface rule exists to prevent. Unmatched → orphan.
             orphans.append(j)
-        elif j.is_child and getattr(j, "parent_cwd", None):
+        elif not hasattr(j, "_parent_edge_sid") and j.is_child and getattr(j, "parent_cwd", None):
             sid = shown_cwds.get(os.path.realpath(j.parent_cwd))
             if sid:
                 children.setdefault(sid, []).append(j)

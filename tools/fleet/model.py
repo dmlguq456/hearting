@@ -1147,6 +1147,14 @@ class ParentEdgeTracker:
         self._store = {}
         self._seen = set()
 
+    def resolve_unknown(self, slug):
+        """Age only the already-confirmed edge using the existing missing-tick policy."""
+        entry = self._store.get(("pe", slug))
+        if not entry or not entry.get("confirmed"):
+            self._seen.add(("pe", slug))
+            return None, False
+        return self.resolve(slug, entry["parent_sid"], None, False)
+
     def resolve(self, slug, parent_sid, parent_visible, dead_evidence, display_sid=None):
         """(edge_sid_or_None, promoted_orphan: bool) for this tick's verdict.
 
@@ -1201,6 +1209,10 @@ _PARENT_EDGE_TRACKER = ParentEdgeTracker()
 def parent_edge_resolve(slug, parent_sid, parent_visible, dead_evidence, display_sid=None):
     return _PARENT_EDGE_TRACKER.resolve(
         slug, parent_sid, parent_visible, dead_evidence, display_sid)
+
+
+def parent_edge_unknown(slug):
+    return _PARENT_EDGE_TRACKER.resolve_unknown(slug)
 
 
 def parent_edge_sweep():

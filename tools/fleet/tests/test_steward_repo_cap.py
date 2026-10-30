@@ -633,16 +633,22 @@ class OpenCodeV2AttributionTest(_RepoFixture, unittest.TestCase):
                          ("boss", "role", True))
 
 
+def _current_relations(relations):
+    """Fleet consumes the common reader's current projection, including for legacy fixtures."""
+    import dispatch_seat_handover as handover
+    states = {(handover._role_identity(row), "marker"): row for row in relations}
+    return list(handover._current_roles(states).values())
+
+
 def _chain(generation, *links):
-    """One relation per holder of a hand-over chain; ``links`` are the ordered holders and
-    each relation carries the lineage that led to it, as ``dispatch_seat_handover`` writes it."""
+    """The common projection of the exact same-evidence chain, as supplied to Fleet."""
     out = []
     for index, sid in enumerate(links):
         relation = _relation(sid, generation=generation, origin=links[0])
         relation["lineage"] = [{"from": links[i], "to": links[i + 1], "snapshot_id": "x"}
                                for i in range(index)]
         out.append(relation)
-    return out
+    return _current_relations(out)
 
 
 class SameGenerationChainTest(_RepoFixture, unittest.TestCase):
@@ -654,11 +660,36 @@ class SameGenerationChainTest(_RepoFixture, unittest.TestCase):
         self.assertEqual(self.sids(_chain("G", "a", "b", "c"), "a", "b", "c"), ["c"])
 
     def test_t2_a_fork_counts_every_end(self):
-        fork = [_relation("a", generation="G"), _relation("b", generation="G"),
-                _relation("c", generation="G")]
+        fork = [_relation(sid, generation="G", origin="a") for sid in ("a", "b", "c")]
         fork[1]["lineage"] = [{"from": "a", "to": "b", "snapshot_id": "x"}]
         fork[2]["lineage"] = [{"from": "a", "to": "c", "snapshot_id": "x"}]
-        self.assertEqual(self.sids(fork, "a", "b", "c"), ["b", "c"])
+        self.assertEqual(self.sids(_current_relations(fork), "a", "b", "c"), ["b", "c"])
+
+    def test_distinct_same_generation_evidence_is_not_suppressed_again_by_census(self):
+        import dispatch_seat_handover as handover
+        marker = {"harness": "claude", "session_id": "a", "seat_key": "seat",
+                  "generation": "G", "targets": {"-": dict(EXPLICIT, ts="2")}}
+        role = {"seat_key": "seat", "generation": "G", "origin": {"harness": "claude", "sid": "a"},
+                "holder": {"harness": "claude", "sid": "b"}, "marker_digest": "old-evidence",
+                "targets": [dict(EXPLICIT, ts="1")],
+                "lineage": [{"from": "a", "to": "b", "snapshot_id": "AB"}]}
+        row = {"event": "handover", "from": "a", "sid": "b", "harness": "claude",
+               "seat_key": "seat", "snapshot_id": "AB", "source": "clear", "steward": {"roles": [role]}}
+        peer = SimpleNamespace(steward_marker_roots=lambda: ([], "fixture"),
+            read_steward_markers=lambda _roots: {("claude", "a"): marker},
+            steward_evidence_targets=lambda value: list(value["targets"].values()))
+        with mock.patch.object(handover, "_peer_message", return_value=peer), \
+             mock.patch.object(handover, "_all_snapshots", return_value=[{"seat": {"key": "seat"}}]), \
+             mock.patch.object(handover, "_transition_rows", return_value=[("seat", row)]):
+            relations = handover.resolved_steward_relations()
+        self.assertEqual(len(relations), 2)
+        rows = [self.row(sid, self.primary) for sid in ("a", "b")]
+        for ordered in (relations, list(reversed(relations))):
+            census = self.census(rows, ordered)
+            self.assertEqual(sorted(item["session_id"] for item in census["holders"]), ["a", "b"])
+            self.assertEqual(census["counted"], 2)
+            board = steward.supervision_by_repository(rows, markers={}, relations=ordered, agents=[])
+            self.assertEqual(board[self.key]["counted"], 2)
 
     def test_t3_without_lineage_every_holder_counts(self):
         relations = [_relation(sid, generation="G") for sid in ("a", "b", "c")]
