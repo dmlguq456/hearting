@@ -132,6 +132,26 @@ class PeerReadContextTest(unittest.TestCase):
         self.assertEqual(PeerReadContext().lineage_graph(("b",), fresh), "next-pass")
         fresh.assert_called_once_with()
 
+    def test_lineage_directory_is_observed_once_inside_a_pinned_loop(self):
+        # 2026-10-30: one storage_recipients pass resolved 1,681 recipients and
+        # re-stated ~550 ledgers for each, outliving the 10s prompt hook.
+        context = PeerReadContext()
+        observe = mock.Mock(return_value=("sessions", (), "gen-a"))
+        context.lineage_signature(observe)
+        context.lineage_signature(observe)
+        self.assertEqual(observe.call_count, 2)  # unpinned reads still see writers
+        with context.pinned_lineage():
+            for _ in range(3):
+                self.assertEqual(context.lineage_signature(observe), ("sessions", (), "gen-a"))
+            with context.pinned_lineage():
+                context.lineage_signature(observe)
+            self.assertEqual(observe.call_count, 3)
+            context.invalidate_lineage_graph()
+            context.lineage_signature(observe)
+            self.assertEqual(observe.call_count, 4)
+        context.lineage_signature(observe)
+        self.assertEqual(observe.call_count, 5)
+
     def test_history_summary_is_graph_bound_and_cleared_by_replacement_or_failure(self):
         context = PeerReadContext()
         graph_a, graph_b = object(), object()
