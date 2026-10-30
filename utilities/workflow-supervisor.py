@@ -586,12 +586,37 @@ def _host_terminal_evidence(armed, row):
                     "parent_attempt_id": row.get("parent_attempt_id"),
                     "resource_sha256": RESOURCE_RESUME.row_digest(row)}
         for entry in reversed(entries):
-            if entry.get("node") != armed["node"]:
-                continue
             evidence = entry.get("evidence") or {}
+            operation_result = evidence.get("resource_operation_result")
+            if (entry.get("actor") == "resource-operation-settlement"
+                    and isinstance(operation_result, dict)
+                    and operation_result.get("run_id") == row["run_id"]):
+                operation = row.get("resource_operation") or {}
+                result_tuple = {"run_id": row["run_id"],
+                    "operation_id": operation.get("operation_id"),
+                    "resource_sha256": expected["resource_sha256"],
+                    "identity": identity, "exit_code": 0, "succeeded": True,
+                    "quiescent": True}
+                if (not operation or operation_result.get("resource_watch") != armed
+                        or any(type(operation_result.get(key)) is not type(value)
+                               or operation_result.get(key) != value
+                               for key, value in result_tuple.items())):
+                    return None
+                # Historical abbreviated results cannot supply missing host facts.
+                evidence = operation_result.get("terminal_observation") or {}
+                producer_matches = True
+            elif entry.get("node") == armed["node"]:
+                # Successor and completion-controller records consume observations;
+                # they do not replace either host producer (or a sibling run).
+                if entry.get("actor") != "poll":
+                    continue
+                producer_matches = evidence.get("awaiting_next_resource") is True
+                if entry.get("state") not in {"RUNNING", "STAGE_SUCCEEDED"}:
+                    return None
+            else:
+                continue
             if (entry.get("route_id") != route["route_id"]
                     or entry.get("route_hash") != route["route_hash"]
-                    or entry.get("state") not in {"RUNNING", "STAGE_SUCCEEDED"}
                     or any(type(evidence.get(key)) is not type(value) or evidence.get(key) != value
                            for key, value in expected.items())):
                 return None
@@ -599,13 +624,13 @@ def _host_terminal_evidence(armed, row):
                              if item.get("pid") == entry.get("pid")
                              and all(item.get(key) for key in RR.IDENTITY_KEYS)
                              and all(item.get(key) == value for key, value in boot.items())), None)
-            if entry.get("actor") != "poll" or observer is None:
+            if not producer_matches or observer is None:
                 continue
             observed_at = datetime.fromisoformat(entry["at"].replace("Z", "+00:00")).timestamp()
             armed_at = datetime.fromisoformat(armed["armed_at"].replace("Z", "+00:00")).timestamp()
-            if (not evidence.get("awaiting_next_resource")
-                    or not armed_at <= observed_at or sentinel_mtime > observed_at
-                    or not row["started_at"] <= row["ended_at"] <= observed_at):
+            if (not armed_at <= observed_at or sentinel_mtime > observed_at
+                    or not armed_at <= row["ended_at"] <= observed_at
+                    or ("started_at" in row and not row["started_at"] <= row["ended_at"])):
                 return None
             return {**expected, "host_observation": {"at": entry["at"], "pid": entry["pid"]}}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
@@ -1194,7 +1219,10 @@ def _checked_resource_row(armed, evidence, *, require_success=True, require_fini
             # revalidate its row digest and receipt tuple without probing the host.
             observation = evidence.get("execution_observation") or {}
             finished = observation.get("state") == "quiescent"
-        elif (evidence.get("host_observation") is not None
+        elif ("host_observation" in evidence
+              or (evidence.get("awaiting_next_resource") is True
+                  and (row.get("owner_wait") or {}).get("launch_scope") == "codex-owner-controller"
+                  and row.get("status") == "succeeded")
               or (row.get("resource_policy") == "supervised-owner" and row.get("status") != "failed"
                   and RR.classify_identity(row) == ("stale", None, "process-namespace-mismatch"))):
             # Re-read the authoritative journal, watch, boot and row at each
@@ -1202,7 +1230,13 @@ def _checked_resource_row(armed, evidence, *, require_success=True, require_fini
             recorded = _host_terminal_evidence(armed, row)
             finished = (recorded is not None
                         and all(type(evidence.get(key)) is type(value) and evidence.get(key) == value
-                                for key, value in recorded.items()))
+                                for key, value in recorded.items() if key != "host_observation"))
+            if finished and "host_observation" in evidence:
+                supplied = evidence["host_observation"]
+                metadata = recorded["host_observation"]
+                finished = (type(supplied) is dict and supplied.keys() == metadata.keys()
+                            and all(type(supplied[key]) is type(value) and supplied[key] == value
+                                    for key, value in metadata.items()))
             if RR.classify_identity(row) != ("stale", None, "process-namespace-mismatch"):
                 finished = finished and resource_predecessor_finished(row)
         else:
@@ -2371,27 +2405,35 @@ def _admit_owner_resource_aggregate(route, ledger, successor, jobs, owner_attemp
                         resource_operations_sha256=aggregate_sha,
                         owner_attempt_id=owner_attempt_id,
                         owner_session_id=owner_session_id)
-        if stage.get("state") == "STAGE_SUCCEEDED":
-            prior = stage.get("evidence") or {}
-            if prior.get("resource_operations_sha256") != aggregate_sha:
-                raise SupervisorError("resource-owner-operation-set-changed-after-success")
-            marker_path = route_module().completion_dir(route["route_id"], jobs=jobs) / f"{node}.json"
-            try:
-                marker = json.loads(marker_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as error:
-                raise SupervisorError("resource-owner-marker-unavailable") from error
-            import dispatch_contract as DC
-            if not DC.completion_marker_is_current(route, WS.route_node(route, node),
-                                                    marker_path, marker, jobs=jobs):
-                raise SupervisorError("resource-owner-marker-not-current")
-            _claim_owner_successors(route, ledger, leader[0], node, prior)
-            return True
-        if stage.get("state") != "RUNNING":
-            raise SupervisorError("resource-owner-stage-not-running")
         with INPUT._locked(jobs, owner_attempt_id) as (_, value):
             if not _owner_input_matches_locked(route, leader[0], leader[1], owner_attempt_id,
                                                owner_session_id, value, INPUT):
                 raise SupervisorError("resource-owner-input-unavailable")
+            # Input/lease reads can be slow. A sibling must not change while the
+            # leader alone is rechecked, including reuse of a prior claim.
+            if (resource_continuation_cancelled(route, ledger)
+                    or {resource_watch_key(w): w for w in read_resource_watches(ledger, node)
+                        if successor in (w.get("successors") or [])} != current
+                    or any(_checked_resource_row(w, observed) != resource
+                           for w, resource, observed, _output, _artifacts in rows)):
+                raise SupervisorError("resource-evidence-changed")
+            if stage.get("state") == "STAGE_SUCCEEDED":
+                prior = stage.get("evidence") or {}
+                if prior.get("resource_operations_sha256") != aggregate_sha:
+                    raise SupervisorError("resource-owner-operation-set-changed-after-success")
+                marker_path = route_module().completion_dir(route["route_id"], jobs=jobs) / f"{node}.json"
+                try:
+                    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as error:
+                    raise SupervisorError("resource-owner-marker-unavailable") from error
+                import dispatch_contract as DC
+                if not DC.completion_marker_is_current(route, WS.route_node(route, node),
+                                                        marker_path, marker, jobs=jobs):
+                    raise SupervisorError("resource-owner-marker-not-current")
+                _claim_owner_successors(route, ledger, leader[0], node, prior)
+                return True
+            if stage.get("state") != "RUNNING":
+                raise SupervisorError("resource-owner-stage-not-running")
             admitted = _admit_owner_resource_stage_locked(
                 route, ledger, leader[0], node, jobs, owner_attempt_id,
                 owner_session_id, (leader[0], leader[2]), operation_results=operation_results)
@@ -2710,6 +2752,9 @@ def _observe_resource_operation(route, ledger, armed, evidence):
         "identity": evidence.get("identity"), "exit_code": evidence.get("exit_code"),
         "succeeded": evidence.get("succeeded") is True,
         "quiescent": evidence.get("quiescent") is True,
+        "terminal_observation": {key: value for key, value in evidence.items()
+                                 if key != "host_observation"},
+        "resource_watch": armed,
         "artifacts": artifacts,
         "runtime_output_sha256": output.get("runtime_output_sha256"),
         "settlement_error": row.get("settlement_error")}

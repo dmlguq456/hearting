@@ -1749,9 +1749,17 @@ The consumer rechecks the current watch and exact row, request/body, route/node,
 original controller and boot, exit/sentinel and cancellation bindings. Only that
 controller's positive exited and empty-group observation carries across the
 boundary; a status word, output file or foreign invisible PID cannot supply it.
+Both existing producers carry that observation: the node poll's next-resource
+wait and the operation settlement event for an exact authorized run. Operation
+settlement retains its full terminal tuple and watch in that same event; an old
+abbreviated result without those observations remains unknown across namespaces.
+Original node evidence remains consumable without reader-added provenance.
+Supplied provenance is checked against the fresh host record.
 Live or late descendants observed on the controller side remain protected.
 The ordinary successor admission rechecks this evidence on every call, including
-reuse of its existing once-only claim. General identity display keeps an
+reuse of its existing once-only claim. Aggregate admission rechecks every sibling
+and its watch after reading the current owner's input, under the existing input
+lock, before either the first claim or its reuse. General identity display keeps an
 unobservable foreign process unknown and gains no death or signalling authority.
 The shared current-responsibility decision preserves the holder and origin checks for
 owner-pin handoffs while admitting this registered replacement on the same route. Ordinary

@@ -1987,13 +1987,13 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         return route, path, jobs, registry, output, ledger, owner, owner_input, armed
 
     @contextlib.contextmanager
-    def foreign_resource_reader(self):
+    def foreign_resource_reader(self, run_ids=('fixture-run',)):
         # Only the resource observer sees the simulated foreign namespace.
         # Owner lease/session checks continue to exercise their real fixture state.
         classify = SUP.RR.classify_identity
         readlink = os.readlink
         def observe(row, *args, **kwargs):
-            if row.get('run_id') != 'fixture-run':
+            if row.get('run_id') not in run_ids:
                 return classify(row, *args, **kwargs)
             def foreign(path, *a, **kw):
                 return 'pid:[foreign-reader]' if str(path) == '/proc/self/ns/pid' else readlink(path, *a, **kw)
@@ -2001,6 +2001,308 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                 return classify(row, *args, **kwargs)
         with mock.patch.object(SUP.RR, 'classify_identity', side_effect=observe):
             yield
+
+    def test_original_host_evidence_settles_owner_terminal_in_both_namespaces(self):
+        for foreign in (False, True):
+            with self.subTest(foreign=foreign), self.subfixture():
+                route, _path, jobs, registry, output, ledger, owner, _input, armed = self.host_terminal_fixture()
+                stored = ledger.state()['nodes']['full-run']['evidence']
+                self.assertNotIn('host_observation', stored)
+                before = registry.read_bytes()
+                (output / 'run.json').write_text('{"phase":"final"}')
+                with self.foreign_resource_reader() if foreign else contextlib.nullcontext():
+                    self.assertIsNotNone(SUP._checked_resource_row(armed, stored))
+                    with ledger.lock():
+                        SUP.reconcile_resource_artifacts(route, ledger, owner, jobs, terminal_gates={})
+                    self.assertEqual(ledger.state()['nodes']['full-run']['state'], 'STAGE_SUCCEEDED')
+                    marker = SUP.route_module().completion_dir(route['route_id'], jobs=jobs) / 'full-run.json'
+                    protected = marker.read_bytes(), (output / 'run.json').read_bytes(), ledger.journal_path.read_bytes()
+                    with ledger.lock():
+                        SUP.reconcile_resource_artifacts(route, ledger, owner, jobs, terminal_gates={})
+                    self.assertEqual((marker.read_bytes(), (output / 'run.json').read_bytes(),
+                                      ledger.journal_path.read_bytes()), protected)
+                self.assertEqual(registry.read_bytes(), before)
+                self.assertEqual(ledger.claims(), {})
+
+    def test_original_host_evidence_rechecks_current_authority_at_terminal_settlement(self):
+        for foreign in (False, True):
+            with self.subTest(foreign=foreign), self.subfixture():
+                route, path, jobs, registry, output, ledger, owner, _input, armed = self.host_terminal_fixture()
+                stored = ledger.state()['nodes']['full-run']['evidence']
+                (output / 'run.json').write_text('{"phase":"final"}')
+                watch = ledger.root / 'armed/full-run.json'
+                sentinel = Path(json.loads(registry.read_text())['runs']['fixture-run']['sentinel'])
+                stamp = sentinel.stat()
+                originals = {p: p.read_bytes() for p in (registry, path, watch, ledger.journal_path, sentinel)}
+                for change in ('row', 'watch', 'route', 'sentinel', 'cancel', 'journal'):
+                    with self.subTest(change=change):
+                        for p, data in originals.items(): p.write_bytes(data)
+                        os.utime(sentinel, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                        if change in ('row', 'cancel'):
+                            data = json.loads(registry.read_text())
+                            data['runs']['fixture-run']['command_hash' if change == 'row' else 'cancel_requested'] = \
+                                'changed' if change == 'row' else True
+                            registry.write_text(json.dumps(data))
+                        elif change == 'watch':
+                            data = json.loads(watch.read_text()); data['armed_at'] = '2099-01-01T00:00:00Z'
+                            watch.write_text(json.dumps(data))
+                        elif change == 'route':
+                            data = json.loads(path.read_text()); data['route_hash'] = 'changed'
+                            path.write_text(json.dumps(data))
+                        elif change == 'sentinel': sentinel.write_text('7')
+                        else: ledger.journal_path.write_bytes(originals[ledger.journal_path] + b'{"torn":')
+                        with self.foreign_resource_reader() if foreign else contextlib.nullcontext():
+                            self.assertIsNone(SUP._checked_resource_row(armed, stored))
+                            with ledger.lock(), self.assertRaises(WS.WorkflowStateError):
+                                SUP.reconcile_resource_artifacts(route, ledger, owner, jobs, terminal_gates={})
+                        self.assertEqual(ledger.claims(), {})
+                        self.assertEqual(ledger.state()['nodes']['full-run']['state'], 'RUNNING')
+                for p, data in originals.items(): p.write_bytes(data)
+
+    def test_host_metadata_is_optional_but_typed_and_current_when_supplied(self):
+        route, _path, jobs, registry, _output, ledger, owner, _input, armed = self.host_terminal_fixture()
+        with self.foreign_resource_reader():
+            evidence = SUP.resource_evidence(armed)
+            for metadata in (None, {}, {'at': 'changed', 'pid': evidence['host_observation']['pid']},
+                             {**evidence['host_observation'], 'pid': True},
+                             {**evidence['host_observation'], 'extra': 'unbound'}):
+                with self.subTest(metadata=metadata):
+                    self.assertIsNone(SUP._checked_resource_row(armed, {**evidence, 'host_observation': metadata}))
+            for key in ('terminal', 'succeeded', 'quiescent', 'sentinel_present', 'exit_code'):
+                changed = {**evidence, key: 1 if type(evidence[key]) is bool else False}
+                self.assertIsNone(SUP._checked_resource_row(armed, changed), key)
+            original = {key: value for key, value in evidence.items() if key != 'host_observation'}
+            self.assertIsNotNone(SUP._checked_resource_row(armed, original))
+        for quiescent in (False, None):
+            with mock.patch.object(SUP.RR, 'resource_process_group_quiescent', return_value=quiescent):
+                self.assertIsNone(SUP._checked_resource_row(armed, evidence))
+                stored = ledger.state()['nodes']['full-run']['evidence']
+                self.assertIsNone(SUP._checked_resource_row(armed, stored))
+                self.assertFalse(SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native'))
+        self.assertEqual(ledger.claims(), {})
+
+    def host_operation_fixture(self, count=2, *, sibling='succeeded'):
+        """Real authorization, controller launch and host poll; no node poll injection."""
+        route, path, jobs, registry, output, ledger = self.fixture()
+        owner, owner_input = self.live_owner(route, jobs, registry)
+        data = json.loads(registry.read_text())
+        data['runs']['fixture-run']['owner_wait']['launch_scope'] = 'codex-owner-controller'
+        registry.write_text(json.dumps(data))
+        bodies = []
+        releases = []
+        for index in range(count):
+            release = self.base / f'operation-{index}.release'; releases.append(release)
+            code = ('import sys,time\nfrom pathlib import Path\np=Path(sys.argv[1])\n'
+                    'deadline=time.monotonic()+10\n'
+                    'while not p.exists() and time.monotonic()<deadline: time.sleep(.01)\n'
+                    'assert p.exists()\n' + ('sys.exit(7)\n' if index == 1 and sibling == 'failed' else ''))
+            body = self.authorized_body(route, path, jobs, registry, owner, owner_input,
+                f'host-operation-{index}', output, scope=f'authorized host operation {index}',
+                payload_code=code, payload_args=[str(release)])
+            body.update(launch_state='queued', started_at=time.time())
+            bodies.append(body)
+        registry.write_text(json.dumps({'schema_version': 1, 'runs': {}}))
+        (ledger.root / 'armed/full-run.json').unlink()
+        procs = []
+        def finish():
+            for release in releases: release.write_text('finish')
+            for proc in procs: proc.wait(timeout=5)
+        self.addCleanup(finish)
+        for body in bodies:
+            data = json.loads(registry.read_text()); data['runs'][body['run_id']] = body
+            registry.write_text(json.dumps(data))
+            controller = SimpleNamespace(expected=body,
+                identity={**SUP.RR.proc_identity(os.getpid()), 'pid_namespace': os.readlink('/proc/self/ns/pid')},
+                command=body['command'], sandbox='fixture', guard=contextlib.nullcontext)
+            processes, receipt = self.launch(route, path, jobs, registry, output, body,
+                                              controller=controller, wait_for_exit=False)
+            procs.extend(processes)
+            self.assertTrue(receipt['payload_spawned'], receipt)
+        # Preserve real /proc parsing and unknown handling, isolate only this census.
+        owned = {proc.pid for proc in procs}
+        iterdir = Path.iterdir
+        def census(path):
+            return iter(Path('/proc') / str(pid) for pid in owned) if path == Path('/proc') else iterdir(path)
+        patch = mock.patch.object(Path, 'iterdir', census)
+        patch.start(); self.addCleanup(patch.stop)
+        for index, (proc, release) in enumerate(zip(procs, releases)):
+            if index == 1 and sibling == 'live': continue
+            release.write_text('go')
+            self.assertEqual(proc.wait(timeout=5), 7 if index == 1 and sibling == 'failed' else 0)
+        observed = SUP.poll_once(route, ledger)
+        watches = SUP.read_resource_watches(ledger, 'full-run')
+        self.assertEqual(len(watches), count)
+        self.assertEqual(len(observed), count)
+        self.assertEqual(sum(row['action'] == 'resource-result' for row in observed),
+                         count - (sibling == 'live'))
+        return route, path, jobs, registry, output, ledger, owner, watches
+
+    def test_host_operations_first_repeat_and_terminal_aggregate_use_real_producer(self):
+        for count in (1, 2):
+            for terminal in (False, True):
+                with self.subTest(count=count, terminal=terminal), self.retained_subfixture():
+                    route, _path, jobs, registry, output, ledger, owner, watches = self.host_operation_fixture(count)
+                    results = [entry['evidence']['resource_operation_result'] for entry in ledger.journal()
+                               if (entry.get('evidence') or {}).get('resource_operation_result')]
+                    self.assertEqual(len(results), count)
+                    self.assertTrue(all(result['terminal_observation']['quiescent'] is True for result in results))
+                    if count == 1:
+                        journal = ledger.journal_path.read_bytes()
+                        SUP.poll_once(route, ledger)
+                        SUP.poll_once(route, ledger)
+                        self.assertEqual(ledger.journal_path.read_bytes(), journal)
+                    before = registry.read_bytes()
+                    run_ids = {watch['predecessor_id'] for watch in watches}
+                    with self.foreign_resource_reader(run_ids):
+                        for watch in watches:
+                            evidence = SUP.resource_evidence(watch)
+                            self.assertTrue(evidence.get('succeeded'), evidence)
+                            self.assertIsNotNone(SUP._checked_resource_row(watch, evidence))
+                        if terminal:
+                            with ledger.lock():
+                                SUP.reconcile_resource_artifacts(route, ledger, owner, jobs, terminal_gates={})
+                        else:
+                            self.assertTrue(SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native'))
+                        marker = SUP.route_module().completion_dir(route['route_id'], jobs=jobs) / 'full-run.json'
+                        protected = marker.read_bytes(), (output / 'run.json').read_bytes()
+                        for _ in range(2):
+                            if terminal:
+                                with ledger.lock():
+                                    SUP.reconcile_resource_artifacts(route, ledger, owner, jobs, terminal_gates={})
+                            else:
+                                self.assertTrue(SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native'))
+                        self.assertEqual((marker.read_bytes(), (output / 'run.json').read_bytes()), protected)
+                        self.assertTrue(all(SUP._checked_resource_row(w, SUP.resource_evidence(w)) for w in watches))
+                    self.assertEqual(registry.read_bytes(), before)
+                    self.assertEqual(ledger.state()['nodes']['full-run']['state'], 'STAGE_SUCCEEDED')
+                    self.assertEqual(len(ledger.claims()), 0 if terminal else 1)
+                    self.assertEqual(len(ledger.claim_history()), 0 if terminal else 1)
+                    self.assertEqual(sum('resource_operation_result' in (e.get('evidence') or {})
+                                         for e in ledger.journal()), count)
+
+    def test_host_operations_failed_live_unknown_sibling_cannot_admit(self):
+        for sibling in ('failed', 'live', 'unknown'):
+            with self.subTest(sibling=sibling), self.retained_subfixture():
+                route, _path, jobs, registry, _output, ledger, owner, watches = self.host_operation_fixture(
+                    sibling='succeeded' if sibling == 'unknown' else sibling)
+                if sibling == 'unknown':
+                    entries = ledger.journal()
+                    for entry in entries:
+                        result = (entry.get('evidence') or {}).get('resource_operation_result')
+                        if result and result['run_id'] == 'host-operation-1':
+                            result['terminal_observation']['quiescent'] = None
+                    ledger.journal_path.write_text(''.join(json.dumps(e) + '\n' for e in entries))
+                with self.foreign_resource_reader({w['predecessor_id'] for w in watches}):
+                    with self.assertRaises(SUP.SupervisorError):
+                        SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native')
+                    with ledger.lock(), self.assertRaises(WS.WorkflowStateError):
+                        SUP.reconcile_resource_artifacts(route, ledger, owner, jobs, terminal_gates={})
+                self.assertEqual(ledger.claims(), {})
+
+    def test_host_operation_observation_requires_exact_current_binding(self):
+        route, path, jobs, registry, _output, ledger, owner, watches = self.host_operation_fixture()
+        victim = watches[0]
+        run_id = victim['predecessor_id']
+        sentinel = Path(json.loads(registry.read_text())['runs'][run_id]['sentinel'])
+        stamp = sentinel.stat()
+        watch_path = next(p for p in (ledger.root / 'armed').rglob('*.json')
+                          if json.loads(p.read_text()).get('predecessor_id') == run_id)
+        originals = {p: p.read_bytes() for p in (registry, path, watch_path, ledger.journal_path, sentinel)}
+        with self.foreign_resource_reader({w['predecessor_id'] for w in watches}):
+            captured = SUP.resource_evidence(victim)
+        for change in ('row', 'request', 'input', 'watch', 'route', 'cancel', 'parent-close', 'sentinel',
+                       'abbreviated', 'observer', 'boot', 'conflict', 'torn', 'typed'):
+            with self.subTest(change=change):
+                for p, data in originals.items(): p.write_bytes(data)
+                os.utime(sentinel, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+                data = json.loads(registry.read_text()); row = data['runs'][run_id]
+                if change in ('row', 'request', 'input', 'cancel', 'parent-close', 'boot'):
+                    if change == 'request': row['resource_operation']['request_sha256'] = 'changed'
+                    elif change == 'input': row['resource_operation']['input']['digest'] = 'changed'
+                    else: row[{'row': 'command_hash', 'cancel': 'cancel_requested',
+                               'parent-close': 'parent_close_requested', 'boot': 'boot_id'}[change]] = \
+                              True if change in ('cancel', 'parent-close') else 'changed'
+                    registry.write_text(json.dumps(data))
+                elif change == 'watch':
+                    watch = json.loads(watch_path.read_text()); watch['armed_at'] = '2099-01-01T00:00:00Z'
+                    watch_path.write_text(json.dumps(watch))
+                elif change == 'route':
+                    doc = json.loads(path.read_text()); doc['cwd'] = str(self.base / 'changed')
+                    path.write_text(json.dumps(doc))
+                elif change == 'sentinel': sentinel.write_text('7')
+                else:
+                    entries = ledger.journal()
+                    for entry in entries:
+                        result = (entry.get('evidence') or {}).get('resource_operation_result')
+                        if not result or result['run_id'] != run_id: continue
+                        if change == 'abbreviated': result.pop('terminal_observation')
+                        elif change == 'observer': entry['pid'] = 999999998
+                        elif change == 'typed': result['terminal_observation']['quiescent'] = 1
+                        elif change == 'conflict': result['terminal_observation']['succeeded'] = False
+                    ledger.journal_path.write_text(''.join(json.dumps(e) + '\n' for e in entries)
+                                                  + ('{"torn":' if change == 'torn' else ''))
+                with self.foreign_resource_reader({w['predecessor_id'] for w in watches}):
+                    self.assertIsNone(SUP._checked_resource_row(victim, captured))
+                    self.assertFalse(SUP.resource_evidence(victim).get('succeeded'))
+                    with self.assertRaises((SUP.SupervisorError, ValueError)):
+                        SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native')
+                self.assertEqual(ledger.claims(), {})
+        for p, data in originals.items(): p.write_bytes(data)
+
+    def test_host_operation_siblings_rechecked_after_slow_input_on_first_and_repeat(self):
+        for repeat in (False, True):
+            for change in ('row', 'watch', 'sentinel', 'cancel'):
+                with self.subTest(repeat=repeat, change=change), self.retained_subfixture():
+                    route, _path, jobs, registry, _output, ledger, owner, watches = self.host_operation_fixture()
+                    with self.foreign_resource_reader({w['predecessor_id'] for w in watches}):
+                        if repeat:
+                            self.assertTrue(SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native'))
+                        primary = SUP.read_armed(ledger)['full-run']
+                        victim = next(w for w in watches if w != primary)
+                        run_id = victim['predecessor_id']
+                        marker = SUP.route_module().completion_dir(route['route_id'], jobs=jobs) / 'full-run.json'
+                        before = (ledger.journal_path.read_bytes(), ledger.claims(),
+                                  marker.read_bytes() if marker.exists() else None)
+                        match = SUP._owner_input_matches_locked
+                        def changed_while_reading(*args):
+                            allowed = match(*args)
+                            self.assertTrue(allowed)
+                            time.sleep(.01)
+                            data = json.loads(registry.read_text()); row = data['runs'][run_id]
+                            if change == 'watch':
+                                watch_path = next(p for p in (ledger.root / 'armed').rglob('*.json')
+                                    if json.loads(p.read_text()).get('predecessor_id') == run_id)
+                                watch = json.loads(watch_path.read_text()); watch['armed_at'] = '2099-01-01T00:00:00Z'
+                                watch_path.write_text(json.dumps(watch))
+                            elif change == 'sentinel': Path(row['sentinel']).write_text('7')
+                            else:
+                                row['command_hash' if change == 'row' else 'cancel_requested'] = \
+                                    'changed' if change == 'row' else True
+                                registry.write_text(json.dumps(data))
+                            return allowed
+                        with mock.patch.object(SUP, '_owner_input_matches_locked', side_effect=changed_while_reading) as check:
+                            with self.assertRaises(SUP.SupervisorError):
+                                SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native')
+                            self.assertTrue(check.called)
+                        self.assertEqual((ledger.journal_path.read_bytes(), ledger.claims(),
+                            marker.read_bytes() if marker.exists() else None), before)
+
+    def test_host_operation_repeat_keeps_pending_correction_and_owner_lease_vetoes(self):
+        import dispatch_owner_input as INPUT
+        route, _path, jobs, _registry, output, ledger, owner, watches = self.host_operation_fixture(1)
+        with self.foreign_resource_reader({w['predecessor_id'] for w in watches}):
+            self.assertTrue(SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native'))
+            marker = SUP.route_module().completion_dir(route['route_id'], jobs=jobs) / 'full-run.json'
+            before = marker.read_bytes(), (output / 'run.json').read_bytes(), ledger.journal_path.read_bytes()
+            with mock.patch.object(INPUT, 'supervisor_lease_is_held', return_value=False):
+                with self.assertRaisesRegex(SUP.SupervisorError, 'resource-owner-input-unavailable'):
+                    SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native')
+            INPUT.submit(jobs, owner, 'apply this correction before continuing', 'pending-operation-correction')
+            with self.assertRaisesRegex(SUP.SupervisorError, 'resource-owner-input-unavailable'):
+                SUP.admit_owner_successor_start(route, 'run-verify', jobs, owner, 'same-native')
+            self.assertEqual((marker.read_bytes(), (output / 'run.json').read_bytes(),
+                              ledger.journal_path.read_bytes()), before)
+            self.assertEqual(len(ledger.claim_history()), 1)
 
     def test_host_terminal_observation_crosses_owner_namespace_at_public_consumers(self):
         route, path, jobs, registry, output, ledger, owner, _input, armed = self.host_terminal_fixture()
