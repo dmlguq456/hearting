@@ -516,6 +516,103 @@ def resume_recovered_resource_owner(route, ledger):
 # predecessor evidence
 # --------------------------------------------------------------------------------
 
+def _host_terminal_evidence(armed, row):
+    """Reuse the exact host controller's observation, never a foreign PID absence.
+
+    The existing journal records the observing PID and the complete resource row
+    digest. This also reads pre-marker RUNNING/awaiting-next-resource observations;
+    neither a derived state cache nor an owner's completion wording is authority.
+    """
+    import dispatch_resource_wait as OWNER_RESOURCE
+    import route_identity
+    try:
+        owner = row.get("owner_wait") or {}
+        controller = row.get("launch_controller") or {}
+        boot = RR.boot_identity()
+        if (row.get("resource_policy") != "supervised-owner"
+                or owner.get("launch_scope") != "codex-owner-controller"
+                or row.get("launch_state") != "started"
+                or row.get("status") != "succeeded" or row.get("exit_code") != 0
+                or row.get("failure_class") is not None or not row.get("parent_attempt_id")
+                or row.get("cancel_requested") or row.get("parent_close_requested")
+                or not row.get("ended_at") or not row.get("pid_namespace")
+                or row.get("process_group") != row.get("pid")
+                or controller.get("pid_namespace") != row["pid_namespace"]
+                or not all(controller.get(key) for key in RR.IDENTITY_KEYS)
+                or not all(row.get(key) for key in RR.IDENTITY_KEYS)
+                or not boot or any(row.get(key) != value or controller.get(key) != value
+                                   for key, value in boot.items())
+                or row.get("run_id") != armed.get("predecessor_id")
+                or row.get("route") != armed.get("route_file")
+                or row.get("node") != armed.get("node") or row.get("jobs") != armed.get("jobs")
+                or owner.get("parent_attempt_id") != row.get("parent_attempt_id")
+                or not owner.get("session_id")
+                or not OWNER_RESOURCE.resource_binding_matches(armed, row)
+                or runner().read_sentinel(row.get("sentinel")) != 0):
+            return None
+        sentinel = Path(row["sentinel"])
+        if sentinel.is_symlink() or not sentinel.is_file():
+            return None
+        sentinel_mtime = sentinel.stat().st_mtime
+        route = load_route(armed["route_file"])
+        if (route.get("route_id") != armed.get("route_id")
+                or route.get("route_hash") != armed.get("route_hash")
+                or route_identity.route_hash(route) != route.get("route_hash")
+                or owner.get("route_id") != route["route_id"]
+                or owner.get("route_hash") != route["route_hash"]
+                or owner.get("jobs") != armed["jobs"]
+                or WS.route_node(route, armed["node"]) is None):
+            return None
+        ledger = ledger_for(route, armed["jobs"])
+        if (any(Path(path).is_symlink() for path in (armed["route_file"], armed["resource_registry"],
+                                                    ledger.journal_path, armed_dir(ledger) / f"{armed['node']}.json"))
+                or not ledger.journal_path.is_file()
+                or armed not in read_resource_watches(ledger, armed["node"])):
+            return None
+        # A torn/unreadable journal is unknown, including any unread cancellation.
+        raw = ledger.journal_path.read_bytes()
+        if not raw.endswith(b"\n"):
+            return None
+        entries = [RR.strict_json_loads(line) for line in raw.splitlines() if line.strip()]
+        if any(not isinstance(entry, dict) or (entry.get("evidence") or {}).get("parent_close")
+               or entry.get("workflow_state") == "CANCELLED" for entry in entries):
+            return None
+        identity = f"{row['run_id']}:{row['pid']}:{row['starttime']}:{row['exit_code']}"
+        expected = {"terminal": True, "succeeded": True, "identity": identity,
+                    "liveness": "exited", "quiescent": True, "exit_code": 0,
+                    "sentinel": row.get("sentinel"), "sentinel_present": True,
+                    "ended_at": row["ended_at"], "failure_class": None,
+                    "never_started": False, "reason": "process-absent", "log": row.get("log"),
+                    "parent_attempt_id": row.get("parent_attempt_id"),
+                    "resource_sha256": RESOURCE_RESUME.row_digest(row)}
+        for entry in reversed(entries):
+            if entry.get("node") != armed["node"]:
+                continue
+            evidence = entry.get("evidence") or {}
+            if (entry.get("route_id") != route["route_id"]
+                    or entry.get("route_hash") != route["route_hash"]
+                    or entry.get("state") not in {"RUNNING", "STAGE_SUCCEEDED"}
+                    or any(type(evidence.get(key)) is not type(value) or evidence.get(key) != value
+                           for key, value in expected.items())):
+                return None
+            observer = next((item for item in (controller, row.get("supervision") or {})
+                             if item.get("pid") == entry.get("pid")
+                             and all(item.get(key) for key in RR.IDENTITY_KEYS)
+                             and all(item.get(key) == value for key, value in boot.items())), None)
+            if entry.get("actor") != "poll" or observer is None:
+                continue
+            observed_at = datetime.fromisoformat(entry["at"].replace("Z", "+00:00")).timestamp()
+            armed_at = datetime.fromisoformat(armed["armed_at"].replace("Z", "+00:00")).timestamp()
+            if (not evidence.get("awaiting_next_resource")
+                    or not armed_at <= observed_at or sentinel_mtime > observed_at
+                    or not row["started_at"] <= row["ended_at"] <= observed_at):
+                return None
+            return {**expected, "host_observation": {"at": entry["at"], "pid": entry["pid"]}}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return None
+
+
 def resource_evidence(armed, *, compute_observation=None):
     """Terminal evidence for a detached resource child, settled if it is gone."""
     import dispatch_resource_wait as OWNER_RESOURCE
@@ -567,6 +664,14 @@ def resource_evidence(armed, *, compute_observation=None):
             return {"terminal": False, "reason": "resource-body-binding-mismatch"}
     if resume and row.get("status") == "launching":
         return {"terminal": False, "reason": "resource-launching"}
+    if (row.get("resource_policy") == "supervised-owner" and row.get("status") != "failed"
+            and RR.classify_identity(row) == ("stale", None, "process-namespace-mismatch")):
+        recorded = _host_terminal_evidence(armed, row)
+        if recorded is not None:
+            return recorded
+        # This reader cannot settle a host process or contradict its controller.
+        return {"terminal": False, "liveness": "stale", "quiescent": None,
+                "reason": "resource-host-observation-unavailable"}
     row, _settled = runner().settle(registry, run_id, row)
     liveness, _current, reason = RR.classify_identity(row)
     identity = f"{run_id}:{row.get('pid')}:{row.get('starttime')}:{row.get('exit_code')}"
@@ -1089,6 +1194,17 @@ def _checked_resource_row(armed, evidence, *, require_success=True, require_fini
             # revalidate its row digest and receipt tuple without probing the host.
             observation = evidence.get("execution_observation") or {}
             finished = observation.get("state") == "quiescent"
+        elif (evidence.get("host_observation") is not None
+              or (row.get("resource_policy") == "supervised-owner" and row.get("status") != "failed"
+                  and RR.classify_identity(row) == ("stale", None, "process-namespace-mismatch"))):
+            # Re-read the authoritative journal, watch, boot and row at each
+            # admission check instead of repeating the reader-local group scan.
+            recorded = _host_terminal_evidence(armed, row)
+            finished = (recorded is not None
+                        and all(type(evidence.get(key)) is type(value) and evidence.get(key) == value
+                                for key, value in recorded.items()))
+            if RR.classify_identity(row) != ("stale", None, "process-namespace-mismatch"):
+                finished = finished and resource_predecessor_finished(row)
         else:
             finished = resource_predecessor_finished(row)
     if (RESOURCE_RESUME.row_digest(row) != evidence.get("resource_sha256")
@@ -2413,6 +2529,13 @@ def admit_owner_successor_start(route, successor, jobs, owner_attempt_id, owner_
                             route, armed, row, owner_attempt_id, owner_session_id, value, INPUT):
                         raise SupervisorError("resource-owner-input-unavailable")
                     if stage.get("state") == "STAGE_SUCCEEDED":
+                        if not is_compute:
+                            current = resource_evidence(armed)
+                            if (_checked_resource_row(armed, current) is None
+                                    or current.get("identity") != stage_evidence.get("identity")
+                                    or current.get("resource_sha256") != stage_evidence.get("resource_sha256")
+                                    or current.get("quiescent") is not True):
+                                raise SupervisorError("resource-evidence-changed")
                         marker_path = route_module().completion_dir(
                             route["route_id"], jobs=jobs,
                         ) / f"{predecessor}.json"

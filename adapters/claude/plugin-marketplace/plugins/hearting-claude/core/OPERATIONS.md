@@ -1738,8 +1738,19 @@ sequential runs stay possible without another owner-written run.json.
 If the owner is replaced, the resource row, receipt and execution identity
 remain bound to the original owner attempt. The current owner may observe and
 consume that result when the shared replacement lineage proves a launched
-successor and its owner-route ancestry includes the resource route. The shared
-current-responsibility decision preserves the holder and origin checks for
+successor and its owner-route ancestry includes the resource route.
+The host controller's terminal observation in the existing workflow journal remains
+usable by an owner in another PID namespace, including the first successor start
+while the resource stage is still running and waiting for its next resource.
+The consumer rechecks the current watch and exact row, request/body, route/node,
+original controller and boot, exit/sentinel and cancellation bindings. Only that
+controller's positive exited and empty-group observation carries across the
+boundary; a status word, output file or foreign invisible PID cannot supply it.
+Live or late descendants observed on the controller side remain protected.
+The ordinary successor admission rechecks this evidence on every call, including
+reuse of its existing once-only claim. General identity display keeps an
+unobservable foreign process unknown and gains no death or signalling authority.
+The shared current-responsibility decision preserves the holder and origin checks for
 owner-pin handoffs while admitting this registered replacement on the same route. Ordinary
 start checks the current owner's input lease, pending corrections and exact
 resource evidence before creating the existing once-only successor claim.
