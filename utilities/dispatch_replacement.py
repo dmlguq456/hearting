@@ -2739,21 +2739,16 @@ def advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capac
     return result
 
 
-def effective_attempts(jobs, attempts):
-    """Project each input slot to its final launched successor, if any.
-
-    Every hop is checked against its immutable claim and registry row. The
-    receipt stays bounded to one original-to-final projection per slot; the
-    first edge's family and digest retain the historical receipt contract.
-    A claim, registration, or launch reservation without ``launch_started``
-    is not execution and cannot take delivery of the source failure.
-    """
+def _replacement_projection(jobs, attempts):
+    """One checked walk supplies both current projection and launched history."""
     rows = _rows(Path(jobs).read_text().splitlines())
     effective = set(attempts)
     projected = []
+    history = {}
     for aid in sorted(attempts):
         if aid not in rows:
             continue
+        history[aid] = {aid}
         current = aid
         last_launched = aid
         seen = {aid}
@@ -2793,6 +2788,7 @@ def effective_attempts(jobs, attempts):
             current = replacement
             if target.get('launch_started') == '1':
                 last_launched = replacement
+                history[aid].add(replacement)
                 if first is None:
                     first = dict(root_edge)
             elif not never_started(rows[replacement][0][1], target):
@@ -2805,7 +2801,31 @@ def effective_attempts(jobs, attempts):
             projected.append((chain, {**first, 'replacement_attempt_id': last_launched}))
     covered = {attempt for chain, _edge in projected for attempt in chain[1:]}
     mapping = [edge for chain, edge in projected if chain[0] not in covered]
+    return effective, mapping, history
+
+
+def effective_attempts(jobs, attempts):
+    """Project each input slot to its final launched successor, if any.
+
+    Every hop is checked against its immutable claim and registry row. The
+    receipt stays bounded to one original-to-final projection per slot; the
+    first edge's family and digest retain the historical receipt contract.
+    A claim, registration, or launch reservation without ``launch_started``
+    is not execution and cannot take delivery of the source failure.
+    """
+    effective, mapping, _history = _replacement_projection(jobs, attempts)
     return effective, mapping
+
+
+def verified_replacement_history(jobs, source_attempt_id):
+    """Origin and proven-launched replacements, not current effect authority.
+
+    The entire available chain uses the same claim/row checks as the current
+    projection. An unlaunched reservation is not historical execution; the
+    origin retains the caller's separate recorded-owner identity checks.
+    """
+    _effective, _mapping, history = _replacement_projection(jobs, {source_attempt_id})
+    return frozenset(history.get(source_attempt_id, ()))
 
 
 def advance_batch(jobs, attempts, *, authority_check=None, run=subprocess.run, resume_capacity=False):

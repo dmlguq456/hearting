@@ -2543,10 +2543,14 @@ def admit_owner_successor_start(route, successor, jobs, owner_attempt_id, owner_
                 owner_settled = (
                     _owner_settlement_snapshot(route, ledger, armed, row) is not None
                     if is_compute else
-                    (stage_evidence.get("owner_attempt_id") == owner_attempt_id
-                     and stage_evidence.get("resource_execution_identity") == stage_evidence.get("identity")
+                    (stage_evidence.get("resource_execution_identity") == stage_evidence.get("identity")
                      and (stage_evidence.get("owner_successor_start") is True
-                          or stage_evidence.get("owner_terminal_settlement") is True))
+                          or stage_evidence.get("owner_terminal_settlement") is True)
+                     and OWNER_RESOURCE.current_responsibility(
+                         row, route=route,
+                         owner_attempt_id=stage_evidence.get("owner_attempt_id"),
+                         session_id=stage_evidence.get("owner_session_id") or owner.get("session_id"),
+                         jobs=str(Path(jobs).resolve()), historical=True) is not None)
                 )
                 if not owner_settled:
                     if captured_predecessor is not None:

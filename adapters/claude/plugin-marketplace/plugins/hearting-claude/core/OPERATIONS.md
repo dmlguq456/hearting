@@ -966,6 +966,10 @@ retain their existing handling. Review-round and owner continuation budgets do
 not reset. Parent monitoring rechecks the exact admitted registry paths and
 process or supervisor lease, without repeating Git repository discovery: a Git
 timeout is not evidence that the parent ended.
+An exact terminal registration with the existing strict proof of no launch
+is not a failed execution to inherit as a transport retry predecessor. The
+next authorized launch keeps the ordinary round, identity, cancellation and
+current-owner checks; the old cancellation remains recorded and non-retryable.
 Terminal-intent receipts may seal an empty `job_registry`; a shared carrier
 supplies the exact registry it already verified. Delivery follows every
 verified, launched successor and waits for an actual final receipt ack. A claim,
@@ -1743,6 +1747,10 @@ If the owner is replaced, the resource row, receipt and execution identity
 remain bound to the original owner attempt. The current owner may observe and
 consume that result when the shared replacement lineage proves a launched
 successor and its owner-route ancestry includes the resource route.
+An owner that already settled the exact resource remains part of its verified
+history when a later replacement launches. Marker currency uses that launched
+history; a new effect still requires the current live owner, its input and the
+existing fresh resource checks. A claim or registration alone proves neither.
 The host controller's terminal observation in the existing workflow journal remains
 usable by an owner in another PID namespace, including the first successor start
 while the resource stage is still running and waiting for its next resource.
