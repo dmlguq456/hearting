@@ -244,6 +244,40 @@ class CapacityResumeTest(unittest.TestCase):
         self.assertEqual(self.calls[0][1], str(R.ROOT / "utilities/dispatch-owner.py"))
         self.assertNotIn("--adapter", self.calls[0])
 
+    def test_codex_pin_waits_for_usable_credits_then_launches_one_successor(self):
+        if str(R.ROOT / "tools") not in sys.path:
+            sys.path.insert(0, str(R.ROOT / "tools"))
+        from fleet.collectors import usage_cache
+        # This fixture drives start synchronously; do not leave a detached timer.
+        with mock.patch.dict(os.environ, {
+                "FLEET_USAGE_STATE_DIR": str(self.root / "usage"),
+                "HARNESS_CAPACITY_SCORES": "", "CODEX_HOME": str(self.root / "codex")}), \
+                mock.patch("capacity_auto_resume.arm", return_value=None):
+            self.reseed(note="dead-capacity", failure_class="capacity", harness="codex")
+            self.route["selection_pins"] = {"owner": {"harness": "codex"}}
+            self.route["work_request"]["owner_harness"] = "codex"
+            reset = int(time.time()) + 86400
+            windows = {"windows": [["7d", 100, reset]]}
+            for metadata in ({"credits": {"has_credits": False, "unlimited": False}},
+                             {"credits": {"has_credits": True}, "spend_control_reached": True}):
+                self.assertTrue(usage_cache.record("codex", {**windows, **metadata}))
+                waiting = self.start()
+                self.assertEqual(waiting["state"], "waiting-capacity", waiting)
+                self.assertEqual(waiting["reason"], "owner-capacity-wait")
+                self.assertEqual((self.calls, self.claims()), ([], []))
+            self.assertTrue(usage_cache.record("codex", {**windows,
+                "credits": {"has_credits": True, "unlimited": False, "balance": "56446.1701575000"},
+                "spend_control_reached": None}))
+            result = self.start()
+            self.assertEqual(result["state"], "running", result)
+            self.assertEqual(len(self.calls), 1)
+            self.assertEqual(len(self.claims()), 1)
+            successor = self.replacement_id()
+            self.assertEqual(self.rows()[successor][1]["harness"], "codex")
+            self.start()
+            self.assertEqual(self.replacement_id(), successor)
+            self.assertEqual((len(self.calls), len(self.claims())), (1, 1))
+
     # -- 2: a cleanup-pending child is settled by start, not by hand ------------------
     def _owner_with_child(self, child_state=("unverifiable", "post-exit-receipt-incomplete", None)):
         self.reseed(note="dead-exact-pid", failure_class="contract")

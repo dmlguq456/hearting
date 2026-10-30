@@ -531,10 +531,13 @@ def atomic_write_bytes(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        # The sibling is the object this mutation owns. Reading the destination
+        # after publication could instead return a concurrent successor.
+        postimage = capture_state(temp)
         assert_expected(auth, wanted)
         os.replace(temp, auth.target)
         _fsync_parent(auth.target)
-        return capture_state(auth.target)
+        return postimage
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -668,14 +671,29 @@ class Transaction:
             raise
         return self
 
-    def seal(self) -> dict[str, PathState]:
+    def seal(self, *, postimages: Mapping[str, PathState] | None = None) -> dict[str, PathState]:
         if not self._entered:
             raise SafetyError("ownership-unproved", "<transaction>", "transaction is not open")
-        self.postimages = {
+        if postimages is not None and set(postimages) != set(self.authorities):
+            raise SafetyError("ownership-unproved", "<transaction>", "postimage target set differs")
+        self.postimages = dict(postimages) if postimages is not None else {
             name: capture_state(auth.target) for name, auth in self.authorities.items()
         }
         self._sealed = True
         return dict(self.postimages)
+
+    def write_bytes(self, name: str, payload: bytes, mode: int) -> PathState:
+        """Carry a mutation's proven postimage, including partial publication."""
+        if not self._entered:
+            raise SafetyError("ownership-unproved", "<transaction>", "transaction is not open")
+        if not self._sealed:
+            self.seal(postimages=self.preimages)
+        auth = self.authorities[name]
+        postimage = atomic_write_bytes(
+            auth, payload, mode, expected=self.postimages[name], create_parents=True
+        )
+        self.postimages[name] = postimage
+        return postimage
 
     def restore(self) -> dict[str, str]:
         if not self._sealed:

@@ -14,6 +14,131 @@ from fleet.model import ContextProjection, Session
 FULL, EMPTY = render._BAR_FULL, render._BAR_EMPTY
 
 
+class CodexCreditsUsageTest(unittest.TestCase):
+    NOW = 1_000_000
+    CASES = (
+        ({"credits": {"has_credits": True, "balance": "40928.299999"}}, "credits 40,928"),
+        ({"credits": {"has_credits": False, "balance": "0"}}, "credits none"),
+        ({"credits": {"has_credits": True, "balance": "40928.29"},
+          "spend_control_reached": True}, "credits spend limit"),
+        ({}, None),
+    )
+
+    @classmethod
+    def snapshots(cls, metadata=None, two_windows=False):
+        windows = [["7d", 100, cls.NOW + 86400]]
+        if two_windows:
+            windows.insert(0, ["5h", 20, cls.NOW + 3600])
+        return {
+            "claude": {"payload": {"windows": [["5h", 12, cls.NOW + 3600],
+                                                ["7d", 59, cls.NOW + 86400]]}},
+            "codex": {"payload": {"windows": windows, **(metadata or {})}},
+            "opencode": {"payload": {"windows": [["5h", 10, cls.NOW + 3600],
+                                                  ["7d", 30, cls.NOW + 86400]]}},
+        }
+
+    @classmethod
+    def classic(cls, snapshots, width, sessions=()):
+        return render._usage_header_rows(sessions, usage_snapshots=snapshots,
+                                         term_width=width, now=cls.NOW)
+
+    @classmethod
+    def explorer(cls, snapshots, width, expanded=True, sessions=()):
+        from fleet.explorer.live import build_view_model
+        from fleet.explorer.frame import draw
+        from fleet.explorer.state import NavState
+        vm = build_view_model({"sessions": sessions, "usage_snapshots": snapshots}, now=cls.NOW)
+        with mock.patch("fleet.explorer.chrome._clock_freshness", return_value="12:00"):
+            return draw(vm, NavState(usage_open=expanded), width, 45, beat=1)
+
+    def test_actual_expanded_rows_and_other_harnesses_at_all_widths(self):
+        for width in (80, 100, 140):
+            baseline = self.classic(self.snapshots(), width)
+            frame_before = self.explorer(self.snapshots(), width)
+            for metadata, expected in self.CASES:
+                with self.subTest(width=width, metadata=metadata):
+                    rows = self.classic(self.snapshots(metadata), width)
+                    self.assertEqual(rows[0], baseline[0])
+                    self.assertEqual(rows[2], baseline[2])
+                    visible = render._snapshot_line(rows[1])
+                    self.assertEqual(visible.split("week ", 1)[1],
+                                     render._snapshot_line(baseline[1]).split("week ", 1)[1])
+                    self.assertIn("100%", visible)
+                    self.assertTrue(all(render._dw(render._snapshot_line(row)) <= width for row in rows))
+                    frame = self.explorer(self.snapshots(metadata), width)
+                    self.assertEqual(frame.cells[1], frame_before.cells[1])
+                    self.assertEqual(frame.cells[3], frame_before.cells[3])
+                    codex_row = frame.text_rows()[2]
+                    if expected:
+                        self.assertIn(expected, visible)
+                        self.assertIn(expected, codex_row)
+                    else:
+                        self.assertEqual(rows, baseline)
+                        self.assertEqual(frame.cells, frame_before.cells)
+                        self.assertNotIn("credits", visible + codex_row)
+
+    def test_compact_cells_and_hits_are_identical(self):
+        for width in (80, 100, 140):
+            before = self.explorer(self.snapshots(), width, expanded=False)
+            for metadata, _ in self.CASES:
+                with self.subTest(width=width, metadata=metadata):
+                    after = self.explorer(self.snapshots(metadata), width, expanded=False)
+                    self.assertEqual(after.cells, before.cells)
+                    self.assertEqual(after.hits, before.hits)
+
+    def test_two_windows_and_first_usage_row_reserve_complete_credit_text(self):
+        for width in (80, 100, 140):
+            for metadata, expected in self.CASES[:3]:
+                snapshots = {"codex": self.snapshots(metadata, two_windows=True)["codex"]}
+                with self.subTest(width=width, expected=expected):
+                    row = render._snapshot_line(self.classic(snapshots, width)[0])
+                    self.assertIn(expected, row)
+                    self.assertIn("5h 20%", row)
+                    self.assertLessEqual(render._dw(row), width)
+                    frame = self.explorer(snapshots, width)
+                    self.assertIn(expected, frame.text_rows()[1])
+                    self.assertIn("5h 20%", frame.text_rows()[1])
+                    self.assertTrue(frame.text_rows()[1].endswith("u less ▾ "))
+                    baseline = {"codex": self.snapshots(two_windows=True)["codex"]}
+                    quota_before = render._snapshot_line(self.classic(baseline, width)[0])
+                    self.assertEqual(row.split("week ", 1)[1], quota_before.split("week ", 1)[1])
+                    self.assertEqual(frame.cells[1][54:], self.explorer(baseline, width).cells[1][54:])
+
+    def test_session_only_and_non_codex_metadata_keep_their_existing_rows(self):
+        session = Session(harness="codex", pid=1, cwd="/x", liveness="idle", rl_7d=100)
+        for width in (80, 100, 140):
+            baseline = self.classic({}, width, [session])
+            self.assertEqual(baseline, self.classic({"codex": None}, width, [session]))
+            self.assertNotIn("credits", "".join(render._snapshot_line(row) for row in baseline))
+            self.assertNotIn("credits", "\n".join(self.explorer({}, width, sessions=[session]).text_rows()))
+            snapshots = self.snapshots()
+            before = self.classic(snapshots, width)
+            frame_before = self.explorer(snapshots, width)
+            for harness in ("claude", "opencode"):
+                snapshots[harness]["payload"].update(self.CASES[0][0])
+            self.assertEqual(self.classic(snapshots, width), before)
+            self.assertEqual(self.explorer(snapshots, width).cells, frame_before.cells)
+
+    def test_optional_and_malformed_credit_metadata(self):
+        from fleet.display import codex_credits
+        cases = (
+            (None, None), ({}, None),
+            ({"spend_control_reached": True}, None),
+            ({"credits": None}, "credits ?"),
+            ({"credits": {"has_credits": "true", "balance": "99"}}, "credits ?"),
+            ({"credits": {"unlimited": True, "has_credits": False}}, "credits unlimited"),
+            ({"credits": {"has_credits": True, "balance": "0"}}, "credits 0"),
+            ({"credits": {"has_credits": True}, "spend_control_reached": "false"}, "credits ?"),
+        )
+        for payload, expected in cases:
+            with self.subTest(payload=payload):
+                self.assertEqual(codex_credits(payload), expected)
+        for balance in (None, True, "bad", "NaN", "Infinity", "-1", "1e99999", {}, []):
+            with self.subTest(balance=balance):
+                self.assertEqual(codex_credits({"credits": {"has_credits": True, "balance": balance}}),
+                                 "credits available")
+
+
 class F51GaugeTest(unittest.TestCase):
     def test_fixed_width_and_half_up(self):
         """The legacy `width` argument never sizes the meter — `_GAUGE_W` cells regardless
@@ -55,8 +180,9 @@ class F51GaugeTest(unittest.TestCase):
 
     def test_context_now_anchor_and_widths(self):
         session = Session(harness="claude", pid=1, cwd="/x", liveness="working",
-                          context=ContextProjection(50, "normal", "x"), summary="NOW",
-                          rl_5h=50, rl_7d=50)
+                          context=ContextProjection(50, "normal", "x"), summary="NOW")
+        snapshots = {"claude": {"payload": {"rl_5h": 50, "rl_7d": 50, "rl_ms": []},
+                                "freshness": "fresh", "observed_at": 1000}}
         for width, layout in ((168, "wide"), (138, "wide"), (100, "narrow"),
                               (60, "stack")):
             with self.subTest(width=width, layout=layout):
@@ -64,10 +190,11 @@ class F51GaugeTest(unittest.TestCase):
                 visible = "".join(value for value, _key in row[0])
                 self.assertEqual(render._dw(visible[:re.search(r"(?:\d+%|—) +(\S)", visible).start(1)]), render._NAME_COL)
                 self.assertLessEqual(render._dw(visible), width)
-                headers = render._usage_header_rows([session], layout=layout)
-                if headers:
-                    self.assertTrue(any(FULL in value or EMPTY in value or "·" in value
-                                        for value, _key in headers[0]))
+                headers = render._usage_header_rows([session], layout=layout, now=1000,
+                                                    usage_snapshots=snapshots)
+                self.assertTrue(headers)
+                self.assertTrue(any(FULL in value or EMPTY in value
+                                    for value, _key in headers[0]))
 
     def test_header_row_is_layout_independent_and_keeps_the_meter_shape(self):
         """Without an explicit viewport, layouts share the same aligned header.
@@ -75,15 +202,18 @@ class F51GaugeTest(unittest.TestCase):
         Normalizing 7d to week adds two cells to the historical 69-cell row;
         the twelve-cell gauge and its quantization remain unchanged.
         """
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=92, rl_7d=30, mtime=1000)
+        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle")
+        snapshots = {"claude": {"payload": {"rl_5h": 92, "rl_7d": 30, "rl_ms": []},
+                                "freshness": "fresh", "observed_at": 1000}}
         texts = set()
         for layout in ("wide", "narrow", "stack"):
-            rows = render._usage_header_rows([session], layout=layout)
+            rows = render._usage_header_rows([session], layout=layout, now=1000,
+                                             usage_snapshots=snapshots)
             self.assertTrue(rows)
             texts.add("".join(v for row in rows for v, _k in row))
         # plain (--once) path: no term_width constraint and no layout at all — same row.
-        texts.add("".join(v for row in render._usage_header_rows([session]) for v, _k in row))
+        texts.add("".join(v for row in render._usage_header_rows(
+            [session], now=1000, usage_snapshots=snapshots) for v, _k in row))
         self.assertEqual(len(texts), 1, "usage header must not vary by layout")
         text = texts.pop()
         n_meters = text.count("[")
@@ -95,9 +225,9 @@ class F51GaugeTest(unittest.TestCase):
         now = 1000
         snapshots = {
             "claude": {"payload": {
-                "windows": [["5h", 12, now + 175 * 60],
-                            ["7d", 59, now + 8639 * 60]],
-                "rl_ms": [["fable", 0]]}},
+                "rl_5h": 12, "rl_7d": 59, "rs_5h": now + 175 * 60,
+                "rs_7d": now + 8639 * 60, "rl_ms": [["fable", 0]]},
+                "freshness": "fresh", "observed_at": now},
             "codex": {"payload": {
                 "windows": [["7d", 12, now + 9738 * 60]]}},
             "opencode": {"payload": {
@@ -153,13 +283,13 @@ class F51GaugeTest(unittest.TestCase):
         F-61 renders the header's red without the alarm bold, so the key is `lvl_r_flat`; the
         threshold that chose red is unchanged and every non-header surface still gets `lvl_r`.
         """
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=92, rl_7d=30, mtime=1000)
-        session._usage_freshness = "stale"
-        row = render._usage_header_rows([session], layout="wide")[0]
+        snapshots = {"claude": {"payload": {"rl_5h": 92, "rl_7d": 30, "rl_ms": []},
+                                "freshness": "stale", "observed_at": 1000}}
+        row = render._usage_header_rows([], layout="wide", now=1200,
+                                       usage_snapshots=snapshots)[0]
         visible = "".join(v for v, _k in row)
-        self.assertTrue(all(len(track) == render._GAUGE_W
-                            for track in re.findall(r"[%s·]+" % re.escape(FULL), visible)))
+        tracks = re.findall(r"\[([%s·]+)" % re.escape(FULL), visible)
+        self.assertEqual([len(track) for track in tracks], [render._GAUGE_W] * 2)
         fill_keys = {k for v, k in row if render._BAR_FULL in v}
         self.assertIn("lvl_r_flat", fill_keys)
         self.assertIn("lvl_g", fill_keys)
@@ -171,16 +301,19 @@ class F51GaugeTest(unittest.TestCase):
         self.assertIn("lvl_r_flat", pct_keys)
         self.assertIn("lvl_g", pct_keys)
 
-    def test_unknown_window_is_dotted_track_and_em_dash(self):
-        """A5: an unknown usage window (no cached value at all) shows `·`×6 track plus a bare
-        `—`, distinct from both the stale window above and the 0% filled-track case."""
+    def test_unknown_window_is_status_without_an_invented_gauge(self):
+        """Unknown account quota stays distinct from an admitted, measured zero."""
         session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=None, rl_7d=None, mtime=1000)
-        session._usage_freshness = "unknown"
-        row = render._usage_header_rows([session], layout="wide")[0]
+                          rl_5h=92, rl_7d=30, mtime=1000)
+        snapshots = {"claude": {"payload": None, "freshness": "unknown",
+                                "observed_at": None, "error_observation": None}}
+        row = render._usage_header_rows([session], layout="wide", now=1000,
+                                       usage_snapshots=snapshots)[0]
         joined = "".join(v for v, _k in row)
-        self.assertIn("·" * render._GAUGE_W, joined)
-        self.assertIn("—", joined)
+        self.assertIn("claude code", joined)
+        self.assertIn("unavailable", joined)
+        self.assertNotIn("[", joined)
+        self.assertNotIn("%", joined)
         self.assertNotIn(render._BAR_FULL, joined)
 
     def test_account_cache_renders_without_a_session_row(self):
@@ -198,15 +331,17 @@ class F51GaugeTest(unittest.TestCase):
         self.assertIn("81%", visible)
         self.assertNotIn("no usage api", visible)
 
-    def test_empty_account_cache_does_not_invent_a_usage_row(self):
+    def test_empty_account_cache_shows_status_without_inventing_quota(self):
         snapshots = {
             "claude": {
-                "payload": {},
+                "payload": {"rl_5h": None, "rl_7d": None, "rl_ms": []},
                 "freshness": "unknown",
                 "observed_at": None,
             },
         }
-        self.assertEqual([], render._usage_header_rows([], usage_snapshots=snapshots))
+        rows = render._usage_header_rows([], now=1000, usage_snapshots=snapshots)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual("".join(v for v, _key in rows[0]), "  usage claude code   unavailable")
 
     def test_codex_week_label_keeps_its_runtime_window_and_blank_5h_slot(self):
         snapshots = {
@@ -281,9 +416,10 @@ class F61UsageBoldTest(unittest.TestCase):
     """F-61: the usage header drops the alarm bold; no other `lvl_r` surface does."""
 
     def _header(self, pct):
-        session = Session(harness="claude", pid=1, cwd="/x", liveness="idle",
-                          rl_5h=pct, rl_7d=pct, mtime=1000)
-        return render._usage_header_rows([session], layout="wide")[0]
+        snapshots = {"claude": {"payload": {"rl_5h": pct, "rl_7d": pct, "rl_ms": []},
+                                "freshness": "fresh", "observed_at": 1000}}
+        return render._usage_header_rows([], layout="wide", now=1000,
+                                        usage_snapshots=snapshots)[0]
 
     def test_header_never_emits_the_bold_level_key(self):
         for pct in (0, 30, 49, 50, 79, 80, 92, 100):

@@ -721,6 +721,67 @@ class OpenCodeCredentialReadTest(unittest.TestCase):
 
 
 class OpenCodeSessionObservationTest(unittest.TestCase):
+    def test_v2_native_cursor_distinguishes_same_id_same_ms_without_event_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "native.db"
+            with sqlite3.connect(db) as con:
+                con.execute("CREATE TABLE session_v2 (id TEXT, directory TEXT, time_updated INT)")
+                con.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, "
+                            "seq INT, time_created INT, time_updated INT, data TEXT)")
+                con.execute("CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY, seq INT, owner_id TEXT)")
+                con.execute("INSERT INTO session_v2 VALUES ('ses_retry', '/work', 2000)")
+                payload = json.dumps({"time": {"created": 1500, "completed": 2000},
+                                      "tokens": {"total": 300000}})
+                con.execute("INSERT INTO session_message VALUES ('same-id', 'ses_retry', 'assistant', 1, 1500, 2000, ?)",
+                            (payload,))
+                con.execute("INSERT INTO event_sequence VALUES ('ses_retry', 1, NULL)")
+                con.execute("INSERT INTO event_sequence VALUES ('ses_other', 900, NULL)")
+            before = db.read_bytes()
+            first = runtime.read_session_observation("ses_retry", db_path=db)
+            self.assertEqual(first["event_seq"], 1)
+            self.assertEqual(db.read_bytes(), before)
+            with sqlite3.connect(db) as con:
+                # Native retry updates the same projection without a unique
+                # timestamp or insertion seq. Its aggregate cursor still moves.
+                con.execute("UPDATE event_sequence SET seq=3 WHERE aggregate_id='ses_retry'")
+            before = db.read_bytes()
+            retry = runtime.read_session_observation("ses_retry", db_path=db)
+            self.assertEqual(retry["event_seq"], 3)
+            self.assertEqual(retry["messages"], first["messages"])
+            self.assertEqual(db.read_bytes(), before)
+            with sqlite3.connect(db) as con:
+                con.execute("DROP TABLE event_sequence")
+            unsupported = runtime.read_session_observation("ses_retry", db_path=db)
+            self.assertIsNone(unsupported["event_seq"])
+            self.assertEqual(unsupported["messages"], first["messages"])
+
+    def test_v2_projection_and_cursor_share_a_read_snapshot_during_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "native.db"
+            with sqlite3.connect(db) as con:
+                con.execute("PRAGMA journal_mode=WAL")
+                con.execute("CREATE TABLE session_v2 (id TEXT, directory TEXT, time_updated INT)")
+                con.execute("CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT, "
+                            "seq INT, time_created INT, time_updated INT, data TEXT)")
+                con.execute("CREATE TABLE event_sequence (aggregate_id TEXT PRIMARY KEY, seq INT, owner_id TEXT)")
+                con.execute("INSERT INTO session_v2 VALUES ('ses_retry', '/work', 2000)")
+                con.execute("INSERT INTO session_message VALUES ('same-id', 'ses_retry', 'assistant', 1, 1500, 2000, ?)",
+                            (json.dumps({"time": {"created": 1500}, "tokens": {"total": 100}}),))
+                con.execute("INSERT INTO event_sequence VALUES ('ses_retry', 1, NULL)")
+            read_messages = runtime._read_v2_messages
+            def retry_during_read(*args, **kwargs):
+                result = read_messages(*args, **kwargs)
+                with sqlite3.connect(db) as writer:
+                    writer.execute("UPDATE event_sequence SET seq=3 WHERE aggregate_id='ses_retry'")
+                    writer.execute("UPDATE session_message SET data=? WHERE id='same-id'",
+                                   (json.dumps({"time": {"created": 1500}, "tokens": {"total": 300000}}),))
+                return result
+            with unittest.mock.patch.object(runtime, "_read_v2_messages", side_effect=retry_during_read):
+                observed = runtime.read_session_observation("ses_retry", db_path=db)
+            self.assertEqual((observed["event_seq"], observed["messages"][0]["tokens"]["total"]), (1, 100))
+            current = runtime.read_session_observation("ses_retry", db_path=db)
+            self.assertEqual((current["event_seq"], current["messages"][0]["tokens"]["total"]), (3, 300000))
+
     def test_v2_exact_session_and_sequence_reader_needs_no_session_input_table(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / "opencode.db"
@@ -751,12 +812,23 @@ class OpenCodeSessionObservationTest(unittest.TestCase):
             self.assertEqual(observation["generation"], "v2")
             self.assertEqual(observation["session"]["directory"], "/work/tree")
             self.assertEqual(observation["messages"][-1]["text"], "OK")
+            self.assertEqual(observation["messages"][-1]["id"], "msg_assistant")
+            self.assertEqual(observation["messages"][-1]["started"], 1500)
             self.assertEqual(observation["cursor_kind"], "session-message-seq-v2")
             delta = runtime.read_session_observation(session_id, db_path=db,
                                                     generation="v2", after_seq=2)
             self.assertEqual(delta["messages"], [])
             self.assertEqual(delta["cursor"], 2)
             self.assertEqual(db.read_bytes(), before)
+            # Native retries reuse the row/id but update the projected start.
+            with sqlite3.connect(db) as con:
+                row = con.execute("SELECT data FROM session_message WHERE id='msg_assistant'").fetchone()
+                payload = json.loads(row[0])
+                payload["time"]["created"] = 1900
+                con.execute("UPDATE session_message SET data=? WHERE id='msg_assistant'", (json.dumps(payload),))
+            retried = runtime.read_session_observation(session_id, db_path=db)["messages"][-1]
+            self.assertEqual((retried["id"], retried["created"], retried["started"]),
+                             ("msg_assistant", 1500, 1900))
 
     def test_v2_shell_cursor_pages_all_row_types_and_refreshes_old_pending_seq(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -712,7 +712,7 @@ class ZenGoRenderHeaderTest(unittest.TestCase):
         claude = Session(harness="claude", pid=1, cwd="/x", liveness="idle", mtime=1000)
         opencode = Session(harness="opencode", pid=2, cwd="/y", liveness="idle", mtime=1000)
         snapshots = {
-            "claude": {"payload": {"rl_windows": [["5h", None, None]]},
+            "claude": {"payload": {"rl_5h": 0, "rl_7d": None, "rl_ms": []},
                        "freshness": "fresh", "observed_at": 1000},
             "opencode": {"payload": {"rl_windows": [
                 ["5h", 20, 2000], ["week", 30, 3000], ["month", 40, 4000],
@@ -726,7 +726,7 @@ class ZenGoRenderHeaderTest(unittest.TestCase):
         text_rows = self._rows_text(rows).splitlines()
         claude_row = next(line for line in text_rows if "claude code" in line)
         opencode_row = next(line for line in text_rows if "opencode go" in line)
-        self.assertIn("5h [············   —]", claude_row)
+        self.assertIn("5h [" + render._BAR_EMPTY * render._GAUGE_W + "   0%]", claude_row)
         self.assertIn("5h", opencode_row)
         self.assertIn("week", opencode_row)
         self.assertIn("month", opencode_row)
