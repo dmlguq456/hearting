@@ -4636,13 +4636,171 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         return "idle", {"harness": harness, "session_id": sid or "-",
                          "name": name, "pane": pane}, 0, None
 
-    def test_claude_resume_selector_is_native_evidence_without_registry_attribution(self):
-        info = self._pane_info_for("w1:pX")
-        with mock.patch.object(peer_steward, "_retire_process_record", return_value={
-                "argv": ["/usr/bin/claude", "--resume", "exact-resume"], "start": "123"}), \
-             mock.patch.object(peer_steward, "_proc_start_ticks", return_value="123"):
-            self.assertEqual(peer_steward._prompt_process_session("w1:pX", "claude", info),
-                             ("exact-resume", None))
+    @contextlib.contextmanager
+    def _current_claude_resume(self, *, fork=False):
+        """Real shared registry/tap reader; private native files and observed own PID."""
+        from fleet.collectors import claude, procscan
+        self._native_identity_patch.stop()
+        self._readiness_patch.stop()
+        pane, pid = "w1:pResume", os.getpid()
+        old = "11111111-1111-4111-8111-111111111111"
+        new = "22222222-2222-4222-8222-222222222222"
+        start = peer_steward._proc_start_ticks(pid)
+        home = self.tmp_root / "native-claude"
+        (home / "sessions").mkdir(exist_ok=True, parents=True)
+        (home / ".statusline").mkdir(exist_ok=True)
+        registry = home / "sessions" / f"{pid}.json"
+        argv = ["/usr/bin/claude", "--resume", old] + (["--fork-session"] if fork else [])
+        foreground = {"pid": pid, "start": start, "argv": argv}
+        info = {"pane_id": pane, "shell_pid": pid,
+                "foreground_processes": [{"pid": pid, "argv": argv}]}
+        observation = {"state": "idle", "label": old, "screen": CLAUDE_EMPTY}
+
+        def select(mode):
+            registry.unlink(missing_ok=True)
+            for path in (home / ".statusline").glob("*.json"):
+                path.unlink()
+            if mode.startswith("registry"):
+                sid = new if mode == "registry-new" else old
+                registry.write_text(json.dumps({"pid": pid, "procStart": start,
+                    "sessionId": sid, "cwd": str(home)}))
+            taps = ([old, new] if mode == "conflict" else
+                    [new] if mode == "tap-new" else [old] if mode == "tap" else [])
+            for sid in taps:
+                (home / ".statusline" / f"{sid}.json").write_text(json.dumps(
+                    {"pid": pid, "proc_start": start, "session_id": sid}))
+
+        def target(_target):
+            return observation["state"], {"harness": "claude", "session_id": observation["label"],
+                "pane": pane, "name": "resumed"}, 0, None
+
+        select("registry")
+        with mock.patch.object(claude, "_home", return_value=str(home)), \
+             mock.patch.object(procscan, "_comm_of", return_value="fixture"), \
+             mock.patch.object(procscan, "_read_cwd", return_value=(str(home), None)), \
+             mock.patch.object(procscan.claude_process_identity, "observe_process", return_value=None), \
+             mock.patch.object(peer_steward, "_retire_target", side_effect=target), \
+             mock.patch.object(peer_steward, "_retire_pane_info", return_value=info), \
+             mock.patch.object(peer_steward, "_retire_process_record", return_value=foreground), \
+             mock.patch.object(peer_steward, "_prompt_foreground", return_value=foreground), \
+             mock.patch.object(peer_steward, "_agent_state",
+                               side_effect=lambda _: (observation["state"], pane)), \
+             mock.patch.object(peer_steward, "_read_screen",
+                 side_effect=lambda _: peer_steward._screen_lines(observation["screen"])), \
+             mock.patch.object(peer_steward.peer_obligations, "bound_work_for_pane",
+                               return_value=((), "observed")), \
+             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send:
+            yield pane, old, new, select, observation, send
+
+    def test_claude_resume_uses_current_pid_start_registry_and_tap_evidence(self):
+        with self._current_claude_resume() as (pane, old, new, select, observation, send):
+            for mode in ("registry", "tap"):
+                with self.subTest(mode=mode):
+                    select(mode)
+                    candidate, error = peer_steward._prompt_current_candidate(
+                        pane, expected_harness="claude", expected_sid=old)
+                    self.assertIsNone(error)
+                    self.assertEqual(candidate["session_id"], old)
+                    reason, proof = peer_steward._claude_idle_prompt_guard(pane, old, pane)
+                    self.assertIsNone(reason)
+                    self.assertEqual(proof["session_id"], old)
+            # A PID-bound current selection outranks the delayed launch/pane label.
+            select("registry-new")
+            candidate, error = peer_steward._prompt_current_candidate(pane, expected_sid=new)
+            self.assertIsNone(error)
+            self.assertEqual(candidate["session_id"], new)
+            send.assert_not_called()
+
+    def test_claude_resume_stale_pin_has_zero_writes_at_admission_replay_and_final_guard(self):
+        peer = peer_steward.peer_message
+        for phase in ("admission", "replay", "final-prewrite"):
+            for mode in ("registry-new", "tap-new", "conflict", "unavailable"):
+                for fork in (False, True):
+                    with self.subTest(phase=phase, mode=mode, fork=fork), \
+                         self._current_claude_resume(fork=fork) as fixture:
+                        pane, old, new, select, observation, send = fixture
+                        sender = {"harness": "codex", "session_id": "requester"}
+                        recipient = {"harness": "claude", "session_id": old, "pane_id": pane}
+                        text, ref = peer.prepare_peer_message(
+                            f"[steer] {phase}/{mode}/{fork}", sender, recipient, defer=True)
+                        row = peer._read_pending(ref)
+                        duty = peer_steward._schedule_message_obligation(row, pane, pane)
+                        store = peer_steward.peer_obligations.ObligationStore()
+                        immutable = {key: row.get(key) for key in
+                            ("ref", "from", "to", "text", "body_sha256", "producer_binding")}
+                        reserve = peer.reserve_pending_herdr
+                        def reserve_then_select(*args, **kwargs):
+                            claimed = reserve(*args, **kwargs)
+                            self.assertIsNotNone(claimed)
+                            select(mode)
+                            return claimed
+                        if phase != "final-prewrite":
+                            select(mode)
+                        with mock.patch.object(peer, "reserve_pending_herdr",
+                                side_effect=reserve_then_select if phase == "final-prewrite" else reserve) as claim, \
+                             mock.patch.object(peer, "begin_pending_write", wraps=peer.begin_pending_write) as begin:
+                            if phase == "admission":
+                                candidate, error = peer_steward._prompt_current_candidate(
+                                    pane, expected_harness="claude", expected_sid=old)
+                                self.assertIsNone(candidate)
+                                self.assertIn(error, {"target-identity-unverified", "target-identity-changed"})
+                                peer_steward._submit_pending_claude(row, pane, old, pane, "idle")
+                            else:
+                                peer_steward._resume_message_obligation(duty, store)
+                            self.assertEqual(claim.call_count, int(phase == "final-prewrite"))
+                            begin.assert_not_called()
+                        send.assert_not_called()
+                        after = peer._read_pending(ref)
+                        self.assertEqual(after["state"], "pending")
+                        self.assertEqual({key: after.get(key) for key in immutable}, immutable)
+                        self.assertEqual(store.get(duty["id"])["intent"]["ref"], ref)
+                        self.assertEqual(len(store.list(kinds={"message"})), 1)
+
+                        # The same controller reobserves current evidence; one submission
+                        # leaves the original marker/ref queued and then receive-only.
+                        select("registry")
+                        peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                        peer_steward._resume_message_obligation(store.get(duty["id"]), store)
+                        self.assertEqual(send.call_count, 1)
+                        self.assertEqual(send.call_args.args[:2], (pane, text))
+                        self.assertEqual(peer._read_pending(ref)["state"], "queued")
+                        self.assertEqual({key: peer._read_pending(ref).get(key) for key in immutable}, immutable)
+                        # Retire only this case's terminal fixture duty, keeping other
+                        # cases out of the controller count without deleting any rows.
+                        store.update(duty["id"], state="complete", result="fixture-finished")
+
+    def test_current_claude_resume_keeps_form_draft_and_busy_guards_before_physical_input(self):
+        peer = peer_steward.peer_message
+        for phase in ("admission", "final-prewrite"):
+            for case, state, screen in (("form", "idle", CLAUDE_FORM),
+                                        ("draft", "idle", CLAUDE_DRAFT),
+                                        ("busy", "working", CLAUDE_EMPTY)):
+                with self.subTest(phase=phase, case=case), self._current_claude_resume() as fixture:
+                    pane, old, _new, _select, observation, send = fixture
+                    _text, ref = peer.prepare_peer_message(f"[steer] protect {phase}/{case}",
+                        {"harness": "codex", "session_id": "requester"},
+                        {"harness": "claude", "session_id": old, "pane_id": pane}, defer=True)
+                    before = peer._read_pending(ref)
+                    reserve = peer.reserve_pending_herdr
+                    def reserve_then_block(*args, **kwargs):
+                        claimed = reserve(*args, **kwargs)
+                        observation.update(state=state, screen=screen)
+                        return claimed
+                    if phase == "admission":
+                        observation.update(state=state, screen=screen)
+                    with mock.patch.object(peer, "reserve_pending_herdr",
+                            side_effect=reserve_then_block if phase == "final-prewrite" else reserve) as claim, \
+                         mock.patch.object(peer, "begin_pending_write", wraps=peer.begin_pending_write) as begin:
+                        reason, _outcome, _verify, _why = peer_steward._submit_pending_claude(
+                            before, pane, old, pane, "idle")
+                        self.assertIsNotNone(reason)
+                        self.assertEqual(claim.call_count, int(phase == "final-prewrite"))
+                        begin.assert_not_called()
+                    send.assert_not_called()
+                    after = peer._read_pending(ref)
+                    self.assertEqual(after["state"], "pending")
+                    for key in ("ref", "from", "to", "text", "body_sha256"):
+                        self.assertEqual(after[key], before[key])
 
     def test_unsent_claude_message_reenters_guarded_sender_once_then_only_observes(self):
         self._readiness_patch.stop()

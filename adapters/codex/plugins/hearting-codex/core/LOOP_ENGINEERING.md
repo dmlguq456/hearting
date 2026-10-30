@@ -307,6 +307,8 @@ defect. A slower or emptier view is a regression even when every check passes.
 Publish observed session identity, execution/wait reasons and resources first;
 campaign titles, route details and installation/git metadata fill asynchronously.
 Unknown observations stay unknown, and slow details must not stop basic refresh.
+An unknown current parent also defers CWD-based child classification; it cannot
+turn a registered parent or confirmed successor into a child.
 Titles summarize the person's current goal in their language; NOW describes
 progress toward that goal. Internal stage, review and handoff instructions do
 not replace the goal. Failed generation preserves the last successful text and

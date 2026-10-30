@@ -125,6 +125,72 @@ class ManagedDispatchParentTest(unittest.TestCase):
         self.assertNotIn("orphaned dispatch rows", text)
         self.assertNotIn("(orphan)", text)
 
+    def test_unknown_current_parent_defers_cwd_classification_before_edge_resolution(self):
+        utilities = TOOLS.parent / "utilities"
+        if str(utilities) not in sys.path:
+            sys.path.insert(0, str(utilities))
+        import session_tidy as tidy
+        for harness in ("claude", "codex", "opencode"):
+            for parent_cwd in (None, "/different/parent"):
+                for successor in (False, True):
+                    for grace in (False, True):
+                        with self.subTest(harness=harness, parent_cwd=parent_cwd,
+                                          successor=successor, grace=grace), \
+                             tempfile.TemporaryDirectory() as tmp, \
+                             mock.patch.object(tidy, "state_root", return_value=Path(tmp)):
+                            model.reset_parent_edge_tracker()
+                            registered = "parent-A"
+                            current = "parent-B" if successor else registered
+                            root = Session(harness=harness, pid=10, cwd="/same/repo",
+                                           session_id=current, liveness="working", slug="parent")
+                            job = DispatchJob(key="code", slug="order-child", harness=harness,
+                                cwd=root.cwd, parent_sid=registered, parent_cwd=parent_cwd,
+                                is_child=True, source="jobs", liveness="working")
+                            job._registry_metadata = {"parent_sid": registered, "parent_harness": harness,
+                                "attempt_id": "order-attempt", "dispatch_depth": "1", "worker_type": "owner",
+                                "route_id": "order-route", "route_hash": "sha256:order"}
+                            job._registry_path = str(Path(tmp) / "jobs.log")
+                            seat = tidy.Seat("pane", "collection-order")
+                            tidy._append_ledger_entry(seat, {"event": "start", "harness": harness,
+                                                           "sid": registered, "ts": 1})
+                            if successor:
+                                tidy._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear",
+                                    "harness": harness, "from": registered, "sid": current, "ts": 2})
+                            def collect():
+                                # This is the production funnel order. The classifier
+                                # must not hide a root before edge/grace resolution.
+                                _mark_dispatch_child_sessions([root], [job])
+                                resolve_parent_edges([root], [job])
+                                self.assertFalse(root.is_child)
+                                self.assertEqual(job.parent_sid, registered)
+                            if grace:
+                                collect()
+                                self.assertEqual(job._parent_edge_sid, current)
+                            tidy._ledger_path(seat).write_text('{unreadable lineage\n')
+                            for _ in range(3):
+                                collect()
+                                self.assertEqual(job._parent_edge_sid, current if grace else None)
+                                self.assertFalse(job._parent_edge_promoted_orphan)
+                            collect()
+                            self.assertIsNone(job._parent_edge_sid)
+                            self.assertEqual(job._parent_edge_promoted_orphan, grace)
+
+    def test_collection_order_keeps_known_child_hiding_and_plugin_queue_isolation(self):
+        for source in ("jobs", "plugin-queue"):
+            with self.subTest(source=source):
+                model.reset_parent_edge_tracker()
+                root = self.session(sid="registered-parent")
+                child = self.session(sid="known-child", pid=11)
+                job = self.job(source=source)
+                job.cwd = root.cwd
+                job.parent_sid = root.session_id
+                job.parent_cwd = "/different/parent"
+                _mark_dispatch_child_sessions([root, child], [job])
+                resolve_parent_edges([root, child], [job])
+                self.assertFalse(root.is_child)
+                self.assertEqual(child.is_child, source == "jobs")
+                self.assertEqual(job._parent_edge_sid, root.session_id)
+
     def test_collector_hidden_current_thread_attaches_to_original_tui(self):
         for reverse in (False, True):
             with self.subTest(reverse=reverse):

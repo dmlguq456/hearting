@@ -341,7 +341,8 @@ def chain_end(harness: str, sid: str, *, read_context=None) -> tuple[str, str]:
         return sid, "unresolved"
 
 
-def _chain_end(graph: LineageGraph, harness: str, sid: str) -> tuple[str, str]:
+def _chain_end(graph: LineageGraph, harness: str, sid: str, *, traversed=None) -> tuple[str, str]:
+    """Resolve once, optionally retaining exact edges for the transition writer."""
     vertex = (harness, sid)
     if vertex in graph.unresolved:
         return sid, "unresolved"
@@ -357,6 +358,8 @@ def _chain_end(graph: LineageGraph, harness: str, sid: str) -> tuple[str, str]:
         target = next(iter(targets))
         if target in seen:
             return sid, "unresolved"
+        if traversed is not None:
+            traversed.add((harness, current, target))
         current, moved = target, True
         seen.add(current)
         if (harness, current) in graph.unresolved:
@@ -1429,7 +1432,8 @@ def _lineage_successor(rows_by_seat: dict, sid: str, harness: str) -> str:
     return sid if state == "unresolved" else end
 
 
-def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: str) -> tuple[str, str, str]:
+def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: str, *,
+                    traversed=None) -> tuple[str, str, str]:
     """Who answers for one logical job (jobs, route, hash, node) now.
 
     The latest row that binds the job names its holder (a later hand-off wins).  From there the
@@ -1449,7 +1453,7 @@ def _lineage_holder(graph: LineageGraph, key: tuple, registered: str, harness: s
     # the shared source-qualified graph can advance that exact holder without
     # another binding. A later legacy binding for a different job is not an
     # unbound edge, nor can chronological rows bypass a fork.
-    end, state = _chain_end(graph, harness, holder)
+    end, state = _chain_end(graph, harness, holder, traversed=traversed)
     return end, harness, state
 
 
@@ -2111,6 +2115,11 @@ def _record_locked(seat, harness: str, sid: str, event: str, source: str, now: f
     # confirmed clear hook.  Refresh only those selected logical keys, retaining
     # the snapshot rows as the original authority boundary.
     selected_keys = {_logical_key(binding) for binding in snapshot_bindings}
+    graph = _pass_lineage_graph()
+    transition = (harness, old, sid)
+    # The matched booking may have published this exact succession already.
+    # New retries use that same current holder's normal admission check.
+    refresh_actor = sid if transition in graph.edges else old
     refreshed = []
     for jobs_path in dict.fromkeys(str(binding.get("jobs") or "") for binding in snapshot_bindings):
         if not jobs_path or not Path(jobs_path).is_file():
@@ -2132,7 +2141,8 @@ def _record_locked(seat, harness: str, sid: str, event: str, source: str, now: f
                 if (aid and aid not in bound
                         and (jobs_key, *route_identity(meta)) in selected_keys):
                     fresh[aid] = (status, meta)
-            refreshed.extend(binding for binding, _status in _handover_candidates(harness, old, jobs_path, rows=fresh))
+            refreshed.extend(binding for binding, _status in _handover_candidates(
+                harness, refresh_actor, jobs_path, rows=fresh))
         except Exception:  # noqa: BLE001 - the original snapshot remains a safe fallback
             continue
     bindings = _deduplicate_bindings([*bindings, *refreshed])
@@ -2145,11 +2155,20 @@ def _record_locked(seat, harness: str, sid: str, event: str, source: str, now: f
     with binding_mutexes(snapshot_bindings):
         if read_snapshot(seat.key) != snap:
             return None
-        seats, error = _lineage_index()
-        if error:
+        try:
+            graph = _pass_lineage_graph()
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             return None
-        bindings = [binding for binding in bindings if _lineage_holder(
-            _pass_lineage_graph(), _logical_key(binding), str(binding.get("parent") or old), harness)[0] == old]
+        kept = []
+        for binding in bindings:
+            traversed = set()
+            holder, holder_harness, disposition = _lineage_holder(
+                graph, _logical_key(binding), str(binding.get("parent") or old), harness,
+                traversed=traversed)
+            if (disposition != "unresolved" and holder_harness == harness
+                    and (holder == old or holder == sid and transition in traversed)):
+                kept.append(binding)
+        bindings = kept
         row["bindings"] = bindings
         _append_transition_row(seat, row)
         refreshed_snapshot = dict(snap)

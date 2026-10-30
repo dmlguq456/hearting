@@ -301,18 +301,6 @@ def _prompt_process_session(pane, harness, info):
                 if (found.confidence == PROVEN
                         and peer_message.usable_session_id(found.session_id)):
                     claims.add(found.session_id)
-                elif harness == "claude":
-                    # A resume selector is native process evidence. Read actual argv
-                    # with its birth fence, never the terminal label's command string.
-                    start = _proc_start_ticks(pid)
-                    actual = _retire_process_record(pid)
-                    argv = (actual or {}).get("argv") or []
-                    selectors = [argv[i + 1] for i, token in enumerate(argv[:-1])
-                                 if token in {"--resume", "-r"}]
-                    if (len(selectors) == 1 and peer_message.usable_session_id(selectors[0])
-                            and argv and os.path.basename(argv[0]) == "claude"
-                            and start and _proc_start_ticks(pid) == start):
-                        claims.add(selectors[0])
     except Exception:
         return None, "target-observation-unavailable"
     if len(claims) > 1:

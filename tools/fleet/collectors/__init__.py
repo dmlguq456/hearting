@@ -167,7 +167,9 @@ def _mark_dispatch_child_sessions(sessions, jobs):
             if getattr(j, 'parent_sid', None) and not getattr(s, 'session_id', None):
                 continue
             parent_sid, _parent_harness = _effective_job_parent(j, read_context=parent_context)
-            if parent_sid and s.session_id and parent_sid == s.session_id:
+            if not parent_sid:
+                continue  # Unknown current lineage cannot prove this is a child.
+            if s.session_id and parent_sid == s.session_id:
                 continue
             if getattr(j, 'parent_cwd', None) and _same_path(s.cwd, j.parent_cwd):
                 continue

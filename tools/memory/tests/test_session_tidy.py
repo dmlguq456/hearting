@@ -5167,6 +5167,144 @@ class SeatHandoverTest(TidyCase):
         self.assertEqual(original["parent_sid"], "sid-A")
         self.assertNotIn("att-unselected", {b["attempt"] for b in rows[0]["bindings"]})
 
+    def book_clear(self, old, harness="claude", pane=PANE):
+        with self.iso.patched_environ({"HERDR_PANE_ID": pane}):
+            seat = self.seat(pane)
+            with st.seat_lock(seat.key):
+                clear._write_reservation({"schema": 1, "nonce": "booking-" + old,
+                    "status": "reserved", "created": st.now_epoch() - 4,
+                    "deadline": st.now_epoch() + 500, "seat": seat.as_dict(),
+                    "harness": harness, "sid": old, "card_generation": 0,
+                    "prompt_seq": st.read_prompt_seq(seat)})
+
+    def test_matched_booking_hook_preserves_exact_bindings_retries_and_onward_harness_transfer(self):
+        for harness, onward in (("claude", "codex"), ("codex", "opencode"), ("opencode", "claude")):
+            with self.subTest(harness=harness), self.iso.patched_environ():
+                old, new, last = [harness + "-" + suffix for suffix in "ABC"]
+                pane = "test:booking-" + harness
+                first = self.row(harness + "-before", parent=old, harness=harness,
+                                 route="rt-" + harness, node="selected")
+                # An inherited job retains its own registered parent.
+                ancestor = harness + "-ancestor"
+                inherited = self.row(harness + "-inherited", parent=ancestor, harness=harness,
+                                     route="rt-" + harness, node="inherited")
+                self.handover.record_retire_handover(ancestor, harness, old, harness,
+                    successor_seat=self.seat(pane), jobs=self.jobs, now=st.now_epoch() - 10)
+                self.assertEqual(self.snapshot(old, harness, pane, st.now_epoch() - 5), 2)
+                retry = self.row(harness + "-retry", parent=old, harness=harness,
+                                 route="rt-" + harness, node="selected", worker="frame")
+                self.row(harness + "-unselected", parent=old, harness=harness, node="unselected")
+                self.book_clear(old, harness, pane)
+                record = self.handover.record_locked
+                observed = []
+                def after_succession(seat, h, sid, event, source, now):
+                    graph = self.handover.lineage_graph()
+                    observed.append((h, old, sid) in graph.edges)
+                    return record(seat, h, sid, event, source, now)
+                with mock.patch.object(self.handover, "record_locked", side_effect=after_succession):
+                    _out, rows = self.start(new, harness=harness, pane=pane)
+                self.assertEqual(observed, [True], "exercise succession-before-record hook ordering")
+                expected = [self.handover.binding_of(self.jobs, meta) for meta in (first, inherited, retry)]
+                bindings = lambda values: {json.dumps(value, sort_keys=True) for value in values}
+                self.assertEqual(bindings(rows[-1]["bindings"]), bindings(expected))
+                snap = self.handover.read_snapshot(self.seat(pane).key)
+                self.assertEqual(bindings(snap["bindings"]), bindings(expected))
+                discovered = self.handover.current_bindings(harness, new, self.jobs)
+                self.assertTrue(bindings(expected) <= bindings(discovered))
+                # Duplicate hook callbacks do not duplicate or trim the transition.
+                _out, again = self.start(new, harness=harness, event="prompt", source="", pane=pane)
+                self.assertEqual(again, rows)
+                self.assertEqual(self.handover.read_snapshot(self.seat(pane).key), snap)
+                registry_bytes = self.jobs.read_bytes()
+                self.jobs.write_bytes(b"")
+                try:
+                    for meta in (first, inherited, retry):
+                        answer = self.handover.resolve_attempt_recipient(self.jobs, meta["attempt_id"],
+                            registered=meta["parent_sid"], harness=harness)
+                        self.assertEqual((answer.session_id, answer.harness), (new, harness))
+                finally:
+                    self.jobs.write_bytes(registry_bytes)
+                moved = self.handover.record_retire_handover(new, harness, last, onward,
+                    successor_seat=self.seat(pane + "-onward"), jobs=self.jobs)
+                self.assertEqual(bindings(moved["bindings"]), bindings(discovered))
+                for meta in (first, inherited, retry):
+                    answer = self.handover.resolve_attempt_recipient(self.jobs, meta["attempt_id"],
+                        registered=meta["parent_sid"], harness=harness)
+                    self.assertEqual((answer.session_id, answer.harness), (last, onward))
+                # Losing registry rows must preserve the same exact attempt evidence.
+                registry_bytes = self.jobs.read_bytes()
+                self.jobs.write_bytes(b"")
+                try:
+                    for meta in (first, inherited, retry):
+                        answer = self.handover.resolve_attempt_recipient(self.jobs, meta["attempt_id"],
+                            registered=meta["parent_sid"], harness=harness)
+                        self.assertEqual((answer.session_id, answer.harness), (last, onward))
+                finally:
+                    self.jobs.write_bytes(registry_bytes)
+
+    def test_second_matched_booking_keeps_original_and_new_registered_parents(self):
+        first = self.row("book-original")
+        self.snapshot(now=st.now_epoch() - 5)
+        self.book_clear("sid-A")
+        self.start("sid-B")
+        own = self.row("book-own-B", parent="sid-B", node="own-B")
+        self.snapshot(sid="sid-B", now=st.now_epoch() - 5)
+        retry = self.row("book-retry-B", parent="sid-B", node="own-B", worker="frame")
+        self.book_clear("sid-B")
+        _out, rows = self.start("sid-C")
+        expected = {json.dumps(self.handover.binding_of(self.jobs, meta), sort_keys=True)
+                    for meta in (first, own, retry)}
+        self.assertEqual({json.dumps(b, sort_keys=True) for b in rows[-1]["bindings"]}, expected)
+        with self.iso.patched_environ():
+            self.assertEqual({json.dumps(b, sort_keys=True) for b in
+                self.handover.read_snapshot(self.seat().key)["bindings"]}, expected)
+            self.assertEqual({b["attempt"] for b in self.handover.current_bindings("claude", "sid-C", self.jobs)},
+                             {"book-original", "book-own-B", "book-retry-B"})
+
+    def test_matched_booking_still_excludes_foreign_holder_fork_cycle_and_unreadable_authority(self):
+        with self.iso.patched_environ():
+            for case in ("foreign", "foreign-same-sid", "fork", "cycle", "unreadable"):
+                with self.subTest(case=case):
+                    old, new = case + "-A", case + "-B"
+                    pane = "test:excluded-" + case
+                    meta = self.row(case + "-attempt", parent=old, route="rt-" + case)
+                    self.snapshot(old, "claude", pane, st.now_epoch() - 5)
+                    self.book_clear(old, pane=pane)
+                    record = self.handover.record_locked
+                    path = st._ledger_path(self.seat(pane))
+                    observed = []
+                    def changed_authority(seat, harness, sid, event, source, now):
+                        self.assertIn((harness, old, sid), self.handover.lineage_graph().edges)
+                        before = path.read_bytes()
+                        if case.startswith("foreign"):
+                            # A separate explicit binding to B is not evidence that
+                            # this job traversed the booking's A -> B transition.
+                            st._append_ledger_entry(seat, {"event": "handover", "harness": harness,
+                                "from": "another-holder", "sid": new if case == "foreign-same-sid" else "elsewhere",
+                                "bindings": [self.handover.binding_of(self.jobs, meta)], "ts": now + 1})
+                        elif case == "unreadable":
+                            path.write_text('{broken authority\n')
+                        else:
+                            st._append_ledger_entry(seat, {"event": "succession", "source": "tidy-clear",
+                                "harness": harness, "from": new if case == "cycle" else old,
+                                "sid": old if case == "cycle" else "fork-target", "ts": now + 1})
+                        try:
+                            row = record(seat, harness, sid, event, source, now)
+                            observed.append(row)
+                            return row
+                        finally:
+                            if case == "unreadable":
+                                path.write_bytes(before)
+                    with mock.patch.object(self.handover, "record_locked", side_effect=changed_authority):
+                        self.start(new, pane=pane)
+                    self.assertEqual(len(observed), 1)
+                    if case.startswith("foreign"):
+                        self.assertEqual(observed[0]["bindings"], [])
+                    else:
+                        self.assertIsNone(observed[0])
+                        self.assertEqual(self.handover.read_snapshot(self.seat(pane).key)["bindings"],
+                                         [self.handover.binding_of(self.jobs, meta)])
+
     def test_the_clear_start_reads_the_registry_once_and_asks_only_about_new_attempts(self):
         # The card hook has seconds: a full registry walk or route verification per binding of
         # the same job can let a cleared supervisor's SessionStart time out and lose its card.
