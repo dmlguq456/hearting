@@ -666,6 +666,31 @@ class Case4RetryLinkTest(unittest.TestCase):
     predecessor, whatever its round admission; only a transport failure does.
     """
 
+    def test_strictly_unstarted_cancellation_is_not_an_executed_retry_predecessor(self):
+        row = {"_status": "done", "attempt_id": "att-unstarted",
+               "launch_claimed": "0", "launch_outcome": "never-launched",
+               "note": "dead-parent-exited", "failure_class": "cancelled"}
+        original = dict(row)
+        self.assertTrue(DC.terminal_attempt_never_started(row["_status"], row))
+        self.assertEqual(RA.retry_predecessor([row]), "")
+        decision = DC.decide_attempt("done", row, process_state="quiescent")
+        self.assertFalse(decision.retry_allowed)
+        self.assertEqual(row, original)
+
+    def test_incomplete_or_contradictory_no_start_keeps_existing_handling(self):
+        base = {"_status": "done", "attempt_id": "att-unproven",
+                "launch_claimed": "0", "launch_outcome": "never-launched",
+                "note": "dead-parent-exited", "failure_class": "cancelled",
+                "_terminal_never_started": True}
+        for changes in ({"launch_claimed": "1"}, {"launch_claimed": ""},
+                        {"launch_started": "1"}, {"pid": "123"},
+                        {"launch_outcome": ""}, {"terminal_conflict": "1"},
+                        {"conflicting_failure_class": "runtime"}):
+            row = {**base, **changes}
+            with self.subTest(changes=changes):
+                self.assertFalse(DC.terminal_attempt_never_started(row["_status"], row))
+                self.assertEqual(RA.retry_predecessor([row]), row["attempt_id"])
+
     def test_a_readable_result_is_never_a_retry_predecessor(self):
         latest = _fail_row("att-0c43", automatic_retry_of="att-4cf2")
         self.assertEqual(RA.retry_predecessor([latest]), "")

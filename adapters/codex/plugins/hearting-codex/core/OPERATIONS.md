@@ -966,6 +966,10 @@ retain their existing handling. Review-round and owner continuation budgets do
 not reset. Parent monitoring rechecks the exact admitted registry paths and
 process or supervisor lease, without repeating Git repository discovery: a Git
 timeout is not evidence that the parent ended.
+An exact terminal registration with the existing strict proof of no launch
+is not a failed execution to inherit as a transport retry predecessor. The
+next authorized launch keeps the ordinary round, identity, cancellation and
+current-owner checks; the old cancellation remains recorded and non-retryable.
 Terminal-intent receipts may seal an empty `job_registry`; a shared carrier
 supplies the exact registry it already verified. Delivery follows every
 verified, launched successor and waits for an actual final receipt ack. A claim,
