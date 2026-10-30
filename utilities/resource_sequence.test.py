@@ -438,6 +438,10 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         original_fields, original = rows[original_attempt]
         logical = DR._logical_key(route, original)
         family = DR._digest(logical)
+        prior = DR._read(DR._record_path(jobs, family))
+        if prior and prior['original_attempt_id'] != original_attempt:
+            logical = {**logical, 'after_death': original_attempt}
+            family = DR._digest(logical)
         replacement = 'att-' + hashlib.sha256(('replacement:' + family).encode()).hexdigest()[:48]
         lease = DC.supervisor_lease_path(jobs, replacement)
         record = {'schema': DR.SCHEMA, 'family_id': family, 'logical_node': logical,
@@ -445,13 +449,17 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
                   'ordinal': 1}
         DR._once(DR._record_path(jobs, family), record)
         DR._reserve_source(jobs, original_attempt, family)
-        original.update(note='dead-exact-pid', failure_class='contract',
-                        replacement_family_id=family, replacement_claim_digest=DR._digest(record),
-                        replacement_attempt_id=replacement, replacement_ordinal='1')
+        original.update(note='dead-exact-pid', failure_class='contract')
+        if not original.get('replacement_original_attempt_id'):
+            original.update(replacement_family_id=family,
+                            replacement_claim_digest=DR._digest(record),
+                            replacement_attempt_id=replacement, replacement_ordinal='1')
         source_fields = list(original_fields)
         source_fields[1] = 'done'
         source_fields[5] = ','.join(f'{key}={value}' for key, value in original.items())
         candidate = {**original, 'attempt_id': replacement,
+                     'replacement_family_id': family,
+                     'replacement_claim_digest': DR._digest(record),
                      'replacement_original_attempt_id': original_attempt,
                      'automatic_retry_of': original_attempt, 'launch_claimed': '1',
                      'launch_started': '1', 'supervisor_lease_file': str(lease),
@@ -474,9 +482,11 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         lease_context = DC.hold_supervisor_lease(jobs, replacement, lease)
         lease_context.__enter__()
         self.addCleanup(lease_context.__exit__, None, None, None)
-        INPUT.initialize_owner_input(jobs, replacement, 'claude-session-resume')
+        transport = ('codex-active-turn' if candidate['harness'] == 'codex'
+                     else f"{candidate['harness']}-session-resume")
+        INPUT.initialize_owner_input(jobs, replacement, transport)
         owner_input = INPUT.OwnerInput(jobs, replacement, session_id,
-                                       'claude-session-resume', lambda _: None)
+                                       transport, lambda _: None)
         self.addCleanup(owner_input.close)
         return replacement, owner_input
 
@@ -3374,6 +3384,115 @@ class ResourceSequenceTest(FIX.WorkflowFixture):
         resource['parent_attempt_id'] = owner_attempt
         resource['owner_wait']['parent_attempt_id'] = 'att-foreign'
         self.assertFalse(SUP._owner_input_is_current(route, armed, resource, owner_attempt, 'same-native'))
+
+    def _resource_settled_before_owner_replacement(self, hops=1, *, harness='claude'):
+        route, path, jobs, registry, _output, ledger = self.fixture()
+        origin, _origin_input = self.live_owner(route, jobs, registry, harness=harness)
+        self.record_original_owner_exit(route, jobs, registry, origin)
+        self.assertEqual(SUP.poll_once(route, ledger)[0]['action'], 'wait-next-resource')
+        settler, current_input = self.launched_replacement_owner(
+            route, jobs, origin, session_id='settler-native')
+        self.assertTrue(SUP.admit_owner_successor_start(
+            route, 'run-verify', jobs, settler, 'settler-native'))
+        marker_path = SUP.route_module().completion_dir(
+            route['route_id'], jobs=jobs) / 'full-run.json'
+        marker_bytes = marker_path.read_bytes()
+        resource_bytes = registry.read_bytes()
+        current = settler
+        for index in range(hops):
+            current_input.close()
+            current, current_input = self.launched_replacement_owner(
+                route, jobs, current, session_id=f'current-native-{index}')
+        return (route, path, jobs, registry, ledger, origin, settler, current,
+                f'current-native-{hops - 1}', marker_path, marker_bytes, resource_bytes)
+
+    def test_settled_resource_marker_survives_later_owner_replacements(self):
+        for harness, hops in ((harness, hops)
+                              for harness in ('claude', 'codex', 'opencode') for hops in (1, 3)):
+            with self.subTest(harness=harness, later_replacements=hops), self.subfixture():
+                (route, _path, jobs, registry, ledger, _origin, settler, current,
+                 session, marker_path, marker_bytes, resource_bytes) = (
+                    self._resource_settled_before_owner_replacement(hops, harness=harness))
+                node = WS.route_node(route, 'full-run')
+                marker = json.loads(marker_bytes)
+                self.assertEqual(DC.gate_currency(
+                    route, node, marker_path, marker, jobs=jobs).state, 'current')
+                resource = json.loads(resource_bytes)['runs']['fixture-run']
+                self.assertIsNotNone(WAIT.current_responsibility(
+                    resource, route=route, owner_attempt_id=settler,
+                    session_id='settler-native', jobs=str(jobs), historical=True))
+                self.assertIsNone(WAIT.current_responsibility(
+                    resource, route=route, owner_attempt_id=settler,
+                    session_id='settler-native', jobs=str(jobs)))
+                for _repeat in range(2):
+                    self.assertTrue(SUP.admit_owner_successor_start(
+                        route, 'run-verify', jobs, current, session))
+                self.assertEqual(ledger.state()['nodes']['full-run']['evidence'][
+                    'owner_attempt_id'], settler)
+                self.assertEqual(len(ledger.claims()), 1)
+                self.assertEqual(marker_path.read_bytes(), marker_bytes)
+                self.assertEqual(registry.read_bytes(), resource_bytes)
+
+    def test_historical_resource_owner_requires_verified_launched_lineage(self):
+        for mutation in ('settler-unlaunched', 'settler-route', 'missing-first-claim',
+                         'later-claim-digest'):
+            with self.subTest(mutation=mutation), self.subfixture():
+                (route, _path, jobs, _registry, ledger, origin, settler, current,
+                 _session, marker_path, marker_bytes, resource_bytes) = (
+                    self._resource_settled_before_owner_replacement())
+                import dispatch_replacement as DR
+                rows = DR._rows(jobs.read_text().splitlines())
+                if mutation == 'missing-first-claim':
+                    family = rows[origin][1]['replacement_family_id']
+                    DR._record_path(jobs, family).unlink()
+                else:
+                    target = current if mutation == 'later-claim-digest' else settler
+                    fields, metadata = rows[target]
+                    if mutation == 'settler-unlaunched':
+                        metadata['launch_started'] = '0'
+                    elif mutation == 'settler-route':
+                        metadata['owner_route_hash'] = 'sha256:foreign'
+                    else:
+                        metadata['replacement_claim_digest'] = 'f' * 64
+                    fields[5] = ','.join(f'{key}={value}' for key, value in metadata.items())
+                    jobs.write_text('\n'.join(
+                        '\t'.join(fields) if DC.row_has_attempt(line.split('\t')[5], target)
+                        else line for line in jobs.read_text().splitlines()) + '\n')
+                resource = json.loads(resource_bytes)['runs']['fixture-run']
+                self.assertIsNone(WAIT.current_responsibility(
+                    resource, route=route, owner_attempt_id=settler,
+                    session_id='settler-native', jobs=str(jobs), historical=True))
+                self.assertNotEqual(DC.gate_currency(
+                    route, WS.route_node(route, 'full-run'), marker_path,
+                    json.loads(marker_bytes), jobs=jobs).state, 'current')
+                self.assertEqual(marker_path.read_bytes(), marker_bytes)
+                self.assertEqual(len(ledger.claims()), 1)
+
+    def test_replacement_resource_start_keeps_fresh_input_and_resource_checks(self):
+        for mutation in ('sentinel', 'resource-body', 'pending-correction'):
+            with self.subTest(mutation=mutation), self.subfixture():
+                (route, _path, jobs, registry, ledger, _origin, _settler, current,
+                 session, marker_path, marker_bytes, resource_bytes) = (
+                    self._resource_settled_before_owner_replacement())
+                data = json.loads(resource_bytes)
+                if mutation == 'sentinel':
+                    Path(data['runs']['fixture-run']['sentinel']).write_text('7\n')
+                elif mutation == 'resource-body':
+                    data['runs']['fixture-run']['command'].append('changed')
+                    registry.write_text(json.dumps(data))
+                else:
+                    import dispatch_owner_input as INPUT
+                    with mock.patch.object(RA, 'correction_source_session',
+                                           return_value='fixture-parent-session'):
+                        INPUT.submit(jobs, current, 'Keep the pending correction',
+                                     request_id='historical-successor-correction')
+                before = registry.read_bytes(), ledger.journal_path.read_bytes()
+                with self.assertRaises(SUP.SupervisorError):
+                    SUP.admit_owner_successor_start(
+                        route, 'run-verify', jobs, current, session)
+                self.assertEqual((registry.read_bytes(), ledger.journal_path.read_bytes()), before)
+                self.assertEqual(marker_path.read_bytes(), marker_bytes)
+                self.assertEqual(len(ledger.claims()), 1)
 
     def test_replacement_owner_rejects_invalid_resource_owner_pid_with_proven_lineage(self):
         for owner_pid in (True, False, 0, -1, 999999999.0, 'invalid', '0', None):
