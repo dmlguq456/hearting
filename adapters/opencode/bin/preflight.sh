@@ -253,7 +253,8 @@ sys.path.insert(0, str(pathlib.Path(sys.argv[1]) / "tools/install"))
 import projector, runtime_activation
 home = pathlib.Path(sys.argv[3])
 state = projector.opencode_activation(home)
-root = pathlib.Path(state.get("active_root") or sys.argv[2]).resolve()
+# The installer renders the guard import from this same unresolved root.
+root = pathlib.Path(state.get("active_root") or sys.argv[2])
 layout = projector.opencode_guard_layout(root, home)
 issues = projector.opencode_guard_health(layout) + runtime_activation.duplicate_sources("opencode")
 scan = set()
