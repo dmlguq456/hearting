@@ -246,19 +246,29 @@ def ack_rows(payload, rows):
     session_id = payload.get("session_id")
     if not session_id:
         return
-    env = _sweep_env(session_id)
-    for row in rows:
-        watch_id = row.get("watch_id")
-        if not watch_id:
-            continue
-        try:
-            subprocess.run(
-                [sys.executable, str(_PEER_STEWARD_PY), "ack", str(watch_id),
-                 "--carrier", "userprompt-sweep"],
-                capture_output=True, timeout=5, env=env,
-            )
-        except Exception:
-            continue
+    watch_ids = [str(row["watch_id"]) for row in rows[:_SWEEP_MAX] if row.get("watch_id")]
+    if not watch_ids:
+        return
+    # Load the existing command once. Five independent interpreter/import
+    # starts can exhaust the prompt's deadline under load, even when each ACK
+    # finishes inside its own timeout. Keep the entire ACK phase bounded by
+    # the same five seconds, and revalidate every watch through normal `ack`.
+    script = """
+import runpy, sys
+steward = runpy.run_path(sys.argv[1])
+for watch_id in sys.argv[2:]:
+    try:
+        steward["main"](["ack", watch_id, "--carrier", "userprompt-sweep"])
+    except (Exception, SystemExit):
+        continue
+"""
+    try:
+        subprocess.run(
+            [sys.executable, "-c", script, str(_PEER_STEWARD_PY), *watch_ids],
+            capture_output=True, timeout=5, env=_sweep_env(session_id),
+        )
+    except Exception:
+        pass
 def _is_helper_process():
     """F-100c: a title/summary refresher or memory distiller runs `claude -p` with the
     user's prompt text inside ITS prompt, so the trailer would make the helper look like

@@ -130,6 +130,9 @@ owns further observation. Do not turn uncertain history into a new retry rule.
 Observational callbacks must not delay the operation they observe. Provider
 telemetry must let the runtime consume its original response without waiting
 for a cloned body or its reader cancellation.
+Prompt fallback acknowledges its displayed watch receipts in one bounded child
+runtime; each receipt still uses the shared current-recipient ACK checks after
+the context has been emitted.
 
 ## 5. Remove duplicated decisions before stacking exceptions
 

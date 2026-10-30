@@ -194,55 +194,87 @@ class PendingWaitTest(unittest.TestCase):
             self.assertGreater(first_parse_count, 0)
             self.assertEqual(metadata_parse.call_count, first_parse_count)
 
-    def test_owner_handover_lineage_survives_cached_generation_for_s2_and_s3(self):
-        route, _attempt, _lease, metadata = self._blocked_owner_fixture()
-        # A real-shaped owner has a registered parent but no parent_harness. The
-        # seat ledger hands its exact route binding to a successor on another harness.
-        metadata += ",dispatch_depth=1,route_node="
+    def _handed_over_owner_fixture(self):
+        route, attempt, _lease, metadata = self._blocked_owner_fixture()
+        # Transfer the open job through the existing writer, then observe its
+        # blocked result. The parent carrier identifies opencode without a
+        # parent_harness field; the typed handover moves its exact job to Claude.
         instant = time.time()
+        self.jobs.write_text(
+            f"{instant}\topen\t/repo\t/wt\towner\t" + metadata + "\n", encoding="utf-8")
+        state_home = self.root / "xdg-state"
+        import dispatch_seat_handover as handover
+        import session_tidy as tidy
+        seat = tidy.Seat("pane", "fixture-seat", "fixture:pane")
+        with mock.patch.dict("os.environ", {"XDG_STATE_HOME": str(state_home)}):
+            row = handover.record_retire_handover(
+                "old-parent", "opencode", "new-parent", "claude",
+                jobs=self.jobs, now=instant - 1, successor_seat=seat)
+        self.assertIsNotNone(row)
+        self.assertEqual(row["bindings"], [{
+            "jobs": str(self.jobs.resolve()), "route": route["route_id"],
+            "hash": route["route_hash"], "node": "", "attempt": attempt, "parent": "old-parent"}])
         self.jobs.write_text(
             f"{instant}\tdone\t/repo\t/wt\towner\t" + metadata +
             ",note=dead-worker-blocked,failure_class=blocked\n", encoding="utf-8")
-
-        state_home = self.root / "xdg-state"
-        tidy_root = state_home / "hearting" / "session-tidy"
-        (tidy_root / "handover").mkdir(parents=True)
-        (tidy_root / "sessions").mkdir(parents=True)
-        seat_key = "fixture-seat"
-        binding = {"jobs": str(self.jobs.resolve()), "route": route["route_id"],
-                   "hash": route["route_hash"], "node": ""}
-        snapshot = {"schema": 1, "seat": {"key": seat_key},
-                    "from": {"harness": "codex", "sid": "old-parent"},
-                    "bindings": [binding]}
-        (tidy_root / "handover" / f"{seat_key}.json").write_text(
-            json.dumps(snapshot), encoding="utf-8")
-        handover = {"event": "handover", "from": "old-parent", "sid": "new-parent",
-                    "harness": "claude", "ts": instant - 1, "bindings": [binding]}
-        (tidy_root / "sessions" / f"{seat_key}.jsonl").write_text(
-            json.dumps(handover) + "\n", encoding="utf-8")
-
         import dispatch_registry_cache as registry_cache
         H._GENERATION_CACHE.clear()
         with registry_cache.registry_read_scope():
             candidate_view = registry_cache.registry_snapshot(self.jobs).view
-        route_candidates = H._generation_candidates(candidate_view)[3]
-        self.assertTrue(route_candidates)
+        self.assertTrue(H._generation_candidates(candidate_view)[3])
         wait = {"gate_id": "fixture-gate", "kind": "decision", "source": "hearting-ledger",
                 "waiting_since": instant, "route_id": route["route_id"]}
+        return state_home, instant, wait, candidate_view
+
+    def _assert_wait_owners(self, result, session, harness):
+        attributed = {item["source"]: item for item in result["items"]}
+        self.assertEqual(set(attributed), {"S2", "S3"}, repr(result))
+        for item in attributed.values():
+            self.assertEqual(item["attribution"], "lineage" if session else "unattributed")
+            self.assertEqual(item["owner"]["session_id"], session)
+            self.assertEqual(item["owner"]["harness"], harness)
+
+    def test_owner_handover_lineage_survives_cached_generation_for_s2_and_s3(self):
+        state_home, instant, wait, candidate_view = self._handed_over_owner_fixture()
         with mock.patch.dict("os.environ", {"XDG_STATE_HOME": str(state_home)}), \
                 mock.patch.object(H, "pending_human_waits", return_value=[wait]):
             first = H.read_answer_waits(jobs_paths=[self.jobs], now=instant)
             second = H.read_answer_waits(jobs_paths=[self.jobs], now=instant + 1)
         for result in (first, second):
-            attributed = {item["source"]: item for item in result["items"]}
-            self.assertEqual(set(attributed), {"S2", "S3"}, repr(result))
-            for item in attributed.values():
-                self.assertEqual(item["attribution"], "lineage")
-                self.assertEqual(item["owner"]["session_id"], "new-parent")
-                self.assertEqual(item["owner"]["harness"], "claude")
+            self._assert_wait_owners(result, "new-parent", "claude")
+        import dispatch_registry_cache as registry_cache
         with registry_cache.registry_read_scope():
             view = registry_cache.registry_snapshot(self.jobs).view
         self.assertIn((view.path_identity, view.signature), H._GENERATION_CACHE)
+        self.assertIs(H._generation_candidates(view), H._generation_candidates(candidate_view))
+
+    def test_cached_generation_does_not_turn_damaged_handover_into_parent_authority(self):
+        state_home, instant, wait, candidate_view = self._handed_over_owner_fixture()
+        snapshot_path = state_home / "hearting/session-tidy/handover/fixture-seat.json"
+        original = snapshot_path.read_bytes()
+        with mock.patch.dict("os.environ", {"XDG_STATE_HOME": str(state_home)}), \
+                mock.patch.object(H, "pending_human_waits", return_value=[wait]):
+            self._assert_wait_owners(H.read_answer_waits(jobs_paths=[self.jobs], now=instant),
+                                     "new-parent", "claude")
+            for missing in ("kind", "attempt"):
+                with self.subTest(missing=missing):
+                    damaged = json.loads(original)
+                    if missing == "kind":
+                        del damaged["seat"]["kind"]
+                    else:
+                        del damaged["bindings"][0]["attempt"]
+                    snapshot_path.write_text(json.dumps(damaged), encoding="utf-8")
+                    for offset in (1, 2):
+                        self._assert_wait_owners(
+                            H.read_answer_waits(jobs_paths=[self.jobs], now=instant + offset), None, None)
+                    snapshot_path.write_bytes(original)
+                    self._assert_wait_owners(
+                        H.read_answer_waits(jobs_paths=[self.jobs], now=instant + 3), "new-parent", "claude")
+        import dispatch_registry_cache as registry_cache
+        with registry_cache.registry_read_scope():
+            view = registry_cache.registry_snapshot(self.jobs).view
+        self.assertEqual(view.signature, candidate_view.signature)
+        self.assertIs(H._generation_candidates(view), H._generation_candidates(candidate_view))
 
     def test_advisory_lease_contention_keeps_reader_safe_and_unknown(self):
         _route, attempt, lease, metadata = self._blocked_owner_fixture()

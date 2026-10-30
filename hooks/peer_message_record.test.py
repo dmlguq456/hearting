@@ -745,11 +745,47 @@ class SweepTest(_BaseTest):
         self.assertEqual(proc.stdout, b"")
 
     def test_sweep_is_capped_at_five_lines(self):
+        watch_ids = set()
         for index in range(6):
-            self._arm_and_complete(f"peer-{index}")
+            watch_ids.add(self._arm_and_complete(f"peer-{index}"))
         context = self._context(self._prompt())
         receipt_lines = [l for l in context.splitlines() if l.startswith("state=")]
         self.assertEqual(len(receipt_lines), 5)
+        displayed = {dict(item.split("=", 1) for item in line.split())["watch_id"]
+                     for line in receipt_lines}
+        root = self._watch_root()
+        acked = {watch_id for watch_id in watch_ids if (root / f"{watch_id}.ack.json").exists()}
+        self.assertEqual(acked, displayed)
+        remaining = watch_ids - displayed
+        self.assertEqual(len(remaining), 1)
+        second = self._context(self._prompt())
+        self.assertEqual(sum(line.startswith("state=") for line in second.splitlines()), 1)
+        self.assertIn(f"watch_id={remaining.pop()}", second)
+        self.assertEqual(self._prompt().stdout, b"")
+
+    def test_ack_batch_keeps_later_receipts_after_handler_failures(self):
+        spec = importlib.util.spec_from_file_location("sweep_ack_hook", _HOOK)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        attempts = self.tmp_root / "ack-attempts.jsonl"
+        stub = self.tmp_root / "failing-ack.py"
+        stub.write_text("\n".join([
+            "import json, os",
+            "def main(argv):",
+            f"    with open({str(attempts)!r}, 'a') as handle:",
+            "        handle.write(json.dumps([argv, os.environ.get('CLAUDE_CODE_SESSION_ID')]) + '\\n')",
+            "    if argv[1] == 'exit': raise SystemExit(7)",
+            "    if argv[1] == 'error': raise RuntimeError('fixture ACK failure')",
+            "    return 0",
+        ]) + "\n", encoding="utf-8")
+        with mock.patch.object(hook, "_PEER_STEWARD_PY", stub), \
+                mock.patch.dict(os.environ, self.env, clear=True):
+            hook.ack_rows({"session_id": self.session},
+                          [{"watch_id": watch_id} for watch_id in ("exit", "error", "later")])
+        recorded = [json.loads(line) for line in attempts.read_text().splitlines()]
+        self.assertEqual(recorded, [
+            [["ack", watch_id, "--carrier", "userprompt-sweep"], self.session]
+            for watch_id in ("exit", "error", "later")])
 
     def _hook_copy_with_broken_steward(self):
         # E-m5: the hook calls `_PEER_STEWARD_PY`, built from `__file__` at
