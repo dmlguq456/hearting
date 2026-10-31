@@ -209,28 +209,17 @@ def _check_saved_variant(adapter: str, model: str | None, variant: str | None,
     """Reject only what the OpenCode catalog observation can decide.
 
     ``None`` observation means the caller did not supply a catalog (V1 or a
-    non-opencode harness): the previous contract is unchanged. An unsupported
-    exact combination is always rejected; an unobserved model rejects only an
-    explicit variant, while an omitted suffix keeps the existing preserved
-    budget behavior.
+    non-opencode harness): the previous contract is unchanged. Only an observed
+    unsupported exact combination is rejected; an unobserved model keeps the
+    person's choice, as launch placement excludes only confirmed-unsupported pairs.
     """
     if adapter != "opencode" or observation is None:
         return
     variants = observation.get("variants") if isinstance(observation, dict) else None
     observed = variants.get(model) if isinstance(variants, dict) else None
-    support = opencode_runtime.variant_support(model, variant, observed)
-    if support == "unsupported":
+    if opencode_runtime.variant_support(model, variant, observed) == "unsupported":
         raise ModelSettingsUsageError(
             f"Variant unavailable for {model}: {variant} (지원: {', '.join(observed)})")
-    if support != "unknown" or explicit_budget in (None, "runtime-default"):
-        return
-    state = observation.get("state") if isinstance(observation, dict) else None
-    reason = ("catalog-state-unknown" if state not in ("available", "empty")
-              else "model-not-observed")
-    raise ModelSettingsUsageError(
-        f"Variant unverifiable for {model}: {variant} ({reason}) - the OpenCode catalog "
-        "did not report this model's variants; save without an explicit variant, "
-        "or use @runtime-default")
 
 
 def _backup(path: Path, payload: bytes, mode: int) -> Path:

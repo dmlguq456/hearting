@@ -501,23 +501,20 @@ class ModelSettingsCliTest(unittest.TestCase):
         self.assertEqual(result["new_budget"], "max")
         self.assertIn("model/opencode-go/glm-5.3-flash:max", accepted.read_text())
 
-        # (d) An unknown catalog state and an unobserved model name both refuse an
-        # explicit variant with the fixed V-UNKNOWN text and reason token.
-        for label, observed, reason in (
-                ("state", unknown, "catalog-state-unknown"),
+        # (d) An unknown catalog state or an unobserved model keeps the person's
+        # explicit variant: only an observed unsupported pair is refused.
+        for label, observed in (
+                ("state", unknown),
                 ("model", {"state": "available", "models": ("opencode-go/glm-5.3-flash",),
                            "variants": {"opencode-go/glm-5.3-flash": ("low", "high", "max")},
-                           "observed_at": 1.0}, "model-not-observed")):
+                           "observed_at": 1.0})):
             with self.subTest(unknown=label):
-                unknown_home = self.root / ("variant-unknown-" + label)
-                with self.assertRaisesRegex(
-                        settings.ModelSettingsUsageError,
-                        rf"Variant unverifiable for opencode-go/gemini-4-argon: xhigh "
-                        rf"\({reason}\)"):
-                    settings.set_model("opencode", "profile/top",
-                                       "opencode-go/gemini-4-argon@xhigh",
-                                       runtime=unknown_home, environ=self.env,
-                                       source_root=ROOT, variant_observation=observed)
+                result = settings.set_model("opencode", "profile/top",
+                                            "opencode-go/gemini-4-argon@xhigh",
+                                            runtime=self.root / ("variant-unknown-" + label),
+                                            environ=self.env, source_root=ROOT,
+                                            variant_observation=observed)
+                self.assertEqual(result["new_budget"], "xhigh")
 
         # (e) A suffix omission keeps the preserved budget even when unobserved.
         omitted_home = self.root / "variant-omitted"
@@ -607,17 +604,15 @@ class ModelSettingsCliTest(unittest.TestCase):
         self.assertEqual(code, 0, output)
         self.assertEqual(json.loads(output)["new_budget"], "max")
 
-    def test_opencode_cli_rejects_an_explicit_variant_when_the_catalog_is_unknown(self):
+    def test_opencode_cli_keeps_an_explicit_variant_when_the_catalog_is_unknown(self):
         import json
         path = self.user_path("opencode")
         with mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "2.0.32"}):
             code, output = self.run_cli("opencode", "profile/top",
                                         "opencode-go/gemini-4-argon@xhigh", "--json")
-        self.assertEqual(code, 64, output)
-        result = json.loads(output)
-        self.assertIn("Variant unverifiable for opencode-go/gemini-4-argon: xhigh "
-                      "(catalog-state-unknown)", result["error"])
-        self.assertFalse(path.parent.exists())
+        self.assertEqual(code, 0, output)
+        self.assertEqual(json.loads(output)["new_budget"], "xhigh")
+        self.assertIn("model/opencode-go/gemini-4-argon:xhigh", path.read_text())
         # The context-window scalar never needs the variant catalog.
         with mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "2.0.32"}):
             code, output = self.run_cli("opencode", "context-window", "800000", "--json")
