@@ -365,10 +365,20 @@ def cmd_model(args):
                     "exit": EXIT_BLOCKED, "runtime": args.harness, "config_path": None,
                     "error": str(exc), "lines": [f"model get: blocked: {exc}"]}
     try:
+        variant_observation = None
+        if args.harness == "opencode" and not (
+                model_settings._norm(args.target) == "context-window"
+                and "/" not in args.target):
+            utilities = Path(__file__).resolve().parents[2] / "utilities"
+            if str(utilities) not in sys.path:
+                sys.path.insert(0, str(utilities))
+            import opencode_runtime
+            variant_observation = opencode_runtime.read_model_catalog()
         result = model_settings.set_model(
             args.harness, args.target, args.model,
             runtime=paths.runtime_home(args.harness, "global"),
             source_root=paths.agent_home(), dry_run=args.dry_run,
+            variant_observation=variant_observation,
         )
     except model_settings.ModelSettingsUsageError as exc:
         result = {

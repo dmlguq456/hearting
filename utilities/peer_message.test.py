@@ -323,6 +323,8 @@ class PeerMessageTest(_TmpRootMixin, unittest.TestCase):
 
     def test_flock_serializes_concurrent_writers(self):
         import multiprocessing
+        # Local targets need fork; Python 3.14 defaults to forkserver.
+        multiprocessing = multiprocessing.get_context("fork")
 
         def worker(n):
             for i in range(20):
@@ -3865,6 +3867,8 @@ class PendingLockLifetimeTest(_TmpRootMixin, unittest.TestCase):
 
     def test_t5_empty_and_sigkill_directory_residue_is_reclaimed(self):
         import multiprocessing
+        # Local targets need fork; Python 3.14 defaults to forkserver.
+        multiprocessing = multiprocessing.get_context("fork")
         path = self.lock_path("prepare-residue")
         path.mkdir(mode=0o700)
         with peer_message.pending_lock("prepare-residue"):

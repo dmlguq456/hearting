@@ -24,6 +24,11 @@ class OpenCodeTextRequestTest(unittest.TestCase):
         binary = shutil.which("opencode")
         if binary is None:
             self.skipTest("OpenCode CLI unavailable; native request count not measured")
+        if rt.opencode_runtime.is_v2(binary):
+            # This suite asserts the V1 argv spelling (--pure/--dir/--variant and
+            # --log-level). The V2 argv contract is covered by
+            # tools/fleet/tests/test_text_provider_context.py.
+            self.skipTest("V1 native argv fixture; V2 has a different argv contract")
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):

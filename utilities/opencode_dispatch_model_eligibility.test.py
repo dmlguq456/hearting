@@ -175,7 +175,7 @@ class OpencodeDispatchModelEligibilityTest(unittest.TestCase):
                       "automatic_eligible": False}
         with mock.patch.object(WRAPPER.opencode_runtime, "is_v2", return_value=True), \
              mock.patch.object(WRAPPER.opencode_runtime, "select_automatic_model",
-                               side_effect=lambda model, variant: (model, variant, unverified)):
+                               side_effect=lambda model, variant, **kwargs: (model, variant, unverified)):
             kept = WRAPPER.resolve_model_settings(args)
         self.assertEqual(kept["source"], "profile")
         self.assertNotIn("provider_fallback_from", kept)
@@ -183,7 +183,7 @@ class OpencodeDispatchModelEligibilityTest(unittest.TestCase):
                     "automatic_eligible": False}
         with mock.patch.object(WRAPPER.opencode_runtime, "is_v2", return_value=True), \
              mock.patch.object(WRAPPER.opencode_runtime, "select_automatic_model",
-                               side_effect=lambda model, variant: (model, variant, rejected)), \
+                               side_effect=lambda model, variant, **kwargs: (model, variant, rejected)), \
              self.assertRaises(WRAPPER.ModelSelectionError) as refused:
             WRAPPER.resolve_model_settings(args)
         self.assertEqual(refused.exception.reason, "opencode-model-unavailable")

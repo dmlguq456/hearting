@@ -364,6 +364,8 @@ class RegistryCloseTest(ActionLogEnv):
 
     def test_close_registry_row_holds_the_canonical_flock(self):
         import multiprocessing
+        # The local holder/closer closures need fork; Python 3.14 defaults to forkserver.
+        multiprocessing = multiprocessing.get_context("fork")
         p = self.jobs
         lock_path = p + ".lock"
         held = multiprocessing.Event()

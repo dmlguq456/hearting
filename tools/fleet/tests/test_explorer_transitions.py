@@ -254,6 +254,53 @@ class CoreTransitions(unittest.TestCase):
                     self.assertEqual(demo["status"], "read-only")
                     setter.assert_not_called()
 
+    def test_model_apply_uses_observed_variants_for_opencode(self):
+        import os
+        import shutil
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from types import SimpleNamespace
+        from unittest import mock
+        from tools.fleet.explorer.runtime import ExplorerRuntime
+
+        data = {
+            "profiles": ["balanced"],
+            "profile_map": {"opencode": {"balanced": ("opencode-go/argon", "high")}},
+            "model_choices": {"opencode": ["opencode-go/argon", "opencode-go/glm"]},
+            "efforts": ["low", "medium", "high", "xhigh", "max"],
+            "catalog_sources": {"opencode": {
+                "state": "available", "source": "native", "observed_at": 1,
+                "variants": {"opencode-go/argon": ("low", "high"),
+                             "opencode-go/glm": ("low", "max")}}},
+            "token_units": {},
+        }
+        vm = SimpleNamespace(models=data, ordering={})
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            environment = {
+                "AGENT_HOME": str(Path(__file__).resolve().parents[3]),
+                "HOME": str(root), "XDG_CONFIG_HOME": str(root / "config"),
+                "XDG_DATA_HOME": str(root / "data"), "XDG_STATE_HOME": str(root / "state"),
+                "XDG_CACHE_HOME": str(root / "cache"),
+                "HEARTING_MODEL_CONFIG_HOME": str(root / "opencode-runtime"),
+                "OPENCODE_RUNTIME_VERSION": "1.19.0", "FLEET_DEMO": "",
+            }
+            with mock.patch.dict(os.environ, environment):
+                runtime = ExplorerRuntime()
+                config = root / "opencode-runtime/agent-config/models.conf"
+                config.parent.mkdir(parents=True)
+                shutil.copyfile(Path(environment["AGENT_HOME"])
+                                / "adapters/opencode/config/models.conf", config)
+                planned = runtime.apply_effects([
+                    ("models.apply", "opencode", "profile", "balanced",
+                     "opencode-go/argon", "low", True)], vm)
+                self.assertEqual(planned["status"], "planned")
+                rejected = runtime.apply_effects([
+                    ("models.apply", "opencode", "profile", "balanced",
+                     "opencode-go/argon", "medium", True)], vm)
+                self.assertEqual(rejected["status"], "failed")
+                self.assertIn("effort is not a supported choice", rejected["message"])
+
     def test_replay_model_action_is_reported_read_only_without_runtime_call(self):
         from types import SimpleNamespace
         from unittest import mock

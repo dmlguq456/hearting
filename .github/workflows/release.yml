@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   admission:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -48,7 +48,7 @@ jobs:
       always() && !cancelled() && needs.admission.result == 'success' &&
       (needs.admission.outputs.validation_required == 'false' ||
       (needs.admission.outputs.validation_required == 'true' && needs.validation.result == 'success'))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Only admitted releases enter serialization.
     concurrency:
       group: release

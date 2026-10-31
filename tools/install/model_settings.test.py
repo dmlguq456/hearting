@@ -50,6 +50,11 @@ class ModelSettingsCliTest(unittest.TestCase):
                                 text=True, capture_output=True, timeout=10)
         return result.returncode, result.stdout + result.stderr
 
+    def run_cli_v1(self, *args):
+        """CLI edits whose subject is not the V2 variant catalog."""
+        with mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "1.19.0"}):
+            return self.run_cli(*args)
+
     def run_get_cli(self, *args):
         launcher = self.root / "bin" / "hearting"
         launcher.parent.mkdir(exist_ok=True)
@@ -248,30 +253,30 @@ class ModelSettingsCliTest(unittest.TestCase):
                 path.write_bytes(original)
                 fallback = model_profile.resolve_profile_values(
                     adapter, model_config.parse_config(path), "top" if adapter == "opencode" else "deep")
-                code, output = self.run_cli(adapter, "profile/top", "vendor-top", "--dry-run", "--json")
+                code, output = self.run_cli_v1(adapter, "profile/top", "vendor-top", "--dry-run", "--json")
                 self.assertEqual(code, 0, output)
                 self.assertEqual(json.loads(output)["status"], "planned")
                 self.assertEqual(path.read_bytes(), original)
-                code, output = self.run_cli(adapter, "profile/top", "vendor-top", "--json")
+                code, output = self.run_cli_v1(adapter, "profile/top", "vendor-top", "--json")
                 self.assertEqual(code, 0, output)
                 result = json.loads(output)
                 self.assertEqual(result["old_model"], None)
                 self.assertEqual(Path(result["backup"]).read_bytes(), original)
                 top = model_profile.resolve_profile_values(adapter, model_config.parse_config(path), "top")
                 self.assertEqual((top["model"], top["budget"]), ("vendor-top", fallback["budget"]))
-                code, output = self.run_cli(adapter, "profile/top", "vendor-top", "--json")
+                code, output = self.run_cli_v1(adapter, "profile/top", "vendor-top", "--json")
                 self.assertEqual(code, 0, output)
                 self.assertEqual(json.loads(output)["status"], "unchanged")
-                code, output = self.run_cli(adapter, "profile/top", "vendor-next@high", "--json")
+                code, output = self.run_cli_v1(adapter, "profile/top", "vendor-next@high", "--json")
                 self.assertEqual(code, 0, output)
                 self.assertEqual(model_profile.resolve_profile_values(adapter, model_config.parse_config(path), "top")["budget"], "high")
-                code, output = self.run_cli(adapter, "profile/top", "bad model", "--json")
+                code, output = self.run_cli_v1(adapter, "profile/top", "bad model", "--json")
                 self.assertEqual(code, 64, output)
 
     def test_opencode_role_families_use_installed_cli_and_real_shell_consumer(self):
         import json
         path = self.user_path("opencode")
-        code, output = self.run_cli("opencode", "role/fast reviewer",
+        code, output = self.run_cli_v1("opencode", "role/fast reviewer",
                                     "arbitrary-role-model@high", "--dry-run", "--json")
         self.assertEqual(code, 0, output)
         self.assertEqual(json.loads(output)["target"]["tier"], "MINI")
@@ -289,7 +294,7 @@ class ModelSettingsCliTest(unittest.TestCase):
                 before = model_config.parse_config(path if path.exists() else
                                                   model_config.shipped_path("opencode"))
                 model = "arbitrary-role-model-" + tier.lower()
-                code, output = self.run_cli("opencode", "role/" + role, model + "@high", "--json")
+                code, output = self.run_cli_v1("opencode", "role/" + role, model + "@high", "--json")
                 self.assertEqual(code, 0, output)
                 result = json.loads(output)
                 self.assertEqual(result["target"]["tier"], tier)
@@ -306,12 +311,12 @@ class ModelSettingsCliTest(unittest.TestCase):
                 self.assertEqual(values["variant"], "high")
         before = path.read_bytes()
         backups = sorted(path.parent.glob("models.conf.bak*"))
-        code, output = self.run_cli("opencode", "role/fast reviewer", "omitted-budget-model", "--json")
+        code, output = self.run_cli_v1("opencode", "role/fast reviewer", "omitted-budget-model", "--json")
         self.assertEqual(code, 0, output)
         self.assertEqual(json.loads(output)["new_budget"], "high")
         before = path.read_bytes()
         backups = sorted(path.parent.glob("models.conf.bak*"))
-        code, output = self.run_cli("opencode", "role/external adversary", "external-model", "--json")
+        code, output = self.run_cli_v1("opencode", "role/external adversary", "external-model", "--json")
         self.assertEqual(code, 64, output)
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(sorted(path.parent.glob("models.conf.bak*")), backups)
@@ -421,6 +426,197 @@ class ModelSettingsCliTest(unittest.TestCase):
         values = model_config.parse_config(self.user_path(adapter, home))
         self.assertEqual(values["CFG_MODEL_PROFILE_LIGHT"], "model/vendor-light:medium")
         self.assertEqual(values["CFG_MODEL_PROFILE_MINI"], "model/vendor-mini:low")
+
+    def test_opencode_variant_observation_gates_saves(self):
+        import json
+        observation = {
+            "state": "available",
+            "models": ("opencode-go/gemini-4-argon", "opencode-go/glm-5.3-flash"),
+            "variants": {
+                "opencode-go/gemini-4-argon": ("low", "medium", "high"),
+                "opencode-go/glm-5.3-flash": ("low", "high", "max"),
+            },
+            "observed_at": 1.0,
+        }
+        unknown = {"state": "unknown", "models": (), "variants": {}, "observed_at": None}
+
+        # (a) A confirmed-unsupported top edit leaves an existing user file byte-identical.
+        home = self.root / "variant-existing"
+        path = self.user_path("opencode", home)
+        path.parent.mkdir(parents=True)
+        raw = model_config.shipped_path("opencode").read_bytes()
+        path.write_bytes(raw)
+        with self.assertRaisesRegex(
+                settings.ModelSettingsUsageError,
+                r"Variant unavailable for opencode-go/gemini-4-argon: xhigh "
+                r"\(지원: low, medium, high\)"):
+            settings.set_model("opencode", "profile/top",
+                               "opencode-go/gemini-4-argon@xhigh", runtime=home,
+                               environ=self.env, source_root=ROOT,
+                               variant_observation=observation)
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertEqual(list(path.parent.glob("models.conf.bak*")), [])
+
+        # The same rejection creates no user config directory when none exists.
+        missing_home = self.root / "variant-missing"
+        missing_path = self.user_path("opencode", missing_home)
+        with self.assertRaises(settings.ModelSettingsUsageError):
+            settings.set_model("opencode", "profile/top",
+                               "opencode-go/gemini-4-argon@xhigh", runtime=missing_home,
+                               environ=self.env, source_root=ROOT,
+                               variant_observation=observation)
+        self.assertFalse(missing_path.parent.exists())
+
+        # A byte-identical no-op re-save of an unsupported legacy value is refused too.
+        legacy_home = self.root / "variant-legacy"
+        legacy_path = self.user_path("opencode", legacy_home)
+        legacy_path.parent.mkdir(parents=True)
+        legacy = settings._edit_bytes(
+            model_config.shipped_path("opencode").read_bytes(),
+            {"CFG_MODEL_PROFILE_TOP": "model/opencode-go/gemini-4-argon:xhigh"})
+        legacy_path.write_bytes(legacy)
+        with self.assertRaisesRegex(settings.ModelSettingsUsageError, "Variant unavailable"):
+            settings.set_model("opencode", "profile/top",
+                               "opencode-go/gemini-4-argon@xhigh", runtime=legacy_home,
+                               environ=self.env, source_root=ROOT,
+                               variant_observation=observation)
+        self.assertEqual(legacy_path.read_bytes(), legacy)
+        self.assertEqual(list(legacy_path.parent.glob("models.conf.bak*")), [])
+
+        # (b) and (c) observed supported variants save.
+        accepted_home = self.root / "variant-accepted"
+        accepted = self.user_path("opencode", accepted_home)
+        result = settings.set_model("opencode", "profile/top",
+                                    "opencode-go/gemini-4-argon@high", runtime=accepted_home,
+                                    environ=self.env, source_root=ROOT,
+                                    variant_observation=observation)
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(result["new_budget"], "high")
+        self.assertIn("model/opencode-go/gemini-4-argon:high", accepted.read_text())
+        result = settings.set_model("opencode", "profile/top",
+                                    "opencode-go/glm-5.3-flash@max", runtime=accepted_home,
+                                    environ=self.env, source_root=ROOT,
+                                    variant_observation=observation)
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(result["new_budget"], "max")
+        self.assertIn("model/opencode-go/glm-5.3-flash:max", accepted.read_text())
+
+        # (d) An unknown catalog state or an unobserved model keeps the person's
+        # explicit variant: only an observed unsupported pair is refused.
+        for label, observed in (
+                ("state", unknown),
+                ("model", {"state": "available", "models": ("opencode-go/glm-5.3-flash",),
+                           "variants": {"opencode-go/glm-5.3-flash": ("low", "high", "max")},
+                           "observed_at": 1.0})):
+            with self.subTest(unknown=label):
+                result = settings.set_model("opencode", "profile/top",
+                                            "opencode-go/gemini-4-argon@xhigh",
+                                            runtime=self.root / ("variant-unknown-" + label),
+                                            environ=self.env, source_root=ROOT,
+                                            variant_observation=observed)
+                self.assertEqual(result["new_budget"], "xhigh")
+
+        # (e) A suffix omission keeps the preserved budget even when unobserved.
+        omitted_home = self.root / "variant-omitted"
+        result = settings.set_model("opencode", "profile/light",
+                                    "opencode-go/gemini-4-argon", runtime=omitted_home,
+                                    environ=self.env, source_root=ROOT,
+                                    variant_observation=unknown)
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(result["new_budget"], "max")
+
+        # (f) runtime-default is always allowed, observed or not.
+        result = settings.set_model("opencode", "profile/light",
+                                    "opencode-go/gemini-4-argon@runtime-default",
+                                    runtime=omitted_home, environ=self.env,
+                                    source_root=ROOT, variant_observation=unknown)
+        self.assertEqual(result["status"], "changed")
+        self.assertEqual(result["new_budget"], "runtime-default")
+
+        # The adapter guard leaves Claude/Codex and no-observation callers unchanged.
+        for adapter in ("claude", "codex"):
+            settings.set_model(adapter, "profile/deep", "arbitrary-vendor/model@xhigh",
+                               runtime=self.root / adapter, environ=self.env,
+                               source_root=ROOT, variant_observation=observation)
+        settings.set_model("opencode", "profile/top", "opencode-go/gemini-4-argon@xhigh",
+                           runtime=self.root / "variant-none", environ=self.env,
+                           source_root=ROOT, variant_observation=None)
+
+    def _catalog_service(self, rows):
+        import json
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        payload = {"location": {"directory": os.getcwd()}, "data": rows}
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *_args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(thread.join)
+        self.addCleanup(server.shutdown)
+        path = self.state / "opencode" / "service.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps({
+            "version": "2.0.32", "url": f"http://127.0.0.1:{server.server_port}",
+            "pid": os.getpid(), "password": "fixture-private-password",
+        }))
+        path.chmod(0o600)
+        return path
+
+    def test_opencode_cli_uses_catalog_observation_for_explicit_variants(self):
+        import json
+        rows = [
+            {"providerID": "opencode-go", "id": "gemini-4-argon", "modelID": "argon",
+             "enabled": True, "status": "active",
+             "variants": [{"id": "low", "settings": {}}, {"id": "medium"}, {"id": "high"}]},
+            {"providerID": "opencode-go", "id": "glm-5.3-flash", "modelID": "glm",
+             "enabled": True, "status": "active",
+             "variants": [{"id": "low"}, {"id": "high"}, {"id": "max"}]},
+        ]
+        self._catalog_service(rows)
+        path = self.user_path("opencode")
+
+        code, output = self.run_cli("opencode", "profile/top",
+                                    "opencode-go/gemini-4-argon@xhigh", "--json")
+        self.assertEqual(code, 64, output)
+        rejected = json.loads(output)
+        self.assertEqual(rejected["status"], "invalid-arguments")
+        self.assertIn("Variant unavailable for opencode-go/gemini-4-argon: xhigh "
+                      "(지원: low, medium, high)", rejected["error"])
+        self.assertFalse(path.parent.exists())
+
+        code, output = self.run_cli("opencode", "profile/top",
+                                    "opencode-go/gemini-4-argon@high", "--json")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(json.loads(output)["new_budget"], "high")
+        code, output = self.run_cli("opencode", "profile/top",
+                                    "opencode-go/glm-5.3-flash@max", "--json")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(json.loads(output)["new_budget"], "max")
+
+    def test_opencode_cli_keeps_an_explicit_variant_when_the_catalog_is_unknown(self):
+        import json
+        path = self.user_path("opencode")
+        with mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "2.0.32"}):
+            code, output = self.run_cli("opencode", "profile/top",
+                                        "opencode-go/gemini-4-argon@xhigh", "--json")
+        self.assertEqual(code, 0, output)
+        self.assertEqual(json.loads(output)["new_budget"], "xhigh")
+        self.assertIn("model/opencode-go/gemini-4-argon:xhigh", path.read_text())
+        # The context-window scalar never needs the variant catalog.
+        with mock.patch.dict(os.environ, {"OPENCODE_RUNTIME_VERSION": "2.0.32"}):
+            code, output = self.run_cli("opencode", "context-window", "800000", "--json")
+        self.assertEqual(code, 0, output)
 
     def test_noncooperating_successor_is_not_overwritten_after_preimage_check(self):
         adapter, home = "claude", self.root / "successor"

@@ -25,6 +25,7 @@ class ModelCatalog:
     state: str = "unknown"
     source: Optional[str] = None
     models: Tuple[str, ...] = ()
+    variants: Mapping[str, Tuple[str, ...]] = field(default_factory=dict)
     observed_at: Optional[float] = None
 
 

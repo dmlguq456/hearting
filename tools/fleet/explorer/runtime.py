@@ -717,6 +717,7 @@ class ExplorerRuntime:
                         or amount not in allowed_amounts):
                     raise ValueError("context window is not a displayed choice")
                 target_name, requested = "context-window", str(amount)
+                variant_observation = None
             elif len(effect) == 7:
                 _kind, harness, target, profile, model, effort, dry_run = effect
                 profiles = models.get("profiles", ())
@@ -736,6 +737,17 @@ class ExplorerRuntime:
                         or (model not in harness_choices and model != current_model)):
                     raise ValueError("model is not a displayed or current choice")
                 efforts = models.get("efforts", ())
+                variant_observation = None
+                catalog_sources = models.get("catalog_sources")
+                source = (catalog_sources.get(harness)
+                          if isinstance(catalog_sources, Mapping) else None)
+                observed = source.get("variants") if isinstance(source, Mapping) else None
+                if harness == "opencode" and isinstance(observed, Mapping):
+                    variant_observation = {"state": source.get("state"),
+                                           "variants": dict(observed)}
+                    model_variants = observed.get(model)
+                    if isinstance(model_variants, (list, tuple)) and model_variants:
+                        efforts = model_variants
                 if (not isinstance(effort, str)
                         or (not isinstance(efforts, (list, tuple, set, frozenset))
                             or effort not in efforts)
@@ -764,7 +776,7 @@ class ExplorerRuntime:
                     harness, target_name, requested,
                     runtime=model_config.runtime_home(harness),
                     source_root=Path(__file__).resolve().parents[3],
-                    dry_run=dry_run)
+                    dry_run=dry_run, variant_observation=variant_observation)
             finally:
                 sys.path[:] = original_path
             if not isinstance(result, Mapping):

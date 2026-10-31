@@ -193,6 +193,7 @@ def _v2_model_info(payload: object, *, cwd: str, model: str | None = None) -> di
         "id": model_id,
         "modelID": selected["modelID"],
         "status": selected["status"],
+        "variants": opencode_runtime.observed_variants(selected.get("variants")),
         "limits": {
             "context": _integer_limit(limits, "context", required=True),
             "input": _integer_limit(limits, "input", required=False),
@@ -550,6 +551,14 @@ def prepare_launch_context(*, model: str, context_window: str | int,
         selected_model = (f"{before_info['providerID']}/{before_info['id']}"
                           if model == "inherit" else model)
         assert isinstance(selected_model, str)
+        if effective_variant not in (None, "", "runtime-default"):
+            variant_model = selected_model.partition("#")[0]
+            observed = before_info.get("variants") or ()
+            if opencode_runtime.variant_support(
+                    variant_model, effective_variant, observed) == "unsupported":
+                raise OpenCodeContextError(
+                    f"Variant unavailable for {variant_model}: {effective_variant} "
+                    f"(지원: {', '.join(observed)})")
         native_limits = dict(before_info["limits"])
         updated, applied = apply_context_override(
             config_content, selected_model, context_window, native_limits,

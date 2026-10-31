@@ -931,6 +931,8 @@ def read_model_config():
         for adapter, catalog in catalogs.items():
             catalog_sources[adapter] = {"state": catalog.state, "source": catalog.source,
                                         "observed_at": catalog.observed_at}
+            if adapter == "opencode" and catalog.variants:
+                catalog_sources[adapter]["variants"] = dict(catalog.variants)
             if catalog.models or catalog.state in ("available", "empty"):
                 choices[adapter] = list(catalog.models)
     except Exception:

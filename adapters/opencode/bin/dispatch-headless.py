@@ -537,7 +537,9 @@ def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
         # and only a confirmed rejection is refused.
         original = selected["model"]
         model, variant, evidence = opencode_runtime.select_automatic_model(
-            original, selected["variant"])
+            original, selected["variant"],
+            catalog=opencode_runtime.read_model_catalog(
+                directory=getattr(args, "worktree", None)))
         if evidence.get("state") == "unavailable" and model == original:
             raise ModelSelectionError(
                 "opencode-model-unavailable",

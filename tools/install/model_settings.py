@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "utilities"))
 import model_config
 import model_profile
+import opencode_runtime
 import safe_fs
 
 
@@ -203,6 +204,24 @@ def _candidate(adapter: str, values: dict[str, str], target: dict[str, str],
     return dict(values), changed
 
 
+def _check_saved_variant(adapter: str, model: str | None, variant: str | None,
+                         explicit_budget: str | None, observation) -> None:
+    """Reject only what the OpenCode catalog observation can decide.
+
+    ``None`` observation means the caller did not supply a catalog (V1 or a
+    non-opencode harness): the previous contract is unchanged. Only an observed
+    unsupported exact combination is rejected; an unobserved model keeps the
+    person's choice, as launch placement excludes only confirmed-unsupported pairs.
+    """
+    if adapter != "opencode" or observation is None:
+        return
+    variants = observation.get("variants") if isinstance(observation, dict) else None
+    observed = variants.get(model) if isinstance(variants, dict) else None
+    if opencode_runtime.variant_support(model, variant, observed) == "unsupported":
+        raise ModelSettingsUsageError(
+            f"Variant unavailable for {model}: {variant} (지원: {', '.join(observed)})")
+
+
 def _backup(path: Path, payload: bytes, mode: int) -> Path:
     stem = path.with_name(path.name + ".bak")
     for suffix in range(1000):
@@ -228,7 +247,8 @@ def _backup(path: Path, payload: bytes, mode: int) -> Path:
 
 def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | Path | None = None,
               environ: dict[str, str] | None = None, source_root: str | Path | None = None,
-              dry_run: bool = False, _locked: bool = False) -> dict[str, object]:
+              dry_run: bool = False, variant_observation=None,
+              _locked: bool = False) -> dict[str, object]:
     if adapter not in model_config.ADAPTERS:
         raise ModelSettingsError(f"unknown harness: {adapter!r}")
     context_target = _norm(target_name) == "context-window" and "/" not in target_name
@@ -338,6 +358,8 @@ def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | 
         new_budget = (new_values.get(f"CFG_TIER_{target['tier']}_{'VARIANT' if adapter == 'opencode' else 'EFFORT'}") if "tier" in target else
                       model_profile.resolve_profile_values(adapter, new_values, target["profile"])["budget"])
         unchanged = old_model == new_model and (explicit_budget is None or old_budget == new_budget)
+    if target["kind"] != "scalar":
+        _check_saved_variant(adapter, new_model, new_budget, explicit_budget, variant_observation)
     if unchanged:
         projected = None
         if target["kind"] == "scalar" and not dry_run and adapter in {"claude", "codex"}:
@@ -383,7 +405,8 @@ def set_model(adapter: str, target_name: str, requested: str, *, runtime: str | 
         path.parent.mkdir(parents=True, exist_ok=True)
         with safe_fs.TargetLock(path):
             return set_model(adapter, target_name, requested, runtime=runtime_path,
-                             source_root=source_root, dry_run=False, _locked=True)
+                             source_root=source_root, dry_run=False,
+                             variant_observation=variant_observation, _locked=True)
     backup = None
     current = safe_fs.capture_state(path, include_payload=True)
     if missing and current.kind != "missing":
