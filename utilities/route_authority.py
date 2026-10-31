@@ -112,7 +112,7 @@ PROVEN_BLOCKED_GATE_REASONS = frozenset({
 # `route-lineage-unverified`, `output-invalid`, lock/busy) stay recoverable.
 DETERMINISTIC_FINALIZE_REFUSALS = (
     "cycle-route-binding-mismatch", "route-hash-drift", "completion-route-hash-mismatch",
-    "route-invalid", "route-artifact-root-mismatch",
+    "route-invalid", "route-artifact-root-mismatch", "completion-route-composite-mismatch",
 )
 DETERMINISTIC_FINALIZE_RETRY_WHEN = (
     "The route lineage or the installed runtime changed; a later join or finish judges it again.")

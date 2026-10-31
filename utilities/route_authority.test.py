@@ -2010,6 +2010,7 @@ class DeterministicFinalizeRefusalTest(unittest.TestCase):
         for detail in ("cycle-route-binding-mismatch:lineage-fork: rt-a:rt-b,rt-c",
                        "route-hash-drift: cyc-a",
                        "completion-route-hash-mismatch: rt-b",
+                       "completion-route-composite-mismatch: cyc-a",
                        "route-invalid: stale or modified route hash",
                        "route-artifact-root-mismatch"):
             with self.subTest(detail=detail):

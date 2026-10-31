@@ -1193,16 +1193,36 @@ def _exact_notice_diagnosis(receipt: dict, notice_context=None) -> dict:
     return diagnosis if isinstance(diagnosis, dict) else {}
 
 
-def _held_finalize_refusal(receipt: dict, notice_context=None) -> bool:
-    """Whether this closure-blocked notice describes a deterministic finalize refusal."""
-    for child in receipt.get("children") or []:
-        if isinstance(child, dict) and child.get("reason") == "closure-blocked:producer-finalize-refused":
-            return True
-    refusal = _exact_notice_diagnosis(receipt, notice_context).get("last_refusal")
+# A held refusal carries the durable evidence digest it was judged on. Only
+# that shape, at the route-closed checkpoint, describes what the next settle
+# would see again; an old record without evidence is retried.
+_HELD_REFUSAL_EVIDENCE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _held_finalize_diagnosis(diagnosis: dict) -> bool:
+    """Whether this owner diagnosis still holds a deterministic finalize refusal."""
+    if not isinstance(diagnosis, dict) or diagnosis.get("checkpoint") != "route-closed":
+        return False
+    refusal = diagnosis.get("last_refusal")
     if not isinstance(refusal, dict):
+        return False
+    evidence = refusal.get("evidence")
+    if not isinstance(evidence, str) or not _HELD_REFUSAL_EVIDENCE.fullmatch(evidence):
         return False
     from route_authority import deterministic_finalize_refusal
     return deterministic_finalize_refusal(refusal.get("reason"), refusal.get("detail"))
+
+
+def _held_finalize_refusal(receipt: dict, notice_context=None) -> bool:
+    """Whether this closure-blocked notice describes a held deterministic finalize refusal."""
+    blocked = [child.get("reason") for child in receipt.get("children") or []
+               if isinstance(child, dict) and str(child.get("reason") or "").startswith("closure-blocked:")]
+    if blocked:
+        # A batch may mix a held child with a gate-blocked one; only an
+        # all-held batch keeps the held wording, so the gate child's own
+        # recovery advice is not replaced.
+        return all(reason == "closure-blocked:producer-finalize-refused" for reason in blocked)
+    return _held_finalize_diagnosis(_exact_notice_diagnosis(receipt, notice_context))
 
 
 def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
@@ -1224,10 +1244,10 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
                 + " The existing controller retries closure automatically; read-only diagnosis: " + command)
     reason = refusal.get("reason")
     raw_detail = refusal.get("detail", "")
-    from route_authority import deterministic_finalize_refusal
-    if deterministic_finalize_refusal(reason, raw_detail):
-        # A deterministic route-lineage refusal is recorded evidence, not
-        # in-flight work: the same settle would produce the same answer.
+    if _held_finalize_diagnosis(diagnosis):
+        # A deterministic route-lineage refusal recorded with durable evidence
+        # at the route-closed checkpoint is recorded evidence, not in-flight
+        # work: the same settle would produce the same answer.
         return ("This refusal is not retried automatically on the same evidence; a later join or "
                 "finish judges it again only after the route lineage or the installed runtime changes. "
                 "Read-only diagnosis: " + command)
