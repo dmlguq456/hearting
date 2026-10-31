@@ -1,4 +1,5 @@
 """Steward supervision is a column of cards and an exact LINKS relationship."""
+import itertools
 import unittest
 
 from tools.fleet.explorer import live
@@ -45,6 +46,31 @@ def _model(ended=False):
     mapping = {"sessions": rows, "routes": [],
                "repos": [{"id": "repo-a", "name": "repo-a"},
                          {"id": "repo-b", "name": "repo-b"}],
+               "peer_nodes": [tuple((repo, [list(column) for column in columns]))
+                              for repo, columns in nodes],
+               "peer_edges": edges}
+    return ExplorerViewModel.from_mapping(mapping)
+
+
+def _target(tag, harness="claude"):
+    return {"harness": harness, "session_id": "sid-" + tag, "name": tag, "source": "watch", "ts": TS}
+
+
+def _graph_model(rows, targets, snapshot=None):
+    """A peer view model whose steward graph is ``targets`` (tag -> target records)."""
+    index = {}
+    for row in rows:
+        tag = row["tag"]
+        index[tag] = {"session": _session(targets.get(tag)), "sid": "sid-" + tag,
+                      "ids": ("sid-" + tag,), "chain": set(), "interaction": None}
+    nodes, edges = live._peer_records(rows, index, NOW, snapshot)
+    nodes, edges = live._finish_peers(nodes, edges, rows, index, [], [], ())
+    repos = []
+    for row in rows:
+        if row["repo"] not in repos:
+            repos.append(row["repo"])
+    mapping = {"sessions": rows, "routes": [],
+               "repos": [{"id": repo, "name": repo} for repo in repos],
                "peer_nodes": [tuple((repo, [list(column) for column in columns]))
                               for repo, columns in nodes],
                "peer_edges": edges}
@@ -172,6 +198,93 @@ class StewardColumnTests(unittest.TestCase):
                 self.assertIn("repo-b/", text)
                 if cols == 180:
                     self.assertGreater(boxes["x1"][0], boxes["s1"][0])
+
+    def _assert_one_steward_column(self, vm, tags, repo="repo-a"):
+        self.assertEqual([list(column) for column in vm.peer_edges["steward_columns"]],
+                         [list(tags)])
+        node = next(entry for entry in vm.peer_nodes if entry[0] == repo)
+        self.assertEqual([list(column) for column in node[1]], [list(tags)])
+        flat = [tag for _repo, columns in vm.peer_nodes for column in columns for tag in column]
+        for tag in tags:
+            self.assertEqual(flat.count(tag), 1, (tag, flat))
+        for cols in (120, 180):
+            with self.subTest(cols=cols):
+                frame, trace = ef.trace_draw(draw, vm, NavState(view="PEERS", title="PEERS"),
+                                             cols, 60)
+                self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
+                boxes = _card_boxes(frame)
+                for tag in tags:
+                    self.assertIn(tag, boxes)
+                    self.assertEqual(boxes[tag][0], boxes[tags[0]][0], (cols, tag))
+                x = boxes[tags[0]][0]
+                for upper, lower in zip(tags, tags[1:]):
+                    for y in range(boxes[upper][3] + 1, boxes[lower][1]):
+                        self.assertEqual(frame.cells[y][x][0], "┆", (cols, upper, lower, y))
+                self.assertNotEqual(frame.cells[boxes[tags[-1]][3] + 1][x][0], "┆")
+
+    def test_a_target_first_row_order_produces_the_same_steward_column(self):
+        rows = [_row("s2", "repo-a", "codex"), _row("s1", "repo-a"), _row("t2", "repo-a")]
+        targets = {"s1": [_target("s2", "codex")], "s2": [_target("t2")]}
+        self._assert_one_steward_column(_graph_model(rows, targets), ["s1", "s2", "t2"])
+
+    def test_every_permutation_of_a_three_node_chain_is_one_identical_column(self):
+        targets = {"a": [_target("b")], "b": [_target("c")]}
+        for order in itertools.permutations(("a", "b", "c")):
+            with self.subTest(order=order):
+                rows = [_row(tag, "repo-a") for tag in order]
+                self._assert_one_steward_column(_graph_model(rows, targets), ["a", "b", "c"])
+
+    def test_a_three_node_cycle_starts_at_its_lowest_tag(self):
+        rows = [_row("c", "repo-a"), _row("b", "repo-a"), _row("a", "repo-a")]
+        targets = {"a": [_target("b")], "b": [_target("c")], "c": [_target("a")]}
+        self._assert_one_steward_column(_graph_model(rows, targets), ["a", "b", "c"])
+
+    def test_a_four_node_chain_is_one_column(self):
+        rows = [_row("d", "repo-a"), _row("c", "repo-a"), _row("b", "repo-a"),
+                _row("a", "repo-a")]
+        targets = {"a": [_target("b")], "b": [_target("c")], "c": [_target("d")]}
+        self._assert_one_steward_column(_graph_model(rows, targets), ["a", "b", "c", "d"])
+
+    def test_independent_columns_follow_the_heads_session_order(self):
+        rows = [_row("h2", "repo-a"), _row("h1", "repo-a"), _row("t1", "repo-a"),
+                _row("t2", "repo-a")]
+        targets = {"h2": [_target("t2")], "h1": [_target("t1")]}
+        vm = _graph_model(rows, targets)
+        self.assertEqual([list(column) for column in vm.peer_edges["steward_columns"]],
+                         [["h2", "t2"], ["h1", "t1"]])
+
+    def test_a_repo_mismatch_member_stays_out_of_the_chain_column(self):
+        rows = [_row("s2", "repo-a", "codex"), _row("s1", "repo-a"), _row("t2", "repo-a"),
+                _row("x1", "repo-b", "opencode")]
+        targets = {"s1": [_target("s2", "codex"), _target("x1", "opencode")],
+                   "s2": [_target("t2")]}
+        vm = _graph_model(rows, targets)
+        self._assert_one_steward_column(vm, ["s1", "s2", "t2"])
+        node = next(entry for entry in vm.peer_nodes if entry[0] == "repo-b")
+        self.assertEqual([list(column) for column in node[1]], [["x1"]])
+        frame = draw(vm, NavState(view="PEERS", title="PEERS"), 180, 60)
+        boxes = _card_boxes(frame)
+        self.assertGreater(boxes["x1"][0], boxes["s1"][0])
+        text = "\n".join(frame.text_rows())
+        self.assertTrue(any("[s1]" in line and "[x1]" in line and "watch ⚑" in line
+                            for line in text.splitlines()))
+        self.assertEqual(text.count("⚑ watch 3"), 1)
+        self.assertIn("repo-b/", text)
+
+    def test_a_historical_alias_keeps_the_short_sid_and_the_ended_note(self):
+        rows = [_row("s1", "repo-a")]
+        targets = {"s1": [{"harness": "claude", "session_id": "sid-gone", "name": "gone",
+                           "source": "watch", "ts": TS}]}
+        snapshot = {"observations": {"replay_sources": {
+            "historical_tags": {"sid-gone": "g0"}}}}
+        vm = _graph_model(rows, targets, snapshot)
+        links = [link for link in vm.peer_edges["links"] if str(link[2]) == "watch ⚑"]
+        self.assertEqual(len(links), 1)
+        self.assertEqual(links[0][1], "sid-gone")
+        self.assertEqual(links[0][4], "ended")
+        text = "\n".join(draw(vm, NavState(view="PEERS", title="PEERS"), 180, 60).text_rows())
+        self.assertNotIn("[g0]", text)
+        self.assertIn("⚑ watch 0 · ended 1", text)
 
 
 if __name__ == "__main__":

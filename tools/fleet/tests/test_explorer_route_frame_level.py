@@ -22,8 +22,8 @@ def _job(node, harness, model, effort, running=False):
         attempt_id="att-" + node, elapsed_min=5, route_attempt_round=1)
 
 
-def _snapshot(running=False, owner=None):
-    node_state = "active" if running else "done"
+def _snapshot(running=False, owner=None, node_state=None):
+    node_state = node_state or ("active" if running else "done")
     view = {
         "nodes": [
             {"id": "frame", "state": node_state, "depends_on": [], "parallel_group": "frame"},
@@ -56,8 +56,12 @@ def _snapshot(running=False, owner=None):
     return view, slot, sessions
 
 
-def _vm(running=False, owner=None, attempts=None):
-    view, slot, sessions = _snapshot(running, owner)
+def _vm(running=False, owner=None, attempts=None, node_state=None, chain=None, extra_owners=()):
+    view, slot, sessions = _snapshot(running, owner, node_state)
+    if chain is not None:
+        sessions = [dict(session, route_chain={"nodes": chain}) for session in sessions]
+    if extra_owners:
+        slot = dict(slot, jobs=list(slot["jobs"]) + list(extra_owners))
     with patch.object(live, "_collect_routes", return_value={"rt-frame": slot}):
         rows, index = live._session_records({"sessions": sessions}, NOW, lambda _cwd: "repo")
         routes, nodes = live._route_records({"resources": []}, rows, index,
@@ -68,6 +72,14 @@ def _vm(running=False, owner=None, attempts=None):
         mapping["attempts"] = attempts
     vm = ExplorerViewModel.from_mapping(mapping)
     return view, routes[0], vm
+
+
+def _owner_job(attempt, harness, liveness):
+    return {"key": "autopilot-code", "depth": 1, "dispatch_depth": 1,
+            "route_node": None, "worker_type": "owner", "liveness": liveness,
+            "harness": harness, "resolved_model": "Opus 5.5" if harness == "claude"
+            else "gpt-6.1-sol", "effort": "high" if harness == "claude" else "medium",
+            "route_id": "rt-frame", "attempt_id": attempt, "elapsed_min": 11}
 
 
 class FrameOwnerLevelTests(unittest.TestCase):
@@ -143,6 +155,7 @@ class FrameOwnerLevelTests(unittest.TestCase):
     def test_framed_progress_mark_follows_the_frame_legs(self):
         _view, _route, running = _vm(running=True)
         _view, _route, finished = _vm()
+        _view, _route, failed = _vm(node_state="failed")
         for cols in (120, 180):
             with self.subTest(cols=cols):
                 text = "\n".join(draw(running, NavState(view="ROUTES", title="ROUTES"),
@@ -155,6 +168,77 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
                 self.assertIn("frame ✓", row)
                 self.assertIn("∥ frame 2-way", row)
+                text = "\n".join(draw(failed, NavState(view="ROUTES", title="ROUTES"),
+                                      cols, 60).text_rows())
+                row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
+                self.assertIn("frame ✕", row)
+
+    def test_framed_progress_marks_the_routes_own_frame_leg_after_a_predecessor(self):
+        chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
+                 {"route_id": "rt-frame", "capability": "route-frame", "state": "active"}]
+        for kwargs, expected in (({"running": True}, "frame ●"),
+                                 ({"node_state": "failed"}, "frame ✕")):
+            with self.subTest(expected=expected):
+                _view, route, vm = _vm(chain=chain, **kwargs)
+                self.assertEqual([leg[0] for leg in route["legs"]], ["frame", "frame"])
+                for cols in (120, 180):
+                    text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
+                                          cols, 60).text_rows())
+                    row = next(line for line in text.splitlines()
+                               if "[z9]" in line and "frame" in line)
+                    self.assertIn(expected, row)
+                    self.assertNotIn("frame ✓", row)
+
+    def test_framed_progress_suffix_uses_the_last_stages_own_state(self):
+        from tools.fleet.explorer import tables
+        from tools.fleet.explorer.grid import CellGrid
+
+        route = {"capability": "frame", "shape": "framed",
+                 "legs": [["frame", "done", None], ["frame", "active", "0/2"]],
+                 "stages": [{"name": "frame-alternative", "st": "done"}]}
+        grid = CellGrid(120, 1)
+        tables._draw_route_progress(grid, 0, 120, 0, route)
+        text = grid.rows_text()[0]
+        self.assertIn("frame ●", text)
+        self.assertIn("(frame-alternative ✓)", text)
+
+        route["stages"] = [{"name": "frame-alternative", "st": "failed"}]
+        grid = CellGrid(120, 1)
+        tables._draw_route_progress(grid, 0, 120, 0, route)
+        text = grid.rows_text()[0]
+        self.assertIn("frame ●", text)
+        self.assertIn("(frame-alternative ✕)", text)
+
+    def test_a_resumed_route_with_two_owner_jobs_does_not_borrow_a_frame_leg(self):
+        owners = (_owner_job("att-old", "claude", "dead"),
+                  _owner_job("att-new", "codex", "working"))
+        _view, route, vm = _vm(extra_owners=owners)
+        self.assertIsNone(route["harness"])
+        self.assertIsNone(route["model"])
+        self.assertIsNone(route["effort"])
+        for cols in (120, 180):
+            with self.subTest(cols=cols):
+                text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
+                                      cols, 60).text_rows())
+                row = next(line for line in text.splitlines()
+                           if "[z9]" in line and "frame" in line)
+                self.assertIn("frame", row)
+                self.assertNotIn("claude·high", row)
+                self.assertNotIn("Opus 5.5", row)
+
+    def test_narrow_routes_keep_the_progress_mark_at_96_and_100_columns(self):
+        _view, _route, vm = _vm(owner={"harness": "opencode", "effort": "xhigh"})
+        for cols in (96, 100):
+            with self.subTest(cols=cols):
+                frame, trace = ef.trace_draw(draw, vm, NavState(view="ROUTES", title="ROUTES"),
+                                             cols, 60)
+                self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
+                row = next(line for line in frame.text_rows()
+                           if "[z9]" in line and "frame" in line)
+                self.assertIn("frame ✓", row)
+                self.assertIn("opencode", row)
+                # the mark survives the long harness; the 120/180 rows keep the ∥ tail
+                self.assertNotIn("frame ✓  ∥", row)
 
     def test_an_owner_attempt_without_a_harness_does_not_borrow_a_frame_leg(self):
         _view, route, vm = _vm(owner={"harness": ""})

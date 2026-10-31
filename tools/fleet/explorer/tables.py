@@ -562,7 +562,9 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 def _draw_route_progress(grid, x, end, y, route):
     if route.get("capability") == "frame" and route.get("shape") == "framed":
         legs = tuple(route.get("legs") or ())
-        frame_leg = next((leg for leg in legs if str(leg[0]) == "frame"), None)
+        # The route's own leg is appended after every earlier leg, so the last frame leg is
+        # this route's mark; the first one may belong to a predecessor frame route.
+        frame_leg = next((leg for leg in reversed(legs) if str(leg[0]) == "frame"), None)
         status = str(frame_leg[1]) if frame_leg else ""
         mark, mark_key = {"done": ("✓", "done"), "active": ("●", "work"),
                           "failed": ("✕", "lvl_r")}.get(status, ("·", "dim"))
@@ -571,7 +573,10 @@ def _draw_route_progress(grid, x, end, y, route):
         stages = tuple(route.get("stages") or ())
         if end - cursor > 55 and stages:
             stage_name = str(stages[-1].get("name") or "·")
-            cursor = grid.put(cursor, y, "  (" + stage_name + " " + mark + ")", "dim", limit=end)
+            stage_mark = {"done": "✓", "active": "●",
+                          "failed": "✕"}.get(str(stages[-1].get("st") or ""), "·")
+            cursor = grid.put(cursor, y, "  (" + stage_name + " " + stage_mark + ")", "dim",
+                              limit=end)
         grid.put(cursor, y, "  ∥ frame 2-way", "dim", limit=end)
         return
     legs = tuple(route.get("legs") or ())
@@ -787,7 +792,9 @@ def draw_routes(grid, vm, state, x=34, y=3):
     routes = tuple(vm.routes or ())
     use = max(0, grid.cols - x - 2)
     right, bottom = x + use + 1, grid.rows - 5
-    cols = _route_columns(use, _route_harness_width(routes, use < 150))
+    narrow = use < 150
+    cols = _route_columns(use, _route_harness_width(routes, narrow),
+                          _route_age_width(routes) if narrow else AGE_W)
     slim = cols["slim"]
     gap = cols["gap"]
     grid.fill(x, right, y, " ", tint=234)
@@ -1434,7 +1441,13 @@ def _route_harness_width(routes, narrow):
                 for route in routes), default=0)
 
 
-def _route_columns(use, own_need=0):
+def _route_age_width(routes):
+    """The widest AGE text the ROUTES rows draw, after the column's own clip."""
+    return max((_seg_width(_clip(str(route.get("age") or ""), AGE_W + 1))
+                for route in routes), default=AGE_W)
+
+
+def _route_columns(use, own_need=0, age_need=AGE_W):
     if use < 60:
         return {"narrow": True, "slim": True, "tiny": True, "gap": 1, "age_w": AGE_W + 1,
                 "st": 3, "title": 10, "title_w": 5, "kind": 16, "own": 25,
@@ -1446,10 +1459,12 @@ def _route_columns(use, own_need=0):
     base_own = 10 if slim else 13
     if narrow:
         # HARNESS keeps the observed ``harness·effort`` text like OVERVIEW; the title
-        # floor and the other columns bound it, and the end is clipped with ``…``.
-        title_floor = 8
-        max_own = use - title - kind - ctx_w - AGE_W - gaps * GAP - title_floor
-        own_w = max(base_own, min(own_need, max_own))
+        # floor, the PROGRESS mark and the other columns bound it, and the end is
+        # clipped with ``…`` first.
+        title_floor, progress_floor = 8, 7              # 7 = the width of ``frame ✓``
+        max_own = (use - title - kind - ctx_w - age_need - gaps * GAP
+                   - title_floor - progress_floor)
+        own_w = min(max_own, max(base_own, own_need))
     else:
         own_w = 26
     flex = use - title - kind - own_w - ctx_w - AGE_W - gaps * GAP

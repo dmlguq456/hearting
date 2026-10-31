@@ -507,10 +507,14 @@ def _worker_segments(node, resources, state_text=None):
     return ["frame" if _is_frame_leg(node) else "worker", segs, state]
 
 
+def _owner_jobs(jobs):
+    return [job for job in jobs
+            if (_get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1)
+            and not _get(job, "route_node")]
+
+
 def _owner_job(jobs):
-    owners = [job for job in jobs
-              if (_get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1)
-              and not _get(job, "route_node")]
+    owners = _owner_jobs(jobs)
     return owners[0] if len(owners) == 1 else None
 
 
@@ -969,7 +973,10 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             ([[short or "·", leg_status, progress]] if short else [])
         framed_route = (short == "frame" or shape == "framed"
                         or bool(legs and str(legs[0][0]) == "frame"))
-        if framed_route and owner is None and frame_displays:
+        # Borrow a frame leg's identity only while the route has no owner job at all: several
+        # owner attempts (a resumed route without a recorded owner_attempt_id) keep their own
+        # display instead of borrowing a frame leg's harness.
+        if framed_route and not _owner_jobs(owner_jobs) and frame_displays:
             preferred = max(frame_displays.values(), key=lambda item: item.get("rank", ()))
             owner_harness = preferred.get("harness") or owner_harness
             owner_model = preferred.get("model") or owner_model
@@ -1371,9 +1378,9 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
     def add(link, stamp=None):
         candidates.append((float(stamp or 0), link))
 
-    def endpoint(sid, harness):
+    def endpoint(sid, harness, live_only=False):
         tag = tag_by_sid.get(sid)
-        if tag:
+        if tag and (not live_only or tag in harness_of):
             return [tag, harness_of.get(tag) or harness]
         return str(sid)[:8] if _text(sid) and _text(harness) else None      # an ended session: its short id
 
@@ -1399,7 +1406,9 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
         targets = [t for t in (_get(session, "steward_targets") or ()) if isinstance(t, Mapping) or hasattr(t, "get")]
         for target in targets:
             sid = _text(_get(target, "session_id"))
-            other = endpoint(sid, _get(target, "harness"))
+            # Only a current session row is a live watch: a name the target had before it
+            # resumed (observations.replay_sources.historical_tags) is history, not a card.
+            other = endpoint(sid, _get(target, "harness"), live_only=True)
             if other is None:
                 continue
             raw_ts = _get(target, "ts", "start_ts")
@@ -1407,10 +1416,11 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
             when = _iso_age(raw_ts, now)
             if when is None and stamp is not None:
                 when = datetime.datetime.fromtimestamp(stamp).strftime("%m-%d")
-            linked_tag = tag_by_sid.get(sid)
-            if linked_tag:
-                linked.add(linked_tag)
-            add([me, other, "watch ⚑", when, "" if linked_tag else "ended"], stamp or 0)
+            live_tag = tag_by_sid.get(sid)
+            live_tag = live_tag if live_tag in harness_of else None
+            if live_tag:
+                linked.add(live_tag)
+            add([me, other, "watch ⚑", when, "" if live_tag else "ended"], stamp or 0)
     peer_messages = _get(joined, "peer_messages", default={}) or {}
     for message in _get(peer_messages, "records", default=()) or ():
         if not isinstance(message, Mapping):
@@ -1485,25 +1495,39 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
     nodes, steward_columns, ordered_lanes = [], [], []
     for repo, tags in by_repo.items():
         columns, used = [], set()
-        for tag in tags:
-            targets = [target for target in steward_targets.get(tag, ()) if target not in used]
-            if tag in used:
-                # A target of an earlier steward stays in that steward's column: this
-                # session never starts a second column, it extends the chain below it.
-                if not targets:
-                    continue
-                column = next((item for item in columns if tag in item), None)
-                if column is None:
-                    continue
-                column.extend(targets)
-                used.update(targets)
-                continue
-            if not targets:
-                continue
-            column = [tag] + targets
-            used.update(column)
-            columns.append(column)
-            steward_columns.append(column)
+
+        def walk(start):
+            """One steward column: the head first, then its targets depth-first."""
+            column = []
+
+            def visit(tag):
+                if tag in used or tag in column:
+                    return                    # a placed tag never appears twice
+                column.append(tag)
+                for target in steward_targets.get(tag, ()):
+                    visit(target)
+
+            visit(start)
+            return column
+
+        # A column starts at a head (a steward nobody in this repo watches) and follows the
+        # steward graph, so the stack does not depend on session order. A pure cycle has no
+        # head; it starts at its lowest tag. Heads keep the sessions' own order.
+        watched = {target for targets in steward_targets.values() for target in targets}
+        heads = [tag for tag in tags if tag in steward_targets and tag not in watched]
+        pending = []
+        starts = list(heads)
+        while True:
+            while starts:
+                column = walk(starts.pop(0))
+                used.update(column)
+                columns.append(column)
+                if len(column) > 1:
+                    steward_columns.append(column)
+            pending = sorted(tag for tag in tags if tag not in used and tag in steward_targets)
+            if not pending:
+                break
+            starts = [pending[0]]
         for tag in tags:
             if tag in used:
                 continue
