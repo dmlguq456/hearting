@@ -6,7 +6,6 @@ from .style import recede_key
 X = 34
 GAP = 3
 IND = 2
-HARN_W = 25
 CTX_W = 13
 AGE_W = 6
 
@@ -56,12 +55,6 @@ def _draw_context_gauge(grid, x, y, pct, window):
     grid.put(x + 9, y, f"{pct:3d}%", key if pct >= 50 else "dim")
 
 
-def _repo_column_width(use, labels, reserve):
-    """Give observed display names room, then share a narrow pane with the other columns."""
-    wanted = max((_seg_width(repo_rule_label(label)) for label in labels), default=0)
-    return min(max(4, wanted), max(4, min(use // 2, use - reserve))) if wanted else 0
-
-
 def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     use = max(0, grid.cols - x - 2)
     right = x + use + 1
@@ -69,14 +62,8 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
     grid.fill(x, grid.cols - 1, y, " ", tint=234)
     grid.put(x - 2, y, "┃", "line")
     grid.put(1, y, "OVERVIEW", "head", tint=236)
-    repo_w = _repo_column_width(use, (row.get("repo") for row in vm.sessions), 44)
-    shift = repo_w + GAP if repo_w else 0
-    c = _overview_columns(use - shift)
-    for key in ("h", "title", "ctx", "now"):
-        if c[key] is not None:
-            c[key] += shift
-    for offset, label in (*(((3, "REPO"),) if repo_w else ()),
-                          (IND + 3 + shift, "ID"), (c["h"], "HARNESS"),
+    c = _overview_columns(use, _overview_harness_width(vm.sessions))
+    for offset, label in ((IND + 3, "ID"), (c["h"], "HARNESS"),
                           *(((c["title"], "TITLE"),) if c["title_w"] else ()), (c["ctx"], "CTX"),
                           *(([(c["now"], "NOW")] if c["now"] is not None else [])),
                           (use - 2, "AGE")):
@@ -133,41 +120,42 @@ def draw_overview(grid: CellGrid, vm, state, x=34, y=3):
                 marker, marker_key = "●", "blocked"
             elif session.get("answer_wait_marker") == "◑":
                 marker, marker_key = "◑", "lvl_y"
-            if repo_w:
-                grid.put(x + 3, y, repo_rule_label(session.get("repo"), repo_w),
-                         "title_dim", limit=x + 3 + repo_w)
-            grid.put(x + IND + 1 + shift, y, marker, marker_key)
-            tag_x = x + IND + 3 + shift
+            grid.put(x + IND + 1, y, marker, marker_key)
+            tag_x = x + IND + 3
             grid.put(tag_x, y, "[", "dim")
             grid.put(tag_x + 1, y, tag, "steward" if session.get("steward") else "soft")
-            grid.put(tag_x + 1 + len(tag), y, "]", "dim")
+            grid.put(tag_x + 1 + _seg_width(tag), y, "]", "dim")
             if session.get("steward"):
-                grid.put(x + IND + 8 + shift, y, "⚑", "steward")
+                grid.put(x + IND + 8, y, "⚑", "steward")
             harness = str(session.get("harness") or "other")
-            if c["narrow"]:
-                grid.put(x + c["h"], y, harness, "hb_" + harness, limit=x + c["title"] - GAP)
-                if session.get("effort"):
-                    grid.put(x + c["h"] + len(harness), y, "·" + str(session["effort"]), "eff_xhigh",
-                             limit=x + c["title"] - GAP)
-            elif not session.get("model"):
+            harn_limit = x + c["title"] - GAP
+            if not session.get("model"):
                 # No model value: the harness alone, as the default board draws a row without telemetry.
-                grid.put(x + c["h"], y, harness, "hb_" + harness)
+                grid.put(x + c["h"], y, harness, "hb_" + harness, limit=harn_limit)
+                if session.get("effort"):
+                    grid.put(x + c["h"] + _seg_width(harness), y, "·" + str(session["effort"]),
+                             "eff_" + str(session["effort"]) if str(session["effort"]) in ("medium", "xhigh") else "dim",
+                             limit=harn_limit)
             else:
                 model = session.get("model") or ("·", "dim")
                 model_name, model_key = (tuple(model) + ("dim",))[:2]
-                effort_cells = len(str(session.get("effort") or ""))
-                room = (c["title"] - c["h"] - GAP) - len(harness) - 2 - 1 - (1 + effort_cells if effort_cells else 0)
-                model_name = _clip(model_name, max(1, room))
-                grid.put(x + c["h"], y, harness, "hb_" + harness)
-                grid.put(x + c["h"] + len(harness), y, " (", "dim")
-                grid.put(x + c["h"] + len(harness) + 2, y, model_name, model_key)
-                pos = x + c["h"] + len(harness) + 2 + len(model_name)
                 effort = str(session.get("effort") or "")
+                cursor = x + c["h"]
+                grid.put(cursor, y, harness, "hb_" + harness, limit=harn_limit)
+                cursor += _seg_width(harness)
+                grid.put(cursor, y, " (", "dim", limit=harn_limit)
+                cursor += 2
+                tail_cells = (_seg_width(effort) + 1 if effort else 0) + 1
+                room = max(1, harn_limit - cursor - tail_cells)
+                model_name = _clip(model_name, room)
+                grid.put(cursor, y, model_name, model_key, limit=harn_limit)
+                cursor += _seg_width(model_name)
                 if effort:
-                    grid.put(pos, y, "·", "dim")
-                    grid.put(pos + 1, y, effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim")
-                    pos += 1 + len(effort)
-                grid.put(pos, y, ")", "dim")
+                    grid.put(cursor, y, "·", "dim", limit=harn_limit)
+                    grid.put(cursor + 1, y, effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim",
+                             limit=harn_limit)
+                    cursor += 1 + _seg_width(effort)
+                grid.put(cursor, y, ")", "dim", limit=harn_limit)
             if c["title_w"]:
                 title = str(session.get("title") or "·")
                 # The checkout follows the title in parentheses (12 cells at most); the title gives way
@@ -335,14 +323,20 @@ def _draw_overview_tail(grid, vm, state, x, use, right, y, route_rows, repos, he
     scoped_page = getattr(state, "scope", "-") != "-"
     repo_order = {repo.get("id", repo.get("name", "")): index for index, repo in enumerate(repos)}
     route_rows.sort(key=lambda route: repo_order.get(route.get("repo"), len(repo_order)))
+    repo_width = _route_line_repo_width(x + IND + 1, x + use, route_rows)
+    previous_repo = None
     for route in route_rows:
         if getattr(state, "scope", "-") == "-":
             grid.add_hit(y, x + IND + 1, right,
                          ("root", "ROUTES", {"ropen:ROUTES": route.get("id")}))
         source = next((session for session in vm.sessions
                        if str(session.get("tag")) == str(route.get("session_tag"))), None)
+        repo_name = repo_label(route.get("repo"))
         _draw_overview_route(grid, x, use, y, route,
-                             steward=bool(scoped_page and (source or {}).get("steward")))
+                             steward=bool(scoped_page and (source or {}).get("steward")),
+                             repo_w=repo_width,
+                             show_repo=bool(repo_name) and repo_name != previous_repo)
+        previous_repo = repo_name
         y += 1
     y += 1
     grid.put(x, y, "── ", "line")
@@ -498,15 +492,33 @@ def _session_open_link(grid, x_lab, x_val, right, y, tag):
         grid.add_hit(y, x_val, end, ("page", "session", tag))
 
 
-def _draw_overview_route(grid, x, use, y, route, steward=False):
-    _draw_route_line(grid, x + IND + 1, x + use, y, route, steward=steward)
+def _draw_overview_route(grid, x, use, y, route, steward=False, repo_w=None, show_repo=True):
+    _draw_route_line(grid, x + IND + 1, x + use, y, route, steward=steward,
+                     repo_w=repo_w, show_repo=show_repo)
     if route_is_history(route):
         # Only the OVERVIEW summary row recedes here. `_draw_route_line` is also the
         # session-unfold route line, which another change owns; leave that path alone.
         _recede_row(grid, y, x + IND + 1, x + use)
 
 
-def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False):
+def _route_line_room(x0, x1, route):
+    tag_text = str(route.get("session_tag") or "··")
+    tag_width = min(_seg_width(tag_text), 8)
+    return max(0, x1 - x0 - 2 - (tag_width + 2 + GAP) - AGE_W - GAP)
+
+
+def _route_line_repo_width(x0, x1, routes):
+    """One repo width for every summary line: the longest shown name, capped by the narrowest row."""
+    wanted = max((_seg_width(repo_rule_label(route.get("repo"))) for route in routes), default=0)
+    if not wanted:
+        return 0
+    cap = min((max(0, min(_route_line_room(x0, x1, route) // 2,
+                          _route_line_room(x0, x1, route) - 24)) for route in routes), default=0)
+    return min(wanted, cap)
+
+
+def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
+                     repo_w=None, show_repo=True):
     age = _clip(str(route.get("age") or ""), AGE_W + 1)
     tag_text = str(route.get("session_tag") or "··") if tag else ""
     tag_width = min(_seg_width(tag_text), 8) if tag else 0
@@ -515,7 +527,10 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False)
     tag_room = tag_width + 2 + GAP if tag else 0
     room = max(0, x1 - x0 - 2 - tag_room - AGE_W - GAP)
     repo_text = repo_rule_label(route.get("repo")) if repo else ""
-    repo_w = min(_seg_width(repo_text), max(0, min(room // 2, room - 24)))
+    if repo_w is None:
+        repo_w = min(_seg_width(repo_text), max(0, min(room // 2, room - 24)))
+    else:
+        repo_w = min(repo_w, max(0, min(room // 2, room - 24)))
     own = room - (repo_w + GAP if repo_w else 0) >= 8 + GAP + 12 + GAP + 12
     state = "working" if route.get("activity") == "running" else route.get("state")
     marker, marker_key = {"working": ("⠏", "g_spin"), "dead": ("✕", "g_dead"),
@@ -524,7 +539,8 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False)
     grid.put(x0, y, marker, marker_key)
     x = x0 + 2
     if repo_w:
-        grid.put(x, y, _clip(repo_text, repo_w), "title_dim", limit=x + repo_w)
+        if show_repo and repo_text:
+            grid.put(x, y, _clip(repo_text, repo_w), "title_dim", limit=x + repo_w)
         x += repo_w + GAP
     if tag:
         grid.put(x, y, "[", "dim")
@@ -684,16 +700,36 @@ def _minimal_stage_rail(stages, index, room, lit=True):
     return current[:1] + marks
 
 
-def _overview_columns(use):
+def _harness_cell_text(session):
+    """The ``harness (model·effort)`` text a session row draws, from its already-clean model."""
+    harness = str(session.get("harness") or "other")
+    effort = str(session.get("effort") or "")
+    model = session.get("model")
+    if not model:
+        return harness + ("·" + effort if effort else "")
+    model_name = (tuple(model) + ("dim",))[0]
+    return harness + " (" + str(model_name) + ("·" + effort if effort else "") + ")"
+
+
+def _overview_harness_width(sessions):
+    return max((_seg_width(_harness_cell_text(session)) for session in sessions), default=0)
+
+
+def _overview_columns(use, harn_need=0):
     narrow = use < 100
-    harn_w, ctx_w = (13, 4) if narrow else (HARN_W, CTX_W)
+    ctx_w = 4 if narrow else CTX_W
     h = IND + 3 + 6 + GAP
+    title_floor = 12 if narrow else 24
+    reserve = title_floor + ctx_w + AGE_W + 4 * GAP
+    # HARNESS keeps the observed display text (model and effort included); TITLE, CTX and
+    # AGE keep their floor and a long model is clipped inside its own cell instead.
+    harn_w = min(max(13, harn_need), max(8, use - h - reserve))
     if use < 44:
         h = min(h, max(11, use - 27))
         harn_w = min(harn_w, max(8, use - h - ctx_w - AGE_W - 2 * GAP))
     title = h + harn_w + GAP
     flex = use - title - ctx_w - AGE_W - 3 * GAP
-    title_w = min(48, max(12 if narrow else 24, int(flex * 0.45)))
+    title_w = min(48, max(title_floor, int(flex * 0.45)))
     now = use - (title + title_w + GAP + ctx_w + GAP) - AGE_W - GAP >= 16
     if not now:
         title_w = use - title - ctx_w - AGE_W - 2 * GAP
@@ -746,15 +782,11 @@ def draw_routes(grid, vm, state, x=34, y=3):
     routes = tuple(vm.routes or ())
     use = max(0, grid.cols - x - 2)
     right, bottom = x + use + 1, grid.rows - 5
-    repo_w = _repo_column_width(use, (route.get("repo") for route in routes), 46)
-    shift = repo_w + GAP if repo_w else 0
-    cols = _route_columns(use - shift)
-    for key in ("st", "title", "kind", "own", "ctx", "prog"):
-        cols[key] += shift
+    cols = _route_columns(use)
     slim = cols["slim"]
     gap = cols["gap"]
     grid.fill(x, right, y, " ", tint=234)
-    headers = ([(3, "REPO")] if repo_w else []) + [(cols["st"], "ID"), (cols["title"], "ROUTE"), (cols["kind"], "KIND"),
+    headers = [(cols["st"], "ID"), (cols["title"], "ROUTE"), (cols["kind"], "KIND"),
                (cols["own"], "HARNESS")]
     if not slim:
         headers.append((cols["ctx"], "CTX"))
@@ -804,9 +836,6 @@ def draw_routes(grid, vm, state, x=34, y=3):
                            "blocked": ("●", "g_blocked"), "dead": ("✕", "g_dead"),
                            "done": ("✓", "done"), "idle": ("●", "g_work_off")}.get(
                                status, ("●", "g_work_off"))
-            if repo_w:
-                grid.put(x + 3, y, repo_rule_label(route.get("repo"), repo_w),
-                         "title_dim", limit=x + 3 + repo_w)
             grid.put(x + cols["st"], y, marker, key)
             tag = str(route.get("session_tag") or route.get("past_from") or "")
             if tag:
