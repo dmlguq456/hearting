@@ -677,9 +677,9 @@ def _clock_ago(now, minutes):
     return _clock(now - value * 60)
 
 
-def _route_title_line(rid, owner, resume):
+def _route_title_line(rid, owner, resume, role="owner"):
     harness = _text(owner.get("harness"))
-    parts = [[f"  {rid[:11]} · owner ", _SEG_DIM]]
+    parts = [[f"  {rid[:11]} · {role} ", _SEG_DIM]]
     if harness:
         parts.append([harness, "hb_" + harness])
         model, effort = owner.get("model"), owner.get("effort")
@@ -1002,7 +1002,9 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         # Borrow a frame leg's identity only while the route has no owner job at all: several
         # owner attempts (a resumed route without a recorded owner_attempt_id) keep their own
         # display instead of borrowing a frame leg's harness.
-        if framed_route and not _owner_jobs(owner_jobs) and frame_displays:
+        borrowed_frame_identity = bool(framed_route and not _owner_jobs(owner_jobs)
+                                       and frame_displays)
+        if borrowed_frame_identity:
             preferred = max(frame_displays.values(), key=lambda item: item.get("rank", ()))
             owner_harness = preferred.get("harness") or owner_harness
             owner_model = preferred.get("model") or owner_model
@@ -1037,11 +1039,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
         routes.append(route)
-        nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status)
+        nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
+                                  borrowed_frame_identity)
     return routes, nodes
 
 
-def _node_groups(view_nodes, route, rid, legs, now, done, leg_status):
+def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_identity=False):
     """One leg group holding the route's stages: the detail the route page prints per stage."""
     if not view_nodes:
         return []
@@ -1068,10 +1071,13 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status):
                     line.append([")", "dim"])
             lines.append(line)
         frame_name = " ∥ ".join(str(node.get("id") or "frame") for node in frame_nodes)
+        # The band's identity can be a borrowed frame leg; only a real owner attempt
+        # is called `owner`, the borrowed case uses the leg's own role word.
+        role = "frame" if borrowed_identity else "owner"
         return [{
             "kind": "frame", "n": frame_name, "st": leg_status,
             "verdict": f"{done}/{len(view_nodes)}", "lines": lines, "detail": detail,
-            "title": [[frame_name, "head"]] + _route_title_line(rid, route, route.get("resume")),
+            "title": [[frame_name, "head"]] + _route_title_line(rid, route, route.get("resume"), role),
             "loops": [],
         }]
     owner_line = [["owner  ", "dim"]]

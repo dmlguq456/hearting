@@ -1524,10 +1524,17 @@ def _draw_owner(grid, x, y, route, narrow, slim, limit):
         elif not room:
             parts = []
     else:
-        model_name, model_key = (tuple(model) + ("dim",))[:2] if model else ("·", "dim")
-        parts = [(harness, "hb_" + harness), (" (", "dim"), (str(model_name), model_key),
-                 ("·", "dim"), (effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"),
-                 (")", "dim")]
+        parts = [(harness, "hb_" + harness)]
+        if model:
+            model_name, model_key = (tuple(model) + ("dim",))[:2]
+            parts += [(" (", "dim"), (str(model_name), model_key)]
+            if effort:
+                parts += [("·", "dim"),
+                          (effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim")]
+            parts.append((")", "dim"))
+        elif effort:
+            # Same form as the narrow branch: no empty `()` when the model is unknown.
+            parts.append(("·" + effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"))
     profile = route.get("profile")
     if profile and profile != "deep" and not slim:
         parts.append((" " + str(profile), "dim"))

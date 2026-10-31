@@ -18,6 +18,7 @@ from tools.fleet.tests import explorer_fixture as ef
 
 NOW = 1_000_000.0
 ROUTE_ID = "rt-frame"
+STAGED_ID = "rt-staged"
 REPO = "/synthetic/repo"
 FRAME_LEGS = ("frame", "frame-alternative")
 
@@ -96,6 +97,39 @@ def _vm(running=False, owner=None, attempts=None, node_state=None, chain=None,
     return view, record, routes[0], vm
 
 
+def _staged_after_frame_vm():
+    """A normal staged route whose session chain starts with a finished frame route."""
+    view = {
+        "nodes": [{"id": "execute", "state": "active", "depends_on": [],
+                   "unit": "dev/backend", "worker_type": "stage"}],
+        "capability": "autopilot-code", "capability_mode": "dev",
+        "execution_topology": "staged", "effective_intensity": "standard",
+        "cwd": REPO, "slug": "staged subject",
+    }
+    record = {"route_id": STAGED_ID, "capability": "autopilot-code",
+              "capability_mode": "dev", "execution_topology": "staged",
+              "selection": {"shape": "staged"}, "effective_intensity": "standard",
+              "owner_attempt_id": "att-owner", "result": None, "slug": "staged subject"}
+    jobs = [{"key": "route-staged", "depth": 1, "dispatch_depth": 1, "route_node": None,
+             "worker_type": "owner", "unit": "_kernel/owner", "worker_mode": None,
+             "harness": "claude", "model": "claude-opus-5-5", "resolved_model": None,
+             "effort": "xhigh", "route_id": STAGED_ID, "attempt_id": "att-owner",
+             "elapsed_min": 11}]
+    chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
+             {"route_id": STAGED_ID, "capability": "autopilot-code", "state": "active"}]
+    session = {"harness": "claude", "session_id": "sid-owner", "session_tag": "z9",
+               "cwd": REPO, "liveness": "idle", "is_child": False, "title": "owner",
+               "route_chain": {"nodes": chain}}
+    slot = {"view": view, "record": record, "jobs": jobs, "sessions": [session]}
+    with patch.object(live, "_collect_routes", return_value={STAGED_ID: slot}):
+        rows, index = live._session_records({"sessions": [session]}, NOW, lambda _cwd: "repo")
+        routes, nodes = live._route_records({"resources": []}, rows, index,
+                                            lambda _cwd: "repo", NOW)
+    mapping = {"repos": [{"id": "repo", "name": "repo"}],
+               "sessions": rows, "routes": routes, "nodes": nodes}
+    return routes[0], nodes[STAGED_ID], ExplorerViewModel.from_mapping(mapping)
+
+
 class FrameOwnerLevelTests(unittest.TestCase):
     def test_a_sealed_route_frame_record_displays_as_frame_without_a_default_suffix(self):
         view, record, route, vm = _vm()
@@ -167,6 +201,56 @@ class FrameOwnerLevelTests(unittest.TestCase):
                                           220, 60).text_rows()
                     if "[z9]" in line and "frame" in line)
         self.assertIn("claude (Opus·max)", wide)
+
+    def test_wide_routes_owner_cell_has_no_separator_without_effort_or_model(self):
+        # 435 of 731 frame jobs carry no effort row: the wide owner cell must read
+        # `codex (gpt-6-astra)`, and a missing model falls back to `harness·effort`.
+        _view_value, _record_value, route, vm = _vm()
+        self.assertIsNone(route["effort"])
+        for cols in (186, 220):
+            with self.subTest(cols=cols, case="no effort"):
+                text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
+                                      cols, 60).text_rows())
+                row = next(line for line in text.splitlines()
+                           if "[z9]" in line and "frame" in line)
+                self.assertIn("codex (gpt-6-astra)", row)
+                self.assertNotIn("gpt-6-astra·", row)
+                self.assertNotIn("·)", row)
+        _view_value, _record_value, _route, vm = _vm(
+            owner={"harness": "claude", "model": None, "effort": "xhigh"})
+        for cols in (186, 220):
+            with self.subTest(cols=cols, case="no model"):
+                text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
+                                      cols, 60).text_rows())
+                row = next(line for line in text.splitlines()
+                           if "[z9]" in line and "frame" in line)
+                self.assertIn("claude·xhigh", row)
+                self.assertNotIn("(·", row)
+
+    def test_the_frame_band_says_frame_for_a_borrowed_identity_and_owner_for_a_real_attempt(self):
+        _view_value, _record_value, _route, borrowed = _vm()
+        for cols in (120, 180):
+            with self.subTest(cols=cols, case="borrowed"):
+                text = "\n".join(draw(borrowed, NavState(
+                    view="ROUTES", title="ROUTES",
+                    folds=(("ropen:ROUTES", ROUTE_ID),)), cols, 60).text_rows())
+                band = next(line for line in text.splitlines()
+                            if "frame ∥ frame-alternative" in line and "┴─" in line)
+                self.assertNotIn("owner", band)
+                if cols == 180:
+                    self.assertIn("rt-frame · frame codex (gpt-6-astra)", band)
+        _view_value, _record_value, _route, owned = _vm(
+            owner={"harness": "opencode", "model": "glm-5.2", "effort": "medium"})
+        for cols in (120, 180):
+            with self.subTest(cols=cols, case="owner"):
+                text = "\n".join(draw(owned, NavState(
+                    view="ROUTES", title="ROUTES",
+                    folds=(("ropen:ROUTES", ROUTE_ID),)), cols, 60).text_rows())
+                band = next(line for line in text.splitlines()
+                            if "frame ∥ frame-alternative" in line and "┴─" in line)
+                self.assertIn("rt-frame · owner opencode", band)
+                if cols == 180:
+                    self.assertIn("(glm-5.2·medium)", band)
 
     def test_both_frame_legs_show_their_own_harness_and_model(self):
         _view_value, _record_value, _route, vm = _vm()
@@ -356,6 +440,21 @@ class FrameOwnerLevelTests(unittest.TestCase):
             routes, _nodes = live._route_records({"resources": []}, rows, index,
                                                  lambda _cwd: "repo", NOW)
         self.assertEqual(routes[0]["worker"][0], "frame")
+
+    def test_a_staged_route_after_a_frame_chain_is_not_displayed_as_a_frame_route(self):
+        route, groups, vm = _staged_after_frame_vm()
+        self.assertEqual(route["capability"], "code")
+        self.assertEqual(route["shape"], "staged")
+        self.assertEqual(route["mode"], "dev")
+        self.assertEqual(route["intensity"], "standard")
+        self.assertEqual([group.get("kind") for group in groups], ["leg"])
+        for cols in (120, 180):
+            with self.subTest(cols=cols):
+                text = "\n".join(draw(vm, NavState(
+                    view="ROUTES", title="ROUTES",
+                    folds=(("ropen:ROUTES", STAGED_ID),)), cols, 60).text_rows())
+                self.assertNotIn("frame ∥", text)
+                self.assertIn("frame ✓", text)
 
 
 if __name__ == "__main__":
