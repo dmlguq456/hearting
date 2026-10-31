@@ -561,12 +561,17 @@ def _draw_route_line(grid, x0, x1, y, route, tag=True, repo=True, steward=False,
 
 def _draw_route_progress(grid, x, end, y, route):
     if route.get("capability") == "frame" and route.get("shape") == "framed":
+        legs = tuple(route.get("legs") or ())
+        frame_leg = next((leg for leg in legs if str(leg[0]) == "frame"), None)
+        status = str(frame_leg[1]) if frame_leg else ""
+        mark, mark_key = {"done": ("✓", "done"), "active": ("●", "work"),
+                          "failed": ("✕", "lvl_r")}.get(status, ("·", "dim"))
         cursor = grid.put(x, y, "frame", "title_dim", limit=end)
-        cursor = grid.put(cursor, y, " ✓", "done", limit=end)
+        cursor = grid.put(cursor, y, " " + mark, mark_key, limit=end)
         stages = tuple(route.get("stages") or ())
         if end - cursor > 55 and stages:
             stage_name = str(stages[-1].get("name") or "·")
-            cursor = grid.put(cursor, y, "  (" + stage_name + " ✓)", "dim", limit=end)
+            cursor = grid.put(cursor, y, "  (" + stage_name + " " + mark + ")", "dim", limit=end)
         grid.put(cursor, y, "  ∥ frame 2-way", "dim", limit=end)
         return
     legs = tuple(route.get("legs") or ())
@@ -782,7 +787,7 @@ def draw_routes(grid, vm, state, x=34, y=3):
     routes = tuple(vm.routes or ())
     use = max(0, grid.cols - x - 2)
     right, bottom = x + use + 1, grid.rows - 5
-    cols = _route_columns(use)
+    cols = _route_columns(use, _route_harness_width(routes, use < 150))
     slim = cols["slim"]
     gap = cols["gap"]
     grid.fill(x, right, y, " ", tint=234)
@@ -1420,15 +1425,34 @@ def _wrap(text, width):
     return rows + [current] if current or not rows else rows
 
 
-def _route_columns(use):
+def _route_harness_width(routes, narrow):
+    """The widest ``harness·effort`` text the ROUTES rows draw in their narrow form."""
+    if not narrow:
+        return 0
+    return max((_seg_width(str(route.get("harness") or "·") +
+                           ("·" + str(route.get("effort")) if route.get("effort") else ""))
+                for route in routes), default=0)
+
+
+def _route_columns(use, own_need=0):
     if use < 60:
         return {"narrow": True, "slim": True, "tiny": True, "gap": 1, "age_w": AGE_W + 1,
                 "st": 3, "title": 10, "title_w": 5, "kind": 16, "own": 25,
                 "own_w": 10, "ctx": 35, "prog": 36}
     narrow, slim = use < 150, use < 120
     title, kind = (10, 12) if slim else (12, 15)
-    own_w, ctx_w = (10 if slim else 13 if narrow else 26), (0 if slim else 13)
-    flex = use - title - kind - own_w - ctx_w - AGE_W - (4 if slim else 5) * GAP
+    ctx_w = 0 if slim else CTX_W
+    gaps = 4 if slim else 5
+    base_own = 10 if slim else 13
+    if narrow:
+        # HARNESS keeps the observed ``harness·effort`` text like OVERVIEW; the title
+        # floor and the other columns bound it, and the end is clipped with ``…``.
+        title_floor = 8
+        max_own = use - title - kind - ctx_w - AGE_W - gaps * GAP - title_floor
+        own_w = max(base_own, min(own_need, max_own))
+    else:
+        own_w = 26
+    flex = use - title - kind - own_w - ctx_w - AGE_W - gaps * GAP
     title_w = min(48, max(8 if narrow else 24, int(flex * (.35 if narrow else .5))))
     kind_x = title + title_w + GAP
     own_x = kind_x + kind + GAP
@@ -1447,6 +1471,20 @@ def _draw_owner(grid, x, y, route, narrow, slim, limit):
         parts = [(harness, "hb_" + harness)]
         if effort:
             parts.append(("·" + effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"))
+        room = max(0, limit - x)
+        if sum(_seg_width(text) for text, _style in parts) > room:
+            kept, used = [], 0
+            for text, style in parts:
+                width = _seg_width(text)
+                if used + width <= room:
+                    kept.append((text, style))
+                    used += width
+                    continue
+                clipped = _clip(text, room - used)
+                if clipped:
+                    kept.append((clipped, style))
+                break
+            parts = kept
     else:
         model_name, model_key = (tuple(model) + ("dim",))[:2] if model else ("·", "dim")
         parts = [(harness, "hb_" + harness), (" (", "dim"), (str(model_name), model_key),

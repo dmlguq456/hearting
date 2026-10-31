@@ -18,8 +18,8 @@ def _row(tag, repo, harness="claude"):
             "age": "5m", "now": "work", "ask": None, "steward": tag == "s1"}
 
 
-def _session(targets=None, sent=None):
-    return {"steward_targets": targets, "peer_last_recv": None, "peer_last_sent": sent}
+def _session(targets=None, sent=None, received=None):
+    return {"steward_targets": targets, "peer_last_recv": received, "peer_last_sent": sent}
 
 
 def _model(ended=False):
@@ -40,6 +40,39 @@ def _model(ended=False):
                  "kind": "steer", "age_min": 3} if row["tag"] == "s1" else None)
         index[row["tag"]] = {"session": _session(targets_for, sent), "sid": "sid-" + row["tag"],
                              "ids": ("sid-" + row["tag"],), "chain": set(), "interaction": None}
+    nodes, edges = live._peer_records(rows, index, NOW, None)
+    nodes, edges = live._finish_peers(nodes, edges, rows, index, [], [], ())
+    mapping = {"sessions": rows, "routes": [],
+               "repos": [{"id": "repo-a", "name": "repo-a"},
+                         {"id": "repo-b", "name": "repo-b"}],
+               "peer_nodes": [tuple((repo, [list(column) for column in columns]))
+                              for repo, columns in nodes],
+               "peer_edges": edges}
+    return ExplorerViewModel.from_mapping(mapping)
+
+
+def _chain_model():
+    """s1 → s2 → t2 is one column; l1/l2 keep their side lane and x1 stays LINKS-only."""
+    rows = [_row("s1", "repo-a"), _row("s2", "repo-a", "codex"), _row("t2", "repo-a"),
+            _row("l1", "repo-a"), _row("l2", "repo-a"), _row("x1", "repo-b")]
+    targets = {
+        "s1": [{"harness": "codex", "session_id": "sid-s2", "name": "s2", "source": "watch", "ts": TS},
+               {"harness": "opencode", "session_id": "sid-x1", "name": "x1", "source": "watch", "ts": TS}],
+        "s2": [{"harness": "claude", "session_id": "sid-t2", "name": "t2", "source": "watch", "ts": TS}],
+    }
+    index = {}
+    for row in rows:
+        tag = row["tag"]
+        sent = received = None
+        if tag in ("l1", "l2"):
+            other = "l2" if tag == "l1" else "l1"
+            sent = {"to_session_id": "sid-" + other, "to_harness": "claude",
+                    "kind": "steer", "age_min": 3}
+            received = {"from_session_id": "sid-" + other, "from_harness": "claude",
+                        "kind": "steer", "age_min": 3}
+        index[tag] = {"session": _session(targets.get(tag), sent, received),
+                      "sid": "sid-" + tag, "ids": ("sid-" + tag,), "chain": set(),
+                      "interaction": None}
     nodes, edges = live._peer_records(rows, index, NOW, None)
     nodes, edges = live._finish_peers(nodes, edges, rows, index, [], [], ())
     mapping = {"sessions": rows, "routes": [],
@@ -108,6 +141,37 @@ class StewardColumnTests(unittest.TestCase):
         text = "\n".join(frame.text_rows())
         self.assertTrue(any("[s1]" in line and "[x1]" in line and "watch ⚑" in line
                             for line in text.splitlines()))
+
+    def test_a_chained_steward_is_one_column_without_a_duplicate_card(self):
+        vm = _chain_model()
+        self.assertEqual([list(column) for column in vm.peer_edges["steward_columns"]],
+                         [["s1", "s2", "t2"]])
+        flat = [tag for _repo, columns in vm.peer_nodes for column in columns for tag in column]
+        self.assertEqual(sorted(flat), sorted(set(flat)), flat)
+        self.assertEqual([list(column) for column in vm.peer_edges["side_lanes"]], [["l1", "l2"]])
+        for cols in (120, 180):
+            with self.subTest(cols=cols):
+                frame, trace = ef.trace_draw(draw, vm, NavState(view="PEERS", title="PEERS"),
+                                             cols, 60)
+                self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
+                boxes = _card_boxes(frame)
+                for upper, lower in (("s1", "s2"), ("s2", "t2"), ("l1", "l2")):
+                    self.assertEqual(boxes[upper][0], boxes[lower][0], (cols, upper, lower))
+                x = boxes["s1"][0]
+                for upper, lower in (("s1", "s2"), ("s2", "t2")):
+                    for y in range(boxes[upper][3] + 1, boxes[lower][1]):
+                        self.assertEqual(frame.cells[y][x][0], "┆", (cols, upper, lower, y))
+                self.assertNotEqual(frame.cells[boxes["t2"][3] + 1][x][0], "┆")
+                text = "\n".join(frame.text_rows())
+                self.assertEqual(text.count("⚑ watch 3"), 1)
+                self.assertNotIn("⚑ watch 1", text)
+                watch_rows = [line for line in text.splitlines() if "watch ⚑" in line]
+                self.assertEqual(len(watch_rows), 3)
+                for tag in ("s2", "t2", "x1"):
+                    self.assertTrue(any("[" + tag + "]" in line for line in watch_rows), tag)
+                self.assertIn("repo-b/", text)
+                if cols == 180:
+                    self.assertGreater(boxes["x1"][0], boxes["s1"][0])
 
 
 if __name__ == "__main__":

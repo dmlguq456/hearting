@@ -814,7 +814,8 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     stage_bottom = bottom
     attempts = vm.attempts or {}
     raw_lines = (tuple(attempts.get("lines", ()))
-                 if str(attempts.get("route") or "") == ident and node.get("kind") == "leg" else ())
+                 if str(attempts.get("route") or "") == ident
+                 and node.get("kind") in ("leg", "frame") else ())
     if raw_lines:
         per = min(flow, max(3, min(6, (stage_room + 4) // 40)))
         need = ((flow - 1) // per + 1) * 4

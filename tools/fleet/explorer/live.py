@@ -969,7 +969,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             ([[short or "·", leg_status, progress]] if short else [])
         framed_route = (short == "frame" or shape == "framed"
                         or bool(legs and str(legs[0][0]) == "frame"))
-        if framed_route and owner_harness is None and frame_displays:
+        if framed_route and owner is None and frame_displays:
             preferred = max(frame_displays.values(), key=lambda item: item.get("rank", ()))
             owner_harness = preferred.get("harness") or owner_harness
             owner_model = preferred.get("model") or owner_model
@@ -1487,6 +1487,17 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
         columns, used = [], set()
         for tag in tags:
             targets = [target for target in steward_targets.get(tag, ()) if target not in used]
+            if tag in used:
+                # A target of an earlier steward stays in that steward's column: this
+                # session never starts a second column, it extends the chain below it.
+                if not targets:
+                    continue
+                column = next((item for item in columns if tag in item), None)
+                if column is None:
+                    continue
+                column.extend(targets)
+                used.update(targets)
+                continue
             if not targets:
                 continue
             column = [tag] + targets
