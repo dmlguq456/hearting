@@ -23,7 +23,7 @@ from typing import Callable
 
 import dispatch_contract as DC
 from artifact_receipt import _write_once
-from dispatch_registry_cache import registry_view
+from dispatch_registry_cache import registry_lines, registry_view
 import route_authority
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,6 +119,22 @@ def _directory(jobs):
 
 
 _ROWS_MEMO = [None, None]
+
+
+def registry_text(jobs):
+    """The registry text as ``Path.read_text().splitlines()`` from the pass observation.
+
+    Inside ``registry_read_scope`` this is that pass's one pinned generation;
+    outside it is one stable read, the same contract ``registry_lines`` already
+    has. A generation ``read_text`` could not decode is not text: keep the
+    existing failure (the readers treat it as unreadable) instead of handing
+    them replacement characters.
+    """
+    path = Path(jobs)
+    lines = registry_lines(path)
+    if registry_view(path).has_invalid_utf8:
+        raise UnicodeError("registry-invalid-utf8")
+    return lines
 
 
 def _rows(lines):
@@ -1401,7 +1417,7 @@ def recovery_delivery_state(jobs, aid):
     conflicting evidence stays ``unknown`` for the normal recovery path.
     """
     try:
-        rows = _rows(Path(jobs).read_text().splitlines())
+        rows = _rows(registry_text(jobs))
         index = source_reservation(jobs, aid)
         row = rows.get(aid)
         if row is None:
@@ -2853,7 +2869,7 @@ def advance(jobs, aid, *, run=subprocess.run, authority_check=None, resume_capac
 
 def _replacement_projection(jobs, attempts):
     """One checked walk supplies both current projection and launched history."""
-    rows = _rows(Path(jobs).read_text().splitlines())
+    rows = _rows(registry_text(jobs))
     effective = set(attempts)
     projected = []
     history = {}

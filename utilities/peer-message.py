@@ -691,6 +691,28 @@ def read_peer_payload(ref):
 
 
 _PENDING_BYTES = 16 * 1024
+# Derived per-recipient index of the retained pending rows. It is a discovery
+# hint only: every row it names is still re-read and re-verified through
+# `_read_pending` before a caller acts on it. The runner publishes it with
+# `rebuild_recipient_index`; a pending write keeps an existing recipient entry
+# current, and the Stop hook reads it instead of opening every sibling row.
+_RECIPIENT_INDEX_SCHEMA = 1
+_RECIPIENT_INDEX_DIRECTORY = "peer-messages/index"
+_RECIPIENT_INDEX_LOCK_SUFFIX = ".lock"
+_RECIPIENT_HARNESSES = ("claude", "codex", "opencode")
+
+
+class RecipientIndexRows(list):
+    """Rows named by a recipient index; ``complete`` is False when unusable.
+
+    Missing, corrupt, foreign-schema, ``complete: false`` and stale indexes all
+    return ``complete=False`` with no rows, so a caller keeps its existing full
+    scan and never treats a partial observation as current.
+    """
+
+    def __init__(self, rows=(), *, complete=False):
+        super().__init__(rows)
+        self.complete = bool(complete)
 
 
 def _pending_dir():
@@ -1223,10 +1245,343 @@ def _read_pending(ref, *, roots=None, state_root=None):
     return row
 
 
+def _recipient_index_component(value, field):
+    text = str(value or "")
+    if (not text or text in {".", ".."} or "/" in text or "\\" in text
+            or "\x00" in text or len(text) > 200):
+        raise ValueError("peer-recipient-index-unsafe-" + field)
+    return text
+
+
+def recipient_index_path(dispatch_root, harness, session_id):
+    """``<root>/peer-messages/index/<harness>/<session_id>.json``.
+
+    ``root`` is the canonical state root: the runner passes the dispatch root
+    from ``dispatch_recipient_inbox.dispatch_inbox_root``, and a hook passes the
+    pending store's own root (``peer_state_root``), which is the same canonical
+    ``<state>/hearting/dispatch`` directory in the normal case.
+    """
+    return (Path(dispatch_root).expanduser() / _RECIPIENT_INDEX_DIRECTORY
+            / _recipient_index_component(harness, "harness")
+            / (_recipient_index_component(session_id, "session") + ".json"))
+
+
+def _recipient_index_write_root():
+    """The tree an implicit hook read/write uses: the pending rows' own root.
+
+    The runner passes the canonical dispatch root explicitly. A hook derives
+    the same root from the pending store, because the dispatch registry root
+    can be inherited from another installation (a Codex managed process passes
+    its own ``AGENT_DISPATCH_JOBS``) while ``AGENT_PEER_LEDGER_ROOT`` or
+    ``XDG_STATE_HOME`` names this one. Publishing the index anywhere else would
+    separate it from the rows it describes. In the normal case both resolve to
+    the canonical ``<state>/hearting/dispatch`` root.
+    """
+    return peer_state_root()
+
+
+def _pending_names(pending):
+    try:
+        return sorted(entry.name for entry in os.scandir(pending)
+                      if entry.name.endswith(".json"))
+    except OSError:
+        return None
+
+
+def _pending_names_digest(names):
+    digest = hashlib.sha256()
+    for name in names:
+        digest.update(name.encode("utf-8", "surrogateescape") + b"\n")
+    return digest.hexdigest()
+
+
+def _index_json(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        with os.fdopen(fd, "rb") as handle:
+            raw = handle.read(4 * 1024 * 1024)
+    except OSError:
+        return None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _index_directory(path):
+    directory = path.parent
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = directory.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise OSError("peer-recipient-index-unsafe-directory")
+    return directory
+
+
+@contextlib.contextmanager
+def _recipient_index_lock(path):
+    """Serialize published writes for one recipient index (readers are lock-free)."""
+    _index_directory(path)
+    lock_path = path.with_name(path.name + _RECIPIENT_INDEX_LOCK_SUFFIX)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _atomic_index_write(path, payload):
+    _index_directory(path)
+    data = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                       separators=(",", ":")) + "\n").encode("utf-8")
+    fd, tmp = tempfile.mkstemp(prefix=".index-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)  # Own temporary payload only.
+
+
+def _valid_index_payload(payload, harness, session_id):
+    if not isinstance(payload, dict) or payload.get("schema") != _RECIPIENT_INDEX_SCHEMA:
+        return False
+    if payload.get("harness") != harness or payload.get("session_id") != session_id:
+        return False
+    if payload.get("complete") is not True:
+        return False
+    if (not isinstance(payload.get("files_digest"), str)
+            or type(payload.get("file_count")) is not int):
+        return False
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return False
+    for entry in rows:
+        if (not isinstance(entry, dict)
+                or not isinstance(entry.get("ref"), str)
+                or not re.fullmatch(r"[0-9a-f]{32}", entry["ref"])
+                or entry.get("state") not in ("pending", "queued", "unverified")
+                or type(entry.get("mtime_ns")) is not int):
+            return False
+    return True
+
+
+def _index_payload(harness, session_id, rows, names):
+    return {
+        "schema": _RECIPIENT_INDEX_SCHEMA,
+        "harness": harness,
+        "session_id": session_id,
+        "complete": True,
+        "source_roots": [str(_pending_dir())],
+        "generated_at": time.time(),
+        "files_digest": _pending_names_digest(names),
+        "file_count": len(names),
+        "rows": sorted(rows, key=lambda entry: entry["ref"]),
+    }
+
+
+def read_recipient_index(dispatch_root, harness, session_id):
+    """The rows one recipient may still need, or ``complete=False`` when stale.
+
+    Currentness needs the published edge generation's equivalent for this
+    store: the exact pending file-name set (additions, removals and renames)
+    plus each named row's ``mtime_ns`` (content/state transitions). A row's
+    state is re-read and re-verified by the caller, so a stale settlement view
+    never delivers anything on its own.
+    """
+    harness = str(harness or "").lower()
+    if harness not in _RECIPIENT_HARNESSES or not isinstance(session_id, str) or not session_id:
+        return RecipientIndexRows()
+    try:
+        path = recipient_index_path(dispatch_root, harness, session_id)
+    except ValueError:
+        return RecipientIndexRows()
+    payload = _index_json(path)
+    if not _valid_index_payload(payload, harness, session_id):
+        return RecipientIndexRows()
+    pending = _pending_dir()
+    names = _pending_names(pending)
+    if (names is None or payload["file_count"] != len(names)
+            or payload["files_digest"] != _pending_names_digest(names)):
+        return RecipientIndexRows()
+    for entry in payload["rows"]:
+        try:
+            info = os.lstat(pending / (entry["ref"] + ".json"))
+        except OSError:
+            return RecipientIndexRows()
+        if info.st_mtime_ns != entry["mtime_ns"]:
+            return RecipientIndexRows()
+    return RecipientIndexRows(payload["rows"], complete=True)
+
+
+def _publish_recipient_index(pending, recipient, rows, names, *, dispatch_root=None):
+    """Best-effort atomic publish; a failure leaves the caller's scan result.
+
+    ``dispatch_root`` is the explicit root a runner observed; an implicit hook
+    publish derives it from the pending store (see `_recipient_index_write_root`).
+    """
+    dispatch_root = (_recipient_index_write_root() if dispatch_root is None
+                     else Path(dispatch_root).expanduser())
+    if dispatch_root is None:
+        return None
+    harness = str((recipient or {}).get("harness") or "").lower()
+    session_id = (recipient or {}).get("session_id")
+    if harness not in _RECIPIENT_HARNESSES or not isinstance(session_id, str) or not session_id:
+        return None
+    try:
+        path = recipient_index_path(dispatch_root, harness, session_id)
+        with _recipient_index_lock(path):
+            _atomic_index_write(path, _index_payload(harness, session_id, rows, names))
+        return str(path)
+    except (OSError, ValueError):
+        return None
+
+
+def _update_recipient_index(row, *, created):
+    """Keep an existing recipient index current after one pending write.
+
+    Only an index the runner (or a completed full scan) already published is
+    maintained. ``created`` publishes the new file-name set; a state transition
+    of an existing row only refreshes that entry's ``mtime_ns``.
+    """
+    recipient = pending_delivery_recipient(row)
+    if not isinstance(recipient, dict):
+        return
+    dispatch_root = _recipient_index_write_root()
+    if dispatch_root is None:
+        return
+    harness = str(recipient.get("harness") or "").lower()
+    session_id = recipient.get("session_id")
+    if harness not in _RECIPIENT_HARNESSES or not isinstance(session_id, str) or not session_id:
+        return
+    try:
+        path = recipient_index_path(dispatch_root, harness, session_id)
+        if not path.is_file():
+            return  # Implicit publication owns creation, never a state transition.
+        with _recipient_index_lock(path):
+            payload = _index_json(path)
+            if not _valid_index_payload(payload, harness, session_id):
+                return
+            names = _pending_names(_pending_dir())
+            if names is None:
+                return
+            known = {entry["ref"] for entry in payload["rows"]}
+            added = row["ref"] not in known
+            if added and not created:
+                return
+            if added and payload["file_count"] + 1 != len(names):
+                # More than this one file appeared since publication (or a
+                # record disappeared). The index can no longer prove the name
+                # set, so retire it and let the next read rebuild it.
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+                return
+            rows = [entry for entry in payload["rows"] if entry["ref"] != row["ref"]]
+            if row.get("state") != "received":
+                mtime_ns = _pending_path(row["ref"]).lstat().st_mtime_ns
+                rows.append({"ref": row["ref"], "state": row["state"],
+                             "mtime_ns": mtime_ns})
+            _atomic_index_write(path, _index_payload(harness, session_id, rows, names))
+    except (OSError, ValueError, KeyError):
+        return
+
+
+def rebuild_recipient_index(dispatch_root, time_budget_s=1.0):
+    """Publish every recipient's pending-row index in one bounded pass.
+
+    The runner calls this on its periodic cleanup duty; hook fallbacks call the
+    receipt-only variants. An over-budget pass publishes nothing (a partial
+    index is never current) and reports ``complete: false`` so the next pass
+    retries. Malformed rows are left for the existing full scan to quarantine;
+    this publisher only observes.
+    """
+    started = time.monotonic()
+    try:
+        budget = float(time_budget_s)
+    except (TypeError, ValueError):
+        budget = 1.0
+    deadline = started + max(0.0, budget)
+    pending = _pending_dir()
+    names = _pending_names(pending)
+    result = {"schema": _RECIPIENT_INDEX_SCHEMA, "complete": False, "scanned": 0,
+              "recipients": 0, "rows": 0, "generated_at": time.time()}
+    if names is None:
+        return result
+    try:
+        roots, _source = steward_marker_roots()
+    except (OSError, ValueError):
+        roots = None
+    groups = {}
+    scanned = 0
+    verified_all = True
+    for name in names:
+        if time.monotonic() > deadline:
+            result.update(scanned=scanned, complete=False)
+            return result
+        scanned += 1
+        path = pending / name
+        if _received_on_disk(path):
+            continue
+        try:
+            row = _read_pending(path.stem, roots=roots)
+        except UnsupportedPendingSchema:
+            continue
+        except OSError:
+            # A lock or temporary I/O failure: the named row might be a
+            # deliverable one, so this pass publishes nothing.
+            verified_all = False
+            continue
+        except ValueError:
+            # A corrupt/unsafe row is not deliverable by any reader; the
+            # recipient's own full scan still owns its quarantine diagnostic.
+            continue
+        if not row or row.get("state") == "received":
+            continue
+        recipient = pending_delivery_recipient(row)
+        if not isinstance(recipient, dict):
+            continue
+        harness = str(recipient.get("harness") or "").lower()
+        session_id = recipient.get("session_id")
+        if harness not in _RECIPIENT_HARNESSES or not isinstance(session_id, str) or not session_id:
+            continue
+        try:
+            mtime_ns = path.lstat().st_mtime_ns
+        except OSError:
+            continue
+        groups.setdefault((harness, session_id), []).append(
+            {"ref": row["ref"], "state": row["state"], "mtime_ns": mtime_ns})
+    if not verified_all:
+        result.update(scanned=scanned, complete=False)
+        return result
+    published = 0
+    for (harness, session_id), rows in groups.items():
+        if _publish_recipient_index(
+                pending, {"harness": harness, "session_id": session_id}, rows, names,
+                dispatch_root=dispatch_root) is not None:
+            published += 1
+    result.update(complete=True, scanned=scanned, recipients=published,
+                  rows=sum(len(rows) for rows in groups.values()))
+    return result
+
+
 def _save_pending(row):
     path = _pending_path(row["ref"])
     if len(json.dumps(row, ensure_ascii=False).encode("utf-8")) > 65536:
         raise ValueError("peer-pending-oversized")
+    created = not os.path.lexists(path)
     fd, tmp = tempfile.mkstemp(prefix=".pending-", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -1242,6 +1597,7 @@ def _save_pending(row):
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)  # Own temporary payload only.
+    _update_recipient_index(row, created=created)
 
 
 def bind_dispatch_notice(ref, binding):
@@ -1311,6 +1667,37 @@ def _quarantine_pending(path, expected):
         return False
 
 
+def _indexed_pending_rows(pending, recipient, *, roots, read_context):
+    """Rows named by a current recipient index, or ``None`` to take the full scan."""
+    dispatch_root = _recipient_index_write_root()
+    if dispatch_root is None:
+        return None
+    indexed = read_recipient_index(dispatch_root, recipient.get("harness"),
+                                   recipient.get("session_id"))
+    if not indexed.complete:
+        return None
+    rows = []
+    for entry in indexed:
+        path = pending / (entry["ref"] + ".json")
+        try:
+            row = _read_pending(entry["ref"], roots=roots)
+        except UnsupportedPendingSchema:
+            # A newer schema is another reader's; its bytes stay in place.
+            continue
+        except (OSError, ValueError):
+            # The index named a row this reader cannot verify right now. Fall
+            # back to the full scan, which owns quarantine and retry semantics.
+            return None
+        if not row or row["state"] == "received":
+            continue
+        current_recipient = pending_delivery_recipient(row)
+        if not _same_transfer_session(current_recipient, recipient):
+            return None
+        if not _registered_delivery_settled(row, read_context=read_context):
+            rows.append(row)
+    return rows
+
+
 def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=False):
     # Every row of one scan reads the same ledger roots; resolving them per row
     # cost seconds on each prompt once a few thousand rows had accumulated.
@@ -1321,7 +1708,24 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
     if read_context is None:
         from peer_read_context import PeerReadContext
         read_context = PeerReadContext()
-    for path in sorted(_pending_dir().glob("*.json")):
+    pending = _pending_dir()
+    # The recipient index is discovery for the exact recipient-only, non-strict
+    # call (`pending_messages`). Intent reuse, sender-or-recipient scans and the
+    # full scans keep reading every row, and a missing/stale index falls back to
+    # that same full scan below.
+    use_index = recipient is not None and sender is None and not strict
+    if use_index:
+        indexed = _indexed_pending_rows(pending, recipient, roots=roots,
+                                        read_context=read_context)
+        if indexed is not None:
+            for row in indexed:
+                yield row
+            return
+    names = sorted(path.name for path in pending.glob("*.json"))
+    observed = [] if use_index else None
+    verified_all = True
+    for name in names:
+        path = pending / name
         if _received_on_disk(path):
             continue
         expected = None
@@ -1333,6 +1737,7 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
             # and inode in place for a compatible managed reader to consume.
             continue
         except (OSError, ValueError) as exc:
+            verified_all = False
             if isinstance(exc, OSError) and exc.errno != errno.ELOOP:
                 if strict:
                     # Preparation cannot turn unavailable retained state into
@@ -1354,8 +1759,17 @@ def _pending_rows(*, recipient=None, sender=None, read_context=None, strict=Fals
         sender_match = sender is not None and _same_transfer_session(row.get("from"), sender)
         if (recipient is not None or sender is not None) and not (receiver_match or sender_match):
             continue
+        if observed is not None and receiver_match and expected is not None:
+            observed.append({"ref": row["ref"], "state": row["state"],
+                             "mtime_ns": expected.st_mtime_ns})
         if not _registered_delivery_settled(row, read_context=read_context):
             yield row
+    if observed is not None and verified_all:
+        # The scan already opened every row, so publishing this recipient's
+        # index costs one small file. Future recipient-only reads skip the scan.
+        # A row this pass could not verify (or quarantined) leaves the index
+        # unpublished: a partial observation is never current.
+        _publish_recipient_index(pending, recipient, observed, names)
 
 
 def _same_transfer_session(left, right):
@@ -3093,8 +3507,28 @@ def _observe_continue_receipt(recipient, ref=""):
         return False
 
 
-def retry_receiver_idle(recipient, *, peer=True):
-    """Use an existing native callback; never add a watcher or trust an inherited pane."""
+_PEER_STEWARD_MODULE = None
+
+
+def _peer_steward_module():
+    """Load ``peer-steward.py`` once per process (the Stop callback reused it per call)."""
+    global _PEER_STEWARD_MODULE
+    if _PEER_STEWARD_MODULE is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_peer_idle_steward", Path(__file__).with_name("peer-steward.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _PEER_STEWARD_MODULE = module
+    return _PEER_STEWARD_MODULE
+
+
+def retry_receiver_idle(recipient, *, peer=True, permission=None):
+    """Use an existing native callback; never add a watcher or trust an inherited pane.
+
+    ``permission`` lets the calling hook pass the one ``may_report`` answer it
+    already computed instead of walking process identity a second time.
+    """
     pane = os.environ.get("HERDR_PANE_ID")
     if not pane or recipient.get("harness") not in {"claude", "opencode"}:
         return
@@ -3102,14 +3536,12 @@ def retry_receiver_idle(recipient, *, peer=True):
         tools = str(Path(__file__).resolve().parent.parent / "tools")
         if tools not in sys.path:
             sys.path.insert(0, tools)
-        from fleet.herdr_projection import may_report
-        if not may_report(recipient["harness"], recipient.get("session_id")):
+        if permission is None:
+            from fleet.herdr_projection import may_report
+            permission = may_report(recipient["harness"], recipient.get("session_id"))
+        if not permission:
             return
-        import importlib.util
-        spec = importlib.util.spec_from_file_location("_peer_idle_steward", Path(__file__).with_name("peer-steward.py"))
-        steward = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(steward)
-        steward.receiver_idle(recipient, pane, peer=peer)
+        _peer_steward_module().receiver_idle(recipient, pane, peer=peer)
     except Exception:
         pass
 

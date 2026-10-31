@@ -1051,6 +1051,14 @@ def notice_is_current(record: dict, *, notice_context=None) -> bool:
         return False
     if _cleanup_only_result(receipt) is not None:
         return False  # Retire the model wake; the cleanup controller still owns its observation.
+    # Send-time precedence (d8): one completion, one path. An attention whose
+    # every monitored attempt already has its exact completion record (open or
+    # acked) retires without a send; that completion record is the replacement.
+    # A single unresolved attempt keeps the attention current. Completion
+    # records themselves never consult this path, so they are never suppressed.
+    if _recorded_completion_result(receipt, require_ack=False,
+                                   notice_context=notice_context) is not None:
+        return False
     return _pending(rows, receipt["monitored_attempt_ids"], Path(receipt["job_registry"]),
                     receipt["reason"], notice_context=notice_context)
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 
 import dispatch_pending_delivery as pending_delivery
 
@@ -13,6 +14,13 @@ KIND = "notice"
 MAX_TEXT = 600
 KEYS = frozenset({"schema_version", "kind", "subject", "text", "required_action", "key"})
 LINEAGE_PREFIX = "session-notice-lineage-v1:"
+# The one existing key shape a finished experiment run writes
+# (``resource_progress.observe_experiment``). Classification and the send-time
+# supersede check read only these receipt fields; nothing here is new state.
+EXPERIMENT_FINAL_KEY = re.compile(r"^experiment:(?P<run_id>[^:]+):final:")
+TERMINAL_ACTIONS = frozenset({"report-to-user"})
+TERMINAL = "terminal"
+PROGRESS = "progress"
 
 
 def _registry(jobs=None) -> Path:
@@ -178,9 +186,112 @@ def render_text(receipt: dict) -> str:
     return f"{receipt['subject']}: {receipt['text']} (required_action={receipt['required_action']})"
 
 
-def notice_is_current(record: dict) -> bool:
+def classify(receipt: dict) -> str:
+    """Terminal (failure/completion) or progress, from existing receipt fields only.
+
+    One helper for the whole notice path: the runner's group selection and the
+    batch ordering both ask this, so a notice cannot be "terminal" for one and
+    "progress" for the other.
+    """
+    try:
+        receipt = validate(receipt)
+    except ValueError:
+        return PROGRESS
+    key = receipt["key"]
+    if (receipt["required_action"] in TERMINAL_ACTIONS
+            or EXPERIMENT_FINAL_KEY.match(key) is not None
+            or receipt["subject"].startswith("experiment final")):
+        return TERMINAL
+    return PROGRESS
+
+
+def _run_state(record: dict):
+    """The runner-published state for this run notice, or ``None``.
+
+    ``run-states.json`` is the one cheap derived observation the obligation
+    runner publishes; this path never opens a run registry or a jobs log on its
+    own account (the completion projection below reads its own exact row).
+    """
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    key = receipt.get("key")
+    if not isinstance(key, str):
+        return None
+    match = EXPERIMENT_FINAL_KEY.match(key)
+    if match is None:
+        return None
+    try:
+        import dispatch_recipient_inbox as inbox
+        payload = inbox.read_run_states(inbox.dispatch_inbox_root())
+    except (OSError, ValueError, TypeError):
+        return None
+    runs = payload.get("runs") if isinstance(payload, dict) else None
+    run = runs.get(match.group("run_id")) if isinstance(runs, dict) else None
+    return run if isinstance(run, dict) else None
+
+
+def _run_notice_superseded(record: dict, *, notice_context=None):
+    """``True`` only when the exact parent completion already covers this run notice.
+
+    Chain (owner note N1): notice key -> run id -> the runner's published run
+    state -> the recorded parent attempt and its jobs -> the existing exact
+    completion projection. Any unreadable, missing or ambiguous step returns
+    ``None`` (unknown), and an unknown notice is never folded.
+    """
+    run = _run_state(record)
+    if run is None:
+        return None
+    status = run.get("status")
+    if not isinstance(status, str) or not status or status == "running":
+        return None
+    attempt = run.get("parent_attempt_id")
+    jobs = run.get("jobs")
+    if not isinstance(attempt, str) or not attempt or not isinstance(jobs, str) or not jobs:
+        return None
+    try:
+        from dispatch_completion_join import current_attempt_row
+        from dispatch_seat_handover import effective_parent
+        jobs_path = Path(jobs).resolve(strict=True)
+        row = current_attempt_row(jobs_path, attempt)
+        if row is None:
+            return None
+        target = effective_parent(row.metadata, jobs_path)
+        if not target:
+            return None
+        from dispatch_supervision import _recorded_completion_result
+        completion = {"job_registry": str(jobs_path), "recipient_thread_id": target,
+                      "monitored_attempt_ids": [attempt]}
+        result = _recorded_completion_result(completion, require_ack=False,
+                                             notice_context=notice_context)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return None
+    return True if result is not None else None
+
+
+def fold_summary(record: dict) -> str | None:
+    """The one-line replacement for a folded run notice, or ``None``.
+
+    Only a notice whose run already ended folds; the parent completion receipt
+    remains the primary replacement and this line is what a body that also
+    carries other notices can show instead of the stale individual notice.
+    """
+    run = _run_state(record)
+    if run is None:
+        return None
+    status = run.get("status")
+    if not isinstance(status, str) or not status or status == "running":
+        return None
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    match = EXPERIMENT_FINAL_KEY.match(str(receipt.get("key") or ""))
+    run_id = match.group("run_id") if match else "unknown"
+    exit_code = run.get("exit_code")
+    exit_text = "unknown" if exit_code is None else str(exit_code)
+    return f"compute run summary: run {run_id} status={status} exit={exit_text}"
+
+
+def notice_is_current(record: dict, *, jobs=None, notice_context=None) -> bool:
     """A notice is retired by its delivery, never by registry state, except a
-    role-bound steward-check notice, which its own duty keeps current."""
+    role-bound steward-check notice, which its own duty keeps current, and a
+    run notice whose exact parent completion is already recorded."""
     try:
         receipt = validate(record.get("receipt"))
     except ValueError:
@@ -191,7 +302,7 @@ def notice_is_current(record: dict) -> bool:
             return bool(steward_check.notice_is_current(record))
         except Exception:  # noqa: BLE001 - unknown evidence stays recoverable
             return True
-    return True
+    return _run_notice_superseded(record, notice_context=notice_context) is not True
 
 
 def context(receipt: dict, delivery_id: str) -> dict:

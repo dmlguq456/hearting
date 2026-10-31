@@ -113,6 +113,22 @@ def _lineage_signature(directory: Path):
     return location, tuple(files), generation
 
 
+def _snapshot_signature():
+    """Stat-only identity of every handover snapshot the validator reads."""
+    try:
+        names = sorted(entry.name for entry in os.scandir(_snapshot_dir())
+                       if entry.name.endswith(".json"))
+    except FileNotFoundError:
+        return ()
+    observed = []
+    for name in names:
+        info = os.lstat(_snapshot_dir() / name)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError("handover-snapshot-unsafe")
+        observed.append((name, *_lineage_generation(info)))
+    return tuple(observed)
+
+
 def _readable_lineage_signature(directory: Path):
     """Observe current readable bytes once and retain them for the parser.
 
@@ -137,6 +153,10 @@ def _readable_lineage_signature(directory: Path):
 def _build_lineage_graph(read_context=None) -> LineageGraph:
     directory = _st().state_root() / "sessions"
     try:
+        if getattr(read_context, "compact_lineage", False):
+            compact = _build_compact_lineage_graph(directory, read_context)
+            if compact is not None:
+                return compact
         # Snapshots are not a second lineage reader; their unreadable schema
         # still prevents a current authority judgment.
         _all_snapshots()
@@ -170,6 +190,156 @@ def _build_lineage_graph(read_context=None) -> LineageGraph:
         raise
 
 
+def _build_compact_lineage_graph(directory: Path, read_context=None):
+    """Reuse published compact rows for every unchanged ledger, stat only.
+
+    The effect path re-observes current lineage per claim group. An unchanged
+    ledger's recorded generation tuple is exactly the bytes already parsed into
+    ``lineage-rows.json``, so a transient read fault on it cannot block a
+    delivery (approved notice 3 in the plan). A changed or unlisted ledger keeps
+    the normal no-follow read and still fails closed. Returns ``None`` when the
+    derived file is missing or unusable so the caller runs the full read.
+    """
+    import dispatch_recipient_inbox as inbox
+
+    try:
+        payload = inbox.read_lineage_rows(inbox.dispatch_inbox_root())
+    except (OSError, ValueError, TypeError):
+        return None
+    if payload is None:
+        return None
+    try:
+        current_snapshots = [list(item) for item in _snapshot_signature()]
+    except OSError:
+        return None
+    if payload.get("snapshots") != current_snapshots:
+        # Changed or unpublished snapshots keep the full fail-closed read.
+        _all_snapshots()
+    location, files, generation = _lineage_signature(directory)
+    if payload.get("directory") != location:
+        return None
+    ledgers = payload.get("ledgers") if isinstance(payload.get("ledgers"), dict) else {}
+    contents, compact_rows = {}, {}
+    for filename, *file_generation in files:
+        reusable = _compact_rows_from_record(ledgers.get(Path(filename).stem), file_generation)
+        if reusable is not None:
+            compact_rows[filename] = reusable
+            continue
+        path = directory / filename
+        raw = _st().read_bytes(path)
+        if (raw is None or len(raw) != file_generation[4]
+                or _lineage_generation(path.lstat()) != tuple(file_generation)):
+            raise OSError("lineage-ledger-unavailable")
+        contents[filename] = raw
+    if _lineage_signature(directory) != (location, files, generation):
+        raise OSError("lineage-observation-changed")
+    graph = _build_lineage_graph_uncached((location, files, generation), contents,
+                                          compact_rows=compact_rows)
+    if read_context is not None:
+        read_context.invalidate_lineage_graph()
+        read_context.lineage_graph((location, files, generation), lambda: graph)
+    return graph
+
+
+def _compact_rows_from_record(record, generation):
+    """Indexed rows for one unchanged ledger, or ``None`` to read its bytes."""
+    if not isinstance(record, dict):
+        return None
+    stored = record.get("generation")
+    if (not isinstance(stored, (list, tuple)) or len(stored) != len(generation)
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in stored)
+            or tuple(stored) != tuple(generation)):
+        return None
+    rows = record.get("rows")
+    if not isinstance(rows, list):
+        return None
+    indexed = []
+    for item in rows:
+        if (not isinstance(item, (list, tuple)) or len(item) != 2
+                or not isinstance(item[0], int) or isinstance(item[0], bool) or item[0] < 0
+                or not isinstance(item[1], dict)):
+            return None
+        indexed.append((item[0], item[1]))
+    return indexed
+
+
+def _compact_row_indexes(rows) -> set[int]:
+    """Rows any lineage resolver reads; the rest only narrows activity history.
+
+    Union of rows carrying bindings, rows either edge helper accepts, explicit
+    ``handover`` events, and each ledger's first row per ``(harness, sid)``.
+    The last entry keeps ``ledger_keys``/``keys_by_vertex`` identical without
+    every activity row.
+    """
+    st = _st()
+    keep, first_vertices = set(), set()
+    for index, row in enumerate(rows):
+        if row.get("bindings") or row.get("event") == "handover":
+            keep.add(index)
+        elif st.tidy_lineage_edge(row) is not None or st._handover_origin(row) is not None:
+            keep.add(index)
+        harness, sid = row.get("harness"), row.get("sid")
+        if isinstance(harness, str) and harness and isinstance(sid, str) and sid:
+            vertex = (harness, sid)
+            if vertex not in first_vertices:
+                first_vertices.add(vertex)
+                keep.add(index)
+    return keep
+
+
+def build_lineage_rows_payload(directory=None) -> dict:
+    """The compact relation rows ``lineage-rows.json`` must carry right now."""
+    st = _st()
+    directory = Path(directory) if directory is not None else st.state_root() / "sessions"
+    location, files, generation = _lineage_signature(directory)
+    ledgers, skipped = {}, []
+    for filename, *file_generation in files:
+        ledger_key = Path(filename).stem
+        path = directory / filename
+        raw = st.read_bytes(path)
+        if (raw is None or len(raw) != file_generation[4]
+                or _lineage_generation(path.lstat()) != tuple(file_generation)):
+            raise OSError("lineage-ledger-unavailable")
+        rows = st._read_ledger_lines(st.Seat("pane", ledger_key), raw=raw)
+        if not getattr(rows, "usable", True):
+            # No entry means the effect path re-reads this ledger and fails
+            # closed exactly as the full observation does.
+            skipped.append(ledger_key)
+            continue
+        keep = _compact_row_indexes(rows)
+        ledgers[ledger_key] = {
+            "generation": list(file_generation),
+            "rows": [[index, dict(rows[index])] for index in sorted(keep)],
+        }
+    if _lineage_signature(directory) != (location, files, generation):
+        raise OSError("lineage-observation-changed")
+    # The effect path may skip re-reading unchanged snapshots only when the
+    # runner validated exactly these incarnations in this same publication.
+    snapshot_before = _snapshot_signature()
+    _all_snapshots()
+    snapshot_after = _snapshot_signature()
+    if snapshot_before != snapshot_after:
+        raise OSError("handover-snapshot-changed")
+    return {"directory": location,
+            "generated_at": time.time(),
+            "ledgers": ledgers,
+            "skipped": skipped,
+            "snapshots": [list(item) for item in snapshot_after]}
+
+
+def publish_lineage_rows(dispatch_root=None) -> dict:
+    """Atomically publish the compact rows; only the existing runner calls this."""
+    import dispatch_recipient_inbox as inbox
+
+    root = Path(dispatch_root) if dispatch_root is not None else inbox.dispatch_inbox_root()
+    payload = build_lineage_rows_payload()
+    inbox.write_lineage_rows(root, payload)
+    return {"path": str(inbox.lineage_rows_path(root)),
+            "ledgers": len(payload["ledgers"]),
+            "skipped": len(payload["skipped"]),
+            "rows": sum(len(entry["rows"]) for entry in payload["ledgers"].values())}
+
+
 def _pass_lineage_graph(read_context=None) -> LineageGraph:
     """Resolve read-only records from this pass; effects observe without it.
 
@@ -188,17 +358,23 @@ def _pass_lineage_graph(read_context=None) -> LineageGraph:
         raise
 
 
-def _build_lineage_graph_uncached(signature, contents) -> LineageGraph:
+def _build_lineage_graph_uncached(signature, contents, compact_rows=None) -> LineageGraph:
     st = _st()
     edges, keys_by_vertex, rows_by_key, latest_bindings = set(), {}, {}, {}
     for filename, *_generation in signature[1]:
         ledger_key = Path(filename).stem
-        seat = st.Seat("pane", ledger_key)
-        rows = st._read_ledger_lines(seat, raw=contents[filename])
-        if not getattr(rows, "usable", True):
-            raise OSError("lineage-ledger-unavailable")
-        rows_by_key[ledger_key] = rows
-        for index, row in enumerate(rows):
+        if compact_rows is not None and filename in compact_rows:
+            # Original indexes travel with the published rows so the latest
+            # binding order stays ``(ts, index, ledger_key)``.
+            indexed = compact_rows[filename]
+        else:
+            seat = st.Seat("pane", ledger_key)
+            rows = st._read_ledger_lines(seat, raw=contents[filename])
+            if not getattr(rows, "usable", True):
+                raise OSError("lineage-ledger-unavailable")
+            indexed = list(enumerate(rows))
+        rows_by_key[ledger_key] = [row for _index, row in indexed]
+        for index, row in indexed:
             row_harness, row_sid = row.get("harness"), row.get("sid")
             if isinstance(row_harness, str) and row_harness and isinstance(row_sid, str) and row_sid:
                 keys_by_vertex.setdefault((row_harness, row_sid), set()).add(ledger_key)
@@ -1202,6 +1378,21 @@ def _append_transition_row(seat, row: dict) -> None:
         st._fold_ledger(seat)
 
 
+def _bump_dispatch_edge_generation(jobs=None) -> None:
+    """A confirmed edge change invalidates derived recipient inboxes.
+
+    Only discovery reads the generation, and a missed bump costs one periodic
+    runner reconciliation; it never grants or revokes authority, which every
+    record re-reads. The canonical ledger row is already durable here, so a
+    failure to record this derived observation never fails the writer.
+    """
+    try:
+        import dispatch_recipient_inbox as inbox
+        inbox.bump_edge_generation(inbox.dispatch_inbox_root(jobs=jobs))
+    except Exception:  # noqa: BLE001 - derived observation only
+        return
+
+
 def record_steward_release(seat, harness: str, sid: str, generation: str, now=None, *, relation=None) -> bool:
     """Revoke the unique actor-bound canonical relation under the caller's seat lock."""
     if not generation:
@@ -1378,7 +1569,8 @@ def resolve_attempt_recipient(jobs, attempt, registered, harness="", *, read_con
     from dispatch_registry_cache import registry_snapshot
     try:
         try:
-            snapshot = registry_snapshot(Path(jobs))
+            snapshot = (read_context.registry_snapshot(Path(jobs))
+                        if read_context is not None else registry_snapshot(Path(jobs)))
         except FileNotFoundError:
             snapshot = None
         if snapshot is not None and not snapshot.complete:
@@ -1618,17 +1810,54 @@ def owns(meta: dict, session: str, jobs=None, *, read_context=None) -> bool:
     return bool(session) and effective_parent(meta, jobs, read_context=read_context) == session
 
 
-def storage_recipients(session: str, env=None, harness: Optional[str] = None, *, read_context=None) -> list:
-    """Original storage scopes for the current qualified recipient; never move rows."""
+class RecipientScopes(list):
+    """``(storage_key, attempts)`` scopes plus whether enumeration finished.
+
+    Existing consumers unpack the list exactly as before. ``complete=False``
+    marks a partial enumeration: it is never published as a current inbox, and
+    the caller keeps the previous inbox plus the session's own scope instead.
+    """
+
+    __slots__ = ("complete",)
+
+    def __init__(self, items=(), *, complete: bool = True):
+        super().__init__(items)
+        self.complete = complete
+
+
+def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
+                       read_context=None, deadline_ns: Optional[int] = None) -> RecipientScopes:
+    """Original storage scopes for the current qualified recipient; never move rows.
+
+    ``deadline_ns`` is a caller-side monotonic bound (the hook effect path never
+    calls this; the inbox prefill and discovery fallback do). Past it the
+    enumeration stops and returns the scopes gathered so far with
+    ``complete=False``; the graph read itself is not interrupted mid-file.
+    """
     from peer_read_context import PeerReadContext
     context = read_context or PeerReadContext()
+
+    def expired() -> bool:
+        return deadline_ns is not None and time.monotonic_ns() >= deadline_ns
+
+    def scopes(owed, complete):
+        return RecipientScopes([(session, None), *((key, LineageAttempts(attempts))
+                             for key, attempts in sorted(owed.items()) if key != session)],
+                             complete=complete)
+
     try:
         with context.pinned_lineage():
+            if expired():
+                return scopes({}, False)
             graph = _pass_lineage_graph(context)
             candidates = set(graph.ledger_keys)
             owed = {}
+            complete = True
             for rows in graph.ledger_rows.values():
                 for row in rows:
+                    if expired():
+                        complete = False
+                        break
                     origin = _st()._handover_origin(row)
                     if origin is not None:
                         candidates.add(origin)
@@ -1643,14 +1872,21 @@ def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
                             owed.setdefault(parent, set())
                             if binding.get("attempt"):
                                 owed[parent].add(binding["attempt"])
-            for source_harness, origin in candidates:
-                answer = resolve_recipient("seat-successor", session=origin, harness=source_harness, read_context=context)
-                if (answer.state == "confirmed" and answer.session_id == session
-                        and (not harness or answer.harness == harness)):
-                    owed.setdefault(origin, set())
-        return [(session, None), *((key, LineageAttempts(attempts)) for key, attempts in sorted(owed.items()) if key != session)]
+                if not complete:
+                    break
+            if complete:
+                for source_harness, origin in candidates:
+                    if expired():
+                        complete = False
+                        break
+                    answer = resolve_recipient("seat-successor", session=origin, harness=source_harness, read_context=context)
+                    if (answer.state == "confirmed" and answer.session_id == session
+                            and (not harness or answer.harness == harness)):
+                        owed.setdefault(origin, set())
+        return scopes(owed, complete)
     except (OSError, ValueError, TypeError, KeyError, RuntimeError):
-        return []
+        # Unreadable authority is not an empty, complete enumeration.
+        return RecipientScopes(complete=False)
 
 def _chain_to(rows: list, session: str, *, graph=None) -> list:
     """Authority handovers plus tidy edges on the unique ancestry to ``session``.
@@ -1733,9 +1969,8 @@ def record_for_session(record: dict, allowed: Optional[frozenset], *, session=No
         for attempt in ids:
             row = None
             try:
-                from dispatch_registry_cache import registry_snapshot
-                snapshot = registry_snapshot(Path(jobs))
-                row = snapshot.view.handover_attempt(attempt)
+                snapshot = context.registry_snapshot(Path(jobs))
+                row = snapshot.view.handover_attempt(attempt) if snapshot is not None else None
                 registered = row[1].get("parent_sid") if row else session
             except FileNotFoundError:
                 registered = session
@@ -2173,6 +2408,7 @@ def _record_locked(seat, harness: str, sid: str, event: str, source: str, now: f
         bindings = kept
         row["bindings"] = bindings
         _append_transition_row(seat, row)
+        _bump_dispatch_edge_generation()
         refreshed_snapshot = dict(snap)
         refreshed_snapshot["bindings"] = bindings
         if steward_payload:
@@ -2286,6 +2522,7 @@ def record_retire_handover(predecessor_sid: str, predecessor_harness: str, succe
                 "from": {"harness": successor_harness, "sid": successor_sid}, "at": now,
                 "bindings": union})
             _append_transition_row(seat, row)
+            _bump_dispatch_edge_generation(jobs)
             return row
 
 

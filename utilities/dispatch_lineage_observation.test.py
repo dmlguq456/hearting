@@ -231,10 +231,15 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
             with self.jobs_path.open("a") as stream:
                 stream.write("now\trunning\t/w\t/w\ttask\t" +
                              ",".join(k + "=" + v for k, v in changed.items()) + "\n")
+            # A pass context keeps its one registry observation; a new pass
+            # observes the append instead of inheriting the old pin.
+            self.assertEqual(handover.record_recipient(record, "indexed-record-A", harness="claude",
+                                                       read_context=context), "indexed-record-Z")
             self.assertIsNone(handover.record_recipient(record, "indexed-record-A", harness="claude",
-                                                        read_context=context))
+                                                        read_context=PeerReadContext()))
             self.assertFalse(handover.record_for_session(record, None, session="indexed-record-Z",
-                harness="claude", storage_key="indexed-record-A", jobs=self.jobs_path, read_context=context))
+                harness="claude", storage_key="indexed-record-A", jobs=self.jobs_path,
+                read_context=PeerReadContext()))
 
     def test_legacy_holder_follows_only_confirmed_same_harness_successor_and_denies_fork(self):
         import route_authority
@@ -683,6 +688,7 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
             self.assertEqual(recovered, changed)
 
     def test_opencode_projection_uses_the_current_readable_graph_generation(self):
+        import dispatch_recipient_inbox as inbox
         seat = self.edge("opencode", "projection-A", "projection-B")
         path = tidy._ledger_path(seat)
 
@@ -697,10 +703,17 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
         digest = hashlib.sha256(b"projection-A").hexdigest()
         before = project()
         self.assertIn(digest, before["digests"])
+        inbox_file = inbox.inbox_path(sweep._state_roots()[0], "opencode", "projection-B")
+        # A current inbox is the bounded tick's cache and answers even while a
+        # ledger is unreadable; a miss must observe the readable graph instead.
+        with self.unreadable(path):
+            self.assertEqual(project(), before)
+        inbox_file.unlink()
         with self.unreadable(path), self.assertRaises(OSError):
             project()
         self.assertEqual(project(), before)
         self.replace_ledger(path, "projection-B", "projection-C")
+        inbox_file.unlink()      # the runner refreshes after a writer change
         after = project()
         self.assertNotEqual(after["generation"], before["generation"])
         self.assertNotIn(digest, after["digests"])

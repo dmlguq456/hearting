@@ -4,6 +4,13 @@
 Instances are short lived and owned by one peer-message scan. They cache no
 delivery state, claim, acknowledgement, or authority across a state-changing
 operation.
+
+Lifetime is one discovery pass plus one context per post-claim effect group: a
+claim is an effect boundary, so the group that hands records over observes
+current lineage again instead of inheriting the discovery pass's view. The
+pre-claim ``currently_addressed`` check belongs to the discovery context, so
+one complete registry snapshot per jobs path is memoized for that same
+lifetime and is never shared across a claim.
 """
 
 from __future__ import annotations
@@ -15,9 +22,14 @@ _UNOBSERVED = object()
 
 
 class PeerReadContext:
-    def __init__(self, *, registry_append_only: bool = False):
+    def __init__(self, *, registry_append_only: bool = False, compact_lineage: bool = False):
         self.registry_append_only = registry_append_only
+        # Opt-in: read the runner-published compact relation rows instead of every
+        # ledger byte. Only the effect path sets this; history readers
+        # (``session_tidy.seat_lineage``) need every row and pass a plain context.
+        self.compact_lineage = compact_lineage
         self._registry_views = {}
+        self._registry_snapshots = {}
         self._handover_snapshots = None
         self._handover_ledgers = {}
         self._lineage_graphs = {}
@@ -83,6 +95,25 @@ class PeerReadContext:
             except FileNotFoundError:
                 self._registry_views[key] = None
         return self._registry_views[key]
+
+    def registry_snapshot(self, jobs: Path):
+        """Reuse one complete registry generation (view and exact text) per pass.
+
+        The snapshot carries no authority of its own: it is the observation the
+        pre-claim ``currently_addressed`` check and the member's recipient
+        projection read. A claim creates a new context, so the handed-over
+        group never inherits the discovery generation.
+        """
+        from dispatch_registry_cache import registry_snapshot
+
+        jobs = Path(jobs)
+        key = str(jobs.resolve(strict=False))
+        if key not in self._registry_snapshots:
+            try:
+                self._registry_snapshots[key] = registry_snapshot(jobs)
+            except FileNotFoundError:
+                self._registry_snapshots[key] = None
+        return self._registry_snapshots[key]
 
     def handover_snapshots(self, loader):
         if self._handover_snapshots is None:

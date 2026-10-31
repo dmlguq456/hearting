@@ -1,0 +1,745 @@
+#!/usr/bin/env python3
+"""Slice-4 runner duties and notice d6-d9 contracts (narrow verify).
+
+Every state root here is an isolated temporary home: no test touches live
+dispatch, session-tidy, peer, obligation or run-registry state. The only
+external observations (herdr census, pane process info) are replaced with
+explicit fakes; a missing fake is an unknown observation, which the product
+code must treat as "do not act".
+"""
+from __future__ import annotations
+
+import contextlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import time
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path[:0] = [str(ROOT / "utilities"), str(ROOT / "tools")]
+
+_STEWARD_SPEC = importlib.util.spec_from_file_location(
+    "peer_steward_reconcile_test", str(ROOT / "utilities" / "peer-steward.py"))
+peer_steward = importlib.util.module_from_spec(_STEWARD_SPEC)
+_STEWARD_SPEC.loader.exec_module(peer_steward)
+
+import dispatch_completion_join as join  # noqa: E402
+import dispatch_pending_delivery as pending  # noqa: E402
+import dispatch_recipient_inbox as inbox  # noqa: E402
+import dispatch_supervision as supervision  # noqa: E402
+import herdr_observation  # noqa: E402
+import peer_obligations  # noqa: E402
+import session_notice  # noqa: E402
+import session_tidy as tidy  # noqa: E402
+from route_identity import route_hash  # noqa: E402
+
+
+def _notice(harness, sid, *, key, subject, text, jobs,
+            required_action="read-notice", route_id="route-free"):
+    """One stored notice record plus its retained run-notice duty."""
+    import hashlib
+    receipt = session_notice.validate({
+        "schema_version": 1, "kind": "notice", "key": key,
+        "subject": subject, "text": " ".join(text.split())[:600],
+        "required_action": required_action})
+    from harness_capabilities import parent_completion
+    delivery_id = "delivery-" + hashlib.sha256(f"notice\0{key}".encode()).hexdigest()
+    tag = "notice-" + delivery_id.removeprefix("delivery-")[:32]
+    root = Path(jobs).parent
+    record = pending.read(root, sid, delivery_id)
+    if record is None:
+        record = pending.create(
+            root, recipient_kind=parent_completion(harness)["carrier"],
+            recipient_key=sid, delivery_id=delivery_id, session_generation="",
+            session_generation_supported="0", attempt_ids=[tag], parent_attempt_id=tag,
+            route_id=route_id, route_node="notice", receipt=receipt,
+            receipt_digest=session_notice.receipt_digest(receipt),
+            row_revisions={tag: "notice"}, lineage=[])
+    peer_obligations.retain_session_notice(Path(jobs), harness, sid, record)
+    return record
+
+
+class IsolatedCase(unittest.TestCase):
+    """A private HOME/XDG/dispatch root per test; nothing resolves to live state."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory(prefix="runner-notices-test-")
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self._saved_environ = dict(os.environ)
+        self.addCleanup(self._restore_environ)
+        for key in tuple(os.environ):
+            if key.startswith(("AGENT_", "HERDR_", "OPENCODE_", "CLAUDE_", "CODEX_",
+                               "XDG_", "HARNESS_")):
+                os.environ.pop(key, None)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        os.environ.update({
+            "HOME": str(self.home),
+            "XDG_STATE_HOME": str(self.home / ".local" / "state"),
+            "XDG_CONFIG_HOME": str(self.home / ".config"),
+            "XDG_DATA_HOME": str(self.home / ".local" / "share"),
+            "XDG_CACHE_HOME": str(self.home / ".cache"),
+            "AGENT_DISPATCH_JOBS": str(self.root / "jobs.log"),
+            "AGENT_PEER_LEDGER_ROOT": str(self.root),
+        })
+        self.jobs = self.root / "jobs.log"
+        self.jobs.touch()
+        self._old_herdr = peer_steward._HERDR_SESSION
+        peer_steward._HERDR_SESSION = None
+        self.addCleanup(setattr, peer_steward, "_HERDR_SESSION", self._old_herdr)
+        self.store = peer_obligations.ObligationStore(self.root)
+        self.assertTrue(self.store.ensure_directory())
+        runner_patch = mock.patch.object(peer_obligations, "ensure_normal_runner",
+                                         return_value=False)
+        runner_patch.start()
+        self.addCleanup(runner_patch.stop)
+        peer_steward._LINEAGE_GRAPH_CACHE.clear() if hasattr(peer_steward, "_LINEAGE_GRAPH_CACHE") else None
+        import dispatch_seat_handover as handover
+        handover._LINEAGE_GRAPH_CACHE.clear()
+        self.addCleanup(handover._LINEAGE_GRAPH_CACHE.clear)
+
+    def _restore_environ(self):
+        os.environ.clear()
+        os.environ.update(self._saved_environ)
+
+    # -- fixtures ---------------------------------------------------------
+    def edge(self, origin, target, *, harness="claude", source="tidy-clear",
+             event="succession", ts=1):
+        tidy._append_ledger_entry(
+            tidy.Seat("pane", f"ledger-{target}", harness=harness),
+            {"event": event, "source": source, "harness": harness, "sid": target,
+             "from": {"harness": harness, "sid": origin}, "ts": ts})
+
+    def write_ledger(self, key, rows):
+        path = tidy.state_root() / "sessions" / f"{key}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+        return path
+
+    def duties(self):
+        return self.store.list(kinds={"session-notice", "run-notice"})
+
+    @contextlib.contextmanager
+    def transport(self, sid="B", *, sent=None):
+        inventory = {"result": {"agents": [{"agent": "claude",
+            "agent_session": {"value": sid}, "pane_id": "w1:pLive"}]}}
+        resolved = {"pane": "w1:pLive", "harness": "claude", "session_id": sid,
+                    "name": "fixture", "state": "idle"}
+
+        def courier(args, *, expected_recipient, on_prepared, producer_binding):
+            body = Path(args.body_file).read_text()
+            if sent is not None:
+                sent.append({"body": body, "recipient": expected_recipient})
+            return 3
+
+        with mock.patch.object(peer_steward.subprocess, "run",
+                               return_value=SimpleNamespace(
+                                   returncode=0, stdout=json.dumps(inventory))), \
+             mock.patch.object(peer_steward, "_resolve_target",
+                               return_value=("claude", sid, "fixture")), \
+             mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
+             mock.patch.object(peer_steward, "_resolve_prompt_target",
+                               return_value=(resolved, None, [])), \
+             mock.patch.object(peer_steward, "_pane_readiness",
+                               return_value=SimpleNamespace(state="ready")), \
+             mock.patch.object(peer_steward, "_claude_idle_prompt_guard",
+                               return_value=(None, {})), \
+             mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})), \
+             mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):
+            yield
+
+    def completion_fixture(self, *, attempt="att-run-parent", sid="A",
+                           route_id="rt-run", carrier="claude-parent-runtime",
+                           delivery_id="delivery-run-parent",
+                           parent_attempt="att-parent"):
+        """One exact terminal attempt row and its open completion record."""
+        route = {"route_id": route_id, "parent_cycle_id": "cycle-run",
+                 "nodes": [{"id": "frame"}]}
+        route["route_hash"] = route_hash(route)
+        route_path = self.root / (route_id + ".json")
+        route_path.write_text(json.dumps(route))
+        body = {"schema_version": 2, "state": "ready",
+                "parent_attempt_id": parent_attempt, "job_registry": str(self.jobs),
+                "delivery_classification": "success",
+                "children": [{"attempt_id": attempt, "status": "done",
+                              "readiness": "ready", "reason": "terminal-complete",
+                              "required_action": "advance-completed",
+                              "harness": "claude",
+                              "delivery_classification": "success"}]}
+        record = pending.create(
+            self.root, recipient_kind=carrier, recipient_key=sid,
+            delivery_id=delivery_id, session_generation="",
+            session_generation_supported="0", attempt_ids=[attempt],
+            parent_attempt_id=parent_attempt, route_id=route_id, route_node="frame",
+            receipt=body, receipt_digest=pending._canonical_receipt_digest(body),
+            row_revisions={attempt: "revision"})
+        meta = dict(attempt_id=attempt, attempt_schema_version="2", dispatch_depth="1",
+            registered_worker="1", worker_type="frame", parent_sid=sid,
+            parent_harness="claude", parent_attempt_id=parent_attempt,
+            parent_completion_delivery=carrier, delivery_intent="1",
+            delivery_intent_at_ns=str(time.monotonic_ns()), delivery_id=delivery_id,
+            delivery_receipt_digest=record["receipt_digest"],
+            delivery_row_revision="revision", failure_class="pass",
+            note="completed-marker", launch_outcome="reaped-before-publish",
+            route_file=str(route_path), route_id=route_id,
+            route_hash=route["route_hash"], route_node="frame")
+        with self.jobs.open("a") as handle:
+            handle.write("now\tdone\t/fixture/repo\t/fixture/wt\tframe\t"
+                         + ",".join(key + "=" + value for key, value in meta.items())
+                         + "\n")
+        return record, meta
+
+    def publish_run_state(self, run_id, *, status="succeeded", exit_code=0,
+                          parent_attempt="att-run-parent"):
+        inbox.write_run_states(inbox.dispatch_inbox_root(), {"runs": {run_id: {
+            "status": status, "exit_code": exit_code, "ended_at": 123.0,
+            "artifact_root": str(self.root / "artifacts"),
+            "parent_attempt_id": parent_attempt, "jobs": str(self.jobs)}}})
+
+
+class ClassifyTest(IsolatedCase):
+    def test_terminal_forms_use_existing_receipt_fields_only(self):
+        base = {"schema_version": 1, "kind": "notice", "text": "t",
+                "subject": "notice", "required_action": "read-notice",
+                "key": "checkpoint:1"}
+        self.assertEqual(session_notice.classify(base), session_notice.PROGRESS)
+        self.assertEqual(session_notice.classify(
+            {**base, "required_action": "report-to-user"}), session_notice.TERMINAL)
+        self.assertEqual(session_notice.classify(
+            {**base, "key": "experiment:run-1:final:1:claude:A",
+             "subject": "experiment final (1/1)"}), session_notice.TERMINAL)
+        self.assertEqual(session_notice.classify(
+            {**base, "key": "experiment:run-1:attention:abc",
+             "subject": "experiment final (1/1)"}), session_notice.TERMINAL)
+        self.assertEqual(session_notice.classify(
+            {**base, "key": "experiment:run-1:attention:abc"}), session_notice.PROGRESS)
+        # A broken receipt is progress, never a terminal wake.
+        self.assertEqual(session_notice.classify({"kind": "notice"}), session_notice.PROGRESS)
+
+
+class TerminalFirstDeliveryTest(IsolatedCase):
+    def test_terminal_notice_is_sent_before_progress_in_the_same_group(self):
+        progress = _notice("claude", "A", key="checkpoint:1", subject="progress",
+                           text="routine progress", jobs=self.jobs)
+        terminal = _notice("claude", "A", key="experiment:run-1:final:1:claude:A",
+                           subject="experiment final (1/1)",
+                           text="experiment finished", jobs=self.jobs)
+        sent = []
+        with mock.patch.object(peer_steward, "NOTICE_BATCH_LIMIT", 1), \
+             self.transport("A", sent=sent):
+            peer_steward._resume_session_notice_obligations(self.duties(), self.store)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("experiment finished", sent[0]["body"])
+        self.assertNotIn("routine progress", sent[0]["body"])
+        self.assertEqual(pending.read(self.root, "A", terminal["delivery_id"])["state"],
+                         "sent-ambiguous")
+        self.assertEqual(pending.read(self.root, "A", progress["delivery_id"])["state"],
+                         "pending")
+        # The next pass carries the remaining progress notice.
+        pending.ack(self.root, "A", terminal["delivery_id"], acked_by="fixture-receipt")
+        with mock.patch.object(peer_steward, "NOTICE_BATCH_LIMIT", 1), \
+             self.transport("A", sent=sent):
+            peer_steward._resume_session_notice_obligations(self.duties(), self.store)
+        self.assertEqual(len(sent), 2)
+        self.assertIn("routine progress", sent[1]["body"])
+
+
+class RunNoticeSupersedeTest(IsolatedCase):
+    def run_notice(self, run_id="run-1", sid="A"):
+        return _notice("claude", sid, key=f"experiment:{run_id}:final:1:claude:{sid}",
+                       subject="experiment final (1/1)", text="experiment finished",
+                       jobs=self.jobs)
+
+    def test_exact_parent_completion_retires_the_run_notice(self):
+        record, _meta = self.completion_fixture()
+        self.publish_run_state("run-1")
+        notice = self.run_notice()
+        self.assertFalse(session_notice.notice_is_current(notice))
+        self.assertEqual(session_notice.fold_summary(notice),
+                         "compute run summary: run run-1 status=succeeded exit=0")
+        # Unknown or still-running state keeps the notice current.
+        self.publish_run_state("run-1", status="running", exit_code=None)
+        self.assertTrue(session_notice.notice_is_current(notice))
+        inbox.run_states_path(inbox.dispatch_inbox_root()).unlink()
+        self.assertTrue(session_notice.notice_is_current(notice))
+        # A missing exact completion record is also unknown, never folded.
+        self.publish_run_state("run-1")
+        record_path = pending.record_path(self.root, "A", record["delivery_id"])
+        record_path.unlink()
+        self.assertTrue(session_notice.notice_is_current(notice))
+
+    def test_superseded_run_notice_is_folded_into_the_sent_body(self):
+        self.completion_fixture()
+        self.publish_run_state("run-1")
+        folded = self.run_notice()
+        kept = _notice("claude", "A", key="checkpoint:2", subject="progress",
+                       text="still running", jobs=self.jobs)
+        sent = []
+        with self.transport("A", sent=sent):
+            peer_steward._resume_session_notice_obligations(self.duties(), self.store)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("still running", sent[0]["body"])
+        self.assertIn("compute run summary: run run-1 status=succeeded exit=0",
+                      sent[0]["body"])
+        self.assertNotIn("experiment finished", sent[0]["body"])
+        self.assertEqual(pending.read(self.root, "A", folded["delivery_id"])["state"],
+                         "rejected")
+        self.assertEqual(pending.read(self.root, "A", kept["delivery_id"])["state"],
+                         "sent-ambiguous")
+
+
+class AttentionRetirementTest(IsolatedCase):
+    OWNER = ("att-owner\tdone\t/fixture/repo\t/fixture/wt\towner\t"
+             "attempt_id=att-owner,dispatch_depth=1,parent_sid=parent-test,"
+             "parent_harness=claude,parent_completion_delivery=claude-parent-runtime,"
+             "worker_type=owner,note=dead-worker-blocked")
+
+    def _child(self, attempt, *, meta=None):
+        fields = {"attempt_id": attempt, "parent_sid": "parent-test",
+                  "parent_attempt_id": "att-owner",
+                  "parent_completion_delivery": "claude-parent-runtime",
+                  "pid": "99999998", "pid_start": "1"}
+        delivery_keys = ("attempt_schema_version", "parent_attempt_id",
+                         "delivery_intent", "delivery_intent_at_ns", "delivery_id",
+                         "delivery_receipt_digest", "delivery_row_revision",
+                         "failure_class", "note", "launch_outcome", "route_file",
+                         "route_id", "route_hash", "route_node", "worker_type",
+                         "dispatch_depth", "registered_worker")
+        fields.update({key: meta[key] for key in delivery_keys if key in (meta or {})})
+        return ("%s\tdone\t/fixture/repo\t/fixture/wt\tframe\t" % attempt
+                + ",".join(key + "=" + value for key, value in fields.items()))
+
+    def _rows(self, *children):
+        self.jobs.write_text(self.OWNER + "\n" + "\n".join(children) + "\n")
+
+    def test_attention_retires_only_when_every_monitored_attempt_has_completion(self):
+        rec1, meta1 = self.completion_fixture(
+            attempt="att-child", sid="parent-test", route_id="rt-att-1",
+            delivery_id="delivery-att-1", parent_attempt="att-owner")
+        rec2, meta2 = self.completion_fixture(
+            attempt="att-child-2", sid="parent-test", route_id="rt-att-2",
+            delivery_id="delivery-att-2", parent_attempt="att-owner")
+        self._rows(self._child("att-child", meta=meta1),
+                   self._child("att-child-2", meta=meta2))
+        notice = supervision.materialize(
+            self.jobs, {"att-child", "att-child-2"}, reason="attempt-stalled")[0]
+        self.assertIsNotNone(supervision._recorded_completion_result(
+            notice["receipt"], require_ack=False))
+        with mock.patch.object(supervision, "_pending", return_value=True):
+            self.assertFalse(supervision.notice_is_current(notice))
+        # One unresolved sibling keeps the (new) attention current: the d8
+        # guard must not retire it, so the ordinary currentness verdict wins.
+        self._rows(self._child("att-child", meta=meta1),
+                   self._child("att-child-2"))
+        fresh = supervision.materialize(
+            self.jobs, {"att-child", "att-child-2"}, reason="attempt-stalled")[0]
+        with mock.patch.object(supervision, "_pending", return_value=True):
+            self.assertTrue(supervision.notice_is_current(fresh))
+
+
+    def test_completion_records_are_never_suppressed_by_attention(self):
+        import dispatch_notice_state
+        record, _meta = self.completion_fixture()
+        self.assertTrue(dispatch_notice_state.notice_is_current(record, jobs=self.jobs))
+
+
+class ReconcileDutyTest(IsolatedCase):
+    def _open_records(self, count):
+        from harness_capabilities import parent_completion
+        records = []
+        for index in range(count):
+            body = {"schema_version": 1, "kind": "notice", "subject": "bulk",
+                "text": "bulk", "required_action": "read-notice",
+                "key": f"bulk-{index}"}
+            records.append(pending.create(
+                self.root, recipient_kind=parent_completion("claude")["carrier"],
+                recipient_key="A", delivery_id=f"delivery-bulk-{index}",
+                session_generation="", session_generation_supported="0",
+                attempt_ids=[], parent_attempt_id="",
+                route_id="route-free", route_node="notice", receipt=body,
+                receipt_digest=pending._canonical_receipt_digest(body),
+                row_revisions={}))
+        return records
+
+    def test_manual_call_is_unchanged_and_bounded_call_stops_at_the_limit(self):
+        self._open_records(5)
+        unlimited = join.reconcile_pending_delivery(self.jobs)
+        self.assertEqual(set(unlimited), {"materialized", "expired", "skipped",
+                                          "pruned_records", "pruned_locks", "prune_skipped"})
+        full = join.reconcile_pending_delivery(self.jobs, max_rows=500,
+                                               time_budget_s=30)
+        self.assertEqual(full["records_read"], 5)
+        self.assertEqual(full["budget_exhausted"], 0)
+        bounded = join.reconcile_pending_delivery(self.jobs, max_rows=2,
+                                                  time_budget_s=30)
+        self.assertEqual(bounded["records_read"], 2)
+        self.assertEqual(bounded["budget_exhausted"], 1)
+
+    def test_maintenance_pass_runs_reconcile_once_per_due_window(self):
+        self._open_records(3)
+        first = peer_steward._runner_maintenance_pass(self.store)
+        self.assertIn("reconcile", first)
+        self.assertLessEqual(first["reconcile"]["records_read"], 500)
+        state = peer_obligations.read_runner_duty_state(self.root, "reconcile")
+        self.assertEqual(state["records_read"], 3)
+        self.assertIsNone(state["cursor"])
+        second = peer_steward._runner_maintenance_pass(self.store)
+        self.assertNotIn("reconcile", second)
+        # A different duty keeps its own due record.
+        self.assertTrue(peer_obligations.read_runner_duty_state(
+            self.root, "peer-history"))
+
+    def test_incomplete_registry_never_judges_records_and_still_prunes(self):
+        records = self._open_records(3)
+        result = join.reconcile_pending_delivery(self.jobs, time_budget_s=0)
+        self.assertEqual(result["records_read"], 0)
+        self.assertEqual(result["budget_exhausted"], 1)
+        self.assertIn("pruned_records", result)
+        for record in records:
+            self.assertEqual(
+                pending.read(self.root, "A", record["delivery_id"])["state"], "pending")
+
+    def test_bounded_walk_resumes_from_the_returned_cursor(self):
+        self._open_records(5)
+        reads, cursor = [], None
+        for _ in range(4):
+            result = join.reconcile_pending_delivery(
+                self.jobs, max_rows=2, time_budget_s=30, start_after=cursor)
+            reads.append(result["records_read"])
+            cursor = result["cursor"]
+            if cursor is None:
+                break
+        self.assertEqual(sum(reads), 5)
+        self.assertIsNone(cursor)
+        self.assertEqual(reads, [2, 2, 1])
+
+    def test_maintenance_clears_a_multi_pass_backlog_with_the_cursor(self):
+        self._open_records(5)
+        totals = []
+        with mock.patch.object(peer_steward, "RECONCILE_MAX_ROWS", 2):
+            for _ in range(4):
+                result = peer_steward._runner_maintenance_pass(self.store)
+                if "reconcile" not in result:
+                    break
+                totals.append(result["reconcile"]["records_read"])
+                if result["reconcile"].get("cursor") is None:
+                    break
+            state = peer_obligations.read_runner_duty_state(self.root, "reconcile")
+        self.assertGreaterEqual(sum(totals), 5)
+        self.assertIsNone(state["cursor"])
+        self.assertGreater(state["last_pass_ns"], 0)
+
+    def test_a_quiet_pass_reads_no_registry(self):
+        now_ns = time.time_ns()
+        for duty in ("reconcile", "peer-history", "peer-index", "retire",
+                     "inbox-prefill", "steward-relations", "lineage-rows"):
+            peer_obligations.write_runner_duty_state(self.root, duty, {
+                "last_pass_ns": now_ns, "cursor": None, "edge_generation": 0})
+        inbox.write_lineage_rows(self.root, {"directory": "/fixture",
+                                             "ledgers": {}})
+        with mock.patch.object(join, "reconcile_pending_delivery",
+                               side_effect=AssertionError("registry read")):
+            result = peer_steward._runner_maintenance_pass(self.store)
+        self.assertNotIn("reconcile", result)
+        self.assertNotIn("peer_history", result)
+
+    def test_lineage_rows_duty_publishes_a_first_compact_observation(self):
+        self.write_ledger("seat-lineage", [
+            {"ts": 1, "event": "prompt", "harness": "claude", "sid": "lineage-holder"}])
+        first = peer_steward._publish_lineage_rows_duty(self.root)
+        self.assertTrue(first["published"])
+        payload = inbox.read_lineage_rows(self.root)
+        self.assertIsNotNone(payload)
+        self.assertIn("seat-lineage", payload["ledgers"])
+        second = peer_steward._publish_lineage_rows_duty(self.root)
+        self.assertFalse(second["published"])
+
+    def test_peer_index_duty_publishes_then_waits_for_its_due_window(self):
+        peer_steward.peer_message.prepare_peer_message(
+            "index duty body", {"harness": "codex", "session_id": "sender"},
+            {"harness": "claude", "session_id": "A"}, defer=True)
+        first = peer_steward._publish_peer_indexes(self.root)
+        self.assertTrue(first["published"])
+        self.assertGreaterEqual(first["recipients"], 1)
+        self.assertTrue(peer_steward.peer_message.recipient_index_path(
+            peer_steward.peer_message.peer_state_root(), "claude", "A").is_file())
+        second = peer_steward._publish_peer_indexes(self.root)
+        self.assertFalse(second["published"])
+
+    def test_steward_relations_publish_and_refresh_on_edge_change(self):
+        marker_dir = peer_steward.peer_message.peer_state_root() / "peer-steward" / "claude"
+        marker_dir.mkdir(parents=True, exist_ok=True)
+        (marker_dir / "legacy.json").write_text(json.dumps({
+            "schema_version": 1, "harness": "claude", "session_id": "legacy-holder",
+            "targets": {"legacy-holder": {"harness": "claude",
+                                          "session_id": "legacy-holder",
+                                          "kind": "watch", "ts": "1"}},
+        }), encoding="utf-8")
+        self.write_ledger("legacy-seat", [
+            {"ts": 1, "event": "prompt", "harness": "claude", "sid": "legacy-holder"}])
+        first = peer_steward._publish_steward_relations(self.root)
+        self.assertTrue(first["published"])
+        self.assertIsNotNone(inbox.read_steward_relations(self.root))
+        second = peer_steward._publish_steward_relations(self.root)
+        self.assertFalse(second["published"])
+        inbox.bump_edge_generation(self.root)
+        third = peer_steward._publish_steward_relations(self.root)
+        self.assertTrue(third["published"])
+
+
+class PeerHistoryCursorTest(IsolatedCase):
+    def _received(self, ref, received_at):
+        pending_dir = peer_steward.peer_message._pending_dir()
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        path = pending_dir / f"{ref}.json"
+        path.write_text(json.dumps({
+            "ref": ref, "state": "received", "received_at": received_at,
+            "to": {"harness": "claude", "session_id": "A"},
+            "from": {"harness": "runtime", "session_id": None},
+        }), encoding="utf-8")
+        return path
+
+    def test_deadline_cursor_resumes_the_walk(self):
+        now = time.time()
+        first = self._received("a" * 32, now - 8 * 86400)
+        self._received("b" * 32, now - 8 * 86400)
+        self._received("c" * 32, now - 8 * 86400)
+        clock = iter([0, 5])
+        with mock.patch.object(peer_steward, "time",
+                               SimpleNamespace(time=lambda: now,
+                                               monotonic_ns=lambda: next(clock))):
+            cut = peer_steward._prune_received_peer_history(now=now, deadline_ns=3)
+        self.assertFalse(cut["complete"])
+        self.assertEqual(cut["examined"], 1)
+        self.assertEqual(cut["cursor"], "a" * 32 + ".json")
+        self.assertFalse(first.exists())
+        with mock.patch.object(peer_steward, "time",
+                               SimpleNamespace(time=lambda: now,
+                                               monotonic_ns=lambda: 0)):
+            rest = peer_steward._prune_received_peer_history(
+                now=now, deadline_ns=10**18, start_after=cut["cursor"])
+        self.assertTrue(rest["complete"])
+        self.assertIsNone(rest["cursor"])
+        self.assertEqual(rest["removed"], 2)
+
+
+class PeerHistoryCleanupTest(IsolatedCase):
+    def _row(self, ref, state, received_at):
+        return {"ref": ref, "state": state, "received_at": received_at,
+                "to": {"harness": "claude", "session_id": "A"},
+                "from": {"harness": "runtime", "session_id": None}}
+
+    def test_only_received_rows_past_seven_days_are_removed(self):
+        peer_message = peer_steward.peer_message
+        pending_dir = peer_message._pending_dir()
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        old_received = pending_dir / ("a" * 32 + ".json")
+        new_received = pending_dir / ("b" * 32 + ".json")
+        old_pending = pending_dir / ("c" * 32 + ".json")
+        old_received.write_text(json.dumps(self._row("a" * 32, "received", now - 8 * 86400)))
+        new_received.write_text(json.dumps(self._row("b" * 32, "received", now - 86400)))
+        old_pending.write_text(json.dumps(self._row("c" * 32, "pending", now - 30 * 86400)))
+        transfers = peer_message.peer_state_root() / "peer-messages" / "transfers"
+        transfers.mkdir(parents=True, exist_ok=True)
+        transfer = transfers / ("a" * 32 + ".json")
+        transfer.write_text(json.dumps({"ref": "a" * 32, "state": "received"}))
+        result = peer_steward._prune_received_peer_history(now=now)
+        self.assertEqual(result["removed"], 1)
+        self.assertFalse(old_received.exists())
+        self.assertTrue(new_received.exists())
+        self.assertTrue(old_pending.exists())
+        self.assertTrue(transfer.exists())
+
+
+class LineageBundleRetirementTest(IsolatedCase):
+    OLD = 1_000_000.0
+
+    def component(self, *, ts=None):
+        ts = self.OLD if ts is None else ts
+        self.write_ledger("seat-A", [
+            {"ts": ts, "harness": "claude", "sid": "A", "event": "start", "source": "startup"}])
+        self.write_ledger("seat-B", [
+            {"ts": ts, "harness": "claude", "sid": "B", "event": "handover",
+             "source": "clear", "from": {"harness": "claude", "sid": "A"}}])
+
+    def census(self):
+        return herdr_observation.PaneCensus("default", (), time.monotonic())
+
+    def retire(self, **kwargs):
+        with mock.patch.object(peer_steward.herdr_observation, "pane_census",
+                               return_value=kwargs.pop("census", self.census())):
+            return peer_steward._retire_finished_lineage_bundles(
+                self.store, now=time.time(), **kwargs)
+
+    def archived(self):
+        archive = tidy.state_root() / peer_steward.RETIRE_ARCHIVE_DIRECTORY
+        return sorted(path.name for path in archive.glob("*.jsonl")) if archive.is_dir() else []
+
+    def sessions(self):
+        sessions = tidy.state_root() / "sessions"
+        return sorted(path.name for path in sessions.glob("*.jsonl")) if sessions.is_dir() else []
+
+    def test_all_five_conditions_archive_both_ledgers_without_deleting(self):
+        self.component()
+        result = self.retire()
+        self.assertEqual(result["retired"], 1)
+        self.assertEqual(result["ledgers"], 2)
+        self.assertEqual(self.sessions(), [])
+        self.assertEqual(self.archived(), ["seat-A.jsonl", "seat-B.jsonl"])
+        # Archive retention: 29 days kept, 31 days removed.
+        archive = tidy.state_root() / peer_steward.RETIRE_ARCHIVE_DIRECTORY
+        old = time.time() - 29 * 86400
+        os.utime(archive / "seat-A.jsonl", (old, old))
+        self.assertEqual(peer_steward._purge_retired_archives()["removed"], 0)
+        older = time.time() - 31 * 86400
+        os.utime(archive / "seat-B.jsonl", (older, older))
+        self.assertEqual(peer_steward._purge_retired_archives()["removed"], 1)
+        self.assertEqual(self.archived(), ["seat-A.jsonl"])
+
+    def test_each_blocking_condition_keeps_the_bundle(self):
+        cases = {}
+
+        def open_notice():
+            self.component()
+            _notice("claude", "B", key="open-1", subject="n", text="t", jobs=self.jobs)
+
+        def recent_activity():
+            self.component(ts=time.time())
+
+        def unknown_census():
+            self.component()
+            self._census = None
+
+        def open_binding():
+            self.component()
+            binding = {"jobs": str(self.jobs), "route": "rt", "hash": "sha256:" + "b" * 64,
+                       "node": "execute", "attempt": "att-open", "parent": "A"}
+            self.write_ledger("seat-B", [
+                {"ts": self.OLD, "harness": "claude", "sid": "B", "event": "handover",
+                 "source": "clear", "from": {"harness": "claude", "sid": "A"},
+                 "bindings": [binding]}])
+            with self.jobs.open("a") as handle:
+                handle.write("now\trunning\t/fixture/repo\t/fixture/wt\tframe\t"
+                             "attempt_id=att-open,parent_sid=A\n")
+
+        def role_row():
+            self.component()
+            self.write_ledger("seat-B", [
+                {"ts": self.OLD, "harness": "claude", "sid": "B", "event": "tidy-claim",
+                 "claim_id": "c1", "nonce": "n1"}])
+
+        def unresolved_component():
+            self.component()
+            self.write_ledger("seat-C", [
+                {"ts": self.OLD, "harness": "claude", "sid": "C", "event": "handover",
+                 "source": "clear", "from": {"harness": "claude", "sid": "A"}}])
+
+        cases = {"open-notice": open_notice, "recent-activity": recent_activity,
+                 "open-binding": open_binding, "role-row": role_row,
+                 "unresolved": unresolved_component}
+        for name, build in cases.items():
+            with self.subTest(name=name):
+                for path in (tidy.state_root() / "sessions").glob("*.jsonl"):
+                    path.unlink()
+                archive = tidy.state_root() / peer_steward.RETIRE_ARCHIVE_DIRECTORY
+                if archive.is_dir():
+                    for path in archive.glob("*.jsonl"):
+                        path.unlink()
+                for path in (self.root / "pending-delivery").rglob("*.json"):
+                    path.unlink()
+                self.jobs.write_text("")
+                build()
+                result = self.retire()
+                self.assertEqual(result["retired"], 0, name)
+                self.assertTrue(self.sessions(), name)
+        self.component()
+        result = self.retire(census=None)
+        self.assertEqual(result["retired"], 0)
+
+
+class InboxPrefillTest(IsolatedCase):
+    def test_prefill_publishes_a_current_inbox_and_skips_incomplete_scopes(self):
+        notice = _notice("claude", "A", key="open-1", subject="n", text="t",
+                         jobs=self.jobs)
+        self.edge("A", "B")
+        deadline = time.monotonic_ns() + 30 * 1_000_000_000
+        with mock.patch.object(peer_steward, "_live_recipients",
+                               return_value={("claude", "B")}):
+            result = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
+        self.assertEqual(result["written"], 1)
+        payload = inbox.read_inbox(self.root, "claude", "B")
+        self.assertIsNotNone(payload)
+        self.assertIn({"storage_key": "A", "delivery_id": notice["delivery_id"]},
+                      [{"storage_key": item["storage_key"],
+                        "delivery_id": item["delivery_id"]}
+                       for item in payload["delivery_ids"]])
+        self.assertTrue(inbox.is_current(payload, self.root))
+        # A new record in a named scope makes the inbox stale; prefill repairs it.
+        _notice("claude", "A", key="open-2", subject="n2", text="t2", jobs=self.jobs)
+        self.assertFalse(inbox.is_current(payload, self.root))
+        with mock.patch.object(peer_steward, "_live_recipients",
+                               return_value={("claude", "B")}):
+            peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
+        self.assertTrue(inbox.is_current(inbox.read_inbox(self.root, "claude", "B"),
+                                         self.root))
+
+    def test_incomplete_scopes_are_never_published(self):
+        import dispatch_seat_handover as handover
+        _notice("claude", "A", key="open-1", subject="n", text="t", jobs=self.jobs)
+        self.edge("A", "B")
+        incomplete = handover.RecipientScopes()
+        incomplete.complete = False
+        with mock.patch.object(handover, "storage_recipients", return_value=incomplete):
+            payload = peer_steward._prefill_recipient_inbox(
+                self.root, "claude", "B",
+                deadline_ns=time.monotonic_ns() + 30 * 1_000_000_000)
+        self.assertIsNone(payload)
+        self.assertIsNone(inbox.read_inbox(self.root, "claude", "B"))
+
+
+class RunStatesPublishTest(IsolatedCase):
+    def test_publish_merges_public_status_with_registry_exit_and_jobs(self):
+        import resource_run_registry as registry
+        artifact_root = self.root / "artifacts"
+        artifact_root.mkdir()
+        public = artifact_root / "resource-runs" / "run-1.json"
+        public.parent.mkdir(parents=True)
+        public.write_text(json.dumps({"schema_version": 1, "run_id": "run-1",
+                                      "status": "succeeded", "ended_at": 42.0}))
+        registry_path = self.root / "runs.json"
+        registry_path.write_text(json.dumps({"schema_version": 1, "runs": {"run-1": {
+            "run_id": "run-1", "status": "running", "exit_code": 0, "ended_at": 41.0,
+            "artifact_root": str(artifact_root), "parent_attempt_id": "att-run-parent",
+            "jobs": str(self.jobs)}}}))
+        index_path = self.root / "resource-runs.index.json"
+        index_path.write_text(json.dumps({"schema_version": 1, "registries": {
+            "fixture": {"path": str(registry_path)}}}))
+        os.environ["AGENT_RESOURCE_RUN_INDEX"] = str(index_path)
+        _notice("claude", "A", key="experiment:run-1:final:1:claude:A",
+                subject="experiment final (1/1)", text="experiment finished",
+                jobs=self.jobs)
+        result = peer_steward._publish_run_states(self.store, self.duties())
+        self.assertTrue(result["published"])
+        self.assertEqual(result["runs"], 1)
+        payload = inbox.read_run_states(inbox.dispatch_inbox_root())
+        row = payload["runs"]["run-1"]
+        self.assertEqual(row["status"], "succeeded")   # public record wins
+        self.assertEqual(row["exit_code"], 0)          # registry row supplies exit
+        self.assertEqual(row["parent_attempt_id"], "att-run-parent")
+        self.assertEqual(row["jobs"], str(self.jobs))  # the run's own recorded jobs
+        self.assertEqual(row["ended_at"], 42.0)
+        # A second pass inside the due window does not rescan.
+        again = peer_steward._publish_run_states(self.store, self.duties())
+        self.assertFalse(again["published"])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

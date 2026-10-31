@@ -755,11 +755,14 @@ owner-settlement writes to the explicitly selected authoritative registry or,
 when it discovers configured roots, the canonical registry at index 0; discovery
 of a compatibility root never grants registry-write authority. Its independent
 sidecar-recovery pass still visits every configured discovery root. Activation
-invokes the existing `reconcile_pending_delivery` actor once for the canonical
-registry. That actor retains sole authority for pending materialization,
-known-dead expiry, and terminal retention pruning. Missing or inaccessible PID
-evidence stays unknown; no prompt callback, Fleet reader, or exact-attempt
-request runs an unrelated bulk mutation.
+only requests the existing obligation runner; the runner's periodic pass is what
+invokes `reconcile_pending_delivery` for the canonical registry, and no hook
+callback runs the global actor itself. That actor retains sole authority for
+pending materialization, known-dead expiry, and terminal retention pruning.
+Hooks read the runner-published recipient inbox and public run states instead of
+re-deriving global dispatch state. Missing or inaccessible PID evidence stays
+unknown; no prompt callback, Fleet reader, or exact-attempt request runs an
+unrelated bulk mutation.
 
 When a child already has a committed PASS, join and reap inspect only its exact
 terminal log before cleanup. A valid late FAIL/BLOCKED is recorded through the

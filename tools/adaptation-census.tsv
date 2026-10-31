@@ -38,6 +38,7 @@ shared-utility-deferred	dispatch_notice_state.py
 shared-utility-deferred	dispatch_owner_input.py
 shared-utility-deferred	dispatch_parent_completion.py
 shared-utility-deferred	dispatch_receipt_identity.py
+shared-utility-deferred	dispatch_recipient_inbox.py
 shared-utility-deferred	dispatch_recipient_receipt.py
 shared-utility-deferred	dispatch_replacement.py
 shared-utility-deferred	dispatch_resource_wait.py
@@ -52,6 +53,7 @@ shared-utility-deferred	hearting_gates.py
 shared-utility-deferred	herdr_integration_live.py
 shared-utility-deferred	herdr_observation.py
 shared-utility-deferred	herdr_opencode_live.py
+shared-utility-deferred	hook_perf_fixture.py
 shared-utility-deferred	human_gate_observation.py
 shared-utility-deferred	human_wait_state.py
 shared-utility-deferred	interactive-main-recovery.py
@@ -357,6 +359,7 @@ tool-deferred	integrations
 tool-deferred	lab-config-provenance.py
 tool-deferred	lab_config_provenance.test.py
 tool-deferred	ledger_invariant.test.py
+tool-deferred	measure_hook_before_after.py
 tool-deferred	migration-manifest.py
 tool-deferred	migration_manifest.test.py
 tool-deferred	native-skill-discovery.test.py

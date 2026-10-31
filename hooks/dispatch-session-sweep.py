@@ -24,10 +24,16 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
+
+# The pass deadline starts before the module-level contract/sweep imports: under
+# load their import time is part of the configured prompt-hook budget.
+_STARTED_NS = time.monotonic_ns()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "utilities"))
 from dispatch_contract import dispatch_state_roots, resolve_agent_home  # noqa: E402
 from dispatch_session_sweep import (  # noqa: E402
+    ACTION_BUDGET_SECONDS,
     activate,
     ack_delivered,
     delivery_context,
@@ -54,7 +60,20 @@ def _event_name(payload: object) -> str:
     return "UserPromptSubmit"
 
 
+def _pass_start_ns() -> int:
+    """The pre-import start for the real hook process, call time for importers.
+
+    A test imports this module once and runs cases minutes later; charging that
+    whole gap to one simulated pass would make every later case look expired.
+    """
+    return _STARTED_NS if __name__ == "__main__" else time.monotonic_ns()
+
+
 def main() -> int:
+    # One pass-wide deadline for discovery, claiming, rendering and ACK inside
+    # the configured 10 s prompt hook; the rest is the render/ACK reserve. It is
+    # derived from the pre-import start so import time is charged too.
+    deadline_ns = _pass_start_ns() + int(ACTION_BUDGET_SECONDS * 1_000_000_000)
     try:
         payload = json.load(sys.stdin)
     except (OSError, json.JSONDecodeError):
@@ -63,14 +82,16 @@ def main() -> int:
     if session_id is None:
         return 0
     try:
-        return _process_session(payload, session_id)
+        return _process_session(payload, session_id, deadline_ns)
     finally:
         # The hook owns one detached request after delivery work. This covers
         # empty context, SessionStart, workers, and root-resolution failures.
         request_obligation_reconciliation(lifecycle_root=Path(__file__).resolve().parents[1])
 
 
-def _process_session(payload: object, session_id: str) -> int:
+def _process_session(payload: object, session_id: str, deadline_ns: int | None = None) -> int:
+    if deadline_ns is None:
+        deadline_ns = _pass_start_ns() + int(ACTION_BUDGET_SECONDS * 1_000_000_000)
     try:
         agent_home = resolve_agent_home()
         roots = dispatch_state_roots(agent_home)
@@ -112,6 +133,10 @@ def _process_session(payload: object, session_id: str) -> int:
         if root in seen:
             continue
         seen.add(root)
+        if time.monotonic_ns() >= deadline_ns:
+            # The pass budget is spent. Rendering and ACK still run for what
+            # this pass already holds; later roots stay pending for the next prompt.
+            break
         if not Path(root).is_dir():
             # A read-only fallback root (legacy <agent-home>/.dispatch) that
             # does not exist holds nothing to sweep; touching it would create it.
@@ -123,7 +148,7 @@ def _process_session(payload: object, session_id: str) -> int:
             else:
                 records, _entries = sweep_deliver(
                     root, RECIPIENT_KIND, session_id,
-                    notice_context=notice_context,
+                    notice_context=notice_context, deadline_ns=deadline_ns,
                     **({"receipt_observer": receipt_observer} if receipt_observer else {}))
         except Exception:  # noqa: BLE001 -- fail-open (§13.33.1-(3))
             continue
@@ -137,7 +162,11 @@ def _process_session(payload: object, session_id: str) -> int:
     # lock-guarded, completed duties are never replayed and the original
     # assignment is never relaunched. The common request below is the single
     # recovery entry for this hook invocation.
-    context = delivery_context(batches)
+    from dispatch_registry_cache import registry_read_scope
+    with registry_read_scope():
+        # Rendering happens after the claims and is not an authority decision:
+        # one observation covers the delivery text and every followup.
+        context = delivery_context(batches)
     if not context:
         return 0
     print(

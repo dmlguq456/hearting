@@ -11,8 +11,16 @@ A registered worker projects nothing — the pane belongs to the interactive ses
 """
 import json
 import os
-import sys
 from pathlib import Path
+import sys
+import time
+
+# The hook's own budget starts before the heavy projection imports below (they
+# live inside `main`). A Stop that reaches this file under load must still leave
+# the idle-receive retry to the next Stop/prompt/runner rather than run it past
+# the deadline.
+_STARTED_NS = time.monotonic_ns()
+RETRY_BUDGET_NS = 3_000_000_000
 
 
 def main() -> int:
@@ -35,11 +43,18 @@ def main() -> int:
                 continue
             if str(tools) not in sys.path:
                 sys.path.insert(0, str(tools))
-            from fleet.herdr_projection import project
+            from fleet.herdr_projection import may_report, project
+            event = payload.get("hook_event_name")
+            # The display report and the idle-receive retry name the same pane.
+            # Decide that identity once, then hand the answer to both; the retry
+            # would otherwise repeat the full process-identity walk.
+            permission = (may_report("claude", session_id)
+                          if event in {"Stop", "UserPromptSubmit"} else None)
             # The v11 SessionStart hook reports the exact session once. This
             # Hearting hook owns display metadata and never duplicates that report.
-            project("claude", session_id, report_session=False)
-            if (payload.get("hook_event_name") in {"SessionStart", "UserPromptSubmit", "Stop"}
+            project("claude", session_id, report_session=False, permission=permission,
+                    display_relations=True)
+            if (event in {"SessionStart", "UserPromptSubmit", "Stop"}
                     and os.environ.get("AGENT_SESSION_ROLE", "").lower() != "worker"
                     and os.environ.get("AGENT_DISPATCH_CHILD") != "1"
                     and not os.environ.get("AGENT_DISPATCH_DEPTH")):
@@ -51,14 +66,16 @@ def main() -> int:
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     close_fds=True, start_new_session=True,
                 )
-            if payload.get("hook_event_name") in {"Stop", "UserPromptSubmit"}:
+            if (event in {"Stop", "UserPromptSubmit"} and permission
+                    and time.monotonic_ns() - _STARTED_NS < RETRY_BUDGET_NS):
                 # Reuse the existing idle/receive callback and shared draft guard.
                 import importlib.util
                 utility = tools.parent / "utilities" / "peer-message.py"
                 spec = importlib.util.spec_from_file_location("_peer_idle_message", utility)
                 mod = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(mod)
-                mod.retry_receiver_idle({"harness": "claude", "session_id": session_id})
+                mod.retry_receiver_idle({"harness": "claude", "session_id": session_id},
+                                        permission=permission)
             break
     except Exception:
         pass

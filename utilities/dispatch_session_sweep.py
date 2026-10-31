@@ -25,6 +25,7 @@ import hashlib
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import time
 
@@ -77,6 +78,9 @@ DELIVER_LEASE_SECONDS = 120.0
 # so the same records come back on every prompt. Records not reached within this
 # budget stay pending for the next prompt instead.
 DELIVER_BUDGET_SECONDS = 6.0
+# One pass-wide deadline covers discovery, claiming, rendering and ACK inside the
+# configured 10 s prompt hook. The remainder is the render/ACK reserve.
+ACTION_BUDGET_SECONDS = 8.0
 STORAGE_KEY = "_storage_key"     # added to a returned copy only: the directory a record is stored under
 
 
@@ -189,39 +193,284 @@ def _recipient_harness(recipient_kind: str) -> str | None:
     return None
 
 
-def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_context=None) -> tuple[list[dict], int]:
-    """Read the current session's open notices without claiming or consuming them."""
-    from dispatch_seat_handover import record_for_session, storage_recipients
-    from peer_read_context import PeerReadContext
-    read_context = read_context or PeerReadContext()
-    records, count = [], 0
-    harness = _recipient_harness(recipient_kind)
-    for storage_key, allowed in storage_recipients(session_id, harness=harness, read_context=read_context):
-        try:
-            directory = pending_delivery.record_directory(root, storage_key)
-            entries = sorted(directory.glob("delivery-*.json"))
-        except (OSError, pending_delivery.PendingDeliveryError):
-            continue
-        count += len(entries)
-        for entry in entries:
+class AddressedRecords(list):
+    """The records discovery reached, plus whether the bounded scan finished.
+
+    ``complete=False`` means the pass time budget ran out. Delivery keeps what
+    it reached and leaves the rest pending; nothing publishes a partial scan as
+    a current inbox.
+    """
+
+    __slots__ = ("complete", "stale_inbox")
+
+    def __init__(self, items=(), *, complete: bool = True, stale_inbox: bool = False):
+        super().__init__(items)
+        self.complete = complete
+        self.stale_inbox = stale_inbox
+
+
+def _inbox_root(root: Path) -> Path:
+    """The dispatch root inboxes live under for one read root."""
+    try:
+        import dispatch_recipient_inbox as inbox
+        return Path(inbox.dispatch_inbox_root(jobs=Path(root) / "jobs.log"))
+    except Exception:  # noqa: BLE001 - derived discovery never owns the pass
+        return Path(root)
+
+
+def _directory_identity(path: Path):
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return None
+    return [info.st_dev, info.st_ino, info.st_mtime_ns]
+
+
+def _record_mtime_ns(root: Path, storage_key: str, delivery_id: str):
+    try:
+        info = os.lstat(pending_delivery.record_path(root, storage_key, delivery_id))
+    except (OSError, pending_delivery.PendingDeliveryError):
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        return None
+    return info.st_mtime_ns
+
+
+def _scope_entries(root: Path, storage_key: str) -> list[tuple[str, str]]:
+    try:
+        directory = pending_delivery.record_directory(root, storage_key)
+        return [(storage_key, path.stem) for path in sorted(directory.glob("delivery-*.json"))
+                if path.is_file() and not path.is_symlink()]
+    except (OSError, pending_delivery.PendingDeliveryError):
+        return []
+
+
+def _read_addressed(
+    root: Path,
+    recipient_kind: str,
+    session_id: str,
+    harness: str,
+    candidates,
+    *,
+    read_context,
+    deadline_ns: int | None,
+):
+    """Read the candidate records this session currently answers for.
+
+    ``candidates`` are ``(storage_key, delivery_id)`` discovery hints from the
+    inbox or the session's own scopes. Authority is always re-read per record
+    through ``record_for_session``; a hint never substitutes for it.
+    """
+    from dispatch_seat_handover import record_for_session
+
+    addressed: list[dict] = []
+    open_entries: list[tuple[str, str, int]] = []
+    seen: set[tuple[str, str]] = set()
+    count = 0
+    complete = True
+    # One discovery pass observes one registry generation; the effect group
+    # below opens its own scope because a claim is an effect boundary.
+    with _registry_read_scope():
+        for storage_key, delivery_id in candidates:
+            if (storage_key, delivery_id) in seen:
+                continue
+            seen.add((storage_key, delivery_id))
+            if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+                complete = False
+                break
             try:
-                record = pending_delivery.read(root, storage_key, entry.stem)
+                record = pending_delivery.read(root, storage_key, delivery_id)
             except (OSError, pending_delivery.PendingDeliveryError):
                 continue
-            if (record and (record.get("recipient_kind") == recipient_kind or storage_key != session_id)
-                    and record.get("state") in pending_delivery.OPEN_STATES
-                    and record_for_session(record, allowed, session=session_id,
-                                           harness=harness,
-                                           storage_key=storage_key, jobs=record_jobs(root, record),
-                                           read_context=read_context)):
-                records.append({**record, STORAGE_KEY: storage_key})
-    return records, count
+            count += 1
+            if not record or record.get("state") not in pending_delivery.OPEN_STATES:
+                continue
+            if not (record.get("recipient_kind") == recipient_kind or storage_key != session_id):
+                continue
+            # The inbox names every open record in the recipient's scopes; each
+            # pass still re-reads authority below before it hands one over.
+            mtime_ns = _record_mtime_ns(root, storage_key, delivery_id)
+            if mtime_ns is not None:
+                open_entries.append((storage_key, delivery_id, mtime_ns))
+            try:
+                if not record_for_session(record, None, session=session_id, harness=harness,
+                                          storage_key=storage_key, jobs=record_jobs(root, record),
+                                          read_context=read_context):
+                    continue
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                continue
+            addressed.append({**record, STORAGE_KEY: storage_key})
+    return addressed, open_entries, count, complete
+
+
+def _inbox_payload(root: Path, session_id: str, harness: str, scopes, open_entries,
+                   read_context=None) -> dict:
+    """Describe the exact open-record set and the scopes that can change it."""
+    import dispatch_recipient_inbox as inbox
+
+    from dispatch_seat_handover import lineage_graph
+    graph = lineage_graph(read_context=read_context)
+    identities = {}
+    storage_keys = [session_id]
+    candidates = []
+    for storage_key, allowed in scopes:
+        if storage_key not in storage_keys:
+            storage_keys.append(storage_key)
+        try:
+            attempts = sorted(str(item) for item in (allowed or ()))
+        except TypeError:
+            attempts = []
+        candidates.append({"storage_key": storage_key, "attempts": attempts})
+    for storage_key in storage_keys:
+        try:
+            directory = pending_delivery.record_directory(root, storage_key)
+        except pending_delivery.PendingDeliveryError:
+            continue
+        identity = _directory_identity(directory)
+        if identity is not None:
+            identities[str(directory)] = identity
+    return {
+        "edge_generation": inbox.read_edge_generation(root),
+        "folded_edge_digest": inbox.edge_digest(getattr(graph, "edges", ()) or ()),
+        "dir_identities": identities,
+        "delivery_ids": [{"storage_key": storage_key, "delivery_id": delivery_id,
+                          "mtime_ns": mtime_ns}
+                         for storage_key, delivery_id, mtime_ns in open_entries],
+        "candidates": candidates,
+        "observed_at_ns": time.time_ns(),
+    }
+
+
+def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_context=None,
+                      deadline_ns: int | None = None) -> tuple[list[dict], int]:
+    """Read this session's open notices from the derived inbox, never globally.
+
+    A current inbox names exactly the open records to open (``delivery_ids``).
+    A stale inbox keeps its previous names plus the session's own scope and
+    leaves the global recomputation to the existing obligation runner. Only the
+    one-time prefill (no inbox yet) derives the scopes once, within the pass
+    deadline, and publishes them; a partial prefill is never published.
+    """
+    from dispatch_seat_handover import storage_recipients
+    from peer_read_context import PeerReadContext
+    import dispatch_recipient_inbox as inbox
+
+    read_context = read_context or PeerReadContext(compact_lineage=True)
+    harness = _recipient_harness(recipient_kind) or ""
+    if not Path(root).is_dir():
+        # A read-only fallback root that does not exist holds nothing to sweep;
+        # discovery must not materialize it (or its derived inbox directory).
+        return AddressedRecords(complete=True), 0
+    inbox_root = _inbox_root(root)
+    canonical = inbox_root == Path(root).resolve(strict=False)
+    recorded = inbox.read_inbox(inbox_root, harness, session_id) if harness else None
+    current = False
+    if recorded is not None:
+        try:
+            current = inbox.is_current(recorded, inbox_root)
+        except (OSError, ValueError, TypeError):
+            current = False
+
+    if current:
+        candidates = [(item["storage_key"], item["delivery_id"])
+                      for item in recorded["delivery_ids"]]
+        # A scope directory that did not exist when the inbox was written cannot
+        # be compared by identity; read the session's own directory until it is
+        # recorded. Once recorded, its identity detects create/delete and the
+        # named ids cover modification.
+        try:
+            own_directory = str(pending_delivery.record_directory(root, session_id))
+        except pending_delivery.PendingDeliveryError:
+            own_directory = ""
+        if own_directory and own_directory not in recorded["dir_identities"]:
+            candidates.extend(_scope_entries(root, session_id))
+        addressed, _open, count, complete = _read_addressed(
+            root, recipient_kind, session_id, harness, candidates,
+            read_context=read_context, deadline_ns=deadline_ns)
+        return AddressedRecords(addressed, complete=complete), count
+
+    # No current inbox. Reuse what a previous inbox named, every scope
+    # directory it recorded, and always add the session's own scope. A new
+    # record under a cleared predecessor's key changes only that directory, so
+    # naming its scope is what keeps the next completion visible. This is still
+    # only the session's share; a missing or stale inbox never recomputes
+    # globally and never calls `storage_recipients`.
+    stale_scopes = []
+    if recorded is not None:
+        seen_scopes = set()
+        for item in recorded.get("candidates") or ():
+            storage_key = item.get("storage_key") if isinstance(item, dict) else None
+            if (not isinstance(storage_key, str) or not storage_key
+                    or storage_key in seen_scopes):
+                continue
+            seen_scopes.add(storage_key)
+            attempts = item.get("attempts") if isinstance(item.get("attempts"), list) else []
+            stale_scopes.append((storage_key, tuple(attempts)))
+        if session_id not in seen_scopes:
+            stale_scopes.append((session_id, ()))
+    candidates = []
+    for storage_key, _allowed in stale_scopes:
+        candidates.extend(_scope_entries(root, storage_key))
+    candidates.extend(_scope_entries(root, session_id))
+
+    prefill = recorded is None and harness and canonical
+    if prefill:
+        with _registry_read_scope():
+            scopes = storage_recipients(
+                session_id, harness=harness, read_context=read_context,
+                deadline_ns=deadline_ns if deadline_ns is not None
+                else time.monotonic_ns() + int(DELIVER_BUDGET_SECONDS * 1_000_000_000))
+            complete_scopes = bool(getattr(scopes, "complete", True))
+            scoped_candidates = []
+            for storage_key, _allowed in scopes:
+                scoped_candidates.extend(_scope_entries(root, storage_key))
+        candidates.extend(scoped_candidates)
+        addressed, open_entries, count, complete = _read_addressed(
+            root, recipient_kind, session_id, harness, candidates,
+            read_context=read_context, deadline_ns=deadline_ns)
+        complete = complete and complete_scopes
+        if complete and open_entries is not None:
+            try:
+                payload = _inbox_payload(root, session_id, harness, scopes, open_entries,
+                                         read_context=read_context)
+                inbox.write_inbox(inbox_root, harness, session_id, payload)
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+                pass
+        return AddressedRecords(addressed, complete=complete,
+                                stale_inbox=not complete), count
+
+    addressed, open_entries, count, complete = _read_addressed(
+        root, recipient_kind, session_id, harness, candidates,
+        read_context=read_context, deadline_ns=deadline_ns)
+    if complete and recorded is not None:
+        # The pass observed the whole share. Republish only under the inbox's own
+        # edge generation: when edges changed, this observation predates the
+        # runner's refresh and must not claim to be current.
+        try:
+            same_generation = (inbox.read_edge_generation(inbox_root)
+                               == recorded.get("edge_generation"))
+            if same_generation:
+                payload = _inbox_payload(root, session_id, harness, stale_scopes,
+                                         open_entries, read_context=read_context)
+                inbox.write_inbox(inbox_root, harness, session_id, payload)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            pass
+    return AddressedRecords(addressed, complete=complete, stale_inbox=recorded is not None), count
+
+
+def _registry_read_scope():
+    from dispatch_registry_cache import registry_read_scope
+    return registry_read_scope()
+
 
 
 def activate(root: Path, recipient_kind: str, session_id: str, *,
-             request_recovery: bool = True, notice_context=None) -> list[dict]:
+             request_recovery: bool = True, notice_context=None,
+             deadline_ns: int | None = None) -> list[dict]:
     """Retain this session's duties and request maintenance from its existing runner."""
-    records, _ = addressed_records(root, recipient_kind, session_id)
+    records, _ = addressed_records(root, recipient_kind, session_id, deadline_ns=deadline_ns)
     from peer_obligations import retain_ordinary_notice, retain_registered_completion
     for record in records:
         jobs = record_jobs(root, record)
@@ -367,7 +616,7 @@ def retain_receiving_turn(batches: list[tuple[Path, list[dict]]], session_id: st
 def sweep_deliver(
     root: Path, recipient_kind: str, session_id: str, *, now_ns: int | None = None,
     native_evidence: dict | None = None, receipt_observer=None,
-    notice_context=None,
+    notice_context=None, deadline_ns: int | None = None,
 ) -> tuple[list[dict], int]:
     """Claude carrier 2 -- deliver, not merely refuse (2026-08-29 decision,
     supersedes the A-21 "surface nothing" slice for Claude).
@@ -387,10 +636,24 @@ def sweep_deliver(
 
     now = time.monotonic_ns() if now_ns is None else now_ns
     start_ns = time.monotonic_ns()
+    limit_ns = start_ns + int(DELIVER_BUDGET_SECONDS * 1_000_000_000)
+    if deadline_ns is not None:
+        limit_ns = min(limit_ns, int(deadline_ns))
+
+    def over_budget() -> bool:
+        return time.monotonic_ns() > limit_ns
+
     from dispatch_notice_state import NoticeReadContext
+    from dispatch_seat_handover import record_for_session
+    from peer_read_context import PeerReadContext
     notice_context = notice_context or NoticeReadContext()
+    # One discovery context for the whole pass; the post-claim effect section
+    # opens its own per group (a claim is an effect boundary).
+    discovery_context = PeerReadContext(compact_lineage=True)
     claimed: list[dict] = []
-    addressed, entry_count = addressed_records(root, recipient_kind, session_id)
+    addressed, entry_count = addressed_records(
+        root, recipient_kind, session_id, read_context=discovery_context,
+        deadline_ns=deadline_ns)
     addressed = [{**record, NOTICE_CONTEXT_KEY: notice_context} for record in addressed]
     from dispatch_recipient_receipt import settle_native_receipt
     harness = ("claude" if recipient_kind.startswith("claude") else
@@ -400,15 +663,17 @@ def sweep_deliver(
     visited_batch_ids: set[str] = set()
     observed_evidence: dict[int, dict] = {}
 
-    def currently_addressed(record, storage_key):
-        from dispatch_seat_handover import record_for_session, storage_recipients
-        from peer_read_context import PeerReadContext
-        # A new effect check must not consume the discovery pass's authority.
-        context = PeerReadContext()
-        scopes = dict(storage_recipients(session_id, harness=harness, read_context=context))
-        return storage_key in scopes and record_for_session(
-            record, scopes[storage_key], session=session_id, harness=harness,
-            storage_key=storage_key, jobs=record_jobs(root, record), read_context=context)
+    def currently_addressed(record, storage_key, context=None):
+        from dispatch_seat_handover import record_for_session
+        # Authority is re-read per record; the inbox and the enumeration scopes
+        # are discovery hints, never permission. Outside the effect group this
+        # call is its own one-record discovery scope; inside it, the group's
+        # scope is already active and this is a no-op.
+        with _registry_read_scope():
+            return record_for_session(
+                record, None, session=session_id, harness=harness,
+                storage_key=storage_key, jobs=record_jobs(root, record),
+                read_context=context or discovery_context)
 
     def settle_observed(record):
         evidence = native_evidence
@@ -475,7 +740,7 @@ def sweep_deliver(
     for current in addressed:
         if current.get("delivery_id") in visited_batch_ids:
             continue
-        if claimed and time.monotonic_ns() - start_ns > DELIVER_BUDGET_SECONDS * 1_000_000_000:
+        if claimed and over_budget():
             break
         storage_key = current[STORAGE_KEY]
         delivery_id = current["delivery_id"]
@@ -509,7 +774,7 @@ def sweep_deliver(
                 visited_batch_ids.update(batch.get("member_delivery_ids", ()))
                 continue
             if (batch and len(batch_ids) > 1
-                    and time.monotonic_ns() - start_ns > DELIVER_BUDGET_SECONDS * 1_000_000_000):
+                    and over_budget()):
                 continue
             group_claims = pending_delivery._claim_ready_batch_snapshot(
                 root, storage_key, delivery_id, claim_owner=claim_owner,
@@ -525,100 +790,97 @@ def sweep_deliver(
             member, storage_key, member["delivery_id"]) for member in group_claims}
         # Check elapsed at the group boundary. A group that crossed the
         # six-second carrier budget while claiming is released as a whole.
-        if (len(group_claims) > 1 and time.monotonic_ns() - start_ns
-                > DELIVER_BUDGET_SECONDS * 1_000_000_000):
+        if len(group_claims) > 1 and over_budget():
             release_group(group_claims, storage_key, claim_owner, group_identities)
             continue
         group_output = []
         group_ok = True
         authority_changed = False
         from dispatch_notice_state import keep_claim
-        for record in group_claims:
-            member_id = record["delivery_id"]
-            expected_identity = group_identities[member_id]
-            try:
-                from dispatch_seat_handover import record_for_session, storage_recipients
-                from peer_read_context import PeerReadContext
-                effect_context = PeerReadContext()
-                allowances = dict(storage_recipients(session_id, harness=harness, read_context=effect_context))
-                if storage_key not in allowances or not record_for_session(
-                        record, allowances[storage_key], session=session_id, harness=harness,
-                        storage_key=storage_key, jobs=jobs, read_context=effect_context):
+        with _registry_read_scope():
+            # One effect context and one pinned registry generation per group.
+            effect_context = PeerReadContext(compact_lineage=True)
+            for record in group_claims:
+                member_id = record["delivery_id"]
+                expected_identity = group_identities[member_id]
+                try:
+                    if not record_for_session(
+                            record, None, session=session_id, harness=harness,
+                            storage_key=storage_key, jobs=jobs, read_context=effect_context):
+                        group_ok = False
+                        break
+                    if not keep_claim(root, storage_key, member_id, record, claim_owner, jobs=jobs,
+                                      notice_context=notice_context):
+                        group_ok = False
+                        break
+                except OSError:
                     group_ok = False
                     break
-                if not keep_claim(root, storage_key, member_id, record, claim_owner, jobs=jobs,
-                                  notice_context=notice_context):
-                    group_ok = False
-                    break
-            except OSError:
-                group_ok = False
-                break
-            fresh = pending_delivery.read(root, storage_key, member_id)
-            if (fresh is None or pending_delivery.received_ack_identity(
-                    fresh, storage_key, member_id) != expected_identity
-                    or fresh.get("claim_owner") != claim_owner
-                    or settle_observed({**fresh, STORAGE_KEY: storage_key})["received"]):
-                group_ok = False
-                break
-            final = pending_delivery.read(root, storage_key, member_id)
-            if (final is None or pending_delivery.received_ack_identity(
-                    final, storage_key, member_id) != expected_identity
-                    or final.get("claim_owner") != claim_owner):
-                group_ok = False
-                break
-            if not currently_addressed(final, storage_key):
-                group_ok = False
-                authority_changed = True
-                break
-            from dispatch_supervision import CONTINUED_KEY, continue_for_parent
-            continued = continue_for_parent(record, session_id=session_id,
-                                            recipient_kind=recipient_kind)
-            group_output.append({**record, STORAGE_KEY: storage_key, IDENTITY_KEY: expected_identity,
-                                 NOTICE_CONTEXT_KEY: notice_context,
-                                 **({CONTINUED_KEY: continued} if continued else {})})
-        # A later native snapshot can contain an earlier member's exact receipt,
-        # even when its claim/recipient changed or the ACK write must be retried.
-        # Reuse this group's observations without starting another native read
-        # mid-check. A later unavailable/empty snapshot cannot undo exact proof.
-        for member in group_claims:
-            member_id = member["delivery_id"]
-            try:
                 fresh = pending_delivery.read(root, storage_key, member_id)
                 if (fresh is None or pending_delivery.received_ack_identity(
-                        fresh, storage_key, member_id) != group_identities[member_id]):
+                        fresh, storage_key, member_id) != expected_identity
+                        or fresh.get("claim_owner") != claim_owner
+                        or settle_observed({**fresh, STORAGE_KEY: storage_key})["received"]):
                     group_ok = False
-                    continue
-                if any(settle_evidence({**fresh, STORAGE_KEY: storage_key}, evidence)["received"]
-                       for evidence in observed_evidence.values()):
+                    break
+                final = pending_delivery.read(root, storage_key, member_id)
+                if (final is None or pending_delivery.received_ack_identity(
+                        final, storage_key, member_id) != expected_identity
+                        or final.get("claim_owner") != claim_owner):
                     group_ok = False
-            except (OSError, pending_delivery.PendingDeliveryError):
-                group_ok = False
-        # Every native observation and continuation above can change any member.
-        # Validate the whole group here; no native callback or continuation may
-        # intervene between these current checks and handing out the group.
-        if group_ok:
+                    break
+                if not currently_addressed(final, storage_key, effect_context):
+                    group_ok = False
+                    authority_changed = True
+                    break
+                from dispatch_supervision import CONTINUED_KEY, continue_for_parent
+                continued = continue_for_parent(record, session_id=session_id,
+                                                recipient_kind=recipient_kind)
+                group_output.append({**record, STORAGE_KEY: storage_key, IDENTITY_KEY: expected_identity,
+                                     NOTICE_CONTEXT_KEY: notice_context,
+                                     **({CONTINUED_KEY: continued} if continued else {})})
+            # A later native snapshot can contain an earlier member's exact receipt,
+            # even when its claim/recipient changed or the ACK write must be retried.
+            # Reuse this group's observations without starting another native read
+            # mid-check. A later unavailable/empty snapshot cannot undo exact proof.
             for member in group_claims:
                 member_id = member["delivery_id"]
                 try:
-                    final = pending_delivery.read(root, storage_key, member_id)
-                    deadline = final.get("claim_deadline_ns") if final is not None else None
-                    if (final is None or pending_delivery.received_ack_identity(
-                            final, storage_key, member_id) != group_identities[member_id]
-                            or final.get("state") != "claimed"
-                            or final.get("claim_owner") != claim_owner
-                            or type(deadline) is not int or deadline <= time.monotonic_ns()
-                            or not unsubmitted(final, storage_key)):
+                    fresh = pending_delivery.read(root, storage_key, member_id)
+                    if (fresh is None or pending_delivery.received_ack_identity(
+                            fresh, storage_key, member_id) != group_identities[member_id]):
                         group_ok = False
-                        break
-                    if not currently_addressed(final, storage_key):
+                        continue
+                    if any(settle_evidence({**fresh, STORAGE_KEY: storage_key}, evidence)["received"]
+                           for evidence in observed_evidence.values()):
                         group_ok = False
-                        authority_changed = True
-                        break
                 except (OSError, pending_delivery.PendingDeliveryError):
                     group_ok = False
-                    break
-        if (len(group_claims) > 1 and time.monotonic_ns() - start_ns
-                > DELIVER_BUDGET_SECONDS * 1_000_000_000):
+            # Every native observation and continuation above can change any member.
+            # Validate the whole group here; no native callback or continuation may
+            # intervene between these current checks and handing out the group.
+            if group_ok:
+                for member in group_claims:
+                    member_id = member["delivery_id"]
+                    try:
+                        final = pending_delivery.read(root, storage_key, member_id)
+                        deadline = final.get("claim_deadline_ns") if final is not None else None
+                        if (final is None or pending_delivery.received_ack_identity(
+                                final, storage_key, member_id) != group_identities[member_id]
+                                or final.get("state") != "claimed"
+                                or final.get("claim_owner") != claim_owner
+                                or type(deadline) is not int or deadline <= time.monotonic_ns()
+                                or not unsubmitted(final, storage_key)):
+                            group_ok = False
+                            break
+                        if not currently_addressed(final, storage_key, effect_context):
+                            group_ok = False
+                            authority_changed = True
+                            break
+                    except (OSError, pending_delivery.PendingDeliveryError):
+                        group_ok = False
+                        break
+        if len(group_claims) > 1 and over_budget():
             group_ok = False
         if not group_ok:
             if len(group_claims) == 1 and not authority_changed:
@@ -809,6 +1071,100 @@ def _compute_run_notice(record: dict) -> dict | None:
             "run_id": run_id}
 
 
+_EXPERIMENT_FINAL_KEY_RE = re.compile(r"^experiment:(?P<run_id>[^:]+):final(?::|$)")
+_STATUS_EXIT_RE = re.compile(
+    r"status=(?P<status>[^;,\s]+)(?P<sep>;\s*)exit=(?P<exit>[^;,\s]+)")
+
+
+def _utc_epoch(value) -> float | None:
+    """Parse the existing UTC wall-clock provenance; ``None`` stays unknown."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        from datetime import datetime, timezone
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _experiment_run_state(root: Path, record: dict, cache: dict):
+    """The runner's public state for this experiment notice, only when newer.
+
+    The hook path reads this one small published file; it never opens a run
+    registry or a notice record to refresh a body. Anything it cannot resolve
+    leaves the notice's own text unchanged (unknown is never folded).
+    """
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    key = receipt.get("key")
+    if not isinstance(key, str):
+        return None
+    match = _EXPERIMENT_FINAL_KEY_RE.match(key)
+    if not match:
+        return None
+    import dispatch_recipient_inbox as inbox
+    inbox_root = _inbox_root(root)
+    if inbox_root not in cache:
+        cache[inbox_root] = inbox.read_run_states(inbox_root)
+    payload = cache[inbox_root]
+    runs = payload.get("runs") if isinstance(payload, dict) else None
+    run = runs.get(match.group("run_id")) if isinstance(runs, dict) else None
+    if not isinstance(run, dict):
+        return None
+    generated = payload.get("generated_at")
+    if not isinstance(generated, (int, float)) or isinstance(generated, bool):
+        return None
+    provenance = record.get("timestamp_provenance")
+    materialized = _utc_epoch(provenance.get("record_materialized_at_utc")
+                              if isinstance(provenance, dict) else None)
+    if materialized is not None and float(generated) < materialized:
+        return None
+    if not isinstance(run.get("status"), str) or not run["status"]:
+        return None
+    return run
+
+
+def _refreshed_notice_text(root: Path, record: dict, cache: dict) -> str | None:
+    """Rewrite only ``status=…; exit=…`` for this render; never the record."""
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    text = receipt.get("text")
+    if not isinstance(text, str):
+        return None
+    run = _experiment_run_state(root, record, cache)
+    if run is None or not _STATUS_EXIT_RE.search(text):
+        return None
+    exit_code = run.get("exit_code")
+    exit_text = "None" if exit_code is None else str(exit_code)
+    return _STATUS_EXIT_RE.sub(
+        f"status={run['status']}; exit={exit_text}", text, count=1)
+
+
+def _notice_text(root: Path, record: dict, cache: dict | None = None) -> str:
+    """The bounded notice line, with the runner's newer public state if any."""
+    from session_notice import render_text
+    receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
+    original = render_text(receipt)
+    refreshed = _refreshed_notice_text(root, record, {} if cache is None else cache)
+    if refreshed is None or refreshed == receipt.get("text"):
+        return original
+    return f"{receipt.get('subject', '')}: {refreshed} (required_action={receipt.get('required_action', '')})"
+
+
+def _render_context(batches: list[tuple[Path, list[dict]]]) -> str:
+    """Render delivery text after the claims under one registry observation.
+
+    Rendering is not an authority decision; the followups are projections of
+    the same post-claim state, so they share one pass scope instead of opening
+    one full registry read each.
+    """
+    from dispatch_registry_cache import registry_read_scope
+
+    with registry_read_scope():
+        return delivery_context(batches)
+
+
 def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
     """The one text a parent receives for its delivered records, whichever runtime carries it.
 
@@ -820,6 +1176,7 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
     notice_records: list[tuple[Path, dict]] = []
     lines: list[tuple[str, str]] = []
     followups: list[str] = []
+    run_state_cache: dict = {}
     from dispatch_recipient_receipt import receipt_marker
 
     def bound_text(root, record):
@@ -832,15 +1189,25 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
         except (KeyError, TypeError, ValueError, pending_delivery.PendingDeliveryError):
             return text
 
+    def bound_notice_text(root, record):
+        text = _notice_text(root, record, run_state_cache)
+        storage_key = record.get(STORAGE_KEY)
+        if not isinstance(storage_key, str) or not storage_key:
+            return text
+        try:
+            return text + "\n" + receipt_marker(record, storage_key)
+        except (KeyError, TypeError, ValueError, pending_delivery.PendingDeliveryError):
+            return text
+
     for root, records in batches:
         for record in records:
-            text = bound_text(root, record)
             if is_human_gate_record(record):
-                gate_lines.append((str(record.get("delivery_id", "")), text))
+                gate_lines.append((str(record.get("delivery_id", "")), bound_text(root, record)))
                 continue
             if (record.get("receipt") or {}).get("kind") == "notice":
                 notice_records.append((root, record))
                 continue
+            text = bound_text(root, record)
             lines.append((str(record.get("delivery_id", "")), text))
             follow = _followup(root, record)
             if follow and follow not in followups:
@@ -861,7 +1228,7 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
                 groups.setdefault(key, []).append((run, {"root": root, "record": record}))
             else:
                 receipt = record.get("receipt") if isinstance(record.get("receipt"), dict) else {}
-                text = bound_text(root, record)
+                text = bound_notice_text(root, record)
                 individual.append(((0, str(receipt.get("text", "")),
                                     str(record.get("delivery_id", ""))), text))
         for key, members in groups.items():
@@ -873,7 +1240,7 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
                     receipt = record.get("receipt") or {}
                     individual.append(((0, str(receipt.get("text", "")),
                                         str(record.get("delivery_id", ""))),
-                                       bound_text(pair["root"], record)))
+                                       bound_notice_text(pair["root"], record)))
                 continue
             runs = [run for run, _pair in members]
             latest = runs[-1]
@@ -883,7 +1250,7 @@ def delivery_context(batches: list[tuple[Path, list[dict]]]) -> str:
                        f"latest {latest['run_id']}; compute-hosts tail {latest['run_id']}")
             markers = []
             for _run, pair in members:
-                text = bound_text(pair["root"], pair["record"])
+                text = bound_notice_text(pair["root"], pair["record"])
                 markers.extend(line for line in text.splitlines()
                                if line.startswith("HEARTING_RECEIPT_V1 "))
             individual.append(((1, key, latest["run_id"]), summary + "\n" + "\n".join(markers)))
@@ -1145,10 +1512,14 @@ def sweep(
     recipient_kind: str,
     session_id: str,
     session_generation: str,
+    *,
+    delivery_ids=None,
 ) -> tuple[str, int]:
     """Enumerate this session's own ``recipient_digest`` directory and try to
     claim every open record found in it, always demanding generation proof.
 
+    ``delivery_ids`` narrows that enumeration to the ids a current derived
+    inbox named; without it the session's own directory is the enumeration.
     Returns ``(outcome, entry_count)`` where ``outcome`` is ``"claimed"`` when
     at least one record was actually claimed and ``"refused"`` otherwise
     (including the "nothing here" / "directory unreadable" cases -- those are
@@ -1170,9 +1541,15 @@ def sweep(
     settled_batch_ids: set[str] = set()
     try:
         directory = pending_delivery.record_directory(root, session_id)
-        entries = sorted(
-            p for p in directory.glob("delivery-*.json") if p.is_file()
-        )
+        if delivery_ids is None:
+            entries = sorted(
+                p for p in directory.glob("delivery-*.json") if p.is_file()
+            )
+        else:
+            entries = [directory / f"{delivery_id}.json" for delivery_id in
+                       dict.fromkeys(str(item) for item in delivery_ids)
+                       if isinstance(delivery_id, str) and delivery_id.startswith("delivery-")]
+            entries = [path for path in entries if path.is_file() and not path.is_symlink()]
         for entry in entries:
             delivery_id = entry.stem
             if delivery_id in settled_batch_ids:
@@ -1212,6 +1589,83 @@ def _state_roots() -> list[Path]:
             if Path(root).is_dir()]
 
 
+def _recipients_view(roots: list[Path], session_id: str, recipient_kind: str) -> dict:
+    """The OpenCode tick's bounded look: a current inbox, else one computation.
+
+    The legacy-cache key is the inbox's edge generation and folded edge digest,
+    never a sessions-ledger file signature. On a cache miss one bounded scope
+    enumeration runs; an incomplete enumeration is never published, and the
+    previous inbox (or the session's own scope) answers this tick instead.
+    """
+    import dispatch_recipient_inbox as inbox
+    from dispatch_seat_handover import lineage_graph, storage_recipients
+    from peer_read_context import PeerReadContext
+
+    if not roots:
+        return {"generation": "", "digests": [], "delivery_ids": []}
+    root = roots[0]
+    inbox_root = _inbox_root(root)
+    recorded = inbox.read_inbox(inbox_root, "opencode", session_id)
+
+    def inbox_view(payload):
+        digests = sorted({hashlib.sha256(item["storage_key"].encode("utf-8")).hexdigest()
+                          for item in payload["candidates"]
+                          if isinstance(item.get("storage_key"), str) and item["storage_key"]})
+        return {"generation": f"{payload['edge_generation']}:{payload.get('folded_edge_digest') or ''}",
+                "digests": digests,
+                "delivery_ids": [item["delivery_id"] for item in payload["delivery_ids"]]}
+
+    if recorded is not None and inbox.is_current(recorded, inbox_root):
+        view = inbox_view(recorded)
+        # The session's own scope may have appeared after the inbox was written.
+        try:
+            own_directory = str(pending_delivery.record_directory(root, session_id))
+        except pending_delivery.PendingDeliveryError:
+            own_directory = ""
+        if own_directory and own_directory not in recorded["dir_identities"]:
+            known = set(view["delivery_ids"])
+            view["delivery_ids"] = [*view["delivery_ids"], *(
+                delivery_id for _storage, delivery_id in _scope_entries(root, session_id)
+                if delivery_id not in known)]
+        return view
+
+    read_context = PeerReadContext(compact_lineage=True)
+    deadline_ns = time.monotonic_ns() + int(DELIVER_BUDGET_SECONDS * 1_000_000_000)
+    # Project the generation that the shared graph actually read. Taking it
+    # before the scope enumeration lets the final recheck refuse a writer
+    # change during discovery; old scopes never publish under a new generation.
+    graph = lineage_graph(read_context=read_context)
+    generation = hashlib.sha256(json.dumps(graph.generation, separators=(",", ":")).encode()).hexdigest()
+    scopes = storage_recipients(session_id, harness="opencode",
+                                read_context=read_context, deadline_ns=deadline_ns)
+    digests = sorted({hashlib.sha256(storage.encode("utf-8")).hexdigest()
+                      for storage, _allowed in scopes})
+    if lineage_graph() is not graph:
+        raise OSError("lineage-observation-changed")
+    if not bool(getattr(scopes, "complete", True)):
+        _reconcile_canonical_dispatch_state(root)
+        if recorded is not None:
+            return inbox_view(recorded)
+        return {"generation": generation, "digests": digests, "delivery_ids": []}
+
+    candidates = []
+    for storage_key, _allowed in scopes:
+        candidates.extend(_scope_entries(root, storage_key))
+    _addressed, open_entries, _count, complete = _read_addressed(
+        root, recipient_kind, session_id, "opencode", candidates,
+        read_context=read_context, deadline_ns=deadline_ns)
+    if complete:
+        try:
+            payload = _inbox_payload(root, session_id, "opencode", scopes, open_entries,
+                                     read_context=read_context)
+            inbox.write_inbox(inbox_root, "opencode", session_id, payload)
+            return inbox_view(payload)
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+            pass
+    return {"generation": generation, "digests": digests,
+            "delivery_ids": [delivery_id for _storage, delivery_id, _mtime in open_entries]}
+
+
 def main(argv: list[str] | None = None) -> int:
     """A runtime carrier's steps for one session's records, as JSON on stdout.
 
@@ -1225,6 +1679,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--recipient-kind", default="")
     parser.add_argument("--session", default="")
     args = parser.parse_args(argv)
+    deadline_ns = time.monotonic_ns() + int(ACTION_BUDGET_SECONDS * 1_000_000_000)
     if args.action == "roots":
         # Where this runtime's records live, so a carrier can look before it asks.
         print(json.dumps([str(root) for root in _state_roots()]))
@@ -1238,19 +1693,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "recipients":
         if args.recipient_kind != "opencode-turn":
             parser.error("recipients is an internal OpenCode carrier action")
-        from dispatch_seat_handover import lineage_graph, storage_recipients
-        from peer_read_context import PeerReadContext
-        read_context = PeerReadContext()
-        # Project the generation that was actually readable by the shared
-        # graph, so a warm observation failure cannot preserve old digests.
-        graph = lineage_graph(read_context=read_context)
-        generation = hashlib.sha256(json.dumps(graph.generation, separators=(",", ":")).encode()).hexdigest()
-        digests = sorted({hashlib.sha256(storage.encode()).hexdigest()
-                          for storage, _allowed in storage_recipients(
-                              args.session, harness="opencode", read_context=read_context)})
-        if lineage_graph() is not graph:
-            raise OSError("lineage-observation-changed")
-        print(json.dumps({"generation": generation, "digests": digests}))
+        print(json.dumps(_recipients_view(_state_roots(), args.session, args.recipient_kind)))
         return 0
     if args.action == "settle":
         try:
@@ -1283,7 +1726,8 @@ def main(argv: list[str] | None = None) -> int:
                     continue
         else:
             for root in roots:
-                records, _count = addressed_records(root, args.recipient_kind, args.session)
+                records, _count = addressed_records(root, args.recipient_kind, args.session,
+                                                    deadline_ns=deadline_ns)
                 targets.extend((root, r.get(STORAGE_KEY) or args.session,
                                 r["delivery_id"], None) for r in records)
         expected_messages = []
@@ -1415,7 +1859,8 @@ def main(argv: list[str] | None = None) -> int:
                             (item or {}).get("claim_owner"), args.session)
                 remaining_context, remaining_handoffs = [], []
         print(json.dumps({"received_ids": sorted(received_ids), "settled_count": settled_count,
-                          "unknown_ids": sorted(unknown_ids), "text": delivery_context(remaining_context),
+                          "unknown_ids": sorted(unknown_ids),
+                          "text": _render_context(remaining_context),
                           "records": remaining_handoffs},
                          ensure_ascii=False), flush=True)
         return 0
@@ -1436,15 +1881,17 @@ def main(argv: list[str] | None = None) -> int:
             for root in roots:
                 if args.action == "activate":
                     records = activate(root, args.recipient_kind, args.session,
-                                       request_recovery=False, notice_context=notice_context)
+                                       request_recovery=False, notice_context=notice_context,
+                                       deadline_ns=deadline_ns)
                 else:
                     records, _entries = sweep_deliver(
                         root, args.recipient_kind, args.session,
-                        native_evidence=native_evidence, notice_context=notice_context)
+                        native_evidence=native_evidence, notice_context=notice_context,
+                        deadline_ns=deadline_ns)
                 if records:
                     batches.append((root, records))
             print(json.dumps({
-                "text": delivery_context(batches),
+                "text": _render_context(batches),
                 "records": [{"root": str(root), "storage_key": record.get(STORAGE_KEY) or args.session,
                              "delivery_id": record["delivery_id"], "claim_owner": record.get("claim_owner"),
                              "immutable_identity": record.get(IDENTITY_KEY)

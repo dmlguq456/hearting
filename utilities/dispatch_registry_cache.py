@@ -855,7 +855,20 @@ def _read_retained_suffix(path: Path, path_identity: str, cached: RegistryView):
 
 @contextlib.contextmanager
 def registry_read_scope():
-    """Pin one stable generation of each registry for one passive Fleet pass."""
+    """Pin one stable generation of each registry for one passive Fleet pass.
+
+    Pass lifetime of the callers in the delivery path: a sweep opens exactly one
+    scope for discovery (``dispatch_session_sweep.addressed_records``), one
+    fresh scope per post-claim effect group, a claim opens its own scope under
+    the record lock (``dispatch_pending_delivery.claim`` ->
+    ``_replacement_disposition``), and rendering opens one after the claims
+    (``_render_context``). Each effect scope is paired with one
+    ``PeerReadContext``. A claim is an effect boundary, so the group that hands
+    records over must observe the registry outside the discovery scope: a
+    registry append between discovery and effect is seen by the effect check,
+    not hidden behind the earlier pin. Read-only history readers keep the same
+    per-pass scope and never reuse a delivery authority across a write.
+    """
     current = _READ_SCOPE.get()
     if current is not None:
         yield

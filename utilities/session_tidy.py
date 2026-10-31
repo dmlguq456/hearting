@@ -264,6 +264,21 @@ def now_epoch() -> float:
     return time.time()
 
 
+def bump_dispatch_edge_generation(jobs=None) -> None:
+    """Record that a confirmed lineage edge changed, for derived inbox discovery.
+
+    Permission is never derived from this counter: every record re-reads its
+    recipient authority. A missed bump costs one periodic runner reconciliation,
+    and the canonical ledger row is already durable when this runs, so a failure
+    to record the derived observation never fails the writer.
+    """
+    try:
+        import dispatch_recipient_inbox as inbox
+        inbox.bump_edge_generation(inbox.dispatch_inbox_root(jobs=jobs))
+    except Exception:  # noqa: BLE001 - derived observation only
+        return
+
+
 def iso_utc(epoch: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
 
@@ -1125,6 +1140,7 @@ def _record_tidy_clear_succession_locked(seat: Seat, harness: str, sid: str, now
         return
     _append_ledger_entry(seat, {"ts": now, "harness": harness, "sid": sid,
                                 "event": "succession", "from": old, "source": "tidy-clear"})
+    bump_dispatch_edge_generation()
 
 
 def prompt_state(seat: Seat) -> Optional[dict]:
@@ -1333,6 +1349,11 @@ def seat_lineage(seat: Seat, *, harness=None, sid=None, read_context=None) -> li
         harness = harness or logical_harness or None
     wanted = (str(harness or ""), str(sid or ""))
     graph = None
+    if read_context is not None and getattr(read_context, "compact_lineage", False):
+        # Compact rows carry relation rows only; this projection summarizes every
+        # row for history. Observe normally rather than silently narrowing it.
+        from peer_read_context import PeerReadContext
+        read_context = PeerReadContext()
     try:
         import dispatch_seat_handover
         graph = dispatch_seat_handover._pass_lineage_graph(read_context)
@@ -1948,10 +1969,14 @@ def _fold_ledger(seat: Seat) -> None:
     body = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n"
                     for r in list(folded.values()) + relations + provenance
                     + list(native_addresses.values()) + recent)
+    # Retained edges are bounded above; a fold that drops one changes reachability.
+    dropped_edges = any(index not in keep_relation_indices for index, _row in handovers)
     try:
         atomic_write(native_path, body.encode("utf-8"))
     finally:
         _invalidate_ledger_read(seat)
+    if dropped_edges:
+        bump_dispatch_edge_generation()
 
 
 # ---------------------------------------------------------------------------

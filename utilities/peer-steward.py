@@ -8754,6 +8754,10 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
     # still owns all currentness/claim checks and its bounded recipient cursor.
     if notice_duties:
         try:
+            _publish_run_states(store, notice_duties)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            pass
+        try:
             _resume_session_notice_obligations(
                 notice_duties, store, read_context=read_context,
                 selection=notice_selection, runner_incarnation=runner_incarnation)
@@ -8984,11 +8988,22 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
     # runner-local selection cursor so an open first group cannot starve later
     # recipients. It carries no delivery or authorization evidence; candidates
     # and every record/target are re-read through the normal path each pass.
-    candidates.sort(key=lambda item: (item[1], item[3], item[4]["delivery_id"]))
+    # d6: terminal (failure/completion) notices go first, both in group order
+    # and inside the batch; progress notices share the batch or wait one pass.
+    def _terminal_rank(item):
+        try:
+            return 0 if session_notice.classify(item[4].get("receipt")) == session_notice.TERMINAL else 1
+        except (TypeError, ValueError):
+            return 1
+
+    candidates.sort(key=lambda item: (item[1], item[3], _terminal_rank(item),
+                                      item[4]["delivery_id"]))
     groups = {}
     for item in candidates:
         groups.setdefault((item[1], item[3]), []).append(item)
     group_keys = sorted(groups)
+    terminal_groups = {key for key in group_keys
+                       if any(_terminal_rank(item) == 0 for item in groups[key])}
     state_root = str(root.resolve())
     if selection is not None:
         if (selection.get("state_root") != state_root
@@ -9003,14 +9018,20 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
             last_group = None
     else:
         last_group = None
-    group_key = next((key for key in group_keys if last_group is not None and key > last_group),
-                     group_keys[0])
+
+    def _pick(keys):
+        return next((key for key in keys if last_group is not None and key > last_group), keys[0])
+
+    terminal_keys = sorted(key for key in group_keys if key in terminal_groups)
+    progress_keys = sorted(key for key in group_keys if key not in terminal_groups)
+    group_key = _pick(terminal_keys) if terminal_keys else _pick(progress_keys)
     if selection is not None:
         selection["last_group"] = group_key
     harness, recipient_sid = group_key
-    batch = groups[group_key][:8]
+    batch = groups[group_key][:NOTICE_BATCH_LIMIT]
     pending_transfers = []
     retargeted = {}
+    folded = []
     for item in batch:
         obs = item[0].get("observation") or {}
         ref = obs.get("transfer_ref")
@@ -9133,7 +9154,15 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                             {**original, IDENTITY_KEY: original_identity}, owner, item_sid)
                         return
                 if not keep_claim(root, storage_sid, fresh["delivery_id"], claim, owner, jobs=source_jobs):
-                    return
+                    # d7: a run notice whose exact parent completion is already
+                    # recorded is folded, not sent alone. It stays rejected (its
+                    # replacement is that completion receipt); one summary line
+                    # rides the body of the notices this pass does send.
+                    summary = session_notice.fold_summary(fresh)
+                    if summary is None:
+                        return
+                    folded.append(summary)
+                    continue
                 stored = dict(claim)
                 identity = pending.received_ack_identity(stored, storage_sid, fresh["delivery_id"])
                 view = {**claim, STORAGE_KEY: storage_sid, IDENTITY_KEY: identity}
@@ -9146,6 +9175,9 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
         if not claimed:
             return
         body = delivery_context([(root, [entry[5] for entry in claimed])])
+        if folded:
+            body += ("\n\nfolded run notices (parent completion already received):\n"
+                     + "\n".join(f"- {line}" for line in folded))
         producer = {"schema": peer_message._SESSION_NOTICE_PRODUCER_SCHEMA,
             "duty_id": claimed[0][0]["id"], "jobs": str(jobs.resolve()),
             "records": producer_records,
@@ -9196,6 +9228,712 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                     release_unsubmitted_claim(root, storage_sid, stored, owner, recipient_sid)
             except (OSError, ValueError, RuntimeError):
                 pass  # The original lease and prepared transfer remain recoverable.
+
+
+# ---------------------------------------------------------------------------
+# Runner maintenance duties (the existing obligation runner owns these)
+# ---------------------------------------------------------------------------
+#
+# The hooks only read derived observations. This runner pass publishes them and
+# performs the global cleanup that stopped running after 2026-10-18. Every duty
+# keeps its own cursor/due record (the `prune_terminal_obligations` pattern) and
+# a bounded per-pass budget, so no single pass can block notice delivery.
+
+RECONCILE_DUE_SECONDS = 6 * 3600
+RECONCILE_MAX_ROWS = 500
+RECONCILE_TIME_BUDGET_S = 5.0
+PEER_HISTORY_RETENTION_SECONDS = 7 * 86400
+RETIRE_ACTIVITY_SECONDS = 14 * 86400
+RETIRE_ARCHIVE_SECONDS = 30 * 86400
+MAINTENANCE_DUE_SECONDS = 6 * 3600
+MAINTENANCE_TIME_BUDGET_S = 3.0
+INBOX_PREFILL_DUE_SECONDS = 15 * 60
+LINEAGE_ROWS_DUE_SECONDS = 15 * 60
+PEER_INDEX_DUE_SECONDS = 15 * 60
+PEER_INDEX_TIME_BUDGET_S = 1.0
+RUN_STATES_DUE_SECONDS = 30.0
+STEWARD_RELATIONS_DUE_SECONDS = 60.0
+NOTICE_BATCH_LIMIT = 8
+RETIRE_ARCHIVE_DIRECTORY = "sessions-retired"
+_ROLE_ROW_EVENTS = frozenset({"tidy-claim"})
+_ROLE_ROW_KEYS = frozenset({"steward", "role", "watch", "watch_id", "role_id"})
+
+
+def _open_run_ids(root, notice_duties):
+    """Run ids named by open experiment notices, never a global scan by itself."""
+    import dispatch_pending_delivery as pending
+    import session_notice
+
+    run_ids = set()
+    for duty in notice_duties:
+        try:
+            source = peer_obligations._notice_duty_source(duty, root)
+            if source is None:
+                continue
+            _harness, storage_sid, delivery_id, _source_jobs = source
+            record = pending.read(root, storage_sid, delivery_id)
+            receipt = (record or {}).get("receipt")
+            key = receipt.get("key") if isinstance(receipt, dict) else None
+            match = session_notice.EXPERIMENT_FINAL_KEY.match(key or "")
+            if match is not None:
+                run_ids.add(match.group("run_id"))
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            continue
+    return run_ids
+
+
+def _run_jobs_for_row(row, run_id):
+    """The jobs log named by a run row, using the row's own recorded value."""
+    registry_path = row.get("registry_path")
+    if not isinstance(registry_path, str) or not registry_path:
+        return None
+    path = Path(registry_path)
+    if path.name == "jobs.log":
+        return path
+    try:
+        import resource_run_registry as registry
+        _source, data = registry.read_registry_source(path)
+        payload = registry.strict_json_loads(data) if data is not None else None
+        runs = payload.get("runs") if isinstance(payload, dict) else None
+        run = runs.get(run_id) if isinstance(runs, dict) else None
+        jobs = run.get("jobs") if isinstance(run, dict) else None
+        if isinstance(jobs, str) and jobs:
+            return Path(jobs)
+    except (OSError, ValueError, TypeError, KeyError):
+        return None
+    return None
+
+
+def _publish_run_states(store, notice_duties):
+    """Publish the public run status/exit the notice path may refresh from.
+
+    Owner note N1: one ``scan()`` for the run ids named by open notice keys,
+    each public record's status merged with the registry row's exit code. A
+    short due interval keeps the runner pass responsive; the reader treats a
+    file older than its notice as unknown and keeps the original text.
+    """
+    import dispatch_recipient_inbox as inbox
+
+    root = store.root.parent.parent.resolve()
+    state = peer_obligations.read_runner_duty_state(root, "run-states")
+    if not peer_obligations.runner_duty_due(state, RUN_STATES_DUE_SECONDS):
+        return {"runs": 0, "published": False, "due": False}
+    run_ids = _open_run_ids(root, notice_duties)
+    if not run_ids:
+        peer_obligations.write_runner_duty_state(
+            root, "run-states", {"last_pass_ns": time.time_ns(), "runs": 0})
+        return {"runs": 0, "published": False, "due": True}
+    import resource_run_registry as registry
+    from resource_progress import read_public_run_record
+
+    rows, _diagnostics = registry.scan()
+    runs = {}
+    for row in rows:
+        run_id = row.get("run_id")
+        if run_id not in run_ids:
+            continue
+        artifact_root = row.get("artifact_root")
+        public = None
+        if isinstance(artifact_root, str) and artifact_root:
+            public = read_public_run_record(artifact_root, run_id)
+        status = public.get("status") if isinstance(public, dict) else None
+        if not isinstance(status, str) or not status:
+            status = row.get("registry_status") or row.get("liveness") or "unknown"
+        ended_at = row.get("ended_at")
+        if isinstance(public, dict) and isinstance(public.get("ended_at"), (int, float)):
+            ended_at = public["ended_at"]
+        jobs = _run_jobs_for_row(row, run_id)
+        runs[run_id] = {"status": status, "exit_code": row.get("exit_code"),
+                        "ended_at": ended_at, "artifact_root": artifact_root,
+                        "parent_attempt_id": row.get("parent_attempt_id"),
+                        "jobs": str(jobs) if jobs is not None else ""}
+    inbox.write_run_states(root, {"runs": runs})
+    peer_obligations.write_runner_duty_state(
+        root, "run-states", {"last_pass_ns": time.time_ns(), "runs": len(runs)})
+    return {"runs": len(runs), "published": True, "due": True}
+
+
+def _live_recipients(root):
+    """Sessions that may need a derived inbox: census panes and open handovers."""
+    from harness_capabilities import HARNESSES, parent_completion
+    from dispatch_seat_handover import _registered_parent_harness
+
+    found = set()
+    try:
+        census = herdr_observation.pane_census()
+    except (OSError, ValueError, TypeError, RuntimeError):
+        census = None
+    if census is not None and census.complete:
+        for pane in census.panes:
+            harness = pane.get("agent")
+            session = pane.get("agent_session")
+            value = session.get("value") if isinstance(session, dict) else None
+            if (harness in HARNESSES and isinstance(value, str) and value
+                    and parent_completion(harness).get("carrier")):
+                found.add((harness, value))
+    jobs = root / "jobs.log"
+    from dispatch_supervision import _rows
+    try:
+        for status, meta in _rows(jobs).values():
+            if status not in {"open", "running"}:
+                continue
+            sid = str(meta.get("parent_sid") or "")
+            harness = _registered_parent_harness(meta)
+            if sid and harness in HARNESSES and parent_completion(harness).get("carrier"):
+                found.add((harness, sid))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        pass
+    return found
+
+
+def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
+    """Derive and publish one recipient inbox from the real recipient scopes."""
+    import dispatch_pending_delivery as pending
+    import dispatch_recipient_inbox as inbox
+    import dispatch_session_sweep as sweep
+    from dispatch_seat_handover import storage_recipients
+    from peer_read_context import PeerReadContext
+
+    read_context = PeerReadContext()
+    with sweep._registry_read_scope():
+        scopes = storage_recipients(
+            session_id, harness=harness, read_context=read_context,
+            deadline_ns=deadline_ns)
+        complete = bool(getattr(scopes, "complete", True))
+        open_entries = []
+        for storage_key, _allowed in scopes:
+            try:
+                directory = pending.record_directory(root, storage_key)
+                entries = list(directory.iterdir())
+            except FileNotFoundError:
+                continue
+            except (OSError, pending.PendingDeliveryError):
+                complete = False
+                continue
+            for entry in entries:
+                if not entry.name.startswith("delivery-") or entry.suffix != ".json":
+                    continue
+                try:
+                    info = entry.stat()
+                except OSError:
+                    complete = False
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                open_entries.append((storage_key, entry.stem, info.st_mtime_ns))
+        if not complete:
+            return None
+        payload = sweep._inbox_payload(root, session_id, harness, scopes, open_entries,
+                                       read_context=read_context)
+    inbox.write_inbox(root, harness, session_id, payload)
+    return payload
+
+
+def _prefill_live_inboxes(root, *, deadline_ns):
+    """Refresh a missing/stale inbox for live sessions only, bounded per pass."""
+    import dispatch_recipient_inbox as inbox
+
+    result = {"checked": 0, "written": 0, "skipped": 0}
+    for harness, session_id in sorted(_live_recipients(root)):
+        if time.monotonic_ns() >= deadline_ns:
+            result["skipped"] += 1
+            continue
+        recorded = inbox.read_inbox(root, harness, session_id)
+        current = False
+        if recorded is not None:
+            try:
+                current = inbox.is_current(recorded, root)
+            except (OSError, ValueError, TypeError):
+                current = False
+        if current:
+            continue
+        result["checked"] += 1
+        try:
+            written = _prefill_recipient_inbox(root, harness, session_id,
+                                               deadline_ns=deadline_ns)
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+            written = None
+        if written is None:
+            result["skipped"] += 1
+        else:
+            result["written"] += 1
+    return result
+
+
+def _prune_received_peer_history(*, now=None, deadline_ns=None, start_after=None):
+    """Drop received queue rows past the 7-day history window; transfers stay.
+
+    ``start_after`` resumes the sorted walk at the next file name. A pass cut
+    off by the shared deadline returns ``complete=False`` and the last examined
+    name as ``cursor`` so the next pass continues instead of restarting the
+    same prefix; a completed walk returns ``cursor=None``.
+    """
+    now = time.time() if now is None else float(now)
+    cutoff = now - PEER_HISTORY_RETENTION_SECONDS
+    result = {"removed": 0, "examined": 0, "cursor": None, "complete": True}
+    try:
+        pending_dir = peer_message._pending_dir()
+        names = sorted(path.name for path in pending_dir.glob("*.json"))
+    except OSError:
+        return result
+    start_after = start_after if isinstance(start_after, str) and start_after else None
+    last = start_after
+    for name in names:
+        if start_after is not None and name <= start_after:
+            continue
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            result["complete"] = False
+            result["cursor"] = last
+            return result
+        result["examined"] += 1
+        last = name
+        path = pending_dir / name
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(row, dict) or row.get("state") != "received":
+            continue
+        received = row.get("received_at")
+        if (not isinstance(received, (int, float)) or isinstance(received, bool)
+                or received > cutoff):
+            continue
+        try:
+            os.unlink(path)
+        except OSError:
+            continue
+        result["removed"] += 1
+    if result["removed"]:
+        try:
+            import dispatch_recipient_inbox as inbox
+            peer_message.rebuild_recipient_index(
+                inbox.dispatch_inbox_root(), time_budget_s=0.5)
+        except (OSError, ValueError, TypeError, RuntimeError):
+            pass
+    return result
+
+
+def _publish_lineage_rows_duty(root, *, deadline_ns=None):
+    """Keep the compact lineage observation published for the effect path.
+
+    Without this first/periodic publication a fresh install has no
+    ``lineage-rows.json`` and every prompt falls back to reading all ledger
+    bytes; the published file is what makes the compact effect path real. A
+    changed ledger still re-reads that ledger, so a stale file is never
+    authority.
+    """
+    import dispatch_seat_handover as handover
+    import dispatch_recipient_inbox as inbox
+
+    state = peer_obligations.read_runner_duty_state(root, "lineage-rows")
+    if (inbox.read_lineage_rows(root) is not None
+            and not peer_obligations.runner_duty_due(state, LINEAGE_ROWS_DUE_SECONDS)):
+        return {"published": False, "due": False}
+    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+        return {"published": False, "due": True, "deferred": True}
+    try:
+        counts = handover.publish_lineage_rows(root)
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError):
+        return {"published": False, "due": True, "deferred": True}
+    peer_obligations.write_runner_duty_state(root, "lineage-rows", {
+        "last_pass_ns": time.time_ns(),
+        "ledgers": counts.get("ledgers", 0),
+        "rows": counts.get("rows", 0),
+        "skipped": counts.get("skipped", 0)})
+    return {"published": True, "due": True, **counts}
+
+
+def _publish_peer_indexes(root, *, deadline_ns=None):
+    """Publish each recipient's pending-row index so a Stop reads no full history.
+
+    The Stop header retry is bounded by its own 3 s budget and may skip, so the
+    runner is the intended steady-state publisher. A pass cut off by its budget
+    publishes nothing (the builder refuses partial indexes) and retries next
+    pass instead of waiting for the 15-minute due window.
+    """
+    state = peer_obligations.read_runner_duty_state(root, "peer-index")
+    if not peer_obligations.runner_duty_due(state, PEER_INDEX_DUE_SECONDS):
+        return {"published": False, "due": False}
+    if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+        return {"published": False, "due": True, "deferred": True}
+    remaining = PEER_INDEX_TIME_BUDGET_S
+    if deadline_ns is not None:
+        remaining = min(remaining, max(
+            0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000))
+    counts = peer_message.rebuild_recipient_index(
+        peer_message.peer_state_root(), time_budget_s=remaining)
+    complete = bool(counts.get("complete"))
+    peer_obligations.write_runner_duty_state(
+        root, "peer-index", {
+            "last_pass_ns": time.time_ns() if complete else 0,
+            "scanned": counts.get("scanned", 0),
+            "recipients": counts.get("recipients", 0),
+            "rows": counts.get("rows", 0),
+            "complete": complete})
+    return {"published": complete, "due": True, "complete": complete,
+            "scanned": counts.get("scanned", 0),
+            "recipients": counts.get("recipients", 0)}
+
+
+def _lineage_components(graph):
+    """Connected components over the confirmed same-harness lineage edges."""
+    adjacency = {}
+    for harness, origin, target in graph.edges:
+        left, right = (harness, origin), (harness, target)
+        adjacency.setdefault(left, set()).add(right)
+        adjacency.setdefault(right, set()).add(left)
+    seen, components = set(), []
+    for vertex in sorted(adjacency):
+        if vertex in seen:
+            continue
+        stack, component = [vertex], set()
+        while stack:
+            current = stack.pop()
+            if current in component:
+                continue
+            component.add(current)
+            seen.add(current)
+            stack.extend(adjacency.get(current, ()))
+        components.append(frozenset(component))
+    return sorted(components, key=lambda item: tuple(sorted(item)))
+
+
+def _sid_has_open_notice(root, session_id):
+    import dispatch_pending_delivery as pending
+    try:
+        directory = pending.record_directory(root, session_id)
+        entries = list(directory.iterdir())
+    except FileNotFoundError:
+        return False
+    except (OSError, pending.PendingDeliveryError):
+        return True  # unknown never authorizes retirement
+    for entry in entries:
+        if not entry.name.startswith("delivery-") or entry.suffix != ".json":
+            continue
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True
+        if isinstance(record, dict) and record.get("state") in pending.OPEN_STATES:
+            return True
+    return False
+
+
+def _component_has_open_binding(graph, component, jobs):
+    open_attempts = set()
+    from dispatch_supervision import _rows
+    try:
+        for status, meta in _rows(jobs).values():
+            if status in {"open", "running"}:
+                open_attempts.add(meta.get("attempt_id"))
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+        return True  # unknown never authorizes retirement
+    for ledger_key in {key for vertex in component
+                       for key in graph.ledger_keys.get(vertex, ())}:
+        for row in graph.ledger_rows.get(ledger_key, ()):
+            for binding in row.get("bindings") or ():
+                attempt = binding.get("attempt") if isinstance(binding, dict) else None
+                if attempt and attempt in open_attempts:
+                    return True
+    return False
+
+
+def _component_has_role_rows(graph, component, store):
+    ledgers = {key for vertex in component for key in graph.ledger_keys.get(vertex, ())}
+    for ledger_key in ledgers:
+        for row in graph.ledger_rows.get(ledger_key, ()):
+            if row.get("event") in _ROLE_ROW_EVENTS:
+                return True
+            if _ROLE_ROW_KEYS.intersection(row):
+                return True
+    sids = {sid for _harness, sid in component}
+    try:
+        duties = store.list(kinds={"watch", "steward-check"})
+    except (OSError, ValueError, RuntimeError, peer_obligations.ObligationError):
+        return True
+    for duty in duties:
+        encoded = json.dumps((duty.get("intent") or {}).get("identity") or {}, sort_keys=True)
+        if any(sid in encoded for sid in sids):
+            return True
+    return False
+
+
+def _component_last_activity(graph, component):
+    """Newest ledger row timestamp, or ``None`` when any row is unreadable."""
+    latest = None
+    for ledger_key in {key for vertex in component
+                       for key in graph.ledger_keys.get(vertex, ())}:
+        for row in graph.ledger_rows.get(ledger_key, ()):
+            stamp = row.get("ts")
+            if not isinstance(stamp, (int, float)) or isinstance(stamp, bool):
+                return None
+            latest = stamp if latest is None else max(latest, stamp)
+    return latest
+
+
+def _component_proven_ended(component, census, server):
+    """Absence in a complete census and no live pane still on a member session."""
+    if census is None or census.complete is not True:
+        return False
+    for harness, session_id in component:
+        if _census_session_presence(census, session_id, server) is not False:
+            return False
+    harnesses = {harness for harness, _sid in component}
+    for pane in census.panes:
+        harness = pane.get("agent")
+        if harness not in harnesses:
+            continue
+        pane_id = pane.get("pane_id")
+        if not isinstance(pane_id, str) or not pane_id:
+            return False
+        observed = _process_session(pane_id, harness)  # pane id string, never the dict
+        if observed is None:
+            return False  # unknown never authorizes retirement
+        if (harness, observed) in component:
+            return False
+    return True
+
+
+def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
+    """Archive a finished lineage bundle after all five conditions hold."""
+    import dispatch_recipient_inbox as inbox
+    import session_tidy as tidy
+    from dispatch_seat_handover import lineage_graph
+
+    now = time.time() if now is None else float(now)
+    root = store.root.parent.parent.resolve()
+    jobs = root / "jobs.log"
+    result = {"components": 0, "retired": 0, "ledgers": 0, "skipped": 0}
+    try:
+        graph = lineage_graph()
+    except (OSError, ValueError, TypeError):
+        return {**result, "skipped": 1}
+    components = _lineage_components(graph)
+    if not components:
+        # No lineage bundle can be retired; do not ask herdr for a census.
+        return result
+    try:
+        census = herdr_observation.pane_census()
+    except (OSError, ValueError, TypeError, RuntimeError):
+        census = None
+    server = herdr_observation.endpoint_name(_HERDR_SESSION)
+    sessions = tidy.state_root() / "sessions"
+    archive = tidy.state_root() / RETIRE_ARCHIVE_DIRECTORY
+    for component in components:
+        if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
+            result["skipped"] += 1
+            break
+        result["components"] += 1
+        if any(vertex in graph.unresolved for vertex in component):
+            result["skipped"] += 1
+            continue
+        ledgers = sorted({key for vertex in component
+                          for key in graph.ledger_keys.get(vertex, ())})
+        if not ledgers:
+            result["skipped"] += 1
+            continue
+        if any(_sid_has_open_notice(root, sid) for _harness, sid in component):
+            result["skipped"] += 1
+            continue
+        if _component_has_open_binding(graph, component, jobs):
+            result["skipped"] += 1
+            continue
+        if _component_has_role_rows(graph, component, store):
+            result["skipped"] += 1
+            continue
+        last = _component_last_activity(graph, component)
+        if last is None or now - last < RETIRE_ACTIVITY_SECONDS:
+            result["skipped"] += 1
+            continue
+        if not _component_proven_ended(component, census, server):
+            result["skipped"] += 1
+            continue
+        try:
+            archive.mkdir(mode=0o700, parents=True, exist_ok=True)
+        except OSError:
+            result["skipped"] += 1
+            continue
+        moved = 0
+        for ledger_key in ledgers:
+            source = sessions / (ledger_key + ".jsonl")
+            if not source.is_file() or source.is_symlink():
+                continue
+            try:
+                os.replace(source, archive / source.name)
+            except OSError:
+                continue
+            moved += 1
+        if moved:
+            result["retired"] += 1
+            result["ledgers"] += moved
+            try:
+                from dispatch_seat_handover import publish_lineage_rows
+                publish_lineage_rows(inbox.dispatch_inbox_root())
+            except (OSError, ValueError, TypeError):
+                pass
+            try:
+                inbox.bump_edge_generation(inbox.dispatch_inbox_root())
+            except (OSError, ValueError, TypeError):
+                pass
+        else:
+            result["skipped"] += 1
+    return result
+
+
+def _purge_retired_archives(*, now=None):
+    """Remove archive ledgers after their 30-day retention."""
+    import session_tidy as tidy
+
+    now = time.time() if now is None else float(now)
+    archive = tidy.state_root() / RETIRE_ARCHIVE_DIRECTORY
+    result = {"removed": 0}
+    if not archive.is_dir():
+        return result
+    try:
+        entries = sorted(archive.glob("*.jsonl"))
+    except OSError:
+        return result
+    for path in entries:
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        if now - info.st_mtime < RETIRE_ARCHIVE_SECONDS:
+            continue
+        try:
+            os.unlink(path)
+        except OSError:
+            continue
+        result["removed"] += 1
+    return result
+
+
+def _publish_steward_relations(root, *, force=False):
+    """Publish the role relation the Stop header may reuse instead of a live walk.
+
+    Display-only: the file feeds `fleet.herdr_projection.is_steward` on the Stop
+    path, which falls back to the live read when it is missing. Authority paths
+    and Fleet never read it. A 60 s due keeps header evidence fresh, and an
+    edge-generation change (including every retirement) republishes at once.
+    """
+    import dispatch_recipient_inbox as inbox
+    from dispatch_seat_handover import resolved_steward_relations
+
+    state = peer_obligations.read_runner_duty_state(root, "steward-relations")
+    generation = inbox.read_edge_generation(root)
+    due = (force or state.get("edge_generation") != generation
+           or peer_obligations.runner_duty_due(state, STEWARD_RELATIONS_DUE_SECONDS))
+    if not due:
+        return {"published": False, "due": False, "relations": 0}
+    relations = resolved_steward_relations(include_released=True)
+    inbox.write_steward_relations(root, relations)
+    peer_obligations.write_runner_duty_state(root, "steward-relations", {
+        "last_pass_ns": time.time_ns(), "edge_generation": generation,
+        "relations": len(relations)})
+    return {"published": True, "due": True, "relations": len(relations)}
+
+
+def _runner_maintenance_pass(store):
+    """Publish derived observations and run the bounded global cleanup duties."""
+    import dispatch_recipient_inbox as inbox
+
+    root = store.root.parent.parent.resolve()
+    deadline_ns = time.monotonic_ns() + int(MAINTENANCE_TIME_BUDGET_S * 1_000_000_000)
+    result = {}
+    # The Stop header reads this file; publish before the cleanup duties so a
+    # long reconcile backlog cannot starve it for hours.
+    try:
+        result["steward_relations"] = _publish_steward_relations(root)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        pass
+    try:
+        result["lineage_rows"] = _publish_lineage_rows_duty(root, deadline_ns=deadline_ns)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        pass
+    try:
+        state = peer_obligations.read_runner_duty_state(root, "reconcile")
+        if (peer_obligations.runner_duty_due(state, RECONCILE_DUE_SECONDS)
+                and time.monotonic_ns() < deadline_ns):
+            import dispatch_completion_join as join
+            jobs = root / "jobs.log"
+            remaining = max(0.0, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+            cursor = state.get("cursor")
+            counts = join.reconcile_pending_delivery(
+                jobs, max_rows=RECONCILE_MAX_ROWS,
+                time_budget_s=min(RECONCILE_TIME_BUDGET_S, remaining),
+                start_after=cursor if isinstance(cursor, str) else None)
+            result["reconcile"] = counts
+            complete = not counts.get("budget_exhausted") and counts.get("cursor") is None
+            peer_obligations.write_runner_duty_state(root, "reconcile", {
+                # An unfinished walk is due on the next pass, not in six hours:
+                # the first 2,575-record backlog then clears within hours.
+                "last_pass_ns": time.time_ns() if complete else 0,
+                "cursor": counts.get("cursor"),
+                "rows_read": counts.get("rows_read", 0),
+                "records_read": counts.get("records_read", 0),
+                "pruned_records": counts.get("pruned_records", 0),
+                "expired": counts.get("expired", 0),
+                "budget_exhausted": counts.get("budget_exhausted", 0)})
+    except (OSError, ValueError, RuntimeError):
+        pass
+    try:
+        state = peer_obligations.read_runner_duty_state(root, "peer-history")
+        if (peer_obligations.runner_duty_due(state, RECONCILE_DUE_SECONDS)
+                and time.monotonic_ns() < deadline_ns):
+            cursor = state.get("cursor")
+            counts = _prune_received_peer_history(
+                deadline_ns=deadline_ns,
+                start_after=cursor if isinstance(cursor, str) else None)
+            result["peer_history"] = counts
+            peer_obligations.write_runner_duty_state(root, "peer-history", {
+                "last_pass_ns": time.time_ns() if counts.get("complete", True) else 0,
+                "cursor": counts.get("cursor"),
+                "removed": counts["removed"]})
+    except (OSError, ValueError, RuntimeError):
+        pass
+    try:
+        result["peer_index"] = _publish_peer_indexes(root, deadline_ns=deadline_ns)
+    except (OSError, ValueError, TypeError, RuntimeError):
+        pass
+    try:
+        state = peer_obligations.read_runner_duty_state(root, "retire")
+        if (peer_obligations.runner_duty_due(state, MAINTENANCE_DUE_SECONDS)
+                and time.monotonic_ns() < deadline_ns):
+            counts = _retire_finished_lineage_bundles(store, deadline_ns=deadline_ns)
+            counts.update(_purge_retired_archives())
+            result["retire"] = counts
+            peer_obligations.write_runner_duty_state(root, "retire", {
+                "last_pass_ns": time.time_ns(), "retired": counts.get("retired", 0),
+                "ledgers": counts.get("ledgers", 0),
+                "purged": counts.get("removed", 0)})
+            if counts.get("retired"):
+                # A retirement bumps the edge generation; republish in this
+                # same pass rather than waiting for the next due check.
+                try:
+                    result["steward_relations"] = _publish_steward_relations(root)
+                except (OSError, ValueError, TypeError, RuntimeError):
+                    pass
+    except (OSError, ValueError, RuntimeError):
+        pass
+    try:
+        state = peer_obligations.read_runner_duty_state(root, "inbox-prefill")
+        generation = inbox.read_edge_generation(root)
+        # No confirmed edge writer has bumped a generation yet: the hooks own
+        # their one-time first-install prefill, so the runner owes nothing.
+        due = generation > 0 and (
+            state.get("edge_generation") != generation
+            or peer_obligations.runner_duty_due(state, INBOX_PREFILL_DUE_SECONDS))
+        if due and time.monotonic_ns() < deadline_ns:
+            counts = _prefill_live_inboxes(root, deadline_ns=deadline_ns)
+            result["inbox"] = counts
+            peer_obligations.write_runner_duty_state(root, "inbox-prefill", {
+                "last_pass_ns": time.time_ns(), "edge_generation": generation,
+                "written": counts["written"], "skipped": counts["skipped"]})
+    except (OSError, ValueError, RuntimeError):
+        pass
+    return result
 
 
 def _runner_lock_current(store, lock_fd):
@@ -9380,6 +10118,14 @@ def cmd_obligation_runner(args):
                         incarnation=runner_incarnation)
             except Exception:
                 pass
+        # Global cleanup and derived-observation publishing run on every pass
+        # after its delivery work. Each duty keeps its own due check and the
+        # shared maintenance budget, so a quiet pass costs only a small state
+        # read per duty. A failure here never stops delivery work.
+        try:
+            _runner_maintenance_pass(store)
+        except (OSError, ValueError, RuntimeError, peer_obligations.ObligationError):
+            pass
         current_duties = store.list()
         external_signature = _external_obligation_signature(external_snapshot)
         if (notice_discovery_observed and not _runner_duties(store, current_duties)
