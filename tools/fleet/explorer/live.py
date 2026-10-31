@@ -782,7 +782,8 @@ def _frame_leg_displays(jobs):
         if key not in found or rank > found[key][0]:
             found[key] = (rank, {"harness": _text(_get(job, "harness")),
                                  "model": _model_pair(_get(job, "resolved_model", "model")),
-                                 "effort": _effort(_get(job, "effort"))})
+                                 "effort": _effort(_get(job, "effort")),
+                                 "rank": rank})
     return {key: value for key, (_rank, value) in found.items()}
 
 
@@ -969,7 +970,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         framed_route = (short == "frame" or shape == "framed"
                         or bool(legs and str(legs[0][0]) == "frame"))
         if framed_route and owner_harness is None and frame_displays:
-            preferred = frame_displays.get("frame") or next(iter(frame_displays.values()))
+            preferred = max(frame_displays.values(), key=lambda item: item.get("rank", ()))
             owner_harness = preferred.get("harness") or owner_harness
             owner_model = preferred.get("model") or owner_model
             owner_effort = preferred.get("effort") or owner_effort
