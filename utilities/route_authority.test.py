@@ -2002,5 +2002,77 @@ class NestedHostSandboxEqualityTest(unittest.TestCase):
                 self.assertFalse(RA.same_sealed_work(previous, candidate))
 
 
+class DeterministicFinalizeRefusalTest(unittest.TestCase):
+    """A recorded route-lineage refusal is not retried forever; a transient
+    finalize cause stays recoverable. Both come from the same terminal result."""
+
+    def test_deterministic_route_refusals_need_owner_attention(self):
+        for detail in ("cycle-route-binding-mismatch:lineage-fork: rt-a:rt-b,rt-c",
+                       "route-hash-drift: cyc-a",
+                       "completion-route-hash-mismatch: rt-b",
+                       "route-invalid: stale or modified route hash",
+                       "route-artifact-root-mismatch"):
+            with self.subTest(detail=detail):
+                decision = RA.decide_continuation(
+                    action="terminal-result",
+                    facts={"reason": "producer-finalize-failed", "detail": detail})
+                self.assertFalse(decision.allowed)
+                self.assertEqual(decision.state, "needs-owner")
+                self.assertEqual(decision.next_action, "inspect-recovery")
+                self.assertIn("다시 판정", decision.retry_when)
+                self.assertEqual(decision.detail, detail)
+
+    def test_transient_finalize_causes_stay_recoverable(self):
+        for detail in ("output-invalid: locator-invalid-component:artifacts/a|b",
+                       "route-unreadable: /root/.runtime/routes/rt-a.json",
+                       "route-lineage-unverified: cycle:rt-a",
+                       "admission-busy: lock-timeout"):
+            with self.subTest(detail=detail):
+                decision = RA.decide_continuation(
+                    action="terminal-result",
+                    facts={"reason": "producer-finalize-failed", "detail": detail})
+                self.assertEqual(decision.state, "recoverable")
+                self.assertEqual(decision.next_action, "same-command")
+                self.assertEqual(decision.retry_when,
+                                 "The exact process and terminal transaction can be reobserved and settled.")
+
+    def test_a_producer_finalize_refusal_without_a_known_prefix_stays_recoverable(self):
+        decision = RA.decide_continuation(
+            action="terminal-result",
+            facts={"reason": "producer-finalize-failed", "detail": "admission-recovery-required"})
+        self.assertEqual(decision.state, "recoverable")
+
+    def test_the_proven_gate_vocabulary_is_unchanged(self):
+        self.assertEqual(RA.PROVEN_BLOCKED_GATE_REASONS,
+                         {"completion-attempt-not-current", "completion-evidence-revised-unrecorded"})
+        self.assertNotIn("producer-finalize-refused", RA.PROVEN_BLOCKED_GATE_REASONS)
+
+
+class ProducerFinalizeHeldCompletionStateTest(unittest.TestCase):
+    """The route-closed checkpoint with unchanged lineage evidence is blocked;
+    a checkpoint without that fact, or with the fact before route-close, is not."""
+
+    def _decide(self, **facts):
+        return RA.decide_continuation(action="completion-state", facts=facts)
+
+    def test_held_finalize_refusal_at_the_route_closed_checkpoint_is_blocked(self):
+        decision = self._decide(commit_exists=True, checkpoint="route-closed",
+                                finalize_refusal_held=True)
+        self.assertFalse(decision.allowed)
+        self.assertEqual((decision.state, decision.reason),
+                         ("blocked", "producer-finalize-refused"))
+        self.assertEqual(decision.next_action, "inspect-recovery")
+
+    def test_unheld_route_closed_checkpoint_stays_pending(self):
+        decision = self._decide(commit_exists=True, checkpoint="route-closed",
+                                finalize_refusal_held=False)
+        self.assertEqual((decision.state, decision.reason), ("pending", "route-closed"))
+
+    def test_the_held_fact_only_applies_to_the_route_closed_checkpoint(self):
+        decision = self._decide(commit_exists=True, checkpoint="claimed",
+                                finalize_refusal_held=True)
+        self.assertEqual((decision.state, decision.reason), ("pending", "claimed"))
+
+
 if __name__ == "__main__":
     unittest.main()

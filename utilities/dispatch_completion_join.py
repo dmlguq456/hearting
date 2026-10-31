@@ -459,7 +459,12 @@ def materialize_after_terminal_close(jobs: Path, attempt_id: str) -> Path | None
             from dispatch_owner_input import materialize_unresolved
             materialize_unresolved(jobs, attempt_id)
         if row.metadata.get("workflow_completion") == "runtime-v1":
-            from dispatch_terminal_commit import settle_owner_completion
+            from dispatch_terminal_commit import owner_completion_state, settle_owner_completion
+            # A held deterministic finalize refusal means this settle would
+            # re-drive the same refusal; only a lineage or runtime change
+            # clears the hold (the next finish/join judges again).
+            if owner_completion_state(jobs, row.status, row.metadata).reason == "producer-finalize-refused":
+                return None
             settlement = settle_owner_completion(jobs, row.status, row.metadata)
             if settlement is not None and settlement.result != "completed":
                 return None

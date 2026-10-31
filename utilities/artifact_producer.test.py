@@ -8158,5 +8158,192 @@ class QuickPreviewApprovalWriteGuardTest(ProducerTestBase):
             P._quick_refine_write_gate(self.root, target, old)
 
 
+
+class _LineageForkFinalizeFixture(ProducerTestBase):
+    """The recorded [eb] shape: a begin route, two published never-run resumes,
+    and one verified owner-pin handoff successor. Every route is built by the
+    real builders and the launch tuple names the fixture's absolute registry."""
+
+    def setUp(self):
+        super().setUp()
+        lineage = RouteLineageBindingTest
+        for name in ("_root_route", "_publish_root", "_continuation", "_begin", "_close", "_ran"):
+            setattr(self, name, getattr(lineage, name).__get__(self))
+
+    def _handoff_cycle(self, slug):
+        begin = self._root_route(slug)
+        self._publish_root(begin)
+        started = self._begin(begin)
+        unused = [self._continuation(begin, reason=f"never-run-resume-{index}") for index in (1, 2)]
+        successor = self._continuation(begin, reason="owner-pin-handoff")
+        record = P.read_cycle_record(self.root, started["cycle_id"])
+        return begin, unused, successor, started, record
+
+    def _binding(self, record, route):
+        import dispatch_terminal_commit as terminal
+        return {"contract": "producer_binding_v1", "cycle_id": record["cycle_id"],
+                "campaign_id": record["campaign_id"], "producer_id": record["producer_id"],
+                "route_id": route["route_id"], "route_hash": route["route_hash"],
+                "route_file": str(R.canonical_route_path(self.root, route["route_id"])),
+                "cycle_record_digest": terminal.cycle_identity_digest(record)}
+
+    @contextlib.contextmanager
+    def _handoff(self, source, successor):
+        import route_parent_close
+
+        def handoff(route, *, jobs=None):
+            return {"successor": successor} if route["route_id"] == source["route_id"] else None
+
+        with mock.patch.object(route_parent_close, "verified_owner_pin_handoff_close",
+                               side_effect=handoff):
+            yield
+
+    def _manifest(self, sealed):
+        return json.loads(Path(sealed["manifest_path"]).read_text(encoding="utf-8"))
+
+
+class LineageForkFinalizeReproductionTest(_LineageForkFinalizeFixture):
+    """Base API only: the exact controller's own binding seals the successor it
+    names (red on the base tree, where the walk still refuses the fork)."""
+
+    def test_exact_controller_seals_the_verified_handoff_successor(self):
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-exact")
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(successor)
+        binding = self._binding(record, successor)
+        with self._handoff(begin, successor):
+            sealed = P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"],
+                                            expected_binding=binding)
+        self.assertEqual(sealed["status"], "sealed")
+        document = self._manifest(sealed)
+        self.assertEqual([row["route_id"] for row in document["routes"]], [successor["route_id"]])
+        observed = P.observe_finalized_cycle(self.root, cycle_id=record["cycle_id"],
+                                             expected_binding=binding)
+        self.assertEqual(observed["status"], "already-sealed")
+
+    def test_executed_sibling_still_refuses_and_seals_nothing(self):
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-harm")
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(successor)
+        self._ran(unused[0])
+        binding = self._binding(record, successor)
+        with self._handoff(begin, successor):
+            with self.assertRaises(P.ProducerError) as caught:
+                P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"],
+                                       expected_binding=binding)
+        self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:lineage-fork")
+        self.assertNotEqual(P.read_cycle_record(self.root, record["cycle_id"]).get("state"), "sealed")
+        self.assertFalse((Path(started["cycle_dir"]) / "manifest.json").exists())
+
+
+class LineageForkFinalizeJudgmentTest(_LineageForkFinalizeFixture):
+    """The walk and the binding-first exact path share one judgment, and the
+    branch they pass over is recorded without entering the cycle identity."""
+
+    def test_walk_selects_the_handoff_successor_and_records_the_skipped_branch(self):
+        import dispatch_terminal_commit as terminal
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-walk")
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(successor)
+        with self._handoff(begin, successor):
+            self.assertEqual(P._finalize_route(self.root, record)["route_id"], successor["route_id"])
+            sealed = P.finalize(self.root, cycle_id=record["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed")
+        document = self._manifest(sealed)
+        self.assertEqual([row["route_id"] for row in document["routes"]], [successor["route_id"]])
+        self.assertNotIn("skipped_continuations", document)
+        skipped = [row["route_id"] for row in sealed["skipped_continuations"]]
+        self.assertEqual(sorted(skipped), sorted(route["route_id"] for route in unused))
+        self.assertTrue(all(row["reason"] == "never-run"
+                            for row in sealed["skipped_continuations"]))
+        stored = P.read_cycle_record(self.root, record["cycle_id"])
+        self.assertEqual(stored["skipped_continuations"], sealed["skipped_continuations"])
+        # The advisory field is not cycle identity.
+        self.assertEqual(terminal.cycle_identity_digest(stored),
+                         terminal.cycle_identity_digest({**stored, "skipped_continuations": []}))
+
+    def test_walk_refuses_an_executed_sibling(self):
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-walk-harm")
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(successor)
+        self._ran(unused[1])
+        with self._handoff(begin, successor):
+            with self.assertRaises(P.ProducerError) as caught:
+                P._finalize_route(self.root, record)
+            self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:lineage-fork")
+            with self.assertRaises(P.ProducerError) as caught:
+                P.finalize(self.root, cycle_id=record["cycle_id"])
+        self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:lineage-fork")
+        self.assertFalse((Path(started["cycle_dir"]) / "manifest.json").exists())
+
+    def test_walk_refuses_two_candidates_without_a_verified_handoff(self):
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-no-handoff")
+        with self.assertRaises(P.ProducerError) as caught:
+            P._finalize_route(self.root, record)
+        self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:lineage-fork")
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize(self.root, cycle_id=record["cycle_id"])
+        self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:lineage-fork")
+        self.assertNotEqual(P.read_cycle_record(self.root, record["cycle_id"]).get("state"), "sealed")
+
+    def test_binding_route_that_is_not_the_leaf_is_refused(self):
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-superseded")
+        self.write_output(started, "plans/lineage/plan.md")
+        binding = self._binding(record, begin)
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"], expected_binding=binding)
+        self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:superseded-route")
+
+    def test_binding_route_hash_drift_is_a_completion_route_hash_mismatch(self):
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-fork-hash")
+        binding = self._binding(record, successor)
+        binding["route_hash"] = "sha256:" + "0" * 64
+        with self.assertRaises(P.ProducerError) as caught:
+            P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"], expected_binding=binding)
+        self.assertEqual(caught.exception.code, "completion-route-hash-mismatch")
+
+    def test_lineage_evidence_tracks_outcomes_not_the_shared_registry(self):
+        begin, unused, successor, started, record = self._handoff_cycle("lineage-evidence")
+        evidence = P.finalize_lineage_evidence(self.root, record)
+        self.assertIsNotNone(evidence)
+        self.assertTrue(evidence.startswith("sha256:"))
+        # Unrelated registry churn is not lineage: a held refusal must not revive.
+        self.jobs.write_text("2026-10-09\tdone\t/w\t/w\tchild\tattempt_id=att-unrelated\n")
+        self.assertEqual(P.finalize_lineage_evidence(self.root, record), evidence)
+        # An outcome in this cycle's tree is lineage: the judgment sees new evidence.
+        self._close(unused[0])
+        self.assertNotEqual(P.finalize_lineage_evidence(self.root, record), evidence)
+
+    def test_unexecuted_continuation_rereads_a_registry_changed_during_the_first_read(self):
+        begin = self._root_route("unused-reread")
+        self._publish_root(begin)
+        unused = self._continuation(begin, reason="reread")
+        original = Path.read_text
+        reads = {"jobs": 0}
+
+        def churn(path, *args, **kwargs):
+            text = original(path, *args, **kwargs)
+            if Path(path) == self.jobs and reads["jobs"] == 0:
+                reads["jobs"] += 1
+                self.jobs.write_text(text + "2026-10-09\tdone\t/w\t/w\tchild\tattempt_id=att-other\n")
+            return text
+
+        with mock.patch.object(Path, "read_text", churn):
+            self.assertTrue(P._unexecuted_continuation(self.root, unused))
+        self.assertEqual(reads["jobs"], 1)
+
+    def test_a_seal_without_a_skipped_branch_writes_no_field(self):
+        begin = self._root_route("lineage-no-skip")
+        self._publish_root(begin)
+        started = self._begin(begin)
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(begin)
+        sealed = P.finalize(self.root, cycle_id=started["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertNotIn("skipped_continuations", sealed)
+        self.assertNotIn("skipped_continuations",
+                         P.read_cycle_record(self.root, started["cycle_id"]))
+
+
 if __name__ == "__main__":
     unittest.main()
