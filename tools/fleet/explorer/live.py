@@ -128,6 +128,27 @@ def _short_capability(name):
     return name[len("autopilot-"):] if name.startswith("autopilot-") else name
 
 
+FRAME_ROUTE_CAPABILITY = "route-frame"
+FRAME_ROUTE_SHAPE = "framed"
+
+
+def _is_frame_route(capability, record, topology):
+    """Whether the board draws this route as a frame route.
+
+    A sealed frame route carries ``capability: route-frame`` and records the
+    framed selection in ``selection.shape``; its ``execution_topology`` stays
+    the ordinary ``staged``. The earlier synthetic shape (``capability: frame``
+    or ``execution_topology: framed``) still renders through the same branch.
+    Only reads the record; ``capability_mode`` and the topology stay untouched
+    so collectors, assignment, pins and fold inputs see the source values.
+    """
+    selection = _get(record, "selection")
+    return (capability == FRAME_ROUTE_CAPABILITY
+            or _short_capability(capability) == "frame"
+            or _text(_get(selection, "shape")) == FRAME_ROUTE_SHAPE
+            or topology == FRAME_ROUTE_SHAPE)
+
+
 # -- sessions -----------------------------------------------------------------------------
 
 def _is_main(session):
@@ -663,9 +684,11 @@ def _route_title_line(rid, owner, resume):
         parts.append([harness, "hb_" + harness])
         model, effort = owner.get("model"), owner.get("effort")
         if model:
-            parts += [[" (", _SEG_DIM], [model[0], model[1]], ["·", _SEG_DIM],
-                      [effort or "", "eff_" + effort if effort in ("medium", "xhigh") else _SEG_DIM],
-                      [")", _SEG_DIM]]
+            parts += [[" (", _SEG_DIM], [model[0], model[1]]]
+            if effort:
+                parts += [["·", _SEG_DIM],
+                          [effort, "eff_" + effort if effort in ("medium", "xhigh") else _SEG_DIM]]
+            parts.append([")", _SEG_DIM])
     if resume:
         parts += [["  resumes from ", _SEG_DIM], [resume, "lvl_y"]]
     return parts
@@ -864,7 +887,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         if capability is None:
             capability = next((_text(_get(job, "capability_owner", "assigned_contract")) for job in jobs
                                if _text(_get(job, "capability_owner", "assigned_contract"))), None)
-        short = _short_capability(capability)
+        # The display identity of a frame route is derived here, once: KIND, tree,
+        # opened-route shape and the framed PROGRESS all read these route fields.
+        framed_route = _is_frame_route(
+            capability, record,
+            _text(view.get("execution_topology")) or _text(record.get("execution_topology")))
+        short = "frame" if framed_route else _short_capability(capability)
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
@@ -889,8 +917,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         age = _dur(max(elapsed_values)) if elapsed_values else None
         topology = _text(view.get("execution_topology")) or _text(record.get("execution_topology"))
         resource_node = shown_node is not None and shown_node.get("unit") == "_kernel/resource"
-        shape = topology
-        if topology == "staged" and resource_node:
+        shape = FRAME_ROUTE_SHAPE if framed_route else topology
+        if not framed_route and topology == "staged" and resource_node:
             shape = "staged+resource"
         leg_status = "failed" if (failed and active is None) or state == "dead" else \
             "done" if state == "done" or (total and done == total) else "active"
@@ -971,8 +999,6 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 next((n.get("id") for n in view_nodes if _stage_state(n) == "todo"), None)
         legs = _chain_legs(chain_nodes, rid, short, leg_status, progress) if chain_nodes else \
             ([[short or "·", leg_status, progress]] if short else [])
-        framed_route = (short == "frame" or shape == "framed"
-                        or bool(legs and str(legs[0][0]) == "frame"))
         # Borrow a frame leg's identity only while the route has no owner job at all: several
         # owner attempts (a resumed route without a recorded owner_attempt_id) keep their own
         # display instead of borrowing a frame leg's harness.
@@ -982,6 +1008,11 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             owner_model = preferred.get("model") or owner_model
             owner_effort = preferred.get("effort") or owner_effort
         mode = _text(view.get("capability_mode")) or _text(record.get("capability_mode"))
+        intensity = _text(view.get("effective_intensity")) or _text(record.get("effective_intensity"))
+        if framed_route:
+            # KIND reads `frame`: a frame route's default capability mode and inherited
+            # intensity are not display axes. The source record keeps both values.
+            mode = intensity = None
         current = bool(run_children or worker_contexts
                        or owner_live in ("working", "idle", "blocked")
                        and total and done != total and (active is not None or not failed))
@@ -994,7 +1025,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "loops": None, "worktree": worktree, "tree_label": short,
             "harness": owner_harness, "model": owner_model, "effort": owner_effort,
             "mode": mode,
-            "intensity": _text(view.get("effective_intensity")) or _text(record.get("effective_intensity")),
+            "intensity": intensity,
             "profile": _text(_get(owner, "model_profile", "profile")) if owner is not None else None,
             "capability": short, "shape": shape, "past_from": None,
             "worker_stage": worker_stage or "·", "worker_unit": worker_unit,
@@ -1018,8 +1049,7 @@ def _node_groups(view_nodes, route, rid, legs, now, done, leg_status):
     short, mode = route.get("capability"), route.get("mode")
     name = f"leg {len(legs) or 1} · {short or '·'}{' ' + mode if mode else ''}"
     frame_nodes = [node for node in view_nodes if _is_frame_leg(node)]
-    if frame_nodes and (short == "frame" or route.get("shape") == "framed"
-                        or bool(legs and str(legs[0][0]) == "frame")):
+    if frame_nodes and (short == "frame" or route.get("shape") == FRAME_ROUTE_SHAPE):
         lines = []
         for node in frame_nodes:
             node_id = str(node.get("id") or "frame")

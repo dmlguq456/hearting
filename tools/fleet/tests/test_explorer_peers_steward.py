@@ -19,57 +19,68 @@ def _row(tag, repo, harness="claude"):
             "age": "5m", "now": "work", "ask": None, "steward": tag == "s1"}
 
 
-def _session(targets=None, sent=None, received=None):
-    return {"steward_targets": targets, "peer_last_recv": received, "peer_last_sent": sent}
+def _raw_session(row, targets=None, sent=None, received=None):
+    """A collector-shaped session row: the fields the live path reads to mint/reuse a tag."""
+    tag = row["tag"]
+    return {"harness": row["harness"], "session_id": "sid-" + tag, "session_tag": tag,
+            "cwd": "/synthetic/" + row["repo"], "liveness": row.get("state") or "working",
+            "steward": row.get("steward", False), "title": row.get("title"),
+            "summary": row.get("now"), "context_pct": row.get("context"),
+            "window": row.get("window"), "steward_targets": targets,
+            "peer_last_sent": sent, "peer_last_recv": received}
+
+
+def _resolver(cwd):
+    return str(cwd).rsplit("/", 1)[-1]
+
+
+def _source(rows, targets, snapshot=None):
+    source = dict(snapshot or {})
+    source["sessions"] = [
+        _raw_session(row, targets.get(row["tag"], row.get("steward_targets")),
+                     row.get("peer_last_sent"), row.get("peer_last_recv"))
+        for row in rows]
+    source.setdefault("resources", [])
+    return source
 
 
 def _model(ended=False):
     rows = [_row("s1", "repo-a"), _row("t1", "repo-a"), _row("t2", "repo-a", "codex"),
             _row("x1", "repo-b")]
+    rows[0]["peer_last_sent"] = {"to_session_id": "sid-t1", "to_harness": "claude",
+                                 "kind": "steer", "age_min": 3}
     targets = [
-        {"harness": "claude", "session_id": "sid-t1", "name": "t1", "source": "watch", "ts": TS},
-        {"harness": "codex", "session_id": "sid-t2", "name": "t2", "source": "watch", "ts": TS},
-        {"harness": "opencode", "session_id": "sid-x1", "name": "x1", "source": "watch", "ts": TS},
+        _target("t1"),
+        _target("t2", "codex"),
+        _target("x1", "opencode"),
     ]
     if ended:
-        targets.append({"harness": "claude", "session_id": "sid-gone", "name": "gone",
-                        "source": "watch", "ts": TS})
-    index = {}
-    for row in rows:
-        targets_for = targets if row["tag"] == "s1" else None
-        sent = ({"to_session_id": "sid-t1", "to_harness": "claude",
-                 "kind": "steer", "age_min": 3} if row["tag"] == "s1" else None)
-        index[row["tag"]] = {"session": _session(targets_for, sent), "sid": "sid-" + row["tag"],
-                             "ids": ("sid-" + row["tag"],), "chain": set(), "interaction": None}
-    nodes, edges = live._peer_records(rows, index, NOW, None)
-    nodes, edges = live._finish_peers(nodes, edges, rows, index, [], [], ())
-    mapping = {"sessions": rows, "routes": [],
-               "repos": [{"id": "repo-a", "name": "repo-a"},
-                         {"id": "repo-b", "name": "repo-b"}],
-               "peer_nodes": [tuple((repo, [list(column) for column in columns]))
-                              for repo, columns in nodes],
-               "peer_edges": edges}
-    return ExplorerViewModel.from_mapping(mapping)
+        targets.append(_target("gone"))
+    return _graph_model(rows, {"s1": targets})
 
 
 def _target(tag, harness="claude"):
-    return {"harness": harness, "session_id": "sid-" + tag, "name": tag, "source": "watch", "ts": TS}
+    """Exactly the keys ``steward.role_targets`` returns for a watch target."""
+    return {"harness": harness, "session_id": "sid-" + tag, "name": tag, "kind": "watch",
+            "ts": TS, "source": "watch", "pane": "wB:pAW"}
 
 
 def _graph_model(rows, targets, snapshot=None):
-    """A peer view model whose steward graph is ``targets`` (tag -> target records)."""
-    index = {}
-    for row in rows:
-        tag = row["tag"]
-        index[tag] = {"session": _session(targets.get(tag)), "sid": "sid-" + tag,
-                      "ids": ("sid-" + tag,), "chain": set(), "interaction": None}
-    nodes, edges = live._peer_records(rows, index, NOW, snapshot)
-    nodes, edges = live._finish_peers(nodes, edges, rows, index, [], [], ())
+    """A peer view model whose steward graph is ``targets`` (tag -> target records).
+
+    The session rows are collector-shaped and pass through the real
+    ``_session_records`` join, so a target resolves by its native session id
+    exactly as it does live.
+    """
+    source = _source(rows, targets, snapshot)
+    session_rows, index = live._session_records(source, NOW, _resolver)
+    nodes, edges = live._peer_records(session_rows, index, NOW, source)
+    nodes, edges = live._finish_peers(nodes, edges, session_rows, index, [], [], ())
     repos = []
-    for row in rows:
+    for row in session_rows:
         if row["repo"] not in repos:
             repos.append(row["repo"])
-    mapping = {"sessions": rows, "routes": [],
+    mapping = {"sessions": session_rows, "routes": [],
                "repos": [{"id": repo, "name": repo} for repo in repos],
                "peer_nodes": [tuple((repo, [list(column) for column in columns]))
                               for repo, columns in nodes],
@@ -81,33 +92,19 @@ def _chain_model():
     """s1 → s2 → t2 is one column; l1/l2 keep their side lane and x1 stays LINKS-only."""
     rows = [_row("s1", "repo-a"), _row("s2", "repo-a", "codex"), _row("t2", "repo-a"),
             _row("l1", "repo-a"), _row("l2", "repo-a"), _row("x1", "repo-b")]
+    rows[3]["peer_last_sent"] = {"to_session_id": "sid-l2", "to_harness": "claude",
+                                 "kind": "steer", "age_min": 3}
+    rows[3]["peer_last_recv"] = {"from_session_id": "sid-l2", "from_harness": "claude",
+                                 "kind": "steer", "age_min": 3}
+    rows[4]["peer_last_sent"] = {"to_session_id": "sid-l1", "to_harness": "claude",
+                                 "kind": "steer", "age_min": 3}
+    rows[4]["peer_last_recv"] = {"from_session_id": "sid-l1", "from_harness": "claude",
+                                 "kind": "steer", "age_min": 3}
     targets = {
-        "s1": [{"harness": "codex", "session_id": "sid-s2", "name": "s2", "source": "watch", "ts": TS},
-               {"harness": "opencode", "session_id": "sid-x1", "name": "x1", "source": "watch", "ts": TS}],
-        "s2": [{"harness": "claude", "session_id": "sid-t2", "name": "t2", "source": "watch", "ts": TS}],
+        "s1": [_target("s2", "codex"), _target("x1", "opencode")],
+        "s2": [_target("t2")],
     }
-    index = {}
-    for row in rows:
-        tag = row["tag"]
-        sent = received = None
-        if tag in ("l1", "l2"):
-            other = "l2" if tag == "l1" else "l1"
-            sent = {"to_session_id": "sid-" + other, "to_harness": "claude",
-                    "kind": "steer", "age_min": 3}
-            received = {"from_session_id": "sid-" + other, "from_harness": "claude",
-                        "kind": "steer", "age_min": 3}
-        index[tag] = {"session": _session(targets.get(tag), sent, received),
-                      "sid": "sid-" + tag, "ids": ("sid-" + tag,), "chain": set(),
-                      "interaction": None}
-    nodes, edges = live._peer_records(rows, index, NOW, None)
-    nodes, edges = live._finish_peers(nodes, edges, rows, index, [], [], ())
-    mapping = {"sessions": rows, "routes": [],
-               "repos": [{"id": "repo-a", "name": "repo-a"},
-                         {"id": "repo-b", "name": "repo-b"}],
-               "peer_nodes": [tuple((repo, [list(column) for column in columns]))
-                              for repo, columns in nodes],
-               "peer_edges": edges}
-    return ExplorerViewModel.from_mapping(mapping)
+    return _graph_model(rows, targets)
 
 
 class StewardColumnTests(unittest.TestCase):
@@ -273,8 +270,7 @@ class StewardColumnTests(unittest.TestCase):
 
     def test_a_historical_alias_keeps_the_short_sid_and_the_ended_note(self):
         rows = [_row("s1", "repo-a")]
-        targets = {"s1": [{"harness": "claude", "session_id": "sid-gone", "name": "gone",
-                           "source": "watch", "ts": TS}]}
+        targets = {"s1": [_target("gone")]}
         snapshot = {"observations": {"replay_sources": {
             "historical_tags": {"sid-gone": "g0"}}}}
         vm = _graph_model(rows, targets, snapshot)
@@ -285,6 +281,26 @@ class StewardColumnTests(unittest.TestCase):
         text = "\n".join(draw(vm, NavState(view="PEERS", title="PEERS"), 180, 60).text_rows())
         self.assertNotIn("[g0]", text)
         self.assertIn("⚑ watch 0 · ended 1", text)
+
+    def test_role_target_records_resolve_through_real_session_rows_as_50_to_7a(self):
+        """The ``[50] -> [7a]`` fixture uses role_targets' keys and the live tag join."""
+        rows = [_row("50", "repo-a"), _row("7a", "repo-a", "codex")]
+        rows[0]["steward"] = True
+        rows[0]["steward_targets"] = [
+            _target("7a", "codex"),
+            {**_target("gone"), "session_id": "sid-gone", "pane": "wB:p9J"},
+        ]
+        vm = _graph_model(rows, {})
+        links = [link for link in vm.peer_edges["links"] if str(link[2]) == "watch ⚑"]
+        self.assertEqual([link[:2] for link in links],
+                         [(("50", "claude"), ("7a", "codex")), (("50", "claude"), "sid-gone")])
+        self.assertEqual(links[1][4], "ended")
+        self.assertEqual([dict(entry) for entry in vm.peer_edges["watches"]],
+                         [{"repo": "repo-a", "text": "watch 1 · ended 1"}])
+        text = "\n".join(draw(vm, NavState(view="PEERS", title="PEERS"), 180, 60).text_rows())
+        self.assertTrue(any("[50]" in line and "[7a]" in line and "watch ⚑" in line
+                            for line in text.splitlines()))
+        self.assertIn("⚑ watch 1 · ended 1", text)
 
 
 if __name__ == "__main__":

@@ -758,6 +758,20 @@ def _clip(text, width):
     return clip_cells(text, int(width))
 
 
+def _clip_cut(text, width):
+    """Cut to ``width`` cells with ``…`` even when the text exactly fills the cell."""
+    from .grid import cell_width
+    text, width = str(text), max(1, int(width))
+    out, used = [], 0
+    for char in text:
+        cells = cell_width(char)
+        if used + cells > width - 1:
+            break
+        out.append(char)
+        used += cells
+    return "".join(out) + "…"
+
+
 def _tint_row(grid, y, x0, x1, tint):
     if 0 <= y < grid.rows:
         for xx in range(max(0, x0), min(grid.cols, x1)):
@@ -1487,19 +1501,28 @@ def _draw_owner(grid, x, y, route, narrow, slim, limit):
         if effort:
             parts.append(("·" + effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"))
         room = max(0, limit - x)
-        if sum(_seg_width(text) for text, _style in parts) > room:
+        if room and sum(_seg_width(text) for text, _style in parts) > room:
+            # Keep the drawn prefix and make the cut visible: when a segment falls
+            # outside the cell, the last kept cell is spent on `…` (open…, opencode…).
             kept, used = [], 0
             for text, style in parts:
                 width = _seg_width(text)
-                if used + width <= room:
+                remaining = room - used
+                if width <= remaining:
                     kept.append((text, style))
                     used += width
                     continue
-                clipped = _clip(text, room - used)
-                if clipped:
-                    kept.append((clipped, style))
+                if remaining >= 1:
+                    clipped = _clip(text, remaining)
+                    if clipped:
+                        kept.append((clipped, style))
                 break
+            if kept and not kept[-1][0].endswith("…"):
+                text, style = kept[-1]
+                kept[-1] = (_clip_cut(text, _seg_width(text)), style)
             parts = kept
+        elif not room:
+            parts = []
     else:
         model_name, model_key = (tuple(model) + ("dim",))[:2] if model else ("·", "dim")
         parts = [(harness, "hb_" + harness), (" (", "dim"), (str(model_name), model_key),

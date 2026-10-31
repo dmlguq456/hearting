@@ -1,6 +1,11 @@
-"""A framed route with no owner attempt shows its frame legs at owner level."""
+"""A sealed ``route-frame`` route shows its frame legs at owner level.
+
+The fixture mirrors a real route file: ``capability: route-frame``,
+``capability_mode: default``, ``execution_topology: staged`` and the framed
+shape in ``selection.shape``. Only the direct ``_draw_route_progress`` case
+still uses the older synthetic ``capability: frame`` / ``framed`` shape.
+"""
 import unittest
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from tools.fleet.explorer import live
@@ -12,58 +17,75 @@ from tools.fleet.tests import explorer_fixture as ef
 
 
 NOW = 1_000_000.0
+ROUTE_ID = "rt-frame"
+REPO = "/synthetic/repo"
+FRAME_LEGS = ("frame", "frame-alternative")
 
 
-def _job(node, harness, model, effort, running=False):
-    return SimpleNamespace(
-        key="route-frame", depth=1, dispatch_depth=2, route_node=node,
-        worker_type="frame", liveness="working" if running else "done", harness=harness, model=None,
-        resolved_model=model, effort=effort, route_id="rt-frame",
-        attempt_id="att-" + node, elapsed_min=5, route_attempt_round=1)
+def _frame_job(node, harness, model, effort, running=True):
+    """A frame leg job with the field names the dispatch registry writes."""
+    return {"key": "route-frame", "depth": 1, "dispatch_depth": 1, "route_node": node,
+            "worker_type": "frame", "worker_mode": "plan/frame", "unit": "plan/frame",
+            "assigned_contract": "plan/frame", "capability_owner": "route-frame",
+            "liveness": "working" if running else "done", "harness": harness,
+            "model": model, "resolved_model": None, "effort": effort,
+            "route_id": ROUTE_ID, "attempt_id": "att-" + node,
+            "elapsed_min": 5 if node == "frame" else 4, "route_attempt_round": 1}
 
 
-def _snapshot(running=False, owner=None, node_state=None):
+def _owner_job(attempt, harness, model="opus", effort="max", liveness="working"):
+    """An owner attempt job (the route's real owner, not a frame leg)."""
+    return {"key": "route-frame", "depth": 1, "dispatch_depth": 1, "route_node": None,
+            "worker_type": "owner", "unit": "_kernel/owner", "worker_mode": None,
+            "harness": harness, "model": model, "resolved_model": None, "effort": effort,
+            "route_id": ROUTE_ID, "attempt_id": attempt, "elapsed_min": 11}
+
+
+def _view(running=False, node_state=None, live_legs=FRAME_LEGS):
     node_state = node_state or ("active" if running else "done")
-    view = {
+    return {
         "nodes": [
-            {"id": "frame", "state": node_state, "depends_on": [], "parallel_group": "frame"},
+            {"id": "frame", "state": node_state, "depends_on": [], "parallel_group": "frame",
+             "unit": "plan/frame", "worker_type": "frame"},
             {"id": "frame-alternative", "state": node_state, "depends_on": [],
-             "parallel_group": "frame"},
+             "parallel_group": "frame", "unit": "plan/frame", "worker_type": "frame"},
+            {"id": "route-decision", "state": "todo" if running else node_state,
+             "depends_on": ["frame", "frame-alternative"], "gate": "route-decision"},
         ],
-        "capability": "frame", "execution_topology": "framed", "capability_mode": "dev",
-        "cwd": "/synthetic/repo", "slug": "subject",
+        "capability": "route-frame", "capability_mode": "default",
+        "execution_topology": "staged", "effective_intensity": "standard",
+        "cwd": REPO, "slug": "framed subject",
     }
-    record = {"result": None, "slug": "subject"}
-    jobs = [_job("frame", "claude", "Opus 5.5", "high", running),
-            _job("frame-alternative", "codex", "gpt-6.1-sol", "medium", running)]
+
+
+def _record(owner=None):
+    record = {"route_id": ROUTE_ID, "capability": "route-frame",
+              "capability_mode": "default", "execution_topology": "staged",
+              "selection": {"shape": "framed"}, "effective_intensity": "standard",
+              "result": None, "slug": "framed subject"}
     if owner is not None:
         record["owner_attempt_id"] = "att-owner"
-        jobs.append({"key": "autopilot-code", "depth": 1, "dispatch_depth": 1,
-                     "route_node": None, "worker_type": "owner", "liveness": "done",
-                     "harness": owner.get("harness", ""),
-                     "resolved_model": owner.get("model", "gpt-6.1-sol"),
-                     "effort": owner.get("effort", "medium"), "route_id": "rt-frame",
-                     "attempt_id": "att-owner", "elapsed_min": 11})
-    slot = {
-        "view": view, "record": record, "jobs": jobs,
-        "sessions": [{"harness": "claude", "session_id": "sid-owner", "session_tag": "z9",
-                      "cwd": "/synthetic/repo", "liveness": "idle", "is_child": False,
-                      "title": "owner"}],
-    }
-    sessions = [{"harness": "claude", "session_id": "sid-owner", "session_tag": "z9",
-                 "cwd": "/synthetic/repo", "liveness": "idle", "is_child": False,
-                 "title": "owner"}]
-    return view, slot, sessions
+    return record
 
 
-def _vm(running=False, owner=None, attempts=None, node_state=None, chain=None, extra_owners=()):
-    view, slot, sessions = _snapshot(running, owner, node_state)
+def _vm(running=False, owner=None, attempts=None, node_state=None, chain=None,
+        extra_owners=(), live_legs=FRAME_LEGS):
+    view = _view(running, node_state, live_legs)
+    record = _record(owner)
+    jobs = [_frame_job("frame", "claude", "opus", "max", "frame" in live_legs),
+            _frame_job("frame-alternative", "codex", "gpt-6-astra", None,
+                       "frame-alternative" in live_legs)]
+    if owner is not None:
+        jobs.append(_owner_job("att-owner", owner.get("harness", ""),
+                               owner.get("model", "opus"), owner.get("effort", "max")))
+    jobs.extend(extra_owners)
+    session = {"harness": "claude", "session_id": "sid-owner", "session_tag": "z9",
+               "cwd": REPO, "liveness": "idle", "is_child": False, "title": "owner"}
     if chain is not None:
-        sessions = [dict(session, route_chain={"nodes": chain}) for session in sessions]
-    if extra_owners:
-        slot = dict(slot, jobs=list(slot["jobs"]) + list(extra_owners))
-    with patch.object(live, "_collect_routes", return_value={"rt-frame": slot}):
-        rows, index = live._session_records({"sessions": sessions}, NOW, lambda _cwd: "repo")
+        session["route_chain"] = {"nodes": chain}
+    slot = {"view": view, "record": record, "jobs": jobs, "sessions": [session]}
+    with patch.object(live, "_collect_routes", return_value={ROUTE_ID: slot}):
+        rows, index = live._session_records({"sessions": [session]}, NOW, lambda _cwd: "repo")
         routes, nodes = live._route_records({"resources": []}, rows, index,
                                             lambda _cwd: "repo", NOW)
     mapping = {"repos": [{"id": "repo", "name": "repo"}],
@@ -71,30 +93,65 @@ def _vm(running=False, owner=None, attempts=None, node_state=None, chain=None, e
     if attempts is not None:
         mapping["attempts"] = attempts
     vm = ExplorerViewModel.from_mapping(mapping)
-    return view, routes[0], vm
-
-
-def _owner_job(attempt, harness, liveness):
-    return {"key": "autopilot-code", "depth": 1, "dispatch_depth": 1,
-            "route_node": None, "worker_type": "owner", "liveness": liveness,
-            "harness": harness, "resolved_model": "Opus 5.5" if harness == "claude"
-            else "gpt-6.1-sol", "effort": "high" if harness == "claude" else "medium",
-            "route_id": "rt-frame", "attempt_id": attempt, "elapsed_min": 11}
+    return view, record, routes[0], vm
 
 
 class FrameOwnerLevelTests(unittest.TestCase):
-    def test_owner_telemetry_is_borrowed_from_the_frame_legs_without_mutating_the_record(self):
-        view, route, _vm_value = _vm()
-        self.assertEqual(route["harness"], "claude")
-        self.assertEqual(route["model"][0], "Opus 5.5")
-        self.assertEqual(route["effort"], "high")
+    def test_a_sealed_route_frame_record_displays_as_frame_without_a_default_suffix(self):
+        view, record, route, vm = _vm()
+        self.assertEqual(route["capability"], "frame")
         self.assertEqual(route["shape"], "framed")
-        self.assertEqual(route["legs"], [["frame", "done", "2/2"]])
-        self.assertEqual([node.get("id") for node in view["nodes"]], ["frame", "frame-alternative"])
+        self.assertIsNone(route["mode"])
+        self.assertIsNone(route["intensity"])
+        self.assertEqual(route["legs"], [["frame", "done", "3/3"]])
+        # The source record is only read: collectors, pins and fold inputs see it unchanged.
+        self.assertEqual(view["capability"], "route-frame")
+        self.assertEqual(view["capability_mode"], "default")
+        self.assertEqual(view["execution_topology"], "staged")
+        self.assertEqual(record["selection"]["shape"], "framed")
+        self.assertEqual(record["capability_mode"], "default")
+        self.assertTrue(all("harness" not in node for node in view["nodes"]))
+        for cols in (120, 180):
+            with self.subTest(cols=cols):
+                frame, trace = ef.trace_draw(draw, vm, NavState(view="ROUTES", title="ROUTES"),
+                                             cols, 60)
+                self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
+                pane = ["".join(cell[0] for cell in row[34:]) for row in frame.cells]
+                row = next(line for line in pane if "[z9]" in line)
+                self.assertNotIn("route-frame", row)
+                self.assertNotIn("(def", row)
+                self.assertNotIn("frame(", row)
+                self.assertIn("frame", row)
+
+    def test_owner_telemetry_is_borrowed_from_the_frame_legs_without_mutating_the_record(self):
+        view, _record_value, route, _vm_value = _vm()
+        # Both legs finished: the newest leg (the alternative, started later) names the
+        # owner-level cell, and its missing effort leaves no `·` behind.
+        self.assertEqual(route["harness"], "codex")
+        self.assertEqual(route["model"][0], "gpt-6-astra")
+        self.assertIsNone(route["effort"])
+        self.assertEqual(route["legs"], [["frame", "done", "3/3"]])
+        self.assertEqual([node.get("id") for node in view["nodes"]],
+                         ["frame", "frame-alternative", "route-decision"])
         self.assertTrue(all("harness" not in node for node in view["nodes"]))
 
+    def test_a_frame_leg_with_an_alias_model_shows_the_resolved_name(self):
+        _view_value, _record_value, route, vm = _vm(live_legs=("frame",))
+        self.assertEqual(route["harness"], "claude")
+        self.assertEqual(route["model"][0], "Opus")
+        self.assertEqual(route["effort"], "max")
+        for cols in (120, 180):
+            with self.subTest(cols=cols):
+                text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES",
+                                                  folds=(("ropen:ROUTES", ROUTE_ID),)),
+                                      cols, 60).text_rows())
+                self.assertIn("frame  claude (Opus·max)", text)
+                self.assertIn("alt  codex (gpt-6-astra)", text)
+                self.assertNotIn("gpt-6-astra·", text)
+                self.assertNotIn("·)", text)
+
     def test_route_row_says_frame_and_the_owner_cell_is_not_unknown(self):
-        _view, _route, vm = _vm()
+        _view_value, _record_value, _route, vm = _vm(running=True, live_legs=("frame",))
         for cols in (120, 180):
             with self.subTest(cols=cols):
                 frame, trace = ef.trace_draw(draw, vm, NavState(view="ROUTES", title="ROUTES"),
@@ -104,39 +161,53 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 row = next(line for line in pane if "[z9]" in line)
                 self.assertIn("frame", row)
                 self.assertNotIn("worker", row)
-                self.assertTrue("claude·" in row or "claude (" in row, row)
+                self.assertIn("claude·max", row)
                 self.assertTrue(any("└ frame" in line for line in pane), pane[:12])
+        wide = next(line for line in draw(vm, NavState(view="ROUTES", title="ROUTES"),
+                                          220, 60).text_rows()
+                    if "[z9]" in line and "frame" in line)
+        self.assertIn("claude (Opus·max)", wide)
 
     def test_both_frame_legs_show_their_own_harness_and_model(self):
-        _view, _route, vm = _vm()
+        _view_value, _record_value, _route, vm = _vm()
+        groups = vm.nodes[ROUTE_ID]
+        self.assertEqual([group.get("kind") for group in groups], ["frame"])
+        self.assertEqual(groups[0].get("n"), "frame ∥ frame-alternative")
+        legs = [line[0][0].strip() for line in groups[0].get("lines") or ()]
+        self.assertEqual(legs, ["frame", "alt"])
         for cols in (120, 180):
             with self.subTest(cols=cols):
                 frame, trace = ef.trace_draw(
                     draw, vm, NavState(view="ROUTES", title="ROUTES",
-                                       folds=(("ropen:ROUTES", "rt-frame"),)), cols, 60)
+                                       folds=(("ropen:ROUTES", ROUTE_ID),)), cols, 60)
                 self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
                 text = "\n".join(frame.text_rows())
-                self.assertIn("frame  claude (Opus 5.5·high)", text)
-                self.assertIn("alt  codex (gpt-6.1-sol·medium)", text)
+                self.assertIn("frame  claude (Opus·max)", text)
+                self.assertIn("alt  codex (gpt-6-astra)", text)
+                self.assertNotIn("gpt-6-astra·", text)
+                self.assertNotIn("·)", text)
 
     def test_tree_route_line_uses_the_frame_harness_and_mix_counts_the_owner_once(self):
-        _view, route, vm = _vm(running=True)
+        _view_value, _record_value, route, vm = _vm(running=True)
         frame = draw(vm, NavState(view="ROUTES", title="ROUTES"), 140, 60)
         tree = "\n".join("".join(cell[0] for cell in row[:34]) for row in frame.cells)
-        self.assertIn("frame: claude", tree)
+        self.assertIn("frame: codex", tree)
         mix = "".join(text for text, _key in _harness_mix([route]))
-        self.assertIn("claude 1", mix)
-        self.assertIn("codex 0", mix)
+        self.assertIn("codex 1", mix)
+        self.assertIn("claude 0", mix)
 
     def test_a_framed_route_with_an_owner_attempt_keeps_the_owner_raw_box(self):
-        attempts = {"route": "rt-frame", "att": "att-owner",
+        attempts = {"route": ROUTE_ID, "att": "att-owner",
                     "lines": ["assistant: hello", "tool Bash: ls"]}
-        _view, route, vm = _vm(owner={"harness": "codex"}, attempts=attempts)
-        self.assertEqual(route["harness"], "codex")
+        _view_value, _record_value, route, vm = _vm(
+            owner={"harness": "opencode", "model": "glm-5.2", "effort": "medium"},
+            attempts=attempts)
+        self.assertEqual(route["harness"], "opencode")
+        self.assertEqual(route["model"][0], "glm-5.2")
         for cols in (120, 180):
             with self.subTest(cols=cols):
                 state = NavState(view="ROUTES", title="ROUTES",
-                                 folds=(("ropen:ROUTES", "rt-frame"),))
+                                 folds=(("ropen:ROUTES", ROUTE_ID),))
                 frame, trace = ef.trace_draw(draw, vm, state, cols, 60)
                 self.assertEqual(ef.frame_violations(frame, trace, cols, 60), [])
                 text = "\n".join(frame.text_rows())
@@ -145,17 +216,17 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 self.assertIn("● hello", text)
                 self.assertIn("● Bash  ls", text)
                 self.assertEqual(text.count("frame-review and the legs after it"), 1)
-                self.assertEqual(text.count("frame  claude (Opus 5.5·high)"), 1)
-                self.assertEqual(text.count("alt  codex (gpt-6.1-sol·medium)"), 1)
+                self.assertEqual(text.count("frame  claude (Opus·max)"), 1)
+                self.assertEqual(text.count("alt  codex (gpt-6-astra)"), 1)
                 lines = text.splitlines()
                 band = next(i for i, line in enumerate(lines)
                             if "frame ∥ frame-alternative" in line and "┌" in line)
                 self.assertIn("frame  claude", lines[band + 1])
 
     def test_framed_progress_mark_follows_the_frame_legs(self):
-        _view, _route, running = _vm(running=True)
-        _view, _route, finished = _vm()
-        _view, _route, failed = _vm(node_state="failed")
+        _view_value, _record_value, _route, running = _vm(running=True)
+        _view_value, _record_value, _route, finished = _vm()
+        _view_value, _record_value, _route, failed = _vm(node_state="failed")
         for cols in (120, 180):
             with self.subTest(cols=cols):
                 text = "\n".join(draw(running, NavState(view="ROUTES", title="ROUTES"),
@@ -175,11 +246,11 @@ class FrameOwnerLevelTests(unittest.TestCase):
 
     def test_framed_progress_marks_the_routes_own_frame_leg_after_a_predecessor(self):
         chain = [{"route_id": "rt-prev", "capability": "route-frame", "state": "done"},
-                 {"route_id": "rt-frame", "capability": "route-frame", "state": "active"}]
+                 {"route_id": ROUTE_ID, "capability": "route-frame", "state": "active"}]
         for kwargs, expected in (({"running": True}, "frame ●"),
                                  ({"node_state": "failed"}, "frame ✕")):
             with self.subTest(expected=expected):
-                _view, route, vm = _vm(chain=chain, **kwargs)
+                _view_value, _record_value, route, vm = _vm(chain=chain, **kwargs)
                 self.assertEqual([leg[0] for leg in route["legs"]], ["frame", "frame"])
                 for cols in (120, 180):
                     text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
@@ -189,7 +260,9 @@ class FrameOwnerLevelTests(unittest.TestCase):
                     self.assertIn(expected, row)
                     self.assertNotIn("frame ✓", row)
 
-    def test_framed_progress_suffix_uses_the_last_stages_own_state(self):
+    def test_the_legacy_synthetic_frame_shape_draws_the_same_progress_suffix(self):
+        # Render-only unit case: the pre-collector synthetic shape is not a record the
+        # collector emits, so it stays here as a direct drawing input.
         from tools.fleet.explorer import tables
         from tools.fleet.explorer.grid import CellGrid
 
@@ -210,9 +283,9 @@ class FrameOwnerLevelTests(unittest.TestCase):
         self.assertIn("(frame-alternative ✕)", text)
 
     def test_a_resumed_route_with_two_owner_jobs_does_not_borrow_a_frame_leg(self):
-        owners = (_owner_job("att-old", "claude", "dead"),
-                  _owner_job("att-new", "codex", "working"))
-        _view, route, vm = _vm(extra_owners=owners)
+        owners = (_owner_job("att-old", "claude", "opus", "max", "dead"),
+                  _owner_job("att-new", "codex", "gpt-6-astra", None, "working"))
+        _view_value, _record_value, route, vm = _vm(extra_owners=owners)
         self.assertIsNone(route["harness"])
         self.assertIsNone(route["model"])
         self.assertIsNone(route["effort"])
@@ -223,12 +296,13 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 row = next(line for line in text.splitlines()
                            if "[z9]" in line and "frame" in line)
                 self.assertIn("frame", row)
-                self.assertNotIn("claude·high", row)
-                self.assertNotIn("Opus 5.5", row)
+                self.assertNotIn("claude·max", row)
+                self.assertNotIn("Opus", row)
 
     def test_narrow_routes_keep_the_progress_mark_at_96_and_100_columns(self):
-        _view, _route, vm = _vm(owner={"harness": "opencode", "effort": "xhigh"})
-        for cols in (96, 100):
+        _view_value, _record_value, _route, vm = _vm(
+            owner={"harness": "opencode", "model": "glm-5.2", "effort": "xhigh"})
+        for cols, harness_cell in ((96, "opencod…"), (100, "opencode·xh…")):
             with self.subTest(cols=cols):
                 frame, trace = ef.trace_draw(draw, vm, NavState(view="ROUTES", title="ROUTES"),
                                              cols, 60)
@@ -236,31 +310,33 @@ class FrameOwnerLevelTests(unittest.TestCase):
                 row = next(line for line in frame.text_rows()
                            if "[z9]" in line and "frame" in line)
                 self.assertIn("frame ✓", row)
-                self.assertIn("opencode", row)
-                # the mark survives the long harness; the 120/180 rows keep the ∥ tail
+                self.assertIn(harness_cell, row)
                 self.assertNotIn("frame ✓  ∥", row)
 
     def test_an_owner_attempt_without_a_harness_does_not_borrow_a_frame_leg(self):
-        _view, route, vm = _vm(owner={"harness": ""})
+        _view_value, _record_value, route, vm = _vm(
+            owner={"harness": "", "model": "opus", "effort": "max"})
         self.assertIsNone(route["harness"])
-        self.assertEqual(route["model"][0], "gpt-6.1-sol")
-        self.assertEqual(route["effort"], "medium")
+        self.assertEqual(route["model"][0], "Opus")
+        self.assertEqual(route["effort"], "max")
         for cols in (120, 180):
             with self.subTest(cols=cols):
                 text = "\n".join(draw(vm, NavState(view="ROUTES", title="ROUTES"),
                                       cols, 60).text_rows())
                 row = next(line for line in text.splitlines() if "[z9]" in line and "frame" in line)
-                self.assertNotIn("claude·high", row)
-                self.assertNotIn("Opus 5.5", row)
+                self.assertNotIn("claude·max", row)
+                self.assertNotIn("Opus", row)
 
     def test_narrow_routes_harness_fits_the_observed_text_and_clips_with_an_ellipsis(self):
-        _view, _route, vm = _vm(owner={"harness": "claude", "effort": "high"})
+        _view_value, _record_value, _route, vm = _vm(
+            owner={"harness": "claude", "model": "opus", "effort": "high"})
         row = next(line for line in draw(vm, NavState(view="ROUTES", title="ROUTES"),
                                          120, 60).text_rows()
                    if "[z9]" in line and "frame" in line)
         self.assertIn("claude·high", row[34:])
 
-        _view, _route, vm = _vm(owner={"harness": "opencode", "effort": "xhigh"})
+        _view_value, _record_value, _route, vm = _vm(
+            owner={"harness": "opencode", "model": "glm-5.2", "effort": "xhigh"})
         row = next(line for line in draw(vm, NavState(view="ROUTES", title="ROUTES"),
                                          80, 60).text_rows()
                    if "[z9]" in line and "frame" in line)
@@ -268,10 +344,15 @@ class FrameOwnerLevelTests(unittest.TestCase):
         self.assertNotIn("opencode·x ", row[34:])
 
     def test_a_frame_leg_shown_as_the_body_row_keeps_the_frame_label(self):
-        view, slot, sessions = _snapshot()
-        slot = dict(slot, view=dict(view, nodes=view["nodes"][:1]))
-        with patch.object(live, "_collect_routes", return_value={"rt-frame": slot}):
-            rows, index = live._session_records({"sessions": sessions}, NOW, lambda _cwd: "repo")
+        view = _view(running=True)
+        jobs = [_frame_job("frame", "claude", "opus", "max", True)]
+        session = {"harness": "claude", "session_id": "sid-owner", "session_tag": "z9",
+                   "cwd": REPO, "liveness": "idle", "is_child": False, "title": "owner"}
+        slot = {"view": dict(view, nodes=view["nodes"][:1]), "record": _record(),
+                "jobs": jobs, "sessions": [session]}
+        with patch.object(live, "_collect_routes", return_value={ROUTE_ID: slot}):
+            rows, index = live._session_records({"sessions": [session]}, NOW,
+                                                lambda _cwd: "repo")
             routes, _nodes = live._route_records({"resources": []}, rows, index,
                                                  lambda _cwd: "repo", NOW)
         self.assertEqual(routes[0]["worker"][0], "frame")
