@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   adaptation-boundary:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -68,7 +68,7 @@ jobs:
   install-lifecycle:
     needs: adaptation-boundary
     if: needs.adaptation-boundary.outputs.full_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out the source
@@ -108,7 +108,7 @@ jobs:
   dispatch-pid-namespace:
     needs: adaptation-boundary
     if: needs.adaptation-boundary.outputs.full_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out the source
@@ -183,7 +183,7 @@ jobs:
   full-suite-shard:
     needs: adaptation-boundary
     if: needs.adaptation-boundary.outputs.full_tests == 'true'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       # Every shard reports even when a sibling fails, so one run shows all causes.
@@ -308,7 +308,7 @@ jobs:
     name: full-test-suite
     needs: [adaptation-boundary, full-suite-shard]
     if: always() && needs.adaptation-boundary.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Require every shard to have succeeded
@@ -365,7 +365,7 @@ jobs:
       needs.install-lifecycle.result == 'success' &&
       needs.dispatch-pid-namespace.result == 'success' &&
       needs.full-test-suite.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Check out the tested merge result
