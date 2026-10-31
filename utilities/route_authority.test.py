@@ -2019,7 +2019,8 @@ class DeterministicFinalizeRefusalTest(unittest.TestCase):
                 self.assertFalse(decision.allowed)
                 self.assertEqual(decision.state, "needs-owner")
                 self.assertEqual(decision.next_action, "inspect-recovery")
-                self.assertIn("다시 판정", decision.retry_when)
+                self.assertEqual(decision.retry_when, RA.DETERMINISTIC_FINALIZE_RETRY_WHEN)
+                self.assertIn("later join or finish judges it again", decision.retry_when)
                 self.assertEqual(decision.detail, detail)
 
     def test_transient_finalize_causes_stay_recoverable(self):

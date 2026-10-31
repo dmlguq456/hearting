@@ -1180,6 +1180,31 @@ def _recorded_completion_result(receipt: dict, *, require_ack: bool, notice_cont
         return None
 
 
+def _exact_notice_diagnosis(receipt: dict, notice_context=None) -> dict:
+    """The exact owner row's recorded completion diagnosis, or an empty map."""
+    try:
+        from dispatch_completion_join import exact_attempt_row
+        from dispatch_notice_state import NoticeReadContext
+        row = exact_attempt_row(Path(receipt["job_registry"]), receipt["owner_attempt_id"])
+        diagnosis = (notice_context or NoticeReadContext()).owner_completion(
+            Path(receipt["job_registry"]), row.status, row.metadata)
+    except Exception:  # noqa: BLE001 -- closure remains controller-owned if the exact row is unavailable
+        return {}
+    return diagnosis if isinstance(diagnosis, dict) else {}
+
+
+def _held_finalize_refusal(receipt: dict, notice_context=None) -> bool:
+    """Whether this closure-blocked notice describes a deterministic finalize refusal."""
+    for child in receipt.get("children") or []:
+        if isinstance(child, dict) and child.get("reason") == "closure-blocked:producer-finalize-refused":
+            return True
+    refusal = _exact_notice_diagnosis(receipt, notice_context).get("last_refusal")
+    if not isinstance(refusal, dict):
+        return False
+    from route_authority import deterministic_finalize_refusal
+    return deterministic_finalize_refusal(refusal.get("reason"), refusal.get("detail"))
+
+
 def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
     """Render late-bound refusal details from this receipt's exact owner row."""
     try:
@@ -1190,22 +1215,22 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
     command = shlex.join(["python3", str(utility), "inspect",
                           "--jobs", clean(receipt["job_registry"]),
                           "--attempt", clean(receipt["owner_attempt_id"])])
-    try:
-        from dispatch_completion_join import exact_attempt_row
-        from dispatch_notice_state import NoticeReadContext
-        row = exact_attempt_row(Path(receipt["job_registry"]), receipt["owner_attempt_id"])
-        diagnosis = (notice_context or NoticeReadContext()).owner_completion(
-            Path(receipt["job_registry"]), row.status, row.metadata)
-    except Exception:  # noqa: BLE001 -- closure remains controller-owned if the exact row is unavailable
-        diagnosis = {}
-    refusal = diagnosis.get("last_refusal") if isinstance(diagnosis, dict) else None
+    diagnosis = _exact_notice_diagnosis(receipt, notice_context)
+    refusal = diagnosis.get("last_refusal")
     if not isinstance(refusal, dict):
-        checkpoint = diagnosis.get("checkpoint") if isinstance(diagnosis, dict) else None
+        checkpoint = diagnosis.get("checkpoint")
         detail = f" The last recorded checkpoint is {checkpoint}." if isinstance(checkpoint, str) else ""
         return ("No recorded refusal is available." + detail
                 + " The existing controller retries closure automatically; read-only diagnosis: " + command)
     reason = refusal.get("reason")
     raw_detail = refusal.get("detail", "")
+    from route_authority import deterministic_finalize_refusal
+    if deterministic_finalize_refusal(reason, raw_detail):
+        # A deterministic route-lineage refusal is recorded evidence, not
+        # in-flight work: the same settle would produce the same answer.
+        return ("This refusal is not retried automatically on the same evidence; a later join or "
+                "finish judges it again only after the route lineage or the installed runtime changes. "
+                "Read-only diagnosis: " + command)
     nested_output_invalid = reason == "producer-finalize-failed" and isinstance(raw_detail, str) \
         and raw_detail.startswith("output-invalid:")
     if reason != "output-invalid" and not nested_output_invalid:
@@ -1425,6 +1450,13 @@ def render_text(receipt: dict, *, continued: dict | None = None, notice_context=
         utility = _printed("dispatch_terminal_commit.py")
         command = (f"python3 {shlex.quote(str(utility))} inspect --jobs {shlex.quote(receipt['job_registry'])} "
                    f"--attempt {shlex.quote(receipt['owner_attempt_id'])}")
+        if _held_finalize_refusal(receipt, notice_context):
+            # The held cause is a recorded route-lineage refusal: re-dispatching
+            # the same node or repairing a marker is not its recovery path.
+            return ("The owner result remains PASS, but its own workflow/route closure holds a deterministic "
+                    "producer finalize refusal: it is not retried automatically on the same evidence; a later "
+                    "join or finish judges it again only after the route lineage or the installed runtime "
+                    "changes. Read-only diagnosis: " + command)
         return ("The owner result remains PASS, but its own workflow/route closure can never complete from "
                 "this exact attempt -- a proven permanent reason (a later attempt already claimed this route "
                 "node, or the route's completion marker no longer matches its recorded evidence), not an "

@@ -115,7 +115,7 @@ DETERMINISTIC_FINALIZE_REFUSALS = (
     "route-invalid", "route-artifact-root-mismatch",
 )
 DETERMINISTIC_FINALIZE_RETRY_WHEN = (
-    "route lineage 또는 설치된 runtime이 바뀌면, 이후 join 또는 finish 호출이 다시 판정한다")
+    "The route lineage or the installed runtime changed; a later join or finish judges it again.")
 
 
 def deterministic_finalize_refusal(reason, detail) -> bool:

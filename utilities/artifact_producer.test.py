@@ -8344,6 +8344,41 @@ class LineageForkFinalizeJudgmentTest(_LineageForkFinalizeFixture):
         self.assertNotIn("skipped_continuations",
                          P.read_cycle_record(self.root, started["cycle_id"]))
 
+    def test_a_retried_seal_removes_a_stale_skipped_branch_field(self):
+        # A crash between the record write and the manifest commit can leave
+        # the field on a record whose next seal passes over no branch.
+        begin = self._root_route("lineage-stale-skip")
+        self._publish_root(begin)
+        started = self._begin(begin)
+        self.write_output(started, "plans/lineage/plan.md")
+        self._close(begin)
+        record = P.read_cycle_record(self.root, started["cycle_id"])
+        P._write_cycle_record(self.root, {**record, "skipped_continuations": [
+            {"route_id": "rt-" + "0" * 16, "reason": "never-run"}]}, exclusive=False)
+        sealed = P.finalize(self.root, cycle_id=started["cycle_id"])
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertNotIn("skipped_continuations", sealed)
+        self.assertNotIn("skipped_continuations",
+                         P.read_cycle_record(self.root, started["cycle_id"]))
+
+    def test_a_damaged_begin_route_file_still_yields_lineage_evidence(self):
+        begin = self._root_route("lineage-damaged-begin")
+        self._publish_root(begin)
+        started = self._begin(begin)
+        record = P.read_cycle_record(self.root, started["cycle_id"])
+        route_file = R.canonical_route_path(self.root, begin["route_id"])
+        original = route_file.read_bytes()
+        damaged = json.loads(original)
+        damaged["slug"] = damaged["slug"] + "-damaged"
+        route_file.write_text(json.dumps(damaged), encoding="utf-8")
+        evidence = P.finalize_lineage_evidence(self.root, record)
+        self.assertIsNotNone(evidence)
+        self.assertTrue(evidence.startswith("sha256:"))
+        route_file.write_bytes(original)
+        self.assertNotEqual(P.finalize_lineage_evidence(self.root, record), evidence)
+        broken = {key: value for key, value in record.items() if key != "route_file"}
+        self.assertIsNone(P.finalize_lineage_evidence(self.root, broken))
+
 
 if __name__ == "__main__":
     unittest.main()

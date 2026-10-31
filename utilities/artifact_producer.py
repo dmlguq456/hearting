@@ -5647,14 +5647,35 @@ def finalize_lineage_evidence(root: Path, record: Mapping[str, Any]) -> Optional
 
     Only durable route/outcome shapes enter it: the jobs registry is shared and
     changes for every other attempt in the root, so it must not decide that a
-    held finalize refusal is fresh. Bounded to the cycle's own starting tree;
-    an unreadable tree is unknown evidence (`None`), never a refusal.
+    held finalize refusal is fresh. Bounded to the cycle's own starting tree.
+
+    The begin route file's own (size, mtime_ns) is always a row, so a refusal
+    caused by that file being replaced or damaged still has evidence to hold
+    on; an unreadable or hash-drifted begin route falls back to that row alone.
+    A broken record and a tree walk that cannot read its children stay unknown
+    (`None`), never a refusal.
     """
     try:
-        begin_route = load_route(root, Path(record["route_file"]))
-        if begin_route["route_hash"] != record["route_hash"]:
-            return None
-        rows: List[Tuple[str, Optional[List[int]]]] = []
+        route_file = Path(record["route_file"])
+        route_hash = record["route_hash"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(route_hash, str):
+        return None
+    try:
+        info = route_file.stat()
+        route_row: Optional[List[int]] = [info.st_size, info.st_mtime_ns]
+    except OSError:
+        route_row = None
+    try:
+        begin_route = load_route(root, route_file)
+        readable = begin_route.get("route_hash") == route_hash
+    except (OSError, KeyError, ValueError, TypeError, ProducerError):
+        readable = False
+    if not readable:
+        return _digest(_canonical([("begin-route-file", route_row)]))
+    try:
+        rows: List[Tuple[str, Optional[List[int]]]] = [("begin-route-file", route_row)]
         queue = [begin_route]
         seen = {begin_route["route_id"]}
         while queue:
@@ -6083,7 +6104,8 @@ def finalize(
         cycle_path = os.path.relpath(str(directory), str(root))
         skipped_continuations = [{"route_id": route_id, "reason": "never-run"}
                                  for route_id in admission.skipped]
-        if excluded_symlinks or (prescan and prescan.excluded_roots) or skipped_continuations:
+        if (excluded_symlinks or (prescan and prescan.excluded_roots)
+                or skipped_continuations or record.get("skipped_continuations")):
             # Written before the manifest is published so a crash after the commit
             # point recovers from the on-disk record without losing the exclusion
             # or the branch this seal passed over.
@@ -6092,6 +6114,11 @@ def finalize(
             record["excluded_roots"] = sorted(set(prescan.excluded_roots if prescan else ()))
             if skipped_continuations:
                 record["skipped_continuations"] = skipped_continuations
+            else:
+                # A retry after a crash between the record write and the manifest
+                # commit may carry a branch this seal did not pass over; reconcile
+                # it instead of leaving a stale advisory claim.
+                record.pop("skipped_continuations", None)
             _write_cycle_record(root, record, exclusive=False)
         manifest_bytes = artifact_manifest.canonical_bytes(document)
         _write_journal(root, cycle_id, state="sealing", manifest_digest=digest, cycle_path=cycle_path,

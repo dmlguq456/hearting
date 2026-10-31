@@ -1015,11 +1015,13 @@ def _judgment_runtime() -> str:
 
 def _finalize_refusal_evidence(artifact_root: Path,
                                record: Optional[Mapping[str, Any]]) -> Optional[str]:
-    """sha256(installed runtime, cycle lineage) for a deterministic finalize refusal.
+    """sha256(installed runtime, cycle lineage, cycle state) for a held refusal.
 
     Only durable records enter it. The jobs registry is shared and changes for
     unrelated work, so it must not resurrect a held refusal that only a route
-    lineage or installed-runtime change can resolve.
+    lineage or installed-runtime change can resolve. The cycle's storage state
+    is part of the judgment: when another route seals or deletes the cycle, the
+    refusal no longer describes what the next settle will see.
     """
     if not isinstance(record, Mapping):
         return None
@@ -1032,7 +1034,8 @@ def _finalize_refusal_evidence(artifact_root: Path,
         return None
     if not isinstance(lineage, str) or not lineage:
         return None
-    return _digest(_canonical([_judgment_runtime(), lineage]))
+    return _digest(_canonical([_judgment_runtime(), lineage,
+                               record.get("state"), record.get("deleted_at")]))
 
 
 def _current_finalize_evidence(request, route_id: str) -> Optional[str]:
