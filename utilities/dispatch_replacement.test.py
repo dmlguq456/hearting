@@ -2572,6 +2572,8 @@ class ReplacementTest(unittest.TestCase):
                     reconcile_reason='terminal-event-missing', terminal_event='dispatch.supervisor.error')
         self.write(meta)
         self.assertTrue(RA.runtime_owner_can_resume('done', meta))
+        self.assertTrue(RA.runtime_owner_can_resume(
+            'done', {**meta, 'reconcile_reason': 'opencode-final-stop-missing'}))
         for change in ({'note': 'dead-worker-fail'}, {'note': 'completed-supervisor'},
                        {'reconcile_reason': 'terminal-envelope-invalid'}, {'launch_started': '0'},
                        {'terminal_event': 'dispatch.supervisor.done'}):

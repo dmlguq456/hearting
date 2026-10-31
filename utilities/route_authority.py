@@ -2737,7 +2737,9 @@ def runtime_owner_can_resume(status, meta) -> bool:
             and bool(meta.get("supervisor_lease_file"))
             and (meta.get("note") in {"dead-runtime-exit", "dead-runtime-error"}
                  or (meta.get("note") == "dead-protocol"
-                     and meta.get("reconcile_reason") == "terminal-event-missing"
+                     # OpenCode's own name for the same missing terminal event.
+                     and meta.get("reconcile_reason") in {"terminal-event-missing",
+                                                          "opencode-final-stop-missing"}
                      and meta.get("terminal_event") == "dispatch.supervisor.error"
                      and not readable_result(meta))))
 
