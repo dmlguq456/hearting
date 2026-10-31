@@ -5462,6 +5462,114 @@ class JoinClosureBlockedTest(unittest.TestCase):
         ])
 
 
+    def test_producer_finalize_refusal_holds_settlement_and_returns_ready_receipt(self):
+        """The deterministic finalize refusal is the same proven-permanent
+        block shape: one closure-blocked notice, no settlement retry."""
+        row = self._blocked_owner_row()
+        settlement_calls = []
+        notices = []
+
+        def settlement(child_row):
+            settlement_calls.append(child_row.attempt_id)
+            return {"attempt_id": child_row.attempt_id, "closed": False,
+                    "reason": "should-not-be-called"}
+
+        def fake_materialize(jobs, attempts, *, reason):
+            notices.append((set(attempts), reason))
+            return []
+
+        jobs = Path("/nonexistent/jobs.log")
+        with mock.patch.object(
+                TERMINAL, "owner_completion_state",
+                return_value=TERMINAL.CompletionState("blocked", "producer-finalize-refused")), \
+             mock.patch.object(dispatch_supervision, "materialize", side_effect=fake_materialize):
+            receipt = JOIN._join_snapshot(
+                jobs=jobs, initial=[row], refresh=lambda _attempts: [row],
+                identity={"parent_attempt_id": "att-blocked-owner"},
+                interval=0.01, timeout=0.05, liveness_command=None,
+                liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=jobs, settlement=settlement,
+            )
+        self.assertEqual(settlement_calls, [])
+        self.assertEqual(receipt["state"], "ready")
+        self.assertEqual(notices, [({"att-blocked-owner"}, "closure-blocked")])
+        self.assertEqual(receipt["children"][0]["readiness"], "ready")
+        self.assertEqual(receipt["children"][0]["required_action"], "inspect-recovery")
+        self.assertEqual(receipt["children"][0]["reason"],
+                         "closure-blocked:producer-finalize-refused")
+
+    def test_transient_finalize_refusal_keeps_settling(self):
+        row = self._blocked_owner_row()
+        settlement_calls = []
+
+        def settlement(child_row):
+            settlement_calls.append(child_row.attempt_id)
+            return {"attempt_id": child_row.attempt_id, "closed": False,
+                    "reason": "producer-finalize-failed"}
+
+        jobs = Path("/nonexistent/jobs.log")
+        with mock.patch.object(
+                TERMINAL, "owner_completion_state",
+                return_value=TERMINAL.CompletionState("pending", "route-closed")):
+            JOIN._join_snapshot(
+                jobs=jobs, initial=[row], refresh=lambda _attempts: [row],
+                identity={"parent_attempt_id": "att-blocked-owner"},
+                interval=0.01, timeout=0.05, liveness_command=None,
+                liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=None, settlement=settlement,
+            )
+        self.assertTrue(settlement_calls)
+
+
+class MaterializeAfterTerminalCloseHoldTest(unittest.TestCase):
+    """The reaper/supervisor trace also settles; a held deterministic refusal
+    must stop there too, while an ordinary pending settlement still runs."""
+
+    def _row(self):
+        meta = {"attempt_id": "att-held-owner", "workflow_completion": "runtime-v1",
+                "worker_type": "owner"}
+        raw = "\t".join([
+            "2026-09-24T00:00:00Z", "done", "/w", "/w", "owner",
+            ",".join(f"{k}={v}" for k, v in meta.items()),
+        ])
+        return JOIN.ChildRow(order=0, status="done", slug="owner",
+                             attempt_id="att-held-owner", raw=raw, metadata=meta)
+
+    def test_a_held_producer_finalize_refusal_is_not_settled_again(self):
+        row = self._row()
+        settled = []
+        with mock.patch.object(JOIN, "current_attempt_row", return_value=row), \
+             mock.patch.object(JOIN, "materialize_pending_delivery") as materialize, \
+             mock.patch("dispatch_owner_input.materialize_unresolved"), \
+             mock.patch.object(
+                 TERMINAL, "owner_completion_state",
+                 return_value=TERMINAL.CompletionState("blocked", "producer-finalize-refused")), \
+             mock.patch.object(TERMINAL, "settle_owner_completion",
+                               side_effect=lambda *a, **k: settled.append(a)):
+            result = JOIN.materialize_after_terminal_close(
+                Path("/nonexistent/jobs.log"), "att-held-owner")
+        self.assertIsNone(result)
+        self.assertEqual(settled, [])
+        materialize.assert_not_called()
+
+    def test_a_pending_owner_still_settles(self):
+        row = self._row()
+        settled = []
+        with mock.patch.object(JOIN, "current_attempt_row", return_value=row), \
+             mock.patch.object(JOIN, "materialize_pending_delivery", return_value=Path("/delivery")), \
+             mock.patch("dispatch_owner_input.materialize_unresolved"), \
+             mock.patch("dispatch_replacement.accept_terminal_delivery_duty"), \
+             mock.patch.object(
+                 TERMINAL, "owner_completion_state",
+                 return_value=TERMINAL.CompletionState("pending", "route-closed")), \
+             mock.patch.object(TERMINAL, "settle_owner_completion",
+                               side_effect=lambda *a, **k: settled.append(a)):
+            result = JOIN.materialize_after_terminal_close(
+                Path("/nonexistent/jobs.log"), "att-held-owner")
+        self.assertEqual(len(settled), 1)
+        self.assertEqual(result, Path("/delivery"))
+
+
 class SettlementBackoffTest(unittest.TestCase):
     """plan.md item 8: a repeated identical settlement outcome backs its retry
     interval off 2 -> 4 -> ... -> 60s instead of re-driving the same

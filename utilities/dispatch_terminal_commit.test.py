@@ -1,3 +1,4 @@
+import contextlib
 import fcntl
 import json
 import os
@@ -2513,6 +2514,644 @@ class OwnerFinishPrimaryRegressionTest(_TerminalCommitFixture):
         self.assertEqual(result.result, "completed", (result.reason, result.detail))
         envelope = json.loads((T._commit_state_path(request).parent / "owner-envelope.json").read_text())
         self.assertEqual(envelope["primary_path"], str(self.artifact.resolve()))
+
+
+
+class ProducerFinalizeRefusalHoldTest(PRODUCER_FIXTURE.ProducerTestBase):
+    """The held-refusal evidence path on real producer cycles: only a
+    deterministic refusal whose recorded lineage is unchanged still holds."""
+
+    def setUp(self):
+        super().setUp()
+        self.P = PRODUCER_FIXTURE.P
+        self.R = PRODUCER_FIXTURE.R
+        lineage = PRODUCER_FIXTURE.RouteLineageBindingTest
+        for name in ("_root_route", "_publish_root", "_continuation", "_begin", "_close"):
+            setattr(self, name, getattr(lineage, name).__get__(self))
+        self.activate()
+        self.owner = "att-refusal-owner"
+        self.detail = "cycle-route-binding-mismatch:lineage-fork: rt-a:rt-b,rt-c"
+
+    def _published_cycle(self, slug):
+        route = self._root_route(slug)
+        self._publish_root(route)
+        started = self._begin(route)
+        self.write_output(started, "plans/hold/plan.md")
+        self._close(route)
+        return route, started, self.P.read_cycle_record(self.root, started["cycle_id"])
+
+    def _request(self, route):
+        return T.TerminalCommitRequest(
+            self.R.canonical_route_path(self.root, route["route_id"]),
+            self.owner, self.jobs, self.root)
+
+    def _publish_binding(self, route, record):
+        binding = {
+            "schema_version": 1, "contract": T.CONTRACT,
+            "owner_attempt_id": self.owner,
+            "route_file": str(self.R.canonical_route_path(self.root, route["route_id"])),
+            "route_id": route["route_id"], "route_hash": route["route_hash"],
+            "artifact_root": str(self.root),
+            "root_identity": {"repository_id": PRODUCER_FIXTURE.REPO_ID,
+                              "artifact_root_id": PRODUCER_FIXTURE.ROOT_ID},
+            "campaign_id": record["campaign_id"], "cycle_id": record["cycle_id"],
+            "producer_id": record["producer_id"],
+            "cycle_record_digest": T.cycle_identity_digest(record),
+            "observed_state": record["state"],
+        }
+        T._atomic_json(T.producer_binding_path(self.root, route["route_id"], self.owner),
+                       binding, exclusive=True)
+        return binding
+
+    def _checkpoint(self, request, state="route-closed"):
+        # A checkpoint the notice reader accepts as this exact owner's: the
+        # route identity and the binding digest the commit id is derived from.
+        route = json.loads(Path(request.route_file).read_text(encoding="utf-8"))
+        binding_path = T.producer_binding_path(self.root, route["route_id"], self.owner)
+        producer_digest = T._digest(binding_path.read_bytes())
+        marker_digest = "a" * 64
+        T._atomic_json(T._commit_state_path(request), {
+            "schema_version": 1, "state": state, "owner_attempt_id": self.owner,
+            "route_id": route["route_id"], "route_hash": route["route_hash"],
+            "terminal_marker_digest": marker_digest,
+            "producer_binding_digest": producer_digest,
+            "terminal_commit_id": T.terminal_commit_id(
+                route_id=route["route_id"], route_hash=route["route_hash"],
+                owner_attempt_id=self.owner, marker_digest=marker_digest,
+                producer_digest=producer_digest),
+        }, exclusive=True)
+
+    def _metadata(self):
+        return {"workflow_completion": "runtime-v1", "worker_type": "owner",
+                "dispatch_depth": "1", "attempt_id": self.owner, "failure_class": "pass"}
+
+    def _state(self, request):
+        with mock.patch.object(T, "_historical_request", return_value=request):
+            return T._owner_completion_state_scoped(self.jobs, "done", self._metadata())
+
+    def _attempt_file(self, request, reason, detail):
+        import hashlib
+        event = hashlib.sha256(f"{reason}:{detail}".encode()).hexdigest()
+        return T._commit_state_path(request).parent / "attempts" / f"{event}.json"
+
+    def _handoff_cycle(self, slug):
+        begin = self._root_route(slug)
+        self._publish_root(begin)
+        started = self._begin(begin)
+        unused = [self._continuation(begin, reason=f"never-run-resume-{index}")
+                  for index in (1, 2)]
+        successor = self._continuation(begin, reason="owner-pin-handoff")
+        record = self.P.read_cycle_record(self.root, started["cycle_id"])
+        return begin, unused, successor, started, record
+
+    @contextlib.contextmanager
+    def _handoff(self, source, successor):
+        import route_parent_close
+
+        def handoff(route, *, jobs=None):
+            return {"successor": successor} if route["route_id"] == source["route_id"] else None
+
+        with mock.patch.object(route_parent_close, "verified_owner_pin_handoff_close",
+                               side_effect=handoff):
+            yield
+
+    def _join_row(self, metadata):
+        from dispatch_completion_join import ChildRow
+        raw = "\t".join(["2026-10-31T00:00:00Z", "done", str(self.root), str(self.root), "owner",
+                         ",".join(f"{key}={value}" for key, value in metadata.items())])
+        return ChildRow(order=0, status="done", slug="owner", attempt_id=self.owner,
+                        raw=raw, metadata=metadata)
+
+    def _write_owner_row(self, **extra):
+        metadata = {**self._metadata(), "attempt_schema_version": "2",
+                    "launch_outcome": "reaped-before-publish", **extra}
+        self.jobs.write_text("\t".join([
+            "2026-10-31T00:00:00Z", "done", str(self.root), str(self.root), "owner",
+            ",".join(f"{key}={value}" for key, value in metadata.items()),
+        ]) + "\n", encoding="utf-8")
+        return metadata
+
+    def test_matching_recorded_evidence_holds_and_is_read_back(self):
+        route, started, record = self._published_cycle("refusal-hold-match")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        evidence = T._finalize_refusal_evidence(self.root, record)
+        self.assertIsNotNone(evidence)
+        self.assertTrue(evidence.startswith("sha256:"))
+        T._record_attempt(request, "producer-finalize-failed", self.detail, evidence)
+        self.assertEqual(T.last_owner_refusal(request)["evidence"], evidence)
+        self.assertTrue(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_a_missing_binding_does_not_hold(self):
+        route, started, record = self._published_cycle("refusal-hold-missing")
+        request = self._request(route)
+        evidence = T._finalize_refusal_evidence(self.root, record)
+        T._record_attempt(request, "producer-finalize-failed", self.detail, evidence)
+        self.assertFalse(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_changed_lineage_does_not_hold(self):
+        route, started, record = self._published_cycle("refusal-hold-changed")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        evidence = T._finalize_refusal_evidence(self.root, record)
+        T._record_attempt(request, "producer-finalize-failed", self.detail, evidence)
+        self.assertTrue(T._finalize_refusal_held(request, "route-closed"))
+        # A later continuation changes the cycle's lineage: the old judgment
+        # is no longer what the next settle would see.
+        self._continuation(route, reason="late-branch")
+        self.assertFalse(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_a_recorded_but_different_digest_does_not_hold(self):
+        route, started, record = self._published_cycle("refusal-hold-other")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        T._record_attempt(request, "producer-finalize-failed", self.detail,
+                          "sha256:" + "0" * 64)
+        self.assertFalse(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_an_old_record_without_evidence_does_not_hold(self):
+        route, started, record = self._published_cycle("refusal-hold-old")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        T._record_attempt(request, "producer-finalize-failed", self.detail)
+        T._record_attempt(request, "producer-finalize-failed", self.detail)
+        refusal = T.last_owner_refusal(request)
+        self.assertIsNone(refusal["evidence"])
+        self.assertEqual(refusal["count"], 2)
+        self.assertFalse(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_a_foreign_evidence_value_is_ignored(self):
+        route, started, record = self._published_cycle("refusal-hold-foreign")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        T._record_attempt(request, "producer-finalize-failed", self.detail)
+        path = self._attempt_file(request, "producer-finalize-failed", self.detail)
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["evidence"] = "not-a-digest"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        self.assertIsNone(T.last_owner_refusal(request)["evidence"])
+        self.assertFalse(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_transient_causes_are_not_held_even_with_matching_evidence(self):
+        route, started, record = self._published_cycle("refusal-hold-transient")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        evidence = T._finalize_refusal_evidence(self.root, record)
+        for detail in ("output-invalid: locator-invalid-component:artifacts/a|b",
+                       "route-unreadable: /root/.runtime/routes/rt-a.json",
+                       "route-lineage-unverified: cycle:rt-a"):
+            with self.subTest(detail=detail):
+                T._record_attempt(request, "producer-finalize-failed", detail, evidence)
+                self.assertFalse(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_owner_completion_state_blocks_only_while_the_evidence_holds(self):
+        route, started, record = self._published_cycle("refusal-hold-state")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        T._record_attempt(request, "producer-finalize-failed", self.detail,
+                          T._finalize_refusal_evidence(self.root, record))
+        self._checkpoint(request)
+        state = self._state(request)
+        self.assertEqual((state.state, state.reason),
+                         ("blocked", "producer-finalize-refused"))
+        # Old refusal records stay pending: the fixed code judges them again.
+        old_route, old_started, old_record = self._published_cycle("refusal-hold-state-old")
+        old_request = self._request(old_route)
+        self._publish_binding(old_route, old_record)
+        T._record_attempt(old_request, "producer-finalize-failed", self.detail)
+        self._checkpoint(old_request)
+        old_state = self._state(old_request)
+        self.assertEqual((old_state.state, old_state.reason), ("pending", "route-closed"))
+
+    def test_completion_route_hash_mismatch_is_a_held_refusal(self):
+        route, started, record = self._published_cycle("refusal-hold-hash")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        T._record_attempt(request, "producer-finalize-failed",
+                          f"completion-route-hash-mismatch: {route['route_id']}",
+                          T._finalize_refusal_evidence(self.root, record))
+        self.assertTrue(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_a_changed_binding_hash_is_refused_then_held(self):
+        route, started, record = self._published_cycle("refusal-hold-binding-hash")
+        request = self._request(route)
+        binding = self._publish_binding(route, record)
+        wrong = dict(binding, route_hash="sha256:" + "0" * 64)
+        with self.assertRaises(self.P.ProducerError) as caught:
+            self.P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"],
+                                        expected_binding=wrong)
+        self.assertEqual(caught.exception.code, "completion-route-hash-mismatch")
+        # The terminal controller wraps this as producer-finalize-failed; the
+        # recorded detail is the same typed refusal, and the unchanged lineage
+        # still holds it.
+        T._record_attempt(request, "producer-finalize-failed", str(caught.exception),
+                          T._finalize_refusal_evidence(self.root, record))
+        self.assertTrue(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_finish_rejudges_despite_a_held_refusal(self):
+        route, started, record = self._published_cycle("refusal-hold-finish")
+        request = self._request(route)
+        binding = self._publish_binding(route, record)
+        T._record_attempt(request, "producer-finalize-failed", self.detail,
+                          T._finalize_refusal_evidence(self.root, record))
+        self.assertTrue(T._finalize_refusal_held(request, "route-closed"))
+        sealed = self.P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"],
+                                             expected_binding=binding)
+        self.assertEqual(sealed["status"], "sealed")
+
+    def test_a_changed_judgment_runtime_clears_the_hold(self):
+        route, started, record = self._published_cycle("refusal-hold-runtime")
+        request = self._request(route)
+        self._publish_binding(route, record)
+        T._record_attempt(request, "producer-finalize-failed", self.detail,
+                          T._finalize_refusal_evidence(self.root, record))
+        self.assertTrue(T._finalize_refusal_held(request, "route-closed"))
+        with mock.patch.object(T, "_judgment_runtime", return_value="release:next"):
+            self.assertFalse(T._finalize_refusal_held(request, "route-closed"))
+
+    def test_an_old_record_does_not_block_the_fixed_finalize(self):
+        import hashlib
+        import route_parent_close
+        begin = self._root_route("refusal-old-record")
+        self._publish_root(begin)
+        started = self._begin(begin)
+        unused = [self._continuation(begin, reason=f"old-record-unused-{index}")
+                  for index in (1, 2)]
+        successor = self._continuation(begin, reason="old-record-handoff")
+        record = self.P.read_cycle_record(self.root, started["cycle_id"])
+        self.write_output(started, "plans/old/plan.md")
+        self._close(successor)
+        binding = self._publish_binding(successor, record)
+        request = self._request(successor)
+        T._record_attempt(request, "producer-finalize-failed", self.detail)
+        T._record_attempt(request, "producer-finalize-failed", self.detail)
+        attempt_path = self._attempt_file(request, "producer-finalize-failed", self.detail)
+        before = json.loads(attempt_path.read_text(encoding="utf-8"))
+        self.assertEqual(before["count"], 2)
+        self._checkpoint(request)
+        self.assertEqual(self._state(request).state, "pending")
+
+        def handoff(route, *, jobs=None):
+            return {"successor": successor} if route["route_id"] == begin["route_id"] else None
+
+        with mock.patch.object(route_parent_close, "verified_owner_pin_handoff_close",
+                               side_effect=handoff):
+            sealed = self.P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"],
+                                                 expected_binding=binding)
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertEqual(sorted(row["route_id"] for row in sealed["skipped_continuations"]),
+                         sorted(route["route_id"] for route in unused))
+        stored = self.P.read_cycle_record(self.root, record["cycle_id"])
+        self.assertEqual(stored["skipped_continuations"], sealed["skipped_continuations"])
+        after = json.loads(attempt_path.read_text(encoding="utf-8"))
+        self.assertEqual((after["count"], after["first_ns"]), (2, before["first_ns"]))
+
+    def _record_superseded_refusal(self, begin, record):
+        """The review's repro: a PASS owner binding points at the non-leaf begin route."""
+        binding = self._publish_binding(begin, record)
+        request = self._request(begin)
+        with self.assertRaises(self.P.ProducerError) as caught:
+            self.P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"],
+                                        expected_binding=binding)
+        self.assertEqual(caught.exception.code, "cycle-route-binding-mismatch:superseded-route")
+        T._record_attempt(request, "producer-finalize-failed", str(caught.exception),
+                          T._finalize_refusal_evidence(self.root, record))
+        self._checkpoint(request)
+        return binding, request
+
+    def test_a_successor_seal_releases_the_non_leaf_binding_hold(self):
+        begin, unused, successor, started, record = self._handoff_cycle(
+            "refusal-hold-successor-seal")
+        self.write_output(started, "plans/hold/plan.md")
+        self._close(successor)
+        _binding, request = self._record_superseded_refusal(begin, record)
+        self.assertEqual((self._state(request).state, self._state(request).reason),
+                         ("blocked", "producer-finalize-refused"))
+        # Another route (the verified handoff successor) seals the same cycle:
+        # the recorded refusal no longer describes what the next settle sees.
+        successor_binding = self._publish_binding(successor, record)
+        with self._handoff(begin, successor):
+            sealed = self.P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"],
+                                                 expected_binding=successor_binding)
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertEqual(self._state(request).state, "pending")
+        # A pending route-closed state is settled again, not held.
+        from dispatch_completion_join import _join_snapshot
+        metadata = self._write_owner_row()
+        row = self._join_row(metadata)
+        settlement_calls = []
+
+        def settlement(child_row):
+            settlement_calls.append(child_row.attempt_id)
+            return {"attempt_id": child_row.attempt_id, "closed": False,
+                    "reason": "producer-finalize-pending"}
+
+        with mock.patch.object(T, "_historical_request", return_value=request):
+            _join_snapshot(
+                jobs=self.jobs, initial=[row], refresh=lambda _attempts: [row],
+                identity={"parent_attempt_id": self.owner},
+                interval=0.01, timeout=0.0, liveness_command=None,
+                liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=None, settlement=settlement,
+            )
+        self.assertEqual(settlement_calls, [self.owner])
+        # unused is still the never-run branch this seal passed over.
+        self.assertEqual(sorted(item["route_id"] for item in sealed["skipped_continuations"]),
+                         sorted(route["route_id"] for route in unused))
+
+    def test_a_damaged_begin_route_is_refused_held_and_released_on_restore(self):
+        route, started, record = self._published_cycle("refusal-hold-damaged-begin")
+        request = self._request(route)
+        binding = self._publish_binding(route, record)
+        route_file = self.R.canonical_route_path(self.root, route["route_id"])
+        original = route_file.read_bytes()
+        damaged = json.loads(original)
+        damaged["slug"] = damaged["slug"] + "-damaged"
+        route_file.write_text(json.dumps(damaged), encoding="utf-8")
+        with self.assertRaises(self.P.ProducerError) as caught:
+            self.P.finalize_exact_cycle(self.root, cycle_id=record["cycle_id"],
+                                        expected_binding=binding)
+        self.assertEqual(caught.exception.code, "route-invalid")
+        # The begin route cannot be read as the recorded route, yet its own
+        # (size, mtime_ns) still gives the refusal durable evidence.
+        evidence = T._finalize_refusal_evidence(self.root, record)
+        self.assertIsNotNone(evidence)
+        T._record_attempt(request, "producer-finalize-failed", str(caught.exception), evidence)
+        self._checkpoint(request)
+        self.assertEqual((self._state(request).state, self._state(request).reason),
+                         ("blocked", "producer-finalize-refused"))
+        route_file.write_bytes(original)
+        self.assertNotEqual(T._finalize_refusal_evidence(self.root, record), evidence)
+        self.assertEqual(self._state(request).state, "pending")
+
+    def test_join_skips_settlement_and_notice_never_recommends_a_repeat_dispatch(self):
+        begin, unused, successor, started, record = self._handoff_cycle("refusal-hold-join")
+        self.write_output(started, "plans/hold/plan.md")
+        self._close(successor)
+        _binding, request = self._record_superseded_refusal(begin, record)
+        import dispatch_supervision
+        from dispatch_completion_join import _join_snapshot
+        metadata = self._write_owner_row(parent_sid="fixture-parent",
+                                         parent_completion_delivery="opencode-turn",
+                                         route_node="__owner__")
+        row = self._join_row(metadata)
+        settlement_calls = []
+        notices = []
+
+        def settlement(child_row):
+            settlement_calls.append(child_row.attempt_id)
+            return {"attempt_id": child_row.attempt_id, "closed": False,
+                    "reason": "should-not-be-called"}
+
+        def fake_materialize(jobs, attempts, *, reason):
+            notices.append((set(attempts), reason))
+            return []
+
+        with mock.patch.object(T, "_historical_request", return_value=request), \
+             mock.patch.object(dispatch_supervision, "materialize", side_effect=fake_materialize):
+            receipt = _join_snapshot(
+                jobs=self.jobs, initial=[row], refresh=lambda _attempts: [row],
+                identity={"parent_attempt_id": self.owner},
+                interval=0.01, timeout=0.0, liveness_command=None,
+                liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=self.jobs, settlement=settlement,
+            )
+        self.assertEqual(settlement_calls, [])
+        self.assertEqual(notices, [({self.owner}, "closure-blocked")])
+        self.assertEqual(receipt["state"], "ready")
+        self.assertEqual(receipt["children"][0]["reason"],
+                         "closure-blocked:producer-finalize-refused")
+        # The notice text comes from the real recorded refusal on this row,
+        # not from the mock in the join above.
+        with mock.patch.object(T, "_historical_request", return_value=request):
+            notice = dispatch_supervision.materialize(
+                self.jobs, {self.owner}, reason="closure-blocked")[0]
+            text = dispatch_supervision.render_text(notice["receipt"])
+        self.assertIn("holds a deterministic producer finalize refusal", text)
+        self.assertIn("not retried automatically on the same evidence", text)
+        self.assertNotIn("fresh dispatch of the same route node", text)
+        self.assertNotIn("manual repair of the marker/evidence", text)
+
+
+class ProducerFinalizeForkSettlementTest(unittest.TestCase):
+    """The verified-handoff fork through the real terminal settlement.
+
+    Round 2 found that a successor seal released the binding hold but the next
+    settle retried `completion-route-composite-mismatch` forever. These inputs
+    run the production `settle_terminal_commit` / `settle_owner_completion`
+    path (the `TerminalTransactionIntegrationTest` fixture and its
+    `crash_after="close-after"` checkpoint), never a settlement stub.
+    """
+
+    def setUp(self):
+        self.fixture = PRODUCER_FIXTURE.TerminalTransactionIntegrationTest()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.P = PRODUCER_FIXTURE.P
+        self.R = PRODUCER_FIXTURE.R
+        self.root = self.fixture.root
+        self.jobs = self.fixture.jobs
+        self.owner = "att-fork-owner"
+
+    def _prepared(self):
+        return self.fixture._prepare_fixture("claude", "autopilot-code", owner=self.owner)
+
+    def _continuation(self, route, reason):
+        first = route["nodes"][0]["id"]
+        successor = self.R.build_continuation_route(
+            route, resume_from_node=first, requested_boundary=first,
+            reason=reason, artifact_root=self.root)
+        path = self.R.canonical_route_path(self.root, successor["route_id"])
+        self.R.publish_continuation_route(successor, route, path)
+        return successor, path
+
+    def _row(self, status, slug, metadata, cwd):
+        return (f"2026-09-08T00:00:00Z\t{status}\t{cwd}\t{cwd}\t{slug}\t"
+                + ",".join(f"{key}={value}" for key, value in metadata.items()) + "\n")
+
+    def _child_row(self, route, node, attempt):
+        return dict(attempt_schema_version=2, attempt_id=attempt, parent_attempt_id=self.owner,
+                    dispatch_depth=2, transport="headless", execution_surface="registered-headless",
+                    registered_worker="1", fallback_hop="same-harness-headless", harness="codex",
+                    route_id=route["route_id"], route_hash=route["route_hash"],
+                    route_node=node["id"], failure_class="pass",
+                    launch_outcome="reaped-before-publish")
+
+    def _handoff(self, route, successor):
+        import route_parent_close
+
+        def close(source, *, jobs=None):
+            return {"successor": successor} if source["route_id"] == route["route_id"] else None
+
+        return mock.patch.object(route_parent_close, "verified_owner_pin_handoff_close",
+                                 side_effect=close)
+
+    def _binding(self, route, record):
+        binding = {
+            "schema_version": 1, "contract": T.CONTRACT,
+            "owner_attempt_id": self.owner, "route_file": str(
+                self.R.canonical_route_path(self.root, route["route_id"])),
+            "route_id": route["route_id"], "route_hash": route["route_hash"],
+            "artifact_root": str(self.root),
+            "root_identity": {"repository_id": PRODUCER_FIXTURE.REPO_ID,
+                              "artifact_root_id": PRODUCER_FIXTURE.ROOT_ID},
+            "campaign_id": record["campaign_id"], "cycle_id": record["cycle_id"],
+            "producer_id": record["producer_id"],
+            "cycle_record_digest": T.cycle_identity_digest(record),
+            "observed_state": record["state"],
+        }
+        T._atomic_json(T.producer_binding_path(self.root, route["route_id"], self.owner),
+                       binding, exclusive=True)
+        return binding
+
+    def _settle_env(self):
+        return {"AGENT_DISPATCH_JOBS": str(self.jobs),
+                "AGENT_ARTIFACT_ROOT": str(self.root)}
+
+    def _join_after(self, request, metadata):
+        from dispatch_completion_join import ChildRow, _join_snapshot
+        meta = dict(metadata, attempt_schema_version="2", launch_outcome="reaped-before-publish",
+                    parent_sid="fixture-parent", parent_completion_delivery="opencode-turn",
+                    route_node="__owner__")
+        raw = "\t".join(["2026-10-31T00:00:00Z", "done", str(self.root), str(self.root), "owner",
+                         ",".join(f"{key}={value}" for key, value in meta.items())])
+        row = ChildRow(order=0, status="done", slug="owner", attempt_id=self.owner,
+                       raw=raw, metadata=meta)
+        settlement_calls = []
+
+        def settlement(child_row):
+            settlement_calls.append(child_row.attempt_id)
+            return {"attempt_id": child_row.attempt_id, "closed": False,
+                    "reason": "should-not-be-called"}
+
+        with mock.patch.object(T, "_historical_request", return_value=request):
+            receipt = _join_snapshot(
+                jobs=self.jobs, initial=[row], refresh=lambda _attempts: [row],
+                identity={"parent_attempt_id": self.owner},
+                interval=0.01, timeout=0.0, liveness_command=None,
+                liveness_probe_timeout=1.0, env=None, recovery=None,
+                observation_jobs=None, settlement=settlement,
+            )
+        return settlement_calls, receipt
+
+    def test_a_successor_seal_then_real_settlement_holds_instead_of_retrying(self):
+        route, route_file, jobs, _owner, cycle, _report, _request = self._prepared()
+        self.fixture._closed_owner(jobs, self.owner)
+        from dispatch_completion_join import exact_attempt_row
+        metadata = exact_attempt_row(jobs, self.owner).metadata
+        request = T.TerminalCommitRequest(route_file, self.owner, jobs, self.root)
+        crashed = T.settle_terminal_commit(
+            request, T.TerminalCommitServices(crash_after="close-after"))
+        self.assertEqual(crashed.result, "recoverable", crashed)
+        self.assertEqual(json.loads(T._commit_state_path(request).read_text())["state"],
+                         "route-closed")
+
+        successor, successor_file = self._continuation(route, "owner-pin-handoff")
+        node = next(node for node in successor["nodes"] if node.get("terminal") is True)
+        child = "att-successor-report"
+        jobs.write_text(jobs.read_text() + self._row(
+            "open", "report2", self._child_row(successor, node, child), route["cwd"]))
+        artifact = self.fixture.write_output(cycle, "plans/fork/successor.md",
+                                             b"verified successor report\n")
+        self.R.complete_node(successor, node, node["id"], artifact, attempt_id=child, jobs=jobs)
+        outcome, _ = self.R.close_route(successor, successor_file, commit="a" * 40,
+                                        summary="fixture")
+        self.assertTrue(outcome["terminal_gate_proven"], outcome)
+        unused = [self._continuation(route, f"never-run-{index}")[0] for index in (1, 2)]
+
+        record = self.P.read_cycle_record(self.root, cycle["cycle_id"])
+        binding = self._binding(successor, record)
+        with self._handoff(route, successor):
+            sealed = self.P.finalize_exact_cycle(
+                self.root, cycle_id=record["cycle_id"], expected_binding=binding)
+        self.assertEqual(sealed["status"], "sealed")
+        self.assertEqual(sorted(row["route_id"] for row in sealed["skipped_continuations"]),
+                         sorted(row["route_id"] for row in unused))
+        # The successor seal released the old binding hold; the next settle is
+        # a fresh judgment of the sealed manifest, not a hold.
+        self.assertEqual(T.owner_completion_state(jobs, "done", metadata).state, "pending")
+
+        with self._handoff(route, successor), mock.patch.dict(os.environ, self._settle_env()):
+            settled = T.settle_owner_completion(jobs, "done", metadata)
+            state = T.owner_completion_state(jobs, "done", metadata)
+        self.assertEqual(settled.result, "needs-owner", settled)
+        self.assertEqual(settled.reason, "producer-finalize-failed")
+        self.assertIn("completion-route-composite-mismatch", settled.detail)
+        self.assertEqual((state.state, state.reason), ("blocked", "producer-finalize-refused"))
+        refusal = T.last_owner_refusal(request)
+        self.assertTrue(str(refusal.get("evidence") or "").startswith("sha256:"))
+        settlement_calls, receipt = self._join_after(request, metadata)
+        self.assertEqual(settlement_calls, [])
+        self.assertEqual(receipt["state"], "ready")
+        self.assertEqual(receipt["children"][0]["reason"],
+                         "closure-blocked:producer-finalize-refused")
+
+    def test_an_old_fork_refusal_settles_the_verified_successor_end_to_end(self):
+        import hashlib
+        from dispatch_completion_join import exact_attempt_row
+
+        route, route_file, jobs, _owner, cycle, _report, _request = self._prepared()
+        successor, successor_file = self._continuation(route, "owner-pin-handoff")
+        node = next(node for node in successor["nodes"] if node.get("terminal") is True)
+        child = "att-successor-report"
+        owner_meta = dict(attempt_id=self.owner, worker_type="owner", unit="_kernel/owner",
+                          dispatch_depth="1", registered_worker="1", harness="claude",
+                          owner_route_file=str(successor_file),
+                          owner_route_id=successor["route_id"],
+                          owner_route_hash=successor["route_hash"])
+        jobs.write_text(self._row("open", "owner", owner_meta, route["cwd"])
+                        + self._row("open", "report2",
+                                    self._child_row(successor, node, child), route["cwd"]))
+        artifact = self.fixture.write_output(cycle, "plans/fork/successor.md",
+                                             b"verified successor report\n")
+        self.R.complete_node(successor, node, node["id"], artifact, attempt_id=child, jobs=jobs)
+        with self._handoff(route, successor):
+            self.assertTrue(self.R.bind_continuation_cycle(self.root, route, successor)["bound"])
+            begun = self.P.begin(self.root, route_file=successor_file,
+                                 capability=successor["capability"],
+                                 intensity=successor["effective_intensity"],
+                                 jobs=jobs, owner_attempt_id=self.owner)
+            self.assertEqual(begun["cycle_id"], cycle["cycle_id"])
+            self.fixture._closed_owner(jobs, self.owner)
+        metadata = exact_attempt_row(jobs, self.owner).metadata
+        request = T.TerminalCommitRequest(successor_file, self.owner, jobs, self.root)
+        crashed = T.settle_terminal_commit(
+            request, T.TerminalCommitServices(crash_after="close-after"))
+        self.assertEqual(crashed.result, "recoverable", crashed)
+        self.assertEqual(json.loads(T._commit_state_path(request).read_text())["state"],
+                         "route-closed")
+
+        # The never-run resume candidates appear after the owner's route closed
+        # -- the order the [eb] lineage-fork refusal was judged on.
+        unused = [self._continuation(route, f"never-run-{index}")[0] for index in (1, 2)]
+        detail = "cycle-route-binding-mismatch:lineage-fork: rt-a:rt-b,rt-c"
+        for _ in range(5):
+            T._record_attempt(request, "producer-finalize-failed", detail)
+        event = hashlib.sha256(f"producer-finalize-failed:{detail}".encode()).hexdigest()
+        attempt_path = T._commit_state_path(request).parent / "attempts" / f"{event}.json"
+        before = json.loads(attempt_path.read_text())
+        self.assertEqual(before["count"], 5)
+        # An old record without evidence is not held: the fixed code judges it
+        # again rather than leaving the attempt blocked.
+        self.assertFalse(T._finalize_refusal_held(request, "route-closed"))
+
+        with self._handoff(route, successor), mock.patch.dict(os.environ, self._settle_env()):
+            settled = T.settle_owner_completion(jobs, "done", metadata)
+            state = T.owner_completion_state(jobs, "done", metadata)
+        self.assertEqual(settled.result, "completed", settled)
+        self.assertEqual(json.loads(T._commit_state_path(request).read_text())["state"],
+                         "owner-envelope-sealed")
+        stored = self.P.read_cycle_record(self.root, cycle["cycle_id"])
+        self.assertEqual(stored["state"], "sealed")
+        manifest = json.loads((Path(cycle["cycle_dir"]) / "manifest.json").read_text())
+        self.assertEqual([row["route_id"] for row in manifest["routes"]],
+                         [successor["route_id"]])
+        self.assertEqual(sorted(row["route_id"] for row in stored["skipped_continuations"]),
+                         sorted(row["route_id"] for row in unused))
+        self.assertEqual((state.state, state.reason), ("complete", ""))
+        after = json.loads(attempt_path.read_text())
+        self.assertEqual((after["count"], after["first_ns"]),
+                         (before["count"], before["first_ns"]))
 
 
 if __name__ == "__main__":

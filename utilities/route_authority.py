@@ -106,6 +106,24 @@ PROVEN_BLOCKED_GATE_REASONS = frozenset({
     "completion-attempt-not-current", "completion-evidence-revised-unrecorded",
 })
 
+# A producer finalize refusal that more settling cannot change: the route
+# lineage it judged is recorded evidence, not in-flight work. Kept to these
+# detail prefixes so unreadable/transient causes (`route-unreadable`,
+# `route-lineage-unverified`, `output-invalid`, lock/busy) stay recoverable.
+DETERMINISTIC_FINALIZE_REFUSALS = (
+    "cycle-route-binding-mismatch", "route-hash-drift", "completion-route-hash-mismatch",
+    "route-invalid", "route-artifact-root-mismatch", "completion-route-composite-mismatch",
+)
+DETERMINISTIC_FINALIZE_RETRY_WHEN = (
+    "The route lineage or the installed runtime changed; a later join or finish judges it again.")
+
+
+def deterministic_finalize_refusal(reason, detail) -> bool:
+    if reason != "producer-finalize-failed" or not isinstance(detail, str):
+        return False
+    return any(detail == prefix or detail.startswith(prefix + ":")
+               for prefix in DETERMINISTIC_FINALIZE_REFUSALS)
+
 
 def _replacement_kind(status, meta, *, jobs=None, lines=None):
     import dispatch_replacement as DR
@@ -311,6 +329,11 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                 if facts.get("gate_only"):
                     return ContinuationDecision(not missing, "proved" if not missing else state, reason,
                         "continue" if not missing else "needs-owner", census=missing)
+            elif (facts.get("checkpoint") == "route-closed"
+                    and facts.get("finalize_refusal_held")):
+                # The last finalize was refused for a reason more settling
+                # cannot change (the same route lineage is recorded evidence).
+                state, reason = "blocked", "producer-finalize-refused"
             elif facts.get("checkpoint") != "owner-envelope-sealed":
                 state, reason = "pending", str(facts.get("checkpoint") or "")
             elif not (facts.get("settlement_verified") or facts.get("forward_verified")):
@@ -426,12 +449,17 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         return ContinuationDecision(True, "pass")
     if action == "terminal-result":
         reason = facts.get("reason", "")
+        detail = facts.get("detail", "")
+        deterministic = deterministic_finalize_refusal(reason, detail)
         recoverable = reason in {"transaction-conflict", "child-not-quiescent", "child-not-terminal",
                                 "route-close-failed", "producer-finalize-failed", "recovery-unavailable"}
-        return ContinuationDecision(False, "recoverable" if recoverable else "ineligible", reason,
-            "same-command" if recoverable else "inspect-recovery",
+        recoverable = recoverable and not deterministic
+        return ContinuationDecision(False, "needs-owner" if deterministic else
+                                    "recoverable" if recoverable else "ineligible", reason,
+            "inspect-recovery" if deterministic else "same-command" if recoverable else "inspect-recovery",
+            DETERMINISTIC_FINALIZE_RETRY_WHEN if deterministic else
             "The exact process and terminal transaction can be reobserved and settled." if recoverable else "",
-            facts.get("detail", ""))
+            detail)
     if action == "attempt":
         decision = _attempt_decision(status, metadata or {}, **facts)
         return ContinuationDecision(decision.action not in {"wait", "recover", "inspect-conflict"},

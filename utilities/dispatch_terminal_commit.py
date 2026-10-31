@@ -265,7 +265,8 @@ def _commit_state_path(request: TerminalCommitRequest) -> Path:
     return terminal_slot(request.artifact_root, route_id, request.owner_attempt_id) / "terminal-commit.json"
 
 
-def _record_attempt(request: TerminalCommitRequest, reason: str, detail: str = "") -> None:
+def _record_attempt(request: TerminalCommitRequest, reason: str, detail: str = "",
+                    evidence: Optional[str] = None) -> None:
     # One record per distinct refusal. A caller that keeps retrying a settlement
     # which keeps failing the same way bumps that record's count and last time
     # instead of adding a file per retry; concurrent writers may drop a count.
@@ -279,9 +280,15 @@ def _record_attempt(request: TerminalCommitRequest, reason: str, detail: str = "
         previous = None
     previous = previous if isinstance(previous, dict) else {}
     count, first = previous.get("count"), previous.get("first_ns")
-    _atomic_json(path, {"reason": reason, "detail": detail, "event": event,
-                        "count": (count if isinstance(count, int) and count > 0 else 0) + 1,
-                        "first_ns": first if isinstance(first, int) else now, "last_ns": now})
+    record = {"reason": reason, "detail": detail, "event": event,
+              "count": (count if isinstance(count, int) and count > 0 else 0) + 1,
+              "first_ns": first if isinstance(first, int) else now, "last_ns": now}
+    # The evidence a held refusal stands on (see `_finalize_refusal_evidence`);
+    # a later refusal without one never erases what an earlier observation saw.
+    stored_evidence = evidence if evidence is not None else previous.get("evidence")
+    if isinstance(stored_evidence, str) and stored_evidence:
+        record["evidence"] = stored_evidence
+    _atomic_json(path, record)
 
 
 def last_owner_refusal(request: TerminalCommitRequest, *, observer=None) -> Optional[dict[str, Any]]:
@@ -344,9 +351,13 @@ def last_owner_refusal(request: TerminalCommitRequest, *, observer=None) -> Opti
                         or (reason == "producer-finalize-failed" and detail.startswith("output-invalid:"))):
                     remediation = ("Correct the reported locator, add an existing self-exclusion marker to that exact "
                                    "payload directory, or move it outside the cycle; the controller retries closure automatically.")
+                evidence = record.get("evidence")
+                if not (isinstance(evidence, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", evidence)):
+                    evidence = None  # an old or foreign value is no evidence; the record still counts
                 valid.append((last_ns, name, {
                     "reason": reason, "detail": detail, "count": count, "last_ns": last_ns,
                     "record_path": str(directory / name), "remediation": remediation,
+                    "evidence": evidence,
                 }))
             except (OSError, ValueError, TypeError, UnicodeError):
                 continue
@@ -988,6 +999,90 @@ def cycle_identity_matches(record, expected_digest, *, campaign_id=None) -> bool
 
 
 @functools.lru_cache(maxsize=1)
+def _judgment_runtime() -> str:
+    """Identity of the installed runtime the current judgment comes from.
+
+    A whole-release identity, not a list of judgment modules: any installed
+    change can change the answer, and a development tree without the release
+    marker is told apart by its path.
+    """
+    root = Path(__file__).resolve().parents[1]
+    try:
+        return _digest((root / ".hearting-release.json").read_bytes())
+    except OSError:
+        return str(root)
+
+
+def _finalize_refusal_evidence(artifact_root: Path,
+                               record: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """sha256(installed runtime, cycle lineage, cycle state) for a held refusal.
+
+    Only durable records enter it. The jobs registry is shared and changes for
+    unrelated work, so it must not resurrect a held refusal that only a route
+    lineage or installed-runtime change can resolve. The cycle's storage state
+    is part of the judgment: when another route seals or deletes the cycle, the
+    refusal no longer describes what the next settle will see.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    try:
+        import artifact_producer
+        lineage = artifact_producer.finalize_lineage_evidence(Path(artifact_root), record)
+    except Exception:
+        # Evidence that cannot be observed is "not held"; the next settle
+        # judges the refusal again rather than inheriting an unknown block.
+        return None
+    if not isinstance(lineage, str) or not lineage:
+        return None
+    return _digest(_canonical([_judgment_runtime(), lineage,
+                               record.get("state"), record.get("deleted_at")]))
+
+
+def _current_finalize_evidence(request, route_id: str) -> Optional[str]:
+    """Recompute the refusal evidence from the cycle a historic binding names."""
+    try:
+        binding = load_producer_binding(artifact_root=request.artifact_root, route_id=route_id,
+                                        owner_attempt_id=request.owner_attempt_id, historical=True)
+    except TerminalCommitError:
+        return None
+    cycle_id = (binding.binding or {}).get("cycle_id")
+    if not isinstance(cycle_id, str) or not cycle_id:
+        return None
+    try:
+        import artifact_producer
+        record = artifact_producer.read_cycle_record(request.artifact_root, cycle_id)
+    except (OSError, ValueError, TypeError, ImportError):
+        return None
+    return _finalize_refusal_evidence(request.artifact_root, record)
+
+
+def _finalize_refusal_held(request, checkpoint: Optional[str]) -> bool:
+    """Whether the route-closed checkpoint's last refusal still describes this lineage.
+
+    Only a deterministic refusal with recorded evidence that is unchanged now
+    holds; an old record without evidence, a changed lineage, or a changed
+    runtime all read as not held, so the next settle judges again.
+    """
+    if checkpoint != "route-closed":
+        return False
+    from route_authority import deterministic_finalize_refusal
+    refusal = last_owner_refusal(request)
+    if refusal is None or not deterministic_finalize_refusal(
+            refusal.get("reason"), refusal.get("detail")):
+        return False
+    recorded = refusal.get("evidence")
+    if not isinstance(recorded, str) or not recorded:
+        return False
+    try:
+        route_id = json.loads(Path(request.route_file).read_text(encoding="utf-8")).get("route_id")
+    except (OSError, ValueError, TypeError):
+        return False
+    if not isinstance(route_id, str) or not route_id:
+        return False
+    return _current_finalize_evidence(request, route_id) == recorded
+
+
+@functools.lru_cache(maxsize=1)
 def _route_module():
     """Load code once; its functions still read current route/claim/state inputs.
 
@@ -1397,6 +1492,7 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
     if proof.status != "proved":
         _record_attempt(request, proof.reason or "recovery-unavailable", proof.detail or "")
         return _unsettled_result(proof.reason, proof.detail)
+    refusal_evidence: Optional[str] = None
     try:
         route = json.loads(Path(request.route_file).read_text(encoding="utf-8"))
         route_module = _route_module()
@@ -1564,6 +1660,15 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
                         finalize_args["primary"] = Path(primary).resolve(strict=True).relative_to(directory).as_posix()
                     except (OSError, ValueError, KeyError, TypeError):
                         finalize_args["primary"] = primary
+                # Read the lineage evidence before the call, so a refusal records
+                # what the judgment saw rather than a lineage that moved after it.
+                try:
+                    import artifact_producer as _producer
+                    refusal_record = _producer.read_cycle_record(
+                        request.artifact_root, binding_value["cycle_id"])
+                except (OSError, ValueError, KeyError, TypeError, ImportError):
+                    refusal_record = None
+                refusal_evidence = _finalize_refusal_evidence(request.artifact_root, refusal_record)
                 services.finalize_exact_cycle(request.artifact_root, cycle_id=binding_value["cycle_id"],
                                               **finalize_args)
                 state = _advance_state(path, commit_id, "route-closed", "producer-finalized",
@@ -1600,7 +1705,10 @@ def settle_terminal_commit(request: TerminalCommitRequest, services: Any = None)
                                      envelope_text, after_seal)
         return TerminalCommitResult("recoverable", "recovery-unavailable", "partial-state", terminal_nodes)
     except TerminalCommitError as exc:
-        _record_attempt(request, exc.code, exc.detail)
+        from route_authority import deterministic_finalize_refusal
+        _record_attempt(request, exc.code, exc.detail,
+                        evidence=(refusal_evidence
+                                  if deterministic_finalize_refusal(exc.code, exc.detail) else None))
         return _unsettled_result(exc.code, exc.detail)
     except RuntimeError as exc:
         _record_attempt(request, "recovery-unavailable", str(exc))
@@ -2090,7 +2198,12 @@ def _owner_completion_state_scoped(jobs, status, metadata, *, selected_registry_
         if facts["commit_exists"]:
             state = json.loads(path.read_text())
             facts["checkpoint"] = state.get("state")
-            if facts["checkpoint"] == "owner-envelope-sealed":
+            if facts["checkpoint"] == "route-closed":
+                # A deterministic finalize refusal whose recorded lineage
+                # evidence still holds is a proven-permanent block: the same
+                # settle would produce the same refusal.
+                facts["finalize_refusal_held"] = _finalize_refusal_held(request, facts["checkpoint"])
+            elif facts["checkpoint"] == "owner-envelope-sealed":
                 _, publication, goal_pending = _observe_settled_transaction(
                     request, state, selected_registry_rows=selected_registry_rows)
                 facts["settlement_verified"] = True

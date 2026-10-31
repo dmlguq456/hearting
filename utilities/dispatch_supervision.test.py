@@ -528,6 +528,77 @@ except d.DispatchContractError as e: print(json.dumps({'reason':e.reason}))
         self.assertNotIn(" finish ", text)
         self.assertEqual(supervision.receipt_digest(receipt), digest)
 
+    def test_completion_pending_notice_never_promises_a_retry_for_a_held_refusal(self):
+        import dispatch_terminal_commit
+        self._notice_rows()
+        receipt = supervision.materialize(
+            self.jobs, {"att-child"}, reason="workflow-completion-pending")[0]["receipt"]
+        diagnosis = {"state": "closure-pending", "checkpoint": "route-closed",
+                     "last_refusal": {
+                         "reason": "producer-finalize-failed",
+                         "detail": "cycle-route-binding-mismatch:superseded-route: rt-a",
+                         "evidence": "sha256:" + "a" * 64,
+                     }}
+        with mock.patch.object(dispatch_terminal_commit,
+                               "recorded_owner_completion_notice", return_value=diagnosis):
+            text = supervision.render_text(receipt)
+        self.assertIn("not retried automatically on the same evidence", text)
+        self.assertIn("a later join or finish judges it again only after the route lineage "
+                      "or the installed runtime changes", text)
+        self.assertNotIn("retries when possible", text)
+        self.assertNotIn("retries closure automatically", text)
+
+    def test_completion_pending_notice_keeps_the_retry_wording_for_an_old_refusal_record(self):
+        import dispatch_terminal_commit
+        self._notice_rows()
+        receipt = supervision.materialize(
+            self.jobs, {"att-child"}, reason="workflow-completion-pending")[0]["receipt"]
+        # The same deterministic prefix without evidence is an old record: the
+        # fixed code judges it again, so the notice must not promise otherwise.
+        old = {"state": "closure-pending", "checkpoint": "route-closed",
+               "last_refusal": {"reason": "producer-finalize-failed",
+                                "detail": "cycle-route-binding-mismatch:lineage-fork: rt-a:rt-b,rt-c"}}
+        with mock.patch.object(dispatch_terminal_commit,
+                               "recorded_owner_completion_notice", return_value=old):
+            text = supervision.render_text(receipt)
+        self.assertIn("retries when possible", text)
+        self.assertNotIn("not retried automatically on the same evidence", text)
+
+    def test_closure_blocked_notice_names_the_held_refusal_without_marker_repair_advice(self):
+        import dispatch_terminal_commit
+        self._notice_rows()
+        receipt = supervision.materialize(
+            self.jobs, {"att-child"}, reason="closure-blocked")[0]["receipt"]
+        held = {"state": "closure-pending", "checkpoint": "route-closed",
+                "last_refusal": {
+                    "reason": "producer-finalize-failed",
+                    "detail": "completion-route-hash-mismatch: rt-a",
+                    "evidence": "sha256:" + "b" * 64,
+                }}
+        with mock.patch.object(dispatch_terminal_commit,
+                               "recorded_owner_completion_notice", return_value=held):
+            text = supervision.render_text(receipt)
+        self.assertIn("holds a deterministic producer finalize refusal", text)
+        self.assertIn("not retried automatically on the same evidence", text)
+        self.assertNotIn("fresh dispatch of the same route node", text)
+        self.assertNotIn("manual repair of the marker/evidence", text)
+        # The existing gate-blocked wording is unchanged for a non-held reason.
+        gate = {"state": "closure-pending", "checkpoint": "route-closed",
+                "last_refusal": {"reason": "completion-attempt-not-current", "detail": ""}}
+        with mock.patch.object(dispatch_terminal_commit,
+                               "recorded_owner_completion_notice", return_value=gate):
+            gate_text = supervision.render_text(receipt)
+        self.assertIn("a later attempt already claimed this route node", gate_text)
+        self.assertIn("fresh dispatch of the same route node", gate_text)
+
+    def test_a_mixed_closure_blocked_batch_keeps_the_gate_blocked_wording(self):
+        held = {"attempt_id": "att-held", "reason": "closure-blocked:producer-finalize-refused"}
+        gate = {"attempt_id": "att-gate", "reason": "closure-blocked:completion-attempt-not-current"}
+        # `render_text` chooses the gate-blocked wording exactly when this
+        # predicate is false, so a mixed batch keeps the gate child's advice.
+        self.assertFalse(supervision._held_finalize_refusal({"children": [held, gate]}))
+        self.assertTrue(supervision._held_finalize_refusal({"children": [held]}))
+
     def test_notice_observation_leaves_full_controller_pending_observation_intact(self):
         import dispatch_notice_state
         from types import SimpleNamespace

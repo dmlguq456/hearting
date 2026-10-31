@@ -1148,6 +1148,36 @@ class LeftoverCyclesTest(PRODUCER_FIXTURE.ProducerTestBase):
         self.assertEqual(self._results(self._sweep()), {cycle["cycle_id"]: "cycle-abandoned"})
         self.assertEqual(self._manifest_routes(cycle), [a["route_id"]])
 
+    def test_verified_handoff_successor_seals_from_the_sweep(self):
+        """A sweep asked to close the begin route holds the cycle; the successor
+        closes it, and one never-run sibling is not a live branch."""
+        import route_parent_close
+        import route_autoclose
+        a = self._root_route("leftover-handoff")
+        self._publish_root(a)
+        cycle = self._begin(a)
+        unused = [self._continuation(a, reason=f"leftover-unused-{index}") for index in (1, 2)]
+        successor = self._continuation(a, reason="leftover-handoff")
+        self.write_output(cycle, "plans/leftover/note.md", b"handoff\n")
+        self._close(successor)
+        record = self._record(cycle)
+
+        def handoff(route, *, jobs=None):
+            return {"successor": successor} if route["route_id"] == a["route_id"] else None
+
+        with mock.patch.object(route_parent_close, "verified_owner_pin_handoff_close",
+                               side_effect=handoff):
+            self.assertEqual(route_autoclose._seal_cycle(self.root, a, False, record=record),
+                             "cycle-held-by-continuation")
+            self.assertEqual(self._record(cycle)["state"], "open")
+            self.assertEqual(route_autoclose._seal_cycle(self.root, successor, False, record=record),
+                             "cycle-abandoned")
+        self.assertEqual(self._record(cycle)["state"], "sealed")
+        self.assertEqual(self._manifest_routes(cycle), [successor["route_id"]])
+        self.assertEqual(sorted(row["route_id"] for row in
+                                self._record(cycle)["skipped_continuations"]),
+                         sorted(route["route_id"] for route in unused))
+
     def test_a_lineage_walk_past_its_deadline_leaves_the_cycle_open_and_completes_without_one(self):
         import route_autoclose
         a = self._root_route("leftover-deadline")

@@ -1016,6 +1016,9 @@ class Admission:
     detail: str
     path: List[Dict[str, Any]]
     next_action: Optional[str]
+    # Never-run siblings this judgment passed over (D-120's verified-handoff
+    # exception); recorded on the seal so the difference is not silently lost.
+    skipped: Tuple[str, ...] = ()
 
 
 _D120_NEXT_ACTION = {
@@ -1205,11 +1208,17 @@ def _unexecuted_continuation(root: Path, route: Mapping[str, Any]) -> bool:
         if resolution.status not in ("exact", "aliased"):
             return False
         jobs = resolution.jobs_path
-        before = jobs.stat()
-        lines = jobs.read_text(encoding="utf-8").splitlines()
-        after = jobs.stat()
-        if any(getattr(before, key) != getattr(after, key)
-               for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns")):
+        # The registry is shared and busy; a stat change during the read is
+        # ordinary contention, not "unknown" evidence. Re-read a bounded
+        # number of times (three) and only then stay unknown.
+        for _attempt in range(4):
+            before = jobs.stat()
+            lines = jobs.read_text(encoding="utf-8").splitlines()
+            after = jobs.stat()
+            if all(getattr(before, key) == getattr(after, key)
+                   for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns")):
+                break
+        else:
             return False
         for line in lines:
             if not line.strip():
@@ -1364,6 +1373,7 @@ def cycle_route_admission(root: Path, record: Mapping[str, Any], route: Mapping[
             reason = "cycle-route-binding-mismatch:material-input"
             return Admission(False, reason, f"route={node['route_id']}", path, _d120_next_action(reason))
     handed_over: Optional[frozenset] = None  # computed only when a refusal is about to be issued
+    skipped_siblings: List[str] = []
     for node in path[:-1]:
         siblings = _lineage_children(root, node["route_id"], node["route_hash"])
         qualifying = [s for s in siblings
@@ -1379,6 +1389,7 @@ def cycle_route_admission(root: Path, record: Mapping[str, Any], route: Mapping[
                         and _closed_for_successor(node, path[path.index(node) + 1])):
                     # The parent closed this route and handed its remaining work to the
                     # next route on the path; a sibling that never ran is not a branch.
+                    skipped_siblings.append(sibling["route_id"])
                     continue
                 reason = "cycle-route-binding-mismatch:lineage-fork"
                 return Admission(False, reason, f"branch={node['route_id']} siblings={sibling['route_id']},{path[path.index(node)+1]['route_id']}",
@@ -1394,7 +1405,7 @@ def cycle_route_admission(root: Path, record: Mapping[str, Any], route: Mapping[
         if qualifying:
             reason = "cycle-route-binding-mismatch:superseded-route"
             return Admission(False, reason, route["route_id"], path, _d120_next_action(reason))
-    return Admission(True, None, "", path, None)
+    return Admission(True, None, "", path, None, tuple(sorted(skipped_siblings)))
 
 
 def _inline_producer_binding_check(root: Path, cycle_id: str,
@@ -5608,15 +5619,82 @@ def _finalize_route(root: Path, record: Mapping[str, Any], *, deadline: Optional
         if not candidates:
             return current
         if len(candidates) > 1:
-            raise ProducerError(
-                "cycle-route-binding-mismatch:lineage-fork",
-                f"{current['route_id']}:{','.join(sorted(c['route_id'] for c in candidates))}",
-            )
+            # The same narrowed rule `cycle_route_admission` applies: when the
+            # parent handed its remaining work to exactly one candidate and every
+            # other candidate never ran, that candidate is the branch. Two
+            # executed branches, or a parent not closed for a successor, remain
+            # the symmetric fork this refusal describes.
+            chosen = [c for c in candidates
+                      if _closed_for_successor(current, c)
+                      and all(other["route_id"] == c["route_id"]
+                              or _unexecuted_continuation(root, other) for other in candidates)]
+            if len(chosen) == 1:
+                candidates = chosen
+            else:
+                raise ProducerError(
+                    "cycle-route-binding-mismatch:lineage-fork",
+                    f"{current['route_id']}:{','.join(sorted(c['route_id'] for c in candidates))}",
+                )
         nxt = candidates[0]
         if nxt["route_id"] in visited:
             raise ProducerError("route-lineage-unverified", f"cycle:{nxt['route_id']}")
         visited.add(nxt["route_id"])
         current = nxt
+
+
+def finalize_lineage_evidence(root: Path, record: Mapping[str, Any]) -> Optional[str]:
+    """Digest of this cycle's lineage routes and their outcome files.
+
+    Only durable route/outcome shapes enter it: the jobs registry is shared and
+    changes for every other attempt in the root, so it must not decide that a
+    held finalize refusal is fresh. Bounded to the cycle's own starting tree.
+
+    The begin route file's own (size, mtime_ns) is always a row, so a refusal
+    caused by that file being replaced or damaged still has evidence to hold
+    on; an unreadable or hash-drifted begin route falls back to that row alone.
+    A broken record and a tree walk that cannot read its children stay unknown
+    (`None`), never a refusal.
+    """
+    try:
+        route_file = Path(record["route_file"])
+        route_hash = record["route_hash"]
+    except (KeyError, TypeError):
+        return None
+    if not isinstance(route_hash, str):
+        return None
+    try:
+        info = route_file.stat()
+        route_row: Optional[List[int]] = [info.st_size, info.st_mtime_ns]
+    except OSError:
+        route_row = None
+    try:
+        begin_route = load_route(root, route_file)
+        readable = begin_route.get("route_hash") == route_hash
+    except (OSError, KeyError, ValueError, TypeError, ProducerError):
+        readable = False
+    if not readable:
+        return _digest(_canonical([("begin-route-file", route_row)]))
+    try:
+        rows: List[Tuple[str, Optional[List[int]]]] = [("begin-route-file", route_row)]
+        queue = [begin_route]
+        seen = {begin_route["route_id"]}
+        while queue:
+            node = queue.pop()
+            outcome_path = route_lineage.canonical_route_path(
+                root, node["route_id"]).with_suffix(".outcome.json")
+            try:
+                info = outcome_path.stat()
+                outcome: Optional[List[int]] = [info.st_size, info.st_mtime_ns]
+            except OSError:
+                outcome = None
+            rows.append((node["route_id"], outcome))
+            for child in _indexed_route_children(root, node["route_id"], node["route_hash"]):
+                if child["route_id"] not in seen:
+                    seen.add(child["route_id"])
+                    queue.append(child)
+        return _digest(_canonical(sorted(rows, key=lambda row: row[0])))
+    except (OSError, KeyError, ValueError, TypeError, ProducerError):
+        return None
 
 
 def finalize(
@@ -5849,16 +5927,28 @@ def finalize(
         directory = cycle_dir(root, record["campaign_id"], cycle_id, record)
         # D-120: the route that seals this cycle is the unique T(C) leaf, not
         # necessarily the begin route -- an inherited (rebound) cycle's begin
-        # route may long since have a continuation writing it.
-        try:
-            route = _finalize_route(root, record,
-                                    deadline=_scan_budget.deadline() if _scan_budget is not None else None)
-        except ProducerError as exc:
-            if exc.code != "scan-in-progress":
-                raise
-            if prescan is not None and prescan.open_cycle:
-                _keep_prescan_digests(root, cycle_id, prescan)   # the next try reads only what is left
-            return _finish({"status": "deferred", "reason": "scan-budget", "cycle_id": cycle_id})
+        # route may long since have a continuation writing it. A completion
+        # controller that already names its exact route in the binding seals
+        # that route (hash-verified here) after the same admission, instead of a
+        # walk that could pick a different leaf.
+        binding_route_id = (expected_binding.get("route_id")
+                            if isinstance(expected_binding, Mapping) else None)
+        binding_route_hash = (expected_binding.get("route_hash")
+                              if isinstance(expected_binding, Mapping) else None)
+        if isinstance(binding_route_id, str) and binding_route_id and isinstance(binding_route_hash, str):
+            route = load_route(root, route_lineage.canonical_route_path(root, binding_route_id),
+                               expected_identity={"route_id": binding_route_id,
+                                                  "route_hash": binding_route_hash})
+        else:
+            try:
+                route = _finalize_route(root, record,
+                                        deadline=_scan_budget.deadline() if _scan_budget is not None else None)
+            except ProducerError as exc:
+                if exc.code != "scan-in-progress":
+                    raise
+                if prescan is not None and prescan.open_cycle:
+                    _keep_prescan_digests(root, cycle_id, prescan)   # the next try reads only what is left
+                return _finish({"status": "deferred", "reason": "scan-budget", "cycle_id": cycle_id})
         admission = cycle_route_admission(root, record, route, finalize=True)
         if not admission.allow:
             raise ProducerError(admission.reason, admission.detail)
@@ -6012,12 +6102,23 @@ def finalize(
         if manifest_path.exists():
             raise ProducerError("manifest-already-present", str(manifest_path))
         cycle_path = os.path.relpath(str(directory), str(root))
-        if excluded_symlinks or (prescan and prescan.excluded_roots):
+        skipped_continuations = [{"route_id": route_id, "reason": "never-run"}
+                                 for route_id in admission.skipped]
+        if (excluded_symlinks or (prescan and prescan.excluded_roots)
+                or skipped_continuations or record.get("skipped_continuations")):
             # Written before the manifest is published so a crash after the commit
-            # point recovers from the on-disk record without losing the exclusion.
+            # point recovers from the on-disk record without losing the exclusion
+            # or the branch this seal passed over.
             record = dict(record)
             record["excluded_symlinks"] = excluded_symlinks
             record["excluded_roots"] = sorted(set(prescan.excluded_roots if prescan else ()))
+            if skipped_continuations:
+                record["skipped_continuations"] = skipped_continuations
+            else:
+                # A retry after a crash between the record write and the manifest
+                # commit may carry a branch this seal did not pass over; reconcile
+                # it instead of leaving a stale advisory claim.
+                record.pop("skipped_continuations", None)
             _write_cycle_record(root, record, exclusive=False)
         manifest_bytes = artifact_manifest.canonical_bytes(document)
         _write_journal(root, cycle_id, state="sealing", manifest_digest=digest, cycle_path=cycle_path,
@@ -6045,6 +6146,8 @@ def finalize(
             "artifact_count": len(facts), "lineage_committed": True, "cycle_state": document["cycle"]["state"],
             "storage_state": "sealed",
         }
+        if skipped_continuations:
+            sealed_result["skipped_continuations"] = skipped_continuations
         if reservation != "absent":
             # The interim document's IDs were (or, when unusable, were not)
             # carried into the sealed manifest; say which.
