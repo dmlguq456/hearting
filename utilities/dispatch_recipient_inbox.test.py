@@ -352,6 +352,15 @@ class InboxContractTest(IsolatedCase):
         payload = self.inbox_payload()
         self.assertTrue(inbox.is_current(payload, self.dispatch_root))
 
+    def test_is_current_requires_an_absent_scope_to_stay_absent(self):
+        payload = self.inbox_payload()
+        missing = pending.record_directory(self.dispatch_root, "claude-absent")
+        payload["dir_identities"][str(missing)] = None
+        self.assertFalse(missing.exists())
+        self.assertTrue(inbox.is_current(payload, self.dispatch_root))
+        missing.mkdir(parents=True)
+        self.assertFalse(inbox.is_current(payload, self.dispatch_root))
+
     def test_folded_edge_digest_tracks_the_remaining_edge_set(self):
         one = inbox.edge_digest([("claude", "A", "B")])
         self.assertEqual(one, inbox.edge_digest([("claude", "A", "B")]))

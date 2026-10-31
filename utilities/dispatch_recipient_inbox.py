@@ -328,6 +328,12 @@ def is_current(inbox, dispatch_root, *, folded_edge_digest=None) -> bool:
             return False
         for scope_dir, expected in inbox["dir_identities"].items():
             actual = _directory_identity(Path(str(scope_dir)))
+            if expected is None:
+                # The scope did not exist at publication; a directory that
+                # appears afterwards may hold a record the inbox never named.
+                if actual is not None:
+                    return False
+                continue
             if actual is None or [int(value) for value in expected] != actual:
                 return False
         for item in inbox["delivery_ids"]:

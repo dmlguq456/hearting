@@ -33,6 +33,7 @@ from pathlib import Path
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -214,6 +215,64 @@ class DiscoveryTest(IsolatedCase):
         self.assertFalse(missing.exists())
         self.assertFalse(missing.parent.exists())
 
+    def _succession_bindings(self, attempts):
+        return [{"jobs": str(self.jobs), "route": "rt-inbox",
+                 "hash": "sha256:inbox", "node": "execute",
+                 "attempt": attempt, "parent": PREDECESSOR}
+                for attempt in attempts]
+
+    def test_a_record_created_where_the_scope_was_absent_at_publication_is_seen(self):
+        # The granted predecessor scope does not exist yet at publication.
+        ledger = TIDY.state_root() / "sessions" / f"{SESSION}.jsonl"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps({
+            "ts": 1, "event": "succession", "source": "tidy-clear",
+            "harness": "claude", "sid": SESSION, "from": PREDECESSOR,
+            "bindings": self._succession_bindings(["att-pred-new"]),
+        }, sort_keys=True) + "\n", encoding="utf-8")
+        HANDOVER._LINEAGE_GRAPH_CACHE.clear()
+        predecessor_dir = PD.record_directory(self.root, PREDECESSOR)
+        self.assertFalse(predecessor_dir.exists())
+        SWEEP.addressed_records(self.root, KIND, SESSION)
+        payload = self.current_inbox()
+        self.assertIn(str(predecessor_dir), payload["dir_identities"])
+        self.assertIsNone(payload["dir_identities"][str(predecessor_dir)])
+        # Creating the directory is a publication-relevant change even before
+        # a record lands in it, and the new authorized record is then read.
+        new = self.seed(session=PREDECESSOR, delivery_id="delivery-" + "e" * 32,
+                        attempt="att-pred-new")
+        self.assertFalse(INBOX.is_current(payload, self.root))
+        with self.assert_no_global_scope():
+            records, _count = SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assertEqual([item["delivery_id"] for item in records], [new["delivery_id"]])
+
+    def test_payload_refuses_a_generation_bump_during_the_graph_observation(self):
+        self.seed()
+        real = HANDOVER.lineage_graph
+
+        def racing(*args, **kwargs):
+            INBOX.bump_edge_generation(self.root)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(HANDOVER, "lineage_graph", side_effect=racing):
+            with self.assertRaises(OSError):
+                SWEEP._inbox_payload(self.root, SESSION, "claude", [], [])
+        self.assertIsNone(INBOX.read_inbox(self.root, "claude", SESSION))
+
+    def test_first_prefill_is_not_published_when_a_writer_bumps_during_it(self):
+        self.seed()
+        real = HANDOVER.lineage_graph
+
+        def racing(*args, **kwargs):
+            INBOX.bump_edge_generation(self.root)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(HANDOVER, "lineage_graph", side_effect=racing):
+            SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assertIsNone(INBOX.read_inbox(self.root, "claude", SESSION))
+        SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assertIsNotNone(INBOX.read_inbox(self.root, "claude", SESSION))
+
     def test_effect_path_calls_storage_recipients_zero_times_and_keeps_claim_ack(self):
         record = self.seed()
         SWEEP.addressed_records(self.root, KIND, SESSION)  # warm the derived inbox
@@ -301,6 +360,60 @@ class DiscoveryTest(IsolatedCase):
         self.assertFalse(getattr(records, "complete", True))
 
 
+class StaleReadOrderTest(IsolatedCase):
+    def test_a_cut_stale_pass_reads_the_new_record_before_the_old_prefix(self):
+        attempts = [f"att-order-{index}" for index in range(3)]
+        ledger = TIDY.state_root() / "sessions" / f"{SESSION}.jsonl"
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_text(json.dumps({
+            "ts": 1, "event": "succession", "source": "tidy-clear",
+            "harness": "claude", "sid": SESSION, "from": PREDECESSOR,
+            "bindings": [{"jobs": str(self.jobs), "route": "rt-inbox",
+                          "hash": "sha256:inbox", "node": "execute",
+                          "attempt": attempt, "parent": PREDECESSOR}
+                         for attempt in attempts + ["att-order-new"]],
+        }, sort_keys=True) + "\n", encoding="utf-8")
+        HANDOVER._LINEAGE_GRAPH_CACHE.clear()
+        for index, attempt in enumerate(attempts):
+            self.seed(session=PREDECESSOR,
+                      delivery_id="delivery-" + f"{0xAA00 + index:064x}",
+                      attempt=attempt)
+        SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assertEqual(len(self.current_inbox()["delivery_ids"]), 3)
+        # Twelve terminal records sort between the previous names and the new
+        # record, so the old sorted prefix would consume a cut pass first.
+        now = time.time()
+        for index in range(12):
+            record = self.seed(session=PREDECESSOR,
+                               delivery_id="delivery-" + f"{0xBB00 + index:064x}",
+                               attempt=f"att-old-{index}")
+            PD.claim_ready_batch(self.root, PREDECESSOR, record["delivery_id"],
+                                 claim_owner="old-fixture", lease_seconds=30,
+                                 require_generation_proof=False, jobs=self.jobs)
+            PD.ack(self.root, PREDECESSOR, record["delivery_id"], acked_by="old-fixture")
+            path = PD.record_path(self.root, PREDECESSOR, record["delivery_id"])
+            stamp = now - 3600 - index
+            os.utime(path, (stamp, stamp))
+        new = self.seed(session=PREDECESSOR, delivery_id="delivery-" + "f" * 64,
+                        attempt="att-order-new")
+        INBOX.bump_edge_generation(self.root)
+        calls = {"n": 0}
+
+        def clock():
+            calls["n"] += 1
+            return 0 if calls["n"] <= 6 else 10 ** 15
+
+        with mock.patch.object(SWEEP, "time",
+                               SimpleNamespace(monotonic_ns=clock,
+                                               time_ns=time.time_ns)):
+            records, _count = SWEEP.addressed_records(
+                self.root, KIND, SESSION, deadline_ns=1)
+        self.assertFalse(getattr(records, "complete", True))
+        # Named previous records (3) then the newest scope entry: the new
+        # record is reached before the terminal prefix.
+        self.assertIn(new["delivery_id"], [record["delivery_id"] for record in records])
+
+
 class RecipientsActionTest(IsolatedCase):
     def test_recipients_answers_from_a_current_inbox_without_a_ledger_read(self):
         record = self.seed(kind="opencode-turn")
@@ -325,6 +438,46 @@ class RecipientsActionTest(IsolatedCase):
         INBOX.bump_edge_generation(self.root)
         second = SWEEP._recipients_view([self.root], SESSION, "opencode-turn")
         self.assertNotEqual(first["generation"], second["generation"])
+
+    def test_recipients_slow_path_bootstraps_with_published_compact_rows(self):
+        # The compact builder does not seed the full-read cache, so the slow
+        # path must compare the observation, not object identity. Generation 0
+        # (a fresh install) must still publish the first OpenCode inbox.
+        record = self.seed(kind="opencode-turn")
+        HANDOVER.publish_lineage_rows(self.root)
+        self.assertIsNotNone(INBOX.read_lineage_rows(self.root))
+        self.assertIsNone(INBOX.read_inbox(self.root, "opencode", SESSION))
+        self.assertEqual(INBOX.read_edge_generation(self.root), 0)
+        view = SWEEP._recipients_view([self.root], SESSION, "opencode-turn")
+        self.assertIn(record["delivery_id"], view["delivery_ids"])
+        payload = INBOX.read_inbox(self.root, "opencode", SESSION)
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["edge_generation"], 0)
+        self.assertTrue(INBOX.is_current(payload, self.root))
+        self.assertEqual(view["generation"],
+                         f"{payload['edge_generation']}:{payload['folded_edge_digest'] or ''}")
+
+    def test_recipients_slow_path_refuses_a_writer_change_during_discovery(self):
+        self.seed(kind="opencode-turn")
+        real = HANDOVER.storage_recipients
+        sessions = TIDY.state_root() / "sessions"
+
+        def racing(*args, **kwargs):
+            # A confirmed edge writer appends a ledger while discovery runs.
+            sessions.mkdir(parents=True, exist_ok=True)
+            (sessions / "race.jsonl").write_text(json.dumps({
+                "ts": 9, "harness": "claude", "sid": "race-target",
+                "event": "handover", "source": "clear",
+                "from": {"harness": "claude", "sid": "race-origin"},
+                "bindings": [],
+            }, sort_keys=True) + "\n", encoding="utf-8")
+            HANDOVER._LINEAGE_GRAPH_CACHE.clear()
+            return real(*args, **kwargs)
+
+        with mock.patch.object(HANDOVER, "storage_recipients", side_effect=racing):
+            with self.assertRaises(OSError):
+                SWEEP._recipients_view([self.root], SESSION, "opencode-turn")
+        self.assertIsNone(INBOX.read_inbox(self.root, "opencode", SESSION))
 
 
 class DeliveryContextRefreshTest(IsolatedCase):

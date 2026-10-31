@@ -8030,6 +8030,10 @@ class ObligationStartupTest(_TmpRootMixin, unittest.TestCase):
             pid = 901234
 
         def launch(command, **kwargs):
+            # The inbox prefill observes the pane census through `subprocess.run`
+            # (which calls Popen); that is a read, not an obligation launch.
+            if command and Path(str(command[0])).name == "herdr":
+                return Launched()
             if "--resume-obligation" in command:
                 launches.append(("batch", command, batch.read(self.jobs_path, created[0]), kwargs))
             else:

@@ -9158,9 +9158,12 @@ def _resume_session_notice_obligations(duties, store, *, read_context=None,
                     # recorded is folded, not sent alone. It stays rejected (its
                     # replacement is that completion receipt); one summary line
                     # rides the body of the notices this pass does send.
+                    # A rejected notice that cannot fold has no replacement, but
+                    # it must not abandon members already claimed in this batch:
+                    # keep them moving and leave this one rejected.
                     summary = session_notice.fold_summary(fresh)
                     if summary is None:
-                        return
+                        continue
                     folded.append(summary)
                     continue
                 stored = dict(claim)
@@ -9387,7 +9390,13 @@ def _live_recipients(root):
 
 
 def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
-    """Derive and publish one recipient inbox from the real recipient scopes."""
+    """Derive and publish one recipient inbox from the real recipient scopes.
+
+    Only open records are named: ``delivery_ids`` is the open-delivery list, so
+    a terminal record under a granted scope must not make a carrier believe it
+    still owes a delivery. The per-record read also honours the shared pass
+    deadline; a pass cut here publishes nothing and retries next pass.
+    """
     import dispatch_pending_delivery as pending
     import dispatch_recipient_inbox as inbox
     import dispatch_session_sweep as sweep
@@ -9413,6 +9422,9 @@ def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
             for entry in entries:
                 if not entry.name.startswith("delivery-") or entry.suffix != ".json":
                     continue
+                if time.monotonic_ns() >= deadline_ns:
+                    complete = False
+                    break
                 try:
                     info = entry.stat()
                 except OSError:
@@ -9420,7 +9432,18 @@ def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
                     continue
                 if not stat.S_ISREG(info.st_mode):
                     continue
+                try:
+                    record = pending.read(root, storage_key, entry.stem)
+                except (OSError, pending.PendingDeliveryError):
+                    complete = False
+                    continue
+                if not record or record.get("state") not in pending.OPEN_STATES:
+                    # A terminal record is never owed; an unreadable one leaves
+                    # the pass incomplete so no partial list is published.
+                    continue
                 open_entries.append((storage_key, entry.stem, info.st_mtime_ns))
+            if not complete:
+                break
         if not complete:
             return None
         payload = sweep._inbox_payload(root, session_id, harness, scopes, open_entries,
@@ -9430,11 +9453,31 @@ def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
 
 
 def _prefill_live_inboxes(root, *, deadline_ns):
-    """Refresh a missing/stale inbox for live sessions only, bounded per pass."""
+    """Refresh a missing/stale inbox for live sessions only, bounded per pass.
+
+    The periodic reconciliation compares the published ``folded_edge_digest``
+    with a fresh graph observation, so a confirmed edge writer whose best-effort
+    generation bump failed is still repaired within this prefill window. The
+    hook's current path stays stat-only and never reads the graph.
+    """
     import dispatch_recipient_inbox as inbox
 
     result = {"checked": 0, "written": 0, "skipped": 0}
-    for harness, session_id in sorted(_live_recipients(root)):
+    live = sorted(_live_recipients(root))
+    if not live:
+        return result
+    folded_edge_digest = None
+    if time.monotonic_ns() < deadline_ns:
+        try:
+            from dispatch_seat_handover import lineage_graph
+            from peer_read_context import PeerReadContext
+            # The runner keeps full observations by contract; only the sweep's
+            # effect groups opt into the compact read.
+            graph = lineage_graph(read_context=PeerReadContext())
+            folded_edge_digest = inbox.edge_digest(getattr(graph, "edges", ()) or ())
+        except (OSError, ValueError, TypeError):
+            folded_edge_digest = None  # unknown edges keep the generation key
+    for harness, session_id in live:
         if time.monotonic_ns() >= deadline_ns:
             result["skipped"] += 1
             continue
@@ -9442,7 +9485,8 @@ def _prefill_live_inboxes(root, *, deadline_ns):
         current = False
         if recorded is not None:
             try:
-                current = inbox.is_current(recorded, root)
+                current = inbox.is_current(recorded, root,
+                                           folded_edge_digest=folded_edge_digest)
             except (OSError, ValueError, TypeError):
                 current = False
         if current:
@@ -9671,7 +9715,7 @@ def _component_last_activity(graph, component):
     return latest
 
 
-def _component_proven_ended(component, census, server):
+def _component_proven_ended(component, census, server, process_cache=None):
     """Absence in a complete census and no live pane still on a member session."""
     if census is None or census.complete is not True:
         return False
@@ -9686,7 +9730,13 @@ def _component_proven_ended(component, census, server):
         pane_id = pane.get("pane_id")
         if not isinstance(pane_id, str) or not pane_id:
             return False
-        observed = _process_session(pane_id, harness)  # pane id string, never the dict
+        cache_key = (harness, pane_id)
+        if process_cache is not None and cache_key in process_cache:
+            observed = process_cache[cache_key]
+        else:
+            observed = _process_session(pane_id, harness)  # pane id string, never the dict
+            if process_cache is not None:
+                process_cache[cache_key] = observed
         if observed is None:
             return False  # unknown never authorizes retirement
         if (harness, observed) in component:
@@ -9713,12 +9763,13 @@ def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
         # No lineage bundle can be retired; do not ask herdr for a census.
         return result
     try:
-        census = herdr_observation.pane_census()
+        census = herdr_observation.pane_census(session=_HERDR_SESSION)
     except (OSError, ValueError, TypeError, RuntimeError):
         census = None
     server = herdr_observation.endpoint_name(_HERDR_SESSION)
     sessions = tidy.state_root() / "sessions"
     archive = tidy.state_root() / RETIRE_ARCHIVE_DIRECTORY
+    process_cache = {}
     for component in components:
         if deadline_ns is not None and time.monotonic_ns() >= deadline_ns:
             result["skipped"] += 1
@@ -9745,7 +9796,7 @@ def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
         if last is None or now - last < RETIRE_ACTIVITY_SECONDS:
             result["skipped"] += 1
             continue
-        if not _component_proven_ended(component, census, server):
+        if not _component_proven_ended(component, census, server, process_cache):
             result["skipped"] += 1
             continue
         try:
@@ -9758,10 +9809,31 @@ def _retire_finished_lineage_bundles(store, *, now=None, deadline_ns=None):
             source = sessions / (ledger_key + ".jsonl")
             if not source.is_file() or source.is_symlink():
                 continue
+            destination = archive / source.name
+            placeholder = None
+            if os.path.lexists(destination):
+                # Never overwrite an archived ledger for a re-used key: keep
+                # the earlier retirement under its own name and give this one
+                # a unique sibling.
+                try:
+                    fd, unique = tempfile.mkstemp(prefix=f"{source.stem}.retired-",
+                                                  suffix=".jsonl", dir=archive)
+                except OSError:
+                    continue
+                os.close(fd)
+                destination = Path(unique)
+                placeholder = destination
             try:
-                os.replace(source, archive / source.name)
+                os.replace(source, destination)
             except OSError:
+                if placeholder is not None:
+                    with contextlib.suppress(OSError):
+                        os.unlink(placeholder)
                 continue
+            # The source keeps its last-write mtime; retention counts from the
+            # retirement, so stamp the moved ledger explicitly.
+            with contextlib.suppress(OSError):
+                os.utime(destination, None)
             moved += 1
         if moved:
             result["retired"] += 1
@@ -9920,11 +9992,12 @@ def _runner_maintenance_pass(store):
     try:
         state = peer_obligations.read_runner_duty_state(root, "inbox-prefill")
         generation = inbox.read_edge_generation(root)
-        # No confirmed edge writer has bumped a generation yet: the hooks own
-        # their one-time first-install prefill, so the runner owes nothing.
-        due = generation > 0 and (
-            state.get("edge_generation") != generation
-            or peer_obligations.runner_duty_due(state, INBOX_PREFILL_DUE_SECONDS))
+        # A fresh install has no confirmed edge writer yet (generation 0), but
+        # a live OpenCode/carrier session still needs its first derived inbox;
+        # the hooks of a session that never prompts own nothing. The first pass
+        # publishes it and every later edge change or due window refreshes it.
+        due = (state.get("edge_generation") != generation
+               or peer_obligations.runner_duty_due(state, INBOX_PREFILL_DUE_SECONDS))
         if due and time.monotonic_ns() < deadline_ns:
             counts = _prefill_live_inboxes(root, deadline_ns=deadline_ns)
             result["inbox"] = counts

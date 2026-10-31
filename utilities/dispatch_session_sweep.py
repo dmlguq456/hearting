@@ -247,6 +247,33 @@ def _scope_entries(root: Path, storage_key: str) -> list[tuple[str, str]]:
         return []
 
 
+def _scope_entries_newest_first(root: Path, storage_key: str) -> list[tuple[str, str]]:
+    """Scope entries ordered by record mtime, newest first.
+
+    A stale pass may be cut by the shared deadline. The previous inbox's named
+    records are read first; the remaining directory entries follow newest
+    first so a record created after publication is reached before an old
+    sorted prefix of terminal records.
+    """
+    try:
+        directory = pending_delivery.record_directory(root, storage_key)
+        entries = []
+        for path in directory.iterdir():
+            if not path.name.startswith("delivery-") or path.suffix != ".json":
+                continue
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                continue
+            entries.append((info.st_mtime_ns, path.name, path.stem))
+    except (OSError, pending_delivery.PendingDeliveryError):
+        return []
+    entries.sort(reverse=True)
+    return [(storage_key, stem) for _mtime_ns, _name, stem in entries]
+
+
 def _read_addressed(
     root: Path,
     recipient_kind: str,
@@ -311,6 +338,10 @@ def _inbox_payload(root: Path, session_id: str, harness: str, scopes, open_entri
     import dispatch_recipient_inbox as inbox
 
     from dispatch_seat_handover import lineage_graph
+    # Capture the generation this observation is published under before the
+    # graph read. An edge writer that appends and bumps between the two must
+    # not leave old scopes under the newer generation.
+    generation = inbox.read_edge_generation(root)
     graph = lineage_graph(read_context=read_context)
     identities = {}
     storage_keys = [session_id]
@@ -328,11 +359,14 @@ def _inbox_payload(root: Path, session_id: str, harness: str, scopes, open_entri
             directory = pending_delivery.record_directory(root, storage_key)
         except pending_delivery.PendingDeliveryError:
             continue
-        identity = _directory_identity(directory)
-        if identity is not None:
-            identities[str(directory)] = identity
+        # Record every candidate scope, including one that does not exist yet.
+        # `is_current` then requires an absent directory to still be absent, so
+        # a record created there after publication invalidates the inbox.
+        identities[str(directory)] = _directory_identity(directory)
+    if inbox.read_edge_generation(root) != generation:
+        raise OSError("lineage-generation-changed")
     return {
-        "edge_generation": inbox.read_edge_generation(root),
+        "edge_generation": generation,
         "folded_edge_digest": inbox.edge_digest(getattr(graph, "edges", ()) or ()),
         "dir_identities": identities,
         "delivery_ids": [{"storage_key": storage_key, "delivery_id": delivery_id,
@@ -396,7 +430,10 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
     # record under a cleared predecessor's key changes only that directory, so
     # naming its scope is what keeps the next completion visible. This is still
     # only the session's share; a missing or stale inbox never recomputes
-    # globally and never calls `storage_recipients`.
+    # globally and never calls `storage_recipients`. Read the previous inbox's
+    # named records first, then the newest scope entries: a pass cut by the
+    # deadline must reach a record created after publication instead of an old
+    # sorted prefix of terminal records.
     stale_scopes = []
     if recorded is not None:
         seen_scopes = set()
@@ -410,12 +447,20 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
             stale_scopes.append((storage_key, tuple(attempts)))
         if session_id not in seen_scopes:
             stale_scopes.append((session_id, ()))
-    candidates = []
-    for storage_key, _allowed in stale_scopes:
-        candidates.extend(_scope_entries(root, storage_key))
-    candidates.extend(_scope_entries(root, session_id))
-
     prefill = recorded is None and harness and canonical
+    candidates = []
+    if recorded is not None:
+        candidates.extend(
+            (item["storage_key"], item["delivery_id"])
+            for item in recorded.get("delivery_ids") or ()
+            if isinstance(item, dict) and isinstance(item.get("storage_key"), str)
+            and item["storage_key"] and isinstance(item.get("delivery_id"), str)
+            and item["delivery_id"])
+    if not prefill:
+        for storage_key, _allowed in stale_scopes:
+            candidates.extend(_scope_entries_newest_first(root, storage_key))
+        candidates.extend(_scope_entries_newest_first(root, session_id))
+
     if prefill:
         with _registry_read_scope():
             scopes = storage_recipients(
@@ -426,6 +471,10 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
             scoped_candidates = []
             for storage_key, _allowed in scopes:
                 scoped_candidates.extend(_scope_entries(root, storage_key))
+        if session_id not in {key for key, _allowed in scopes}:
+            # An unreadable full enumeration still leaves the session's own
+            # scope deliverable (its records need no lineage authority).
+            candidates.extend(_scope_entries(root, session_id))
         candidates.extend(scoped_candidates)
         addressed, open_entries, count, complete = _read_addressed(
             root, recipient_kind, session_id, harness, candidates,
@@ -444,6 +493,14 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
     addressed, open_entries, count, complete = _read_addressed(
         root, recipient_kind, session_id, harness, candidates,
         read_context=read_context, deadline_ns=deadline_ns)
+    # Reading order is a deadline concern only; the returned order stays the
+    # previous scope-then-record-name order so batch grouping and rendering do
+    # not change just because a stale pass read the newest entries first.
+    scope_rank = {key: index for index, (key, _allowed) in enumerate(stale_scopes)}
+    addressed.sort(key=lambda record: (
+        scope_rank.get(record.get(STORAGE_KEY), len(scope_rank)), record["delivery_id"]))
+    open_entries.sort(key=lambda item: (
+        scope_rank.get(item[0], len(scope_rank)), item[1]))
     if complete and recorded is not None:
         # The pass observed the whole share. Republish only under the inbox's own
         # edge generation: when edges changed, this observation predates the
@@ -1589,6 +1646,24 @@ def _state_roots() -> list[Path]:
             if Path(root).is_dir()]
 
 
+def _lineage_generation_key(graph):
+    """One comparable observation identity for full and compact graphs.
+
+    The full read records each ledger's readable-bytes digest; the compact read
+    intentionally does not. Both describe the same file generation in the first
+    seven fields, so the comparison normalizes on those.
+    """
+    generation = getattr(graph, "generation", None)
+    if not isinstance(generation, tuple) or len(generation) != 3:
+        return None
+    location, files, directory = generation
+    try:
+        files = tuple(tuple(item)[:7] for item in files)
+    except TypeError:
+        return None
+    return (location, files, directory)
+
+
 def _recipients_view(roots: list[Path], session_id: str, recipient_kind: str) -> dict:
     """The OpenCode tick's bounded look: a current inbox, else one computation.
 
@@ -1640,7 +1715,13 @@ def _recipients_view(roots: list[Path], session_id: str, recipient_kind: str) ->
                                 read_context=read_context, deadline_ns=deadline_ns)
     digests = sorted({hashlib.sha256(storage.encode("utf-8")).hexdigest()
                       for storage, _allowed in scopes})
-    if lineage_graph() is not graph:
+    # The compact builder returns a graph without seeding the full-read cache,
+    # so object identity can never prove that discovery saw one observation.
+    # Compare the observation identity itself against a fresh readable graph
+    # (the compact path stays inside that graph's own normalized generation).
+    current = _lineage_generation_key(lineage_graph())
+    expected = _lineage_generation_key(graph)
+    if current is None or expected is None or current != expected:
         raise OSError("lineage-observation-changed")
     if not bool(getattr(scopes, "complete", True)):
         _reconcile_canonical_dispatch_state(root)

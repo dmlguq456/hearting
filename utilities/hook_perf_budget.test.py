@@ -251,14 +251,24 @@ exit 0
 class FixtureCase:
     """One built fixture plus the scenario helpers every case shares."""
 
-    def __init__(self, base: Path, scale: int):
+    def __init__(self, base: Path, scale: int, *, prime_via: str = "hook"):
         self.base = base
         self.base.mkdir(parents=True, exist_ok=True)
-        self.fixture = fixture_module.build(self.base, scale=scale)
+        self.fixture = fixture_module.build(self.base, scale=scale, prime_via=prime_via)
         self.fixture["counts"] = fixture_module.self_check(self.fixture)
         self.fixture["scale"] = scale
         self.dispatch_root = Path(self.fixture["dispatch_root"])
         self.records = pending.record_directory(self.dispatch_root, TARGET)
+        self.predecessor_records = pending.record_directory(
+            self.dispatch_root, fixture_module.PREDECESSOR)
+        self.terminal_records = {}
+        for path in sorted(self.predecessor_records.glob("delivery-*.json")):
+            try:
+                state = json.loads(path.read_text(encoding="utf-8")).get("state")
+            except (OSError, ValueError):
+                state = None
+            if state is not None and state != "pending":
+                self.terminal_records[path.name] = path
         self.inbox_path = inbox.inbox_path(self.dispatch_root, "claude", TARGET)
         self.edge_path = inbox.edge_generation_path(self.dispatch_root)
         self.pristine = {}
@@ -335,6 +345,22 @@ class FixtureCase:
         self._write_target(True, self.records_mtime[True])
         self._write_inbox(self.full_inbox)
         return data
+
+    def runner_inbox(self):
+        """Re-publish the target inbox through the real obligation-runner prefill."""
+        self._write_target(True, self.records_mtime[True])
+        self.inbox_path.unlink(missing_ok=True)
+        saved = dict(os.environ)
+        try:
+            os.environ.update(self.fixture["env"])
+            fixture_module.prime_inbox(self.fixture, via_runner=True)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        data = (self.inbox_path.read_bytes(), self.inbox_path.stat().st_mtime_ns)
+        payload = inbox.read_inbox(self.dispatch_root, "claude", TARGET)
+        self._write_inbox(self.full_inbox)
+        return data, payload
 
     # -- subprocess -------------------------------------------------------
     def env(self, audit_log: Path) -> dict:
@@ -433,6 +459,8 @@ def _summarize(name: str, samples: list[dict]) -> dict:
         "stop_path": all(sample["stop_path"] for sample in samples),
         "stderr": next((sample["stderr"] for sample in samples if sample["stderr"]), ""),
         "herdr": next((sample["herdr"] for sample in samples if sample["herdr"]), []),
+        "open_events": next((sample.get("open_events", []) for sample in samples
+                             if sample.get("open_events")), []),
     }
 
 
@@ -527,6 +555,49 @@ class HookPerfBudgetTest(unittest.TestCase):
                 for scale, run in ((1, run1), (2, run2)):
                     print(f"{scale:5d} | {case_name:<13} | {run['seconds']:8.3f} | "
                           f"{run['opens']:5d} | {run['bytes']:8d} | {run['stop_path']}")
+            print("")
+
+            # The steady-state installed path: the obligation runner publishes
+            # the inbox, with terminal records under the same granted scope.
+            # The hook must follow only the named open records and never open
+            # a terminal one.
+            for scale, case in ((1, scale1), (2, scale2)):
+                snapshot, payload = case.runner_inbox()
+                self.assertIsNotNone(
+                    payload, f"scale {scale}: runner prefill wrote no inbox")
+                self.assertTrue(inbox.is_current(payload, case.dispatch_root),
+                                f"scale {scale}: runner inbox is not current")
+                terminal_ids = set(case.fixture["terminal_delivery_ids"])
+                named = {item["delivery_id"] for item in payload["delivery_ids"]}
+                self.assertTrue(terminal_ids, f"scale {scale}: no terminal fixture record")
+                self.assertFalse(
+                    terminal_ids & named,
+                    f"scale {scale}: runner inbox named a terminal record")
+                self.assertEqual(
+                    sorted(named), sorted(path.stem for path in case.records.glob("delivery-*.json")),
+                    f"scale {scale}: runner inbox did not name exactly the open records")
+                case.full_inbox = snapshot
+            run1 = scale1.prompt_case("prompt-runner", present=True, stale=False)
+            run2 = scale2.prompt_case("prompt-runner", present=True, stale=False)
+            for run in (run1, run2):
+                self.assertEqual(run["returncodes"], [0], run)
+            check_budget("prompt-runner", run1["seconds"], PROMPT_LIMIT_S)
+            check_scale_time("prompt-runner", run1["seconds"], run2["seconds"])
+            check_scale_opens(run1["opens"], run2["opens"])
+            self.assertEqual(run1["delivered"], 2, "prompt-runner: both open notices must be delivered")
+            self.assertEqual(run2["delivered"], 2, "prompt-runner: both open notices must be delivered")
+            terminal_names = set(scale1.terminal_records)
+            opened_names = {Path(event["path"]).name for event in run1["open_events"]
+                            if isinstance(event, dict) and event.get("event") == "open"
+                            and isinstance(event.get("path"), str)}
+            self.assertTrue(terminal_names, "fixture has no terminal record to exclude")
+            self.assertFalse(
+                terminal_names & opened_names,
+                "the prompt opened a terminal record named by the runner inbox")
+            rows.append(("prompt-runner", run1, run2))
+            for scale, run in ((1, run1), (2, run2)):
+                print(f"{scale:5d} | {'prompt-runner':<13} | {run['seconds']:8.3f} | "
+                      f"{run['opens']:5d} | {run['bytes']:8d} | {run['stop_path']}")
             print("")
 
 

@@ -295,6 +295,28 @@ class RunNoticeSupersedeTest(IsolatedCase):
                          "sent-ambiguous")
 
 
+class BatchClaimContinuationTest(IsolatedCase):
+    def test_a_non_foldable_rejection_does_not_abandon_a_terminal_claim(self):
+        terminal = _notice("claude", "A", key="experiment:run-9:final:1:claude:A",
+                           subject="experiment final (1/1)", text="experiment finished",
+                           jobs=self.jobs)
+        stale = _notice("claude", "A", key="steward-check:claude:A:epoch:1",
+                        subject="stale role check", text="stale", jobs=self.jobs)
+        # No active steward-check duty vouches for this key: keep_claim rejects
+        # it, and it is not a run notice, so there is no folded replacement.
+        self.assertFalse(session_notice.notice_is_current(stale))
+        self.assertIsNone(session_notice.fold_summary(stale))
+        sent = []
+        with self.transport("A", sent=sent):
+            peer_steward._resume_session_notice_obligations(self.duties(), self.store)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("experiment finished", sent[0]["body"])
+        self.assertEqual(pending.read(self.root, "A", terminal["delivery_id"])["state"],
+                         "sent-ambiguous")
+        self.assertEqual(pending.read(self.root, "A", stale["delivery_id"])["state"],
+                         "rejected")
+
+
 class AttentionRetirementTest(IsolatedCase):
     OWNER = ("att-owner\tdone\t/fixture/repo\t/fixture/wt\towner\t"
              "attempt_id=att-owner,dispatch_depth=1,parent_sid=parent-test,"
@@ -604,6 +626,66 @@ class LineageBundleRetirementTest(IsolatedCase):
         self.assertEqual(peer_steward._purge_retired_archives()["removed"], 1)
         self.assertEqual(self.archived(), ["seat-A.jsonl"])
 
+    def test_retirement_uses_the_endpoint_session_and_caches_process_checks(self):
+        self.component()
+        self.write_ledger("seat-C", [
+            {"ts": self.OLD, "harness": "claude", "sid": "C", "event": "start", "source": "startup"}])
+        self.write_ledger("seat-D", [
+            {"ts": self.OLD, "harness": "claude", "sid": "D", "event": "handover",
+             "source": "clear", "from": {"harness": "claude", "sid": "C"}}])
+        peer_steward._HERDR_SESSION = "fixture-server"
+        calls = []
+
+        def census(**kwargs):
+            calls.append(kwargs)
+            return herdr_observation.PaneCensus("fixture-server", (
+                {"agent": "claude", "pane_id": "w1:pA",
+                 "agent_session": {"value": "other-a"}},
+                {"agent": "claude", "pane_id": "w1:pB",
+                 "agent_session": {"value": "other-b"}},
+            ), time.monotonic())
+
+        with mock.patch.object(peer_steward.herdr_observation, "pane_census",
+                               side_effect=census), \
+             mock.patch.object(peer_steward, "_process_session",
+                               return_value="not-a-member") as process:
+            result = peer_steward._retire_finished_lineage_bundles(
+                self.store, now=time.time())
+        self.assertEqual(calls, [{"session": "fixture-server"}])
+        # Two components look at the same two panes; each pane is asked once
+        # per pass instead of once per component.
+        self.assertEqual(process.call_count, 2)
+        self.assertEqual(result["retired"], 2)
+
+    def test_retirement_stamps_the_archive_and_never_overwrites_an_entry(self):
+        self.component()
+        sessions = tidy.state_root() / "sessions"
+        old = time.time() - 20 * 86400
+        for path in sessions.glob("*.jsonl"):
+            os.utime(path, (old, old))
+        archive = tidy.state_root() / peer_steward.RETIRE_ARCHIVE_DIRECTORY
+        archive.mkdir(parents=True, exist_ok=True)
+        sentinel = archive / "seat-A.jsonl"
+        sentinel.write_text("previous retirement\n", encoding="utf-8")
+        started = time.time()
+        result = self.retire()
+        self.assertEqual(result["retired"], 1)
+        self.assertEqual(result["ledgers"], 2)
+        # The earlier archived ledger is never replaced; the second retirement
+        # of a re-used key lands under a unique name.
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "previous retirement\n")
+        names = self.archived()
+        self.assertEqual(len(names), 3)
+        unique = [name for name in names if name.startswith("seat-A.retired-")]
+        self.assertEqual(len(unique), 1)
+        moved = archive / unique[0]
+        self.assertGreaterEqual(moved.stat().st_mtime, started - 1)
+        # Retention counts from retirement, not from the ledger's last write.
+        self.assertEqual(peer_steward._purge_retired_archives(
+            now=started + 29 * 86400)["removed"], 0)
+        self.assertEqual(peer_steward._purge_retired_archives(
+            now=started + 31 * 86400)["removed"], 3)
+
     def test_each_blocking_condition_keeps_the_bundle(self):
         cases = {}
 
@@ -703,6 +785,72 @@ class InboxPrefillTest(IsolatedCase):
                 deadline_ns=time.monotonic_ns() + 30 * 1_000_000_000)
         self.assertIsNone(payload)
         self.assertIsNone(inbox.read_inbox(self.root, "claude", "B"))
+
+    def test_prefill_names_only_open_records_never_terminal_ones(self):
+        open_record = _notice("claude", "A", key="open-1", subject="n", text="t",
+                              jobs=self.jobs)
+        terminal = _notice("claude", "A", key="terminal-1", subject="done", text="done",
+                           jobs=self.jobs)
+        pending.claim_ready_batch(self.root, "A", terminal["delivery_id"],
+                                  claim_owner="fixture", lease_seconds=30,
+                                  require_generation_proof=False, jobs=self.jobs)
+        pending.ack(self.root, "A", terminal["delivery_id"], acked_by="fixture")
+        self.edge("A", "B")
+        payload = peer_steward._prefill_recipient_inbox(
+            self.root, "claude", "B",
+            deadline_ns=time.monotonic_ns() + 30 * 1_000_000_000)
+        self.assertIsNotNone(payload)
+        named = [item["delivery_id"] for item in payload["delivery_ids"]]
+        self.assertEqual(named, [open_record["delivery_id"]])
+        self.assertNotIn(terminal["delivery_id"], named)
+        self.assertTrue(inbox.is_current(inbox.read_inbox(self.root, "claude", "B"),
+                                         self.root))
+        # The hook then sees exactly the open delivery and nothing owed.
+        import dispatch_session_sweep as sweep
+        addressed, _count = sweep.addressed_records(self.root, "claude-parent-runtime", "B")
+        self.assertEqual([record["delivery_id"] for record in addressed], named)
+
+    def test_fresh_install_at_generation_zero_still_bootstraps_an_opencode_inbox(self):
+        notice = _notice("opencode", "B", key="oc-open-1", subject="n", text="t",
+                         jobs=self.jobs)
+        self.assertEqual(inbox.read_edge_generation(self.root), 0)
+        with mock.patch.object(peer_steward, "_live_recipients",
+                               return_value={("opencode", "B")}):
+            result = peer_steward._runner_maintenance_pass(self.store)
+        self.assertIn("inbox", result)
+        self.assertEqual(result["inbox"]["written"], 1)
+        payload = inbox.read_inbox(self.root, "opencode", "B")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["edge_generation"], 0)
+        self.assertIn(notice["delivery_id"],
+                      [item["delivery_id"] for item in payload["delivery_ids"]])
+        self.assertTrue(inbox.is_current(payload, self.root))
+
+    def test_a_missed_edge_bump_is_repaired_by_the_runner_digest_check(self):
+        _notice("claude", "A", key="open-1", subject="n", text="t", jobs=self.jobs)
+        self.edge("A", "B")
+        deadline = time.monotonic_ns() + 30 * 1_000_000_000
+        with mock.patch.object(peer_steward, "_live_recipients",
+                               return_value={("claude", "B")}):
+            first = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
+        self.assertEqual(first["written"], 1)
+        recorded = inbox.read_inbox(self.root, "claude", "B")
+        self.assertTrue(inbox.is_current(recorded, self.root))
+        # A confirmed edge writer whose best-effort bump failed changes the
+        # edge set without moving the generation.
+        self.edge("X", "Y")
+        self.assertEqual(inbox.read_edge_generation(self.root), 0)
+        # The hook's current path is stat-only, so it still trusts what it has.
+        self.assertTrue(inbox.is_current(recorded, self.root))
+        with mock.patch.object(peer_steward, "_live_recipients",
+                               return_value={("claude", "B")}):
+            second = peer_steward._prefill_live_inboxes(self.root, deadline_ns=deadline)
+        self.assertEqual(second["written"], 1)
+        repaired = inbox.read_inbox(self.root, "claude", "B")
+        self.assertNotEqual(repaired["folded_edge_digest"],
+                            recorded["folded_edge_digest"])
+        self.assertTrue(inbox.is_current(repaired, self.root,
+                                         folded_edge_digest=repaired["folded_edge_digest"]))
 
 
 class RunStatesPublishTest(IsolatedCase):
