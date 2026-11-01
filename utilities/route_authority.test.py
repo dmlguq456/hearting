@@ -2295,6 +2295,20 @@ class U7BudgetStateTest(unittest.TestCase):
                          (False, "protected", "automatic-replacement-exhausted"))
 
 
+class U11ArtifactStateTest(unittest.TestCase):
+    def test_unlocated_result_is_never_replaced_and_only_absence_is_(self):
+        """N32: `missing`, `outside-root` and `unchecked` all stop at settlement; none reads as 'no result'."""
+        for state in ("missing", "outside-root", "unchecked"):
+            terminal = {"state": "invalid", "artifact_state": state, "failure_class": "", "reason": "artifact-outside-root"}
+            for kind in ("silent", "runtime", "capacity"):
+                with self.subTest(state=state, kind=kind):
+                    choice = RA.decide_continuation(action="replacement-result", facts={"terminal": terminal, "kind": kind})
+                    self.assertEqual((choice.allowed, choice.reason, choice.next_action),
+                                     (False, "replacement-result-settlement-required", "settle"))
+        self.assertTrue(RA.decide_continuation(action="replacement-result",
+            facts={"terminal": {"state": "absent"}, "kind": "silent"}).allowed)
+
+
 class U11CompletionStateTest(unittest.TestCase):
     def test_sealed_settled_owner_is_complete(self):
         """A sealed envelope whose settlement observation finished without error is complete (no extra proof flag)."""
