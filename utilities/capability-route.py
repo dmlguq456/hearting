@@ -6964,7 +6964,17 @@ def close_route(route, route_file, commit=None, summary=None, publication=None,
     # left over from before D-2 get resolved); everywhere else is rejected.
     location=classify_route_location(route_file,route["artifact_root"])
     if location != "canonical" and location not in _LEGACY_LOCATIONS:
-        raise ValueError("route-close-outside-canonical-or-legacy")
+        # A copy of the route kept elsewhere closes the one record of the same route (same id and
+        # hash) under this artifact root; a route with no such record would write into another root.
+        canonical=canonical_route_path(route["artifact_root"],route["route_id"])
+        try:
+            same=(canonical.is_file() and not canonical.is_symlink()
+                  and json.loads(canonical.read_text(encoding="utf-8")).get("route_hash")==route["route_hash"])
+        except (OSError,ValueError):
+            same=False
+        if not same:
+            raise ValueError("route-close-outside-canonical-or-legacy")
+        route_file,location=canonical,"canonical"
     alias_basename=(location=="canonical" and not route_path_is_exact(
         route_file,route["artifact_root"],route["route_id"]))
     if alias_basename or location in _LEGACY_LOCATIONS:
@@ -10560,6 +10570,28 @@ def _unregistered_attempt(metadata):
     return str(value).lower() in {"0", "false"}
 
 
+def _sole_node_attempt(route,node,jobs_path):
+    """The attempt id of the one registered attempt of `node` on this exact route, else None."""
+    try:
+        lines=jobs_path.read_text(encoding="utf-8",errors="replace").splitlines()
+    except OSError:
+        return None
+    found=set()
+    for line in lines:
+        fields=line.split("\t")
+        if len(fields)!=6:
+            continue
+        metadata=parse_registry_metadata(fields[5])
+        try:
+            same=(metadata.get("attempt_id") and not ROUTE_AUTHORITY.subsession_row(metadata)
+                  and ROUTE_IDENTITY.registered_node_identity(metadata,node)
+                      ==(route["route_id"],route["route_hash"],node["id"]))
+        except (ValueError,KeyError,TypeError):
+            same=False
+        if same:
+            found.add(metadata["attempt_id"])
+    return next(iter(found)) if len(found)==1 else None
+
 def _complete_node_locked(
     route,
     node,
@@ -10573,7 +10605,11 @@ def _complete_node_locked(
     if review_claim and node.get("kind")!="review-worker":
         raise ValueError("reviewer-claim-on-non-review-node")
     if jobs and not attempt_id:
-        raise ValueError("registered completion requires --attempt-id")
+        # The registry names the attempt when exactly one registered attempt belongs to this node;
+        # none, or several, is a choice only the caller can make.
+        attempt_id=_sole_node_attempt(route,node,Path(jobs))
+        if not attempt_id:
+            raise ValueError("registered completion requires --attempt-id")
     if not jobs and attempt_id and explicit_attempt_metadata is None:
         raise ValueError("unregistered completion requires explicit attempt metadata")
     if not jobs and explicit_attempt_metadata is not None and not attempt_id:
@@ -10701,10 +10737,14 @@ def _complete_node_locked(
             # (note=completion-deferred, no marker yet) is the same shape --
             # a checked writer already committed the row, only the marker
             # publication is outstanding -- so it is marker-eligible too.
+            # The success judgment is the shared `verdict_pass`, not one note name. A row that already
+            # carries its marker is a replay (handled below), and a `dead-*` death note is never a success.
             marker_eligible=(
                 already_closed
+                and row_note!="completed-marker"
                 and (
-                    (row_note=="completed-supervisor" and row_metadata.get("failure_class")=="pass")
+                    (verdict_pass(row_metadata) and not terminal_conflict_pending(row_metadata)
+                     and not str(row_note or "").startswith("dead-"))
                     or deferred_completion(row_metadata)=="pending"
                 )
             )
@@ -12467,16 +12507,38 @@ def _correct_attempt_argument(value, jobs):
     return owner
 
 
+def _stage_route_owner(jobs, attempt_id):
+    """The owner a depth-2 stage attempt of the same route reports to, else `attempt_id` itself.
+
+    A correction addressed to a stage is a correction for the work its route owner is doing; only a
+    parent owner of the very same route counts, so another route's attempt stays refused."""
+    row = _find_attempt_row_metadata(Path(jobs), attempt_id)
+    if not row or row.get("worker_type") == "owner" or row.get("dispatch_depth") != "2":
+        return attempt_id
+    parent = _find_attempt_row_metadata(Path(jobs), row.get("parent_attempt_id") or "")
+    if (parent and parent.get("worker_type") == "owner" and parent.get("dispatch_depth") == "1"
+            and (parent.get("owner_route_id") or parent.get("route_id")) == (row.get("route_id") or row.get("route"))):
+        return parent["attempt_id"]
+    return attempt_id
+
+
 def _current_owner_attempt(jobs, attempt_id):
     """The newest launched owner in this attempt's replacement lineage (itself when none).
 
-    An answer sent with an older owner's id still reaches the owner doing the work now."""
+    An answer sent with an older owner's id (or a stage attempt of the same route) still reaches the
+    owner doing the work now. When the lineage of an attempt that was replaced cannot be read, the
+    old owner is not used in its place: the correction stays retained until it can be observed."""
+    start = _stage_route_owner(jobs, attempt_id)
     try:
         from dispatch_replacement import effective_attempts
-        effective, _mapping = effective_attempts(jobs, {attempt_id})
-        return next(iter(effective)) if len(effective) == 1 else attempt_id
+        effective, _mapping = effective_attempts(jobs, {start})
+        return next(iter(effective)) if len(effective) == 1 else start
     except (DispatchContractError, OSError, ValueError, StopIteration):
-        return attempt_id
+        row = _find_attempt_row_metadata(Path(jobs), start) or {}
+        if any(row.get(key) for key in ("replacement_family_id", "replacement_attempt_id",
+                                        "replacement_claim_digest")):
+            raise ValueError("owner-input-unavailable-retain-correction")
+        return start
 
 
 def _continue_after_answer(jobs, attempt_id, correction):
@@ -13240,7 +13302,13 @@ def main():
         a.attempt_id=_correct_attempt_argument(given,jobs)
         if a.attempt_id!=given:
             print(f"owner_attempt_default={a.attempt_id} route={given}",file=sys.stderr)
-        attempt=_current_owner_attempt(jobs,a.attempt_id)
+        try:
+            attempt=_current_owner_attempt(jobs,a.attempt_id)
+        except ValueError as exc:
+            print(json.dumps({"state":"not-admitted","reason":str(exc),"retry_when":"The owner lineage can be read.",
+                              "next_action":"same-command",
+                              "next_step":"Retain the correction. Inspect the exact owner; do not restart it or treat a file edit as delivery."}))
+            return 69
         try:
             result=(submit(jobs,attempt,a.message_file.read_text(),a.request_id)
                     if a.message_file else inspect(jobs,attempt))

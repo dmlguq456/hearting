@@ -1269,6 +1269,8 @@ def _exact_notice_diagnosis(receipt: dict, notice_context=None) -> dict:
     return diagnosis if isinstance(diagnosis, dict) else {}
 
 
+NEW_CLOSURE_WORDING = "The next completion join judges closure again; the same files give the same result."
+
 # A held refusal carries the durable evidence digest it was judged on. Only
 # that shape, at the route-closed checkpoint, describes what the next settle
 # would see again; an old record without evidence is retried.
@@ -1317,7 +1319,7 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
         checkpoint = diagnosis.get("checkpoint")
         detail = f" The last recorded checkpoint is {checkpoint}." if isinstance(checkpoint, str) else ""
         return ("No recorded refusal is available." + detail
-                + " The existing controller retries closure automatically; read-only diagnosis: " + command)
+                + " "+NEW_CLOSURE_WORDING+" Read-only diagnosis: " + command)
     reason = refusal.get("reason")
     raw_detail = refusal.get("detail", "")
     if _held_finalize_diagnosis(diagnosis):
@@ -1349,7 +1351,7 @@ def _completion_refusal_notice(receipt: dict, *, notice_context=None) -> str:
                         else "Correct the locator, mark its exact payload directory for self-exclusion, or move it outside the cycle.")
     cause = "producer-finalize-failed (output-invalid)" if nested_output_invalid else "output-invalid"
     return (f"The last recorded closure refusal is {cause}: {safe_detail}. Record: {safe_path}. "
-            f"{safe_remediation} The existing controller retries closure automatically; read-only diagnosis: {command}")
+            f"{safe_remediation} {NEW_CLOSURE_WORDING} Read-only diagnosis: {command}")
 
 
 def _cleanup_only_result(receipt: dict) -> dict | None:

@@ -2709,6 +2709,18 @@ class StewardRecoveryIntegrationTest(unittest.TestCase):
         self.assertEqual((mismatched_work[0].delivery_state, mismatched_ready.state),
                          ("unknown", "unknown"))
 
+        # A delivery record that is readable and ended (rejected) is a known state, not `unknown`.
+        fields[5] = fields[5].replace("delivery_row_revision=revision-replaced",
+                                      "delivery_row_revision=revision-parent")
+        jobs.write_text("\t".join(fields) + "\n", encoding="utf-8")
+        path = pending.record_path(jobs.parent, "sid-a", "delivery-parent")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**record, "state": "rejected", "expiry_reason": "fixture-refusal"}),
+                        encoding="utf-8")
+        ended_work, _ended_state, ended_ready = observe()
+        self.assertEqual(ended_work[0].delivery_state, "rejected")
+        self.assertEqual(ended_ready.state, "ready")
+
 
 class CanonicalNoticeJoinTest(unittest.TestCase):
     """Real zero-attempt writer, current duty, common courier and native boundaries."""
