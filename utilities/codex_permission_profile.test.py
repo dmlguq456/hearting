@@ -1031,6 +1031,7 @@ class CodeStageLocalNetworkTest(_CodexBuilderFixture):
         self.assertIs(record["network_allowed"], False)
         self.assertEqual(record["network_enforcement"], "os-sandbox")
         self.assertEqual(record["writable_roots"], scope["write_roots"])
+        self.assertEqual(record["read_roots"], [])      # the profile adds no read root
         self.assertNotIn("unmet", record)
 
     def test_unavailable_scope_is_recorded_as_unmet_without_widening(self):

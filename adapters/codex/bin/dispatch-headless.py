@@ -2892,7 +2892,9 @@ def main(argv: list[str]) -> int:
             local_verification = effective_scope(args, [*default_roots,
                 *(args.execution_access_grant.writable_roots if args.execution_access_grant else ())],
                 "codex", dispatch_env, sandbox=effective_runtime_sandbox(args),
-                network=bool(args.nested_headless_network))
+                network=bool(args.nested_headless_network),
+                read_roots=(args.execution_access_grant.read_roots
+                            if args.execution_access_grant else ()))
             effective_path, effective_sha256 = publish_effective_grant(
                 jobs=jobs, attempt_id=args.attempt_id, route_id=grant_route_id,
                 route_hash=grant_route_hash,

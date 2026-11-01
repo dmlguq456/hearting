@@ -283,11 +283,12 @@ def scratch_environment(environ=None):
     return env
 
 
-def effective_scope(args, supplied, harness, environ, *, sandbox=None, network=False):
+def effective_scope(args, supplied, harness, environ, *, sandbox=None, network=False,
+                    read_roots=()):
     """Describe the concrete projection in the existing attempt grant record."""
     bound = bound_lab_context(args, environ)
     if bound is None:
-        return _code_stage_scope(args, supplied, harness, environ, sandbox, network)
+        return _code_stage_scope(args, supplied, harness, environ, sandbox, network, read_roots)
     scope = review_scope(bound["route"], bound["node_id"], args.route_file, environ)
     prepare_review_directories(scope)
     return {"network": "loopback-only", "route_node": bound["node_id"],
@@ -297,7 +298,7 @@ def effective_scope(args, supplied, harness, environ, *, sandbox=None, network=F
             "read_roots": [bound["worktree"], bound["artifact_root"], *scope["read_only_roots"]]}
 
 
-def _code_stage_scope(args, supplied, harness, environ, sandbox, network):
+def _code_stage_scope(args, supplied, harness, environ, sandbox, network, read_roots):
     """Approved code stage on Codex: record the localhost-only projection, or the unmet fact."""
     if harness != "codex":
         return None
@@ -319,7 +320,8 @@ def _code_stage_scope(args, supplied, harness, environ, sandbox, network):
             "route_id": bound["route"].get("route_id"), "route_hash": bound["route"].get("route_hash"),
             "projection": "native-profile",
             "write_roots": sorted({str(Path(root).resolve()) for root in supplied}),
-            "read_roots": [bound["worktree"], bound["artifact_root"]]}
+            # Only what the stage was already granted to read; the profile adds no read root.
+            "read_roots": sorted({str(Path(root).resolve()) for root in read_roots})}
 
 
 def verification_command(command, environ=None):
