@@ -753,7 +753,9 @@ class WorkStartTest(unittest.TestCase):
 
     def test_question_failure_after_frame_completion_does_not_promise_another_wake(self):
         self.start(); self.ready = True
-        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t"))
+        # A completed frame leg carries its pass; a done row with no result is a resultless end.
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").replace(
+            "worker_type=frame", "failure_class=pass,worker_type=frame"))
         with mock.patch.object(W, "frame_interview_step", side_effect=ValueError("bad-question")):
             result = self.start(interview="question.json")
         self.assertEqual(result["state"], "needs-attention", result)

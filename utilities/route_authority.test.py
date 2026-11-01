@@ -2205,5 +2205,95 @@ class ProducerFinalizeHeldCompletionStateTest(unittest.TestCase):
         self.assertEqual((decision.state, decision.reason), ("pending", "claimed"))
 
 
+class U7RuntimeEndRuleTest(unittest.TestCase):
+    """Hand-built shape of SR rt-aad5 / A39 / A42; no installed state or recorded copy needed."""
+
+    OWNER = {"worker_type": "owner", "launch_started": "1", "supervisor_lease": "flock-v1",
+             "supervisor_lease_file": "/unused", "note": "dead-protocol", "failure_class": "protocol",
+             "terminal_event": "dispatch.supervisor.error"}
+
+    def test_supervisor_error_without_result_resumes_for_any_reason_name(self):
+        for reason in ("terminal-event-missing", "opencode-final-stop-missing",
+                       "app-server-turn-failed", "codex-turn-stop-missing"):
+            for failure_class in ("protocol", "runtime"):
+                with self.subTest(reason=reason, failure_class=failure_class):
+                    meta = {**self.OWNER, "reconcile_reason": reason, "failure_class": failure_class}
+                    self.assertTrue(RA.runtime_owner_can_resume("done", meta))
+                    self.assertEqual(RA._replacement_kind("done", meta), "runtime")
+
+    def test_live_owner_hands_back(self):
+        choice = RA.decide_continuation(action="owner", status="running", metadata=self.OWNER,
+            facts={"process": SimpleNamespace(state="live", reason="pid"), "reachable": True})
+        self.assertEqual((choice.allowed, choice.state, choice.next_action), (True, "running", "handback"))
+
+    def test_readable_result_or_unlaunched_or_cancelled_not_resumed(self):
+        for change in ({"note": "dead-worker-blocked", "failure_class": "blocked"},
+                       {"note": "dead-worker-fail", "failure_class": "fail"},
+                       {"launch_started": "0"}, {"supervisor_lease": ""}, {"supervisor_lease_file": ""},
+                       {"terminal_event": "dispatch.supervisor.done"}, {"failure_class": "fail"},
+                       {"worker_type": "stage"}):
+            with self.subTest(change=change):
+                self.assertFalse(RA.runtime_owner_can_resume("done", {**self.OWNER, **change}))
+        self.assertFalse(RA.runtime_owner_can_resume("cancelled", self.OWNER))
+        self.assertFalse(RA.runtime_owner_can_resume("killed", self.OWNER))
+
+
+class U4FrameRuntimeKindTest(unittest.TestCase):
+    """Hand-built shape of BC45 / E4-C3 frame rows; no installed state or recorded copy needed."""
+
+    FRAME = {"worker_type": "frame", "launch_started": "1", "note": "dead-launch-exit-1",
+             "failure_class": "launch"}
+
+    def test_resultless_frame_runtime_end_is_replaceable(self):
+        self.assertEqual(RA._replacement_kind("done", self.FRAME), "runtime")
+        # the rule reads observed columns, never the note's name
+        self.assertEqual(RA._replacement_kind("done", {**self.FRAME, "note": "dead-anything-new"}), "runtime")
+
+    def test_a_frame_result_or_unlaunched_leg_is_not_replaced(self):
+        for change in ({"note": "dead-worker-fail", "failure_class": "fail"},
+                       {"note": "dead-worker-blocked", "failure_class": "blocked"},
+                       {"note": "completed-supervisor", "failure_class": "pass"},
+                       {"launch_started": "0"}, {"parent_close_requested": "1"}):
+            with self.subTest(change=change):
+                self.assertIsNone(RA._replacement_kind("done", {**self.FRAME, **change}))
+        self.assertIsNone(RA._replacement_kind("cancelled", self.FRAME))
+        # a usage-limit stop keeps its own capacity path, not the runtime one
+        self.assertNotEqual(RA._replacement_kind(
+            "done", {**self.FRAME, "note": "dead-capacity", "failure_class": "capacity"}), "runtime")
+
+
+class U4CapacityNextActionTest(unittest.TestCase):
+    def test_replacement_capacity_wait_names_auto_resume(self):
+        choice = RA.decide_continuation(action="replacement-progress", status="done",
+            metadata={"attempt_id": "att-cap", "worker_type": "owner"},
+            facts={"kind": "capacity", "registry_rows": {}, "resume_capacity": False})
+        self.assertEqual((choice.allowed, choice.reason, choice.next_action),
+                         (False, "replacement-capacity-wait", "arm-capacity-resume"))
+
+
+class U4ChildUnsettledTest(unittest.TestCase):
+    def test_child_unsettled_is_wait_with_retry_when(self):
+        choice = RA.decide_continuation(action="replacement", status="done",
+            metadata={"attempt_id": "att-x"}, facts={"child_unsettled": "att-child"})
+        self.assertEqual((choice.allowed, choice.state, choice.reason),
+                         (False, "wait", "replacement-owner-child-unsettled"))
+        self.assertTrue(choice.retry_when)
+
+
+class U7BudgetStateTest(unittest.TestCase):
+    def test_budget_only_is_budget_state_not_protected(self):
+        choice = RA.decide_continuation(action="replacement", status="done",
+            metadata={"attempt_id": "att-x"}, facts={"budget_exhausted": True})
+        self.assertEqual((choice.allowed, choice.state, choice.reason),
+                         (False, "budget", "automatic-replacement-exhausted"))
+        self.assertTrue(choice.retry_when)
+
+    def test_competing_successor_stays_protected(self):
+        choice = RA.decide_continuation(action="replacement-budget", status="done",
+            facts={"competing_successor": True})
+        self.assertEqual((choice.allowed, choice.state, choice.reason),
+                         (False, "protected", "automatic-replacement-exhausted"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1274,6 +1274,25 @@ def _budget_exhausted(jobs, source, *, lines=None, route=None, capacity=False):
     return legacy_budget_exhausted(jobs, lines, source, route=route)
 
 
+def _same_runtime_end(jobs, rows, source):
+    """Whether `source` is itself a `runtime` replacement that ended on the same observed columns.
+
+    The columns are the supervisor's recorded observation (`failure_class`, `terminal_event`,
+    harness, model profile), never a note or reason name. A repeat means the cause did not
+    change, so the default budget stops a further automatic replacement; any changed column
+    (another harness, protocol instead of runtime) is a changed cause and replaces once more.
+    """
+    prior_id, family = source.get('replacement_original_attempt_id'), source.get('replacement_family_id')
+    if not prior_id or not family or prior_id not in rows:
+        return False
+    record = _read(_record_path(jobs, family))
+    if (record or {}).get('proof', {}).get('death_kind') != 'runtime':
+        return False
+    prior = rows[prior_id][1]
+    return all(source.get(key, '') == prior.get(key, '')
+               for key in ('failure_class', 'terminal_event', 'harness', 'model_profile'))
+
+
 def _plain_retry_successor(rows, aid):
     """Does an ordinary same-node retry, not a replacement claim, already continue this attempt?"""
     return any((meta.get('automatic_retry_of') == aid or meta.get('prior_attempt_id') == aid)
@@ -1345,7 +1364,8 @@ def claim(jobs: Path, aid: str, *, resume_capacity=False) -> dict:
         route_authority.require_continuation(route_authority.decide_continuation(route,
             action="replacement", status=fields[1], metadata=meta,
             facts={"death_kind": proof['death_kind'],
-                   "budget_exhausted": _budget_exhausted(jobs, meta, lines=lines, route=route, capacity=capacity)}))
+                   "budget_exhausted": _budget_exhausted(jobs, meta, lines=lines, route=route, capacity=capacity)
+                   or (proof['death_kind'] == 'runtime' and _same_runtime_end(jobs, rows, meta))}))
         _no_competing_successor(rows, aid)
         owner = aid if meta.get('worker_type') == 'owner' else meta.get('parent_attempt_id') or aid
         _source_fences(jobs, meta, route['route_id'], aid)
