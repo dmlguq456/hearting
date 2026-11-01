@@ -61,6 +61,14 @@ class ObserverOwnershipLost(StopWaiting):
     """This observer no longer owns the exact duty lease and durable row."""
 
 
+class ObserverReleaseMoved(StopWaiting):
+    """A newer installed release exists; the lease-holding observer hands over to it."""
+
+    def __init__(self, binding: str):
+        super().__init__("observer-release-moved")
+        self.binding = binding
+
+
 PARENT_SESSION_ENDED = "parent-session-ended"
 JOIN_CHECKPOINT_SECONDS = 5.0
 
@@ -198,7 +206,18 @@ def parent_session_stop_reason(args, attempts):
 
 
 def _join_checkpoint(args, attempts):
-    """Run the existing exact join with a short bounded checkpoint for supervision."""
+    """Run the existing exact join with a short bounded checkpoint for supervision.
+
+    Entering a join is this observer's safe point: nothing is projected or being
+    delivered yet and the duty lease is still held, so an observer running an
+    older release than the installed one passes the duty to the installed
+    release here, before it settles anything with the code it started with.
+    """
+    if not _observer_ownership_lost(args):
+        import peer_obligations
+        binding = peer_obligations.release_successor_binding()
+        if binding:
+            raise ObserverReleaseMoved(binding)
     has_parent_lifetime = bool(getattr(args, "parent_lifetime", None))
     is_resumed_observer = bool(getattr(args, "_resume_execution", False))
     if not has_parent_lifetime and not is_resumed_observer:
@@ -2239,13 +2258,26 @@ def execute(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         ownership_lost = True
         return {"schema_version": 1, "status": "retryable",
                 "reason": "completion-observer-ownership-lost"}, 75
+    except ObserverReleaseMoved as moved:
+        args._successor_binding = moved.binding
+        _update_duty(args, args._obligation_id,
+            state="unknown", reason="observer-release-moved", delivery="pending")
+        return {"schema_version": 1, "status": "retryable",
+                "reason": "observer-release-moved"}, 75
     finally:
         still_owner = (not ownership_lost and batch_obligations.observer_owns_current(
             args.jobs, args._obligation_id, lease))
         if still_owner:
             current = batch_obligations.read(args.jobs, args._obligation_id) or {}
             if current.get("state") in batch_obligations._PENDING:
-                if getattr(args, "_time_budget_spent", False):
+                successor = getattr(args, "_successor_binding", None)
+                if successor:
+                    # The installed release replaced this one: pass the retained lease to
+                    # that release's observer; only a failed handoff goes back to the runner.
+                    if not batch_obligations.handoff_observer(
+                            args.jobs, args._obligation_id, lease, service_current=successor):
+                        batch_obligations.request_runner(args.jobs)
+                elif getattr(args, "_time_budget_spent", False):
                     # Only a generation that used its whole observation budget
                     # passes its retained lease straight to a successor.
                     batch_obligations.handoff_observer(

@@ -1339,6 +1339,126 @@ class ObserverGenerationEndTest(unittest.TestCase):
         handoff.assert_called_once()
         runner.assert_not_called()
 
+    # --- U3: an observer on an older release hands its duty to the installed release ---------
+
+    def _observing_duty(self):
+        self.jobs.write_text("fixture\n", encoding="utf-8")
+        created = self.module.parser().parse_args([
+            "--queue-socket", str(self.base / "app-server-control" / "app-server-control.sock"),
+            "--jobs", str(self.jobs), "--parent-session-id", SESSION, "--thread-id", SESSION,
+            "--sealed-batch-id", "batch-release-moved", "--attempt-id", self.ATTEMPT,
+            "--timeout", "86400"])
+        duty_id, _record = self.batch.create(created)
+        return duty_id
+
+    def _run_observer(self, binding_values, *, joins):
+        """Run a resumed observer whose join never finishes; `joins` caps the fixture's loop."""
+        import peer_obligations
+        import dispatch_supervision
+        duty_id = self._observing_duty()
+        join_calls = []
+
+        def join(_args, _attempts):
+            join_calls.append(1)
+            if len(join_calls) > joins:
+                raise self.module.ObserverOwnershipLost("fixture-stop")
+            return {"schema_version": 2, "state": "timeout"}
+
+        with mock.patch.object(peer_obligations, "release_successor_binding",
+                               side_effect=binding_values) as binding, \
+             mock.patch.object(self.module, "run_join", side_effect=join), \
+             mock.patch.object(self.module, "wait_for_session_launch_claims"), \
+             mock.patch.object(self.module, "parent_session_stop_reason", return_value=""), \
+             mock.patch.object(dispatch_supervision, "materialize", return_value=[]) as materialize, \
+             mock.patch.object(self.batch, "handoff_observer", return_value=True) as handoff, \
+             mock.patch.object(self.batch, "request_runner") as runner:
+            result, code = self._resume(duty_id)
+        return duty_id, result, code, join_calls, binding, materialize, handoff, runner
+
+    def test_an_observer_of_an_older_release_passes_its_lease_on_before_the_next_join(self):
+        # T7: the install moved while this observer waited; its next join must not run old code.
+        duty_id, result, code, joins, _binding, materialize, handoff, runner = self._run_observer(
+            ["/data/current"], joins=1)
+        self.assertEqual((code, result["reason"]), (75, "observer-release-moved"))
+        self.assertEqual(joins, [])  # the older release's settle is never called again
+        duty = self.batch.read(self.jobs, duty_id)
+        self.assertEqual((duty["state"], duty["reason"], duty["delivery"]),
+                         ("unknown", "observer-release-moved", "pending"))
+        handoff.assert_called_once()
+        self.assertEqual(handoff.call_args.kwargs["service_current"], "/data/current")
+        runner.assert_not_called()
+        # No parent notice: the wait was left through the same path as a lost lease.
+        materialize.assert_not_called()
+
+    def test_the_move_happens_at_the_next_checkpoint_after_the_install_not_before(self):
+        _duty, result, _code, joins, binding, _materialize, handoff, _runner = self._run_observer(
+            [None, None, "/data/current"], joins=5)
+        self.assertEqual(result["reason"], "observer-release-moved")
+        self.assertEqual(len(joins), 2)  # joins ran while nothing was installed; none after
+        self.assertEqual(binding.call_count, 3)
+        handoff.assert_called_once()
+
+    def test_a_failed_handoff_returns_the_duty_to_the_runner(self):
+        import peer_obligations
+        duty_id = self._observing_duty()
+        with mock.patch.object(peer_obligations, "release_successor_binding",
+                               return_value="/data/current"), \
+             mock.patch.object(self.module, "wait_for_session_launch_claims"), \
+             mock.patch.object(self.batch, "handoff_observer", return_value=False) as handoff, \
+             mock.patch.object(self.batch, "request_runner") as runner:
+            result, code = self._resume(duty_id)
+        self.assertEqual((code, result["reason"]), (75, "observer-release-moved"))
+        handoff.assert_called_once()
+        runner.assert_called_once_with(self.jobs)
+
+    def test_a_first_generation_observer_without_a_parent_lifetime_checks_before_its_long_join(self):
+        # Real delay bound for this shape (no parent lifetime, not resumed): the check runs each
+        # time a join is entered; one in-flight join is not interrupted (<= its --timeout).
+        import peer_obligations
+        args = SimpleNamespace(parent_lifetime=None, _resume_execution=False, timeout=3600.0,
+                               interval=2.0)
+        with mock.patch.object(peer_obligations, "release_successor_binding", return_value=None), \
+             mock.patch.object(self.module, "run_join", return_value={"state": "ready"}) as join:
+            self.module._join_checkpoint(args, {"att-child"})
+        self.assertIs(join.call_args.args[0], args)  # one unbounded join, as before
+        with mock.patch.object(peer_obligations, "release_successor_binding",
+                               return_value="/data/current"), \
+             mock.patch.object(self.module, "run_join") as join:
+            with self.assertRaises(self.module.ObserverReleaseMoved):
+                self.module._join_checkpoint(args, {"att-child"})
+        join.assert_not_called()
+
+    def test_a_lease_this_observer_lost_is_never_moved(self):
+        import peer_obligations
+        args = SimpleNamespace(parent_lifetime=None, _resume_execution=True, timeout=600.0,
+                               interval=1.0)
+        with mock.patch.object(self.module, "_observer_ownership_lost", return_value=True), \
+             mock.patch.object(peer_obligations, "release_successor_binding",
+                               return_value="/data/current") as binding, \
+             mock.patch.object(self.module, "run_join", return_value={"state": "timeout"}) as join:
+            self.module._join_checkpoint(args, {"att-child"})
+        binding.assert_not_called()
+        join.assert_called_once()
+
+    def test_delivery_never_consults_the_installed_release(self):
+        # T7c: once an outcome is stored the observer is delivering; that is not a safe point.
+        import peer_obligations
+        self.jobs.write_text("fixture\n", encoding="utf-8")
+        duty_id = self._duty({"schema_version": 2, "state": "ready", "children": []})
+        with mock.patch.object(peer_obligations, "release_successor_binding",
+                               return_value="/data/current") as binding, \
+             mock.patch("dispatch_completion_join.cached_batch_delivery_state",
+                        return_value="unmaterialized"), \
+             mock.patch.object(self.module, "deliver_to_native_queue",
+                               side_effect=AssertionError("never resent")), \
+             mock.patch.object(self.batch, "handoff_observer") as handoff, \
+             mock.patch.object(self.batch, "request_runner") as runner:
+            result, code = self._resume(duty_id)
+        self.assertEqual((code, result["reason"]), (75, "cached-outcome-delivery-unmaterialized"))
+        binding.assert_not_called()
+        handoff.assert_not_called()
+        runner.assert_called_once_with(self.jobs)
+
     def test_native_queue_deadline_marks_the_budget_spent(self):
         args = SimpleNamespace(queue_socket=Path("/tmp/app-server.sock"), thread_id=SESSION,
                                jobs=self.base / "jobs.log", timeout=0.0,

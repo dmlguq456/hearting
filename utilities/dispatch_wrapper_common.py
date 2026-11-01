@@ -47,46 +47,98 @@ from model_config import (
 )
 from owner_route_binding import OwnerRouteBindingError, validate_runtime_requirements
 import route_authority
+import route_format
 from route_authority import scan_anchored_death
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def reexec_for_sealed_release(wrapper_root: Path, sealed_home: Path, harness: str,
-                              argv: list[str]) -> bool:
-    """Re-run this wrapper from a sibling managed release matching its sealed home."""
-    if harness not in {"claude", "codex", "opencode"}:
-        return False
+def _release_wrapper(wrapper_root: Path, release: Path, harness: str) -> Path | None:
+    """The sibling managed release's wrapper for this harness, or None when it is not one."""
     try:
-        wrapper_root = Path(wrapper_root).resolve(strict=True)
-        sealed_root = Path(sealed_home).resolve(strict=True)
+        release = Path(release).resolve(strict=True)
     except (OSError, RuntimeError, TypeError, ValueError):
-        return False
-    if wrapper_root == sealed_root or wrapper_root.parent != sealed_root.parent:
-        return False
+        return None
+    if wrapper_root == release or wrapper_root.parent != release.parent:
+        return None
     releases_root = wrapper_root.parent
     if releases_root.name != "releases" or not releases_root.is_dir():
-        return False
-
-    for release in (wrapper_root, sealed_root):
-        marker = release / ".hearting-release.json"
+        return None
+    for item in (wrapper_root, release):
+        marker = item / ".hearting-release.json"
         if marker.is_symlink() or not marker.is_file():
-            return False
-
-    target = sealed_root / "adapters" / harness / "bin" / "dispatch-headless.py"
+            return None
+    target = release / "adapters" / harness / "bin" / "dispatch-headless.py"
     try:
         target = target.resolve(strict=True)
-        if not target.is_relative_to(sealed_root) or not target.is_file():
-            return False
+        if not target.is_relative_to(release) or not target.is_file():
+            return None
     except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    return target
+
+
+def _release_reads_route(installed: Path, wrapper_root: Path, route_file: str | None) -> bool:
+    """Whether the installed release supports the contract and format this launch's record declares."""
+    if not route_file:
+        # Nothing to classify; a release before route_format cannot answer, so it stays out.
+        return installed == wrapper_root or (installed / "utilities" / "route_format.py").is_file()
+    if installed == wrapper_root:
+        import route_format
+        try:
+            record = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        return route_format.unsupported_reason(record) is None
+    reader = installed / "utilities" / "route_format.py"
+    if not reader.is_file():
+        return False
+    try:
+        return subprocess.run([sys.executable, str(reader), str(route_file)], text=True,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=30).returncode == 0
+    except (OSError, subprocess.SubprocessError):
         return False
 
-    # The next wrapper resolves AGENT_HOME to this same real root and therefore
-    # passes the sibling check once. Keep argv as tokens and preserve the
-    # interpreter's normal descriptor, signal, and exit behavior through exec.
-    os.environ["AGENT_HOME"] = str(sealed_root)
-    os.execv(sys.executable, [sys.executable, str(target), *argv])
-    return True
+
+def select_execution_root(wrapper_root: Path, inherited_home: Path, harness: str,
+                          argv: list[str], *, route_file: str | None = None) -> Path:
+    """Choose the release this launch runs on, before admission, and return its root.
+
+    The installed release is the default whenever it supports the contract and
+    format the route record declares; only when it does not (or none can be
+    resolved) does the launch stay on the release its parent tree inherited
+    (`inherited_home`, the parent's `launch_home`; that record is never rewritten).
+    Guard, completion gate, child environment and this launch's own row follow
+    the returned root, so admission happens once, on one release's code.
+    """
+    if harness not in {"claude", "codex", "opencode"}:
+        return Path(inherited_home)
+    try:
+        wrapper_root = Path(wrapper_root).resolve(strict=True)
+        inherited = Path(inherited_home).resolve(strict=True)
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return Path(inherited_home)
+    import peer_obligations
+    installed = peer_obligations.installed_release(wrapper_root)
+    if (installed is not None and installed != inherited
+            and _release_reads_route(installed, wrapper_root, route_file)):
+        if installed == wrapper_root:
+            os.environ["AGENT_HOME"] = str(installed)
+            return installed
+        target = _release_wrapper(wrapper_root, installed, harness)
+        if target is not None:
+            os.environ["AGENT_HOME"] = str(installed)
+            os.execv(sys.executable, [sys.executable, str(target), *argv])
+            return installed
+    target = _release_wrapper(wrapper_root, inherited, harness)
+    if target is not None:
+        # The next wrapper resolves AGENT_HOME to this same real root and therefore
+        # passes the sibling check once. Keep argv as tokens and preserve the
+        # interpreter's normal descriptor, signal, and exit behavior through exec.
+        os.environ["AGENT_HOME"] = str(inherited)
+        os.execv(sys.executable, [sys.executable, str(target), *argv])
+    return inherited
 
 
 def fail(reason: str, code: int, **fields: str) -> int:
@@ -956,8 +1008,8 @@ def validate_route_record(args: argparse.Namespace, *, marker_gate, runtime_harn
         route_record = json.loads(Path(args.route_file).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         route_record = {}
-    if route_record.get("schema_version") != 2 or "broker_contract_version" in route_record:
-        return fail("legacy-broker-route-read-only", 65, route_file=args.route_file, child_spawned="0")
+    if route_format.broker_format(route_record):
+        return fail(route_format.BROKER_REASON, 65, route_file=args.route_file, child_spawned="0")
     try:
         from verification_runtime import supported_requirements
         validate_runtime_requirements(route_record, args.route_node, supported=

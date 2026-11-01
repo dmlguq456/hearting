@@ -777,8 +777,8 @@ class OwnerGrantStartTest(unittest.TestCase):
             "while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)\n")
         wrapper_common = self.wrappers["claude"].WRAPPER_COMMON
         with mock.patch.object(
-            wrapper_common, "reexec_for_sealed_release",
-            wraps=wrapper_common.reexec_for_sealed_release,
+            wrapper_common, "select_execution_root",
+            wraps=wrapper_common.select_execution_root,
         ) as reexec:
             for adapter in ("claude", "codex", "opencode"):
                 with self.subTest(adapter=adapter):
@@ -835,6 +835,35 @@ class OwnerGrantStartTest(unittest.TestCase):
                     registered = [line for line in self.jobs.read_text(encoding="utf-8").splitlines()
                                   if f"attempt_id={attempt}" in line]
                     self.assertEqual(len(registered), 1)
+
+    def test_installed_release_is_the_one_root_of_guard_row_and_child_when_the_tree_inherited_an_older_home(self):
+        # T4: the wrapper runs the installed release B, the tree inherited A. Without any
+        # re-exec, the row's launch_home and the child's AGENT_HOME are B, the root that ran admission.
+        import peer_obligations
+        releases = self.root / "managed" / "releases"
+        releases.mkdir(parents=True)
+        release_a, release_b = releases / "vA", releases / "vB"
+        self.make_release_fixture(release_a)
+        self.make_release_fixture(release_b)
+        self.worker.write_text(
+            "import os,pathlib,sys,time\n"
+            "pathlib.Path(sys.argv[1] + '.home').write_text(os.environ.get('AGENT_HOME', ''))\n"
+            "pathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\n"
+            "while not pathlib.Path(sys.argv[2]).exists(): time.sleep(.01)\n")
+        for adapter in ("claude", "codex", "opencode"):
+            with self.subTest(adapter=adapter):
+                self.env["AGENT_HOME"] = str(release_a)
+                attempt = "att-" + hashlib.sha256(("installed-" + adapter).encode()).hexdigest()[:32]
+                with mock.patch.object(peer_obligations, "installed_release",
+                                       return_value=release_b.resolve()):
+                    result, output = self.start(adapter, attempt, None, route=self.route(adapter),
+                                                release_pair=(release_b, release_a))
+                self.assertEqual(result, 0, output)
+                self.assertEqual(self.last_exec_calls, [])
+                _fields, row = self.row(attempt)
+                self.assertEqual(row["launch_home"], str(release_b.resolve()))
+                self.assertEqual((self.root / (attempt + ".started.home")).read_text(),
+                                 str(release_b.resolve()))
 
     def test_owner_without_request_keeps_default_grants(self):
         route = self.route("codex")

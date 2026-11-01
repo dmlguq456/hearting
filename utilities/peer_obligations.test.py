@@ -3759,5 +3759,72 @@ class FirstGenerationObserverReplacementTest(unittest.TestCase):
         self.assertIsNone(process.poll())
 
 
+class ReleaseSuccessorBindingTest(unittest.TestCase):
+    """A process finds the installed release without any other process's help."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.data = self.base / "data"
+        (self.data / "releases").mkdir(parents=True)
+        self.old = self._release("old")
+        self.new = self._release("new")
+        self.pointer = self.data / "current"
+        self.pointer.symlink_to(self.new)
+
+    def _release(self, name):
+        root = self.data / "releases" / name
+        for relative in ("core", "utilities", "tools/install"):
+            (root / relative).mkdir(parents=True, exist_ok=True)
+        (root / "RELEASE_VERSION").write_text(name + "\n", encoding="utf-8")
+        (root / "harness-manifest.json").write_text("{}\n", encoding="utf-8")
+        (root / "core/CORE.md").write_text("fixture\n", encoding="utf-8")
+        for relative in ("utilities/peer_obligations.py", "utilities/peer-steward.py"):
+            (root / relative).write_text("", encoding="utf-8")
+        shutil.copy2(_HERE.parent / "tools/install/distribution.py",
+                     root / "tools/install/distribution.py")
+        return root
+
+    def _binding_from(self, root, *, agent_home=None, data=None):
+        environment = {"HOME": str(self.base / "home"), "PATH": os.environ.get("PATH", ""),
+                       "HARNESS_DATA_ROOT": str(data or self.data)}
+        if agent_home is not False:
+            environment["AGENT_HOME"] = str(agent_home or root)
+        with mock.patch.object(obligations, "__file__", str(root / "utilities/peer_obligations.py")), \
+             mock.patch.dict(os.environ, environment, clear=True):
+            return obligations.release_successor_binding()
+
+    def test_an_older_installed_release_is_given_the_pointer_to_move_by(self):
+        self.assertEqual(self._binding_from(self.old), str(self.pointer))
+        self.assertEqual(self._binding_from(self.old, agent_home=False), str(self.pointer))
+
+    def test_the_installed_release_is_never_moved_again(self):
+        self.assertIsNone(self._binding_from(self.new))
+
+    def test_installed_release_reads_the_pointer_without_the_callers_environment(self):
+        with mock.patch.dict(os.environ, {"HARNESS_DATA_ROOT": str(self.data),
+                                          "AGENT_HOME": str(self.old)}):
+            self.assertEqual(obligations.installed_release(self.old), self.new.resolve())
+            self.assertEqual(obligations.active_service_root(str(self.pointer), root=self.old),
+                             self.new.resolve())
+
+    def test_checkouts_other_installs_mismatched_homes_and_broken_pointers_stay_put(self):
+        checkout = self.base / "checkout"
+        (checkout / "utilities").mkdir(parents=True)
+        (checkout / "utilities/peer_obligations.py").write_text("", encoding="utf-8")
+        self.assertIsNone(self._binding_from(checkout))
+        foreign = self.base / "foreign-data"
+        (foreign / "releases").mkdir(parents=True)
+        self.assertIsNone(self._binding_from(self.old, data=foreign))
+        # A home that names another release than the code is not this process's install.
+        self.assertIsNone(self._binding_from(self.old, agent_home=self.new))
+        self.pointer.unlink()
+        self.pointer.symlink_to(self.data / "releases" / "missing")
+        self.assertIsNone(self._binding_from(self.old))
+        with mock.patch.dict(os.environ, {"HARNESS_DATA_ROOT": str(self.data)}):
+            self.assertIsNone(obligations.installed_release(self.old))
+
+
 if __name__ == "__main__":
     unittest.main()

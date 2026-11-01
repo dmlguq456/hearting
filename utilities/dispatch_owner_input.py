@@ -288,26 +288,26 @@ def submit(jobs, attempt, text, request_id=None):
     return result
 
 
-def _respawn_adapter():
-    adapter_path = ROOT / "adapters" / "codex" / "bin" / "dispatch-headless.py"
+def _respawn_adapter(harness):
+    """The adapter's same-attempt recovery, or None when that adapter has none."""
+    if harness not in {"claude", "codex", "opencode"}:
+        return None
+    adapter_path = ROOT / "adapters" / harness / "bin" / "dispatch-headless.py"
     if adapter_path.is_symlink() or not adapter_path.is_file():
         return None
     spec = importlib.util.spec_from_file_location(
-        "hearting_codex_dispatch_headless_recovery", adapter_path)
+        f"hearting_{harness}_dispatch_headless_recovery", adapter_path)
     if spec is None or spec.loader is None:
         return None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module.respawn_supervised_owner
+    return getattr(module, "respawn_supervised_owner", None)
 
 
 def _installed_release():
-    current = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "hearting/current"
-    try:
-        return current.resolve(strict=True)
-    except OSError:
-        return None
+    import peer_obligations
+    return peer_obligations.installed_release(ROOT)
 
 
 def _consumer_release(metadata):
@@ -348,7 +348,7 @@ def move_parked_consumer(jobs, row, target, request_id, *, session=None, spawn=N
     attempt = row.attempt_id
     try:
         metadata = dict(row.metadata)
-        if (row.status not in {"open", "running"} or metadata.get("harness") != "codex"
+        if (row.status not in {"open", "running"}
                 or metadata.get("launch_claimed") != "1" or metadata.get("launch_started") != "1"
                 or metadata.get("parent_close_requested") == "1"
                 or route_parent_close.row_requested(metadata, jobs)
@@ -387,7 +387,7 @@ def move_parked_consumer(jobs, row, target, request_id, *, session=None, spawn=N
         consumer_session = route_parent_close.owner_consumer_session(metadata, resources)
         if consumer_session is None:
             return {}
-        spawn = spawn or _respawn_adapter()
+        spawn = spawn or _respawn_adapter(metadata.get("harness"))
         if spawn is None:
             return {}
         expected = (metadata.get("pid", ""), metadata.get("pid_start", ""))
@@ -453,7 +453,8 @@ def recover_consumer(jobs, attempt, *, session=None, spawn=None):
             return _recovery_result("awaiting-parent")
         if metadata.get("launch_claimed") != "1" or metadata.get("launch_started") != "1":
             return _recovery_result("not-started", "owner-launch-not-claimed")
-        if metadata.get("harness") != "codex":
+        spawn = spawn or _respawn_adapter(metadata.get("harness"))
+        if spawn is None:
             return _recovery_result("not-started", "consumer-respawn-unrealized-" +
                                     str(metadata.get("harness") or "unknown"))
 
@@ -483,7 +484,8 @@ def recover_consumer(jobs, attempt, *, session=None, spawn=None):
         decision = route_authority.decide_continuation(
             action="owner-input", jobs=jobs, status=row.status, metadata=metadata,
             facts={"bound": True, "queued": True, "thread_match": True,
-                   "lease_held": False, "caller_owns": True, "harness": "codex",
+                   "lease_held": False, "caller_owns": True,
+                   "harness": metadata.get("harness"), "respawn_realized": True,
                    "accepting": accepting, "reachable": False, "recoverable": True,
                    "process": process, "owner_continuation": continuation},
         )
@@ -491,9 +493,6 @@ def recover_consumer(jobs, attempt, *, session=None, spawn=None):
             return _recovery_result("not-started", decision.reason or decision.detail or
                                     "owner-input-recovery-not-authorized")
 
-        spawn = spawn or _respawn_adapter()
-        if spawn is None:
-            return _recovery_result("not-started", "codex-respawn-adapter-unavailable")
         try:
             outcome = spawn(jobs, attempt,
                             expected_identity=(metadata.get("pid", ""), metadata.get("pid_start", "")))

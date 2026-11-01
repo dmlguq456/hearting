@@ -111,6 +111,60 @@ class OwnerInputTest(unittest.TestCase):
         self.assertEqual(changed['consumer_recovery'], 'not-started:owner-input-thread-mismatch')
         launch.assert_not_called()
 
+    def test_only_an_adapter_with_a_same_attempt_recovery_restores_or_moves_a_consumer(self):
+        # T10: the decision follows the adapter's realization, not a harness name.
+        import dispatch_contract as contract
+        import route_authority
+        import route_parent_close
+
+        self.assertTrue(callable(I._respawn_adapter('codex')))
+        for harness in ('claude', 'opencode', 'unknown'):
+            self.assertIsNone(I._respawn_adapter(harness))
+        resources = [{'kind': 'resource', 'run_id': 'cpu'}]
+        for harness in ('claude', 'opencode'):
+            with self.subTest(harness=harness):
+                jobs = self.root / harness / 'jobs.log'
+                jobs.parent.mkdir()
+                lease = supervisor_lease_path(jobs, self.attempt)
+                jobs.write_text(FIXTURE.owner_row(lease))
+                I.initialize_owner_input(jobs, self.attempt, 'codex-active-turn')
+                with hold_supervisor_lease(jobs, self.attempt, lease):
+                    I.OwnerInput(jobs, self.attempt, 'thread-1', 'codex-active-turn', lambda _e: None)
+                # The same bound channel, now on a row of another harness.
+                jobs.write_text(FIXTURE.owner_row(lease).replace(
+                    'harness=codex', 'harness=' + harness).replace(
+                    'attempt_id=' + self.attempt,
+                    'launch_claimed=1,launch_started=1,launch_fence=registry-v1,'
+                    'pid=99999999,pid_start=100,attempt_id=' + self.attempt))
+                channel = I._path(jobs, self.attempt)
+                value = json.loads(channel.read_text())
+                value['target'] = I._target(jobs, self.attempt)[1]
+                channel.write_text(json.dumps(value))
+                I.submit(jobs, self.attempt, 'pending correction', 'pending')
+                with mock.patch.object(contract, 'supervisor_lease_is_held', return_value=False), \
+                     mock.patch.object(route_authority, 'owns', return_value=True), \
+                     mock.patch.object(route_parent_close, 'row_requested', return_value=False), \
+                     mock.patch.object(route_parent_close, 'owner_continuation_processes',
+                                       return_value=(contract.ProcessQuiescence(
+                                           'quiescent', 'registered-resources-preserved'), resources)), \
+                     mock.patch.object(contract, 'attempt_governed_process_quiescence',
+                                       return_value=contract.ProcessQuiescence('quiescent', 'gone')):
+                    result = I.recover_consumer(jobs, self.attempt, session='parent')
+                self.assertEqual(result['consumer_recovery'],
+                                 'not-started:consumer-respawn-unrealized-' + harness)
+                with mock.patch.object(I, '_installed_release', return_value=ROOT.resolve()), \
+                     mock.patch.object(I, '_consumer_release', return_value=ROOT.resolve().parent), \
+                     mock.patch.object(route_authority, 'owns', return_value=True), \
+                     mock.patch.object(route_parent_close, 'row_requested', return_value=False), \
+                     mock.patch.object(route_parent_close, 'owner_resources', return_value=resources), \
+                     mock.patch.object(route_parent_close, 'owner_consumer_session',
+                                       return_value='thread-1'), \
+                     mock.patch.object(I, 'supervisor_lease_is_held', return_value=True), \
+                     mock.patch.object(I, '_respawn_adapter', wraps=I._respawn_adapter) as adapter:
+                    row, target = I._target(jobs, self.attempt)
+                    self.assertEqual(I.move_parked_consumer(jobs, row, target, 'pending'), {})
+                    adapter.assert_called_once_with(harness)
+
     def test_terminal_admission_race_and_completed_receipt_are_separate(self):
         I.submit(self.jobs, self.attempt, 'reuse')
         self.assertFalse(self.control.terminal_boundary())
