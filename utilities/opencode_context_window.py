@@ -551,14 +551,12 @@ def prepare_launch_context(*, model: str, context_window: str | int,
         selected_model = (f"{before_info['providerID']}/{before_info['id']}"
                           if model == "inherit" else model)
         assert isinstance(selected_model, str)
-        if effective_variant not in (None, "", "runtime-default"):
-            variant_model = selected_model.partition("#")[0]
-            observed = before_info.get("variants") or ()
-            if opencode_runtime.variant_support(
-                    variant_model, effective_variant, observed) == "unsupported":
-                raise OpenCodeContextError(
-                    f"Variant unavailable for {variant_model}: {effective_variant} "
-                    f"(지원: {', '.join(observed)})")
+        # The launch snapshot is the freshest observation of this exact model:
+        # a variant it does not list moves to the nearest supported one instead
+        # of refusing the launch. A value the resolver already fitted passes
+        # through, so no fit key is produced for it.
+        effective_variant, variant_fit_from = opencode_runtime.fit_variant(
+            effective_variant, before_info.get("variants") or ())
         native_limits = dict(before_info["limits"])
         updated, applied = apply_context_override(
             config_content, selected_model, context_window, native_limits,
@@ -583,7 +581,11 @@ def prepare_launch_context(*, model: str, context_window: str | int,
             "source": "opencode-v2-model-api",
             "reason": "native-v2-compaction-behavior-unverified",
         }
+        fit_fields = ({"variant_fit_from": variant_fit_from,
+                       "catalog_fit_observer": "launch-snapshot"}
+                      if variant_fit_from is not None else {})
         return {
+            **fit_fields,
             "config_content": updated,
             "model": selected_model,
             "variant": effective_variant,

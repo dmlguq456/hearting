@@ -75,13 +75,18 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
         }
         self.before = self._model(1000000, 500000, 16000)
 
-    def _model(self, context, input_limit, output):
-        return {"providerID": "fixture", "id": "model", "modelID": "provider-model",
-                "name": "Fixture", "status": "active", "enabled": True,
-                "limit": {"context": context, "input": input_limit, "output": output}}
+    def _model(self, context, input_limit, output, variants=None):
+        row = {"providerID": "fixture", "id": "model", "modelID": "provider-model",
+               "name": "Fixture", "status": "active", "enabled": True,
+               "limit": {"context": context, "input": input_limit, "output": output}}
+        if variants is not None:
+            row["variants"] = [{"id": value} for value in variants]
+        return row
 
-    def _invoke(self, *, wrong_location=False, shared_stale=False, environment=None):
+    def _invoke(self, *, wrong_location=False, shared_stale=False, environment=None,
+                variant="fast", snapshot_variants=None, resolver_catalog=None):
         calls = []
+        self.before = self._model(1000000, 500000, 16000, snapshot_variants)
 
         def native_api(command, *, cwd, env):
             calls.append((command, cwd, dict(env)))
@@ -100,6 +105,7 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
                     limits.get("context", self.before["limit"]["context"]),
                     limits.get("input", self.before["limit"]["input"]),
                     limits.get("output", self.before["limit"]["output"]),
+                    snapshot_variants,
                 )
                 response = {"location": {"directory": location}, "data": [response_model]}
             else:
@@ -112,7 +118,7 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
             "--capability", "autopilot-code", "--capability-mode", "debug",
             "--worker-mode", "dev/backend", "--worker-type", "review",
             "--launch-lifecycle", "foreground-scoped", "--model", "fixture/model",
-            "--variant", "fast", "--attempt-id", "att-context-fixture",
+            "--variant", variant, "--attempt-id", "att-context-fixture",
         ]
         stream = __import__("io").StringIO()
         real_popen = subprocess.Popen
@@ -141,7 +147,7 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
         def capture_worker_command(args, prompt_path, log_path):
             command = real_shell_command(args, prompt_path, log_path)
             worker_commands.append(command)
-            return "true"
+            return f"true  # build-{len(worker_commands)}"
 
         patches = [
             mock.patch.object(DISPATCH, "resolve_artifact_root", return_value=str(self.artifacts)),
@@ -155,6 +161,10 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
             mock.patch.object(CONTEXT, "_installed_version", return_value="2.0.32"),
             mock.patch.object(CONTEXT, "_run", side_effect=native_api),
             mock.patch.object(DISPATCH.subprocess, "Popen", new=spawn),
+            mock.patch.object(DISPATCH.opencode_runtime, "read_model_catalog",
+                              return_value=resolver_catalog or {
+                                  "state": "unknown", "source": "fixture", "models": (),
+                                  "variants": {}}),
         ]
         from contextlib import redirect_stdout
         with mock.patch.dict(os.environ, environment or self.environment, clear=True), \
@@ -203,6 +213,73 @@ class OpenCodeDispatchContextTest(unittest.TestCase):
         self.assertIn("context_window_execution_mode=standalone", receipt)
         self.assertIn("context_window_runtime_target=standalone-per-command", receipt)
         self.assertIn("context_window_server_identity=unavailable", receipt)
+
+    def test_unfitted_launch_leaves_the_receipt_and_attempt_row_without_fit_keys(self):
+        result, receipt, _calls, _spawn, worker_commands = self._invoke(
+            variant="high", snapshot_variants=("low", "high"),
+            resolver_catalog={"state": "available", "source": "fixture",
+                              "models": ("fixture/model",),
+                              "variants": {"fixture/model": ("low", "high")}})
+        self.assertEqual(result, 0, receipt)
+        self.assertEqual(len(worker_commands), 1)
+        self.assertIn("fixture/model#high", worker_commands[0])
+        for key in ("model_fit_from=", "variant_fit_from=", "catalog_fit_observer="):
+            self.assertNotIn(key, receipt)
+            self.assertNotIn(key, self.jobs.read_text(encoding="utf-8"))
+
+    def test_resolver_fit_reaches_argv_receipt_and_attempt_row_once(self):
+        # The resolver already fitted the request; the launch snapshot agrees,
+        # so it produces no second fit and the command is built once.
+        result, receipt, _calls, _spawn, worker_commands = self._invoke(
+            variant="xhigh", snapshot_variants=("low", "high"),
+            resolver_catalog={"state": "available", "source": "fixture",
+                              "models": ("fixture/model",),
+                              "variants": {"fixture/model": ("low", "high")}})
+        self.assertEqual(result, 0, receipt)
+        self.assertEqual(len(worker_commands), 1)
+        self.assertIn("fixture/model#high", worker_commands[0])
+        self.assertIn("variant=high\n", receipt)
+        self.assertIn("variant_fit_from=xhigh\n", receipt)
+        self.assertIn("catalog_fit_observer=resolver-catalog\n", receipt)
+        row = self.jobs.read_text(encoding="utf-8")
+        self.assertIn(",variant=high,", row)
+        self.assertIn(",variant_fit_from=xhigh", row)
+        self.assertIn(",catalog_fit_observer=resolver-catalog", row)
+
+    def test_launch_snapshot_refit_rebuilds_the_command_and_updates_the_attempt_row(self):
+        # The resolver saw no variants; the snapshot of the same model does.
+        result, receipt, _calls, _spawn, worker_commands = self._invoke(
+            variant="xhigh", snapshot_variants=("low", "high", "max"))
+        self.assertEqual(result, 0, receipt)
+        self.assertEqual(len(worker_commands), 2)
+        self.assertIn("fixture/model#xhigh", worker_commands[0])
+        self.assertIn("fixture/model#high", worker_commands[1])
+        self.assertNotIn("fixture/model#xhigh", worker_commands[1])
+        self.assertIn("variant=high\n", receipt)
+        self.assertIn("variant_fit_from=xhigh\n", receipt)
+        self.assertIn("catalog_fit_observer=launch-snapshot\n", receipt)
+        self.assertIn("context_window_native_variant=high\n", receipt)
+        # The command that was fenced and printed is the rebuilt one.
+        self.assertIn("command=true  # build-2\n", receipt)
+        row = self.jobs.read_text(encoding="utf-8")
+        self.assertIn(",variant=high", row)
+        self.assertNotIn(",variant=xhigh", row)
+        self.assertIn(",variant_fit_from=xhigh", row)
+        self.assertIn(",catalog_fit_observer=launch-snapshot", row)
+
+    def test_launch_snapshot_keeps_the_original_request_after_a_resolver_fit(self):
+        result, receipt, _calls, _spawn, worker_commands = self._invoke(
+            variant="max", snapshot_variants=("low", "medium"),
+            resolver_catalog={"state": "available", "source": "fixture",
+                              "models": ("fixture/model",),
+                              "variants": {"fixture/model": ("low", "high")}})
+        self.assertEqual(result, 0, receipt)
+        self.assertEqual(len(worker_commands), 2)
+        self.assertIn("fixture/model#high", worker_commands[0])
+        self.assertIn("fixture/model#medium", worker_commands[1])
+        self.assertIn("variant_fit_from=max\n", receipt)
+        self.assertIn("catalog_fit_observer=launch-snapshot\n", receipt)
+        self.assertIn(",variant=medium", self.jobs.read_text(encoding="utf-8"))
 
     def test_v2_spawns_when_the_user_environment_sets_no_xdg_homes(self):
         # A real user shell often leaves XDG_*_HOME unset; the V2 worker keeps the

@@ -164,24 +164,49 @@ class OpenCodeV2ContextTest(unittest.TestCase):
             "context": 800000, "input": None, "output": 8192,
         })
 
-    def test_v2_rejects_an_observed_unsupported_variant_before_launch(self):
+    def test_v2_fits_an_observed_unsupported_variant_instead_of_refusing(self):
         variants = [{"id": "low", "settings": {}}, {"id": "medium"}, {"id": "high"}]
-        row = model_info(model_id="gemini-4-argon", transport_id="argon", variants=variants)
+        before = model_info(model_id="gemini-4-argon", transport_id="argon", variants=variants)
+        after = model_info(model_id="gemini-4-argon", transport_id="argon",
+                           context_limit=800000, variants=variants)
         config = {"providers": {"fixture": {"models": {"gemini-4-argon": {
             "limit": {"context": 900000, "output": 32000}}}}}}
         with mock.patch.object(context, "_installed_version", return_value="2.0.32"), \
-                mock.patch.object(context, "_api_json",
-                                  side_effect=[self.model_response(row)]) as api:
-            with self.assertRaisesRegex(
-                    context.OpenCodeContextError,
-                    r"Variant unavailable for fixture/gemini-4-argon: xhigh "
-                    r"\(지원: low, medium, high\)"):
-                context.prepare_launch_context(
-                    model="fixture/gemini-4-argon#xhigh", variant="xhigh",
+                mock.patch.object(context, "_api_json", side_effect=[
+                    self.model_response(before), self.model_response(after)]):
+            launch = context.prepare_launch_context(
+                model="fixture/gemini-4-argon", variant="xhigh",
+                context_window="800000", config_content=json.dumps(config),
+                cwd=str(self.cwd), environ={"OPENCODE_RUNTIME_VERSION": "2.0.32"},
+                command="opencode-fixture")
+        self.assertEqual(launch["variant"], "high")
+        self.assertEqual(launch["variant_fit_from"], "xhigh")
+        self.assertEqual(launch["catalog_fit_observer"], "launch-snapshot")
+
+    def test_v2_fits_downward_ladder_gaps_and_keeps_a_supported_request_unkeyed(self):
+        config = {"providers": {"fixture": {"models": {"gemini-4-argon": {
+            "limit": {"context": 900000, "output": 32000}}}}}}
+        for observed, requested, expected, fit_from in (
+                ([{"id": "low"}, {"id": "high"}, {"id": "max"}], "xhigh", "high", "xhigh"),
+                ([{"id": "high"}, {"id": "max"}], "low", "high", "low"),
+                ([{"id": "low"}, {"id": "high"}], "high", "high", None),
+                ([{"id": "custom"}], "xhigh", "xhigh", None),
+                ([{"id": "low"}, {"id": "high"}], "none", "none", None)):
+            before = model_info(model_id="gemini-4-argon", transport_id="argon", variants=observed)
+            after = model_info(model_id="gemini-4-argon", transport_id="argon",
+                               context_limit=800000, variants=observed)
+            with self.subTest(requested=requested, observed=[row["id"] for row in observed]), \
+                    mock.patch.object(context, "_installed_version", return_value="2.0.32"), \
+                    mock.patch.object(context, "_api_json", side_effect=[
+                        self.model_response(before), self.model_response(after)]):
+                launch = context.prepare_launch_context(
+                    model="fixture/gemini-4-argon", variant=requested,
                     context_window="800000", config_content=json.dumps(config),
                     cwd=str(self.cwd), environ={"OPENCODE_RUNTIME_VERSION": "2.0.32"},
                     command="opencode-fixture")
-        self.assertEqual(api.call_count, 1)
+            self.assertEqual(launch["variant"], expected)
+            self.assertEqual(launch.get("variant_fit_from"), fit_from)
+            self.assertEqual("catalog_fit_observer" in launch, fit_from is not None)
 
     def test_v2_observed_supported_variants_launch_and_unobserved_rows_stay_unchanged(self):
         variants = [{"id": "low"}, {"id": "medium"}, {"id": "high"}]

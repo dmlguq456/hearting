@@ -529,22 +529,48 @@ def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
     selected = _select_model_settings(selection_args)
     if context.get("status") == "rotated" and selected.get("source") == "profile":
         selected["source"] = "profile+diversity"
-    if (selected.get("source") in {"profile", "role", "profile+diversity"}
-            and opencode_runtime.is_v2()):
+    if selected.get("source") != "inherit" and opencode_runtime.is_v2():
+        selected = _fit_to_catalog(selection_args, selected)
+    return WRAPPER_COMMON.attach_context_window(selected, "opencode", error=ModelSelectionError)
+
+
+def _fit_to_catalog(args: argparse.Namespace, selected: dict[str, str]) -> dict[str, str]:
+    """Fit the selected model and variant to the service catalog observation.
+
+    A provider-less model id takes its catalog full id, then the automatic
+    provider selection runs, then the variant moves to the nearest supported
+    value. The original requests stay on the settings as `model_fit_from` and
+    `variant_fit_from`; nothing is written back to saved settings.
+    """
+    catalog = opencode_runtime.read_model_catalog(directory=getattr(args, "worktree", None))
+    original_model, variant_fit_from = selected["model"], None
+    model = opencode_runtime.canonical_model_id(
+        original_model, (catalog or {}).get("models"),
+        lambda candidate: opencode_runtime.model_availability(candidate)["automatic_eligible"])
+    completed = model != original_model
+    if completed:
+        selected = {**selected, "model": model}
+        # A launch-time path that exempted the original (route-sealed `top`,
+        # frame pin) keeps its exemption; every other path is checked again
+        # against the full id.
+        if not (args.model_profile == TOP_PROFILE
+                or (selected.get("pin_status") == "applied"
+                    and route_authority.pin_target(args.worker_type) == "frame")):
+            _require_headless_model(model, selected["source"])
+    if selected.get("source") in {"profile", "role", "profile+diversity"}:
         # The first automatically eligible candidate runs. Without one, an
         # unverified primary still runs here (automatic placement has already
         # left OpenCode out, so only an explicit harness choice reaches this),
         # and only a confirmed rejection is refused.
         original = selected["model"]
         model, variant, evidence = opencode_runtime.select_automatic_model(
-            original, selected["variant"],
-            catalog=opencode_runtime.read_model_catalog(
-                directory=getattr(args, "worktree", None)))
+            original, selected["variant"], catalog=catalog)
         if evidence.get("state") == "unavailable" and model == original:
             raise ModelSelectionError(
                 "opencode-model-unavailable",
                 f"provider={original.split('/', 1)[0]} reason={evidence.get('reason', 'unavailable')}",
             )
+        variant_fit_from = evidence.get("variant_fit_from")
         if model != original:
             selected = {**selected, "model": model, "variant": variant,
                         "source": selected["source"] + "+provider-fallback",
@@ -552,7 +578,33 @@ def resolve_model_settings(args: argparse.Namespace) -> dict[str, str]:
                         "provider_fallback_reason": (evidence.get("fallback_from_reason")
                                                      or evidence.get("reason")
                                                      or "primary-unavailable")}
-    return WRAPPER_COMMON.attach_context_window(selected, "opencode", error=ModelSelectionError)
+        else:
+            selected = {**selected, "variant": variant}
+    variants = (catalog or {}).get("variants")
+    fitted, fit_from = opencode_runtime.fit_variant(
+        selected["variant"], variants.get(selected["model"]) if isinstance(variants, dict) else None)
+    if fit_from is not None:
+        selected = {**selected, "variant": fitted}
+        variant_fit_from = fit_from
+    fit = {}
+    if completed:
+        fit["model_fit_from"] = original_model
+    if variant_fit_from is not None:
+        fit["variant_fit_from"] = variant_fit_from
+    if fit:
+        fit["catalog_fit_observer"] = "resolver-catalog"
+    return {**selected, **fit}
+
+
+def catalog_fit_fields(settings: dict[str, str]) -> dict[str, str]:
+    """The catalog fit this launch applied, as plain receipt fields.
+
+    They name the original request next to the effective `model`/`variant` and
+    stay absent when nothing was fitted, so the previous receipt shape holds.
+    """
+    return {key: settings[key]
+            for key in ("model_fit_from", "variant_fit_from", "catalog_fit_observer")
+            if settings.get(key)}
 
 
 def provider_fallback_fields(settings: dict[str, str]) -> dict[str, str]:
@@ -1150,7 +1202,8 @@ def append_job(jobs: Path, args: argparse.Namespace) -> bool:
         jobs, args, harness="opencode", runtime_sandbox="adapter-default", effort_key="variant",
         adapter_fields="".join(
             f",{key}={value}"
-            for key, value in provider_fallback_fields(args.resolved_model_settings).items()),
+            for key, value in {**provider_fallback_fields(args.resolved_model_settings),
+                               **catalog_fit_fields(args.resolved_model_settings)}.items()),
         claim=claim_attempt_row, marker_gate=completion_marker_gate,
     )
 
@@ -1853,6 +1906,20 @@ def main(argv: list[str]) -> int:
             )
             return fail("opencode-context-limit-unavailable", 69,
                         detail=str(exc), attempt_id=args.attempt_id, child_spawned="0")
+        if (context_capture.get("variant_fit_from") is not None
+                and context_capture.get("variant") != args.resolved_model_settings.get("variant")):
+            # The launch snapshot saw a different variant set than the resolver
+            # catalog did. Record the original request and rebuild the frozen
+            # command before it is fenced or spawned, so the attempt row, the
+            # receipt and the argv name the same value.
+            settings = args.resolved_model_settings
+            fit_from = settings.get("variant_fit_from") or settings.get("variant")
+            settings.update({"variant": str(context_capture["variant"]),
+                             "variant_fit_from": str(fit_from),
+                             "catalog_fit_observer": "launch-snapshot"})
+            command = shell_command(args, prompt_path, log_path)
+            annotate_attempt_row(jobs, args.attempt_id, {
+                "variant": settings["variant"], **catalog_fit_fields(settings)})
         args.opencode_config_content = str(context_capture["config_content"])
         dispatch_env["OPENCODE_CONFIG_CONTENT"] = args.opencode_config_content
         catalog_limits = context_capture["catalog_limits"]
@@ -2400,7 +2467,7 @@ def main(argv: list[str]) -> int:
     print(f"agent={args.agent}")
     settings = args.resolved_model_settings
     print(f"model_source={settings['source']}")
-    for key, value in provider_fallback_fields(settings).items():
+    for key, value in {**provider_fallback_fields(settings), **catalog_fit_fields(settings)}.items():
         print(f"{key}={value}")
     print(f"model_pin_status={settings.get('pin_status', 'none')}")
     if getattr(args, 'explicit_adapter', None):

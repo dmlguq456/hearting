@@ -31,7 +31,9 @@ guards and tool-contract reporting.
 The adapter keeps the V1 invocation and legacy `auth.json` path. V2 uses
 `opencode run --format json` with the worktree as process cwd and
 `provider/model#variant`; it does not pass V1 `--pure`, `--dir`, or
-`--variant` flags. V2's shared service owns credentials, configuration,
+`--variant` flags. At launch V2 fits the model id and variant to the
+service catalog observation and records the original request in the receipt.
+V2's shared service owns credentials, configuration,
 sessions, permissions, and tool execution. Dispatch clients use the normal
 service discovery path without linking or copying `opencode.db`; V1 retains
 its isolated worker home and read-only legacy auth link. For V2 Go usage,
