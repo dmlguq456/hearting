@@ -2178,11 +2178,35 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
         from dispatch_terminal_commit import owner_workflow_gaps
         missing = owner_workflow_gaps(jobs, metadata, route)
         if missing:
+            import dispatch_replacement
+            from dispatch_replacement import advance, effective_attempts
+            if not dispatch_replacement.created_as(jobs, metadata):
+                # Unfinished work, not a result: the runtime continues it once in a replacement owner that
+                # receives the original PASS and the undone stages as observations (the PASS row is untouched).
+                replacement = advance(jobs, aid, run=run, resume_capacity=True)
+                if replacement.get("state") in {"running", "reused"}:
+                    result["replacement_lineage"] = effective_attempts(jobs, {aid})[1]
+                    current_path = Path(replacement["record"]["route_file"])
+                    return _advance(json.loads(current_path.read_text()), current_path, jobs, result,
+                                    wait=wait and _wait_budget(result) > 0, interview=interview, answers=answers,
+                                    decision=decision, run=run, sleep=sleep, clock=clock)
+                if replacement.get("state") == "needs-attention":
+                    result["replacement_attention"] = [replacement]
+                    if replacement["reason"] == "replacement-capacity-wait":
+                        return _capacity_pause(result, replacement, resume)
+                    return {**result, "state": "needs-attention", "reason": replacement["reason"],
+                            "missing_terminal_gates": missing,
+                            "next_action": replacement.get("next_action", "same-command"),
+                            "retry_when": replacement.get("retry_when", ""),
+                            "next_step": replacement.get("retry_when") or replacement.get(
+                                "next_step", "Retry resume_command after the exact launch settles.")}
             return {**result, "state": "needs-attention", "reason": "workflow-executor-exited",
                     "missing_terminal_gates": missing, "required_action": "report-unfinished-work",
-                    "next_step": "The owner exited before the declared stages completed. Preserve its report "
-                        "and committed result, and report these missing stages. Waiting or repeating finalization "
-                        "cannot execute them. No automatic retry or replacement is authorized by this observation."}
+                    "next_step": "The owner exited before the declared stages completed"
+                        + (", and this is already a continuation of an earlier owner. "
+                           if dispatch_replacement.created_as(jobs, metadata) else ". ")
+                        + "Preserve its report and committed result, and report these missing stages. Waiting "
+                        "or repeating finalization cannot execute them."}
     joined = _timed_join(
         result, clock, jobs=jobs, expected_attempts={aid},
         timeout=_wait_budget(result) if wait else 0, recover=True, observe_only=not wait)
