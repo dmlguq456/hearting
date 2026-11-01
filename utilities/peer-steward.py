@@ -5769,6 +5769,127 @@ def _watch_notice_pending(watch_id, recipient):
         return False
 
 
+_PEER_STATUS_MAX_ROWS = 20
+_PEER_STATUS_MAX_THREADS = 8
+_PEER_STATUS_RPC_TIMEOUT = 0.25
+_PEER_STATUS_RPC_BUDGET = 1.0
+
+
+def _peer_status_codex_observer():
+    """Read-only Codex queue/turn observer, cached per thread within one status call.
+
+    Nothing is resolved or connected until the first Codex row asks.
+    """
+    import codex_queue_delivery
+    cache = {}
+    state = {"endpoint": None, "error": None, "session": None, "deadline": None, "ready": False}
+
+    def prepare():
+        state["ready"] = True
+        try:
+            from codex_queue_dispatch import resolve_queue_socket
+            state["endpoint"] = resolve_queue_socket()
+        except Exception as exc:  # noqa: BLE001 - status never fails on observation
+            state["error"] = getattr(exc, "reason", None) or type(exc).__name__
+            return
+        state["deadline"] = time.monotonic() + _PEER_STATUS_RPC_BUDGET
+        state["session"] = codex_queue_delivery.DeliverySession(
+            state["endpoint"], timeout=_PEER_STATUS_RPC_TIMEOUT, deadline=state["deadline"])
+
+    def observe(thread_id):
+        if thread_id in cache:
+            return cache[thread_id]
+        if not state["ready"]:
+            prepare()
+        if state["error"] is not None:
+            outcome = (None, None, state["error"])
+        elif len(cache) >= _PEER_STATUS_MAX_THREADS:
+            outcome = (None, None, "observation-cap")
+        else:
+            try:
+                queued = codex_queue_delivery.list_queue(
+                    state["endpoint"], thread_id, timeout=_PEER_STATUS_RPC_TIMEOUT,
+                    session=state["session"], deadline=state["deadline"])
+                turn = codex_queue_delivery._latest_turn(
+                    state["endpoint"], thread_id, timeout=_PEER_STATUS_RPC_TIMEOUT,
+                    session=state["session"])
+                outcome = (queued, turn, None)
+            except Exception as exc:  # noqa: BLE001
+                outcome = (None, None, getattr(exc, "reason", None) or type(exc).__name__)
+        cache[thread_id] = outcome
+        return outcome
+
+    def close():
+        if state["session"] is not None:
+            state["session"].close()
+
+    return observe, close
+
+
+def _peer_status_rows(sid, harness):
+    """The caller's own unreceived peer messages, newest 20, with read-only Codex facts."""
+    if not sid or not harness:
+        return [], 0
+    sender = {"harness": harness, "session_id": sid}
+    rows = [row for row in peer_message._pending_rows(sender=sender)
+            if peer_message._same_transfer_session(row.get("from"), sender)]
+    rows.sort(key=lambda row: (row.get("created") or 0, row.get("ref") or ""))
+    omitted = max(0, len(rows) - _PEER_STATUS_MAX_ROWS)
+    rows = rows[omitted:]
+    observe, close = _peer_status_codex_observer()
+    now = time.time()
+    result = []
+    try:
+        for row in rows:
+            recipient = peer_message.pending_delivery_recipient(row) or row.get("to") or {}
+            entry = {
+                "ref": row["ref"],
+                "to": {"harness": recipient.get("harness"),
+                       "session_id": recipient.get("session_id"),
+                       "name": recipient.get("name")},
+                "state": row.get("state"), "receipt": row.get("receipt"),
+                "age_s": max(0, int(now - (row.get("created") or now))),
+                "steer": False,
+            }
+            if recipient.get("harness") == "codex" and recipient.get("session_id"):
+                entry["steer"] = bool(peer_message._codex_steer_eligible(row))
+                queued, turn, reason = observe(recipient["session_id"])
+                client_id = "delivery-peer-" + row["ref"]
+                codex = {"queue": "unknown", "turn": None, "turn_id": None,
+                         "hearting_items": None, "other_items": None, "reason": reason}
+                if queued is not None:
+                    owners = [item.get("clientUserMessageId") for item in queued]
+                    hearting = sum(isinstance(o, str) and o.startswith("delivery-") for o in owners)
+                    codex.update(queue="present" if client_id in owners else "absent",
+                                 hearting_items=hearting, other_items=len(owners) - hearting)
+                    status = turn.get("status") if isinstance(turn, dict) else None
+                    turn_id = turn.get("id") if isinstance(turn, dict) else None
+                    codex.update(turn=status if isinstance(status, str) else None,
+                                 turn_id=turn_id if isinstance(turn_id, str) else None)
+                entry["codex"] = codex
+            result.append(entry)
+    finally:
+        close()
+    return result, omitted
+
+
+def _peer_status_line(entry):
+    to = entry["to"]
+    line = (f"peer-message ref={entry['ref']} to={to.get('harness') or '-'}:"
+            f"{to.get('name') or to.get('session_id') or '-'} state={entry['state']} "
+            f"receipt={entry['receipt'] or '-'} age={entry['age_s']}s "
+            f"steer={'yes' if entry['steer'] else 'no'}")
+    codex = entry.get("codex")
+    if codex:
+        line += (f" queue={codex['queue']} turn={codex['turn'] or '-'} "
+                 f"turn_id={codex['turn_id'] or '-'} "
+                 f"hearting={'-' if codex['hearting_items'] is None else codex['hearting_items']} "
+                 f"other={'-' if codex['other_items'] is None else codex['other_items']}")
+        if codex["reason"]:
+            line += f" reason={codex['reason']}"
+    return line
+
+
 def cmd_status(args):
     root = _watch_root()
     entries = _watch_entries(root)
@@ -5784,8 +5905,21 @@ def cmd_status(args):
             and (row.get("recipient") or {}).get("harness") == harness
             and not _watch_notice_pending(row["watch_id"], row.get("recipient") or {})
         ]
+    peer_rows, peer_omitted, peer_error = [], 0, None
+    if not args.watch:
+        try:
+            sid, harness = _current_session_identity()
+            peer_rows, peer_omitted = _peer_status_rows(sid, harness)
+        except Exception as exc:  # noqa: BLE001 - peer facts never break watch output
+            peer_rows, peer_omitted, peer_error = [], 0, type(exc).__name__
     if args.json:
-        print(json.dumps({"watch_root": str(root), "watches": rows}, ensure_ascii=False))
+        payload = {"watch_root": str(root), "watches": rows}
+        if not args.watch:
+            payload["peer_messages"] = peer_rows
+            payload["peer_messages_omitted"] = peer_omitted
+            if peer_error is not None:
+                payload["peer_messages_error"] = peer_error
+        print(json.dumps(payload, ensure_ascii=False))
         return 0
     for row in rows:
         agent = row["agent"] or {}
@@ -5797,6 +5931,10 @@ def cmd_status(args):
             )
             + f" watch_id={row['watch_id']} receipt={row['receipt']}"
         )
+    for entry in peer_rows:
+        print(_peer_status_line(entry))
+    if peer_omitted:
+        print(f"peer-message omitted={peer_omitted}")
     return 0
 
 
@@ -10468,8 +10606,10 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
                handoff=None, resolved_recipient=None):
     """Seal a peer message and route it through the recipient's native carrier.
 
-    Codex uses its exact thread queue. Claude's hook context and OpenCode's
-    native idle callback consume their own pending rows. Queue acceptance or
+    Codex steers ordinary input into an active turn (`turn/steer`) and
+    otherwise uses its exact thread queue; an interrupted thread is started
+    only after this sender sees an empty composer. Claude's hook context and
+    OpenCode's native idle callback consume their own pending rows. Queue acceptance or
     context emission remains queued; only an exact native receive is true.
     """
     if args.body_file:
@@ -10617,10 +10757,13 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
             _schedule_message_obligation(pending, resolved_target, target_pane)
         else:
             try:
-                result = peer_message.deliver_pending_codex(transfer_ref)
+                gate = _codex_interrupt_start_gate(target_pane or resolved_target)
+                result = peer_message.deliver_pending_codex(transfer_ref, start_interrupted=gate)
                 outcome = "true" if result["status"] == "received" else (
                     "queued" if result["status"] == "queued" else "unverified")
-                verify, reason = "native-queue-" + result["status"], result.get("reason")
+                reason = result.get("reason")
+                verify = ("native-steer-" if reason == "native-steer-accepted"
+                          else "native-queue-") + result["status"]
             except (OSError, ValueError) as exc:
                 outcome, reason = "unverified", "peer-pending-unavailable:" + str(exc)
             if outcome != "true" and producer_binding is None:
@@ -10881,6 +11024,22 @@ def _read_screen(target):
     if proc.returncode != 0 or not (proc.stdout or "").strip():
         return None
     return _screen_lines(proc.stdout)
+
+
+def _codex_interrupt_start_gate(target):
+    """Sender-side screen evidence for starting an interrupted Codex thread.
+
+    True only for a readable screen with no form and an empty input box; else the
+    observed reason (`draft`, `form`, `screen-unknown`).
+    """
+    lines = _read_screen(target) if target else None
+    if not lines:
+        return "screen-unknown"
+    reason = _native_trust_reason("codex", lines) or _screen_ready("codex", lines)
+    if reason is None:
+        return True
+    return {"form-open": "form", "native-trust-wait": "form", "draft": "draft"}.get(
+        reason, "screen-unknown")
 
 
 def _native_trust_reason(harness, lines):

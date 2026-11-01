@@ -2215,7 +2215,113 @@ def release_pending_herdr_claim(row, *, receipt="delivery-reservation-released")
         return True
 
 
-def deliver_pending_codex(ref, *, timeout=1.0):
+_PRIOR_PROMOTION_MAX = 4
+_CODEX_STEER_SKIP_PREFIXES = ("[handoff]", "[gate]")
+
+
+def _codex_steer_eligible(row):
+    """Whether this stored peer row is ordinary steer input for an active Codex turn.
+
+    Derived from the stored row so a retry or re-prompt judges it the same way.
+    Runtime completions, notices, handoff/gate relays and no-trailer prompts
+    keep the native queue.
+    """
+    if not isinstance(row, dict):
+        return False
+    if (row.get("producer_binding") is not None or row.get("handoff") is not None
+            or row.get("no_trailer") or row.get("dispatch_notice") is not None
+            or row.get("dispatch_notices") is not None
+            or (row.get("from") or {}).get("harness") == "runtime"):
+        return False
+    text = row.get("text")
+    if not isinstance(text, str):
+        return False
+    lines = text.splitlines()
+    if row.get("body_ref") is not None:
+        # A long body travels as an envelope; the second line is the preview.
+        first = lines[1] if len(lines) > 1 else ""
+        if not first.strip() or first == "(empty first line)":
+            return False
+    else:
+        stripped = text.strip().splitlines()
+        first = stripped[0] if stripped else ""
+    return not first.startswith(_CODEX_STEER_SKIP_PREFIXES)
+
+
+def _codex_queue_receipt(result, start_interrupted):
+    """Honest receipt for a queued (not steered) native delivery."""
+    if result.get("started_after_interrupt"):
+        return "native-queue-started"
+    status = result.get("latest_turn_status")
+    if status == "interrupted":
+        if start_interrupted is True:
+            hold = result.get("start_hold")
+            return "native-queue-held-interrupted:" + (
+                hold if hold in {"user-queue", "start-refused"} else "start-refused")
+        if start_interrupted in {"draft", "form", "screen-unknown"}:
+            return "native-queue-held-interrupted:" + start_interrupted
+        return "native-queue-held-interrupted:screen-unknown"
+    if status == "inProgress":
+        return "native-queue-behind-active-turn"
+    return "native-queue-accepted"
+
+
+def _promote_prior_codex_rows(ref, *, timeout, start_interrupted):
+    """Deliver this sender's older queued Hearting rows first, oldest to newest.
+
+    Only ordinary Hearting-owned rows of the same sender and recipient are
+    touched; user queue items, other senders and relay rows are left alone.
+    """
+    row = _read_pending(ref)
+    if not row or row["state"] == "received" or not _codex_steer_eligible(row):
+        return []
+    recipient = pending_delivery_recipient(row)
+    if not recipient or recipient.get("harness") != "codex" or not recipient.get("session_id"):
+        return []
+    candidates = []
+    for other in _pending_rows(sender=row["from"]):
+        receipt = other.get("receipt")
+        if (other["ref"] != ref
+                and _same_transfer_session(other.get("from"), row["from"])
+                and _same_transfer_session(pending_delivery_recipient(other), recipient)
+                and other["state"] == "queued" and not other.get("rpc_claim")
+                and isinstance(receipt, str) and receipt.startswith("native-queue-")
+                and receipt not in {"native-queue-started", "native-queue-inflight"}
+                and other["created"] < row["created"]
+                and _codex_steer_eligible(other)):
+            candidates.append(other)
+    candidates.sort(key=lambda item: (item["created"], item["ref"]))
+    promoted = []
+    for other in candidates[:_PRIOR_PROMOTION_MAX]:
+        try:
+            outcome = deliver_pending_codex(other["ref"], timeout=timeout,
+                start_interrupted=start_interrupted, _promote_prior=False)
+        except (OSError, ValueError, RuntimeError) as exc:
+            outcome = {"status": "unverified", "reason": str(exc)}
+        promoted.append({"ref": other["ref"], "status": outcome.get("status"),
+                         "reason": outcome.get("reason")})
+    if len(candidates) > _PRIOR_PROMOTION_MAX:
+        promoted.append({"ref": None, "status": "omitted",
+                         "reason": "prior-promotion-cap:%d" % (len(candidates) - _PRIOR_PROMOTION_MAX)})
+    return promoted
+
+
+def deliver_pending_codex(ref, *, timeout=1.0, start_interrupted=False, _promote_prior=True):
+    """Deliver one pending Codex peer row, older same-sender rows first.
+
+    ``start_interrupted`` is the sender-side screen evidence for an interrupted
+    thread: ``True`` (empty composer, no form), a blocked reason string, or
+    ``False`` (no screen evidence). Only ``True`` may start the queued item.
+    """
+    promoted = _promote_prior_codex_rows(
+        ref, timeout=timeout, start_interrupted=start_interrupted) if _promote_prior else []
+    outcome = _deliver_pending_codex_row(ref, timeout=timeout, start_interrupted=start_interrupted)
+    if promoted:
+        outcome["promoted"] = promoted
+    return outcome
+
+
+def _deliver_pending_codex_row(ref, *, timeout, start_interrupted):
     """Claim/publish briefly; all external RPC runs outside metadata locks."""
     from codex_queue_delivery import send_at_least_once, QueueDeliveryError
     from codex_queue_dispatch import resolve_queue_socket
@@ -2250,6 +2356,11 @@ def deliver_pending_codex(ref, *, timeout=1.0):
                 return {"status": "unverified", "reason": "peer-native-inflight"}
         claim = {"token": token, "pid": os.getpid(), "start": process_start_ticks(os.getpid())}
         _save_pending(dict(row, rpc_claim=claim))
+        steer = _codex_steer_eligible(row)
+        steer_turn = row.get("steer_turn_id")
+        if (row.get("receipt") not in {"native-steer-accepted", "native-steer-inflight"}
+                or not isinstance(steer_turn, str) or not steer_turn):
+            steer_turn = None
 
     def before_add():
         with pending_lock(ref):
@@ -2258,15 +2369,27 @@ def deliver_pending_codex(ref, *, timeout=1.0):
                 raise QueueDeliveryError("peer-claim-changed-before-add")
             if not _registered_submission_current(current):
                 raise QueueDeliveryError("peer-dispatch-recipient-changed-before-add")
+            current = {key: value for key, value in current.items() if key != "steer_turn_id"}
             _save_pending(dict(current, state="unverified", receipt="native-queue-inflight"))
+
+    def before_steer(turn_id):
+        with pending_lock(ref):
+            current = _read_pending(ref)
+            if not current or current["state"] == "received" or (current.get("rpc_claim") or {}).get("token") != token:
+                raise QueueDeliveryError("peer-claim-changed-before-steer")
+            if not _registered_submission_current(current):
+                raise QueueDeliveryError("peer-dispatch-recipient-changed-before-steer")
+            _save_pending(dict(current, state="unverified", receipt="native-steer-inflight",
+                               steer_turn_id=turn_id))
 
     error = None
     try:
         result = send_at_least_once(resolve_queue_socket(),
             thread_id=recipient["session_id"], client_message_id="delivery-peer-" + ref,
-            message=row["text"], timeout=timeout, allow_restart=False,
+            message=row["text"], timeout=timeout, allow_restart=start_interrupted is True,
             retry_ambiguous=False, allow_add=row["state"] == "pending", require_message_match=True,
-            before_add=before_add)
+            before_add=before_add, steer=steer, owned_queue_only_restart=True,
+            observe_turn=True, steer_turn_id=steer_turn, before_steer=before_steer)
     except (QueueDeliveryError, OSError, ValueError, RuntimeError) as exc:
         error = exc
 
@@ -2310,8 +2433,21 @@ def deliver_pending_codex(ref, *, timeout=1.0):
             _ack_registered_delivery(received)
             _observe_continue_receipt(recipient, ref)
             return {"status": "received", "reason": "exact-native-history"}
-        _save_pending(dict(current, state="queued", rpc_claim=None, receipt="native-queue-accepted"))
-        return {"status": "queued", "reason": "native-queue-accepted"}
+        if result["status"] == "steered":
+            _save_pending(dict(current, state="queued", rpc_claim=None,
+                               receipt="native-steer-accepted",
+                               steer_turn_id=result["steer_turn_id"]))
+            receipt = "native-steer-accepted"
+        else:
+            receipt = _codex_queue_receipt(result, start_interrupted)
+            _save_pending(dict({key: value for key, value in current.items()
+                                if key != "steer_turn_id"},
+                               state="queued", rpc_claim=None, receipt=receipt))
+        return {"status": "queued", "reason": receipt,
+                "latest_turn_status": result.get("latest_turn_status"),
+                "latest_turn_id": result.get("latest_turn_id"),
+                "queued_submission_id": result.get("queued_submission_id"),
+                "steer_turn_id": result.get("steer_turn_id")}
 
 
 def usable_session_id(value):

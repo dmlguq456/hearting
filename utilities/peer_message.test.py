@@ -2107,6 +2107,8 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
 
         def rpc(_path, method, _params, *, timeout):
             calls.append(method)
+            if method == "thread/turns/list":
+                return {"data": []}
             if method == "thread/queue/list":
                 return {"data": [], "nextCursor": None}
             if method == "thread/queue/add":
@@ -2118,7 +2120,7 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
             second = peer_message.deliver_pending_codex(ref)
         self.assertEqual(first["status"], "queued")
         self.assertEqual(second["status"], "unverified")
-        self.assertEqual(calls, ["thread/queue/list", "thread/queue/add", "thread/queue/list"])
+        self.assertEqual(calls, ["thread/queue/list", "thread/turns/list", "thread/queue/add", "thread/queue/list"])
         row = peer_message._read_pending(ref)
         self.assertEqual(row["state"], "unverified")
         self.assertEqual(row["receipt"], "native-queue-accepted")
@@ -2137,6 +2139,8 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
 
         def rpc(_path, method, params, *, timeout):
             calls.append((method, params))
+            if method == "thread/turns/list":
+                return {"data": []}
             if method == "thread/queue/list":
                 return {"data": [], "nextCursor": None}
             if method == "thread/queue/add":
@@ -2159,7 +2163,7 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(first["status"], "queued")
         self.assertEqual(replay["status"], "unverified")
         self.assertEqual([method for method, _params in calls],
-                         ["thread/queue/list", "thread/queue/add", "thread/queue/list"])
+                         ["thread/queue/list", "thread/turns/list", "thread/queue/add", "thread/queue/list"])
         self.assertTrue(all(params["threadId"] == self.recipient["session_id"]
                             for _method, params in calls))
         add_params = next(params for method, params in calls if method == "thread/queue/add")
@@ -2180,6 +2184,8 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
 
         def rpc(_path, method, _params, *, timeout):
             calls.append(method)
+            if method == "thread/turns/list":
+                return {"data": []}
             if method == "thread/queue/list":
                 return {"data": [], "nextCursor": None}
             if method == "thread/queue/add":
@@ -2190,7 +2196,7 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(queue, "_rpc", side_effect=rpc):
             result = peer_message.deliver_pending_codex(ref)
         self.assertEqual(result["status"], "queued")
-        self.assertEqual(calls, ["thread/queue/list", "thread/queue/add"])
+        self.assertEqual(calls, ["thread/queue/list", "thread/turns/list", "thread/queue/add"])
         self.assertEqual(peer_message._read_pending(ref)["state"], "queued")
 
     def test_actual_observer_publish_failure_keeps_attempt_unverified_without_readd(self):
@@ -2200,6 +2206,8 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
 
         def rpc(_path, method, _params, *, timeout):
             calls.append(method)
+            if method == "thread/turns/list":
+                return {"data": []}
             if method == "thread/queue/list":
                 return {"data": [], "nextCursor": None}
             if method == "thread/queue/add":
@@ -2225,7 +2233,7 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(queue, "_rpc", side_effect=rpc):
             replay = peer_message.deliver_pending_codex(ref)
         self.assertEqual(replay["status"], "unverified")
-        self.assertEqual(calls, ["thread/queue/list", "thread/queue/add", "thread/queue/list"])
+        self.assertEqual(calls, ["thread/queue/list", "thread/turns/list", "thread/queue/add", "thread/queue/list"])
         self.assertEqual(peer_message._read_pending(ref)["state"], "unverified")
         self.assertFalse(self._ledger_file("sender").exists())
 
@@ -2240,6 +2248,8 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         def rpc(_path, method, params, *, timeout):
             client_id = params.get("clientUserMessageId")
             calls.append((method, client_id))
+            if method == "thread/turns/list":
+                return {"data": []}
             if method == "thread/queue/list":
                 return {"data": [], "nextCursor": None}
             if method == "thread/queue/add":
@@ -2549,6 +2559,7 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         entered, release = threading.Event(), threading.Event()
         adds, results, errors = [], [], []
         def rpc(_path, method, params, **_kw):
+            if method == "thread/turns/list": return {"data": []}
             if method == "thread/queue/list": return {"data": [], "nextCursor": None}
             self.assertEqual(method, "thread/queue/add")
             adds.append(params)
@@ -2635,6 +2646,7 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
                 def rpc(_path, method, params, **kw):
                     calls.append(method)
                     self.assertEqual(params["threadId"], exact["session_id"])
+                    if method == "thread/turns/list": return {"data": []}
                     if method == "thread/queue/list": return {"data": [], "nextCursor": None}
                     if method == "thread/queue/add":
                         adds.append(params)
@@ -2814,6 +2826,239 @@ class PendingPeerTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual(row["rpc_claim"]["token"], "different")
         self.assertEqual(row["state"], "pending")
         self.assertEqual(row["text"], text)
+
+
+class CodexPeerReceiptTest(_TmpRootMixin, unittest.TestCase):
+    sender = PendingPeerTest.sender
+    recipient = PendingPeerTest.recipient
+    other_sender = {"harness": "codex", "session_id": "other-sender", "name": "other"}
+    prepare_reference = PendingPeerTest.prepare_reference
+    pending = PendingPeerTest.pending
+
+    def deliver(self, ref, result, **kwargs):
+        import codex_queue_delivery as queue
+        with mock.patch.object(queue, "send_at_least_once", return_value=result) as send:
+            outcome = peer_message.deliver_pending_codex(ref, **kwargs)
+        return outcome, send
+
+    def test_receipt_rule_table(self):
+        cases = [
+            ({"started_after_interrupt": True}, True, "native-queue-started"),
+            ({"latest_turn_status": "interrupted", "start_hold": "user-queue"}, True,
+             "native-queue-held-interrupted:user-queue"),
+            ({"latest_turn_status": "interrupted", "start_hold": "start-refused"}, True,
+             "native-queue-held-interrupted:start-refused"),
+            ({"latest_turn_status": "interrupted", "start_hold": "start-disabled"}, True,
+             "native-queue-held-interrupted:start-refused"),
+            ({"latest_turn_status": "interrupted"}, "draft", "native-queue-held-interrupted:draft"),
+            ({"latest_turn_status": "interrupted"}, "form", "native-queue-held-interrupted:form"),
+            ({"latest_turn_status": "interrupted"}, "screen-unknown",
+             "native-queue-held-interrupted:screen-unknown"),
+            ({"latest_turn_status": "interrupted"}, False, "native-queue-held-interrupted:screen-unknown"),
+            ({"latest_turn_status": "inProgress"}, False, "native-queue-behind-active-turn"),
+            ({"latest_turn_status": "completed"}, True, "native-queue-accepted"),
+            ({"latest_turn_status": None}, False, "native-queue-accepted"),
+            ({}, True, "native-queue-accepted"),
+        ]
+        for index, (extra, gate, expected) in enumerate(cases):
+            with self.subTest(extra=extra, gate=gate):
+                result = dict(extra, status="queued")
+                self.assertEqual(peer_message._codex_queue_receipt(result, gate), expected)
+                _text, ref = self.pending("table %d" % index)
+                outcome, send = self.deliver(ref, result, start_interrupted=gate)
+                self.assertEqual((outcome["status"], outcome["reason"]), ("queued", expected))
+                row = peer_message._read_pending(ref)
+                self.assertEqual((row["state"], row["receipt"]), ("queued", expected))
+                self.assertIs(send.call_args.kwargs["allow_restart"], gate is True)
+
+    def test_string_screen_evidence_never_allows_restart(self):
+        for gate in ("draft", "form", "screen-unknown", False):
+            _text, ref = self.pending("gate " + str(gate))
+            _outcome, send = self.deliver(ref, {"status": "queued"}, start_interrupted=gate)
+            self.assertIs(send.call_args.kwargs["allow_restart"], False)
+
+    def test_steered_result_is_recorded_with_its_turn(self):
+        _text, ref = self.pending("steer me")
+        outcome, send = self.deliver(ref, {"status": "steered", "steer_turn_id": "turn-7",
+                                           "latest_turn_status": "inProgress",
+                                           "latest_turn_id": "turn-7"})
+        self.assertEqual((outcome["status"], outcome["reason"]), ("queued", "native-steer-accepted"))
+        self.assertEqual(outcome["steer_turn_id"], "turn-7")
+        row = peer_message._read_pending(ref)
+        self.assertEqual((row["state"], row["receipt"], row["steer_turn_id"]),
+                         ("queued", "native-steer-accepted", "turn-7"))
+        self.assertTrue(send.call_args.kwargs["steer"])
+        self.assertIsNone(send.call_args.kwargs["steer_turn_id"])
+        # A later attempt passes the remembered turn and may not add on its own.
+        _outcome, again = self.deliver(ref, {"status": "queued", "latest_turn_status": "completed",
+                                             "requeued_after_lost_steer": True})
+        self.assertEqual(again.call_args.kwargs["steer_turn_id"], "turn-7")
+        self.assertFalse(again.call_args.kwargs["allow_add"])
+        row = peer_message._read_pending(ref)
+        self.assertEqual(row["receipt"], "native-queue-accepted")
+        self.assertNotIn("steer_turn_id", row)
+
+    def test_fixed_keyword_contract(self):
+        _text, ref = self.pending("kwargs")
+        _outcome, send = self.deliver(ref, {"status": "queued"})
+        kwargs = send.call_args.kwargs
+        self.assertTrue(kwargs["owned_queue_only_restart"])
+        self.assertTrue(kwargs["observe_turn"])
+        self.assertTrue(kwargs["require_message_match"])
+        self.assertFalse(kwargs["retry_ambiguous"])
+        self.assertTrue(kwargs["allow_add"])
+        self.assertTrue(callable(kwargs["before_steer"]))
+
+    def test_steer_target_rule_follows_the_stored_row(self):
+        self.assertTrue(peer_message._codex_steer_eligible({"text": "ordinary", "from": {"harness": "codex"}}))
+        self.assertTrue(peer_message._codex_steer_eligible({"text": "[steer] go", "from": {}}))
+        envelope = "Long peer message (9000 UTF-8 bytes). Preview only; do not act on it:\n%s\nRead"
+        for row in (
+            {"text": "[handoff] card", "from": {}}, {"text": "  [gate] relay", "from": {}},
+            {"text": "x", "from": {}, "handoff": {"a": 1}}, {"text": "x", "from": {}, "no_trailer": True},
+            {"text": "x", "from": {}, "producer_binding": {"schema": "s"}},
+            {"text": "x", "from": {}, "dispatch_notice": {"a": 1}},
+            {"text": "x", "from": {}, "dispatch_notices": []},
+            {"text": "x", "from": {"harness": "runtime"}}, {"text": 7, "from": {}}, None,
+            {"text": envelope % "[gate] x", "from": {}, "body_ref": {"a": 1}},
+            {"text": envelope % "(empty first line)", "from": {}, "body_ref": {"a": 1}},
+            {"text": "Long peer message", "from": {}, "body_ref": {"a": 1}},
+        ):
+            with self.subTest(row=row):
+                self.assertFalse(peer_message._codex_steer_eligible(row))
+        self.assertTrue(peer_message._codex_steer_eligible(
+            {"text": envelope % "[steer] x", "from": {}, "body_ref": {"a": 1}}))
+
+    def test_real_rows_choose_steer_by_message_kind(self):
+        long_tail = "\n" + "long detail " * 260
+        cases = [("plain note", True), ("[steer] adjust", True), ("[handoff] card", False),
+                 ("[gate] relay", False), ("[gate] relay" + long_tail, False),
+                 ("[steer] long" + long_tail, True)]
+        for body, expected in cases:
+            with self.subTest(body=body[:20] + str(len(body))):
+                _text, ref = self.pending(body)
+                _outcome, send = self.deliver(ref, {"status": "queued"})
+                self.assertIs(send.call_args.kwargs["steer"], expected)
+        _text, ref = self.pending("no trailer body", with_trailer=False)
+        _outcome, send = self.deliver(ref, {"status": "queued"})
+        self.assertFalse(send.call_args.kwargs["steer"])
+
+    def test_before_steer_and_before_add_store_the_honest_inflight_state(self):
+        import codex_queue_delivery as queue
+        _text, ref = self.pending("hooks")
+        seen = {}
+
+        def fake(*_args, **kwargs):
+            kwargs["before_steer"]("turn-9")
+            seen["steer"] = dict(peer_message._read_pending(ref))
+            kwargs["before_add"]()
+            seen["add"] = dict(peer_message._read_pending(ref))
+            return {"status": "queued"}
+        with mock.patch.object(queue, "send_at_least_once", side_effect=fake):
+            peer_message.deliver_pending_codex(ref)
+        self.assertEqual((seen["steer"]["state"], seen["steer"]["receipt"], seen["steer"]["steer_turn_id"]),
+                         ("unverified", "native-steer-inflight", "turn-9"))
+        self.assertEqual((seen["add"]["state"], seen["add"]["receipt"]),
+                         ("unverified", "native-queue-inflight"))
+        self.assertNotIn("steer_turn_id", seen["add"])
+
+    def test_ambiguous_steer_stays_unverified_and_remembers_the_turn(self):
+        import codex_queue_delivery as queue
+
+        def fake(*_args, **kwargs):
+            kwargs["before_steer"]("turn-3")
+            raise queue.QueueDeliveryError("lost", ambiguous=True)
+        _text, ref = self.pending("ambiguous steer")
+        with mock.patch.object(queue, "send_at_least_once", side_effect=fake):
+            outcome = peer_message.deliver_pending_codex(ref)
+        self.assertEqual(outcome["status"], "unverified")
+        row = peer_message._read_pending(ref)
+        self.assertEqual((row["state"], row["receipt"], row["steer_turn_id"]),
+                         ("unverified", "native-steer-inflight", "turn-3"))
+        _outcome, again = self.deliver(ref, {"status": "steered", "steer_turn_id": "turn-3"})
+        self.assertEqual(again.call_args.kwargs["steer_turn_id"], "turn-3")
+        self.assertFalse(again.call_args.kwargs["allow_add"])
+
+    def test_claim_change_blocks_the_steer_write(self):
+        import codex_queue_delivery as queue
+        _text, ref = self.pending("claim moved")
+
+        def fake(*_args, **kwargs):
+            with peer_message.pending_lock(ref):
+                row = peer_message._read_pending(ref)
+                peer_message._save_pending(dict(row, rpc_claim=dict(row["rpc_claim"], token="other")))
+            with self.assertRaisesRegex(queue.QueueDeliveryError, "peer-claim-changed-before-steer"):
+                kwargs["before_steer"]("turn-1")
+            return {"status": "queued"}
+        with mock.patch.object(queue, "send_at_least_once", side_effect=fake):
+            peer_message.deliver_pending_codex(ref)
+
+    # prior same-sender rows are delivered first
+    def queued_row(self, body, created, *, sender=None, receipt="native-queue-accepted", **changes):
+        _text, ref = self.pending(body, sender=sender) if sender else self.pending(body)
+        with peer_message.pending_lock(ref):
+            row = peer_message._read_pending(ref)
+            peer_message._save_pending(dict(row, state="queued", receipt=receipt,
+                                            created=created, **changes))
+        return ref
+
+    def run_with_prior(self, rows, new_body="newest", gate=False, fail=()):
+        import codex_queue_delivery as queue
+        base = 1_000_000.0
+        refs = {name: self.queued_row(body, base + offset, **kw)
+                for name, (body, offset, kw) in rows.items()}
+        _text, new_ref = self.pending(new_body)
+        with peer_message.pending_lock(new_ref):
+            peer_message._save_pending(dict(peer_message._read_pending(new_ref), created=base + 100))
+        order = []
+
+        def fake(*_args, **kwargs):
+            order.append((kwargs["client_message_id"], kwargs["allow_restart"]))
+            if kwargs["client_message_id"] in {"delivery-peer-" + refs[name] for name in fail}:
+                raise OSError("fixture-failure")
+            return {"status": "steered", "steer_turn_id": "turn-1"}
+        with mock.patch.object(queue, "send_at_least_once", side_effect=fake):
+            outcome = peer_message.deliver_pending_codex(new_ref, start_interrupted=gate)
+        return refs, new_ref, order, outcome
+
+    def test_older_same_sender_rows_are_delivered_oldest_first_and_others_untouched(self):
+        refs, new_ref, order, outcome = self.run_with_prior({
+            "second": ("older two", 2, {}), "first": ("older one", 1, {}),
+            "foreign": ("other sender", 3, {"sender": self.other_sender}),
+            "handoff": ("[handoff] card", 4, {}),
+            "steered": ("already steered", 5, {"receipt": "native-steer-accepted"}),
+            "started": ("already started", 6, {"receipt": "native-queue-started"}),
+            "later": ("later than new", 200, {}),
+        })
+        self.assertEqual([item[0] for item in order],
+                         ["delivery-peer-" + refs["first"], "delivery-peer-" + refs["second"],
+                          "delivery-peer-" + new_ref])
+        self.assertEqual([item["ref"] for item in outcome["promoted"]], [refs["first"], refs["second"]])
+        for name in ("foreign", "handoff", "steered", "started", "later"):
+            self.assertNotEqual(peer_message._read_pending(refs[name]).get("steer_turn_id"), "turn-1")
+
+    def test_prior_promotion_is_capped_and_reports_the_rest(self):
+        rows = {"r%d" % i: ("older %d" % i, i, {}) for i in range(1, 7)}
+        refs, new_ref, order, outcome = self.run_with_prior(rows)
+        self.assertEqual(len(order), 5)
+        self.assertEqual([item[0] for item in order[:4]],
+                         ["delivery-peer-" + refs["r%d" % i] for i in range(1, 5)])
+        self.assertEqual(outcome["promoted"][-1],
+                         {"ref": None, "status": "omitted", "reason": "prior-promotion-cap:2"})
+
+    def test_prior_promotion_receives_the_screen_evidence_and_never_blocks_the_new_row(self):
+        refs, new_ref, order, outcome = self.run_with_prior(
+            {"first": ("older one", 1, {})}, gate=True, fail=("first",))
+        self.assertEqual(order, [("delivery-peer-" + refs["first"], True),
+                                 ("delivery-peer-" + new_ref, True)])
+        self.assertEqual(outcome["promoted"][0]["status"], "unverified")
+        self.assertEqual(outcome["status"], "queued")
+
+    def test_relay_row_does_not_promote_older_rows(self):
+        refs, new_ref, order, outcome = self.run_with_prior(
+            {"first": ("older one", 1, {})}, new_body="[handoff] relay")
+        self.assertEqual([item[0] for item in order], ["delivery-peer-" + new_ref])
+        self.assertNotIn("promoted", outcome)
 
 
 class SealedHandoffCommandTest(_TmpRootMixin, unittest.TestCase):

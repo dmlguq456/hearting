@@ -1183,7 +1183,9 @@ section; those shapes are migration history only.
 SD-92 completion binds to the calling `CODEX_THREAD_ID`.
 The interactive launcher and gateway are retired. Native queue
 submission is at-least-once; pending/history checks suppress known duplicates.
-Interrupted-parent restart requires one exact pending Hearting item. Transport
+Interrupted-parent restart requires one exact pending Hearting item. Peer
+restart additionally requires a sender-verified empty composer with no form and
+no non-Hearting queue item; otherwise the receipt names the hold. Transport
 refusal preserves the delivery obligation independently of child completion.
 The native TUI owns subscriptions, questions, and approvals. Headless owners keep
 their separate supervisor. See ADAPTATION §7.1 for the carrier contract.
@@ -1191,6 +1193,8 @@ Across adapters, the result record remains under the registered parent's key,
 while the current `effective_parent` receives it. Result recovery may repeat
 after interruption; peer input is reserved as pending and becomes unverified
 only at the external write boundary, so an ambiguous write is not repeated.
+A Codex peer steer into an active turn follows the same boundary; only complete
+exact history without the client id after that turn ends re-queues it once.
 
 **SD-110 runtime-owned deterministic stage advance.** At an eligible-linear
 boundary — completion gate proven, exactly one non-terminal runnable

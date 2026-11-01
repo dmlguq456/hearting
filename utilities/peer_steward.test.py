@@ -31,6 +31,11 @@ _HERE = Path(__file__).resolve().parent
 _CODEX_REVIEW_FIXTURES = _HERE / "fixtures" / "codex-0.162.1-hook-review"
 
 
+def _queue_error(*args, **kwargs):
+    from codex_queue_delivery import QueueDeliveryError
+    return QueueDeliveryError(*args, **kwargs)
+
+
 def _codex_snapshot(name):
     text = (_CODEX_REVIEW_FIXTURES / name).read_text()
     separators = [index for index, row in enumerate(text.splitlines()) if row == "---"]
@@ -4886,6 +4891,9 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         for failure in ("retryable", "unverified", "raises", "rpc-error"):
             with self.subTest(failure=failure), contextlib.ExitStack() as stack:
                 process = self._native_address_retry_observations(stack)
+                # Older same-sender rows from sibling subtests would be delivered first;
+                # this fixture counts one row's RPC sequence (promotion has its own tests).
+                stack.enter_context(mock.patch.object(peer, "_promote_prior_codex_rows", return_value=[]))
                 submissions = []
                 def submit(_socket, **kwargs):
                     submissions.append(kwargs)
@@ -4955,6 +4963,9 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         for recovery, submitted in ((r, s) for r in ("caller", "runner") for s in ("queued", "ambiguous")):
             with self.subTest(recovery=recovery, submitted=submitted), contextlib.ExitStack() as stack:
                 self._native_address_retry_observations(stack)
+                # Older same-sender rows from sibling subtests would be delivered first;
+                # this fixture counts one row's RPC sequence (promotion has its own tests).
+                stack.enter_context(mock.patch.object(peer, "_promote_prior_codex_rows", return_value=[]))
                 saved_rows = self._listed_rows
                 self._set_inventory([])
                 args = peer_steward.build_parser().parse_args([
@@ -5504,6 +5515,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         peer = peer_steward.peer_message
         with contextlib.ExitStack() as stack:
             self._native_address_retry_observations(stack)
+            stack.enter_context(mock.patch.object(peer, "_promote_prior_codex_rows", return_value=[]))
             endpoints = {server: [self._inventory_row(harness="codex", sid=server + "-thread")]
                          for server in ("selected", "ambient")}
             observed = []
@@ -6250,7 +6262,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         calls, queued = [], []
         payload = _agent_json("codex", "exact-thread", "child", status="working")
 
-        def accept(ref, *, timeout=1.0):
+        def accept(ref, *, timeout=1.0, **_kw):
             row = peer_steward.peer_message._read_pending(ref)
             queued.append((row["to"]["session_id"], ref, row["text"]))
             return {"status": "queued", "reason": "native-queue-accepted"}
@@ -6268,6 +6280,257 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         record = self._all_records()[-1]
         self.assertEqual(record["delivery"]["status"], "unknown")
         self.assertIn("verify=native-queue-queued", record["delivery"]["receipt"])
+
+    # --- D1 end-to-end: real prompt -> real deliver_pending_codex -> real send_at_least_once ---
+    class _AppServer:
+        """Method-keyed fake Codex app-server; records every RPC."""
+
+        def __init__(self, *, turn_status="completed", queue=(), turn_id="turn-live"):
+            self.turn_status, self.turn_id = turn_status, turn_id
+            self.queue = [dict(item) for item in queue]
+            self.calls, self.errors, self.history_state = [], {}, "not_observed"
+            self.added = 0
+
+        def methods(self):
+            return [method for method, _params in self.calls]
+
+        def params(self, method):
+            return [params for name, params in self.calls if name == method]
+
+        def __call__(self, _path, method, params, **_kw):
+            self.calls.append((method, dict(params)))
+            error = self.errors.get(method)
+            if error is not None:
+                raise error
+            if method == "thread/queue/list":
+                return {"data": [dict(item) for item in self.queue]}
+            if method == "thread/turns/list":
+                if self.turn_status is None:
+                    return {"data": []}
+                return {"data": [{"id": self.turn_id, "status": self.turn_status, "items": []}]}
+            if method == "thread/queue/add":
+                self.added += 1
+                item = {"id": "queued-%d" % self.added, "input": params["input"],
+                        "clientUserMessageId": params["clientUserMessageId"]}
+                self.queue.append(item)
+                return {"queuedSubmission": {"id": item["id"]}}
+            if method == "thread/queue/delete":
+                self.queue = [i for i in self.queue if i["id"] != params["queuedSubmissionId"]]
+                return {"deleted": True}
+            if method == "thread/queue/start":
+                return {"turn": {"id": "turn-started"}}
+            if method == "turn/steer":
+                return {"turnId": params["expectedTurnId"]}
+            raise AssertionError("unexpected rpc " + method)
+
+    @contextlib.contextmanager
+    def _codex_e2e(self, server, *, screen=None):
+        """Patch only the transport: RPC, native history observation, and the visible screen."""
+        import codex_queue_delivery
+        self._readiness_patch.stop()
+        old_session = peer_steward._HERDR_SESSION
+        peer_steward._HERDR_SESSION = "selected"
+        self.addCleanup(setattr, peer_steward, "_HERDR_SESSION", old_session)
+        sid = "codex-thread-e2e"
+        payload = _agent_json("codex", sid, "child", status="idle")
+        screens = {"value": screen if screen is not None else CODEX_EMPTY}
+        state = SimpleNamespace(server=server, sid=sid, screens=screens, output=[])
+
+        def observe(_path, _thread, _client_id, *, timeout, expected_message=None):
+            return codex_queue_delivery._PeerObservation(state.server.history_state)
+
+        def run_prompt(body, *, sender=("sender-session", "claude")):
+            state.output.clear()
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(mock.patch.object(peer_steward.subprocess, "run",
+                                                       side_effect=self._fake_run(payload, [])))
+                stack.enter_context(mock.patch.object(
+                    peer_steward, "_retire_target",
+                    side_effect=lambda pane: ("idle", {"harness": "codex", "session_id": sid,
+                                                       "name": "child", "pane": pane}, 0, None)))
+                stack.enter_context(mock.patch.object(
+                    peer_steward, "_retire_pane_info",
+                    side_effect=lambda _pane: self._codex_process_info([41002])))
+                stack.enter_context(mock.patch.object(
+                    peer_steward, "_prompt_foreground",
+                    side_effect=lambda _pane, harness, *, strict=True, info=None:
+                    {"pid": 41002, "start": "birth", "argv": [harness]}))
+                stack.enter_context(mock.patch.object(peer_steward, "_current_session_identity",
+                                                       return_value=sender))
+                stack.enter_context(mock.patch.object(peer_steward, "_from_name", return_value="sender"))
+                stack.enter_context(mock.patch.object(peer_steward.peer_obligations,
+                                                       "bound_work_for_pane", return_value=((), "observed")))
+                import pane_ownership
+                stack.enter_context(mock.patch.object(pane_ownership, "current_codex_thread",
+                                                       side_effect=lambda *_a, **_k: sid))
+                stack.enter_context(mock.patch.object(
+                    peer_steward, "_read_screen",
+                    side_effect=lambda _target: peer_steward._screen_lines(state.screens["value"])))
+                printed = stack.enter_context(mock.patch("builtins.print"))
+                rc = peer_steward.main(["prompt", "child", body])
+                state.output = [call.args[0] for call in printed.call_args_list if call.args]
+            ref = self._all_records()[-1]["transfer_ref"]
+            return rc, "\n".join(state.output), ref
+
+        state.run = run_prompt
+        with mock.patch("codex_queue_dispatch.resolve_queue_socket", return_value="fixture-socket"), \
+             mock.patch.object(codex_queue_delivery, "_rpc", server), \
+             mock.patch.object(codex_queue_delivery, "_observe_peer_message", side_effect=observe):
+            yield state
+
+    def test_d1_interrupted_empty_composer_starts_exact_hearting_item(self):
+        server = self._AppServer(turn_status="interrupted")
+        with self._codex_e2e(server) as env:
+            rc, line, ref = env.run("[steer] resume the work")
+        self.assertEqual(rc, 3, line)
+        self.assertIn("reason=native-queue-started", line)
+        starts = server.params("thread/queue/start")
+        self.assertEqual(starts, [{"threadId": env.sid, "queuedSubmissionId": "queued-1"}])
+        self.assertEqual(server.params("thread/queue/add")[0]["clientUserMessageId"], "delivery-peer-" + ref)
+        row = peer_steward.peer_message._read_pending(ref)
+        self.assertEqual((row["state"], row["receipt"]), ("queued", "native-queue-started"))
+
+    def test_d1_interrupted_hold_without_start(self):
+        form = "banner: project · main\nPrior chat text\n" + _codex_snapshot("worktrees_new_choices.snap")
+        cases = (("draft", CODEX_DRAFT, ()), ("form", form, ()),
+                 ("user-queue", CODEX_EMPTY, ({"id": "user-1", "input": [{"type": "text", "text": "mine"}]},)))
+        for expected, screen, queue in cases:
+            with self.subTest(hold=expected):
+                server = self._AppServer(turn_status="interrupted", queue=queue)
+                with self._codex_e2e(server, screen=screen) as env:
+                    rc, line, ref = env.run("[steer] resume the work " + expected)
+                self.assertEqual(rc, 3, line)
+                self.assertEqual(server.params("thread/queue/start"), [])
+                self.assertIn("reason=native-queue-held-interrupted:" + expected, line)
+                self.assertEqual(server.methods().count("thread/queue/add"), 1)
+                self.assertTrue(all(item["id"] != "user-1" for item in server.params("thread/queue/delete")))
+
+    def test_d2_in_progress_steers_active_turn(self):
+        server = self._AppServer(turn_status="inProgress")
+        with self._codex_e2e(server) as env:
+            rc, line, ref = env.run("plain adjustment for the running turn")
+        self.assertEqual(rc, 3, line)
+        self.assertIn("verify=native-steer-queued", line)
+        self.assertIn("reason=native-steer-accepted", line)
+        text = peer_steward.peer_message._read_pending(ref)["text"]
+        self.assertEqual(server.params("turn/steer"), [{
+            "threadId": env.sid, "expectedTurnId": "turn-live",
+            "clientUserMessageId": "delivery-peer-" + ref,
+            "input": [{"type": "text", "text": text}]}])
+        self.assertEqual(server.params("thread/queue/add"), [])
+        row = peer_steward.peer_message._read_pending(ref)
+        self.assertEqual((row["state"], row["receipt"], row["steer_turn_id"]),
+                         ("queued", "native-steer-accepted", "turn-live"))
+
+    def test_d2_steer_refusal_falls_back_to_queue_add(self):
+        server = self._AppServer(turn_status="inProgress")
+        server.errors["turn/steer"] = _queue_error(
+            "queue-rpc-refused:turn/steer:-32600:expected turn mismatch", ambiguous=False)
+        with self._codex_e2e(server) as env:
+            rc, line, ref = env.run("plain adjustment, steer will be refused")
+        self.assertEqual(rc, 3, line)
+        self.assertIn("reason=native-queue-behind-active-turn", line)
+        self.assertEqual(server.methods().count("thread/queue/add"), 1)
+
+    def test_d2_ambiguous_steer_does_not_add(self):
+        server = self._AppServer(turn_status="inProgress")
+        server.errors["turn/steer"] = _queue_error("queue-websocket-timeout", ambiguous=True)
+        with self._codex_e2e(server) as env:
+            rc, line, ref = env.run("plain adjustment, steer reply is lost")
+        self.assertEqual(rc, 5, line)
+        self.assertIn("prompted=unverified", line)
+        self.assertEqual(server.params("thread/queue/add"), [])
+        row = peer_steward.peer_message._read_pending(ref)
+        self.assertEqual((row["state"], row["receipt"], row["steer_turn_id"]),
+                         ("unverified", "native-steer-inflight", "turn-live"))
+
+    def test_d2_lost_steer_is_requeued_exactly_once(self):
+        server = self._AppServer(turn_status="inProgress")
+        with self._codex_e2e(server) as env:
+            rc, line, ref = env.run("plain adjustment that Codex later drops")
+            self.assertIn("native-steer-accepted", line)
+            server.turn_status = "completed"
+            first = peer_steward.peer_message.deliver_pending_codex(ref)
+            second = peer_steward.peer_message.deliver_pending_codex(ref)
+        self.assertEqual(first["status"], "queued", first)
+        self.assertEqual(second["status"], "queued", second)
+        self.assertEqual(server.methods().count("thread/queue/add"), 1)
+        self.assertEqual(server.methods().count("turn/steer"), 1)
+        self.assertEqual(peer_steward.peer_message._read_pending(ref)["receipt"], "native-queue-accepted")
+
+    def test_d3_prior_same_sender_rows_are_promoted_before_new_steer(self):
+        server = self._AppServer(turn_status="completed",
+                                 queue=({"id": "user-1", "input": [{"type": "text", "text": "mine"}]},))
+        pm = peer_steward.peer_message
+        with self._codex_e2e(server) as env:
+            _rc, _line, first_ref = env.run("older note one")
+            _rc, _line, second_ref = env.run("older note two")
+            foreign_sender = {"harness": "claude", "session_id": "other-sender", "name": "other"}
+            recipient = {"harness": "codex", "session_id": env.sid, "name": "child", "pane_id": "w1:pX"}
+            _text, foreign_ref = pm.prepare_peer_message(
+                "foreign note", foreign_sender, recipient, defer=True)
+            server.queue.append({"id": "foreign-1", "clientUserMessageId": "delivery-peer-" + foreign_ref,
+                                 "input": [{"type": "text", "text": _text}]})
+            with pm.pending_lock(foreign_ref):
+                pm._save_pending(dict(pm._read_pending(foreign_ref), state="queued",
+                                      receipt="native-queue-accepted"))
+            server.calls.clear()
+            server.turn_status = "inProgress"
+            rc, line, new_ref = env.run("newest note while running")
+        self.assertEqual(rc, 3, line)
+        steers = [params["clientUserMessageId"] for params in server.params("turn/steer")]
+        self.assertEqual(steers, ["delivery-peer-" + first_ref, "delivery-peer-" + second_ref,
+                                  "delivery-peer-" + new_ref])
+        deleted = [params["queuedSubmissionId"] for params in server.params("thread/queue/delete")]
+        self.assertEqual(deleted, ["queued-1", "queued-2"])
+        self.assertEqual([m for m in server.methods() if m in {"thread/queue/delete", "turn/steer"}],
+                         ["thread/queue/delete", "turn/steer", "thread/queue/delete", "turn/steer", "turn/steer"])
+        self.assertEqual(server.params("thread/queue/add"), [])
+        self.assertEqual({item["id"] for item in server.queue}, {"user-1", "foreign-1"})
+        for ref in (first_ref, second_ref, new_ref):
+            self.assertEqual(pm._read_pending(ref)["receipt"], "native-steer-accepted")
+        self.assertEqual(pm._read_pending(foreign_ref)["receipt"], "native-queue-accepted")
+
+    def _codex_prompt_receipt(self, result, screen):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "sid-steward"
+        calls, gates = [], []
+        payload = _agent_json("codex", "exact-thread", "child", status="working")
+
+        def deliver(ref, **kwargs):
+            gates.append(kwargs.get("start_interrupted", "missing"))
+            return result
+
+        lines = None if screen is None else peer_steward._screen_lines(screen)
+        with mock.patch.object(peer_steward.shutil, "which", return_value="/usr/bin/herdr"), \
+             mock.patch.object(peer_steward.subprocess, "run", side_effect=self._fake_run(payload, calls)), \
+             mock.patch.object(peer_steward, "_read_screen", return_value=lines), \
+             mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=deliver), \
+             mock.patch("builtins.print") as printed:
+            rc = peer_steward.main(["prompt", "child", "[steer] receipt report"])
+        return rc, printed.call_args[0][0], gates, self._all_records()[-1]["delivery"]["receipt"]
+
+    def test_codex_prompt_passes_the_screen_gate_and_reports_the_real_receipt(self):
+        cases = (
+            (CODEX_EMPTY, True, {"status": "queued", "reason": "native-queue-started"},
+             3, "verify=native-queue-queued", "reason=native-queue-started"),
+            (CODEX_DRAFT, "draft", {"status": "queued", "reason": "native-queue-held-interrupted:draft"},
+             3, "verify=native-queue-queued", "reason=native-queue-held-interrupted:draft"),
+            (None, "screen-unknown", {"status": "queued", "reason": "native-queue-held-interrupted:screen-unknown"},
+             3, "verify=native-queue-queued", "reason=native-queue-held-interrupted:screen-unknown"),
+            (CODEX_EMPTY, True, {"status": "queued", "reason": "native-steer-accepted"},
+             3, "verify=native-steer-queued", "reason=native-steer-accepted"),
+            (CODEX_EMPTY, True, {"status": "unverified", "reason": "queue-websocket-timeout"},
+             5, "verify=native-queue-unverified", "reason=queue-websocket-timeout"),
+            (CODEX_EMPTY, True, {"status": "received", "reason": "exact-native-history"},
+             0, "verify=native-queue-received", "reason=exact-native-history"),
+        )
+        for screen, gate, result, rc_expected, verify, reason in cases:
+            with self.subTest(reason=result["reason"]):
+                rc, line, gates, receipt = self._codex_prompt_receipt(result, screen)
+                self.assertEqual((rc, gates), (rc_expected, [gate]), line)
+                self.assertIn(verify, line)
+                self.assertIn(reason, line)
+                self.assertIn(verify, receipt)
 
     def test_immediate_codex_restart_queues_the_original_sealed_thread_and_ref(self):
         rc, proofs, submissions, ref, pending = self._run_immediate_codex_restart("same-thread")
@@ -6317,7 +6580,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         payload = _agent_json("codex", "exact-thread", "child", status="idle")
         calls = []
 
-        def consume(ref, *, timeout=1.0):
+        def consume(ref, *, timeout=1.0, **_kw):
             with peer_steward.peer_message.pending_lock(ref):
                 row = peer_steward.peer_message._read_pending(ref)
                 peer_steward.peer_message._save_pending(dict(
@@ -6372,7 +6635,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         payload = _agent_json("codex", None, "fresh", status="idle")
         self._native_sid_by_pid[os.getpid()] = "proven-thread"
 
-        def accept(ref, *, timeout=1.0):
+        def accept(ref, *, timeout=1.0, **_kw):
             queued.append(peer_steward.peer_message._read_pending(ref)["to"]["session_id"])
             return {"status": "queued", "reason": "native-queue-accepted"}
 
@@ -6429,7 +6692,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                     self.assertEqual(received, 0)
                     return 0, {}
 
-                def queue(ref, *, timeout=1.0):
+                def queue(ref, *, timeout=1.0, **_kw):
                     with peer_steward.peer_message.pending_lock(ref):
                         row = peer_steward.peer_message._read_pending(ref)
                         peer_steward.peer_message._save_pending(dict(
@@ -6890,7 +7153,7 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                     body, {"harness": harness, "session_id": target_sid})
             self.assertEqual(rc, 0)
             return 0, {}
-        def native_queue(ref, *, timeout=1.0):
+        def native_queue(ref, *, timeout=1.0, **_kw):
             row = peer_steward.peer_message._read_pending(ref)
             self.assertIsNotNone(row)
             sends.append(row["text"])
@@ -8878,11 +9141,18 @@ class PromptDraftGuardTest(_TmpRootMixin, unittest.TestCase):
     def test_codex_queue_does_not_read_or_type_into_composer(self):
         self.harness, self.sid = "codex", "thread-exact"
         accepted = []
-        def queue(ref):
+        gates = []
+        def queue(ref, *, start_interrupted=False):
             accepted.append(peer_steward.peer_message._read_pending(ref))
+            gates.append(start_interrupted)
             return {"status": "queued", "reason": "native-queue-accepted"}
-        with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=queue):
+        # The queue path never types into the composer. It reads the visible
+        # screen once, read-only, as the sender-side gate for an interrupted thread.
+        with mock.patch.object(peer_steward.peer_message, "deliver_pending_codex", side_effect=queue), \
+             mock.patch.object(peer_steward, "_read_screen",
+                               return_value=peer_steward._screen_lines(CODEX_EMPTY)):
             self.assertEqual(self.prompt("[steer] exact queue"), 3)
+        self.assertEqual(gates, [True])
         self.assertEqual(len(accepted), 1)
         self.assertEqual(accepted[0]["to"]["session_id"], "thread-exact")
         self.assertEqual(accepted[0]["state"], "pending")
@@ -9050,6 +9320,168 @@ class CurrentSessionIdentityDelegationTest(unittest.TestCase):
     def test_nothing_set_returns_empty_unknown(self):
         with self._clean_env():
             self.assertEqual(peer_steward._current_session_identity(), ("", "unknown"))
+
+
+class CodexPromptGateAndPeerStatusTest(_TmpRootMixin, unittest.TestCase):
+    sender = {"harness": "claude", "session_id": "sender-session", "name": "sender"}
+
+    # --- sender-side screen gate for an interrupted Codex thread ---
+    def gate(self, screen):
+        lines = None if screen is None else peer_steward._screen_lines(screen)
+        with mock.patch.object(peer_steward, "_read_screen", return_value=lines):
+            return peer_steward._codex_interrupt_start_gate("w1:pX")
+
+    def test_gate_maps_the_visible_composer_to_one_of_four_values(self):
+        popup = "banner: project · main\nPrior chat text\n" + _codex_snapshot("worktrees_new_choices.snap")
+        trust = _codex_snapshot("startup_hooks_review_prompt.snap")
+        self.assertIs(self.gate(CODEX_EMPTY), True)
+        self.assertEqual(self.gate(CODEX_DRAFT), "draft")
+        self.assertEqual(self.gate(popup), "form")
+        self.assertEqual(self.gate(trust), "form")
+        self.assertEqual(self.gate(None), "screen-unknown")
+        self.assertEqual(self.gate(NO_BOX), "screen-unknown")
+        with mock.patch.object(peer_steward, "_read_screen") as read:
+            self.assertEqual(peer_steward._codex_interrupt_start_gate(None), "screen-unknown")
+        read.assert_not_called()
+
+    # --- status: the sender sees its own undelivered peer rows ---
+    def setUp(self):
+        super().setUp()
+        self.pm = peer_steward.peer_message
+        self.watch_root = self.tmp_root / "watch"
+        self.watch_root.mkdir()
+        self.rpc_calls = []
+        self.queue = {}
+        self.turn = {}
+        self.rpc_errors = {}
+
+        def rpc(_path, method, params, **_kw):
+            self.rpc_calls.append((method, params["threadId"]))
+            if params["threadId"] in self.rpc_errors:
+                raise _queue_error(self.rpc_errors[params["threadId"]], ambiguous=False)
+            if method == "thread/queue/list":
+                return {"data": list(self.queue.get(params["threadId"], []))}
+            if method == "thread/turns/list":
+                turn = self.turn.get(params["threadId"])
+                return {"data": [turn] if turn else []}
+            raise AssertionError("status used a write rpc: " + method)
+        for patcher in (
+                mock.patch.object(peer_steward, "_watch_root", return_value=self.watch_root),
+                mock.patch.object(peer_steward, "_watch_entries", return_value=[]),
+                mock.patch.object(peer_steward, "_current_session_identity",
+                                  return_value=("sender-session", "claude")),
+                mock.patch("codex_queue_dispatch.resolve_queue_socket", return_value="fixture-socket"),
+                mock.patch("codex_queue_delivery._rpc", side_effect=rpc)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def row(self, body, *, thread="codex-thread", sender=None, harness="codex", receipt=None, state=None,
+            created=None):
+        recipient = {"harness": harness, "session_id": thread, "name": "child", "pane_id": "w1:pX"}
+        _text, ref = self.pm.prepare_peer_message(body, sender or self.sender, recipient, defer=True)
+        changes = {}
+        if receipt:
+            changes["receipt"] = receipt
+        if state:
+            changes["state"] = state
+        if created is not None:
+            changes["created"] = created
+        if changes:
+            with self.pm.pending_lock(ref):
+                self.pm._save_pending(dict(self.pm._read_pending(ref), **changes))
+        return ref
+
+    def status(self, *flags, **overrides):
+        args = SimpleNamespace(watch=overrides.get("watch"), undelivered="--undelivered" in flags,
+                               json="--json" in flags)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = peer_steward.cmd_status(args)
+        return rc, out.getvalue()
+
+    def test_json_shows_exact_codex_queue_and_turn_facts_without_touching_watches(self):
+        ref = self.row("needs a look", receipt="native-queue-accepted", state="queued")
+        self.queue["codex-thread"] = [
+            {"id": "q1", "clientUserMessageId": "delivery-peer-" + ref},
+            {"id": "q2", "input": []}]
+        self.turn["codex-thread"] = {"id": "turn-5", "status": "interrupted"}
+        rc, out = self.status("--json")
+        payload = json.loads(out)
+        self.assertEqual((rc, payload["watches"], payload["peer_messages_omitted"]), (0, [], 0))
+        entry, = payload["peer_messages"]
+        self.assertEqual(entry["ref"], ref)
+        self.assertEqual((entry["state"], entry["receipt"], entry["steer"]), ("queued", "native-queue-accepted", True))
+        self.assertEqual(entry["to"], {"harness": "codex", "session_id": "codex-thread", "name": "child"})
+        self.assertEqual(entry["codex"], {"queue": "present", "turn": "interrupted", "turn_id": "turn-5",
+                                          "hearting_items": 1, "other_items": 1, "reason": None})
+        self.assertIsInstance(entry["age_s"], int)
+        self.assertNotIn("peer_messages_error", payload)
+
+    def test_text_line_and_undelivered_filter(self):
+        ref = self.row("needs a look")
+        self.turn["codex-thread"] = {"id": "turn-5", "status": "inProgress"}
+        for flags in ((), ("--undelivered",)):
+            rc, out = self.status(*flags)
+            line, = out.splitlines()
+            self.assertEqual(rc, 0)
+            self.assertRegex(line, r"^peer-message ref=%s to=codex:child state=pending receipt=\S+ "
+                                   r"age=\d+s steer=yes queue=absent turn=inProgress turn_id=turn-5 "
+                                   r"hearting=0 other=0$" % ref)
+
+    def test_only_the_callers_own_rows_and_never_with_watch(self):
+        mine = self.row("mine")
+        self.row("theirs", sender={"harness": "claude", "session_id": "someone-else", "name": "x"})
+        payload = json.loads(self.status("--json")[1])
+        self.assertEqual([entry["ref"] for entry in payload["peer_messages"]], [mine])
+        rc, out = self.status("--json", watch="abc")
+        self.assertNotIn("peer_messages", json.loads(out))
+        self.assertEqual(self.status(watch="abc")[1], "")
+        self.assertEqual(len(self.rpc_calls), 2)  # only the first, un-filtered call observed Codex
+
+    def test_observation_failure_is_unknown_and_never_breaks_status(self):
+        self.row("needs a look")
+        self.rpc_errors["codex-thread"] = "queue-websocket-timeout"
+        rc, out = self.status("--json")
+        entry, = json.loads(out)["peer_messages"]
+        self.assertEqual(rc, 0)
+        self.assertEqual((entry["codex"]["queue"], entry["codex"]["reason"]),
+                         ("unknown", "queue-websocket-timeout"))
+        with mock.patch.object(self.pm, "_pending_rows", side_effect=OSError("disk")):
+            rc, out = self.status("--json")
+            payload = json.loads(out)
+            self.assertEqual((rc, payload["peer_messages"], payload["peer_messages_error"]), (0, [], "OSError"))
+            self.assertEqual(self.status()[0], 0)
+
+    def test_status_reads_but_never_writes_the_native_queue(self):
+        for index in range(3):
+            self.row("note %d" % index, thread="thread-%d" % index)
+        self.status("--json")
+        self.assertTrue(self.rpc_calls)
+        self.assertLessEqual({method for method, _thread in self.rpc_calls},
+                             {"thread/queue/list", "thread/turns/list"})
+
+    def test_observation_and_row_budgets(self):
+        for index in range(peer_steward._PEER_STATUS_MAX_THREADS + 1):
+            self.row("thread note %d" % index, thread="thread-%d" % index, created=1000.0 + index)
+        entries = json.loads(self.status("--json")[1])["peer_messages"]
+        self.assertEqual([entry["codex"]["reason"] for entry in entries].count("observation-cap"), 1)
+        self.assertEqual(entries[-1]["codex"]["reason"], "observation-cap")
+        self.assertEqual(len({thread for _method, thread in self.rpc_calls}), peer_steward._PEER_STATUS_MAX_THREADS)
+        self.assertEqual(peer_steward._PEER_STATUS_RPC_BUDGET, 1.0)
+        self.assertEqual(peer_steward._PEER_STATUS_RPC_TIMEOUT, 0.25)
+        for index in range(25):
+            self.row("bulk %d" % index, thread="bulk-thread", created=5000.0 + index)
+        payload = json.loads(self.status("--json")[1])
+        self.assertEqual(len(payload["peer_messages"]), peer_steward._PEER_STATUS_MAX_ROWS)
+        self.assertEqual(payload["peer_messages_omitted"], peer_steward._PEER_STATUS_MAX_THREADS + 1 + 25 - 20)
+        self.assertIn("peer-message omitted=", self.status()[1])
+
+    def test_non_codex_rows_have_no_codex_block(self):
+        self.row("to claude", thread="claude-session", harness="claude")
+        entry, = json.loads(self.status("--json")[1])["peer_messages"]
+        self.assertNotIn("codex", entry)
+        self.assertFalse(entry["steer"])
+        self.assertEqual(self.rpc_calls, [])
 
 
 # --- clear (session-tidy auto-clear) ---------------------------------------------------

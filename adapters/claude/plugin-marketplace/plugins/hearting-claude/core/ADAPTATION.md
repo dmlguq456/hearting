@@ -908,8 +908,17 @@ remain separate duties. A transport timeout or ambiguous reply retains the
 same transfer reference and its existing owner.
 
 The peer-delivery support matrix is transport-specific: `Claude plain TUI:
-idle -> existing steward prompt delivery; busy -> callback`; Codex uses its
-exact native per-thread queue, and OpenCode uses its native plugin callback.
+idle -> existing steward prompt delivery; busy -> callback`; Codex steers
+ordinary peer input into the active turn with `turn/steer` (same
+`clientUserMessageId`, `expectedTurnId`) and otherwise uses its exact native
+per-thread queue, and OpenCode uses its native plugin callback.
+A non-ambiguous steer refusal falls back to the queue; an ambiguous result is
+never repeated, and a steer whose turn ended without the id in complete exact
+history is re-queued once. The sender's earlier Hearting items are first moved
+into the turn after `deleted:true` is confirmed. An interrupted thread is
+started only when the sender saw no form and an empty composer and the queue
+holds no non-Hearting item, and then only for the exact Hearting item;
+otherwise the receipt is `native-queue-held-interrupted:<reason>`.
 Claude's idle prompt path requires the exact native SID, pane, foreground PID
 birth and namespace, native `idle` state, ready registered-work state, no open
 form or question, and an empty visible composer. A dim prompt suggestion is
