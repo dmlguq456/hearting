@@ -1931,6 +1931,24 @@ class WorkStartTest(unittest.TestCase):
 WF = load("work_start_workflow_fixture", W.ROOT / "utilities/workflow_supervisor.test.py")
 
 
+class U4FrameDecisionTest(unittest.TestCase):
+    def test_one_brief_never_opens_the_decision(self):
+        """C4-3: the decision reads both briefs and the intent, or nothing."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); output = root / "out"
+            def put(node, name="direction-brief.md"):
+                (output / "shards" / node).mkdir(parents=True, exist_ok=True)
+                (output / "shards" / node / name).write_text(node + "\n")
+            put("frame", "intent.md")
+            put("frame")
+            self.assertIsNone(W._framed_facts(root, output))                    # only the first brief
+            put("frame-alternative")
+            rows, intent = W._framed_facts(root, output)
+            self.assertEqual([row["node"] for row in rows], ["frame", "frame-alternative"])
+            (output / "shards/frame/direction-brief.md").unlink()
+            self.assertIsNone(W._framed_facts(root, output))                    # only the alternative
+
+
 class FrameInterviewStepTest(WF.WorkflowFixture):
     """Real ledger/gate/answer/intent code; transport and producer location are isolated."""
     def setUp(self):
