@@ -8749,8 +8749,10 @@ def _upstream_completed_later(route, node, marker, marker_path):
     A node's completion is the result of the nodes it depends on (directly or through others).
     When one of them has a later completion (a new attempt's new sequence), this one is the
     result of an older upstream, however unchanged its own evidence is. Not a new completion:
-    an upstream revision (its dependents carry their own tombstone or restored marker), a
-    tombstone, or a marker that cannot be read or dated. Only markers beside this one are read.
+    an upstream's first marker (a resource stage's owner settlement writes it after the
+    dependents that already consumed its accepted result), an upstream revision (its
+    dependents carry their own tombstone or restored marker), a tombstone, or a marker that
+    cannot be read or dated. Only markers beside this one are read.
     A result bound to a source or input subject is judged by that subject (`marker_currency`),
     not by when its upstream last ran.
     """
@@ -8773,6 +8775,7 @@ def _upstream_completed_later(route, node, marker, marker_path):
         except (OSError, ValueError):
             continue
         if (not isinstance(later, dict) or later.get("node_id") != upstream
+                or type(later.get("sequence")) is not int or later["sequence"] < 2
                 or later.get("state") == "superseded-by-upstream-revision"
                 or later.get("stage_authority") == "revision"):
             continue

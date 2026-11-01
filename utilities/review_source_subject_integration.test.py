@@ -1853,6 +1853,9 @@ class UpstreamOrderTest(unittest.TestCase):
         self.assertIsNone(judged(**later, stage_authority="revision"))           # an upstream revision
         self.assertIsNone(judged(**later, state="superseded-by-upstream-revision"))
         self.assertIsNone(judged(completed_at="1999-01-01T00:00:00Z"))            # earlier than the result
+        # An upstream's first marker written after the result (a resource stage's owner settlement)
+        # is not a new completion.
+        self.assertIsNone(judged(completed_at="2999-01-01T00:00:00Z", sequence=1))
         inspect_path.write_text("{", encoding="utf-8")                           # unreadable: no judgement
         self.assertIsNone(DC._upstream_completed_later(self.route, report, mine, self.path("report")))
         inspect_path.write_text(json.dumps({**first, **later}), encoding="utf-8")
