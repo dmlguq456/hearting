@@ -1818,11 +1818,15 @@ class RecipientScopes(list):
     the caller keeps the previous inbox plus the session's own scope instead.
     """
 
-    __slots__ = ("complete",)
+    __slots__ = ("complete", "edges")
 
-    def __init__(self, items=(), *, complete: bool = True):
+    def __init__(self, items=(), *, complete: bool = True, edges=None):
         super().__init__(items)
         self.complete = complete
+        # The confirmed edges of the lineage observation these scopes came
+        # from, or None when no graph was read. A published inbox digests this
+        # set, never a graph observed later than the scopes.
+        self.edges = edges
 
 
 def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
@@ -1840,16 +1844,19 @@ def storage_recipients(session: str, env=None, harness: Optional[str] = None, *,
     def expired() -> bool:
         return deadline_ns is not None and time.monotonic_ns() >= deadline_ns
 
+    observed = {}
+
     def scopes(owed, complete):
         return RecipientScopes([(session, None), *((key, LineageAttempts(attempts))
                              for key, attempts in sorted(owed.items()) if key != session)],
-                             complete=complete)
+                             complete=complete, edges=observed.get("edges"))
 
     try:
         with context.pinned_lineage():
             if expired():
                 return scopes({}, False)
             graph = _pass_lineage_graph(context)
+            observed["edges"] = tuple(getattr(graph, "edges", ()) or ())
             candidates = set(graph.ledger_keys)
             owed = {}
             complete = True

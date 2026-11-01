@@ -333,16 +333,18 @@ def _read_addressed(
 
 
 def _inbox_payload(root: Path, session_id: str, harness: str, scopes, open_entries,
-                   read_context=None) -> dict:
-    """Describe the exact open-record set and the scopes that can change it."""
+                   *, edge_generation: int, folded_edge_digest, inbox_root: Path | None = None) -> dict:
+    """Describe the exact open-record set and the scopes that can change it.
+
+    ``edge_generation`` is read by the caller before it enumerated ``scopes`` and
+    ``folded_edge_digest`` digests the edges of that same observation (the
+    scopes' own, or the previous inbox's for a stale republish). Nothing here
+    reads the lineage graph. Publication is refused when the generation moved
+    since the caller's capture, so old scopes never carry a newer edge key.
+    """
     import dispatch_recipient_inbox as inbox
 
-    from dispatch_seat_handover import lineage_graph
-    # Capture the generation this observation is published under before the
-    # graph read. An edge writer that appends and bumps between the two must
-    # not leave old scopes under the newer generation.
-    generation = inbox.read_edge_generation(root)
-    graph = lineage_graph(read_context=read_context)
+    generation_root = inbox_root if inbox_root is not None else root
     identities = {}
     storage_keys = [session_id]
     candidates = []
@@ -363,11 +365,11 @@ def _inbox_payload(root: Path, session_id: str, harness: str, scopes, open_entri
         # `is_current` then requires an absent directory to still be absent, so
         # a record created there after publication invalidates the inbox.
         identities[str(directory)] = _directory_identity(directory)
-    if inbox.read_edge_generation(root) != generation:
+    if inbox.read_edge_generation(generation_root) != edge_generation:
         raise OSError("lineage-generation-changed")
     return {
-        "edge_generation": generation,
-        "folded_edge_digest": inbox.edge_digest(getattr(graph, "edges", ()) or ()),
+        "edge_generation": edge_generation,
+        "folded_edge_digest": folded_edge_digest,
         "dir_identities": identities,
         "delivery_ids": [{"storage_key": storage_key, "delivery_id": delivery_id,
                           "mtime_ns": mtime_ns}
@@ -375,6 +377,20 @@ def _inbox_payload(root: Path, session_id: str, harness: str, scopes, open_entri
         "candidates": candidates,
         "observed_at_ns": time.time_ns(),
     }
+
+
+def scopes_edge_digest(scopes) -> str:
+    """Digest of the lineage observation ``scopes`` were enumerated from.
+
+    Raises when the scopes carry no observation, so such a set is never
+    published (a digest from a later graph would hide a newer edge).
+    """
+    import dispatch_recipient_inbox as inbox
+
+    edges = getattr(scopes, "edges", None)
+    if edges is None:
+        raise OSError("scopes-without-lineage-observation")
+    return inbox.edge_digest(edges)
 
 
 def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_context=None,
@@ -462,6 +478,10 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
         candidates.extend(_scope_entries_newest_first(root, session_id))
 
     if prefill:
+        # Capture the edge generation before enumerating scopes: an edge writer
+        # that completes after this point makes the final recheck refuse the
+        # publication instead of stamping old scopes with its newer generation.
+        edge_generation = inbox.read_edge_generation(inbox_root)
         with _registry_read_scope():
             scopes = storage_recipients(
                 session_id, harness=harness, read_context=read_context,
@@ -482,8 +502,10 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
         complete = complete and complete_scopes
         if complete and open_entries is not None:
             try:
-                payload = _inbox_payload(root, session_id, harness, scopes, open_entries,
-                                         read_context=read_context)
+                payload = _inbox_payload(
+                    root, session_id, harness, scopes, open_entries,
+                    edge_generation=edge_generation,
+                    folded_edge_digest=scopes_edge_digest(scopes), inbox_root=inbox_root)
                 inbox.write_inbox(inbox_root, harness, session_id, payload)
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
                 pass
@@ -503,14 +525,19 @@ def addressed_records(root: Path, recipient_kind: str, session_id: str, *, read_
         scope_rank.get(item[0], len(scope_rank)), item[1]))
     if complete and recorded is not None:
         # The pass observed the whole share. Republish only under the inbox's own
-        # edge generation: when edges changed, this observation predates the
-        # runner's refresh and must not claim to be current.
+        # edge generation and its own folded edge digest: this pass never read
+        # the lineage graph, so it cannot vouch for edges newer than the scopes
+        # it re-read. A missed generation bump therefore stays visible to the
+        # runner's digest comparison, which repairs the session.
         try:
-            same_generation = (inbox.read_edge_generation(inbox_root)
-                               == recorded.get("edge_generation"))
-            if same_generation:
-                payload = _inbox_payload(root, session_id, harness, stale_scopes,
-                                         open_entries, read_context=read_context)
+            recorded_generation = recorded.get("edge_generation")
+            if (isinstance(recorded_generation, int) and not isinstance(recorded_generation, bool)
+                    and inbox.read_edge_generation(inbox_root) == recorded_generation):
+                payload = _inbox_payload(
+                    root, session_id, harness, stale_scopes, open_entries,
+                    edge_generation=recorded_generation,
+                    folded_edge_digest=recorded.get("folded_edge_digest"),
+                    inbox_root=inbox_root)
                 inbox.write_inbox(inbox_root, harness, session_id, payload)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):
             pass
@@ -1706,9 +1733,10 @@ def _recipients_view(roots: list[Path], session_id: str, recipient_kind: str) ->
 
     read_context = PeerReadContext(compact_lineage=True)
     deadline_ns = time.monotonic_ns() + int(DELIVER_BUDGET_SECONDS * 1_000_000_000)
-    # Project the generation that the shared graph actually read. Taking it
-    # before the scope enumeration lets the final recheck refuse a writer
-    # change during discovery; old scopes never publish under a new generation.
+    # Capture the edge generation before the graph and scope reads, so a writer
+    # that completes later makes the publication recheck refuse; old scopes
+    # never publish under a new generation.
+    edge_generation = inbox.read_edge_generation(inbox_root)
     graph = lineage_graph(read_context=read_context)
     generation = hashlib.sha256(json.dumps(graph.generation, separators=(",", ":")).encode()).hexdigest()
     scopes = storage_recipients(session_id, harness="opencode",
@@ -1737,8 +1765,10 @@ def _recipients_view(roots: list[Path], session_id: str, recipient_kind: str) ->
         read_context=read_context, deadline_ns=deadline_ns)
     if complete:
         try:
-            payload = _inbox_payload(root, session_id, "opencode", scopes, open_entries,
-                                     read_context=read_context)
+            payload = _inbox_payload(
+                root, session_id, "opencode", scopes, open_entries,
+                edge_generation=edge_generation,
+                folded_edge_digest=scopes_edge_digest(scopes), inbox_root=inbox_root)
             inbox.write_inbox(inbox_root, "opencode", session_id, payload)
             return inbox_view(payload)
         except (OSError, ValueError, TypeError, KeyError, RuntimeError):

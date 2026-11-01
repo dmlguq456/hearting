@@ -852,6 +852,57 @@ class InboxPrefillTest(IsolatedCase):
         self.assertTrue(inbox.is_current(repaired, self.root,
                                          folded_edge_digest=repaired["folded_edge_digest"]))
 
+    def test_runner_prefill_refuses_old_scopes_after_a_completed_edge_writer(self):
+        import dispatch_seat_handover as handover
+        notice = _notice("claude", "A", key="open-1", subject="n", text="t",
+                         jobs=self.jobs)
+        real = handover.storage_recipients
+
+        def scopes_then_writer(*args, **kwargs):
+            result = real(*args, **kwargs)
+            # The confirmed edge writer completes after the scopes were
+            # enumerated and before the inbox is published.
+            self.edge("A", "B")
+            inbox.bump_edge_generation(self.root)
+            return result
+
+        deadline = time.monotonic_ns() + 30 * 1_000_000_000
+        with mock.patch.object(handover, "storage_recipients",
+                               side_effect=scopes_then_writer):
+            with self.assertRaises(OSError):
+                peer_steward._prefill_recipient_inbox(
+                    self.root, "claude", "B", deadline_ns=deadline)
+        self.assertIsNone(inbox.read_inbox(self.root, "claude", "B"))
+        payload = peer_steward._prefill_recipient_inbox(
+            self.root, "claude", "B", deadline_ns=deadline)
+        self.assertIn(notice["delivery_id"],
+                      [item["delivery_id"] for item in payload["delivery_ids"]])
+        self.assertTrue(inbox.is_current(inbox.read_inbox(self.root, "claude", "B"),
+                                         self.root))
+
+    def test_prefill_publishes_nothing_when_the_graph_read_spent_the_deadline(self):
+        import dispatch_seat_handover as handover
+        _notice("claude", "A", key="open-1", subject="n", text="t", jobs=self.jobs)
+        self.edge("A", "B")
+        real = handover.lineage_graph
+
+        def slow_graph(*args, **kwargs):
+            graph = real(*args, **kwargs)
+            time.sleep(0.08)  # the full-graph read is not interruptible
+            return graph
+
+        started = time.monotonic()
+        with mock.patch.object(handover, "lineage_graph", side_effect=slow_graph), \
+                mock.patch.object(peer_steward, "_live_recipients",
+                                  return_value={("claude", "B"), ("claude", "C")}), \
+                mock.patch.object(peer_steward, "_prefill_recipient_inbox",
+                                  side_effect=AssertionError("prefill after deadline")):
+            result = peer_steward._prefill_live_inboxes(
+                self.root, deadline_ns=time.monotonic_ns() + 40_000_000)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertEqual(result, {"checked": 0, "written": 0, "skipped": 2})
+        self.assertIsNone(inbox.read_inbox(self.root, "claude", "B"))
+
 
 class RunStatesPublishTest(IsolatedCase):
     def test_publish_merges_public_status_with_registry_exit_and_jobs(self):

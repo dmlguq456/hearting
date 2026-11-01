@@ -9404,6 +9404,9 @@ def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
     from peer_read_context import PeerReadContext
 
     read_context = PeerReadContext()
+    # Capture the generation before the scope enumeration; an edge writer that
+    # completes afterwards makes the payload recheck refuse this publication.
+    edge_generation = inbox.read_edge_generation(root)
     with sweep._registry_read_scope():
         scopes = storage_recipients(
             session_id, harness=harness, read_context=read_context,
@@ -9446,8 +9449,10 @@ def _prefill_recipient_inbox(root, harness, session_id, *, deadline_ns):
                 break
         if not complete:
             return None
-        payload = sweep._inbox_payload(root, session_id, harness, scopes, open_entries,
-                                       read_context=read_context)
+        payload = sweep._inbox_payload(
+            root, session_id, harness, scopes, open_entries,
+            edge_generation=edge_generation,
+            folded_edge_digest=sweep.scopes_edge_digest(scopes))
     inbox.write_inbox(root, harness, session_id, payload)
     return payload
 
@@ -9477,6 +9482,11 @@ def _prefill_live_inboxes(root, *, deadline_ns):
             folded_edge_digest = inbox.edge_digest(getattr(graph, "edges", ()) or ())
         except (OSError, ValueError, TypeError):
             folded_edge_digest = None  # unknown edges keep the generation key
+        if time.monotonic_ns() >= deadline_ns:
+            # The full-graph read is not deadline-bounded; a pass that spent its
+            # budget on it leaves every session to the next pass.
+            result["skipped"] += len(live)
+            return result
     for harness, session_id in live:
         if time.monotonic_ns() >= deadline_ns:
             result["skipped"] += 1

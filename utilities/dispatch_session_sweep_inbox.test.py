@@ -26,6 +26,7 @@ Covered here:
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import json
 import os
@@ -47,6 +48,11 @@ import dispatch_session_sweep as SWEEP  # noqa: E402
 import dispatch_seat_handover as HANDOVER  # noqa: E402
 import session_tidy as TIDY  # noqa: E402
 from peer_read_context import PeerReadContext  # noqa: E402
+
+_STEWARD_SPEC = importlib.util.spec_from_file_location(
+    "peer_steward_sweep_inbox_test", str(HERE / "peer-steward.py"))
+STEWARD = importlib.util.module_from_spec(_STEWARD_SPEC)
+_STEWARD_SPEC.loader.exec_module(STEWARD)
 
 KIND = "claude-parent-runtime"
 SESSION = "sess-inbox-target"
@@ -246,17 +252,13 @@ class DiscoveryTest(IsolatedCase):
             records, _count = SWEEP.addressed_records(self.root, KIND, SESSION)
         self.assertEqual([item["delivery_id"] for item in records], [new["delivery_id"]])
 
-    def test_payload_refuses_a_generation_bump_during_the_graph_observation(self):
+    def test_payload_refuses_a_generation_that_moved_since_the_caller_captured_it(self):
         self.seed()
-        real = HANDOVER.lineage_graph
-
-        def racing(*args, **kwargs):
-            INBOX.bump_edge_generation(self.root)
-            return real(*args, **kwargs)
-
-        with mock.patch.object(HANDOVER, "lineage_graph", side_effect=racing):
-            with self.assertRaises(OSError):
-                SWEEP._inbox_payload(self.root, SESSION, "claude", [], [])
+        captured = INBOX.read_edge_generation(self.root)
+        INBOX.bump_edge_generation(self.root)
+        with self.assertRaises(OSError):
+            SWEEP._inbox_payload(self.root, SESSION, "claude", [], [],
+                                 edge_generation=captured, folded_edge_digest="d")
         self.assertIsNone(INBOX.read_inbox(self.root, "claude", SESSION))
 
     def test_first_prefill_is_not_published_when_a_writer_bumps_during_it(self):
@@ -358,6 +360,122 @@ class DiscoveryTest(IsolatedCase):
         self.assertEqual(PD.read(self.root, SESSION, record["delivery_id"])["state"], "pending")
         records, _count = SWEEP.addressed_records(self.root, KIND, SESSION, deadline_ns=1)
         self.assertFalse(getattr(records, "complete", True))
+
+
+def write_succession(case, attempts, *, bump: bool, harness: str = "claude"):
+    """The confirmed edge writer: append the succession row, then bump."""
+    ledger = TIDY.state_root() / "sessions" / f"{SESSION}.jsonl"
+    ledger.parent.mkdir(parents=True, exist_ok=True)
+    row = {"ts": 1, "event": "succession", "source": "tidy-clear",
+           "harness": harness, "sid": SESSION, "from": PREDECESSOR,
+           "bindings": [{"jobs": str(case.jobs), "route": "rt-inbox",
+                         "hash": "sha256:inbox", "node": "execute",
+                         "attempt": attempt, "parent": PREDECESSOR}
+                        for attempt in attempts]}
+    ledger.write_text(json.dumps(row, sort_keys=True) + "\n", encoding="utf-8")
+    HANDOVER._LINEAGE_GRAPH_CACHE.clear()
+    if bump:
+        INBOX.bump_edge_generation(case.root)
+
+
+def run_runner_prefill(case):
+    with mock.patch.object(STEWARD, "_live_recipients",
+                           return_value={("claude", SESSION)}):
+        return STEWARD._prefill_live_inboxes(
+            case.root, deadline_ns=time.monotonic_ns() + 30_000_000_000)
+
+
+class PublicationRaceTest(IsolatedCase):
+    """An edge writer completing between scope enumeration and publication.
+
+    The published inbox must never pair a newer edge generation/digest with
+    scopes enumerated from an older lineage observation.
+    """
+
+    def assert_old_scopes_not_current(self, harness):
+        payload = INBOX.read_inbox(self.root, harness, SESSION)
+        if payload is None:
+            return
+        pred_dir = str(PD.record_directory(self.root, PREDECESSOR))
+        self.assertFalse(
+            INBOX.is_current(payload, self.root) and pred_dir not in payload["dir_identities"],
+            "an inbox carrying the old scopes was published as current")
+
+    def test_hook_first_prefill_refuses_old_scopes_after_a_completed_edge_writer(self):
+        self.seed()
+        real = HANDOVER.storage_recipients
+
+        def scopes_then_writer(*args, **kwargs):
+            result = real(*args, **kwargs)
+            write_succession(self, ["att-pred-new"], bump=True)
+            return result
+
+        with mock.patch.object(HANDOVER, "storage_recipients",
+                               side_effect=scopes_then_writer):
+            SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assert_old_scopes_not_current("claude")
+        new = self.seed(session=PREDECESSOR, delivery_id="delivery-" + "e" * 32,
+                        attempt="att-pred-new")
+        records, _count = SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assertIn(new["delivery_id"], [item["delivery_id"] for item in records])
+
+    def test_hook_stale_republish_refuses_when_a_writer_completes_before_publication(self):
+        self.seed()
+        SWEEP.addressed_records(self.root, KIND, SESSION)  # warm inbox, no predecessor
+        self.seed(delivery_id="delivery-" + "d" * 32, attempt="att-inbox-2")  # makes it stale
+        real = SWEEP._inbox_payload
+
+        def writer_then_payload(*args, **kwargs):
+            write_succession(self, ["att-pred-new"], bump=True)
+            return real(*args, **kwargs)
+
+        with mock.patch.object(SWEEP, "_inbox_payload", side_effect=writer_then_payload):
+            SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assert_old_scopes_not_current("claude")
+        new = self.seed(session=PREDECESSOR, delivery_id="delivery-" + "e" * 32,
+                        attempt="att-pred-new")
+        run_runner_prefill(self)
+        records, _count = SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assertIn(new["delivery_id"], [item["delivery_id"] for item in records])
+
+    def test_recipients_slow_path_refuses_old_scopes_after_a_completed_edge_writer(self):
+        self.seed(kind="opencode-turn", attempt="att-oc")
+        real = SWEEP._read_addressed
+
+        def read_then_writer(*args, **kwargs):
+            result = real(*args, **kwargs)
+            write_succession(self, ["att-oc-pred"], bump=True, harness="opencode")
+            return result
+
+        with mock.patch.object(SWEEP, "_read_addressed", side_effect=read_then_writer):
+            SWEEP._recipients_view([self.root], SESSION, "opencode-turn")
+        self.assert_old_scopes_not_current("opencode")
+        new = self.seed(session=PREDECESSOR, delivery_id="delivery-" + "9" * 32,
+                        attempt="att-oc-pred", kind="opencode-turn")
+        view = SWEEP._recipients_view([self.root], SESSION, "opencode-turn")
+        self.assertIn(new["delivery_id"], view["delivery_ids"])
+
+    def test_stale_republish_keeps_the_recorded_digest_so_the_runner_repairs_a_missed_bump(self):
+        self.seed(delivery_id="delivery-" + "a" * 32, attempt="att-b1")
+        SWEEP.addressed_records(self.root, KIND, SESSION)
+        warm = INBOX.read_inbox(self.root, "claude", SESSION)
+        # A confirmed edge writer whose best-effort bump failed.
+        write_succession(self, ["att-missed-new"], bump=False)
+        self.seed(delivery_id="delivery-" + "d" * 32, attempt="att-b2")  # stale pass trigger
+        SWEEP.addressed_records(self.root, KIND, SESSION)
+        republished = INBOX.read_inbox(self.root, "claude", SESSION)
+        self.assertEqual(republished["edge_generation"], warm["edge_generation"])
+        self.assertEqual(republished["folded_edge_digest"], warm["folded_edge_digest"])
+        fresh = INBOX.edge_digest(HANDOVER.lineage_graph().edges)
+        self.assertNotEqual(republished["folded_edge_digest"], fresh)
+        self.assertFalse(INBOX.is_current(republished, self.root, folded_edge_digest=fresh))
+        new = self.seed(session=PREDECESSOR, delivery_id="delivery-" + "f" * 32,
+                        attempt="att-missed-new")
+        result = run_runner_prefill(self)
+        self.assertEqual(result["written"], 1)
+        with self.assert_no_global_scope():
+            records, _count = SWEEP.addressed_records(self.root, KIND, SESSION)
+        self.assertIn(new["delivery_id"], [item["delivery_id"] for item in records])
 
 
 class StaleReadOrderTest(IsolatedCase):
