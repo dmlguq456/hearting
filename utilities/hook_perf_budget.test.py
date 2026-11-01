@@ -15,8 +15,9 @@ sample is measured. A fake ``herdr`` executable records the argv it receives.
 
 Assertions: prompt <= 3 s and Stop <= 2 s at scale 1; scale 2 may be at most
 1.5x and +0.5 s over scale 1 with at most 1.1x opened files; a delivered prompt
-pass reads at most 6.5x the fixed registry size and is faster than the pre-fix
-13-read median. ``check_budget``/``check_read_budget`` themselves are
+pass reads at most 6.5x the fixed registry size (the pre-fix path read it 13
+times); that ratio, not a wall-clock constant from one machine, carries the
+"faster than before" claim. ``check_budget``/``check_read_budget`` themselves are
 unit-tested against over-budget samples so the gate cannot pass vacuously.
 """
 from __future__ import annotations
@@ -54,9 +55,6 @@ SCALE_OPEN_RATIO = 1.1
 # (discovery 1, claim 1 per group, effect 1 per group, render 1); 6.5 keeps a
 # little slack for harmless one-off reads.
 PROMPT_READ_RATIO = 6.5
-# Pre-fix median for the same delivered prompt case on this fixture
-# (dev_logs/execute-gap.md, 2026-10-31): 13 reads, 1.956 s.
-PROMPT_BEFORE_SECONDS = 1.956
 RUNS = 5
 
 
@@ -544,10 +542,6 @@ class HookPerfBudgetTest(unittest.TestCase):
                     jobs_bytes = scale1.fixture["counts"]["jobs_bytes"]
                     check_read_budget(case_name, run1["bytes"], jobs_bytes)
                     check_read_budget(case_name, run2["bytes"], jobs_bytes)
-                    self.assertLess(
-                        run1["seconds"], PROMPT_BEFORE_SECONDS,
-                        "prompt delivery is not faster than the pre-fix "
-                        f"{PROMPT_BEFORE_SECONDS:.3f}s 13-read median: {run1['seconds']:.3f}s")
 
             print("\nscale | case          | median s | opens | bytes    | stop_path")
             print("------+---------------+----------+-------+----------+----------")

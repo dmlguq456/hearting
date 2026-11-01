@@ -999,12 +999,14 @@ class CodeStageLocalNetworkTest(_CodexBuilderFixture):
         # General network already approved (owner, GPU): byte-identical to commit_profile_config.
         roots = [str(self.base / "art")]
         for network in (True,):
-            profile, status = profiles.code_stage_profile_config(
-                str(self.repo), roots, "workspace-write", network,
-                primary_commit=True, route=self.route, node_id="execute")
+            # Both sides see the same runtime capability (CI has no codex binary).
             with mock.patch.object(profiles, "named_profiles_available", return_value=True):
+                profile, status = profiles.code_stage_profile_config(
+                    str(self.repo), roots, "workspace-write", network,
+                    primary_commit=True, route=self.route, node_id="execute")
                 expected = profiles.commit_profile_config(
                     str(self.repo), roots, "workspace-write", network, primary_commit=True)
+            self.assertIsInstance(expected, dict)
             self.assertEqual((profile, status), (expected, "not-applicable"))
 
     def test_effective_grant_records_loopback_only_scope(self):

@@ -1731,6 +1731,13 @@ import dispatch_contract as D  # noqa: E402
 import dispatch_completion_join as JOIN  # noqa: E402
 
 
+# The Codex courier's interrupted-start gate reads the visible pane once; an empty
+# input box (same shape as peer_steward.test.py CODEX_EMPTY) lets it start.
+CODEX_SCREEN_READ = ("agent", "read", "w1:p9", "--source", "visible", "--format", "ansi")
+CODEX_EMPTY_SCREEN = ("recap line\n\n\n\x1b[1m›\x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m\n\n"
+                      "  proj · master · Context 85% used\n")
+
+
 class CarrierOneClaimGateTest(unittest.TestCase):
     """SD-111 P3 (C-3): carrier 1 only emits when it wins a claim on an
     already-materialized record, gated first by the incarnation-ancestry
@@ -1943,6 +1950,11 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                     elif command[:2] == ["pane", "process-info"]:
                         self.assertEqual(command[command.index("--pane") + 1], "w1:p9")
                         payload = {"result": {"process_info": process_info}}
+                    elif harness == "codex" and command == list(CODEX_SCREEN_READ):
+                        # The Codex courier reads the visible screen once, read-only, as
+                        # its interrupted-start gate; answer with an empty input box.
+                        return subprocess.CompletedProcess(
+                            argv, 0, stdout=CODEX_EMPTY_SCREEN, stderr="")
                     else:
                         self.fail(f"unexpected herdr observation request: {command!r}")
                     return subprocess.CompletedProcess(
@@ -2024,9 +2036,11 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                     delivered.append(text)
 
                 native_sends = []
+                native_send_restarts = []
                 def codex_native_send(_socket, *, thread_id, client_message_id, message,
                                       before_add, **_options):
                     native_sends.append((thread_id, client_message_id, message))
+                    native_send_restarts.append(_options.get("allow_restart"))
                     self.assertEqual(thread_id, "session-1")
                     self.assertEqual(client_message_id, "delivery-peer-" + prepared_refs[0])
                     before_add()
@@ -2105,11 +2119,15 @@ class CarrierOneClaimGateTest(unittest.TestCase):
                     self.assertIn(("agent", "get", "w1:p9"), observed_commands)
                     self.assertTrue(any(command[:2] == ("pane", "process-info")
                                         for command in observed_commands))
+                    screen_reads = observed_commands.count(CODEX_SCREEN_READ)
                     if harness == "codex":
                         self.assertTrue(codex_thread_calls)
                         self.assertTrue(all(pane == "w1:p9" and pid == process_pid
                                             for pane, pid, _server in codex_thread_calls))
+                        self.assertEqual(screen_reads, 1)
+                        self.assertEqual(native_send_restarts[:1], [True])
                     else:
+                        self.assertEqual(screen_reads, 0)
                         self.assertTrue(native_identity_calls)
                         self.assertTrue(all((pid, observed_harness) == (process_pid, harness)
                                             for pid, observed_harness in native_identity_calls))

@@ -213,7 +213,8 @@ class QueueDeliveryError(RuntimeError):
 
 def send_at_least_once(socket, *, thread_id, client_message_id, message, timeout,
                        allow_restart, retry_ambiguous, allow_add, require_message_match,
-                       before_add):
+                       before_add, steer=False, owned_queue_only_restart=False,
+                       observe_turn=False, steer_turn_id=None, before_steer=None):
     if before_add:
         before_add()
     digest = hashlib.sha256(message.encode()).hexdigest()
