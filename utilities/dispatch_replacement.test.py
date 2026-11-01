@@ -2803,6 +2803,25 @@ class ReplacementTest(unittest.TestCase):
                 R.claim(self.jobs, ended['attempt_id'])
         self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
 
+    def test_sd106_recovery_flags_stop_the_claim_at_the_budget_state(self):
+        """U7-D2: `retry_ordinal`, `recovery_exhausted` and `start_permitted` are the receipt-unavailable
+        recovery's own records (`dispatch-recovery.py`: a retry already claimed for this edge, or its
+        route-wide cascade spent). The general claim reads them as the budget it is, not as a harm refusal."""
+        for flags in ({'retry_ordinal': '1'}, {'recovery_exhausted': '1'}, {'start_permitted': '0'}):
+            with self.subTest(flags=flags):
+                self.tearDown_case()
+                meta = self._runtime_end(**flags)
+                self.assertTrue(R._budget_exhausted(self.jobs, meta, capacity=True))
+                with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                                return_value={'state': 'absent', 'failure_class': ''}):
+                    with self.assertRaises(D.DispatchContractError) as caught:
+                        R.claim(self.jobs, 'att-source')
+                self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+                self.assertFalse((R._directory(self.jobs) / 'claims').exists())
+        self.tearDown_case()
+        meta = self._runtime_end()
+        self.assertFalse(R._budget_exhausted(self.jobs, meta, capacity=True))   # no flag: no budget
+
     def test_competing_successor_stays_protected_in_claim(self):
         parent = self._runtime_end()
         first = self._claim_runtime_end()
@@ -5666,7 +5685,7 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
                     **D.parse_registry_metadata(digest_field)}
         return history, candidate, metadata
 
-    def _public_start(self, launches):
+    def _public_start(self, launches, *, register=True):
         import work_start as W
 
         def join(**kwargs):
@@ -5676,6 +5695,8 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
 
         def launch(command, **kwargs):
             launches.append(command)
+            if not register:   # the launcher returned before it registered the replacement row
+                return subprocess.CompletedProcess(command, 0, "", "")
             source = self.rows()["att-source"][1]
             binding = R.source_binding(self.jobs, source)
             record = R._read(R._record_path(self.jobs, binding[0]))
@@ -5734,6 +5755,29 @@ class ClosedNativeFrameCapacityRecoveryTest(unittest.TestCase):
         self.assertEqual(self.rows()["att-peer"][0], peer)
         self.assertEqual(self.log_path.read_bytes(), terminal)
         self.assertNotEqual(self.jobs.read_bytes(), before)
+
+    def test_capacity_dead_frame_leg_is_replaced_and_decision_waits(self):
+        """T4-4: hand-built shape (not a copy) of E4-C4 -- frame-alternative `dead-capacity` with no output,
+        a replacement claim but no registry row for it. The claim is re-entered; the decision stays closed."""
+        launches = []
+        with self._current_capacity(80):
+            first = self._public_start(launches, register=False)
+            claims = list((R._directory(self.jobs) / "claims").glob("*.json"))
+            self.assertEqual(len(claims), 1)                 # claim written, no registry row for its replacement
+            claim = R._read(claims[0])
+            self.assertNotIn(claim["replacement_attempt_id"], self.rows())
+            self.assertNotEqual(first.get("reason"), "frame-outcome-needs-inspection", first)
+            self.assertNotIn("frame_interview", first)
+            second = self._public_start(launches)
+        self.assertEqual([len(launches)], [2])               # the same claim launched again, not a second claim
+        self.assertEqual(len(list((R._directory(self.jobs) / "claims").glob("*.json"))), 1)
+        self.assertIn(claim["replacement_attempt_id"], self.rows())
+        self.assertEqual(second["state"], "preparing", second)
+        self.assertNotEqual(second.get("reason"), "frame-outcome-needs-inspection", second)
+        for receipt in (first, second):   # one successful brief never opens the decision
+            self.assertNotIn("frame_interview", receipt)
+            self.assertNotIn("gate", receipt)
+            self.assertNotEqual(receipt["state"], "needs-interview")
 
     def test_public_start_keeps_pinned_limited_frame_waiting_with_reset_without_claim(self):
         import route_authority
