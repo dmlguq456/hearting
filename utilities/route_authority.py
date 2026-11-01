@@ -578,8 +578,8 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                 and facts.get("queued") is True
                 and facts.get("thread_match") is True
                 and facts.get("caller_owns") is True
-                and facts.get("harness") == "codex"
-                and metadata.get("harness") == "codex"
+                and facts.get("respawn_realized") is True
+                and facts.get("harness") == metadata.get("harness")
                 and metadata.get("launch_claimed") == "1"
                 and metadata.get("launch_started") == "1"
                 and process is not None and process.state == "quiescent"

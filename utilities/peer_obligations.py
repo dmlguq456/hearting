@@ -213,18 +213,46 @@ def managed_service_binding(source_root: str | Path | None) -> str | None:
         return None
 
 
+def installed_release(root=None) -> Path | None:
+    """The managed release the installer's `current` pointer names for root's install.
+
+    Read-only: the answer does not depend on this process's environment, so a
+    caller started from an older release can still ask which release is installed.
+    """
+    try:
+        code_root = Path(root).resolve(strict=True) if root is not None else _code_root()
+        layout = _service_layout(code_root)
+        if layout is None or not layout[3].is_symlink():
+            return None
+        return _release_root(layout[3].resolve(strict=True), layout[2])
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
+
+
 def active_service_root(service_current: str | Path | None, *, root=None) -> Path | None:
     """Resolve a validated binding's active release without comparing versions."""
     try:
         code_root = Path(root).resolve(strict=True) if root is not None else _code_root()
-        binding = validate_service_binding(service_current, root=code_root)
+        if validate_service_binding(service_current, root=code_root) is None:
+            return None
+        return installed_release(code_root)
+    except (OSError, RuntimeError, ValueError, TypeError):
+        return None
+
+
+def release_successor_binding(root=None) -> str | None:
+    """The lifecycle binding to hand over with, when a newer install replaced this process's release.
+
+    None for checkouts, other installs, a mismatched environment, an unresolved
+    pointer, and for a process already running the installed release.
+    """
+    try:
+        code_root = Path(root).resolve(strict=True) if root is not None else _code_root()
+        binding = managed_service_binding(code_root)
         if binding is None:
             return None
-        layout = _service_layout(code_root)
-        if layout is None or layout[3] != Path(binding) or not layout[3].is_symlink():
-            return None
-        target = layout[3].resolve(strict=True)
-        return _release_root(target, layout[2])
+        active = active_service_root(binding, root=code_root)
+        return binding if active is not None and active != code_root else None
     except (OSError, RuntimeError, ValueError, TypeError):
         return None
 

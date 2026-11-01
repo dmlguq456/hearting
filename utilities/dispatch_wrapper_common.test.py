@@ -15,11 +15,13 @@ import fcntl
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest import mock
+from shutil import copy2 as shutil_copy
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "utilities"))
 import dispatch_wrapper_common as C  # noqa: E402
 import dispatch_resource_wait as WAIT  # noqa: E402
+from dispatch_contract import resolve_agent_home  # noqa: E402
 
 _fixture_spec = importlib.util.spec_from_file_location(
     "wrapper_resource_workflow_fixture", ROOT / "utilities" / "workflow_supervisor.test.py")
@@ -593,9 +595,9 @@ class WrapperCommonTest(unittest.TestCase):
                 for harness in ("claude", "codex", "opencode"):
                     for source, sealed in ((release_a, release_b), (release_b, release_a)):
                         with self.subTest(harness=harness, source=source.name, sealed=sealed.name):
-                            self.assertTrue(C.reexec_for_sealed_release(
+                            self.assertEqual(C.select_execution_root(
                                 source, sealed, harness, argv
-                            ))
+                            ), sealed.resolve())
                             self.assertEqual(os.environ["AGENT_HOME"], str(sealed.resolve()))
                             self.assertEqual(
                                 execv.call_args,
@@ -625,16 +627,16 @@ class WrapperCommonTest(unittest.TestCase):
             checkout = root / "checkout"
             checkout.mkdir()
             with mock.patch.object(C.os, "execv") as execv:
-                self.assertFalse(C.reexec_for_sealed_release(release_a, release_a, "codex", []))
-                self.assertFalse(C.reexec_for_sealed_release(checkout, release_b, "codex", []))
-                self.assertFalse(C.reexec_for_sealed_release(release_a, other, "codex", []))
+                self.assertEqual(C.select_execution_root(release_a, release_a, "codex", []), release_a)
+                self.assertEqual(C.select_execution_root(checkout, release_b, "codex", []), release_b)
+                self.assertEqual(C.select_execution_root(release_a, other, "codex", []), other)
                 marker = release_a / ".hearting-release.json"
                 marker.unlink()
-                self.assertFalse(C.reexec_for_sealed_release(release_a, release_b, "codex", []))
+                self.assertEqual(C.select_execution_root(release_a, release_b, "codex", []), release_b)
                 marker.write_text('{"schema":1}\n', encoding="utf-8")
                 (release_b / "adapters" / "codex" / "bin" / "dispatch-headless.py").unlink()
-                self.assertFalse(C.reexec_for_sealed_release(release_a, release_b, "codex", []))
-                self.assertFalse(C.reexec_for_sealed_release(release_a, release_b, "invalid", []))
+                self.assertEqual(C.select_execution_root(release_a, release_b, "codex", []), release_b)
+                self.assertEqual(C.select_execution_root(release_a, release_b, "invalid", []), release_b)
                 execv.assert_not_called()
 
     def test_real_execv_reaches_the_sealed_sibling_release_for_each_harness(self):
@@ -645,10 +647,10 @@ import json
 import os
 import sys
 from pathlib import Path
-from dispatch_wrapper_common import reexec_for_sealed_release
+from dispatch_wrapper_common import select_execution_root
 root = Path(__file__).resolve().parents[3]
 sealed = Path(os.environ["SEALED_LAUNCH_HOME"])
-reexec_for_sealed_release(root, sealed, "{harness}", sys.argv[1:])
+select_execution_root(root, sealed, "{harness}", sys.argv[1:])
 Path(os.environ["REEXEC_RECEIPT"]).write_text(json.dumps({{
     "root": str(root), "agent_home": os.environ.get("AGENT_HOME"),
     "argv": sys.argv[1:], "pid": os.getpid(),
@@ -690,6 +692,161 @@ Path(os.environ["REEXEC_RECEIPT"]).write_text(json.dumps({{
                         self.assertEqual(payload["agent_home"], str(sealed.resolve()))
                         self.assertEqual(payload["argv"], argv)
                         self.assertEqual(payload["pid"], process.pid)
+
+    # --- U2: the installed release is the execution root when it reads the route -------------
+
+    def make_install(self, tmp, *, current, names=("vA", "vC"), reader=("vA", "vC")):
+        """A managed install: releases/<name> with the pieces `installed_release` verifies."""
+        data = Path(tmp) / "data"
+        releases = data / "releases"
+        for name in names:
+            root = releases / name
+            self.make_release(root)
+            (root / "RELEASE_VERSION").write_text(name + "\n", encoding="utf-8")
+            (root / "harness-manifest.json").write_text("{}\n", encoding="utf-8")
+            (root / "core").mkdir()
+            (root / "core" / "CORE.md").write_text("core\n", encoding="utf-8")
+            (root / "utilities").mkdir()
+            for stub in ("peer_obligations.py", "peer-steward.py"):
+                (root / "utilities" / stub).write_text("\n", encoding="utf-8")
+            (root / "tools" / "install").mkdir(parents=True)
+            shutil_copy(ROOT / "tools" / "install" / "distribution.py",
+                        root / "tools" / "install" / "distribution.py")
+            if name in reader:
+                shutil_copy(ROOT / "utilities" / "route_format.py",
+                            root / "utilities" / "route_format.py")
+        (data / "current").symlink_to(releases / current, target_is_directory=True)
+        patcher = mock.patch.dict(os.environ, {"HARNESS_DATA_ROOT": str(data)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return {name: (releases / name).resolve() for name in names}
+
+    def write_route(self, tmp, **fields):
+        record = {"schema_version": 2, "dispatch_contract_version": 3}
+        record.update(fields)
+        path = Path(tmp) / "route.json"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        return str(path)
+
+    def wrapper_of(self, release, harness):
+        return str(release / "adapters" / harness / "bin" / "dispatch-headless.py")
+
+    def test_the_installed_release_is_the_execution_root_for_an_inherited_older_home(self):
+        # T1: the wrapper already runs the installed release C; the tree inherited A.
+        with tempfile.TemporaryDirectory() as tmp:
+            rel = self.make_install(tmp, current="vC")
+            route = self.write_route(tmp)
+            for harness in ("claude", "codex", "opencode"):
+                for route_file in (route, None):
+                    with self.subTest(harness=harness, route=bool(route_file)), \
+                         mock.patch.dict(os.environ, {"AGENT_HOME": str(rel["vA"])}), \
+                         mock.patch.object(C.os, "execv") as execv:
+                        chosen = C.select_execution_root(
+                            rel["vC"], rel["vA"], harness, ["--start"], route_file=route_file)
+                        self.assertEqual(chosen, rel["vC"])
+                        self.assertEqual(os.environ["AGENT_HOME"], str(rel["vC"]))
+                        # N41/N40: later `resolve_agent_home()` readers (Codex projection, build-home)
+                        # see the chosen root, not the inherited one.
+                        self.assertEqual(resolve_agent_home().resolve(), rel["vC"])
+                        execv.assert_not_called()
+
+    def test_a_route_the_installed_release_cannot_read_stays_on_the_inherited_release(self):
+        # T2 (kept protection): a version/format classification keeps the inherited release.
+        with tempfile.TemporaryDirectory() as tmp:
+            rel = self.make_install(tmp, current="vC")
+            for fields in ({"dispatch_contract_version": 2}, {"schema_version": 1},
+                           {"dispatch_evidence_scope_version": 9},
+                           {"validation_basis": {"basis_version": 9}},
+                           {"broker_contract_version": 2}):
+                route = self.write_route(tmp, **fields)
+                with self.subTest(fields=fields), \
+                     mock.patch.dict(os.environ, {"AGENT_HOME": str(rel["vA"])}), \
+                     mock.patch.object(C.os, "execv") as execv:
+                    chosen = C.select_execution_root(
+                        rel["vC"], rel["vA"], "codex", ["--start"], route_file=route)
+                    self.assertEqual(chosen, rel["vA"])
+                    self.assertEqual(os.environ["AGENT_HOME"], str(rel["vA"]))
+                    execv.assert_called_once_with(sys.executable, [
+                        sys.executable, self.wrapper_of(rel["vA"], "codex"), "--start"])
+
+    def test_an_older_wrapper_moves_to_the_installed_release_only_when_that_release_reads_the_route(self):
+        # T2b: wrapper root A (this code) inherited A; current names C.
+        with tempfile.TemporaryDirectory() as tmp:
+            rel = self.make_install(tmp, current="vC")
+            route = self.write_route(tmp)
+            moved = [mock.call(sys.executable, [
+                sys.executable, self.wrapper_of(rel["vC"], "claude"), "--start"])]
+
+            def choose(route_file):
+                with mock.patch.dict(os.environ, {"AGENT_HOME": str(rel["vA"])}), \
+                     mock.patch.object(C.os, "execv") as execv:
+                    chosen = C.select_execution_root(
+                        rel["vA"], rel["vA"], "claude", ["--start"], route_file=route_file)
+                    return chosen, execv.call_args_list, os.environ["AGENT_HOME"]
+
+            chosen, calls, home = choose(route)
+            self.assertEqual((chosen, calls, home), (rel["vC"], moved, str(rel["vC"])))
+            # No route file is "supported": the installed release still wins.
+            chosen, calls, home = choose(None)
+            self.assertEqual((chosen, calls, home), (rel["vC"], moved, str(rel["vC"])))
+            # A record the installed release's own reader refuses, or cannot read: stay.
+            reader = rel["vC"] / "utilities" / "route_format.py"
+            reader.write_text("import sys\nprint('refused')\nsys.exit(65)\n", encoding="utf-8")
+            self.assertEqual(choose(route), (rel["vA"], [], str(rel["vA"])))
+            reader.write_text("import sys\nsys.exit(66)\n", encoding="utf-8")
+            self.assertEqual(choose(route), (rel["vA"], [], str(rel["vA"])))
+            # A release from before route_format cannot be asked, with or without a route file.
+            reader.unlink()
+            self.assertEqual(choose(route), (rel["vA"], [], str(rel["vA"])))
+            self.assertEqual(choose(None), (rel["vA"], [], str(rel["vA"])))
+
+    def test_selection_stops_after_one_move_and_never_returns_to_the_inherited_release_on_a_later_refusal(self):
+        # T3 with real execv for each harness. The wrapper writes a receipt, then admission
+        # (simulated) refuses; nothing sends the launch back to the inherited release.
+        wrapper_template = """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+from dispatch_wrapper_common import select_execution_root
+root = Path(__file__).resolve().parents[3]
+chosen = select_execution_root(root, Path(os.environ["INHERITED_HOME"]), "{harness}", sys.argv[1:],
+                               route_file=os.environ["ROUTE_FILE"])
+with open(os.environ["RECEIPTS"], "a", encoding="utf-8") as stream:
+    stream.write(json.dumps({{"root": str(root), "chosen": str(chosen),
+        "agent_home": os.environ.get("AGENT_HOME"), "pid": os.getpid()}}) + "\\n")
+sys.exit(int(os.environ.get("ADMISSION_EXIT", "0")))
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            rel = self.make_install(tmp, current="vC")
+            for harness in ("claude", "codex", "opencode"):
+                for release in rel.values():
+                    Path(self.wrapper_of(release, harness)).write_text(
+                        wrapper_template.format(harness=harness), encoding="utf-8")
+            cases = (
+                ("unsupported", {"dispatch_contract_version": 2}, "0", "vC", "vA"),
+                ("supported-refused", {}, "65", "vC", "vC"),
+            )
+            for harness in ("claude", "codex", "opencode"):
+                for label, fields, admission, start, expected in cases:
+                    with self.subTest(harness=harness, case=label):
+                        receipts = Path(tmp) / f"receipts-{harness}-{label}.jsonl"
+                        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(Path(tmp) / "home"),
+                               "PYTHONPATH": str(ROOT / "utilities"),
+                               "HARNESS_DATA_ROOT": os.environ["HARNESS_DATA_ROOT"],
+                               "AGENT_HOME": str(rel["vA"]), "INHERITED_HOME": str(rel["vA"]),
+                               "ROUTE_FILE": self.write_route(tmp, **fields),
+                               "RECEIPTS": str(receipts), "ADMISSION_EXIT": admission}
+                        process = subprocess.Popen(
+                            [sys.executable, self.wrapper_of(rel[start], harness), "--start"],
+                            cwd=str(ROOT), env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True)
+                        stdout, stderr = process.communicate(timeout=20)
+                        self.assertEqual(process.returncode, int(admission), stdout + stderr)
+                        lines = [json.loads(line) for line in
+                                 receipts.read_text(encoding="utf-8").splitlines()]
+                        self.assertEqual(len(lines), 1, lines)  # one admission, one release
+                        self.assertEqual(lines[0]["root"], str(rel[expected]))
+                        self.assertEqual(lines[0]["agent_home"], str(rel[expected]))
+                        self.assertEqual(lines[0]["pid"], process.pid)
 
     def test_owner_input_opens_only_for_a_supervised_owner(self):
         from unittest import mock

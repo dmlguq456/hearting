@@ -18,6 +18,7 @@ from hearting_gates import gates_on, same_work_or_refuse
 import artifact_locator as ARTIFACT_LOCATOR
 import harness_state_roots as HARNESS_STATE_ROOTS
 import git_index_lock
+import route_format
 import route_identity as ROUTE_IDENTITY
 import route_lineage as ROUTE_LINEAGE
 import route_plan as ROUTE_PLAN
@@ -111,13 +112,13 @@ NESTED_FAILURE_SCOPES = {
     "none", "exact-worktree", "runtime-global", "parent-runtime", "tuple-contract",
 }
 CODEX_COMMAND_STATES = {"ok", "unavailable", "unchecked", "not-applicable"}
-DISPATCH_EVIDENCE_SCOPE_VERSION = 1
+DISPATCH_EVIDENCE_SCOPE_VERSION = route_format.DISPATCH_EVIDENCE_SCOPE_VERSION
 BROKER_FIELDS = {"broker_root", "broker_instance"}  # historical v1
 BROKER_FIELDS_V2 = {"broker_root"}                   # historical v2
-DISPATCH_CONTRACT_VERSION = 3
+DISPATCH_CONTRACT_VERSION = route_format.DISPATCH_CONTRACT_VERSION
 FALLBACK_ORDER = ["same-harness-headless", "cross-harness-headless", "native-subagent", "inline"]
-ROUTE_SCHEMA_VERSION = 2
-VALIDATION_BASIS_VERSION = 1
+ROUTE_SCHEMA_VERSION = route_format.ROUTE_SCHEMA_VERSION
+VALIDATION_BASIS_VERSION = route_format.VALIDATION_BASIS_VERSION
 LAUNCH_COMPATIBILITY_TUPLE_VERSION = 1
 CONTINUATION_CONTRACT_VERSION = 1
 # Strict equality on purpose: a future v2 changes what the record *means*, so an
@@ -5488,10 +5489,11 @@ def _check_validation_basis(route, *, allow_stale_registry):
     for field in ("runtime_root_validated", "runtime_root_match"):
         if field in basis and not isinstance(basis[field], bool):
             raise ValueError(f"invalid-validation-basis(field={field})")
-    if version > VALIDATION_BASIS_VERSION:
+    reason = route_format.basis_version_reason(version)
+    if reason:
         if allow_stale_registry:
             return _DEGRADE_VALIDATION_BASIS
-        raise ValueError(f"unsupported-validation-basis-version(basis_version={version})")
+        raise ValueError(reason)
     return basis
 
 def classify_validation_basis(route, *, registry_digest_now, units_digest_now,
@@ -5700,10 +5702,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         # making the route unverifiable (`next_leg` simply has nothing to read then).
         import route_plan as RP
         RP.validate_sealed(route["route_plan"])
-    if route.get("schema_version") != ROUTE_SCHEMA_VERSION:
-        raise ValueError(
-            f"legacy route schema_version={route.get('schema_version')!r} rejected for mutating/resume use"
-        )
+    reason = route_format.schema_reason(route)
+    if reason:
+        raise ValueError(reason)
     for key in ("campaign_key", "parent_cycle_id"):
         if key in route:
             _validate_campaign_selection(key, route[key])
@@ -5718,11 +5719,9 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
             raise ValueError("route slug is not canonical")
     elif "slug_truncated" in route:
         raise ValueError("route slug metadata incomplete")
-    if route.get("dispatch_contract_version") != DISPATCH_CONTRACT_VERSION:
-        raise ValueError("legacy dispatch contract is read-only")
-    scope_version=route.get("dispatch_evidence_scope_version")
-    if scope_version not in (None, DISPATCH_EVIDENCE_SCOPE_VERSION):
-        raise ValueError("unsupported dispatch evidence scope version")
+    reason = route_format.contract_reason(route) or route_format.scope_reason(route)
+    if reason:
+        raise ValueError(reason)
     if route.get("route_hash") != route_hash(route):
         if gates_on():
             raise ValueError("stale or modified route hash")
@@ -5746,9 +5745,10 @@ def verify_route(route, expected_cwd=None, *, allow_stale_registry=False):
         # An unsupported basis_version is a legitimate newer harness's route;
         # closure records it honestly as unproven rather than stranding it.
         return dict(route, _registry_current=False)
+    reason = route_format.persona_reason(route)
+    if reason:
+        raise ValueError(reason)
     persona_version = route.get("persona_independence_contract_version")
-    if persona_version is not None and (type(persona_version) is not int or persona_version != 1):
-        raise ValueError("unsupported-persona-independence-contract-version")
     legacy_unit_view=None
     snapshot_pair=(persona_version is None
                    and route.get("registry_digest")==SD160_REGISTRY_DIGEST

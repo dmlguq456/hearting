@@ -1062,7 +1062,13 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
     def test_legacy_public_correct_preserves_runtime_with_additional_writable_grant(self):
         self._public_correct_respawn_fixture(legacy_record=True, additional_grant=True)
 
-    def _public_correct_respawn_fixture(self, *, legacy_record, additional_grant=False):
+    def test_respawned_owner_runs_its_utilities_and_hooks_on_the_governing_release(self):
+        # T12: the recorded launch_home is where the worker home came from (an earlier
+        # release); the respawned child's AGENT_HOME is the release that governs it now.
+        self._public_correct_respawn_fixture(legacy_record=False, earlier_launch_home=True)
+
+    def _public_correct_respawn_fixture(self, *, legacy_record, additional_grant=False,
+                                        earlier_launch_home=False):
         import contextlib
         import dispatch_completion_join as join
         import dispatch_budget_record as budget_record
@@ -1092,6 +1098,14 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             self.assertFalse(compute_root.is_relative_to(base))
         home = base / "home"
         home.mkdir(exist_ok=True)
+        recorded_release = ROOT
+        if earlier_launch_home:
+            # A tree of links to the same content, at its own path, stands in for the earlier release.
+            recorded_release = base / "earlier-release"
+            recorded_release.mkdir()
+            for entry in ROOT.iterdir():
+                if entry.name != ".git":
+                    (recorded_release / entry.name).symlink_to(entry)
         xdg_state = base / "xdg-state"
         xdg_state.mkdir(exist_ok=True)
         logs = jobs.parent / "logs"
@@ -1169,7 +1183,7 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
             route_compiler.verify_route(route, str(base))
 
             prepare_worker_home(
-                ROOT, "codex", "owner", attempt,
+                recorded_release, "codex", "owner", attempt,
                 env={"HOME": str(home), "CODEX_HOME": str(native_codex_home),
                      "AGENT_DISPATCH_JOBS": str(jobs)},
                 destination=worker_home,
@@ -1195,6 +1209,9 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                         snapshot[rel] = ("file", path.read_bytes())
                 return snapshot
             worker_home_before = home_snapshot()
+            from worker_runtime_home import recorded_codex_worker_environment
+            recorded_environment_before = recorded_codex_worker_environment(
+                recorded_release, worker_home, attempt)
             lease = contract.supervisor_lease_path(jobs, attempt)
             model_settings = {"source": "explicit", "model": "gpt-fixture", "reasoning": "high",
                               "context_window": "200000", "role": "owner", "profile": "balanced",
@@ -1253,10 +1270,13 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 self.assertEqual(recorded_access["additional_writable_roots"], [str(compute_root)])
                 self.assertEqual(recorded_access["request_sha256"], access_request.request_sha256)
                 self.assertEqual(recorded_access["source_path"], str(access_file))
+            if earlier_launch_home:
+                sealed_launch["launch_home"] = str(recorded_release)
             if legacy_record:
                 sealed_launch["resolved"].pop("runtime_dir")
                 sealed_launch["applied_permissions"].pop("approval", None)
                 sealed_launch["applied_permissions"].pop("commit_policy", None)
+            if legacy_record or earlier_launch_home:
                 launch_input_path.write_bytes(dispatch_replacement._bytes(sealed_launch))
                 old_digest = input_fragment.split("replacement_input_digest=", 1)[1].split(",", 1)[0]
                 input_fragment = input_fragment.replace(
@@ -1288,7 +1308,8 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
                 "pid_ns": os.readlink("/proc/self/ns/pid"),
                 "pid_observer_ns": os.readlink("/proc/self/ns/pid"), "pgid": old_pid,
                 "runtime_sandbox": "workspace-write", "runtime_home": str(worker_home),
-                "launch_home": str(ROOT.resolve()), "artifact_root": str(artifact_root),
+                "launch_home": str(recorded_release if earlier_launch_home else ROOT.resolve()),
+                "artifact_root": str(artifact_root),
                 "log_file": str(log_path), "approval": "never", "parent_sid": parent_session,
                 "parent_harness": "codex", "parent_transport": "headless",
                 "parent_sandbox": "workspace-write", "parent_cwd": str(base),
@@ -1592,6 +1613,15 @@ class CodexAppServerSupervisorTest(unittest.TestCase):
         self.assertEqual(prompt_temp_dirs, [str(runtime_dir)])
         self.assertEqual(len(launch_environments), 1)
         self.assertEqual(launch_environments[0]["AGENT_RUNTIME_DIR"], str(runtime_dir))
+        self.assertEqual(launch_environments[0]["AGENT_HOME"], str(ROOT.resolve()))
+        self.assertEqual(respawn_outcomes[0]["respawn_release"], str(ROOT.resolve()))
+        self.assertEqual(respawn_outcomes[0]["launch_home"],
+                         str(recorded_release if earlier_launch_home else ROOT.resolve()))
+        # H1 guard: the worker home and thread store the child resumes are the recorded ones.
+        self.assertEqual(recorded_codex_worker_environment(recorded_release, worker_home, attempt),
+                         recorded_environment_before)
+        self.assertEqual(join.exact_attempt_row(jobs, attempt).metadata["launch_home"],
+                         str(recorded_release if earlier_launch_home else ROOT.resolve()))
         if additional_grant:
             self.assertEqual(len(rendered_commands), 1)
             rendered = shlex.split(rendered_commands[0])

@@ -205,12 +205,11 @@ Linked activation is an explicit debug-only exception and must report that it
 cannot guarantee session consistency. An update publishes and verifies a new
 root, then atomically changes only the pointer used by new sessions.
 
-A registered dispatch tree runs on the release its root launch resolved: the
-adapter wrapper resolves `AGENT_HOME` once to the real release path
-(`sealed_launch_home`) and passes that one value to every descendant, the row's
-`launch_home`, its allow rules, its owner Codex home, and its hooks (Claude hook
-commands run `hooks/run-hook.sh`, which takes the hook from `AGENT_HOME` when set, as
-the Codex hook commands do); a later pointer change moves none of them. An
+A registered dispatch tree runs on one execution root: the adapter wrapper
+resolves it once to a real release path (`sealed_launch_home`) and passes that
+one value to every descendant, the row's `launch_home`, its allow rules, its owner
+Codex home, and its hooks (Claude hook commands run `hooks/run-hook.sh`, which takes
+the hook from `AGENT_HOME` when set, as the Codex hook commands do). An
 interactive depth-0 session resolves the installed release per call
 (`hearting run`, printed commands), so each new route starts on the release
 installed when it starts. Instructions, skills and plugins are what each runtime
@@ -218,15 +217,20 @@ loaded when its process started. Runtime-owned credentials, sessions, logs,
 caches, databases, and Codex `config.toml` remain outside this activation
 boundary.
 
-When a dispatch wrapper's code root and sealed launch home are different
-releases in the same managed `releases/` directory, the wrapper replaces itself
-with the corresponding harness wrapper from the sealed release before registry,
-lock, or child-launch work. It keeps the original argument vector and sets
-`AGENT_HOME` to the sealed real path; the target then follows the existing
-validation and registration path once. Checkouts, different installations,
-same-root launches, and roots without both release markers keep their existing
-behavior. This aligns code with the launch already selected and does not create
-a new attempt or alter the route's sealed launch tuple.
+The execution root of a runtime-launched dispatch is the installed release
+whenever it supports the contract and format the launch's route record declares
+(`route_format`, the one reader that `verify_route` and admission share); only
+when it does not, or none can be resolved, does the launch keep the release its
+parent tree inherited. The wrapper chooses before registry, lock, or child-launch
+work, re-executing the chosen release's harness wrapper with the original
+argument vector and `AGENT_HOME` set to its real path, so admission runs once on
+that code. A runtime-owned long-lived observer follows the same rule at its own
+checkpoint boundary, before it projects or delivers and while it holds its duty
+lease: the completion observer hands the lease to the installed release's
+observer. Checkouts, different installations, and roots without both release
+markers keep their existing behavior. The row's `launch_home` records the release
+the launch ran on; no new attempt is created and the route's sealed launch tuple
+is unchanged.
 
 Release cleanup retains trees used by live processes, including their working
 directories and open files. Shared Python dispatch code holds its resolved code
@@ -1361,7 +1365,7 @@ A live consumer keeps the release code it started with, resource launch included
 When the effective parent's `correct` reaches a parked consumer of an earlier
 release (no turn running, no correction being sent, no resource launch pending),
 the runtime first stops only that consumer's own session, keeps registered payloads
-running, and restores it on the installed release through this same recovery
+running, and restores it on the installed release through the adapter's same-attempt recovery
 (`consumer_release_moved_from`). It moves only after the recorded launch passes the
 same respawn checks; otherwise the consumer stays as it is.
 
@@ -2058,11 +2062,7 @@ never proves that a live descendant stopped.
 A residue seal is not a permanent veto: once every recorded residue process is
 gone, the join recovery tick and `dispatch-registry.py reconcile` repeat the
 watcher's own group and tagged-descendant observation and record the same clean
-drain proof, after which the existing close path runs. An owner supervisor
-started from an older release keeps its old join, so release such a row once with
-`hearting run dispatch-registry reconcile --jobs <jobs.log> --attempt <attempt-id> --apply`
-from the current release (it changes nothing while a residue process still
-runs). The launcher/watchdog owns signals; join/reconcile own proof recovery,
+drain proof, after which the existing close path runs. The launcher/watchdog owns signals; join/reconcile own proof recovery,
 bounded typed observer-error diagnostics and notification, not guessed process
 death. The shared controller retains the same
 batch across observation failures.

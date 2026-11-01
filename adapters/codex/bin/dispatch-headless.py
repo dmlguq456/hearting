@@ -1726,7 +1726,10 @@ def respawn_supervised_owner(jobs, attempt_id, *, expected_identity, check_only=
         "AGENT_DISPATCH_COMPLETION_STATE_FILE": str(state_path),
         "AGENT_DISPATCH_SUPERVISOR_LEASE_FILE": str(lease_path),
         "AGENT_DISPATCH_JOBS": str(jobs),
-        "AGENT_HOME": launch_home,
+        # The child's utilities and hooks run from the release that governs it (ROOT, the
+        # governor's and `respawn_release`); the recorded launch_home stays the source
+        # of the worker home, so the same thread and its stores are kept.
+        "AGENT_HOME": str(ROOT),
         "PYTHONPYCACHEPREFIX": str(dispatch_state_root(jobs).parent / "pycache"),
         GOVERNOR_RESERVATION_ENV: "",
         "AGENT_OWNER_ROUTE_FILE": route_file,
@@ -2190,11 +2193,12 @@ def main(argv: list[str]) -> int:
         args.attempt_id = None
     if args.broker_request_id or args.launch_authority == "ancestor-broker":
         return fail("launch-broker-retired", 76, child_spawned="0")
-    # The whole tree runs on the release this launch resolves (OPERATIONS §5.9a): one real
-    # path reaches the child environment, its allow rules and the row, whichever spelling
-    # (`hearting run`, a `current` pointer) the caller exported.
-    args.agent_home = sealed_launch_home(resolve_agent_home())
-    WRAPPER_COMMON.reexec_for_sealed_release(ROOT, args.agent_home, "codex", argv[1:])
+    # One execution root per launch (OPERATIONS §5.9a): the installed release when it reads this
+    # route's contract, else the release the parent tree inherited. Guard, child environment and
+    # the row's `launch_home` (the release this launch ran on) all follow it.
+    args.agent_home = WRAPPER_COMMON.select_execution_root(
+        ROOT, sealed_launch_home(resolve_agent_home()), "codex", argv[1:],
+        route_file=args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
     bind_parent_completion_delivery(args)
     worktree = Path(args.worktree)
     if not worktree.is_dir():

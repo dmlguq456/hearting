@@ -261,6 +261,7 @@ utility-deferred	ripple-map.py
 utility-deferred	route_authority.py
 utility-deferred	route_authority.test.py
 utility-deferred	route_autoclose.py
+utility-deferred	route_format.py
 utility-deferred	route_identity.py
 utility-deferred	route_lineage.py
 utility-deferred	route_lineage.test.py

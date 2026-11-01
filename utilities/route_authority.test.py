@@ -1626,10 +1626,23 @@ class InputContinuationBoundaryTest(unittest.TestCase):
                               "launch_claimed": "1", "launch_started": "1"},
                     facts={"bound": True, "accepting": False, "reachable": False,
                            "recoverable": True, "queued": True, "thread_match": True,
-                           "lease_held": False, "caller_owns": True, "harness": "codex",
+                           "lease_held": False, "caller_owns": True, "harness": harness,
+                           "respawn_realized": harness == "codex",
                            "process": SimpleNamespace(state="quiescent"),
                            "owner_continuation": SimpleNamespace(
                                state="quiescent", reason="registered-resources-preserved")})
+                # T11: recovery follows the adapter's realized same-attempt recovery, not a name.
+                mismatched = RA.decide_continuation(action="owner-input", status="running",
+                    metadata={"harness": harness, "attempt_id": "att-input",
+                              "launch_claimed": "1", "launch_started": "1"},
+                    facts={"bound": True, "accepting": False, "reachable": False,
+                           "recoverable": True, "queued": True, "thread_match": True,
+                           "lease_held": False, "caller_owns": True,
+                           "harness": "other", "respawn_realized": True,
+                           "process": SimpleNamespace(state="quiescent"),
+                           "owner_continuation": SimpleNamespace(
+                               state="quiescent", reason="registered-resources-preserved")})
+                self.assertEqual(mismatched.state, "stored")
                 live = RA.decide_continuation(action="owner-input", status="open",
                     metadata={"harness": harness, "attempt_id": "att-input"},
                     facts={"bound": True, "accepting": True, "reachable": True})

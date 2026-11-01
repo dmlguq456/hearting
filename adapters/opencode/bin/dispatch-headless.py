@@ -1368,11 +1368,12 @@ def main(argv: list[str]) -> int:
     bind_runtime_parent(args)
     if args.broker_request_id or args.launch_authority == "ancestor-broker":
         return fail("launch-broker-retired", 76, child_spawned="0")
-    # The whole tree runs on the release this launch resolves (OPERATIONS §5.9a): one real
-    # path reaches the child environment, its allow rules and the row, whichever spelling
-    # (`hearting run`, a `current` pointer) the caller exported.
-    args.agent_home = sealed_launch_home(resolve_agent_home())
-    WRAPPER_COMMON.reexec_for_sealed_release(ROOT, args.agent_home, "opencode", argv[1:])
+    # One execution root per launch (OPERATIONS §5.9a): the installed release when it reads this
+    # route's contract, else the release the parent tree inherited. Guard, child environment and
+    # the row's `launch_home` (the release this launch ran on) all follow it.
+    args.agent_home = WRAPPER_COMMON.select_execution_root(
+        ROOT, sealed_launch_home(resolve_agent_home()), "opencode", argv[1:],
+        route_file=args.route_file or os.environ.get("AGENT_OWNER_ROUTE_FILE"))
     worktree = Path(args.worktree)
     if not worktree.is_dir():
         return fail("worktree-not-found", 66, worktree=args.worktree)
