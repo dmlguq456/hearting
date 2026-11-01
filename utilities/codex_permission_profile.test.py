@@ -7,12 +7,14 @@ import queue
 import os
 from pathlib import Path
 import shutil
+import shlex
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import tomllib
 import unittest
 from unittest import mock
 
@@ -776,8 +778,8 @@ for path in [repo/'.git/config',repo/'.git/hooks/pre-commit',repo/'.git/info/exc
         self.assertFalse((self.git_dir / "hooks" / "pre-commit").exists())
 
 
-class PrimaryCommitBuilderTest(unittest.TestCase):
-    """The wrapper passes the commit-grant target to both profile builders."""
+class _CodexBuilderFixture(unittest.TestCase):
+    """Loads the Codex wrapper and builds its exec command for synthetic args."""
 
     @classmethod
     def setUpClass(cls):
@@ -817,6 +819,9 @@ class PrimaryCommitBuilderTest(unittest.TestCase):
     def build(self, args, *, available=True):
         with mock.patch.object(profiles, "named_profiles_available", return_value=available):
             return self.wrapper.shell_command(args, self.base / "prompt.txt", self.base / "log.jsonl")
+
+class PrimaryCommitBuilderTest(_CodexBuilderFixture):
+    """The wrapper passes the commit-grant target to both profile builders."""
 
     def test_one_shot_primary_owner_and_commit_stage_get_profile_without_git_add_dir(self):
         for args in (self.args("one-shot"),
@@ -870,6 +875,335 @@ class PrimaryCommitBuilderTest(unittest.TestCase):
                                      str(self.base / "lease"), "--jobs", str(self.base / "jobs.log"),
                                      *flag])
         self.assertEqual(seen, [False, True])
+
+
+class CodeStageLocalNetworkTest(_CodexBuilderFixture):
+    """U10: approved code-execute/code-test stages get localhost only, on top of
+    the stage's current approved profile; nothing else widens."""
+
+    def setUp(self):
+        super().setUp()
+        # The test harness's own route binding must not leak into route lookups.
+        scrubbed = {key: value for key, value in os.environ.items()
+                    if not key.startswith("AGENT_ROUTE_")}
+        patcher = mock.patch.dict(os.environ, scrubbed, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        nodes = [
+            {"id": "plan", "kind": "stage", "unit": "dev/plan", "completion_gate": "code-plan",
+             "commit_expected": False},
+            {"id": "execute", "kind": "stage", "unit": "dev/backend",
+             "completion_gate": "code-execute", "commit_expected": True},
+            {"id": "test", "kind": "stage", "unit": "qa/test",
+             "completion_gate": "code-test", "commit_expected": False},
+            {"id": "review", "kind": "review-worker", "unit": "qa/code-review",
+             "completion_gate": "code-review", "commit_expected": False},
+        ]
+        self.route = {"schema_version": 2, "capability": "autopilot-code",
+                      "cwd": str(self.repo), "artifact_root": str(self.base / "art"),
+                      "route_id": "rt-code-fixture", "route_hash": "sha256:" + "2" * 64,
+                      "nodes": nodes}
+        self.route_path = self.base / "route.json"
+        self.save()
+
+    def save(self):
+        self.route_path.write_text(json.dumps(self.route), encoding="utf-8")
+
+    def stage_args(self, node, **extra):
+        return self.args("one-shot", worker_type="stage", dispatch_depth=2,
+                         commit_expected=self.node(node)["commit_expected"],
+                         route_file=str(self.route_path), route_node=node, **extra)
+
+    def node(self, node_id):
+        return next(n for n in self.route["nodes"] if n["id"] == node_id)
+
+    def profile_of(self, command):
+        """The `permissions.<name>` table and `features` the command hands to codex."""
+        parts = shlex.split(command)
+        tables, features = {}, {}
+        for flag, value in zip(parts, parts[1:]):
+            if flag != "-c":
+                continue
+            key, _, raw = value.partition("=")
+            if key.startswith("permissions."):
+                tables[key[len("permissions."):]] = tomllib.loads("v=" + raw)["v"]
+            elif key.startswith("features."):
+                features[key[len("features."):]] = tomllib.loads("v=" + raw)["v"]
+        return tables, features
+
+    def build_with(self, args, *, local=True):
+        with mock.patch.object(profiles, "named_profiles_available", return_value=True), \
+             mock.patch.object(profiles, "local_verification_available", return_value=local):
+            return self.wrapper.shell_command(args, self.base / "prompt.txt", self.base / "log.jsonl")
+
+    def test_codex_code_execute_exec_profile_adds_localhost_to_workspace_write(self):
+        plain = self.build_with(self.args("one-shot", worker_type="stage", dispatch_depth=2,
+                                          commit_expected=True))
+        args = self.stage_args("execute")
+        command = self.build_with(args)
+        base_tables, base_features = self.profile_of(plain)
+        tables, features = self.profile_of(command)
+        name = profiles.PROFILE_NAME
+        self.assertEqual(base_tables[name]["network"], {"enabled": False})
+        self.assertEqual(base_features, {})
+        self.assertEqual(tables[name]["extends"], ":workspace")
+        self.assertEqual(tables[name]["filesystem"], base_tables[name]["filesystem"])
+        self.assertEqual(tables[name]["network"], profiles.LOCAL_NETWORK)
+        self.assertEqual(features, {"network_proxy": True})
+        self.assertEqual(args.local_network, "applied")
+        self.assertNotIn("sandbox_workspace_write.network_access", command)
+        self.assertFalse(args.nested_headless_network)
+        # D-K1 / D-K2: nothing beyond the three loopback names, no upstream proxy, UDP, or Unix socket key.
+        network = tables[name]["network"]
+        self.assertIs(network["allow_upstream_proxy"], False)
+        self.assertIs(network["enable_socks5_udp"], False)
+        self.assertEqual(set(network["domains"]), {"localhost", "127.0.0.1", "::1"})
+        self.assertEqual(set(network), set(profiles.LOCAL_NETWORK))
+        self.assertFalse(any("unix" in key.lower() for key in network))
+
+    def test_code_test_stage_without_commit_gets_workspace_profile_with_localhost(self):
+        plain = self.build_with(self.args("one-shot", worker_type="stage", dispatch_depth=2,
+                                          commit_expected=False))
+        self.assertIn("--sandbox workspace-write", plain)
+        args = self.stage_args("test")
+        command = self.build_with(args)
+        tables, features = self.profile_of(command)
+        body = tables[profiles.PROFILE_NAME]
+        self.assertNotIn("--sandbox", command)
+        self.assertEqual(body["extends"], ":workspace")
+        self.assertEqual(body["network"], profiles.LOCAL_NETWORK)
+        self.assertEqual(features, {"network_proxy": True})
+        self.assertEqual(body["filesystem"].get(str((self.repo / ".git").resolve())), "read")
+        self.assertTrue(all(access in {"read", "write"} for access in body["filesystem"].values()))
+        self.assertEqual(args.local_network, "applied")
+
+    def test_unsupported_codex_code_stage_proceeds_without_widening(self):
+        for node in ("execute", "test"):
+            with self.subTest(node=node):
+                plain = self.build_with(self.args(
+                    "one-shot", worker_type="stage", dispatch_depth=2,
+                    commit_expected=self.node(node)["commit_expected"]))
+                args = self.stage_args(node)
+                command = self.build_with(args, local=False)
+                self.assertEqual(command, plain)
+                self.assertEqual(args.local_network, "unavailable")
+                self.assertNotIn("network_proxy", command)
+
+    def test_lab_owner_and_general_network_paths_are_unchanged(self):
+        # Reviews and plans are not approved test stages.
+        for node in ("plan", "review"):
+            with self.subTest(node=node):
+                args = self.stage_args(node)
+                self.build_with(args)
+                self.assertEqual(args.local_network, "not-applicable")
+        # General network already approved (owner, GPU): byte-identical to commit_profile_config.
+        roots = [str(self.base / "art")]
+        for network in (True,):
+            profile, status = profiles.code_stage_profile_config(
+                str(self.repo), roots, "workspace-write", network,
+                primary_commit=True, route=self.route, node_id="execute")
+            with mock.patch.object(profiles, "named_profiles_available", return_value=True):
+                expected = profiles.commit_profile_config(
+                    str(self.repo), roots, "workspace-write", network, primary_commit=True)
+            self.assertEqual((profile, status), (expected, "not-applicable"))
+
+    def test_effective_grant_records_loopback_only_scope(self):
+        import execution_access
+        import verification_runtime as V
+        args = argparse.Namespace(route_file=str(self.route_path), route_node="execute",
+                                  route_id="rt-code-fixture", route_hash=self.route["route_hash"],
+                                  worktree=str(self.repo))
+        supplied = [str(self.base / "art"), str(self.base / "state")]
+        with mock.patch.object(profiles, "named_profiles_available", return_value=True), \
+             mock.patch.object(profiles, "local_verification_available", return_value=True):
+            scope = V.effective_scope(args, supplied, "codex", {}, sandbox="workspace-write")
+        self.assertEqual(scope["network"], "loopback-only")
+        self.assertEqual(scope["projection"], "native-profile")
+        self.assertEqual(scope["route_node"], "execute")
+        jobs = self.base / "state" / "jobs.log"
+        path, _digest = execution_access.publish_effective_grant(
+            jobs=jobs, attempt_id="att-fixture", route_id="rt-code-fixture",
+            route_hash=self.route["route_hash"], runtime="codex-exec",
+            sandbox="workspace-write", grant=None, default_writable_roots=supplied,
+            verification_scope=scope, network_allowed=False)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(record["verification_scope"]["network"], "loopback-only")
+        self.assertIs(record["network_allowed"], False)
+        self.assertEqual(record["network_enforcement"], "os-sandbox")
+        self.assertEqual(record["writable_roots"], scope["write_roots"])
+        self.assertNotIn("unmet", record)
+
+    def test_unavailable_scope_is_recorded_as_unmet_without_widening(self):
+        import execution_access
+        import verification_runtime as V
+        args = argparse.Namespace(route_file=str(self.route_path), route_node="test",
+                                  route_id="rt-code-fixture", route_hash=self.route["route_hash"],
+                                  worktree=str(self.repo))
+        supplied = [str(self.base / "art")]
+        with mock.patch.object(profiles, "named_profiles_available", return_value=True), \
+             mock.patch.object(profiles, "local_verification_available", return_value=False):
+            scope = V.effective_scope(args, supplied, "codex", {}, sandbox="workspace-write")
+        self.assertIsNone(scope)
+        self.assertEqual(args.local_network_unmet, ("loopback-unavailable-codex",))
+        path, _digest = execution_access.publish_effective_grant(
+            jobs=self.base / "state" / "jobs.log", attempt_id="att-unmet",
+            route_id="rt-code-fixture", route_hash=self.route["route_hash"],
+            runtime="codex-exec", sandbox="workspace-write", grant=None,
+            default_writable_roots=supplied, verification_scope=scope,
+            network_allowed=False, unmet=args.local_network_unmet)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(record["unmet"], ["loopback-unavailable-codex"])
+        self.assertIs(record["network_allowed"], False)
+        self.assertNotIn("verification_scope", record)
+
+    def test_supervisor_code_stage_profile_matches_exec(self):
+        spec = importlib.util.spec_from_file_location(
+            "code_stage_supervisor", Path(__file__).with_name("codex-app-server-supervisor.py"))
+        supervisor = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(supervisor)
+        roots = [str(self.base / "art")]
+        results = {}
+        for node in ("execute", "test"):
+            args = argparse.Namespace(
+                worktree=str(self.repo), writable_root=list(roots), sandbox="workspace-write",
+                network_access=False, primary_git_commit=self.node(node)["commit_expected"],
+                route_file=str(self.route_path), route_node=node, route_id=None, route_hash=None,
+                owner_runtime_permission_state=None)
+            with mock.patch.object(profiles, "named_profiles_available", return_value=True), \
+                 mock.patch.object(profiles, "local_verification_available", return_value=True), \
+                 mock.patch.object(supervisor, "turn_permissions_available", return_value=True):
+                supervisor.configure_permission_profiles(args, ["codex", "app-server"])
+            profile = args.native_permission_profile
+            self.assertEqual(args.local_network, "applied", node)
+            body = profile["permissions"][profiles.PROFILE_NAME]
+            self.assertEqual(body["network"], profiles.LOCAL_NETWORK)
+            self.assertEqual(profile["features"], {"network_proxy": True})
+            self.assertEqual(body["extends"], ":workspace")
+            results[node] = profile
+        # Same table the exec path hands to codex for the same approved roots.
+        with mock.patch.object(profiles, "named_profiles_available", return_value=True), \
+             mock.patch.object(profiles, "local_verification_available", return_value=True):
+            expected, status = profiles.code_stage_profile_config(
+                str(self.repo), roots, "workspace-write", False, primary_commit=True,
+                route=self.route, node_id="execute")
+        self.assertEqual((results["execute"], status), (expected, "applied"))
+        # Unavailable runtime: the supervisor keeps the exact current commit profile.
+        args = argparse.Namespace(
+            worktree=str(self.repo), writable_root=list(roots), sandbox="workspace-write",
+            network_access=False, primary_git_commit=True, route_file=str(self.route_path),
+            route_node="execute", route_id=None, route_hash=None, owner_runtime_permission_state=None)
+        with mock.patch.object(profiles, "named_profiles_available", return_value=True), \
+             mock.patch.object(profiles, "local_verification_available", return_value=False):
+            supervisor.configure_permission_profiles(args, ["codex", "app-server"])
+            current = profiles.commit_profile_config(
+                str(self.repo), roots, "workspace-write", False, primary_commit=True)
+        self.assertEqual(args.native_permission_profile, current)
+        self.assertEqual(args.local_network, "unavailable")
+
+    def test_declared_loopback_on_non_lab_node_supported_on_capable_codex(self):
+        import verification_runtime as V
+        self.node("execute")["runtime_requirements"] = ["loopback-listen"]
+        self.save()
+        with mock.patch.object(profiles, "named_profiles_available", return_value=True), \
+             mock.patch.object(profiles, "local_verification_available", return_value=True):
+            self.assertEqual(V.supported_requirements(self.route, "execute", "codex",
+                                                      sandbox="workspace-write"), {"loopback-listen"})
+            _profile, status = profiles.code_stage_profile_config(
+                str(self.repo), [str(self.base / "art")], "workspace-write", False,
+                primary_commit=True, route=self.route, node_id="execute")
+        self.assertEqual(status, "applied")
+
+    def test_declared_loopback_unrealizable_node_is_unsupported(self):
+        import verification_runtime as V
+        self.node("review")["runtime_requirements"] = ["loopback-listen"]
+        self.node("execute")["runtime_requirements"] = ["loopback-listen"]
+        cases = (("review", "read-only", True), ("execute", "danger-full-access", True),
+                 ("execute", "workspace-write", False), ("execute", None, True))
+        for node, sandbox, local in cases:
+            with self.subTest(node=node, sandbox=sandbox, local=local), \
+                 mock.patch.object(profiles, "named_profiles_available", return_value=local), \
+                 mock.patch.object(profiles, "local_verification_available", return_value=local):
+                self.assertEqual(V.supported_requirements(self.route, node, "codex",
+                                                          sandbox=sandbox), set())
+                if sandbox:
+                    _profile, status = profiles.code_stage_profile_config(
+                        str(self.repo), [str(self.base / "art")], sandbox, False,
+                        primary_commit=True, route=self.route, node_id=node)
+                    self.assertEqual(status, "unavailable")
+
+    def test_claude_and_opencode_are_never_recorded_as_enforcing(self):
+        import verification_runtime as V
+        for harness in ("claude", "opencode"):
+            with self.subTest(harness=harness):
+                self.assertIsNone(V.local_network_projection(self.route, "execute", harness))
+                self.assertIsNone(V.local_network_projection(self.route, "test", harness))
+                self.assertIsNone(V.effective_scope(
+                    argparse.Namespace(route_file=str(self.route_path), route_node="execute",
+                                       route_id="rt-code-fixture",
+                                       route_hash=self.route["route_hash"], worktree=str(self.repo)),
+                    [str(self.base / "art")], harness, {}))
+                self.assertEqual(V.supported_requirements(self.route, "execute", harness), set())
+
+    def test_required_requirements_stay_the_same_for_approved_stages(self):
+        import verification_runtime as V
+        # Approved test stages are not a hard requirement: no new refusal anywhere.
+        for node in ("execute", "test"):
+            self.assertEqual(V.runtime_requirements(self.route, node), set())
+
+    def test_native_code_stage_profile_blocks_outbound_and_unix_socket(self):
+        require_native_runtime(self)
+        # intake §3 probe, run against the exact profile the exec path hands to codex.
+        profile, status = profiles.code_stage_profile_config(
+            str(self.repo), [str(self.base / "art")], "workspace-write", False,
+            primary_commit=True, route=self.route, node_id="test")
+        self.assertEqual(status, "applied")
+        probe = self.base / "probe.py"
+        probe.write_text('''import errno, json, socket, sys, os
+out = {}
+def attempt(name, fn):
+    try:
+        fn(); out[name] = "ok"
+    except OSError as exc:
+        out[name] = errno.errorcode.get(exc.errno, str(exc.errno))
+def loopback(family, host):
+    def run():
+        server = socket.socket(family, socket.SOCK_STREAM); server.bind((host, 0)); server.listen(1)
+        client = socket.socket(family, socket.SOCK_STREAM); client.connect(server.getsockname())
+    return run
+def outside(kind):
+    def run():
+        s = socket.socket(socket.AF_INET, kind); s.settimeout(3)
+        s.connect(("8.8.8.8", 53)) if kind == socket.SOCK_STREAM else s.sendto(b"x", ("8.8.8.8", 53))
+    return run
+def unix():
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(os.path.join(sys.argv[1], "u.sock"))
+attempt("loopback_tcp", loopback(socket.AF_INET, "127.0.0.1"))
+attempt("outside_tcp", outside(socket.SOCK_STREAM))
+attempt("outside_udp", outside(socket.SOCK_DGRAM))
+attempt("unix_socket", unix)
+attempt("raw", lambda: socket.socket(socket.AF_INET, socket.SOCK_RAW, 1))
+attempt("work_write", lambda: open(os.path.join(sys.argv[1], "w.txt"), "w").write("x"))
+attempt("git_config_write", lambda: open(os.path.join(sys.argv[2], ".git", "config"), "a").write("x"))
+print(json.dumps(out))
+''')
+        work = self.base / "art"
+        env = {"PATH": os.environ["PATH"]}
+        for key, name in (("HOME", "home"), ("CODEX_HOME", "codex-home"),
+                          ("XDG_CACHE_HOME", "cache"), ("XDG_STATE_HOME", "state"), ("TMPDIR", "tmp")):
+            (self.base / name).mkdir(mode=0o700, exist_ok=True)
+            env[key] = str(self.base / name)
+        result = subprocess.run(["codex", "sandbox", "-P", profiles.PROFILE_NAME, "-C", str(self.repo),
+            *profiles.config_arguments(profile), "--", "python3", str(probe), str(work), str(self.repo)],
+            env=env, text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        observed = json.loads(result.stdout.strip().splitlines()[-1])
+        self.assertEqual(observed["loopback_tcp"], "ok")
+        self.assertIn(observed["outside_tcp"], {"ENETUNREACH", "EPERM"})
+        self.assertIn(observed["outside_udp"], {"ENETUNREACH", "EPERM"})
+        self.assertEqual(observed["unix_socket"], "EPERM")
+        self.assertEqual(observed["raw"], "EPERM")
+        self.assertEqual(observed["work_write"], "ok")
+        self.assertIn(observed["git_config_write"], {"EPERM", "EROFS", "EACCES"})
 
 
 if __name__ == "__main__":

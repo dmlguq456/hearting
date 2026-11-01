@@ -1324,5 +1324,27 @@ class DerivedAccessTest(unittest.TestCase):
         self.assertEqual(writes.writable_roots, ())
 
 
+class EffectiveGrantUnmetTest(unittest.TestCase):
+    """U10: an unrealizable localhost scope is recorded as an unmet fact, never as a wider grant."""
+
+    def test_unmet_is_sorted_merged_and_widens_nothing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            jobs = root / "state" / "jobs.log"
+            common = dict(jobs=jobs, route_id="rt-fixture", route_hash="sha256:" + "3" * 64,
+                          runtime="codex-exec", sandbox="workspace-write", grant=None,
+                          default_writable_roots=[root / "work"], network_allowed=False)
+            plain, _ = publish_effective_grant(attempt_id="att-plain", **common)
+            marked, _ = publish_effective_grant(
+                attempt_id="att-marked", unmet=("loopback-unavailable-codex", "a-first"), **common)
+            plain_record = json.loads(plain.read_text())
+            marked_record = json.loads(marked.read_text())
+            self.assertNotIn("unmet", plain_record)
+            self.assertEqual(marked_record.pop("unmet"), ["a-first", "loopback-unavailable-codex"])
+            for record in (plain_record, marked_record):
+                record.pop("attempt_id")
+            self.assertEqual(plain_record, marked_record)
+
+
 if __name__ == "__main__":
     unittest.main()

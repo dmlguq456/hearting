@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "utilities"))
 from review_input import preview_request_nodes
 from codex_permission_profile import (commit_profile_config, config_arguments,
+                                      code_stage_profile_config,
                                       recordish_profile_config, named_profiles_available)
 from worker_runtime_home import (prepare_worker_home, codex_worker_arguments,
                                  recorded_codex_worker_environment)
@@ -1237,10 +1238,19 @@ def shell_command(args: argparse.Namespace, prompt_path: Path, log_path: Path) -
                 raise RuntimeError("codex-non-git-recordish-profile-unsupported")
             cmd += ["--skip-git-repo-check", *config_arguments(profile)]
     else:
-        profile = commit_profile_config(
+        stage_route = None
+        stage_node = getattr(args, "route_node", None)
+        if getattr(args, "route_file", None) and stage_node:
+            try:
+                stage_route = json.loads(Path(args.route_file).read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                stage_route = None
+        profile, args.local_network = code_stage_profile_config(
             args.worktree, write_roots,
             effective_runtime_sandbox(args), args.nested_headless_network,
             primary_commit=commit_grant_target(args),
+            route=stage_route if isinstance(stage_route, dict) else None,
+            node_id=stage_node,
         )
         if profile is not None:
             cmd += config_arguments(profile)
@@ -2154,6 +2164,8 @@ def bind_internal_eligibility_probe(args: argparse.Namespace) -> None:
 def validate_route_record(args: argparse.Namespace) -> int:
     return WRAPPER_COMMON.validate_route_record(
         args, marker_gate=completion_marker_gate, runtime_harness="codex",
+        runtime_sandbox=(effective_runtime_sandbox(args)
+                         if getattr(args, "sandbox", None) else None),
     )
 
 
@@ -2879,7 +2891,8 @@ def main(argv: list[str]) -> int:
             from verification_runtime import effective_scope
             local_verification = effective_scope(args, [*default_roots,
                 *(args.execution_access_grant.writable_roots if args.execution_access_grant else ())],
-                "codex", dispatch_env)
+                "codex", dispatch_env, sandbox=effective_runtime_sandbox(args),
+                network=bool(args.nested_headless_network))
             effective_path, effective_sha256 = publish_effective_grant(
                 jobs=jobs, attempt_id=args.attempt_id, route_id=grant_route_id,
                 route_hash=grant_route_hash,
@@ -2887,6 +2900,7 @@ def main(argv: list[str]) -> int:
                 sandbox=effective_runtime_sandbox(args), grant=args.execution_access_grant,
                 default_writable_roots=default_roots,
                 verification_scope=local_verification,
+                unmet=getattr(args, "local_network_unmet", ()),
                 network_allowed=args.nested_headless_network,
                 execution_selection=args.gpu_execution_selection,
             )

@@ -1828,6 +1828,7 @@ def publish_effective_grant(
     network_allowed: bool,
     execution_selection: Mapping[str, object] | None = None,
     verification_scope: Mapping[str, object] | None = None,
+    unmet: Iterable[str] = (),
 ) -> tuple[Path, str]:
     """Publish the exact filesystem/network effect used by one attempt."""
 
@@ -1879,6 +1880,10 @@ def publish_effective_grant(
         if _os_sandboxed(runtime) and sandbox == "danger-full-access":
             record.update({"boundary": "logical-request" if grant else "logical-defaults",
                            "os_filesystem_enforced": False, "os_network_enforced": False})
+    if unmet:
+        # Facts this attempt could not enforce (e.g. a localhost scope the
+        # runtime cannot realize); merged with any logical-request unmet.
+        record["unmet"] = sorted({*record.get("unmet", ()), *unmet})
     if verification_scope is not None:
         record["verification_scope"] = dict(verification_scope)
         if verification_scope.get("projection") == "native-profile":

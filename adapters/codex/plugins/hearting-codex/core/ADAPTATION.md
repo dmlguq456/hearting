@@ -889,7 +889,7 @@ group, process, and JSON views use the same authoritative current owner generati
 
 ### 8.19. Declared runtime requirements and lifecycle evidence under SD-97
 
-a node may declare only registry-known `runtime_requirements`. `loopback-listen` means localhost bind while outbound network remains denied; a runtime that exposes only a broad network boolean reports `loopback-only-unsupported` and uses the checked main/inline handoff rather than widening outbound access. Every registered row records the requested launch lifecycle plus bounded selector evidence (source, NSpid width, and PID-1 class) so an intermittent nested-sandbox lifetime failure is diagnosable without transcript inspection.
+a node may declare only registry-known `runtime_requirements`. `loopback-listen` means localhost bind and connect while outbound network and broad Unix sockets stay denied; sealed lab HTML verification and the `code-execute`/`code-test` stages use it without resealing — Codex adds only the localhost table to the stage's current approved profile, a runtime that cannot realize it refuses a declared or lab requirement as `loopback-only-unsupported` while a code stage proceeds with network off and records the unmet fact in its effective grant, and Claude and OpenCode are never recorded as enforcing it. Every registered row records the requested launch lifecycle plus bounded selector evidence (source, NSpid width, and PID-1 class) so an intermittent nested-sandbox lifetime failure is diagnosable without transcript inspection.
 
 ## 9. Native interaction and optional Herdr observation
 

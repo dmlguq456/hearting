@@ -500,7 +500,7 @@ def codex_standard_owner_network_enabled(
     *, dispatch_depth: int, worker_type: str, intensity: str, sandbox: str,
     gpu_resource_owner: bool = False,
 ) -> bool:
-    """Return whether the Codex wrapper grants its scoped nested network profile."""
+    """General (non-loopback) network grant; approved-test localhost is decided by `verification_runtime.local_network_projection`."""
 
     return (
         dispatch_depth == 1

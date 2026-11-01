@@ -317,5 +317,67 @@ class VerificationRuntimeTest(unittest.TestCase):
                              self.base / "xdg/hearting/spec-grounding")
 
 
+class ApprovedTestProjectionTest(unittest.TestCase):
+    """U10: one decision for localhost-only scope; lab and declared requirements keep refusing."""
+
+    def route(self):
+        nodes = [{"id": "execute", "completion_gate": "code-execute", "commit_expected": True},
+                 {"id": "test", "completion_gate": "code-test", "commit_expected": False},
+                 {"id": "review", "completion_gate": "code-review", "commit_expected": False}]
+        return {"capability": "autopilot-code", "nodes": nodes}
+
+    def test_approved_nodes_derive_from_the_sealed_gate_without_reseal(self):
+        route = self.route()
+        original = copy.deepcopy(route)
+        self.assertEqual(V.approved_test_node(route, "execute")["id"], "execute")
+        self.assertEqual(V.approved_test_node(route, "test")["id"], "test")
+        self.assertIsNone(V.approved_test_node(route, "review"))
+        self.assertIsNone(V.approved_test_node(route, "missing"))
+        self.assertEqual(route, original)
+
+    def test_projection_matrix(self):
+        route = self.route()
+        route["nodes"][2]["runtime_requirements"] = ["loopback-listen"]
+        with mock.patch.object(P, "local_verification_available", return_value=True):
+            self.assertEqual(V.local_network_projection(route, "execute", "codex",
+                                                        sandbox="workspace-write"), "native-profile")
+            self.assertEqual(V.local_network_projection(route, "test", "codex",
+                                                        sandbox="workspace-write"), "native-profile")
+            for sandbox in ("read-only", "danger-full-access", None):
+                self.assertEqual(V.local_network_projection(route, "execute", "codex",
+                                                            sandbox=sandbox), "unavailable")
+            # Declared on a read-only review node: not realizable, so it is refused.
+            self.assertEqual(V.local_network_projection(route, "review", "codex",
+                                                        sandbox="read-only"), "unavailable")
+            self.assertEqual(V.supported_requirements(route, "review", "codex",
+                                                      sandbox="read-only"), set())
+            # Claude/OpenCode: nothing is claimed outside the checked lab command.
+            for harness in ("claude", "opencode"):
+                self.assertIsNone(V.local_network_projection(route, "execute", harness))
+                self.assertEqual(V.local_network_projection(route, "review", harness), "unavailable")
+        with mock.patch.object(P, "local_verification_available", return_value=False):
+            self.assertEqual(V.local_network_projection(route, "execute", "codex",
+                                                        sandbox="workspace-write"), "unavailable")
+            self.assertEqual(V.supported_requirements(route, "execute", "codex",
+                                                      sandbox="workspace-write"), set())
+
+    def test_lab_projection_ignores_the_launch_sandbox_and_keeps_its_refusal(self):
+        lab = VerificationRuntimeTest("test_legacy_lab_contract_derives_local_execution_without_resealing")
+        lab.setUp()
+        self.addCleanup(lab.tmp.cleanup)
+        with mock.patch.object(P, "local_verification_available", return_value=True):
+            for harness, expected in (("codex", "native-profile"),
+                                      ("claude", "verification-command"),
+                                      ("opencode", "verification-command")):
+                self.assertEqual(V.local_network_projection(
+                    lab.route, "independent-verify", harness), expected)
+                self.assertEqual(V.supported_requirements(
+                    lab.route, "independent-verify", harness), {"loopback-listen"})
+        with mock.patch.object(P, "local_verification_available", return_value=False):
+            for harness in ("codex", "claude", "opencode"):
+                self.assertEqual(V.supported_requirements(
+                    lab.route, "independent-verify", harness), set())
+
+
 if __name__ == "__main__":
     unittest.main()

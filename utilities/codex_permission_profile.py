@@ -19,6 +19,18 @@ LOCAL_VERIFICATION_PROFILE_NAME = "hearting_local_verification"
 LOCAL_VERIFICATION_MIN_VERSION = (0, 163, 0)
 TURN_PERMISSIONS_MIN_VERSION = (0, 160, 0)
 
+# The localhost-only network table shared by the lab review profile and the
+# approved code-stage profile: bind and connect on loopback, nothing else.
+# No upstream proxy, no UDP, and no broad Unix-socket key.
+LOCAL_NETWORK = {
+    "enabled": True,
+    "domains": {"localhost": "allow", "127.0.0.1": "allow", "::1": "allow"},
+    "allow_local_binding": True, "allow_upstream_proxy": False,
+    "enable_socks5_udp": False,
+    "proxy_url": "http://127.0.0.1:0", "socks_url": "http://127.0.0.1:0",
+}
+LOCAL_NETWORK_FEATURES = {"network_proxy": True}
+
 
 @lru_cache(maxsize=1)
 def named_profiles_available() -> bool:
@@ -86,9 +98,10 @@ def verification_profile_config(worktree: str, writable_roots: list[str],
     if not route_file or not node_id:
         return None
     try:
-        from verification_runtime import lab_browser_node
+        from verification_runtime import lab_browser_node, local_network_projection
         route = json.loads(Path(route_file).read_text(encoding="utf-8"))
-        if lab_browser_node(route, node_id) is None or not local_verification_available():
+        if (lab_browser_node(route, node_id) is None
+                or local_network_projection(route, node_id, "codex") != "native-profile"):
             return None
         wt = Path(worktree).resolve()
         artifact = Path(route["artifact_root"]).resolve()
@@ -100,14 +113,10 @@ def verification_profile_config(worktree: str, writable_roots: list[str],
         filesystem[str(wt)] = "read"
         filesystem.update({root: "read" for root in scope["read_only_roots"] if Path(root).exists()})
         return {"default_permissions": LOCAL_VERIFICATION_PROFILE_NAME,
-                "features": {"network_proxy": True},
+                "features": dict(LOCAL_NETWORK_FEATURES),
                 "permissions": {LOCAL_VERIFICATION_PROFILE_NAME: {
                     "extends": ":read-only", "filesystem": filesystem,
-                    "network": {"enabled": True,
-                                "domains": {"localhost": "allow", "127.0.0.1": "allow", "::1": "allow"},
-                                "allow_local_binding": True, "allow_upstream_proxy": False,
-                                "enable_socks5_udp": False,
-                                "proxy_url": "http://127.0.0.1:0", "socks_url": "http://127.0.0.1:0"},
+                    "network": dict(LOCAL_NETWORK),
                 }}}
     except (OSError, ValueError, TypeError, KeyError):
         return None
@@ -166,6 +175,46 @@ def commit_profile_config(worktree: str, writable_roots: list[str],
            if (common / name).exists()},
         **{root: "write" for root in sorted(roots)},
     }, network)
+
+
+def code_stage_profile_config(worktree: str, writable_roots: list[str], sandbox: str,
+                              network: bool, *, primary_commit: bool = False,
+                              route: dict | None = None, node_id: str | None = None
+                              ) -> tuple[dict | None, str]:
+    """Return (profile, local_network) with local_network in {"applied","unavailable","not-applicable"}.
+
+    The profile is the stage's current approved write profile. For an approved
+    code-execute/code-test stage whose localhost scope can be realized, only
+    the network table changes: filesystem and `extends` stay as approved. Lab
+    review keeps its own read-only profile, and a stage that already has
+    general network (owner, GPU) is left exactly as it was.
+    """
+    profile = commit_profile_config(worktree, writable_roots, sandbox, network,
+                                    primary_commit=primary_commit)
+    if route is None or node_id is None or network:
+        return profile, "not-applicable"
+    from verification_runtime import lab_browser_node, local_network_projection
+    if lab_browser_node(route, node_id) is not None:
+        return profile, "not-applicable"
+    projection = local_network_projection(route, node_id, "codex", sandbox=sandbox)
+    if projection is None:
+        return profile, "not-applicable"
+    if projection != "native-profile":
+        return profile, "unavailable"
+    if profile is None:
+        # No-commit stage (test): the approved roots as write, the checked-out
+        # `.git` directory kept read-only as legacy workspace-write does.
+        filesystem = {str(Path(root).resolve()): "write" for root in sorted(writable_roots)}
+        git_dir = Path(worktree).resolve() / ".git"
+        if git_dir.is_dir():
+            filesystem[str(git_dir)] = "read"
+        profile = _profile(filesystem, False)
+    name = profile["default_permissions"]
+    profile = {**profile, "permissions": {**profile["permissions"]}}
+    profile["permissions"][name] = {**profile["permissions"][name],
+                                    "network": dict(LOCAL_NETWORK)}
+    profile["features"] = dict(LOCAL_NETWORK_FEATURES)
+    return profile, "applied"
 
 
 def owner_turn_profile_config(worktree: str, writable_roots: list[str],

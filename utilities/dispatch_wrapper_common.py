@@ -989,7 +989,8 @@ def attach_summary_owner(args, log_path: Path, prompt_path: Path, identity, *,
     )
 
 
-def validate_route_record(args: argparse.Namespace, *, marker_gate, runtime_harness=None) -> int:
+def validate_route_record(args: argparse.Namespace, *, marker_gate, runtime_harness=None,
+                          runtime_sandbox=None) -> int:
     """One admission check for every wrapper.
 
     The wrapper passes its own completion-marker gate, looked up in its own
@@ -1013,9 +1014,10 @@ def validate_route_record(args: argparse.Namespace, *, marker_gate, runtime_harn
     try:
         from verification_runtime import supported_requirements
         validate_runtime_requirements(route_record, args.route_node, supported=
-            supported_requirements(route_record, args.route_node, runtime_harness))
+            supported_requirements(route_record, args.route_node, runtime_harness,
+                                   sandbox=runtime_sandbox))
     except OwnerRouteBindingError as exc:
-        return fail(str(exc), 69, child_spawned="0", fallback="inline-or-main")
+        return fail(str(exc), 69, child_spawned="0", harness=runtime_harness or "-")
     try:
         validate_route_mode_axes(args, route_record)
     except DispatchModeContractError as exc:
