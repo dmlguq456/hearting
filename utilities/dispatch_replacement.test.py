@@ -2706,6 +2706,81 @@ class ReplacementTest(unittest.TestCase):
                                or SimpleNamespace(returncode=0, stdout='', stderr=''))
         return result, commands
 
+    # -- U7/U4 default budget: a repeated runtime end stops at the budget state -------------------
+    def _runtime_end(self, **changes):
+        """Hand-built shape of an owner (or BC45 frame leg) whose runtime ended with no result."""
+        worker = changes.pop('worker_type', 'owner')
+        meta = {**self.meta, 'worker_type': worker, 'launch_started': '1', 'note': 'dead-runtime-exit',
+                'failure_class': 'runtime', 'terminal_event': 'dispatch.supervisor.error',
+                'supervisor_lease': 'flock-v1',
+                'supervisor_lease_file': str(D.supervisor_lease_path(self.jobs, 'att-source')), **changes}
+        meta.pop('launch_outcome', None)
+        self.write(meta)
+        return meta
+
+    def _claim_runtime_end(self):
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            return self.claim()
+
+    def _second_runtime_end(self, worker_type, first_row=None, **second):
+        parent = self._runtime_end(worker_type=worker_type, **(first_row or {}))
+        first = self._claim_runtime_end()
+        self.assertEqual(first['proof']['death_kind'], 'runtime')
+        successor = self._successor(first, parent, status='open')
+        columns = {'note': 'dead-runtime-exit', 'failure_class': 'runtime',
+                   'terminal_event': 'dispatch.supervisor.error', 'launch_started': '1',
+                   'supervisor_lease': 'flock-v1',
+                   'supervisor_lease_file': str(D.supervisor_lease_path(self.jobs, successor['attempt_id'])),
+                   **second}
+        ended = self._die(successor, **columns)
+        return ended
+
+    def test_repeated_same_runtime_owner_death_stops_at_budget(self):
+        ended = self._second_runtime_end('owner', note='dead-protocol')   # note differs; columns do not
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            with self.assertRaises(D.DispatchContractError) as caught:
+                R.claim(self.jobs, ended['attempt_id'])
+        self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+
+    def test_changed_frame_failure_class_replaces_again(self):
+        launch = {'note': 'dead-launch-exit-1', 'failure_class': 'launch', 'terminal_event': ''}
+        ended = self._second_runtime_end('frame', launch, **{**launch, 'failure_class': 'protocol'})
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            self.assertEqual(R.claim(self.jobs, ended['attempt_id'])['proof']['death_kind'], 'runtime')
+
+    def test_changed_harness_or_failure_class_replaces_again(self):
+        for change in ({'failure_class': 'protocol'}, {'terminal_event': 'dispatch.supervisor.other'}):
+            with self.subTest(change=change):
+                self.tearDown_case()
+                ended = self._second_runtime_end('owner', **change)
+                with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                                return_value={'state': 'absent', 'failure_class': ''}):
+                    second = R.claim(self.jobs, ended['attempt_id'])
+                self.assertEqual(second['proof']['death_kind'], 'runtime')
+
+    def test_repeated_same_launch_failure_stops_at_budget(self):
+        launch = {'note': 'dead-launch-exit-1', 'failure_class': 'launch', 'terminal_event': ''}
+        ended = self._second_runtime_end('frame', launch, **launch)
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            with self.assertRaises(D.DispatchContractError) as caught:
+                R.claim(self.jobs, ended['attempt_id'])
+        self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+
+    def test_competing_successor_stays_protected_in_claim(self):
+        parent = self._runtime_end()
+        first = self._claim_runtime_end()
+        successor = self._successor(first, parent, status='open')
+        self._successor_competitor = successor
+        rows = R._rows(self.jobs.read_text().splitlines())
+        competitor = {**parent, 'attempt_id': 'att-rival', 'automatic_retry_of': 'att-source'}
+        with self.assertRaises(D.DispatchContractError) as caught:
+            R._no_competing_successor({**rows, 'att-rival': (['now', 'open'], competitor)}, 'att-source')
+        self.assertEqual(caught.exception.reason, 'automatic-replacement-exhausted')
+
     def test_an_owner_that_ended_blocked_continues_once_its_answer_arrives(self):
         self._blocked_owner()
         fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
@@ -2813,12 +2888,16 @@ class ReplacementTest(unittest.TestCase):
         self.assertTrue(RA.runtime_owner_can_resume('done', meta))
         self.assertTrue(RA.runtime_owner_can_resume(
             'done', {**meta, 'reconcile_reason': 'opencode-final-stop-missing'}))
-        for change in ({'note': 'dead-worker-fail'}, {'note': 'completed-supervisor'},
-                       {'reconcile_reason': 'terminal-envelope-invalid'}, {'launch_started': '0'},
+        # the reason name is not judged; the supervisor's recorded columns are
+        self.assertTrue(RA.runtime_owner_can_resume(
+            'done', {**meta, 'reconcile_reason': 'a-reason-no-harness-has-named-yet'}))
+        for change in ({'note': 'dead-worker-fail', 'failure_class': 'fail'},
+                       {'note': 'completed-supervisor', 'failure_class': 'pass'},
+                       {'failure_class': 'contract'}, {'launch_started': '0'},
                        {'terminal_event': 'dispatch.supervisor.done'}):
             self.assertFalse(RA.runtime_owner_can_resume('done', {**meta, **change}))
         self.assertFalse(RA.runtime_owner_can_resume('cancelled', meta))
-        with mock.patch.object(RA, 'readable_result', return_value='PASS'):
+        with mock.patch('dispatch_attempt_policy.readable_result', return_value='PASS'):
             self.assertFalse(RA.runtime_owner_can_resume('done', meta))
         for state in ('live', 'unverifiable'):
             with self.subTest(state=state), mock.patch.object(D, 'attempt_process_quiescence',

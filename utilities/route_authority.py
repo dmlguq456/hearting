@@ -24,7 +24,7 @@ from pathlib import Path
 import re
 from typing import Mapping, NamedTuple
 
-from dispatch_attempt_policy import committed_outcome, readable_result
+from dispatch_attempt_policy import committed_outcome, readable_result, verdict_pass
 import review_round_cap as _ROUND
 from session_identity import identity as session_identity, session_label
 
@@ -165,8 +165,8 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
                     or native_closed_capacity)
     if (meta.get('worker_type') == 'owner' and status == 'done' and capacity_row):
         return 'capacity'
-    if meta.get('worker_type') == 'owner' and status == 'done' and meta.get('note') in DR.RUNTIME_DEATH_NOTES:
-        return 'runtime'  # the owner's runtime died under it; only an explicit `start` replaces it
+    if meta.get('worker_type') == 'owner' and status == 'done' and _runtime_ended(meta):
+        return 'runtime'  # the owner's runtime ended under it; only an explicit `start` replaces it
     if jobs is not None and meta.get('worker_type') == 'frame' and status == 'done' and capacity_row:
         if DR._same_role_successful_frame_peer_harness(jobs, meta, lines=lines):
             # The ordinary route selector may replay this missing leg at the
@@ -179,6 +179,12 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
             # A verified rotated alternative uses ordinary capacity recovery; it
             # does not claim the frame rule's top-to-deep transition.
             return 'capacity'
+    if (meta.get('worker_type') == 'frame' and status == 'done' and meta.get('launch_started') == '1'
+            and not capacity_row and not readable_result(meta) and not verdict_pass(meta)):
+        # A launched frame leg that ended with no result of its own is replaced
+        # like a dead owner runtime (explicit start only). A readable FAIL/BLOCKED
+        # is a result, not a death; the claim's terminal check keeps any result.
+        return 'runtime'
     return None
 
 
@@ -536,7 +542,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
             return ContinuationDecision(False, "not-applicable", next_action="observe")
         if not facts.get("resume_capacity") and not _replacement_in_flight(jobs, facts["registry_rows"], metadata):
             if kind == "capacity":
-                return ContinuationDecision(False, "capacity", "replacement-capacity-wait", "same-command")
+                return ContinuationDecision(False, "capacity", "replacement-capacity-wait", "arm-capacity-resume")
             if kind in {"runtime", "unlaunched", "corrected"}:
                 return ContinuationDecision(False, "not-applicable", next_action="observe")
         return ContinuationDecision(True, "launch", next_action="start")
@@ -624,8 +630,13 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                 "same-command", "The exact owner and unregistered children are observed quiescent; "
                 "registered payloads remain bound and running.", process.reason)
     if action in {"replacement", "replacement-budget"}:
-        if facts.get("budget_exhausted") or facts.get("competing_successor"):
+        if facts.get("competing_successor"):
             return ContinuationDecision(False, "protected", "automatic-replacement-exhausted", "report")
+        if facts.get("budget_exhausted"):
+            # A default budget chooses the next handling; it is not a harm refusal.
+            return ContinuationDecision(False, "budget", "automatic-replacement-exhausted", "report",
+                "The route-owning session's next `start`/`correct`, or `resume_command` after the cause "
+                "(model, variant or setting) changed.")
         if facts.get("child_unsettled"):
             return ContinuationDecision(False, "wait", "replacement-owner-child-unsettled", "same-command",
                                         "The exact child is settled and quiescent.", facts["child_unsettled"])
@@ -2844,23 +2855,24 @@ def blocked_progress(route, rows, *, worker_type="test") -> int:
     return streak
 
 
+def _runtime_ended(meta) -> bool:
+    from dispatch_supervisor_terminal import runtime_ended_without_result
+    return runtime_ended_without_result(meta)
+
+
 def runtime_owner_can_resume(status, meta) -> bool:
     """A launched supervised owner's runtime end still has its same-route work.
 
     Admission also checks actual process quiescence; this metadata judgment
     keeps the route's sealed contract available while it awaits continuation.
+    The end is judged from the supervisor's own recorded columns, never from a
+    harness-specific reason name.
     """
     return (status == "done" and meta.get("worker_type") == "owner"
             and meta.get("launch_started") == "1"
             and meta.get("supervisor_lease") == "flock-v1"
             and bool(meta.get("supervisor_lease_file"))
-            and (meta.get("note") in {"dead-runtime-exit", "dead-runtime-error"}
-                 or (meta.get("note") == "dead-protocol"
-                     # OpenCode's own name for the same missing terminal event.
-                     and meta.get("reconcile_reason") in {"terminal-event-missing",
-                                                          "opencode-final-stop-missing"}
-                     and meta.get("terminal_event") == "dispatch.supervisor.error"
-                     and not readable_result(meta))))
+            and _runtime_ended(meta))
 
 
 def answerable_owner_end(status, meta) -> str:
