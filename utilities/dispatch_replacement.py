@@ -564,7 +564,8 @@ def death_proof(fields, meta, *, jobs=None, lines=None):
     elif kind == OBSERVED:
         # Observations only: the original result and where its report or log is. No person answered,
         # so nothing is written to the owner input store and no correction is carried.
-        result['source_result'] = ('CONTRACT' if route_authority.owner_result_format_only_end(fields[1], meta)
+        result['source_result'] = ('INCOMPLETE' if DC.verdict_pass(meta)
+                                   else 'CONTRACT' if route_authority.owner_result_format_only_end(fields[1], meta)
                                    else 'BLOCKED')
         handoff = _blocked_handoff(fields, meta)
         if handoff:
@@ -3178,6 +3179,8 @@ def recovery_instructions(args):
     pending = ', '.join(str(node) for node in current_reuse.get('pending', [])) or '(none)'
     source_fields, source = _rows(lines)[prior]
     kind = death_kind(source_fields, source, jobs=jobs, lines=lines)
+    if (record.get('proof') or {}).get('death_kind') == OBSERVED:
+        kind = OBSERVED   # the claim names how this owner was created; the source may have moved on since
     fix = kind == CORRECTED and (record.get('proof') or {}).get('source_result') == 'FAIL'
     if fix:
         opening = (f'The previous owner {prior} ended FAIL and a person approved a fix for it; this continues '
@@ -3193,17 +3196,28 @@ def recovery_instructions(args):
     elif kind == OBSERVED:
         proof = record.get('proof') or {}
         ended = ('ended with a handoff-format error' if proof.get('source_result') == 'CONTRACT'
+                 else 'ended PASS with declared stages undone' if proof.get('source_result') == 'INCOMPLETE'
                  else 'ended BLOCKED')
         where = (f'its report {proof["handoff"]}' if proof.get('handoff')
                  else f'its log {proof.get("log_file", "")}')
-        opening = (f'The previous owner {prior} {ended} and no person has answered. What follows is what the '
-                   f'runtime observed, not an answer or an approval: the original result and {where}. '
-                   f'Read it, then decide the next step within the approved scope; this continues the same '
-                   f'work on the existing route {record["route_id"]}. If it stopped on a Hearting refusal '
-                   '(for example target-identity-unverified, resource-route-body-conflict or '
-                   'reviewed-evidence-revision-not-admitted), observe again whether that refusal still '
-                   'holds before acting. If only a person can decide, name that question and end BLOCKED; '
-                   'the runtime then hands it to a person.\n')
+        if proof.get('source_result') == 'INCOMPLETE':
+            undone = route_authority.unfinished_pass_owner(source_fields[1], source, jobs)
+            opening = (f'The previous owner {prior} {ended} and no person has answered. What follows is what the '
+                       f'runtime observed, not an answer or an approval: its original PASS result stays as it is, '
+                       f'{where}, completed stages {completed}, stages still pending {pending}'
+                       + (f', missing completion evidence {json.dumps(undone, sort_keys=True)}' if undone else '')
+                       + f'. Finish the pending stages on the existing route {record["route_id"]}; completed '
+                       'stages are not rerun and this runtime does not turn the PASS into a completion. If a '
+                       'stage cannot proceed, name the actual blocker and end BLOCKED.\n')
+        else:
+            opening = (f'The previous owner {prior} {ended} and no person has answered. What follows is what the '
+                       f'runtime observed, not an answer or an approval: the original result and {where}. '
+                       f'Read it, then decide the next step within the approved scope; this continues the same '
+                       f'work on the existing route {record["route_id"]}. If it stopped on a Hearting refusal '
+                       '(for example target-identity-unverified, resource-route-body-conflict or '
+                       'reviewed-evidence-revision-not-admitted), observe again whether that refusal still '
+                       'holds before acting. If only a person can decide, name that question and end BLOCKED; '
+                       'the runtime then hands it to a person.\n')
     elif kind == 'capacity':
         opening = f'The previous attempt {prior} stopped at a usage limit; this resumes it on the existing route {record["route_id"]}.\n'
     elif kind == 'unlaunched':

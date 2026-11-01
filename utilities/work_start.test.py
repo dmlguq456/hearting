@@ -806,6 +806,41 @@ class WorkStartTest(unittest.TestCase):
         self.assertNotIn("parent_next", result)
         self.assertEqual(len(self.calls), 3)
 
+    def _exited_pass_owner_with_gaps(self):
+        self.start(); self.ready = self.released = True; self.start()
+        self.jobs.write_text(self.jobs.read_text().replace("\topen\t", "\tdone\t").replace(
+            "worker_type=owner", "workflow_completion=runtime-v1,failure_class=pass,worker_type=owner"))
+
+    def test_exited_owner_with_missing_work_is_continued_once_by_the_runtime(self):
+        """U11-J: unfinished work after a PASS goes to the `observed` continuation before any report."""
+        import dispatch_terminal_commit as T, dispatch_replacement as DR
+        self._exited_pass_owner_with_gaps()
+        seen = []
+        def advance(jobs, aid, **kw):
+            seen.append((aid, kw)); return {"state": "needs-attention", "reason": "replacement-owner-child-unsettled",
+                "next_action": "same-command", "retry_when": "The exact child is settled and quiescent."}
+        with mock.patch.object(T, "owner_workflow_gaps", return_value={"report": "completion-marker-absent"}), \
+             mock.patch.object(DR, "advance", side_effect=advance), \
+             mock.patch.object(W, "join_selected_attempts", side_effect=AssertionError("cannot wait for an absent executor")):
+            result = self.start(wait=True)
+        self.assertEqual([kw.get("resume_capacity") for _, kw in seen], [True])   # one explicit-start continuation
+        self.assertEqual(result["state"], "needs-attention", result)
+        self.assertEqual(result["reason"], "replacement-owner-child-unsettled")
+        self.assertEqual(result["missing_terminal_gates"], {"report": "completion-marker-absent"})
+        self.assertEqual(result["retry_when"], "The exact child is settled and quiescent.")
+
+    def test_exited_replacement_owner_with_missing_work_goes_to_the_route_owner(self):
+        import dispatch_terminal_commit as T, dispatch_replacement as DR
+        self._exited_pass_owner_with_gaps()
+        with mock.patch.object(T, "owner_workflow_gaps", return_value={"report": "completion-marker-absent"}), \
+             mock.patch.object(DR, "created_as", return_value="observed"), \
+             mock.patch.object(DR, "advance", side_effect=AssertionError("a replacement owner is not continued again")), \
+             mock.patch.object(W, "join_selected_attempts", side_effect=AssertionError("cannot wait for an absent executor")):
+            result = self.start(wait=True)
+        self.assertEqual((result["state"], result["reason"], result["required_action"]),
+                         ("needs-attention", "workflow-executor-exited", "report-unfinished-work"), result)
+        self.assertIn("already a continuation", result["next_step"])
+
     def test_completed_deferred_owner_still_reports_workflow_gaps(self):
         """C15 (S3a): `verdict_pass` recognizes a marker-bound deferred owner
         row (failure_class stays infrastructure) the same way a plain

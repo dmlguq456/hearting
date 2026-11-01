@@ -1214,7 +1214,9 @@ that receives the original result and its report as observations, not as an answ
 Only a real user decision reaches a person: the continuation names it and ends
 `BLOCKED`, and `resume_command` then reports `owner-blocked`; the answer sent with
 `correct` starts one replacement owner that receives it. A readable FAIL keeps
-waiting for an approved fix. No gate, close, or recompose is needed.
+waiting for an approved fix. An owner that ended `PASS` with declared stages undone is
+continued the same way once: its PASS stays as recorded, and the replacement receives the
+undone stages as observations. No gate, close, or recompose is needed.
 
 A continuation route projects this contract onto its suffix. It drops a gate
 whose gated entry node was cut, never rebinds a retained raising continuation to

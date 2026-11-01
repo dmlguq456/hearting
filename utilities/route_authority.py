@@ -150,6 +150,8 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
         return DR.CORRECTED
     if observed_stop(status, meta, jobs) == 'readable':
         return DR.OBSERVED
+    if unfinished_pass_owner(status, meta, jobs):
+        return DR.OBSERVED  # a PASS that left declared stages undone is unfinished work, not a result
     if (meta.get('note') == 'cancelled-receipt-unavailable'
             and meta.get('classifier_source') == DR.DC.AUTOMATIC_RECEIPTLESS_CLASSIFIER):
         return 'silent'
@@ -210,6 +212,30 @@ def observed_stop(status, meta, jobs) -> str:
     except OSError:
         readable = False
     return "readable" if readable else "unreadable"
+
+
+def unfinished_pass_owner(status, meta, jobs) -> dict:
+    """The declared stages a PASS owner left undone, or {}.
+
+    The runtime never rewrites that PASS row: the original result stays as it is and the same
+    `observed` continuation (once per lineage: an owner that is itself a replacement is not continued
+    again) hands the
+    undone stages to a replacement owner. An unreadable route or marker is not observed, so {}.
+    """
+    import dispatch_replacement as DR
+    from dispatch_contract import DispatchContractError, verdict_pass
+    if (jobs is None or status != "done" or meta.get("worker_type") != "owner"
+            or meta.get("workflow_completion") != "runtime-v1" or not verdict_pass(meta)
+            or DR.created_as(jobs, meta)):
+        return {}   # an owner that is itself a replacement is not continued again: its end goes to the route owner
+    try:
+        from dispatch_terminal_commit import owner_workflow_gaps
+        if DR.owner_parked_gate(jobs, meta.get("attempt_id")) is not None:
+            return {}   # a declared gate keeps its own answer path; a passed owner parked there is no death
+        _path, route = DR._route(jobs, meta.get("attempt_id"), meta)
+        return owner_workflow_gaps(jobs, meta, route) or {}
+    except (DispatchContractError, OSError, ValueError, KeyError, TypeError):
+        return {}
 
 
 def _replacement_terminal_absent(fields, meta, *, capacity=False, runtime=False):

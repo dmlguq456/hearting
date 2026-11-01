@@ -2919,6 +2919,77 @@ class ReplacementTest(unittest.TestCase):
             jobs_path=self.jobs, attempt_id=result['record']['replacement_attempt_id']))
         self.assertIn('You replace exact-dead attempt', text)
 
+    # -- U11-J: an owner PASS that left declared stages undone is unfinished work, continued once -----------
+    GAPS = {'review': 'completion-marker-absent'}
+
+    def _pass_owner_with_gaps(self, **changes):
+        """Hand-built shape: the owner exited PASS (runtime-v1) while a declared stage has no completion evidence."""
+        log = self.root / 'owner.log'
+        log.write_text('owner final result\n')
+        meta = {**self.meta, 'worker_type': 'owner', 'launch_started': '1', 'note': 'completed-supervisor',
+                'failure_class': 'pass', 'workflow_completion': 'runtime-v1', 'log_file': str(log), **changes}
+        meta.pop('launch_outcome', None)
+        self.write(meta, 'open')
+        self.jobs.write_text(self.jobs.read_text().replace('\topen\t', '\tdone\t'))
+        return meta
+
+    def _gaps(self, value=None):
+        return mock.patch('dispatch_terminal_commit.owner_workflow_gaps', return_value=self.GAPS if value is None else value)
+
+    def test_pass_owner_with_undone_stages_continues_once_and_keeps_its_pass(self):
+        self._pass_owner_with_gaps()
+        before = R._rows(self.jobs.read_text().splitlines())['att-source']
+        with self._gaps():
+            self.assertEqual(R.death_kind(*before, jobs=self.jobs), R.OBSERVED)
+            result, commands = self._observed_launch('')
+            self.assertEqual(len(commands), 1, result)
+            proof = result['record']['proof']
+            self.assertEqual((proof['death_kind'], proof['source_result']), ('observed', 'INCOMPLETE'))
+            self.assertEqual(proof['log_file'], str(self.root / 'owner.log'))
+            text = R.recovery_instructions(SimpleNamespace(
+                automatic_retry_of='att-source', worker_type='owner', jobs_path=self.jobs,
+                attempt_id=result['record']['replacement_attempt_id']))
+        self.assertIn('ended PASS with declared stages undone', text)
+        self.assertIn('original PASS result stays as it is', text)
+        self.assertIn('completion-marker-absent', text)
+        self.assertIn('completed stages are not rerun', text)
+        for forbidden in ('a person approved', 'Treat it as given', 'received an answer'):
+            self.assertNotIn(forbidden, text)
+        # E2-N06: the runtime wrote no PASS and left the original row exactly as it was.
+        rows = R._rows(self.jobs.read_text().splitlines())
+        keep = ('note', 'failure_class', 'classifier_source', 'workflow_completion', 'launch_started')
+        self.assertEqual((rows['att-source'][0][1], {k: rows['att-source'][1].get(k) for k in keep}),
+                         (before[0][1], {k: before[1].get(k) for k in keep}))
+        self.assertEqual(rows['att-source'][0][1], 'done')
+        for aid, (_, meta) in rows.items():
+            if aid != 'att-source':
+                self.assertNotEqual(meta.get('failure_class'), 'pass')
+        import dispatch_owner_input as I
+        self.assertEqual(I.retained(self.jobs, 'att-source'), [])
+
+    def test_pass_owner_continuation_is_not_repeated_for_a_replacement_owner(self):
+        for created in ('observed', 'runtime', 'corrected', 'capacity'):
+            with self.subTest(created=created):
+                self.tearDown_case()
+                self._pass_owner_with_gaps()
+                fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
+                with self._gaps(), mock.patch.object(R, 'created_as', return_value=created):
+                    self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))
+                    self.assertEqual(R.advance(self.jobs, 'att-source', authority_check=lambda *_: True,
+                                               resume_capacity=True)['state'], 'not-applicable')
+                self.assertFalse((R._directory(self.jobs) / 'claims').exists())
+
+    def test_pass_owner_without_undone_stages_or_with_unobservable_ones_is_not_continued(self):
+        self._pass_owner_with_gaps()
+        fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']
+        with self._gaps({}):
+            self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))   # nothing is undone
+        with mock.patch('dispatch_terminal_commit.owner_workflow_gaps', side_effect=OSError('unreadable marker')):
+            self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))   # not observed, so no claim
+        with self._gaps(), mock.patch.object(R, 'owner_parked_gate', return_value={'gate': 'g', 'status': 'blocked', 'epoch': 1}):
+            self.assertIsNone(R.death_kind(fields, meta, jobs=self.jobs))   # a declared gate keeps its own path
+        self.assertFalse((R._directory(self.jobs) / 'claims').exists())
+
     def test_readable_fail_still_waits_for_approved_fix(self):
         self._observed_owner(note='dead-worker-fail', failure_class='fail')
         fields, meta = R._rows(self.jobs.read_text().splitlines())['att-source']

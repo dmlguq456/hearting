@@ -592,7 +592,8 @@ stamp path in `core/HOOKS.md`.
   its report as observations (`dispatch_replacement` `observed`), the same on every
   adapter. Only a real user decision reaches a person: `resume_command` reports
   `owner-blocked`, and `capability-route.py correct` keeps the answer and continues the
-  route in the same call (`corrected`).
+  route in the same call (`corrected`). A `PASS` owner that left declared stages undone
+  is continued the same way once (`observed`); its PASS row is not rewritten.
   A Codex delivery uses a distinct strict `human-gate` receipt and `hg-dlv-*`
   gateway identity. It binds the route id/hash/file, gate raise epoch, exact
   live owner attempt and sealed batch, immutable registry, recipient thread and
