@@ -3101,7 +3101,7 @@ def recovery_instructions(args):
             source = _rows(jobs.read_text().splitlines())[prior][1]
             brief = launch_input(jobs, prior, source).get('retry_brief', brief)
     args.replacement_retry_brief = brief
-    retry_context = ('\n\n## Partial-group retry brief\n' + brief + '\n') if brief else ''
+    retry_context = ('\n\n## Batch leg / retry brief\n' + brief + '\n') if brief else ''
     stage_progress = ''
     if prior and getattr(args, 'worker_type', '') == 'stage':
         try:

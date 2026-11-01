@@ -1863,6 +1863,20 @@ class UpstreamOrderTest(unittest.TestCase):
         self.assertIsNone(DC._upstream_completed_later(
             self.route, report, {k: v for k, v in mine.items() if k != "completed_at"}, self.path("report")))
 
+    def test_a_completion_time_without_a_timezone_is_not_an_instant(self):
+        # Observing failure is "cannot judge", never "older": a naive or unorderable value gives no instant.
+        self.assertIsNotNone(DC._completion_instant({"completed_at": "2026-11-01T15:33:50Z"}))
+        for value in ("2026-11-01T15:33:50", "2026-11-01", "not a time", None, 5):
+            self.assertIsNone(DC._completion_instant({"completed_at": value}), value)
+        self.complete("inspect", "att-inspect-1", "inspect v1")
+        self.complete("report", "att-report-1", "report v1")
+        report, mine, inspect_path = self.get_node("report"), self.marker("report"), self.path("inspect")
+        inspect_path.write_text(json.dumps({**self.marker("inspect"), "completed_at": "2999-01-01T00:00:00",
+                                            "sequence": 2}), encoding="utf-8")
+        self.assertIsNone(DC._upstream_completed_later(self.route, report, mine, self.path("report")))
+        self.assertIsNone(DC._upstream_completed_later(
+            self.route, report, {**mine, "completed_at": "2026-11-01T15:33:50"}, self.path("report")))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8734,10 +8734,13 @@ def completion_superseded(currency: GateCurrency, *, answered: bool = False) -> 
 
 
 def _completion_instant(marker: Mapping[str, object]):
+    # An unreadable, timezone-less or otherwise unorderable value cannot be placed against
+    # another completion, so it is no instant (never a reason to call a result older).
     try:
-        return datetime.fromisoformat(str(marker["completed_at"]).replace("Z", "+00:00"))
-    except (KeyError, ValueError):
+        instant = datetime.fromisoformat(str(marker["completed_at"]).replace("Z", "+00:00"))
+    except (KeyError, ValueError, TypeError):
         return None
+    return instant if instant.tzinfo is not None and instant.utcoffset() is not None else None
 
 
 def _upstream_completed_later(route, node, marker, marker_path):
