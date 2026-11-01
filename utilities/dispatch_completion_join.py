@@ -4084,9 +4084,14 @@ def _join_snapshot(
             last_notice_attempt = now
             state["last_notice_attempt"] = last_notice_attempt
             try:
-                from dispatch_supervision import materialize
-                materialize(observation_jobs, notice_attempt_ids, reason="process-unverifiable")
-                notified_attempt_ids.update(notice_attempt_ids)
+                from dispatch_supervision import confirmed_execution_attempts, materialize
+                # 대기(확인된 실행): a member the existing observers show executing is not
+                # reported; it is re-read at the next pass and notified only if that changes.
+                notice_attempt_ids = notice_attempt_ids - confirmed_execution_attempts(
+                    observation_jobs, notice_attempt_ids)
+                if notice_attempt_ids:
+                    materialize(observation_jobs, notice_attempt_ids, reason="process-unverifiable")
+                    notified_attempt_ids.update(notice_attempt_ids)
             except (OSError, ValueError, pending_delivery.PendingDeliveryError) as exc:
                 observation_error = "supervision-notice-unpersisted:" + str(exc)
         if (not blocked_notice_published and observation_jobs is not None and blocked_attempt_ids

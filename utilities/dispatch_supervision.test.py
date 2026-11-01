@@ -1074,5 +1074,166 @@ class DeferredCollectorBoundaryTest(unittest.TestCase):
         self.assertEqual(join.call_count, 2)
 
 
+class ConfirmedExecutionNoticeTest(unittest.TestCase):
+    """C8: 대기(확인된 실행) is observed by the existing controller, never escalated."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.jobs = self.root / "jobs.log"
+        import route_identity
+        route = {"route_id": "rt-confirmed", "artifact_root": str(self.root),
+                 "nodes": [{"id": "execute", "depends_on": []}]}
+        route["route_hash"] = route_identity.route_hash(route)
+        route_file = self.root / "route.json"
+        route_file.write_text(json.dumps(route), encoding="utf-8")
+        binding = dict(route_file=str(route_file), route_hash=route["route_hash"], route_id=route["route_id"])
+        self.owner_meta = dict(dispatch_depth="1", parent_attempt_id="", parent_sid="parent-test",
+            parent_completion_delivery="claude-parent-runtime", worker_type="owner",
+            owner_route_id=route["route_id"], owner_route_file=str(route_file),
+            owner_route_hash=route["route_hash"], route_node="_owner",
+            managed_sealed_batch_id="batch-test", pid="99999999", pid_start="1", route_id="")
+        self.child_meta = dict(binding, route_node="execute", pid="99999998", pid_start="1")
+        self.executions = {}
+
+    def _rows(self, child_status="open", owner_status="open"):
+        self.jobs.write_text(row("att-owner", status=owner_status, **self.owner_meta)
+                             + row("att-child", status=child_status, **self.child_meta))
+
+    def _execution(self, metadata):
+        return self.executions[metadata["attempt_id"]]
+
+    def _patched(self, decision=None):
+        from types import SimpleNamespace
+        stack = [mock.patch.object(contract, "attempt_execution_observation", side_effect=self._execution)]
+        if decision is not None:
+            stack.append(mock.patch.object(supervision, "_settlement_decision",
+                return_value=(SimpleNamespace(process_state="live"), decision)))
+        return stack
+
+    def _live(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(action="wait", reason="process-alive", outcome="pending")
+
+    def _enter(self, stack):
+        for item in stack:
+            item.start()
+            self.addCleanup(item.stop)
+
+    def _pending(self, reason, aid="att-child", rows=None):
+        rows = rows or supervision._rows(self.jobs, {aid})
+        return supervision._pending(rows, [aid], self.jobs, reason)
+
+    def test_live_child_with_recent_progress_is_not_a_join_deadline_attention(self):
+        self._rows()
+        self.executions["att-child"] = contract.AttemptExecutionObservation("active", "runtime-command-live")
+        self._enter(self._patched(self._live()))
+        self.assertFalse(self._pending("join-deadline"))
+        self.assertFalse(self._pending("process-unverifiable"))
+        # The watch itself records no join-deadline notice while the member is confirmed executing.
+        join = mock.Mock(side_effect=[{"state": "timeout"}, {"state": "ready", "children": []}])
+        with mock.patch.object(supervision.time, "sleep"), \
+             mock.patch.object(supervision, "materialize", return_value=[]) as materialize:
+            supervision.wait_for_batch(join=join, attempts={"att-child"}, jobs=self.jobs)
+        materialize.assert_not_called()
+
+    def test_live_process_without_progress_past_the_window_still_raises_attention(self):
+        self._rows()
+        self.executions["att-child"] = contract.AttemptExecutionObservation("active", "runtime-command-live")
+        self._enter(self._patched(self._live()))
+        start = time.time()
+        supervision.update_attempt_stall_observation(self.jobs, "att-child", now=start)
+        later = start + 2 * 300.0 + 1
+        with mock.patch.object(supervision.time, "time", return_value=later):
+            observation = supervision.update_attempt_stall_observation(
+                self.jobs, "att-child", persist=False, now=later)
+            self.assertEqual(observation["state"], "stalled")
+            self.assertTrue(self._pending("join-deadline"))
+            self.assertTrue(self._pending("process-unverifiable"))
+        join = mock.Mock(side_effect=[{"state": "timeout"}, {"state": "ready", "children": []}])
+        with mock.patch.object(supervision.time, "time", return_value=later), \
+             mock.patch.object(supervision.time, "sleep"), \
+             mock.patch.object(supervision, "materialize", return_value=[]) as materialize:
+            supervision.wait_for_batch(join=join, attempts={"att-child"}, jobs=self.jobs)
+        materialize.assert_called_once()
+
+    def test_dead_process_without_terminal_evidence_still_raises_attention(self):
+        from types import SimpleNamespace
+        self._rows()
+        self.executions["att-child"] = contract.AttemptExecutionObservation("absent", "attempt-tag-census-empty")
+        recover = SimpleNamespace(action="recover", reason="process-unverifiable", outcome="pending")
+        self._enter(self._patched(recover))
+        self.assertTrue(self._pending("join-deadline"))
+        self.assertTrue(self._pending("process-unverifiable"))
+
+    def test_unobservable_execution_stays_pending_under_the_existing_controller(self):
+        from types import SimpleNamespace
+        self._rows()
+        self.executions["att-child"] = contract.AttemptExecutionObservation(
+            "unknown", "attempt-process-role-unclassified")
+        recover = SimpleNamespace(action="recover", reason="process-unverifiable", outcome="pending")
+        self._enter(self._patched(recover))
+        self.assertTrue(self._pending("process-unverifiable"))
+
+    def test_normal_end_with_the_process_still_draining_is_not_attention(self):
+        from types import SimpleNamespace
+        self._rows(child_status="done")
+        draining = SimpleNamespace(action="wait", reason="registry-terminal-process-live", outcome="succeeded")
+        self._enter(self._patched(draining))
+        self.assertFalse(self._pending("join-deadline"))
+        self.assertEqual(supervision.confirmed_execution_attempts(self.jobs, {"att-child"}), {"att-child"})
+        # A finished row whose process cannot be proven is not claimed as draining.
+        unknown = SimpleNamespace(action="recover", reason="process-unverifiable", outcome="succeeded")
+        with mock.patch.object(supervision, "_settlement_decision",
+                               return_value=(SimpleNamespace(process_state="unknown"), unknown)):
+            self.assertTrue(self._pending("process-unverifiable"))
+            self.assertEqual(supervision.confirmed_execution_attempts(self.jobs, {"att-child"}), set())
+
+    def test_other_reasons_keep_their_existing_meaning_for_a_confirmed_member(self):
+        self._rows()
+        self.executions["att-child"] = contract.AttemptExecutionObservation("active", "runtime-command-live")
+        self._enter(self._patched(self._live()))
+        self.assertTrue(self._pending("supervisor-exited"))
+        self.assertTrue(self._pending("closure-blocked"))
+
+    def test_owner_waiting_on_a_live_child_counts_the_childs_execution_as_its_progress(self):
+        self._rows()
+        self.executions["att-owner"] = contract.AttemptExecutionObservation(
+            "unknown", "attempt-process-role-unclassified")
+        self.executions["att-child"] = contract.AttemptExecutionObservation("active", "runtime-command-live")
+        self._enter(self._patched())
+        observation = supervision.update_attempt_stall_observation(
+            self.jobs, "att-owner", persist=False)
+        self.assertEqual((observation["state"], observation["reason"]), ("active", "owned-child-executing"))
+        self.assertFalse(supervision._pending(supervision._rows(self.jobs, {"att-owner"}),
+                                              ["att-owner"], self.jobs, "attempt-stalled"))
+
+    def test_owner_without_a_confirmed_child_keeps_its_unverified_classification(self):
+        self.executions["att-owner"] = contract.AttemptExecutionObservation(
+            "unknown", "attempt-process-role-unclassified")
+        self._enter(self._patched())
+        for case, child_status, child_execution in (
+                ("child-ended", "done", contract.AttemptExecutionObservation("absent", "attempt-tag-census-empty")),
+                ("child-unobservable", "open", contract.AttemptExecutionObservation("unknown", "attempt-process-role-unclassified")),
+                ("child-absent", "open", contract.AttemptExecutionObservation("absent", "attempt-tag-census-empty"))):
+            with self.subTest(case=case):
+                self._rows(child_status=child_status)
+                self.executions["att-child"] = child_execution
+                observation = supervision.update_attempt_stall_observation(
+                    self.jobs, "att-owner", persist=False)
+                self.assertNotEqual(observation["reason"], "owned-child-executing")
+                self.assertIn(observation["state"], {"observing", "unknown"})
+
+    def test_absent_owner_with_a_live_child_is_still_a_stall(self):
+        self._rows()
+        self.executions["att-owner"] = contract.AttemptExecutionObservation("absent", "attempt-tag-census-empty")
+        self.executions["att-child"] = contract.AttemptExecutionObservation("active", "runtime-command-live")
+        self._enter(self._patched())
+        observation = supervision.update_attempt_stall_observation(
+            self.jobs, "att-owner", persist=False)
+        self.assertEqual((observation["state"], observation["reason"]), ("stalled", "execution-absent"))
+
+
 if __name__ == "__main__":
     unittest.main()
