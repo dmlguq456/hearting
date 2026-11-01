@@ -1346,7 +1346,7 @@ def claim(jobs: Path, aid: str, *, resume_capacity=False) -> dict:
                   'original_attempt_id': aid, 'replacement_attempt_id': replacement, 'ordinal': 1,
                   'route_file': str(path), 'route_id': route['route_id'], 'route_hash': route['route_hash'],
                   'input_digest': _digest(replay), 'proof': proof, 'proof_digest': _digest(proof),
-                  'reuse': _reuse_snapshot(jobs, route, lines)}
+                  'reuse': _reuse_snapshot(jobs, route, lines, proof=proof)}
         if proof.get('death_kind') == FRAME_CAPACITY:
             record['profile_transition'] = dict(FRAME_TRANSITION)
         moved = route_authority.moved_owner_harness(route, replay.get('harness')) \
@@ -1583,8 +1583,13 @@ def _approved_fix_answers(record, jobs, rows=None):
     """
     proof = record.get('proof') or {}
     answers = list(proof.get('answers') or [])
+    reuse = record.get('reuse') or {}
+    # A reopened answered verdict keeps the exact pin it had as a completion.
+    pins = [*(reuse.get('completed') or []),
+            *(row for row in reuse.get('invalidated') or []
+              if isinstance(row, dict) and row.get('reopened') == ANSWERED_FAIL_REOPEN)]
     if (proof.get('death_kind') != CORRECTED or proof.get('source_result') != 'FAIL'
-            or not (record.get('reuse') or {}).get('completed')):
+            or not pins):
         return answers
     try:
         rows = _rows(Path(jobs).read_text().splitlines()) if rows is None else rows
@@ -1596,7 +1601,7 @@ def _approved_fix_answers(record, jobs, rows=None):
         return answers
     import review_round_cap
     directory = DC._route_module().completion_dir(record['route_id'], jobs=jobs)
-    for pin in (record.get('reuse') or {}).get('completed') or []:
+    for pin in pins:
         attempt = pin.get('attempt_id')
         if not attempt or attempt in answers or attempt not in eligible:
             continue
@@ -1702,18 +1707,119 @@ def _completion_unproven(route, node, marker, currency):
     return error
 
 
-def _reuse_snapshot(jobs, route, lines):
-    """Pin settled current completions and identify only provenance-proved stale results."""
+def _answered_fail_basis(jobs, proof, pinned):
+    """The corrected-FAIL proof a continuation answers, with the reuse that pins its markers.
+
+    A FAIL-ended owner answered with an approved fix is the basis. So is a replacement
+    that never started (``unlaunched``) whose pinned ``carried_continuation`` names such a
+    claim by digest: it takes that continuation's place unchanged. Every other proof, an
+    unreadable carried claim or no proof at all returns ``(None, None)``: ordinary reuse.
+    """
+    proof = proof if isinstance(proof, dict) else {}
+    if proof.get('death_kind') == CORRECTED:
+        return (proof, pinned) if proof.get('source_result') == 'FAIL' else (None, None)
+    carried = proof.get('carried_continuation')
+    if proof.get('death_kind') != 'unlaunched' or not isinstance(carried, dict):
+        return None, None
+    try:
+        family = str(carried.get('family_id') or '')
+        record = _check_record(_read(_record_path(jobs, family)), family)
+    except (OSError, ValueError, KeyError, TypeError, DC.DispatchContractError):
+        return None, None
+    basis = (record or {}).get('proof') or {}
+    if (not record or _digest(record) != carried.get('claim_digest')
+            or record.get('original_attempt_id') != carried.get('attempt_id')
+            or basis.get('death_kind') != CORRECTED or basis.get('source_result') != 'FAIL'):
+        return None, None
+    return basis, (pinned if pinned is not None else record.get('reuse') or {})
+
+
+def _real_path(value):
+    value = str(value or '')
+    return os.path.realpath(value) if value and os.path.isabs(value) else None
+
+
+def _reruns_on_its_own_authority(node):
+    """Resource runs, human gates and runtime terminals are never reopened as a check."""
+    return (node.get('kind') in {'resource-runner', 'human-gate', 'runtime-terminal'}
+            or (node.get('continuation') or {}).get('kind') == 'supervised')
+
+
+def _answered_fail_verdicts(route, markers, basis, reference):
+    """The nodes whose completed result is the FAIL an approved fix answers.
+
+    The owner's FAIL handoff is the evidence of one completed node; that node and the
+    round-capped checks it directly consumed produced the answered result. The fix
+    changes their input, so they rerun as fresh work. Earlier preparation, unrelated
+    siblings, resource runs and a completion written after the claim keep ordinary reuse.
+    An unmatched handoff keeps ordinary reuse too.
+    """
+    if not basis:
+        return set()
+    target = _real_path(basis.get('handoff'))
+    if not target:
+        return set()
+    nodes = {str(node.get('id')): node for node in route.get('nodes', []) if isinstance(node, dict)}
+    pins = None
+    if reference is not None:
+        pins = {str(row.get('node')): row for row in
+                [*(reference.get('completed') or []), *(reference.get('invalidated') or [])]
+                if isinstance(row, dict)}
+
+    def pinned_marker(node_id):
+        marker = markers.get(node_id)
+        if not isinstance(marker, dict):
+            return False
+        if pins is None:
+            return True
+        pin = pins.get(node_id) or {}
+        return (pin.get('marker_digest') == _digest(marker)
+                and pin.get('attempt_id', '') == marker.get('attempt_id', ''))
+
+    import review_round_cap
+    judged = set()
+    for node_id, marker in markers.items():
+        evidence = (marker or {}).get('evidence') if isinstance(marker, dict) else None
+        node = nodes.get(node_id)
+        if (not isinstance(evidence, dict) or _real_path(evidence.get('path')) != target
+                or node is None or _reruns_on_its_own_authority(node) or not pinned_marker(node_id)):
+            continue
+        judged.add(node_id)
+        for parent in node.get('depends_on') or ():
+            parent_node = nodes.get(str(parent))
+            if (parent_node is not None and review_round_cap.is_round_capped_node(parent_node)
+                    and not _reruns_on_its_own_authority(parent_node) and pinned_marker(str(parent))):
+                judged.add(str(parent))
+    return judged
+
+
+ANSWERED_FAIL_REOPEN = 'corrected-fail-verdict'
+# Evidence or input changes a reopened answered verdict may show: it is not reused, so they
+# need no revision first. Integrity and resource-stage refusals keep their own handling.
+ANSWERED_FAIL_CURRENCIES = frozenset({'current', 'superseded', 'revised-unrecorded',
+                                      'completion-evidence-unreadable'})
+
+
+def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
+    """Pin settled current completions and identify only provenance-proved stale results.
+
+    With a corrected-FAIL ``proof`` the answered verdict is reopened, never reused;
+    ``pinned`` (an existing claim's reuse) restricts that to the exact markers it pinned.
+    """
     module = DC._route_module()
     directory = module.completion_dir(route['route_id'], jobs=Path(jobs))
     completed = []
     invalidated = {}
     observations = {}
+    present = []
     for node in route.get('nodes', []):
         path = directory/(str(node['id'])+'.json')
-        if not path.exists():
-            continue
-        marker = _read(path)
+        if path.exists():
+            present.append((node, path, _read(path)))
+    basis, reference = _answered_fail_basis(jobs, proof, pinned)
+    answered = _answered_fail_verdicts(
+        route, {str(node['id']): marker for node, _path, marker in present}, basis, reference)
+    for node, path, marker in present:
         currency = DC.gate_currency(route, node, path, marker, observe=True, jobs=jobs)
         merge_unobservable = (currency.state == 'completion-evidence-unreadable'
                               and currency.reason == 'review-source-index-unmerged')
@@ -1723,7 +1829,9 @@ def _reuse_snapshot(jobs, route, lines):
         gates_off_edit = (currency.state == 'revised-unrecorded'
                           and currency.reason == 'completion-evidence-revised-unrecorded'
                           and not DC.gates_on())
-        if currency.state not in {'current', 'superseded'} and not merge_unobservable and not gates_off_edit:
+        reopened = str(node['id']) in answered and currency.state in ANSWERED_FAIL_CURRENCIES
+        if (currency.state not in {'current', 'superseded'} and not merge_unobservable
+                and not gates_off_edit and not reopened):
             raise _completion_unproven(route, node, marker, currency)
         ready = DC.completion_attempt_readiness(route, node, marker, Path(jobs), registry_lines=lines)
         if ready.state != 'ready':
@@ -1739,13 +1847,14 @@ def _reuse_snapshot(jobs, route, lines):
         # Keep the predecessor digest with its own observation; the reuse
         # rows below are built in a second pass over every node.
         observations[str(node['id'])] = (node, path, marker, currency, restored_from)
-        if currency.state == 'superseded' or merge_unobservable:
+        if currency.state == 'superseded' or merge_unobservable or reopened:
             invalidated[str(node['id'])] = {
                 'node': node['id'], 'marker_digest': _digest(marker),
                 'attempt_id': marker.get('attempt_id', ''),
                 **({'restored_from': restored_from} if restored_from else {}),
                 'currency': currency.state, 'currency_reason': currency.reason,
                 'depends_on_invalid': [],
+                **({'reopened': ANSWERED_FAIL_REOPEN} if reopened else {}),
             }
     # A settled marker downstream of a stale result remains historical too.
     # Compute the dependency closure from the sealed route, preserving unrelated
@@ -1854,6 +1963,15 @@ def _reuse_preserved(previous, current):
     invalidated = {row.get('node'): row for row in current.get('invalidated', [])}
     if len(invalidated) != len(current.get('invalidated', [])):
         return False
+
+    def readmitted(row):
+        # An answered FAIL verdict is reopened on its exact pinned marker whatever
+        # evidence change it shows; _reuse_snapshot already refused integrity breaks.
+        return (row.get('reopened') == ANSWERED_FAIL_REOPEN
+                or (row.get('currency') in {'current', 'superseded'})
+                or (row.get('currency') == 'completion-evidence-unreadable'
+                    and row.get('currency_reason') == 'review-source-index-unmerged'))
+
     for node, old in previous_completed.items():
         if now.get(node) == old:
             continue
@@ -1861,10 +1979,7 @@ def _reuse_preserved(previous, current):
         if (not current_invalid
                 or current_invalid.get('marker_digest') != old.get('marker_digest')
                 or current_invalid.get('attempt_id', '') != old.get('attempt_id', '')
-                or current_invalid.get('currency') not in {'current', 'superseded',
-                                                            'completion-evidence-unreadable'}
-                or (current_invalid.get('currency') == 'completion-evidence-unreadable'
-                    and current_invalid.get('currency_reason') != 'review-source-index-unmerged')):
+                or not readmitted(current_invalid)):
             return False
     for node, old in previous_invalidated.items():
         new = invalidated.get(node)
@@ -1875,10 +1990,7 @@ def _reuse_preserved(previous, current):
                 continue
             if (new.get('marker_digest') != old.get('marker_digest')
                     or new.get('attempt_id', '') != old.get('attempt_id', '')
-                    or new.get('currency') not in {'current', 'superseded',
-                                                   'completion-evidence-unreadable'}
-                    or (new.get('currency') == 'completion-evidence-unreadable'
-                        and new.get('currency_reason') != 'review-source-index-unmerged')
+                    or not readmitted(new)
                     or not set(old.get('depends_on_invalid') or ()).issubset(
                         set(new.get('depends_on_invalid') or ()))):
                 return False
@@ -1951,7 +2063,7 @@ def validate_claim_source(jobs, lines, record, *, owned_launch=None):
     path, route = _route(jobs, prior, source)
     if str(path) != record['route_file'] or route.get('route_hash') != record['route_hash']:
         raise DC.DispatchContractError('replacement-route-drift')
-    current_reuse = _reuse_snapshot(jobs, route, lines)
+    current_reuse = _reuse_snapshot(jobs, route, lines, proof=record.get('proof'), pinned=record['reuse'])
     if not _reuse_preserved(record['reuse'], current_reuse):
         raise DC.DispatchContractError('replacement-reuse-evidence-drift')
     if source.get('worker_type') == 'owner' and any(g['status'] == 'blocked' for g in current_reuse.get('gates',[])):
@@ -2976,7 +3088,7 @@ def recovery_instructions(args):
     lines = jobs.read_text(encoding='utf-8', errors='replace').splitlines()
     source = _rows(lines)[prior][1]
     _route_path, route = _route(jobs, prior, source)
-    current_reuse = _reuse_snapshot(jobs, route, lines)
+    current_reuse = _reuse_snapshot(jobs, route, lines, proof=record.get('proof'), pinned=record['reuse'])
     if not _reuse_preserved(record['reuse'], current_reuse):
         raise DC.DispatchContractError('replacement-reuse-evidence-drift')
     completed = ', '.join(str(row['node']) for row in current_reuse['completed']) or '(none)'
@@ -3007,6 +3119,13 @@ def recovery_instructions(args):
     rerun = ('Rerun the stage that makes the approved fix and every check after it; reuse everything '
              'else. ' if check_fix else
              'Continue only unfinished work. Do not rerun completed nodes, successful siblings, or completed prefixes. ')
+    fresh = [str(row['node']) for row in current_reuse.get('invalidated', [])
+             if row.get('reopened') == ANSWERED_FAIL_REOPEN and row.get('attempt_id') not in answers]
+    if fresh:
+        rerun += ('The approved fix answers the FAIL result of ' + ', '.join(fresh) + ': run '
+                  + ('it' if len(fresh) == 1 else 'each of them') + ' again from the start on the '
+                  'corrected input as a fresh check, not a closure-check of that result; its earlier '
+                  'FAIL stays as history. ')
     text = ('\n\n## Verified recovery context\n'
             + opening +
             f'Reuse the existing cycle {record["reuse"]["cycle_id"]} and completion evidence for: {completed}.\n'
