@@ -44,7 +44,11 @@ FRAME_CAPACITY = 'frame-capacity'
 # closed before spawning, or an owner that ended BLOCKED and has since been answered. Each pause
 # opens its own family (`after_capacity` keeps the digests of existing capacity families unchanged).
 CORRECTED = 'corrected'
-PAUSE_KINDS = frozenset({'capacity', 'unlaunched', CORRECTED})
+# An owner that ended BLOCKED (or with a handoff-format error) while no person has answered and no
+# declared gate holds it: the runtime carries its original result and report to a replacement owner
+# as observations, never as an answer. It is a pause of its own family, taken once per owner.
+OBSERVED = 'observed'
+PAUSE_KINDS = frozenset({'capacity', 'unlaunched', CORRECTED, OBSERVED})
 FRAME_TRANSITION = {'from': 'top', 'to': 'deep', 'reason': 'capacity', 'ordinal': 1, 'origin': 'frame-rule'}
 CONTINUATION_WAIT_NOTE = (
     'This route has already used its one automatic continuation. If you raise a human gate later, '
@@ -512,6 +516,15 @@ def _same_role_successful_frame_peer_harness(jobs, meta, *, lines=None):
         return None
 
 
+def created_as(jobs, meta):
+    """The death kind of the claim that created this replacement row, or ''."""
+    family = meta.get('replacement_family_id')
+    if not family or not meta.get('replacement_original_attempt_id') or jobs is None:
+        return ''   # a source row's own family fields describe the claim it started, not how it was created
+    record = _read(_record_path(jobs, family))
+    return str(((record or {}).get('proof') or {}).get('death_kind') or '')
+
+
 def death_kind(fields, meta, *, jobs=None, lines=None):
     return route_authority._replacement_kind(fields[1], meta, jobs=jobs, lines=lines)
 
@@ -548,6 +561,16 @@ def death_proof(fields, meta, *, jobs=None, lines=None):
             result['source_result'] = 'EXITED'
         elif route_authority.owner_result_format_only_end(fields[1], meta):
             result['source_result'] = 'CONTRACT'
+    elif kind == OBSERVED:
+        # Observations only: the original result and where its report or log is. No person answered,
+        # so nothing is written to the owner input store and no correction is carried.
+        result['source_result'] = ('CONTRACT' if route_authority.owner_result_format_only_end(fields[1], meta)
+                                   else 'BLOCKED')
+        handoff = _blocked_handoff(fields, meta)
+        if handoff:
+            result['handoff'] = handoff
+        else:
+            result['log_file'] = meta.get('log_file', '')
     elif kind == 'unlaunched' and jobs is not None:
         carried = _unstarted_replacement_claim(jobs, meta.get('attempt_id'))
         carried_proof = (carried or {}).get('proof') or {}
@@ -1841,8 +1864,19 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
     present = []
     for node in route.get('nodes', []):
         path = directory/(str(node['id'])+'.json')
-        if path.exists():
-            present.append((node, path, _read(path)))
+        if not path.exists():
+            continue
+        try:
+            marker = _read(path)
+        except DC.DispatchContractError as exc:
+            if exc.reason == 'replacement-record-unreadable' and isinstance(exc.__cause__, OSError):
+                # A marker that exists but cannot be read right now is not observed yet; it is not damage.
+                waiting = DC.DispatchContractError('replacement-completion-unobservable', str(node['id']))
+                waiting.next_action = 'same-command'
+                waiting.retry_when = 'The completion marker can be read again.'
+                raise waiting from exc
+            raise  # malformed JSON, symlink or non-object is damage evidence and stays refused
+        present.append((node, path, marker))
     basis, reference = _answered_fail_basis(jobs, proof, pinned)
     answered = _answered_fail_verdicts(
         route, {str(node['id']): marker for node, _path, marker in present}, basis, reference)
@@ -3154,6 +3188,20 @@ def recovery_instructions(args):
                  'ended BLOCKED and a person has answered it')
         opening = (f'The previous owner {prior} {ended}; this continues '
                    f'the same work on the existing route {record["route_id"]}.\n')
+    elif kind == OBSERVED:
+        proof = record.get('proof') or {}
+        ended = ('ended with a handoff-format error' if proof.get('source_result') == 'CONTRACT'
+                 else 'ended BLOCKED')
+        where = (f'its report {proof["handoff"]}' if proof.get('handoff')
+                 else f'its log {proof.get("log_file", "")}')
+        opening = (f'The previous owner {prior} {ended} and no person has answered. What follows is what the '
+                   f'runtime observed, not an answer or an approval: the original result and {where}. '
+                   f'Read it, then decide the next step within the approved scope; this continues the same '
+                   f'work on the existing route {record["route_id"]}. If it stopped on a Hearting refusal '
+                   '(for example target-identity-unverified, resource-route-body-conflict or '
+                   'reviewed-evidence-revision-not-admitted), observe again whether that refusal still '
+                   'holds before acting. If only a person can decide, name that question and end BLOCKED; '
+                   'the runtime then hands it to a person.\n')
     elif kind == 'capacity':
         opening = f'The previous attempt {prior} stopped at a usage limit; this resumes it on the existing route {record["route_id"]}.\n'
     elif kind == 'unlaunched':

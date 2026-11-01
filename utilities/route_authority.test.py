@@ -2295,5 +2295,39 @@ class U7BudgetStateTest(unittest.TestCase):
                          (False, "protected", "automatic-replacement-exhausted"))
 
 
+class U11CompletionStateTest(unittest.TestCase):
+    def test_sealed_settled_owner_is_complete(self):
+        """A sealed envelope whose settlement observation finished without error is complete (no extra proof flag)."""
+        decision = RA.decide_continuation(action="completion-state", facts={
+            "commit_exists": True, "checkpoint": "owner-envelope-sealed",
+            "publication_pending": False, "goal_pending": False})
+        self.assertEqual((decision.allowed, decision.state, decision.reason), (True, "complete", ""))
+        self.assertNotIn("forward-recovery-not-proved", repr(decision))
+
+    def test_pending_publication_and_goal_still_hold_the_owner(self):
+        for fact, reason in (("publication_pending", "shared-spec-publication-pending"),
+                             ("goal_pending", "campaign-goal-close-pending")):
+            decision = RA.decide_continuation(action="completion-state", facts={
+                "commit_exists": True, "checkpoint": "owner-envelope-sealed", fact: True})
+            self.assertEqual((decision.state, decision.reason), ("pending", reason))
+
+    def test_terminal_conflict_stays_protected(self):
+        choice = RA.decide_continuation(action="replacement", status="done",
+            metadata={"attempt_id": "att-x"}, facts={"terminal_conflict": True, "death_kind": "silent"})
+        self.assertEqual((choice.allowed, choice.state, choice.reason),
+                         (False, "protected", "replacement-terminal-conflict"))
+
+
+class U11ReviewLeaseDecisionTest(unittest.TestCase):
+    def test_unobservable_review_lease_is_wait_reason(self):
+        unobservable = RA.decide_continuation(action="finish-cycle", facts={"review_unobservable": True})
+        self.assertEqual((unobservable.allowed, unobservable.state, unobservable.reason, unobservable.next_action),
+                         (False, "wait", "finish-review-lease-unobservable", "same-command"))
+        self.assertTrue(unobservable.retry_when)
+        live = RA.decide_continuation(action="finish-cycle", facts={"review_live": True, "review_unobservable": True})
+        self.assertEqual((live.allowed, live.reason), (False, "finish-active-review-lease"))
+        self.assertTrue(RA.decide_continuation(action="finish-cycle", facts={}).allowed)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -994,7 +994,7 @@ def _capacity_pause(result, attention, resume):
                "required_action": "resume-after-capacity", "harness": attention.get("harness", ""),
                "source_attempt_id": attention.get("source_attempt_id", ""),
                "next_step": "The harness is at a usage limit; nothing failed and nothing was started. "
-                   "After retry_at run resume_command once from the session that owns the route; "
+                   "The runtime resumes this route when the usage gate reports capacity again; "
                    "completed stages are kept."}
     if attention.get("retry_at"):
         waiting["retry_at"] = attention["retry_at"]
@@ -1003,12 +1003,9 @@ def _capacity_pause(result, attention, resume):
     if attention.get("usage_state") == "allocation-usage-gate":
         # The route's balanced allocation, not a usage limit, holds this harness.
         harness, gate = attention.get("harness", ""), attention.get("usage_gate_used_percent")
-        when = ("After retry_at, when the last usage window at the gate resets, run resume_command once"
-                if attention.get("retry_at") else
-                f"No reset time is known: run resume_command once after {harness} usage drops below the {gate}% gate")
         waiting["next_step"] = (f"The route's balanced allocation holds {harness}: its usage is at or above the "
-            f"{gate}% gate, not at a usage limit. Nothing failed and nothing was started. {when}, "
-            "from the session that owns the route; completed stages are kept.")
+            f"{gate}% gate, not at a usage limit. Nothing failed and nothing was started. The runtime "
+            "looks again at the end of the wait, from the session that owns the route; completed stages are kept.")
     waiting.pop("parent_next", None)
     waiting.pop("parent_next_command", None)
     return waiting
@@ -1065,13 +1062,23 @@ def _framed_cycle(route):
 
 def _framed_facts(root, output, legs=RP.FRAME_PAIR):
     """The brief row of each frame leg and the intent row the decision binds, or None when a file is missing."""
+    import artifact_producer
+
+    def placed(path):
+        # A file the cycle recorded as moved is still that leg's file: follow the recorded move
+        # (sealed bytes are not changed) before treating the brief as missing.
+        if not os.path.lexists(path):
+            moved = artifact_producer.resolve_placed_output(path)
+            if moved != path and moved.is_relative_to(root):
+                return moved
+        return path
     rows = []
     for node in legs:
-        brief = output / "shards" / node / "direction-brief.md"
+        brief = placed(output / "shards" / node / "direction-brief.md")
         if brief.is_symlink() or not brief.is_file():
             return None
         rows.append({"node": node, "path": brief.relative_to(root).as_posix(), "sha256": RP.file_digest(brief)})
-    intent = output / "shards/frame/intent.md"
+    intent = placed(output / "shards/frame/intent.md")
     if intent.is_symlink() or not intent.is_file():
         return None
     return rows, {"path": intent.relative_to(root).as_posix(), "sha256": RP.file_digest(intent)}
@@ -2014,6 +2021,12 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                             and "check=deferred" in receipt_lines
                             and "reason=frame-first-attempt-pending" in receipt_lines
                             and "child_spawned=0" in receipt_lines):
+                        if attempts and all(rows.get(a, ("open",))[0] in {"done", "killed", "cancelled"}
+                                            for a in attempts):
+                            # The first leg already ended: parking here would wait for a result that
+                            # never comes. The replacement controller below continues that leg; the
+                            # alternative follows once the leg is placed again.
+                            break
                         return {**result, "state": "preparing", "reason": "frame-first-attempt-pending",
                                 "required_action": "wait-for-first-frame-attempt",
                                 "frame_attempts": sorted(attempts),
@@ -2041,7 +2054,8 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                 if attention[0]["reason"] == "replacement-capacity-wait":
                     return _capacity_pause(result, attention[0], resume)
                 return {**result, "state": "needs-attention", "reason": attention[0]["reason"],
-                        "node": attention[0].get("node", "")}
+                        "node": attention[0].get("node", ""),
+                        **{key: attention[0][key] for key in ("next_action", "retry_when") if attention[0].get(key)}}
         if joined["state"] != "ready":
             if wait:
                 return _wait_expired(result)
@@ -2050,14 +2064,11 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
             if (pending and all(child.get("status") in {"done", "killed", "cancelled"}
                                 for child in children)
                     and all(child.get("reason") == "process-unverifiable" for child in pending)):
-                result.pop("parent_next", None)
-                result.pop("parent_next_command", None)
-                return {**result, "state": "needs-attention", "reason": "frame-cleanup-unverifiable",
-                        "required_action": "report-pending-work",
-                        "next_step": "Completed frame results are preserved, but cleanup could not be verified. "
-                            "Report the exact pending attempts and observation; existing supervision retains "
-                            "cleanup responsibility. This receipt does not promise automatic delivery or "
-                            "authorize replacement attempts. Use resume_command for a requested follow-up."}
+                # Unverifiable cleanup is an observation not yet possible, not a report to a person:
+                # existing supervision keeps cleanup responsibility and the bounded wait looks again.
+                return {**result, "state": "preparing", "reason": "frame-cleanup-unverifiable",
+                        "required_action": "wait-for-frame-results",
+                        "parent_next": "bounded-wait", "parent_next_command": resume + " --wait"}
             return {**result, "state": "preparing",
                     "required_action": "wait-for-frame-results"}
         result.pop("parent_next", None)
@@ -2193,17 +2204,19 @@ def _advance(route, path, jobs, result, *, wait=False, interview=None, answers=N
                         clock=clock)
     status, metadata = _rows(jobs).get(aid, (status, metadata))
     owner_choice = route_authority.decide_continuation(route, action="owner", jobs=jobs,
-        status=status, metadata=metadata, facts={"answered": bool(dispatch_replacement._retained_corrections(jobs, aid))})
+        status=status, metadata=metadata, facts={"answered": bool(dispatch_replacement._retained_corrections(jobs, aid)),
+            "observed": route_authority.observed_stop(status, metadata, jobs)})
     if owner_choice.state == "answer" and not replacement.get("parked_gate"):
         owner_stop = route_authority.answerable_owner_end(status, metadata)
         # It stopped for an answer no declared gate carries. The answer, sent to it, is the way on
         # (an answered stop is a pause, so a spent replacement budget does not end it).
         report = _owner_report(route, metadata)
-        format_only = route_authority.owner_result_format_only_end(status, metadata)
-        if format_only:
-            opening = "The owner ended with a handoff-format error and is waiting for an answer."
+        if owner_stop == "FAIL":
+            opening = "The owner ended FAIL and waits for a fix a person approves."
         else:
-            opening = f"The owner stopped {owner_stop} and is waiting for an answer."
+            # A first BLOCKED/format-error end is continued by the runtime on its own report
+            # (`observed`); only a second stop, a held gate or an unreadable result reaches here.
+            opening = "The owner stopped BLOCKED after the runtime already continued it once, and is waiting for an answer."
         if report:
             report_context = "owner_report says what it needs."
         elif metadata.get("log_file"):
@@ -2513,8 +2526,13 @@ def _arm_capacity_resume(result, path, jobs):
                 "next_step": f"No attempt was created or failed: the worker start budget is full. The runtime "
                     f"runs resume_command once at {armed['resume_at']} and then leaves this session one notice "
                     "of the result. resume_command stays valid to try earlier."}
+    # The wait ends at the reset time the receipt named, or, when no reset time could time it, at the longest wait.
+    waits_to_cap = result.get("retry_at") != armed.get("resume_at")
+    when = (f"resumes this route when the usage gate reports capacity again, or re-checks at "
+            f"{armed['resume_at']} at the latest, and then leaves this session one notice of the "
+            if waits_to_cap else
+            f"runs resume_command once at {armed['resume_at']} and then leaves this session one notice of the ")
     return {**result, "auto_resume": armed, "required_action": "wait-for-auto-resume",
             "parent_next": "end-turn", "parent_next_reason": "capacity-auto-resume",
-            "next_step": f"The runtime runs resume_command once at {armed['resume_at']} and then leaves "
-                "this session one notice of the result; tell the user the work is paused until then. "
+            "next_step": f"The runtime {when}result; tell the user the work is paused until then. "
                 "Nothing failed. resume_command stays valid if the user wants to resume earlier."}

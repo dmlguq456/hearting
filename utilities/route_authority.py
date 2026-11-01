@@ -148,6 +148,8 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
     if (jobs is not None and runtime_owner_can_resume(status, meta)
             and DR._retained_corrections(jobs, meta.get('attempt_id'))):
         return DR.CORRECTED
+    if observed_stop(status, meta, jobs) == 'readable':
+        return DR.OBSERVED
     if (meta.get('note') == 'cancelled-receipt-unavailable'
             and meta.get('classifier_source') == DR.DC.AUTOMATIC_RECEIPTLESS_CLASSIFIER):
         return 'silent'
@@ -186,6 +188,28 @@ def _replacement_kind(status, meta, *, jobs=None, lines=None):
         # is a result, not a death; the claim's terminal check keeps any result.
         return 'runtime'
     return None
+
+
+def observed_stop(status, meta, jobs) -> str:
+    """Whether a BLOCKED (or handoff-format) owner end continues once as observations.
+
+    "": it does not apply (not an owner stop, a kept answer exists, or this owner was itself
+    created by an `observed` continuation, so a second stop goes to a person). "readable": the
+    original result's report or log can be read and handed on. "unreadable": neither can be read,
+    so the end is neither continued blindly nor treated as waiting for an answer.
+    """
+    import dispatch_replacement as DR
+    if (jobs is None or status != "done" or meta.get("worker_type") != "owner"
+            or answerable_owner_end(status, meta) != "BLOCKED"
+            or DR._retained_corrections(jobs, meta.get("attempt_id"))
+            or DR.created_as(jobs, meta) == DR.OBSERVED):
+        return ""
+    log = meta.get("log_file")
+    try:
+        readable = bool(log) and Path(log).is_file() and os.access(log, os.R_OK)
+    except OSError:
+        readable = False
+    return "readable" if readable else "unreadable"
 
 
 def _replacement_terminal_absent(fields, meta, *, capacity=False, runtime=False):
@@ -313,6 +337,10 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if facts.get("deleted") and not facts.get("finished"):
             return ContinuationDecision(True, "deleted")
         live = facts.get("review_live", False)
+        if facts.get("review_unobservable") and not live:
+            # The holder cannot be observed: waiting is right, but calling it a live writer is not.
+            return ContinuationDecision(False, "wait", "finish-review-lease-unobservable", "same-command",
+                "The lease holder can be observed again, or the lease is released.")
         return ContinuationDecision(not live, "wait" if live else "continue",
             "finish-active-review-lease" if live else "", "same-command" if live else "continue",
             "The exact independent review process has ended and its lease is released." if live else "")
@@ -342,8 +370,6 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                 state, reason = "blocked", "producer-finalize-refused"
             elif facts.get("checkpoint") != "owner-envelope-sealed":
                 state, reason = "pending", str(facts.get("checkpoint") or "")
-            elif not (facts.get("settlement_verified") or facts.get("forward_verified")):
-                state, reason = "pending", "forward-recovery-not-proved"
             elif facts.get("publication_pending"):
                 state, reason = "pending", "shared-spec-publication-pending"
             elif facts.get("goal_pending"):
@@ -543,7 +569,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if not facts.get("resume_capacity") and not _replacement_in_flight(jobs, facts["registry_rows"], metadata):
             if kind == "capacity":
                 return ContinuationDecision(False, "capacity", "replacement-capacity-wait", "arm-capacity-resume")
-            if kind in {"runtime", "unlaunched", "corrected"}:
+            if kind in {"runtime", "unlaunched", "corrected", "observed"}:
                 return ContinuationDecision(False, "not-applicable", next_action="observe")
         return ContinuationDecision(True, "launch", next_action="start")
     if action == "replacement-result":
@@ -615,6 +641,15 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
                  "revise": "human-gate-revise-owner-parked"}[gate_state],
                 {"blocked": "answer-human-gate", "stop": "report", "revise": "report-gate-revision"}[gate_state])
         if stopped and not parked and not facts.get("answered"):
+            # The caller that can continue the owner (`start`) names what it observed; every other
+            # reader of this decision still sees the stop as the unanswered question it is.
+            seen = facts.get("observed") if stopped == "BLOCKED" else ""
+            if seen == "unreadable":
+                # Neither the report nor the log can be read yet: wait, do not guess and do not ask a person.
+                return ContinuationDecision(False, "wait", "owner-settlement-pending", "same-command",
+                    "The owner's report or log becomes readable.")
+            if seen == "readable":
+                return ContinuationDecision(True, "continue", next_action="start")
             return ContinuationDecision(False, "answer", "owner-" +
                 ("blocked" if stopped == "BLOCKED" else "failed"), "correct")
     process = facts.get("process")
@@ -650,7 +685,7 @@ def decide_continuation(route=None, *, action, jobs=None, owner_attempt_id=None,
         if not facts.get("death_kind"):
             return ContinuationDecision(False, "protected", "replacement-not-silent-death", "settle")
         kind = facts["death_kind"]
-        if facts.get("fields") and kind not in {"parked", "unlaunched", "corrected"}:
+        if facts.get("fields") and kind not in {"parked", "unlaunched", "corrected", "observed"}:
             from dispatch_replacement import terminal_observation
             choice = decide_continuation(action="replacement-result", facts={"kind": kind,
                 "terminal": terminal_observation(facts["fields"], metadata)})
