@@ -98,9 +98,11 @@ unchanged; consume the gate declarations of your assigned route.
 3. Your first work node is fenced by the released gate: every launch surface
    refuses to start it while the entry gate is unreleased
    (`human-gate-unreleased` / `human-gate-not-raised`, defect M). If your route
-   arrives with no `intent.md`, stop and report it rather than proceeding — an
-   owner that plans without the agreed intent is exactly the silent path this
-   gate exists to close. A `revise` or `stop` decision is spent before the
+   seals `frame-review` (its Route steps name the entry gate) and arrives with
+   no `intent.md`, stop and report it rather than proceeding — an owner that
+   plans without the agreed intent is exactly the silent path this gate exists
+   to close. A route whose Route steps say no entry gate is sealed has no
+   `intent.md` by design; proceed with the Assignment. A `revise` or `stop` decision is spent before the
    route starts, so neither consumes your `code-refine` retry budget.
 4. `confirmation.mode` (`profiles/dispatch-defaults.yaml` /
    `utilities/dispatch-defaults.py`, default `hybrid`) governs the ordered

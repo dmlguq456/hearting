@@ -880,6 +880,44 @@ def completion_harvest_command(attempt_id: str, action: str, *, jobs: str, surfa
     return f"{shlex.quote(surface)} harvest {registry}--attempt-id {shlex.quote(attempt_id)} {status}"
 
 
+def _next_ready_start_lines(receipt: dict, jobs: str) -> list[str]:
+    """`Next ready:` lines for an owner's depth-2 stage/review row that just finished; [] when unsure.
+
+    Only names the exact start command (or "run it yourself"); nothing is started. Any unreadable or
+    mismatched route/row leaves the receipt exactly as it was.
+    """
+    if not jobs:
+        return []
+    lines: list[str] = []
+    try:
+        from route_identity import route_hash
+        import dispatch_stage_advance
+        import worker_bootstrap
+        for child in receipt.get("children") or []:
+            try:
+                meta = exact_attempt_row(Path(jobs), child["attempt_id"]).metadata
+                if (meta.get("dispatch_depth") != "2" or meta.get("worker_type") in {"frame", "owner"}
+                        or not all(meta.get(key) for key in ("route_file", "route_id", "route_hash"))):
+                    continue
+                route_file = Path(meta["route_file"])
+                route = json.loads(route_file.read_text())
+                if (route.get("route_hash") != route_hash(route) or route["route_hash"] != meta["route_hash"]
+                        or route.get("route_id") != meta["route_id"]):
+                    continue
+                completed = dispatch_stage_advance.completed_nodes(Path(jobs), route["route_id"])
+                started = dispatch_stage_advance.started_nodes(Path(jobs), route["route_id"], route["route_hash"])
+                for node in dispatch_stage_advance.runnable_successors(route, completed, started):
+                    if worker_bootstrap._dispatchable_stage(node):
+                        lines.append("Next ready: " + worker_bootstrap.route_start_command(route_file, node["id"]))
+                    else:
+                        lines.append(f"Next ready: run {node['id']} yourself (per your Route steps).")
+            except Exception:  # advisory text only: any unreadable route/row keeps the receipt unchanged
+                continue
+    except ImportError:
+        return []
+    return list(dict.fromkeys(lines))
+
+
 def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
     if receipt.get("children") and all(child.get("reason") == "cancelled-by-parent"
             and child.get("required_action") == "advance-completed" for child in receipt["children"]):
@@ -946,7 +984,9 @@ def completion_followup_text(receipt: dict, *, jobs: str, surface: str) -> str:
                   "It returns the current frame results and whether a native user question is ready. "
                   "Use those exact results; another cycle's artifact cannot replace a failed frame. "
                   "No replacement launch or manual workflow/cycle finalization is implied.")
-    command_text = "\n".join(command for command in commands if command) or "(no harvest command; advance the route)"
+    command_text = "\n".join(command for command in commands if command)
+    if not command_text:
+        command_text = "\n".join(["(no harvest command; advance the route)", *_next_ready_start_lines(receipt, jobs)])
     return ("Completion bookkeeping for the listed attempts:\n" + command_text
             + "\nThe commands use the shared, runtime-neutral registry harvest compatibility surface; "
               "it does not select or change the owner or child harness. "

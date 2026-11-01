@@ -7,6 +7,7 @@ import functools
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -732,6 +733,131 @@ def owner_inline_marker_prompt(args) -> str:
             f"still publishes its completion marker: `{command}` (route and attempt axes are derived; pass --evidence with a cycle-local file when the stage produced one or the route has no bound cycle). Without it the route never settles.\n\n")
 
 
+def route_start_command(route_file, node_id: str) -> str:
+    """The exact command that starts `node_id` of a sealed route (text only; the start gate still decides)."""
+    script = Path(__file__).resolve().with_name("stage-dispatch-fallback.py")
+    return (f"python3 {shlex.quote(str(script))} --route {shlex.quote(str(route_file))} "
+            f"--node {shlex.quote(str(node_id))} --start")
+
+
+def inline_complete_command(node_id: str, evidence: str | None = None) -> str:
+    """The exact command that publishes the completion marker of a stage the owner ran itself."""
+    script = Path(__file__).resolve().with_name("capability-route.py")
+    return (f"python3 {shlex.quote(str(script))} complete --inline --node {shlex.quote(str(node_id))}"
+            + (f" --evidence {shlex.quote(str(evidence))}" if evidence else "") + ' --reason "<one line>"')
+
+
+def node_first_evidence(route, node_id: str, output_dir) -> str | None:
+    """Absolute path of the node's first declared file output, or None (semantic, glob, or unbound cycle)."""
+    node = next((n for n in route.get("nodes") or [] if isinstance(n, dict) and n.get("id") == node_id), None)
+    if not output_dir or not node:
+        return None
+    import artifact_context
+    for name in node.get("outputs") or ():
+        if isinstance(name, str) and "*" not in name and not artifact_context.is_semantic_output(name):
+            return artifact_context.render_outputs(output_dir, [name])[0]
+    return None
+
+
+def _dispatchable_stage(node) -> bool:
+    import dispatch_contract
+    return (isinstance(node, dict) and isinstance(node.get("dispatch_depth"), int) and node["dispatch_depth"] >= 2
+            and not dispatch_contract._owner_executed_node(node))
+
+
+def owner_route_steps_prompt(args, environ) -> str:
+    """The sealed route's facts an owner otherwise digs out of the contracts: the exact first command,
+    each node's output location, the entry-gate state. Text only; the runtime enforces every gate."""
+    if getattr(args, "worker_type", None) != "owner":
+        return ""
+    route_file = getattr(args, "route_file", None) or getattr(getattr(args, "owner_route_binding", None), "route_file", None)
+    if not route_file:
+        return ""
+    try:
+        route = json.loads(Path(route_file).read_text(encoding="utf-8"))
+        import dispatch_stage_advance
+        nodes = [n for n in route.get("nodes") or [] if isinstance(n, dict) and n.get("id")]
+        stages = [n for n in nodes if _dispatchable_stage(n)]
+        if not stages:
+            return ""
+        ready = [n["id"] for n in dispatch_stage_advance.runnable_successors(route, frozenset(), frozenset())]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, ImportError):
+        return ""
+    environ = environ or {}
+    output_dir = artifact_cycle_environment(environ)["AGENT_ARTIFACT_OUTPUT_DIR"]
+    if not output_dir:
+        try:
+            output_dir = resolve_node_scope(route, None, environ, route_file=route_file).output_dir
+        except Exception:  # an advisory line never blocks the prompt; unbound is stated, not guessed
+            output_dir = None
+    gates = [g.get("gate") or g.get("id") if isinstance(g, dict) else g for g in route.get("human_gates") or []]
+    bindings = [b for b in route.get("human_gate_bindings") or [] if isinstance(b, dict)]
+    if not gates and not bindings:
+        gate_line = ("Entry gate: none sealed on this route (no frame-review); no intent.md is expected "
+                     "— the Assignment above is the task.")
+    else:
+        sealed = [f"{b.get('gate')}@{b.get('node')}({b.get('position') or 'entry'})" for b in bindings]
+        gate_line = "Entry gates sealed: " + ", ".join(sealed or [str(g) for g in gates])
+    by_id = {n["id"]: n for n in nodes}
+    order, placed = [], set()
+    pending = list(nodes)
+    while pending:
+        layer = [n for n in pending if {d for d in n.get("depends_on") or [] if d in by_id} <= placed] or pending[:1]
+        order.extend(layer)
+        placed.update(n["id"] for n in layer)
+        pending = [n for n in pending if n not in layer]
+    lines = [f"Route steps (sealed route {route.get('route_id')}, runtime-filled; use these exact values):", gate_line,
+             "Route, registry, cycle (AGENT_ARTIFACT_*) and harness come from your environment; do not export or pass them."]
+    first = ready[0] if len(ready) == 1 and ready[0] in {n["id"] for n in stages} else None
+    if first:
+        lines.append(f"Start now: `{route_start_command(route_file, first)}`")
+    elif ready:
+        lines.append("Ready now: " + ", ".join(ready))
+    lines.append("Start each next node the same way (its --node) once every depends_on node is finished; "
+                 "a start for a node already started or finished returns a typed existing state, so follow its "
+                 "required_action. Optional: add --prompt-file <path> for stage-specific instructions.")
+    inline_node = first or stages[0]["id"]
+    evidence = node_first_evidence(route, inline_node, output_dir)
+    lines.append("Run a stage yourself only when its start is refused or returns an inline verdict: write its "
+                 "outputs, then publish its marker with "
+                 f"`{inline_complete_command(inline_node, evidence)}` (other nodes: their id and first listed file as "
+                 + ("--evidence" if evidence else "--evidence when the stage produced a cycle file")
+                 + "). Without the marker the route never settles.")
+    lines.append(f"Outputs under {str(output_dir).rstrip('/')}/:" if output_dir else
+                 "Outputs (cycle unbound; names are relative to the cycle output directory the runtime binds):")
+    for number, node in enumerate(order, 1):
+        after = [d for d in node.get("depends_on") or [] if d in by_id]
+        tags = (" after " + ", ".join(after) if after else "")
+        tags += f" (parallel group {node['parallel_group']})" if node.get("parallel_group") else ""
+        tags += "" if _dispatchable_stage(node) else " [you run it yourself]"
+        outs = ", ".join(str(o) for o in node.get("outputs") or ()) or "-"
+        lines.append(f"{number}. {node['id']}{tags} → {outs}")
+    return "\n".join(lines) + "\n\n"
+
+
+def node_inputs_prompt(route, node_id, output_dir) -> str:
+    """This cycle's earlier outputs a stage reads, as absolute paths; names it would otherwise guess."""
+    if not output_dir or not node_id:
+        return ""
+    nodes = {n.get("id"): n for n in route.get("nodes") or [] if isinstance(n, dict)}
+    node = nodes.get(node_id)
+    if not node:
+        return ""
+    seen, pending, produced = set(), list(node.get("depends_on") or []), set()
+    while pending:
+        nid = pending.pop()
+        if nid in seen or nid not in nodes:
+            continue
+        seen.add(nid)
+        pending.extend(nodes[nid].get("depends_on") or [])
+        produced.update(o for o in nodes[nid].get("outputs") or () if isinstance(o, str))
+    import artifact_context
+    rows = [f"{name}={artifact_context.render_outputs(output_dir, [name])[0]}" for name in node.get("inputs") or ()
+            if isinstance(name, str) and name in produced and "*" not in name
+            and not artifact_context.is_semantic_output(name)]
+    return ("Inputs from this cycle: " + ", ".join(rows) + "\n") if rows else ""
+
+
 def qa_primary_items_sidecar(route, node_id, primary_report):
     """The exact required done-when sidecar for a bound QA primary report."""
     if not primary_report:
@@ -909,8 +1035,10 @@ def assignment_prompt(args, task: str, environ) -> str:
                     plan_prompt = plan_leg_prompt(route)
                 except (OSError, ValueError, KeyError, TypeError, AttributeError):
                     pass
+            steps = owner_route_steps_prompt(args, environ)
             return (f"Assignment:\n{task.rstrip()}\n\n{completion_scope_prompt()}"
-                    f"{plan_prompt}{owner_gate_prompt(args)}{owner_inline_marker_prompt(args)}{owner_close_prompt(args)}")
+                    f"{plan_prompt}{steps}{owner_gate_prompt(args)}"
+                    f"{'' if steps else owner_inline_marker_prompt(args)}{owner_close_prompt(args)}")
         route = json.loads(Path(route_file).read_text(encoding="utf-8"))
         source_worktree = _linked_slice_source_worktree(args, route)
         scope_environment = _child_scope_environment(args, route, environ, source_worktree)
@@ -922,13 +1050,15 @@ def assignment_prompt(args, task: str, environ) -> str:
             source_worktree_verified=source_worktree is not None,
         )
         from verification_runtime import assignment_hint
+        steps = owner_route_steps_prompt(args, environ)
         return (f"Assignment:\n{task.rstrip()}\n\n{completion_scope_prompt()}"
                 f"{assignment_hint(route, getattr(args, 'route_node', None))}"
                 f"{plan_leg_prompt(route, getattr(args, 'route_node', None),
                                    getattr(args, 'report_file', None))}"
-                f"{node_scope_prompt(scope)}{input_sources_prompt(route, getattr(args, 'route_node', None))}\n"
+                f"{node_scope_prompt(scope)}{node_inputs_prompt(route, getattr(args, 'route_node', None), scope.output_dir)}"
+                f"{input_sources_prompt(route, getattr(args, 'route_node', None))}\n"
                 f"{automatic_consumer_prompt(route, getattr(args, 'route_node', None))}"
-                f"{owner_gate_prompt(args)}{owner_inline_marker_prompt(args)}{owner_close_prompt(args)}")
+                f"{steps}{owner_gate_prompt(args)}{'' if steps else owner_inline_marker_prompt(args)}{owner_close_prompt(args)}")
     outputs = []
     route_file = getattr(args, "route_file", None)
     if route_file:
@@ -1133,6 +1263,9 @@ def contract_read_prompt(args, harness: str) -> str:
     else:
         line = (f"- Read only the assigned {args.assigned_contract} Skill/mode and named artifact inputs. "
                 "Project instruction auto-load is not treated as physically masked; do not manually load a full harness bootstrap.\n")
+    if args.worker_type == "owner":
+        line += ("- Your Assignment's Route steps carry the exact start commands, output paths, and entry-gate state; "
+                 "consult the contract only for a stage-specific decision they do not answer.\n")
     return line + _report_reference_line(args)
 
 

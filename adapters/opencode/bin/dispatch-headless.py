@@ -1073,7 +1073,7 @@ def prompt(args: argparse.Namespace) -> tuple[str, str]:
         "OpenCode realization:\n"
         "- The wrapper already validated capability mode, optional worker mode, QA, artifact-root access, and any route record. Use worker-route only for a safety recheck.\n"
         "- The typed bootstrap contains the portable unit. A dispatch-depth-1 capability owner must not load any worker mode.\n"
-        f"- Run adapters/opencode/bin/preflight.sh qa-policy {args.qa} {qa_track(args.capability)} and keep its required assurance in the artifact.\n"
+        f"- Run {ROOT / 'adapters' / 'opencode' / 'bin' / 'preflight.sh'} qa-policy {args.qa} {qa_track(args.capability)} and keep its required assurance in the artifact.\n"
         f"{contract_read_prompt(args, 'opencode')}"
         "- Preserve the reported QA/tool contracts in the artifact; owner workers launch checked adapter wrappers directly.\n\n"
         f"{heartbeat}"
