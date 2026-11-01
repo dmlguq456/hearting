@@ -1308,6 +1308,8 @@ def _same_runtime_end(jobs, rows, source):
     prior_id, family = source.get('replacement_original_attempt_id'), source.get('replacement_family_id')
     if not prior_id or not family or prior_id not in rows:
         return False
+    if source.get('worker_type') == 'owner' and source.get('note') in RUNTIME_DEATH_NOTES:
+        return False   # SD-157: an owner's transport/process death keeps its no-cutoff replacement policy
     record = _read(_record_path(jobs, family))
     if (record or {}).get('proof', {}).get('death_kind') != 'runtime':
         return False

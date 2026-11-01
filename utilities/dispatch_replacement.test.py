@@ -2776,6 +2776,14 @@ class ReplacementTest(unittest.TestCase):
                         return_value={'state': 'absent', 'failure_class': ''}):
             self.assertEqual(R.claim(self.jobs, ended['attempt_id'])['proof']['death_kind'], 'runtime')
 
+    def test_owner_transport_death_keeps_its_no_cutoff_policy(self):
+        """SD-157: an owner's `dead-runtime-*` death is replaced every time; only newly opened ends are budgeted."""
+        ended = self._second_runtime_end('owner')   # same columns, note dead-runtime-exit
+        with mock.patch('codex_dispatch_terminal.inspect_terminal_attempt',
+                        return_value={'state': 'absent', 'failure_class': ''}):
+            second = R.claim(self.jobs, ended['attempt_id'])
+        self.assertEqual(second['proof']['death_kind'], 'runtime')
+
     def test_changed_harness_or_failure_class_replaces_again(self):
         for change in ({'failure_class': 'protocol'}, {'terminal_event': 'dispatch.supervisor.other'}):
             with self.subTest(change=change):
