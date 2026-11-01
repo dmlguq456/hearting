@@ -16344,6 +16344,34 @@ class RegisteredParentReceiptAfterSuccessorTest(unittest.TestCase):
         self.assertFalse(self._settle(other))
         self.assertEqual(self._state(), "sent-ambiguous")
 
+    def test_real_row_shape_without_parent_harness_settles_for_successor(self):
+        # Real registry rows omit parent_harness; the harness comes from
+        # main_runtime_harness / the completion carrier.
+        self._write(self.old, self._native(self.old, self.marker))
+        real = SimpleNamespace(metadata={
+            "parent_cwd": str(self.cwd), "main_runtime_harness": "claude",
+            "parent_completion_delivery": "claude-parent-runtime"})
+        self.assertNotIn("parent_harness", real.metadata)
+        self.assertTrue(self._settle(real))
+        self.assertEqual(self._state(), "acked")
+
+    def test_real_row_shape_with_carrier_only_settles_for_successor(self):
+        self._write(self.old, self._native(self.old, self.marker))
+        real = SimpleNamespace(metadata={
+            "parent_cwd": str(self.cwd),
+            "parent_completion_delivery": "claude-parent-runtime"})
+        self.assertTrue(self._settle(real))
+        self.assertEqual(self._state(), "acked")
+
+    def test_codex_parent_real_row_shape_does_not_consult_registered_parent(self):
+        self._write(self.old, self._native(self.old, self.marker))
+        codex = SimpleNamespace(metadata={
+            "parent_cwd": str(self.cwd), "main_runtime_harness": "codex",
+            "parent_completion_delivery": "codex-native-queue"})
+        self.assertNotIn("parent_harness", codex.metadata)
+        self.assertFalse(self._settle(codex))
+        self.assertEqual(self._state(), "sent-ambiguous")
+
     def _run_courier(self, *events):
         carrier = "claude-parent-runtime"
         jobs = self.root / "jobs.log"

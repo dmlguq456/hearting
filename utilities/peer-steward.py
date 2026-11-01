@@ -7758,9 +7758,10 @@ def _settle_claude_native_dispatch_receipt(root, storage_recipient, row,
     if not isinstance(cwd, str) or not os.path.isabs(cwd):
         return False
     sessions = [recipient_sid]
-    if (storage_recipient and storage_recipient != recipient_sid
-            and row.metadata.get("parent_harness") == "claude"):
-        sessions.append(storage_recipient)
+    if storage_recipient and storage_recipient != recipient_sid:
+        from dispatch_seat_handover import _registered_parent_harness
+        if _registered_parent_harness(row.metadata) == "claude":
+            sessions.append(storage_recipient)
     runtime_home = os.environ.get("CLAUDE_CONFIG_DIR") or str(Path.home() / ".claude")
     try:
         from claude_project_dir import resolve_session_transcript
