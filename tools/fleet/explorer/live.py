@@ -128,6 +128,27 @@ def _short_capability(name):
     return name[len("autopilot-"):] if name.startswith("autopilot-") else name
 
 
+FRAME_ROUTE_CAPABILITY = "route-frame"
+FRAME_ROUTE_SHAPE = "framed"
+
+
+def _is_frame_route(capability, record, topology):
+    """Whether the board draws this route as a frame route.
+
+    A sealed frame route carries ``capability: route-frame`` and records the
+    framed selection in ``selection.shape``; its ``execution_topology`` stays
+    the ordinary ``staged``. The earlier synthetic shape (``capability: frame``
+    or ``execution_topology: framed``) still renders through the same branch.
+    Only reads the record; ``capability_mode`` and the topology stay untouched
+    so collectors, assignment, pins and fold inputs see the source values.
+    """
+    selection = _get(record, "selection")
+    return (capability == FRAME_ROUTE_CAPABILITY
+            or _short_capability(capability) == "frame"
+            or _text(_get(selection, "shape")) == FRAME_ROUTE_SHAPE
+            or topology == FRAME_ROUTE_SHAPE)
+
+
 # -- sessions -----------------------------------------------------------------------------
 
 def _is_main(session):
@@ -458,6 +479,22 @@ def _resource_run_label(run):
     return " · ".join(part for part in (where, script) if part) or None
 
 
+FRAME_NODES = ("frame", "frame-alternative")
+
+
+def _is_frame_leg(node):
+    """A frame/frame-alternative leg, named by the node itself or its anchored job."""
+    if node is None:
+        return False
+    if _text(node.get("id")) in FRAME_NODES:
+        return True
+    if _text(node.get("worker_type")) == "frame":
+        return True
+    anchor = node.get("job")
+    return (_text(_get(anchor, "worker_type")) == "frame"
+            or _text(_get(anchor, "route_node")) in FRAME_NODES)
+
+
 def _worker_segments(node, resources, state_text=None):
     """``[label, harness segments, state segments]`` of the route's worker, or None."""
     if node is None:
@@ -488,13 +525,17 @@ def _worker_segments(node, resources, state_text=None):
         state.append([state_text, _SEG_DIM])
     elif elapsed:
         state.append([(f"running {elapsed}" if running else f"{elapsed} · worker ended"), _SEG_DIM])
-    return ["worker", segs, state]
+    return ["frame" if _is_frame_leg(node) else "worker", segs, state]
+
+
+def _owner_jobs(jobs):
+    return [job for job in jobs
+            if (_get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1)
+            and not _get(job, "route_node")]
 
 
 def _owner_job(jobs):
-    owners = [job for job in jobs
-              if (_get(job, "depth") == 1 or _get(job, "dispatch_depth") == 1)
-              and not _get(job, "route_node")]
+    owners = _owner_jobs(jobs)
     return owners[0] if len(owners) == 1 else None
 
 
@@ -636,16 +677,18 @@ def _clock_ago(now, minutes):
     return _clock(now - value * 60)
 
 
-def _route_title_line(rid, owner, resume):
+def _route_title_line(rid, owner, resume, role="owner"):
     harness = _text(owner.get("harness"))
-    parts = [[f"  {rid[:11]} · owner ", _SEG_DIM]]
+    parts = [[f"  {rid[:11]} · {role} ", _SEG_DIM]]
     if harness:
         parts.append([harness, "hb_" + harness])
         model, effort = owner.get("model"), owner.get("effort")
         if model:
-            parts += [[" (", _SEG_DIM], [model[0], model[1]], ["·", _SEG_DIM],
-                      [effort or "", "eff_" + effort if effort in ("medium", "xhigh") else _SEG_DIM],
-                      [")", _SEG_DIM]]
+            parts += [[" (", _SEG_DIM], [model[0], model[1]]]
+            if effort:
+                parts += [["·", _SEG_DIM],
+                          [effort, "eff_" + effort if effort in ("medium", "xhigh") else _SEG_DIM]]
+            parts.append([")", _SEG_DIM])
     if resume:
         parts += [["  resumes from ", _SEG_DIM], [resume, "lvl_y"]]
     return parts
@@ -747,6 +790,51 @@ def _parallel_stage_details(view_nodes, now):
     return ordered
 
 
+def _frame_leg_job_rank(job):
+    live = 1 if _get(job, "liveness") in ("working", "idle", "blocked") else 0
+    round_value = _num(_get(job, "route_attempt_round")) or _num(_get(job, "attempt_round")) or 0
+    elapsed = _num(_get(job, "elapsed_min"))
+    return (live, round_value, -(elapsed if elapsed is not None else 0))
+
+
+def _frame_leg_displays(jobs):
+    """Display-only harness/model/effort per frame leg, from the leg's own job (newest live wins)."""
+    found = {}
+    for job in jobs:
+        node_id = _text(_get(job, "route_node"))
+        if not (node_id in FRAME_NODES or _text(_get(job, "worker_type")) == "frame"):
+            continue
+        key = node_id if node_id in FRAME_NODES else "frame"
+        rank = _frame_leg_job_rank(job)
+        if key not in found or rank > found[key][0]:
+            found[key] = (rank, {"harness": _text(_get(job, "harness")),
+                                 "model": _model_pair(_get(job, "resolved_model", "model")),
+                                 "effort": _effort(_get(job, "effort")),
+                                 "rank": rank})
+    return {key: value for key, (_rank, value) in found.items()}
+
+
+def _display_nodes(nodes, frame_displays):
+    """Copy frame leg nodes that lack telemetry and fill it from the leg's job, for display only."""
+    if not frame_displays:
+        return nodes
+    out = []
+    for node in nodes:
+        info = frame_displays.get(_text(node.get("id")))
+        if info and (not _text(node.get("harness")) or node.get("model") is None):
+            merged = dict(node)
+            if info["harness"] and not _text(merged.get("harness")):
+                merged["harness"] = info["harness"]
+            if info["model"] is not None and merged.get("model") is None:
+                merged["model"] = info["model"][0]
+            if info["effort"] and not _effort(merged.get("effort")):
+                merged["effort"] = info["effort"]
+            out.append(merged)
+        else:
+            out.append(node)
+    return out
+
+
 def _route_records(snapshot, session_rows, session_index, resolver, now):
     collected = _collect_routes(snapshot)
     resources = _records(_get(snapshot, "resources", default=()))
@@ -788,6 +876,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                     break
         session_row = by_tag.get(owner_tag) if owner_tag else None
         view_nodes = [n for n in (view.get("nodes") or ()) if isinstance(n, Mapping)]
+        frame_displays = _frame_leg_displays(jobs)
+        view_nodes = _display_nodes(view_nodes, frame_displays)
         stages = [_stage_record(node) for node in view_nodes]
         done = sum(1 for node in view_nodes if node.get("state") == "done")
         failed = any(node.get("state") == "failed" for node in view_nodes)
@@ -797,7 +887,12 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         if capability is None:
             capability = next((_text(_get(job, "capability_owner", "assigned_contract")) for job in jobs
                                if _text(_get(job, "capability_owner", "assigned_contract"))), None)
-        short = _short_capability(capability)
+        # The display identity of a frame route is derived here, once: KIND, tree,
+        # opened-route shape and the framed PROGRESS all read these route fields.
+        framed_route = _is_frame_route(
+            capability, record,
+            _text(view.get("execution_topology")) or _text(record.get("execution_topology")))
+        short = "frame" if framed_route else _short_capability(capability)
         cwd = _text(view.get("cwd")) or _text(record.get("cwd")) or _text(_get(owner, "cwd"))
         repo = (session_row or {}).get("repo") or _repo_of(resolver, cwd)
         owner_state = (session_row or {}).get("state")
@@ -822,8 +917,8 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         age = _dur(max(elapsed_values)) if elapsed_values else None
         topology = _text(view.get("execution_topology")) or _text(record.get("execution_topology"))
         resource_node = shown_node is not None and shown_node.get("unit") == "_kernel/resource"
-        shape = topology
-        if topology == "staged" and resource_node:
+        shape = FRAME_ROUTE_SHAPE if framed_route else topology
+        if not framed_route and topology == "staged" and resource_node:
             shape = "staged+resource"
         leg_status = "failed" if (failed and active is None) or state == "dead" else \
             "done" if state == "done" or (total and done == total) else "active"
@@ -904,7 +999,22 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
                 next((n.get("id") for n in view_nodes if _stage_state(n) == "todo"), None)
         legs = _chain_legs(chain_nodes, rid, short, leg_status, progress) if chain_nodes else \
             ([[short or "·", leg_status, progress]] if short else [])
+        # Borrow a frame leg's identity only while the route has no owner job at all: several
+        # owner attempts (a resumed route without a recorded owner_attempt_id) keep their own
+        # display instead of borrowing a frame leg's harness.
+        borrowed_frame_identity = bool(framed_route and not _owner_jobs(owner_jobs)
+                                       and frame_displays)
+        if borrowed_frame_identity:
+            preferred = max(frame_displays.values(), key=lambda item: item.get("rank", ()))
+            owner_harness = preferred.get("harness") or owner_harness
+            owner_model = preferred.get("model") or owner_model
+            owner_effort = preferred.get("effort") or owner_effort
         mode = _text(view.get("capability_mode")) or _text(record.get("capability_mode"))
+        intensity = _text(view.get("effective_intensity")) or _text(record.get("effective_intensity"))
+        if framed_route:
+            # KIND reads `frame`: a frame route's default capability mode and inherited
+            # intensity are not display axes. The source record keeps both values.
+            mode = intensity = None
         current = bool(run_children or worker_contexts
                        or owner_live in ("working", "idle", "blocked")
                        and total and done != total and (active is not None or not failed))
@@ -917,7 +1027,7 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
             "loops": None, "worktree": worktree, "tree_label": short,
             "harness": owner_harness, "model": owner_model, "effort": owner_effort,
             "mode": mode,
-            "intensity": _text(view.get("effective_intensity")) or _text(record.get("effective_intensity")),
+            "intensity": intensity,
             "profile": _text(_get(owner, "model_profile", "profile")) if owner is not None else None,
             "capability": short, "shape": shape, "past_from": None,
             "worker_stage": worker_stage or "·", "worker_unit": worker_unit,
@@ -929,17 +1039,47 @@ def _route_records(snapshot, session_rows, session_index, resolver, now):
         if worker_context_index is not None:
             route["worker_context_index"] = worker_context_index
         routes.append(route)
-        nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status)
+        nodes[rid] = _node_groups(view_nodes, route, rid, legs, now, done, leg_status,
+                                  borrowed_frame_identity)
     return routes, nodes
 
 
-def _node_groups(view_nodes, route, rid, legs, now, done, leg_status):
+def _node_groups(view_nodes, route, rid, legs, now, done, leg_status, borrowed_identity=False):
     """One leg group holding the route's stages: the detail the route page prints per stage."""
     if not view_nodes:
         return []
     detail = _parallel_stage_details(view_nodes, now)
     short, mode = route.get("capability"), route.get("mode")
     name = f"leg {len(legs) or 1} · {short or '·'}{' ' + mode if mode else ''}"
+    frame_nodes = [node for node in view_nodes if _is_frame_leg(node)]
+    if frame_nodes and (short == "frame" or route.get("shape") == FRAME_ROUTE_SHAPE):
+        lines = []
+        for node in frame_nodes:
+            node_id = str(node.get("id") or "frame")
+            short_id = "alt" if node_id == "frame-alternative" else node_id
+            line = [[short_id + "  ", "dim"]]
+            harness = _text(node.get("harness"))
+            if harness:
+                line.append([harness, "hb_" + harness])
+                model = _stage_model(node.get("model"))
+                effort = _effort(node.get("effort"))
+                if model:
+                    line += [[" (", "dim"], [model[0], model[1]]]
+                    if effort:
+                        line += [["·", "dim"],
+                                 [effort, "eff_" + effort if effort in ("medium", "xhigh") else "dim"]]
+                    line.append([")", "dim"])
+            lines.append(line)
+        frame_name = " ∥ ".join(str(node.get("id") or "frame") for node in frame_nodes)
+        # The band's identity can be a borrowed frame leg; only a real owner attempt
+        # is called `owner`, the borrowed case uses the leg's own role word.
+        role = "frame" if borrowed_identity else "owner"
+        return [{
+            "kind": "frame", "n": frame_name, "st": leg_status,
+            "verdict": f"{done}/{len(view_nodes)}", "lines": lines, "detail": detail,
+            "title": [[frame_name, "head"]] + _route_title_line(rid, route, route.get("resume"), role),
+            "loops": [],
+        }]
     owner_line = [["owner  ", "dim"]]
     if route.get("harness"):
         owner_line.append([route["harness"], "hb_" + route["harness"]])
@@ -1246,15 +1386,20 @@ def _finish_peers(nodes, edges, session_rows, session_index, routes, handovers, 
                             "state": "done" if state == "done" else "active" if state == "working" else "todo"}]})
     if cards:
         edges["cards"] = cards
-    watches = []
+    watches = {}
     for link in links:
         if link[2].startswith("watch") and isinstance(link[0], list):
-            count = re.match(r"(\d+) sessions", str(link[1]))
-            watches.append({"repo": repo_of.get(link[0][0]),
-                            "text": f"watch {int(count.group(1)) if count else 1}" +
-                                    (" · ended" if str(link[4]).endswith("ended)") or link[4] == "ended" else "")})
+            steward = str(link[0][0])
+            repo = repo_of.get(steward)
+            entry = watches.setdefault(repo, {"live": 0, "ended": 0})
+            ended = str(link[4]) == "ended" if len(link) > 4 else False
+            entry["ended" if ended else "live"] += 1
     if watches:
-        edges["watches"] = watches
+        edges["watches"] = [
+            {"repo": repo,
+             "text": f"watch {counts['live']}" +
+                     (f" · ended {counts['ended']}" if counts["ended"] else "")}
+            for repo, counts in watches.items()]
     return nodes, edges
 
 
@@ -1269,9 +1414,9 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
     def add(link, stamp=None):
         candidates.append((float(stamp or 0), link))
 
-    def endpoint(sid, harness):
+    def endpoint(sid, harness, live_only=False):
         tag = tag_by_sid.get(sid)
-        if tag:
+        if tag and (not live_only or tag in harness_of):
             return [tag, harness_of.get(tag) or harness]
         return str(sid)[:8] if _text(sid) and _text(harness) else None      # an ended session: its short id
 
@@ -1295,23 +1440,23 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
                     _epoch_of(sent.get("ts", sent.get("at"))) or
                     -float(_num(sent.get("age_min")) or 0))
         targets = [t for t in (_get(session, "steward_targets") or ()) if isinstance(t, Mapping) or hasattr(t, "get")]
-        if targets:
-            names, ended, stamps = [], True, []
-            for target in targets:
-                sid = _text(_get(target, "session_id"))
-                names.append(_text(_get(target, "name")) or (sid[:8] if sid else "·"))
-                if sid in tag_by_sid:
-                    ended = False
-                    linked.add(tag_by_sid[sid])
-                stamp = _epoch_of(_get(target, "start_ts", "ts"))
-                if stamp:
-                    stamps.append(stamp)
-            if len(names) > 1:
-                note = " · ".join(names[:2]) + (" · …" if len(names) > 2 else "") + (" (ended)" if ended else "")
-            else:
-                note = "ended" if ended else ""
-            when = datetime.datetime.fromtimestamp(min(stamps)).strftime("%m-%d") if stamps else None
-            add([me, f"{len(names)} sessions" if len(names) > 1 else names[0], "watch ⚑", when, note], 0)
+        for target in targets:
+            sid = _text(_get(target, "session_id"))
+            # Only a current session row is a live watch: a name the target had before it
+            # resumed (observations.replay_sources.historical_tags) is history, not a card.
+            other = endpoint(sid, _get(target, "harness"), live_only=True)
+            if other is None:
+                continue
+            raw_ts = _get(target, "ts", "start_ts")
+            stamp = _epoch_of(raw_ts)
+            when = _iso_age(raw_ts, now)
+            if when is None and stamp is not None:
+                when = datetime.datetime.fromtimestamp(stamp).strftime("%m-%d")
+            live_tag = tag_by_sid.get(sid)
+            live_tag = live_tag if live_tag in harness_of else None
+            if live_tag:
+                linked.add(live_tag)
+            add([me, other, "watch ⚑", when, "" if live_tag else "ended"], stamp or 0)
     peer_messages = _get(joined, "peer_messages", default={}) or {}
     for message in _get(peer_messages, "records", default=()) or ():
         if not isinstance(message, Mapping):
@@ -1342,7 +1487,7 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
     for stamp, link in candidates:
         if not (live_end(link[0]) or live_end(link[1])) or link[0] == link[1]:
             continue
-        key = (repr(link[0]), repr(link[1]))
+        key = (repr(link[0]), repr(link[1]), str(link[2]))
         if key not in newest_by_pair or stamp > newest_by_pair[key][0]:
             newest_by_pair[key] = (stamp, link)
     ranked = sorted(newest_by_pair.values(), key=lambda item: -item[0])
@@ -1369,18 +1514,71 @@ def _peer_records(session_rows, session_index, now, snapshot=None):
     by_repo = {}
     for row in session_rows:
         by_repo.setdefault(row["repo"], []).append(row["tag"])
-    nodes = []
+    steward_targets = {}
+    for row in session_rows:
+        tag = row["tag"]
+        session = session_index[tag]["session"]
+        targets = []
+        for target in (_get(session, "steward_targets") or ()):
+            sid = _text(_get(target, "session_id"))
+            other = tag_by_sid.get(sid)
+            if (other and other in harness_of and other != tag
+                    and repo_of.get(other) == row["repo"] and other not in targets):
+                targets.append(other)
+        if targets:
+            steward_targets[tag] = targets
+    mutual = {(a, b) for (a, b) in sent if (b, a) in sent}
+    nodes, steward_columns, ordered_lanes = [], [], []
     for repo, tags in by_repo.items():
         columns, used = [], set()
+
+        def walk(start):
+            """One steward column: the head first, then its targets depth-first."""
+            column = []
+
+            def visit(tag):
+                if tag in used or tag in column:
+                    return                    # a placed tag never appears twice
+                column.append(tag)
+                for target in steward_targets.get(tag, ()):
+                    visit(target)
+
+            visit(start)
+            return column
+
+        # A column starts at a head (a steward nobody in this repo watches) and follows the
+        # steward graph, so the stack does not depend on session order. A pure cycle has no
+        # head; it starts at its lowest tag. Heads keep the sessions' own order.
+        watched = {target for targets in steward_targets.values() for target in targets}
+        heads = [tag for tag in tags if tag in steward_targets and tag not in watched]
+        pending = []
+        starts = list(heads)
+        while True:
+            while starts:
+                column = walk(starts.pop(0))
+                used.update(column)
+                columns.append(column)
+                if len(column) > 1:
+                    steward_columns.append(column)
+            pending = sorted(tag for tag in tags if tag not in used and tag in steward_targets)
+            if not pending:
+                break
+            starts = [pending[0]]
         for tag in tags:
             if tag in used:
                 continue
-            pair = next((lane for lane in side_lanes if tag in lane), None)
+            pair = next((lane for lane in side_lanes
+                         if tag in lane and not (set(lane) & used)), None)
             column = list(pair) if pair else [tag]
             used.update(column)
             columns.append(column)
         nodes.append([repo, columns])
-    return nodes, {"links": unique, "cross": [cross] if cross else [], "side_lanes": side_lanes}
+        for column in columns:
+            for upper, lower in zip(column, column[1:]):
+                if (upper, lower) in mutual or (lower, upper) in mutual:
+                    ordered_lanes.append([upper, lower])
+    return nodes, {"links": unique, "cross": [cross] if cross else [],
+                   "side_lanes": ordered_lanes, "steward_columns": steward_columns}
 
 
 # -- hosts / compute / usage / memory / system / events ------------------------------------

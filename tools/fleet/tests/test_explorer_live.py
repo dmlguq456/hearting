@@ -308,9 +308,9 @@ class RealDataFidelity(unittest.TestCase):
                                                        "age_min": 2}}},
         }
         _nodes, edges = _peer_records(sessions, index, 100)
-        self.assertEqual(edges["links"][0][1], ["new", "claude"])
-        self.assertEqual(edges["links"][0][2], "handoff")
-        self.assertEqual(len(edges["links"]), 1)
+        self.assertEqual([link[1] for link in edges["links"]], [["new", "claude"], ["new", "claude"]])
+        self.assertEqual([link[2] for link in edges["links"]], ["handoff", "steer"])
+        self.assertEqual(len(edges["links"]), 2)
 
     def test_decision_records_become_the_answered_list_and_the_feed_line(self):
         memory = {"recent": [{"ts": "2026-10-23T12:00:00+00:00", "action": "decision-record", "type": "decision",

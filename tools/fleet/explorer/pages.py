@@ -783,8 +783,8 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     band_end = x + 3 + len(nodes) * (width + _BAND_GAP) - _BAND_GAP
     after = route["detail_after"] if "detail_after" in route else _route_after(route, nodes)
     if after:
-        # A note that outruns the frame is cut at the screen edge, over the frame's right rail.
-        grid.put(band_end + 3, y + 2, str(after), "dim")
+        # A note that outruns the frame is cut at the frame's right rail.
+        grid.put(band_end + 3, y + 2, str(after), "dim", limit=right)
 
     node = nodes[selected]
     panel_left, panel_right = x + 2, right - 2
@@ -814,7 +814,8 @@ def draw_route_detail(grid, vm, route, x, use, y, state=None, bottom=None):
     stage_bottom = bottom
     attempts = vm.attempts or {}
     raw_lines = (tuple(attempts.get("lines", ()))
-                 if str(attempts.get("route") or "") == ident and node.get("kind") == "leg" else ())
+                 if str(attempts.get("route") or "") == ident
+                 and node.get("kind") in ("leg", "frame") else ())
     if raw_lines:
         per = min(flow, max(3, min(6, (stage_room + 4) // 40)))
         need = ((flow - 1) // per + 1) * 4
