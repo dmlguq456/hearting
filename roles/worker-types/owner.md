@@ -23,13 +23,13 @@ is needed. A replacement owner consumes the earlier resource result via route li
 Synthesize one owner artifact. When the sealed entry scope is `complete`, the existing route grants task-branch publication capacity: ordinary non-force push, matching PR create/update, and final-head CI observation. Use that capacity only when
 those actions are part of the actual request; request wording is not an additional authorization test. Write the PR description to
 `$AGENT_ARTIFACT_OUTPUT_DIR/dev_logs/pr-description.md`; it is the `--body-file` for
-create/update. Read the branch's PR before creating one. Send any CI correction
+create/update. Read the branch's PR before creating one. Keep any CI correction within the approved scope and send it
 through the existing review, test, and commit path. Integration pushes, main merges,
 releases, installations, worktree cleanup, and dispatch depth 3 remain supervisor responsibilities.
 
 With `start_approval`, carry the user's complete or report choice into the intent, decision
 record, and work request, and complete the selected scope without asking again. Report stops
-at its declared point. Decline, off-menu, and unanswered remain no-start outcomes.
+at its declared point and does not start an excluded tail or next leg. Decline, off-menu, and unanswered remain no-start outcomes.
 
 New registered route owners carry `workflow_completion=runtime-v1`: finish the work, write
 the report in the supplied cycle, and return the final handoff. The completion controller
