@@ -5749,6 +5749,101 @@ class WorkContinuationReceiptTest(unittest.TestCase):
             self.assertIn("--attempt-id first --status done",text)
 
 
+class NextReadyReceiptTest(unittest.TestCase):
+    """An owner's finished depth-2 stage row names the exact next start; any doubt leaves the old text."""
+
+    BASE = "(no harvest command; advance the route)"
+
+    def setUp(self):
+        from route_identity import route_hash, route_id_from_hash
+        import dispatch_stage_advance as SA
+        self.SA = SA
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name)
+        self.path = base / "route.json"
+        self.jobs = base / "jobs.log"
+        nodes = [
+            {"id": "plan", "kind": "pipeline-stage", "depends_on": [], "outputs": ["plan.md"], "dispatch_depth": 2},
+            {"id": "plan-check", "kind": "review-worker", "depends_on": ["plan"], "outputs": ["r.md"], "dispatch_depth": 2},
+            {"id": "report", "kind": "capability-owner", "unit": "_kernel/owner", "terminal": True,
+             "depends_on": ["plan-check"], "outputs": ["final_report.md"], "dispatch_depth": 1},
+        ]
+        self.route = {"nodes": nodes, "human_gates": []}
+        self.route["route_hash"] = route_hash(self.route)
+        self.route["route_id"] = route_id_from_hash(self.route["route_hash"])
+        self.path.write_text(json.dumps(self.route))
+        self.marker_dir = SA.ROUTE.completion_dir(self.route["route_id"], jobs=self.jobs)
+
+    def stage_row(self, aid, node, kind="stage", **override):
+        meta = {"dispatch_depth": "2", "worker_type": kind, "route_file": str(self.path), "route_node": node,
+                "route_id": self.route["route_id"], "route_hash": self.route["route_hash"], **override}
+        return row("done", aid, "owner", "task", process_metadata=meta)
+
+    def render(self, jobs=None):
+        receipt = {"children": [{"attempt_id": "stage-1", "required_action": "advance-completed"}]}
+        return JOIN.completion_followup_text(receipt, jobs=str(self.jobs if jobs is None else jobs), surface="/fixture/preflight.sh")
+
+    def old_text(self):
+        with mock.patch.object(JOIN, "_next_ready_start_lines", return_value=[]):
+            return self.render()
+
+    def finish_plan(self):
+        self.jobs.write_text(self.stage_row("stage-1", "plan"))
+        self.marker_dir.mkdir(parents=True, exist_ok=True)
+        (self.marker_dir / "plan.json").write_text("{}")
+
+    def test_the_finished_plan_row_names_the_exact_plan_check_start(self):
+        self.finish_plan()
+        text = self.render()
+        self.assertIn(self.BASE + "\nNext ready: python3 ", text)
+        line = next(l for l in text.splitlines() if l.startswith("Next ready:"))
+        argv = shlex.split(line[len("Next ready: "):])
+        self.assertEqual(Path(argv[1]).name, "stage-dispatch-fallback.py")
+        self.assertEqual(argv[2:], ["--route", str(self.path), "--node", "plan-check", "--start"])
+        help_text = subprocess.run([sys.executable, argv[1], "--help"], text=True, capture_output=True).stdout
+        for flag in ("--route", "--node", "--start"):
+            self.assertIn(flag, help_text)
+        self.assertTrue(text.startswith(self.old_text().split(self.BASE)[0] + self.BASE))
+        self.assertTrue(text.endswith("This receipt creates no new approval step."))
+
+    def test_an_owner_run_terminal_node_is_named_without_a_command(self):
+        self.finish_plan()
+        (self.marker_dir / "plan-check.json").write_text("{}")
+        self.assertIn(self.BASE + "\nNext ready: run report yourself (per your Route steps).\n", self.render())
+
+    def test_any_doubt_leaves_the_receipt_exactly_as_before(self):
+        self.finish_plan()
+        old = self.old_text()
+        self.assertNotIn("Next ready", old)
+        cases = {
+            "corrupt route": lambda: self.path.write_text("{not json"),
+            "hash mismatch": lambda: self.path.write_text(json.dumps({**self.route, "route_hash": "sha256:other"})),
+            "id mismatch": lambda: self.path.write_text(json.dumps({**self.route, "route_id": "rt-other"})),
+            "row without route metadata": lambda: self.jobs.write_text(self.stage_row("stage-1", "plan", route_file="")),
+            "owner row": lambda: self.jobs.write_text(self.stage_row("stage-1", "plan", kind="owner")),
+            "depth one row": lambda: self.jobs.write_text(self.stage_row("stage-1", "plan", dispatch_depth="1")),
+            "every node started": lambda: self.jobs.write_text(
+                self.stage_row("stage-1", "plan") + self.stage_row("stage-2", "plan-check") + self.stage_row("stage-3", "report")),
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name):
+                self.finish_plan()
+                mutate()
+                self.assertEqual(self.render(), old)
+        with self.subTest("no jobs"):
+            self.assertEqual(self.render(jobs=""), JOIN.completion_followup_text(
+                {"children": [{"attempt_id": "stage-1", "required_action": "advance-completed"}]},
+                jobs="", surface="/fixture/preflight.sh"))
+            self.assertNotIn("Next ready", self.render(jobs=""))
+
+    def test_a_harvest_command_row_keeps_the_existing_branch(self):
+        self.jobs.write_text(self.stage_row("stage-1", "plan"))
+        receipt = {"children": [{"attempt_id": "stage-1", "required_action": "inspect-done-failure"}]}
+        text = JOIN.completion_followup_text(receipt, jobs=str(self.jobs), surface="/fixture/preflight.sh")
+        self.assertIn("--attempt-id stage-1 --status done", text)
+        self.assertNotIn("Next ready", text)
+
+
 class CompletionProjectionBoundaryTest(unittest.TestCase):
     def test_projection_defers_once_without_sleep_or_internal_retry(self):
         with mock.patch.object(JOIN, "receipt_with_delivery_observability", side_effect=JOIN.CompletionDeferred("termination-pending")) as observe, \
