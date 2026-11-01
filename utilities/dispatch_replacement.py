@@ -1918,14 +1918,14 @@ def _reuse_snapshot(jobs, route, lines, *, proof=None, pinned=None):
 def _reopened_outputs_note(route, invalidated, jobs):
     """Name the revision path of each reopened stage whose one sealed output still holds its old result."""
     reopened = {str(row['node']) for row in invalidated}
+    from artifact_producer import ProducerError, cycle_dir, route_cycle_for
     try:
-        from artifact_producer import cycle_dir, route_cycle_for
         root = Path(route['artifact_root'])
         cycle = route_cycle_for(root, route)
         output = cycle_dir(root, cycle['campaign_id'], cycle['cycle_id']) / 'artifacts'
         rows = [f"{node['id']} -> {path}" for node in route.get('nodes', []) if str(node['id']) in reopened
                 for path in [DC.reopened_output_path(route, node, jobs, output)] if path]
-    except (OSError, ValueError, KeyError, TypeError, DC.DispatchContractError):
+    except (OSError, ValueError, KeyError, TypeError, ProducerError, DC.DispatchContractError):
         return ''
     return ('Write a reopened stage\'s new result to its revision path, beside the earlier file and not over it: '
             + '; '.join(rows) + '.\n') if rows else ''

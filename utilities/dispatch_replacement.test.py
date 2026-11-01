@@ -3180,9 +3180,12 @@ class ReplacementTest(unittest.TestCase):
             with self.assertRaises(D.DispatchContractError):
                 R._reuse_snapshot(self.jobs, self.route, lines)
         # An answered verdict is reopened whatever evidence change it shows, and carries the mark.
+        # Only the answered node shows the change: with gates on, the same change on an
+        # unanswered node is still refused, which is not what this case is about.
         with mock.patch.object(R, '_answered_fail_verdicts', return_value={'inspect'}), \
                 mock.patch.object(D, 'gate_currency', side_effect=lambda route, node, *a, **k: D.GateCurrency(
-                    'revised-unrecorded', 'completion-evidence-revised-unrecorded')):
+                    'revised-unrecorded', 'completion-evidence-revised-unrecorded')
+                    if node['id'] == 'inspect' else D.GateCurrency('current', 'completion-marker-verified')):
             snapshot = R._reuse_snapshot(self.jobs, self.route, lines)
         marks = {row['node']: row.get('reopened') for row in snapshot['invalidated']}
         self.assertEqual(marks.get('inspect'), R.ANSWERED_FAIL_REOPEN)
