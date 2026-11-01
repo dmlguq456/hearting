@@ -4706,7 +4706,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                         pane, expected_harness="claude", expected_sid=old)
                     self.assertIsNone(error)
                     self.assertEqual(candidate["session_id"], old)
-                    reason, proof = peer_steward._claude_idle_prompt_guard(pane, old, pane)
+                    reason, proof = peer_steward._native_idle_prompt_guard(pane, "claude", old, pane)
                     self.assertIsNone(reason)
                     self.assertEqual(proof["session_id"], old)
             # A PID-bound current selection outranks the delayed launch/pane label.
@@ -4749,7 +4749,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                                     pane, expected_harness="claude", expected_sid=old)
                                 self.assertIsNone(candidate)
                                 self.assertIn(error, {"target-identity-unverified", "target-identity-changed"})
-                                peer_steward._submit_pending_claude(row, pane, old, pane, "idle")
+                                peer_steward._submit_pending_native(row, pane, old, pane, "idle", harness="claude")
                             else:
                                 peer_steward._resume_message_obligation(duty, store)
                             self.assertEqual(claim.call_count, int(phase == "final-prewrite"))
@@ -4796,8 +4796,8 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                     with mock.patch.object(peer, "reserve_pending_herdr",
                             side_effect=reserve_then_block if phase == "final-prewrite" else reserve) as claim, \
                          mock.patch.object(peer, "begin_pending_write", wraps=peer.begin_pending_write) as begin:
-                        reason, _outcome, _verify, _why = peer_steward._submit_pending_claude(
-                            before, pane, old, pane, "idle")
+                        reason, _outcome, _verify, _why = peer_steward._submit_pending_native(
+                            before, pane, old, pane, "idle", harness="claude")
                         self.assertIsNotNone(reason)
                         self.assertEqual(claim.call_count, int(phase == "final-prewrite"))
                         begin.assert_not_called()
@@ -5948,7 +5948,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_retire_target",
                                return_value=(state, ident, 0, None)), \
              mock.patch.object(peer_steward, "_pane_readiness", return_value=ready), \
-             mock.patch.object(peer_steward, "_claude_prompt_foreground_proof",
+             mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                side_effect=lambda *_a, **_k: next(snapshots)), \
              mock.patch.object(peer_steward, "_read_screen", screen_reader), \
              mock.patch.object(peer_steward, "_herdr_prompt", side_effect=deliver), \
@@ -6200,7 +6200,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
         self.assertEqual((row["state"], sent), ("pending", []))
         schedule.assert_called_once()
 
-    def test_claude_prompt_foreground_proof_requires_sid_pid_birth_and_namespace(self):
+    def test_prompt_foreground_proof_requires_sid_pid_birth_and_namespace(self):
         pid = 424242
         group = pid
         info = {"pane_id": "w1:pX", "shell_pid": 123,
@@ -6225,7 +6225,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                  mock.patch.object(peer_steward, "_proc_start_ticks", side_effect=starts), \
                  mock.patch.object(peer_steward, "_prompt_process_session", side_effect=[(sid, None) for sid in session_ids]), \
                  mock.patch.object(peer_steward.os, "readlink", side_effect=readlink):
-                return peer_steward._claude_prompt_foreground_proof("w1:pX", "sid-child")
+                return peer_steward._prompt_foreground_proof("w1:pX", "claude", "sid-child")
 
         proof = prove()
         self.assertEqual(proof, {"pid": pid, "start": "123",
@@ -6707,7 +6707,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                                        side_effect=lambda h, s: "sender" if s == "sender-session" else None), \
                      mock.patch.object(peer_steward, "_prompt_foreground",
                                        side_effect=foreground), \
-                     mock.patch.object(peer_steward, "_claude_prompt_foreground_proof",
+                     mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                        return_value=proof), \
                      mock.patch.object(peer_steward, "_read_screen",
                                        return_value=peer_steward._screen_lines(CLAUDE_EMPTY)), \
@@ -6910,7 +6910,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_from_name", return_value="sender"), \
              mock.patch.object(peer_steward, "_prompt_foreground",
                                return_value={"pid": os.getpid(), "start": "birth", "argv": ["claude"]}), \
-             mock.patch.object(peer_steward, "_claude_prompt_foreground_proof",
+             mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                side_effect=lambda *_a, **_kw: next(proofs)), \
              mock.patch.object(peer_steward, "_read_screen",
                                return_value=peer_steward._screen_lines(CLAUDE_EMPTY)), \
@@ -6997,7 +6997,7 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                                       return_value=("sender-session", "claude")),
                     mock.patch.object(peer_steward, "_from_name", return_value="sender"),
                     mock.patch.object(peer_steward, "_prompt_foreground", side_effect=foreground),
-                    mock.patch.object(peer_steward, "_claude_prompt_foreground_proof",
+                    mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                       return_value=proof),
                     mock.patch.object(peer_steward, "_read_screen",
                                       return_value=peer_steward._screen_lines(screen)),
@@ -7063,10 +7063,10 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                                    return_value=({"_native_session_id": "sid-1"}, None)), \
                  mock.patch.object(peer_steward, "_agent_state", return_value=(state, "w1:p1")), \
                  mock.patch.object(peer_steward, "_pane_readiness", return_value=ready), \
-                 mock.patch.object(peer_steward, "_claude_prompt_foreground_proof", return_value=proof), \
+                 mock.patch.object(peer_steward, "_prompt_foreground_proof", return_value=proof), \
                  mock.patch.object(peer_steward, "_read_screen", return_value=["> "]), \
                  mock.patch.object(peer_steward, "_screen_ready", return_value=None):
-                reason, got = peer_steward._claude_idle_prompt_guard("w1:p1", "sid-1", "w1:p1")
+                reason, got = peer_steward._native_idle_prompt_guard("w1:p1", "claude", "sid-1", "w1:p1")
                 self.assertEqual(reason, expected)
                 self.assertEqual(got, proof if expected is None else None)
 
@@ -7079,8 +7079,8 @@ class F100cPromptAndResolutionTest(_TmpRootMixin, unittest.TestCase):
                          "_prompt_input_reason", "no_verify", "state-flip"):
             self.assertNotIn(obsolete, prompt)
         self.assertIn("elif t_harness == \"claude\"", prompt)
-        self.assertIn("_submit_pending_claude", prompt)
-        self.assertIn("_claude_idle_prompt_guard", source[source.index("def _submit_pending_claude"):start])
+        self.assertIn("_submit_pending_native", prompt)
+        self.assertIn("_native_idle_prompt_guard", source[source.index("def _submit_pending_native"):start])
         self.assertNotIn("--no-verify", peer_steward.build_parser().format_help())
 
 
@@ -7184,9 +7184,9 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                                   return_value=("fixture-steward", "claude")), \
                 mock.patch.object(peer_steward, "_from_name", return_value="fixture-steward"), \
                 mock.patch.object(peer_steward, "_project_of", return_value=str(self.tmp_root)), \
-                mock.patch.object(peer_steward, "_claude_idle_prompt_guard",
+                mock.patch.object(peer_steward, "_native_idle_prompt_guard",
                                   return_value=(None, "fixture-foreground-proof")), \
-                mock.patch.object(peer_steward, "_claude_prompt_foreground_proof",
+                mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                   return_value={"pid": os.getpid(), "start": "fixture-start",
                                       "pid_namespace": self.ident["pid_namespace"],
                                       "session_id": target_sid}), \
@@ -7220,9 +7220,9 @@ class RetainedRunNoticeCarrierTest(_TmpRootMixin, unittest.TestCase):
                 mock.patch.object(peer_steward, "_prompt_current_candidate",
                                   return_value=({"state": "idle", "_identity": self.ident}, None)), \
                 mock.patch.object(peer_steward, "_pane_readiness", return_value=ready), \
-                mock.patch.object(peer_steward, "_claude_idle_prompt_guard",
+                mock.patch.object(peer_steward, "_native_idle_prompt_guard",
                                   return_value=(None, "fixture-foreground-proof")), \
-                mock.patch.object(peer_steward, "_claude_prompt_foreground_proof",
+                mock.patch.object(peer_steward, "_prompt_foreground_proof",
                                   return_value={"pid": os.getpid(), "start": "fixture-start",
                                       "pid_namespace": self.ident["pid_namespace"],
                                       "session_id": self.sid}), \
@@ -10096,7 +10096,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
     def test_claude_continue_types_once_into_the_idle_tui(self):
         self.cleared()
         guard = mock.Mock(return_value=(None, {"pid": 202}))
-        with mock.patch.object(peer_steward, "_claude_idle_prompt_guard", guard), \
+        with mock.patch.object(peer_steward, "_native_idle_prompt_guard", guard), \
              mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as send:
             rc, line = self.continue_cmd()
         self.assertEqual(rc, 0, line)
@@ -10114,7 +10114,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
 
     def test_claude_continue_send_without_state_flip_is_never_retyped(self):
         self.cleared()
-        with mock.patch.object(peer_steward, "_claude_idle_prompt_guard",
+        with mock.patch.object(peer_steward, "_native_idle_prompt_guard",
                                return_value=(None, {"pid": 202})), \
              mock.patch.object(peer_steward, "_herdr_prompt",
                                return_value=(1, {"error": {"code": "timeout"}})):
@@ -10126,7 +10126,7 @@ class ContinueTest(_TmpRootMixin, unittest.TestCase):
 
     def test_continue_keeps_exact_no_trailer_ref_pending_for_native_callback(self):
         self.cleared()
-        refused = mock.patch.object(peer_steward, "_claude_idle_prompt_guard",
+        refused = mock.patch.object(peer_steward, "_native_idle_prompt_guard",
                                     return_value=("draft", None))
         no_send = mock.patch.object(peer_steward, "_herdr_prompt",
                                     side_effect=AssertionError("continue PTY send"))
@@ -11732,7 +11732,7 @@ class RetireTest(_TmpRootMixin, unittest.TestCase):
                 self.assertEqual(interrupted["state"], "unknown")
                 self.assertEqual(interrupted["observation"]["phase"], phase)
                 self.assertEqual(interrupted["observation"]["foreground"]["pid"], 4242)
-                self.assertEqual(interrupted["observation"]["reason"], "observer-unavailable")
+                self.assertEqual(interrupted["observation"]["reason"], "observer-unavailable:RuntimeError")
                 self._run_retire_runner(world)
                 settled = store.get(duty_id)
                 self.assertEqual((settled["state"], settled["result"], settled["cleanup"]),
@@ -13227,7 +13227,7 @@ class SessionNoticeIntegrationCorrectionTest(_TmpRootMixin, unittest.TestCase):
              mock.patch.object(peer_steward, "_resolve_prompt_target", return_value=(resolved, None, [])), \
              mock.patch.object(peer_steward, "_pane_readiness",
                  side_effect=readiness or (lambda *a, **kw: SimpleNamespace(state="ready"))), \
-             mock.patch.object(peer_steward, "_claude_idle_prompt_guard", return_value=(None, {})), \
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard", return_value=(None, {})), \
              mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})) as native:
             yield native
 
@@ -13366,7 +13366,7 @@ class SessionNoticeIntegrationCorrectionTest(_TmpRootMixin, unittest.TestCase):
                 self.edge("claude", "B", "C")
             return None, {}
         with self.transport() as native, \
-             mock.patch.object(peer_steward, "_claude_idle_prompt_guard", side_effect=guard):
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard", side_effect=guard):
             peer_steward._resume_session_notice_obligations(self.duties(), self.store())
         self.assertEqual(len(guards), 2)
         native.assert_not_called()
@@ -13524,8 +13524,9 @@ class SessionNoticeIntegrationCorrectionTest(_TmpRootMixin, unittest.TestCase):
                 send.assert_not_called()
                 self.assertEqual(peer_steward._HERDR_SESSION, "original-endpoint")
                 duty = self.duties()[0]
-                self.assertEqual((duty["state"], duty["observation"]["reason"]),
-                                 ("unknown", "observer-unavailable"))
+                self.assertEqual(duty["state"], "unknown")
+                self.assertRegex(duty["observation"]["reason"],
+                                 r"^observer-unavailable:[A-Za-z_][A-Za-z0-9_]*$")
 
     def test_expired_unsubmitted_claim_recovers_after_interruption_with_original_keys(self):
         import dispatch_pending_delivery as pending
@@ -13676,7 +13677,7 @@ class SessionNoticeIntegrationCorrectionTest(_TmpRootMixin, unittest.TestCase):
         row = pending.read(self.tmp_root, "A", n["delivery_id"])
         self.assertEqual(row["state"], "pending")
         self.assertIsNone(row["claim_owner"])
-        self.assertEqual(self.duties()[0]["observation"]["reason"], "observer-unavailable")
+        self.assertEqual(self.duties()[0]["observation"]["reason"], "observer-unavailable:OSError")
 
     def test_route_free_retention_and_ack_reject_foreign_root_symlink_and_wrong_storage(self):
         import dispatch_pending_delivery as pending
@@ -14310,7 +14311,7 @@ class SessionNoticeCheckpointRecoveryTest(_TmpRootMixin, unittest.TestCase):
         duties = lambda: [d for d in self.duties()
                           if d["intent"]["identity"]["storage_sid"] == old]
         with self.transport(current) as native, \
-             mock.patch.object(peer_steward, "_claude_idle_prompt_guard",
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard",
                                side_effect=OSError("interrupted after on_prepared")):
             peer_steward._reconcile_obligations(self.store(), duties())
         native.assert_not_called()
@@ -18562,6 +18563,401 @@ class SessionNoticePriorityTest(_TmpRootMixin, unittest.TestCase):
                             state_root=self.tmp_root, lock_fd=lock.fileno()))
                 self.assertEqual(reached, [(0, ["complete"] * 3)] if acknowledged
                                  else [(1, ["pending"] * 3)])
+
+
+class DelayNoticeSettlementTest(_TmpRootMixin, unittest.TestCase):
+    """U9/C1: a delay notice follows its original duty; addressless senders get none."""
+
+    RUNTIME = {"harness": "runtime", "session_id": None, "name": "Hearting runtime"}
+
+    def _no_send(self):
+        pm = peer_steward.peer_message
+        stack = contextlib.ExitStack()
+        self.sends = [
+            stack.enter_context(mock.patch.object(pm, "prepare_peer_message")),
+            stack.enter_context(mock.patch.object(pm, "deliver_pending_codex")),
+            stack.enter_context(mock.patch.object(peer_steward, "_herdr_prompt")),
+            stack.enter_context(mock.patch.object(peer_steward, "cmd_prompt")),
+        ]
+        self.addCleanup(stack.close)
+
+    def _assert_no_send(self):
+        for fake in self.sends:
+            fake.assert_not_called()
+
+    def _recorded_delay(self, orig, *, original_state="complete", recipient=None,
+                        delay_state="unknown"):
+        """Fixed data shaped like delay-0bb79c5f… / message-0bb79c5f… (rows already gone)."""
+        store = peer_steward.peer_obligations.ObligationStore()
+        sender = {"harness": "claude", "name": "w4:p1W", "pane_id": "w4:p1W",
+                  "session_id": "sid-delay-sender"}
+        recipient = recipient or self.RUNTIME
+        body = ("[notice] Your peer message ref %s is still pending delivery; "
+                "it was sent at 2026-10-28 10:13 UTC." % orig)
+        notice_ref = "n" * 31 + orig[-1]
+        identity = {"server": "default", "recipient_harness": recipient["harness"],
+                    "recipient_session_id": recipient.get("session_id")}
+        if original_state is not None:
+            store.create("message-" + orig, "message",
+                         {"server": "default", "pane": "", "harness": "claude",
+                          "session_id": "sid-delay-sender"},
+                         {"ref": orig, "body_digest": "0" * 64, "from": recipient,
+                          "to": sender})
+            if original_state != "pending":
+                store.update("message-" + orig, state=original_state, result="received",
+                             delivery="acknowledged", cleanup="complete",
+                             observation={"ref": orig, "reason": "exact-peer-ref",
+                                          "receiver_receipt": {"ref": orig}})
+        store.create("delay-" + orig, "message", identity,
+                     {"delay_notice_for": orig, "target": "Hearting runtime", "body": body,
+                      "body_digest": hashlib.sha256(body.encode()).hexdigest(),
+                      "from": sender, "to": recipient})
+        store.update("delay-" + orig, state=delay_state,
+                     observation={"reason": "pending-row-missing", "ref": notice_ref})
+        return store, notice_ref
+
+    def _reconcile(self, store):
+        peer_steward._reconcile_obligations(store, store.list(), retry_state={})
+
+    def test_delay_notice_settles_from_completed_original(self):
+        self._no_send()
+        for orig, original_state, recipient in (
+                ("a" * 32, "complete", self.RUNTIME),
+                ("b" * 32, "cancelled",
+                 {"harness": "unknown", "session_id": None, "name": "unknown"})):
+            with self.subTest(original=original_state):
+                store, _notice = self._recorded_delay(
+                    orig, original_state=original_state, recipient=recipient)
+                self._reconcile(store)
+                delay = store.get("delay-" + orig)
+                self.assertEqual((delay["state"], delay["delivery"], delay["cleanup"]),
+                                 ("complete", "not-required", "complete"))
+                self.assertEqual(delay["observation"]["reason"], "delay-original-settled")
+                self.assertEqual(delay["observation"]["original_state"], original_state)
+        self._assert_no_send()
+
+    def test_scheduled_notice_message_duty_settles_too(self):
+        self._no_send()
+        orig = "c" * 32
+        store, notice_ref = self._recorded_delay(orig, delay_state="pending")
+        sender = {"harness": "claude", "name": "w4:p1W", "pane_id": "w4:p1W",
+                  "session_id": "sid-delay-sender"}
+        scheduled = store.create(
+            "message-" + notice_ref, "message",
+            {"server": "default", "pane": "w4:p1W", "harness": "claude",
+             "session_id": "sid-delay-sender"},
+            {"ref": notice_ref, "body_digest": "1" * 64, "target": "w4:p1W",
+             "from": self.RUNTIME, "to": sender, "refs": [], "delay_notice_for": orig})
+        self.assertEqual(scheduled["state"], "pending")
+        self._reconcile(store)
+        settled = store.get("message-" + notice_ref)
+        self.assertEqual((settled["state"], settled["delivery"], settled["cleanup"]),
+                         ("complete", "not-required", "complete"))
+        self.assertEqual(settled["observation"]["reason"], "delay-original-settled")
+        self._assert_no_send()
+
+    def test_no_delay_notice_for_addressless_sender(self):
+        old = time.time() - 7200
+        for sender in (self.RUNTIME,
+                       {"harness": "unknown", "session_id": None, "name": "unknown"}):
+            with self.subTest(harness=sender["harness"]):
+                row = {"ref": "d" * 32, "created": old, "from": sender,
+                       "to": {"harness": "codex", "session_id": "sid-r", "name": None},
+                       "refs": []}
+                self.assertIsNone(peer_steward._ensure_sender_delay_notice_if_due(row))
+                self.assertIsNone(peer_steward._ensure_sender_delay_notice(row))
+                store = peer_steward.peer_obligations.ObligationStore()
+                self.assertEqual([d["id"] for d in store.list()
+                                  if d["id"].startswith("delay-")], [])
+
+    def test_valid_sender_still_gets_a_delay_notice(self):
+        pm = peer_steward.peer_message
+        sender = {"harness": "claude", "session_id": "delay-sender", "name": None}
+        recipient = {"harness": "codex", "session_id": "delay-recipient", "name": None}
+        _text, ref = pm.prepare_peer_message("original", sender, recipient, defer=True)
+        with mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner"):
+            duty = peer_steward._ensure_sender_delay_notice(pm._read_pending(ref))
+        self.assertEqual(duty["id"], "delay-" + ref)
+        stored = peer_steward.peer_obligations.ObligationStore().get("delay-" + ref)
+        self.assertTrue(stored["observation"]["transfer_ref"])
+
+    def test_open_original_keeps_delay_notice_open(self):
+        for state in ("pending", "unknown"):
+            with self.subTest(original=state):
+                orig = ("e" if state == "pending" else "f") * 32
+                store, _n = self._recorded_delay(orig, original_state=state)
+                if state == "unknown":
+                    store.update("message-" + orig, state="unknown",
+                                 observation={"reason": "pending-row-missing"})
+                before = store.get("delay-" + orig)
+                self._reconcile(store)
+                after = store.get("delay-" + orig)
+                self.assertNotEqual(after["observation"].get("reason"), "delay-original-settled")
+                self.assertNotEqual(after["state"], "complete")
+                self.assertEqual(after["state"], before["state"])
+
+    def test_missing_original_is_not_treated_as_settled(self):
+        orig = "9" * 32
+        store, _n = self._recorded_delay(orig, original_state=None)
+        self.assertIsNone(store.get("message-" + orig))
+        self._reconcile(store)
+        after = store.get("delay-" + orig)
+        self.assertNotEqual(after["state"], "complete")
+        self.assertNotEqual((after["observation"] or {}).get("reason"), "delay-original-settled")
+
+    def test_settled_original_leaves_existing_notice_row_untouched(self):
+        self._no_send()
+        pm = peer_steward.peer_message
+        sender = {"harness": "claude", "session_id": "delay-sender", "name": None}
+        recipient = {"harness": "codex", "session_id": "delay-recipient", "name": None}
+        for state, receipt in (("pending", "sender-delay-notice"),
+                               ("queued", "native-prompt-submitted"),
+                               ("unverified", "native-prompt-unverified")):
+            with self.subTest(row=state), mock.patch.object(
+                    peer_steward.peer_obligations, "ensure_normal_runner"):
+                # prepare_peer_message is stubbed by _no_send; use the real one.
+                orig = {"pending": "1", "queued": "2", "unverified": "3"}[state] * 32
+                store = peer_steward.peer_obligations.ObligationStore()
+                text, notice_ref = _REAL_PREPARE(
+                    "[notice] Your peer message ref %s is still pending delivery." % orig,
+                    recipient, sender, defer=True, refs=["delay-notice:" + orig, orig],
+                    receipt="sender-delay-notice")
+                pm._save_pending(dict(pm._read_pending(notice_ref), state=state,
+                                      receipt=receipt))
+                store.create("message-" + orig, "message",
+                             {"server": "default", "pane": "", "harness": "codex",
+                              "session_id": "delay-recipient"},
+                             {"ref": orig, "body_digest": "0" * 64, "from": sender,
+                              "to": recipient})
+                store.update("message-" + orig, state="complete", result="received",
+                             delivery="acknowledged", cleanup="complete",
+                             observation={"ref": orig, "reason": "exact-peer-ref"})
+                store.create("delay-" + orig, "message",
+                             {"server": "default", "recipient_harness": "claude",
+                              "recipient_session_id": "delay-sender"},
+                             {"delay_notice_for": orig, "target": "x", "body": "b",
+                              "body_digest": hashlib.sha256(b"b").hexdigest(),
+                              "from": recipient, "to": sender})
+                store.update("delay-" + orig, state="pending",
+                             observation={"ref": notice_ref, "transfer_ref": notice_ref})
+                path = pm._pending_path(notice_ref)
+                before = Path(path).read_bytes()
+                self._reconcile(store)
+                self.assertEqual(Path(path).read_bytes(), before)
+                self.assertEqual(store.get("delay-" + orig)["observation"]["reason"],
+                                 "delay-original-settled")
+        self._assert_no_send()
+
+
+_REAL_PREPARE = peer_steward.peer_message.prepare_peer_message
+
+
+class RunnerObserverErrorCauseTest(_TmpRootMixin, unittest.TestCase):
+    """U9/C2 (N29): runner observer failures keep the exception class, stably."""
+
+    def _message_duty(self, ref="a" * 32):
+        store = peer_steward.peer_obligations.ObligationStore()
+        sender = {"harness": "claude", "session_id": "sid-s", "name": None}
+        recipient = {"harness": "codex", "session_id": "sid-r", "name": None}
+        store.create("message-" + ref, "message",
+                     {"server": "default", "pane": "", "harness": "codex",
+                      "session_id": "sid-r"},
+                     {"ref": ref, "body_digest": "0" * 64, "from": sender, "to": recipient})
+        return store
+
+    def test_message_duty_exception_records_cause_stably(self):
+        store = self._message_duty()
+        seen = []
+        for _ in range(2):
+            with mock.patch.object(peer_steward, "_resume_message_obligation",
+                                   side_effect=KeyError("x")):
+                peer_steward._reconcile_obligations(store, store.list(), retry_state={})
+            duty = store.list()[0]
+            self.assertEqual(duty["observation"]["reason"], "observer-unavailable:KeyError")
+            seen.append((peer_steward._obligation_retry_fingerprint(duty),
+                         peer_steward._runner_duty_signature([duty])))
+        self.assertEqual(seen[0], seen[1])
+
+    def test_notice_batch_exception_records_cause_after_run_states(self):
+        store = peer_steward.peer_obligations.ObligationStore()
+        for n, kind in enumerate(("run-notice", "session-notice")):
+            store.create("notice-%d" % n, kind,
+                         {"server": "default", "pane": "", "harness": "claude",
+                          "session_id": "sid-r"}, {"ref": "r%d" % n})
+        order = []
+        with mock.patch.object(peer_steward, "_publish_run_states",
+                               side_effect=lambda *a, **k: order.append("run-states")), \
+             mock.patch.object(peer_steward, "_resume_session_notice_obligations",
+                               side_effect=lambda *a, **k: (order.append("notices"),
+                                                           (_ for _ in ()).throw(RuntimeError("m")))):
+            peer_steward._reconcile_obligations(store, store.list(), retry_state={})
+        self.assertEqual(order, ["run-states", "notices"])
+        for duty in store.list():
+            self.assertEqual(duty["observation"]["reason"], "observer-unavailable:RuntimeError")
+
+    def test_exception_does_not_reopen_a_settled_duty(self):
+        store = self._message_duty("b" * 32)
+        store.update("message-" + "b" * 32, state="complete", result="received",
+                     delivery="acknowledged", cleanup="complete",
+                     observation={"ref": "b" * 32, "reason": "exact-peer-ref"})
+        with mock.patch.object(peer_steward, "_resume_message_obligation",
+                               side_effect=KeyError("x")):
+            peer_steward._reconcile_obligations(store, store.list(), retry_state={})
+        settled = store.get("message-" + "b" * 32)
+        self.assertEqual(settled["state"], "complete")
+        self.assertEqual(settled["observation"]["reason"], "exact-peer-ref")
+
+
+class OpenCodeSidRunnerInputTest(_TmpRootMixin, unittest.TestCase):
+    """U9/C3 (relay 7): the runner continues a still-pending OpenCode SID row through the
+    same guarded idle input as Claude, and keeps the N33/N04/A47b protections."""
+
+    SID, PANE = "sid-opencode", "w1:pX"
+
+    def _pending(self):
+        pm = peer_steward.peer_message
+        sender = {"harness": "claude", "session_id": "sid-sender", "name": None}
+        recipient = {"harness": "opencode", "session_id": self.SID, "name": "oc",
+                     "pane_id": self.PANE}
+        _text, ref = pm.prepare_peer_message("[steer] relay seven", sender, recipient, defer=True)
+        row = pm._read_pending(ref)
+        self.assertEqual(row["state"], "pending")
+        with mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner"):
+            duty = peer_steward._schedule_message_obligation(row, "oc", self.PANE)
+        self.assertEqual(duty["id"], "message-" + ref)
+        return ref, row
+
+    @contextlib.contextmanager
+    def _world(self, *, state="idle", screen=None, foreground=True, agent_states=None,
+               exact=True):
+        ident = {"harness": "opencode", "session_id": self.SID, "name": "oc", "pane": self.PANE}
+        candidate = {"_identity": ident, "state": state, "session_id": self.SID,
+                     "_native_session_id": self.SID}
+        proof = {"pid": os.getpid(), "start": "fixture-start",
+                 "pid_namespace": os.readlink("/proc/self/ns/pid"), "session_id": self.SID}
+        screens = peer_steward._screen_lines(OPENCODE_EMPTY if screen is None else screen)
+        states = iter(agent_states) if agent_states else None
+        agent = ((lambda *_a, **_k: (next(states), self.PANE)) if states
+                 else (lambda *_a, **_k: (state, self.PANE)))
+        self.sent = []
+        def deliver(target, text, *, wait, timeout_ms):
+            self.sent.append((target, text))
+            return 0, {}
+        with mock.patch.object(peer_steward, "_retire_target",
+                               return_value=(state, ident, 0, None)), \
+             mock.patch.object(peer_steward, "_prompt_current_candidate",
+                               return_value=((candidate, None) if exact
+                                             else (None, "target-identity-unverified"))), \
+             mock.patch.object(peer_steward, "_prompt_exact_candidate",
+                               return_value=(candidate, None)), \
+             mock.patch.object(peer_steward, "_agent_state", side_effect=agent), \
+             mock.patch.object(peer_steward, "_pane_readiness",
+                               return_value=SimpleNamespace(state="ready", reason="")), \
+             mock.patch.object(peer_steward, "_prompt_foreground_proof",
+                               return_value=proof if foreground else None), \
+             mock.patch.object(peer_steward, "_read_screen", return_value=screens), \
+             mock.patch.object(peer_steward, "_herdr_prompt", side_effect=deliver), \
+             mock.patch.object(peer_steward.peer_obligations, "ensure_normal_runner"):
+            yield
+
+    def _pass(self):
+        store = peer_steward.peer_obligations.ObligationStore()
+        peer_steward._reconcile_obligations(store, store.list(), retry_state={})
+        return store
+
+    def test_runner_types_into_idle_opencode_sid_pane_once(self):
+        ref, row = self._pending()
+        pm = peer_steward.peer_message
+        with self._world(), mock.patch.object(
+                pm, "begin_pending_write", wraps=pm.begin_pending_write) as begin:
+            store = self._pass()
+            self.assertEqual(len(self.sent), 1)
+            self.assertEqual(self.sent[0][0], self.PANE)
+            self.assertEqual(self.sent[0][1], row["text"])
+            self.assertEqual(begin.call_args.kwargs["receipt"], "opencode-pty-prompt-inflight")
+            after = pm._read_pending(ref)
+            self.assertEqual(after["state"], "queued")
+            self.assertFalse(after.get("rpc_claim"))
+            self._pass()
+            self.assertEqual(len(self.sent), 1)
+        self.assertNotEqual(store.get("message-" + ref)["state"], "complete")
+
+    def test_working_opencode_is_confirmed_running_wait(self):
+        ref, _row = self._pending()
+        with self._world(state="working"):
+            store = self._pass()
+        self.assertEqual(self.sent, [])
+        duty = store.get("message-" + ref)
+        self.assertEqual(duty["state"], "pending")
+        self.assertEqual(duty["observation"]["reason"], "native-state-working")
+        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "pending")
+
+    def test_unobservable_wait_names_the_reason(self):
+        for kwargs, reason in (({"foreground": False}, "foreground-unverified"),
+                               ({"screen": OPENCODE_DRAFT}, "draft")):
+            with self.subTest(reason=reason):
+                ref, _row = self._pending()
+                with self._world(**kwargs):
+                    store = self._pass()
+                self.assertEqual(self.sent, [])
+                duty = store.get("message-" + ref)
+                self.assertEqual((duty["state"], duty["observation"]["reason"]),
+                                 ("pending", reason))
+                peer_steward.peer_message._pending_path(ref).unlink()
+                store.update("message-" + ref, state="complete", result="received",
+                             delivery="acknowledged", cleanup="complete",
+                             observation={"ref": ref, "reason": "exact-peer-ref"})
+
+    def test_submitted_or_claimed_rows_are_never_retyped(self):
+        pm = peer_steward.peer_message
+        for state, receipt in (("unverified", "context-api-inflight"),
+                               ("queued", "opencode-prompt-inflight")):
+            with self.subTest(row=state):
+                ref, _row = self._pending()
+                pm._save_pending(dict(pm._read_pending(ref), state=state, receipt=receipt))
+                before = pm._pending_path(ref).read_bytes()
+                with self._world():
+                    self._pass()
+                self.assertEqual(self.sent, [])
+                self.assertEqual(pm._pending_path(ref).read_bytes(), before)
+                pm._pending_path(ref).unlink()
+                store = peer_steward.peer_obligations.ObligationStore()
+                store.update("message-" + ref, state="complete", result="received",
+                             delivery="acknowledged", cleanup="complete",
+                             observation={"ref": ref, "reason": "exact-peer-ref"})
+        with self.subTest(row="pending-with-live-claim"):
+            ref, _row = self._pending()
+            from dispatch_contract import process_start_ticks
+            claim = {"token": "plugin-claim", "pid": os.getpid(),
+                     "start": process_start_ticks(os.getpid())}
+            pm._save_pending(dict(pm._read_pending(ref), rpc_claim=claim))
+            with self._world():
+                self._pass()
+            self.assertEqual(self.sent, [])
+            self.assertEqual(pm._read_pending(ref)["rpc_claim"], claim)
+
+    def test_other_session_process_gets_no_input(self):
+        ref, _row = self._pending()
+        with self._world(exact=False):
+            reason, proof = peer_steward._native_idle_prompt_guard(
+                self.PANE, "opencode", self.SID, self.PANE)
+        self.assertEqual((reason, proof), ("target-identity-unverified", None))
+        with self._world(foreground=False):
+            self._pass()
+        self.assertEqual(self.sent, [])
+        self.assertEqual(peer_steward.peer_message._read_pending(ref)["state"], "pending")
+
+    def test_second_guard_busy_releases_claim_without_input(self):
+        ref, _row = self._pending()
+        pm = peer_steward.peer_message
+        with self._world(agent_states=["idle", "working", "working"]), \
+             mock.patch.object(pm, "release_unsent_herdr_claim",
+                               wraps=pm.release_unsent_herdr_claim) as release:
+            store = self._pass()
+        self.assertEqual(self.sent, [])
+        release.assert_called_once()
+        self.assertEqual(pm._read_pending(ref)["state"], "pending")
+        self.assertEqual(store.get("message-" + ref)["state"], "pending")
 
 
 if __name__ == "__main__":

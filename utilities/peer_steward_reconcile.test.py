@@ -149,7 +149,7 @@ class IsolatedCase(unittest.TestCase):
                                return_value=(resolved, None, [])), \
              mock.patch.object(peer_steward, "_pane_readiness",
                                return_value=SimpleNamespace(state="ready")), \
-             mock.patch.object(peer_steward, "_claude_idle_prompt_guard",
+             mock.patch.object(peer_steward, "_native_idle_prompt_guard",
                                return_value=(None, {})), \
              mock.patch.object(peer_steward, "_herdr_prompt", return_value=(0, {})), \
              mock.patch.object(peer_steward, "cmd_prompt", side_effect=courier):

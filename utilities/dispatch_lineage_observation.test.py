@@ -898,7 +898,7 @@ class ObservationTest(peer._TmpRootMixin, unittest.TestCase):
 
             with self.subTest(boundary=boundary), self.unreadable(path, enabled=lambda: failed), \
                     self.transport(current, readiness=readiness) as native, \
-                    mock.patch.object(steward, "_claude_idle_prompt_guard", side_effect=guard):
+                    mock.patch.object(steward, "_native_idle_prompt_guard", side_effect=guard):
                 steward._resume_session_notice_obligations(self.duties(), self.store())
             self.assertTrue(failed)
             native.assert_not_called()

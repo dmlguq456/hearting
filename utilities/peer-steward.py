@@ -6087,10 +6087,10 @@ def _prompt_foreground(pane, harness, *, info=None):
     return found[0] if len(found) == 1 else None
 
 
-def _claude_prompt_foreground_proof(pane, expected_sid):
+def _prompt_foreground_proof(pane, harness, expected_sid):
     info = _retire_pane_info(pane)
-    foreground = _prompt_foreground(pane, "claude", info=info)
-    if not foreground or _prompt_process_session(pane, "claude", info) != (expected_sid, None):
+    foreground = _prompt_foreground(pane, harness, info=info)
+    if not foreground or _prompt_process_session(pane, harness, info) != (expected_sid, None):
         return None
     pid, start = foreground["pid"], foreground["start"]
     if _proc_start_ticks(pid) != start:
@@ -6099,21 +6099,22 @@ def _claude_prompt_foreground_proof(pane, expected_sid):
         namespace = os.readlink(f"/proc/{pid}/ns/pid")
         if (namespace != os.readlink("/proc/self/ns/pid")
                 or _proc_start_ticks(pid) != start
-                or _prompt_process_session(pane, "claude", info) != (expected_sid, None)):
+                or _prompt_process_session(pane, harness, info) != (expected_sid, None)):
             return None
     except OSError:
         return None
     return {"pid": pid, "start": start, "pid_namespace": namespace, "session_id": expected_sid}
 
 
-def _claude_idle_prompt_guard(target, expected_sid, expected_pane, expected_foreground=None):
-    """Prove the exact idle Claude TUI and empty composer before one prompt send."""
+def _native_idle_prompt_guard(target, harness, expected_sid, expected_pane,
+                              expected_foreground=None):
+    """Prove the exact idle Claude/OpenCode TUI and empty composer before one prompt send."""
     state, ident, _code, reason = _retire_target(target)
-    if (reason or ident.get("harness") != "claude"
+    if (reason or ident.get("harness") != harness
             or ident.get("pane") != expected_pane):
         return reason or "target-identity-changed", None
     current, identity_error = _prompt_current_candidate(
-        expected_pane, expected_harness="claude", expected_sid=expected_sid,
+        expected_pane, expected_harness=harness, expected_sid=expected_sid,
         require_process_session=True, target_observation=(state, ident))
     if current is None:
         return identity_error or "target-identity-unverified", None
@@ -6122,13 +6123,13 @@ def _claude_idle_prompt_guard(target, expected_sid, expected_pane, expected_fore
     current_state, current_pane = _agent_state(target)
     if current_state not in ("idle", "done") or current_pane != expected_pane:
         return "target-state-changed", None
-    readiness = _pane_readiness(target, current_state, expected_harness="claude",
+    readiness = _pane_readiness(target, current_state, expected_harness=harness,
                                 expected_sid=expected_sid, expected_pane=expected_pane,
                                 purpose="input", target_observation=(current_state, ident),
                                 native_session_id=current["_native_session_id"])
     if readiness.state != "ready":
         return readiness.reason or "target-identity-unverified", None
-    proof = _claude_prompt_foreground_proof(expected_pane, expected_sid)
+    proof = _prompt_foreground_proof(expected_pane, harness, expected_sid)
     if proof is None:
         return "foreground-unverified", None
     if expected_foreground is not None and proof != expected_foreground:
@@ -6136,7 +6137,7 @@ def _claude_idle_prompt_guard(target, expected_sid, expected_pane, expected_fore
     lines = _read_screen(expected_pane)
     if lines is None:
         return "screen-unavailable", None
-    screen_reason = _screen_ready("claude", lines)
+    screen_reason = _screen_ready(harness, lines)
     if screen_reason:
         return screen_reason, None
     return None, proof
@@ -6993,6 +6994,11 @@ def _ensure_sender_delay_notice(row):
                 for value in refs)):
         return None
     sender, recipient = row.get("from") or {}, row.get("to") or {}
+    if not (peer_message._valid_transfer_endpoint(sender)
+            or peer_message._valid_pane_bound_endpoint(sender)):
+        # A sender with no address (runtime, unknown) cannot receive a notice.
+        # The original duty stays with the runner; its settlement is the result.
+        return None
     notice_id = "delay-" + original_ref
     identity = {"server": _HERDR_SESSION or "default",
                 "recipient_harness": sender.get("harness", ""),
@@ -7116,6 +7122,16 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
     # notice ref as "ref"; reading it keeps one notice per overdue message.
     ref = intent.get("ref") or observation.get("transfer_ref") or observation.get("ref")
     delay_for = intent.get("delay_notice_for") or ""
+    if delay_for:
+        # An additional notice follows its original duty: once that duty is
+        # settled (complete or cancelled) nothing more is owed. An open,
+        # unreadable, or missing original settles nothing.
+        original = store.get(_message_obligation_id(delay_for))
+        if original and original.get("state") in {"complete", "cancelled"}:
+            checkpoint(state="complete", delivery="not-required", cleanup="complete",
+                       observation={"ref": ref or "", "reason": "delay-original-settled",
+                                    "original_state": original["state"]})
+            return
     if delay_for and not ref:
         body = intent.get("body")
         sender, recipient = intent.get("from") or {}, intent.get("to") or {}
@@ -7395,13 +7411,15 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
                     "reason": "runtime-notice-native-retry",
                     "transport_state": (current or row).get("state")})
                 return
-        if recipient.get("harness") == "claude" and row.get("state") == "pending":
-            _submit_pending_claude(row, pinned_pane, recipient.get("session_id"),
-                                   pinned_pane, state, no_trailer=row.get("no_trailer", False))
+        direct_reason = None
+        if recipient.get("harness") in {"claude", "opencode"} and row.get("state") == "pending":
+            # Same guarded idle input for both harnesses. The OpenCode idle plugin
+            # may still take the row first: rpc_claim lets exactly one side send.
+            direct_reason, _o, _v, _r = _submit_pending_native(
+                row, pinned_pane, recipient.get("session_id"), pinned_pane, state,
+                harness=recipient["harness"], no_trailer=row.get("no_trailer", False))
         if recipient.get("harness") == "codex":
             peer_message.deliver_pending_codex(ref, timeout=0.25)
-        # Claude hook context and OpenCode's idle plugin own native delivery.
-        # This obligation runner never types or invents a second wake process.
         try:
             current = read_pending()
         except (OSError, ValueError):
@@ -7413,9 +7431,13 @@ def _resume_message_obligation_scoped(duty, store, *, read_context=None):
             age = max(0.0, time.time() - float((current or row).get("created") or time.time()))
             if age >= _FLUSH_STUCK_HOURS * 3600:
                 _ensure_sender_delay_notice(current or row)
+            latest = current or row
+            wait_reason = latest.get("receipt", "awaiting-receipt")
+            if direct_reason and latest.get("state") == "pending":
+                # Name what the guard saw instead of the stale "native-pending".
+                wait_reason = direct_reason
             checkpoint(state="pending", observation={
-                "ref": ref, "state": (current or row).get("state"),
-                "reason": (current or row).get("receipt", "awaiting-receipt")})
+                "ref": ref, "state": latest.get("state"), "reason": wait_reason})
 
     finally:
         _HERDR_SESSION = old_server
@@ -8899,10 +8921,12 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
             _resume_session_notice_obligations(
                 notice_duties, store, read_context=read_context,
                 selection=notice_selection, runner_incarnation=runner_incarnation)
-        except Exception:
+        except Exception as exc:
+            # Class name only: a message carries paths and ids that change per pass.
+            cause = "observer-unavailable:" + type(exc).__name__
             for duty in notice_duties:
                 try:
-                    store.update(duty["id"], observer_error="observer-unavailable")
+                    store.update(duty["id"], observer_error=cause)
                 except Exception:
                     pass
     for duty in duties:
@@ -8937,9 +8961,10 @@ def _reconcile_obligations(store, duties=None, *, read_context=None, retry_state
                 _resume_registered_obligation(duty, store, read_context=read_context)
             elif kind == "steward-check":
                 _steward_check_module().advance(duty, store)
-        except Exception:
+        except Exception as exc:
             try:
-                store.update(duty["id"], observer_error="observer-unavailable")
+                store.update(duty["id"],
+                             observer_error="observer-unavailable:" + type(exc).__name__)
             except Exception:
                 pass
         if retryable:
@@ -10534,7 +10559,7 @@ def receiver_idle(recipient, pane, *, peer=True):
             clear._continue(seat.key, req["nonce"], clear._run_continue)
 
 
-def _submit_pending_claude(pending, target, sid, pane, state, *, no_trailer=False):
+def _submit_pending_native(pending, target, sid, pane, state, *, harness, no_trailer=False):
     transfer_ref = pending.get("ref")
     if not transfer_ref:
         return "peer-ref-unavailable", "unverified", "private-pending", "peer-ref-unavailable"
@@ -10550,21 +10575,21 @@ def _submit_pending_claude(pending, target, sid, pane, state, *, no_trailer=Fals
     elif not target_pane or not peer_message.usable_session_id(t_sid):
         direct_reason = "target-identity-unverified"
     else:
-        direct_reason, proof = _claude_idle_prompt_guard(
-            resolved_target, t_sid, target_pane)
+        direct_reason, proof = _native_idle_prompt_guard(
+            resolved_target, harness, t_sid, target_pane)
         if direct_reason is None:
             try:
                 claimed = peer_message.reserve_pending_herdr(
-                    transfer_ref, {"harness": "claude", "session_id": t_sid,
+                    transfer_ref, {"harness": harness, "session_id": t_sid,
                                    "pane_id": target_pane},
-                    receipt="claude-pty-prompt-inflight")
+                    receipt=f"{harness}-pty-prompt-inflight")
             except (OSError, ValueError):
                 claimed = None
             if claimed is None:
                 direct_reason = "peer-delivery-already-claimed"
             else:
-                direct_reason, _proof = _claude_idle_prompt_guard(
-                    target_pane, t_sid, target_pane, expected_foreground=proof)
+                direct_reason, _proof = _native_idle_prompt_guard(
+                    target_pane, harness, t_sid, target_pane, expected_foreground=proof)
                 if direct_reason:
                     peer_message.release_unsent_herdr_claim(
                         claimed, receipt=direct_reason)
@@ -10572,9 +10597,9 @@ def _submit_pending_claude(pending, target, sid, pane, state, *, no_trailer=Fals
                 else:
                     reserved = claimed
                     claimed = peer_message.begin_pending_write(
-                        claimed, recipient={"harness": "claude", "session_id": t_sid,
+                        claimed, recipient={"harness": harness, "session_id": t_sid,
                                             "pane_id": target_pane},
-                        receipt="claude-pty-prompt-inflight")
+                        receipt=f"{harness}-pty-prompt-inflight")
                     if claimed is None:
                         peer_message.release_pending_herdr_claim(reserved)
                         direct_reason = "peer-delivery-already-claimed"
@@ -10609,8 +10634,10 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
     Codex steers ordinary input into an active turn (`turn/steer`) and
     otherwise uses its exact thread queue; an interrupted thread is started
     only after this sender sees an empty composer. Claude's hook context and
-    OpenCode's native idle callback consume their own pending rows. Queue acceptance or
-    context emission remains queued; only an exact native receive is true.
+    OpenCode's native idle callback consume their own pending rows; the
+    obligation runner continues a still-pending Claude or OpenCode row through
+    the same guarded idle input. Queue acceptance or context emission remains
+    queued; only an exact native receive is true.
     """
     if args.body_file:
         with open(args.body_file, encoding="utf-8", errors="replace", newline="") as handle:
@@ -10838,8 +10865,9 @@ def cmd_prompt(args, *, expected_recipient=None, on_prepared=None, producer_bind
         elif outcome == "unverified":
             _schedule_message_obligation(pending, resolved_target, target_pane)
     elif t_harness == "claude":
-        direct_reason, outcome, verify, reason = _submit_pending_claude(
-            pending, resolved_target, t_sid, target_pane, state_before, no_trailer=args.no_trailer)
+        direct_reason, outcome, verify, reason = _submit_pending_native(
+            pending, resolved_target, t_sid, target_pane, state_before,
+            harness="claude", no_trailer=args.no_trailer)
         if direct_reason is not None:
             if pending["state"] == "pending":
                 _schedule_message_obligation(pending, resolved_target, target_pane)
@@ -11702,7 +11730,7 @@ def _continue_claude_prompt(target, pane, sid, ref, text):
     idle Claude prompt path of `cmd_prompt`; any refusal keeps the ref pending for the
     hook. A sent ref is never released, so the hook cannot deliver it a second time.
     """
-    reason, proof = _claude_idle_prompt_guard(target, sid, pane)
+    reason, proof = _native_idle_prompt_guard(target, "claude", sid, pane)
     if reason:
         return "native-pending", "queued", reason
     try:
@@ -11713,7 +11741,8 @@ def _continue_claude_prompt(target, pane, sid, ref, text):
         claimed = None
     if claimed is None:
         return "native-pending", "queued", "peer-delivery-already-claimed"
-    reason, _proof = _claude_idle_prompt_guard(pane, sid, pane, expected_foreground=proof)
+    reason, _proof = _native_idle_prompt_guard(
+        pane, "claude", sid, pane, expected_foreground=proof)
     if reason:
         peer_message.release_unsent_herdr_claim(claimed, receipt=reason)
         return "native-pending", "queued", reason
