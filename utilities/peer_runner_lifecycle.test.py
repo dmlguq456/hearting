@@ -1179,6 +1179,8 @@ console.log(JSON.stringify(calls[0]));
                  mock.patch.object(peer_steward, "_herdr_missing", return_value=False), \
                  mock.patch.object(peer_steward.herdr_observation,
                                    "socket_path_for_endpoint", return_value=None), \
+                 mock.patch.object(peer_steward.herdr_observation,
+                                   "pane_census", return_value=None), \
                  mock.patch.object(peer_steward, "_watch_terminal_from_view", return_value=None), \
                  mock.patch.object(batch, "_jobs_paths",
                                    side_effect=lambda jobs=None, strict=True: [
@@ -1917,7 +1919,10 @@ console.log(JSON.stringify(calls[0]));
                  mock.patch.dict(os.environ, runner_env, clear=True), \
                  mock.patch.object(obligations, "exec_service_runner"), \
                  mock.patch.object(batch.subprocess, "Popen", side_effect=launch_current), \
-                 mock.patch.object(peer_steward, "time", runner_clock):
+                 mock.patch.object(peer_steward, "time", runner_clock), \
+                 mock.patch.object(peer_steward, "_runner_maintenance_pass"):
+                # Global maintenance duties are covered by the reconcile suite;
+                # here they would only reach the fake clock and launch fixture.
                 binding = obligations.managed_service_binding(self.a)
                 with self.assertRaises(StopAfterTakeover):
                     peer_steward.cmd_obligation_runner(SimpleNamespace(
